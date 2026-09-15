@@ -71,6 +71,80 @@ pub struct EffectIntent {
     pub expires_at_ms: i64,
 }
 
+/// Command-scoped allocator for durable effect identities.
+///
+/// One batch must be shared by every primitive transition performed by the
+/// same Cell command so each emitted effect receives a unique ordinal.
+pub struct EffectBatch {
+    cell: CellId,
+    incarnation: IncarnationId,
+    sequence: u64,
+    now_ms: i64,
+    next_ordinal: u32,
+}
+
+impl EffectBatch {
+    /// Reconstructs the authoritative source identity from the command transaction.
+    pub fn new(transaction: &Transaction<'_>, sequence: u64, now_ms: i64) -> Result<Self> {
+        if sequence == 0 {
+            return Err(Error::Command("effect batch sequence is zero"));
+        }
+        validate_now(now_ms)?;
+        let (cell, incarnation, commit_sequence) = transaction.query_row(
+            "SELECT cell_id, incarnation, commit_sequence FROM sys_meta WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, u64>(2)?,
+                ))
+            },
+        )?;
+        if commit_sequence.checked_add(1) != Some(sequence) {
+            return Err(Error::Command(
+                "effect batch sequence is not the next Cell commit",
+            ));
+        }
+        Ok(Self {
+            cell: CellId::from_bytes(
+                cell.try_into()
+                    .map_err(|_| Error::Command("invalid stored effect source Cell"))?,
+            ),
+            incarnation: IncarnationId::from_bytes(
+                incarnation
+                    .try_into()
+                    .map_err(|_| Error::Command("invalid stored effect source incarnation"))?,
+            ),
+            sequence,
+            now_ms,
+            next_ordinal: 0,
+        })
+    }
+
+    /// Inserts one intention and advances the command-wide ordinal.
+    pub fn insert(
+        &mut self,
+        transaction: &Transaction<'_>,
+        intent: &EffectIntent,
+    ) -> Result<[u8; 32]> {
+        let ordinal = self.next_ordinal;
+        self.next_ordinal = self
+            .next_ordinal
+            .checked_add(1)
+            .ok_or(Error::Command("effect ordinal overflow"))?;
+        effect_insert(
+            transaction,
+            self.cell,
+            self.incarnation,
+            self.sequence,
+            ordinal,
+            self.now_ms,
+            intent,
+        )
+    }
+}
+
 /// Source of unpredictable effect lease tokens.
 pub trait EffectTokenSource {
     fn next_token(&mut self) -> Result<[u8; 16]>;
@@ -161,14 +235,8 @@ pub fn effect_insert(
     intent: &EffectIntent,
 ) -> Result<[u8; 32]> {
     validate_now(now_ms)?;
-    if sequence == 0
-        || sequence > i64::MAX as u64
-        || ordinal as usize >= MAX_EFFECTS_PER_COMMAND
-        || intent.operation.is_empty()
-        || intent.operation.len() > MAX_EFFECT_OPERATION_BYTES
-        || intent.expires_at_ms <= now_ms
-        || intent.expires_at_ms > now_ms.saturating_add(EFFECT_LIFETIME_MS)
-    {
+    validate_effect_intent(now_ms, intent)?;
+    if sequence == 0 || sequence > i64::MAX as u64 || ordinal as usize >= MAX_EFFECTS_PER_COMMAND {
         return Err(Error::Command("invalid effect intention"));
     }
     let id = effect_id(cell, incarnation, sequence, ordinal);
@@ -222,6 +290,18 @@ pub fn effect_insert(
         ),
     )?;
     Ok(id)
+}
+
+pub(crate) fn validate_effect_intent(now_ms: i64, intent: &EffectIntent) -> Result<()> {
+    validate_now(now_ms)?;
+    if intent.operation.is_empty()
+        || intent.operation.len() > MAX_EFFECT_OPERATION_BYTES
+        || intent.expires_at_ms <= now_ms
+        || intent.expires_at_ms > now_ms.saturating_add(EFFECT_LIFETIME_MS)
+    {
+        return Err(Error::Command("invalid effect intention"));
+    }
+    Ok(())
 }
 
 /// Reclaims expired leases and claims bounded due effects for private delivery.

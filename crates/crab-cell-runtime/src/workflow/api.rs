@@ -638,6 +638,13 @@ mod tests {
     fn persisted_definition_digest_dispatches_to_retained_old_code() {
         let mut connection = Connection::open_in_memory().unwrap();
         let transaction = connection.transaction().unwrap();
+        crate::schema::install_runtime_schema_in(
+            &transaction,
+            crate::CellId::from_bytes([1; 32]),
+            crate::IncarnationId::from_bytes([2; 16]),
+            1,
+        )
+        .unwrap();
         super::super::install_workflow_schema(&transaction).unwrap();
         let request = WorkflowStart {
             workflow_id: b"old-run".to_vec(),

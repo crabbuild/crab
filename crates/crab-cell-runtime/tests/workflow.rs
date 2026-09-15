@@ -64,6 +64,16 @@ impl WorkflowDefinition for Definition {
                 result: Some(b"signalled".to_vec()),
                 actions: Vec::new(),
             }),
+            b"finish-with-effect" => Ok(WorkflowDecision {
+                status: WorkflowStatus::Completed,
+                state: b"done".to_vec(),
+                result: Some(b"effect-scheduled".to_vec()),
+                actions: vec![WorkflowAction::Effect {
+                    destination: crab_cell_runtime::CellId::from_bytes([8; 32]),
+                    operation: b"canonical-destination-command".to_vec(),
+                    expires_at_ms: 20_000,
+                }],
+            }),
             event => Ok(WorkflowDecision {
                 status: WorkflowStatus::Running,
                 state: event.to_vec(),
@@ -233,6 +243,53 @@ fn invalid_decision_is_rejected_before_any_workflow_rows_are_written() {
         )
         .unwrap();
     assert_eq!(rows, (0, 0, 0));
+    transaction.commit().unwrap();
+}
+
+#[test]
+fn terminal_transition_inserts_effect_with_cell_command_identity() {
+    let mut connection = connection();
+    let namespace = NamespaceId::from_bytes([3; 16]);
+    let definition = Definition {
+        digest: Digest::from_bytes([4; 32]),
+    };
+    let transaction = connection.transaction().unwrap();
+    let (run_id, _, _) =
+        applied(workflow_start(&transaction, namespace, 10, &start(5), &definition).unwrap());
+    let outcome = workflow_signal(
+        &transaction,
+        11,
+        &WorkflowSignal {
+            workflow_id: b"build-42".to_vec(),
+            run_id,
+            signal_id: [7; 16],
+            event: b"finish-with-effect".to_vec(),
+        },
+        &definition,
+    )
+    .unwrap();
+    assert_eq!(applied(outcome), (run_id, WorkflowStatus::Completed, 2));
+    let stored: (Vec<u8>, Vec<u8>, i64) = transaction
+        .query_row(
+            "SELECT effect_id, operation, expires_at_ms FROM sys_effects",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        stored,
+        (
+            crab_cell_runtime::effect_id(
+                crab_cell_runtime::CellId::from_bytes([1; 32]),
+                IncarnationId::from_bytes([2; 16]),
+                1,
+                0,
+            )
+            .to_vec(),
+            b"canonical-destination-command".to_vec(),
+            20_000,
+        )
+    );
     transaction.commit().unwrap();
 }
 

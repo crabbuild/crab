@@ -1,7 +1,8 @@
 use crab_cell_runtime::{
-    CellId, IncarnationId, SessionId, WorkflowContext, WorkflowDecision, WorkflowDefinition,
-    WorkflowStatus, install_kv_schema, install_queue_schema, install_runtime_schema,
-    install_workflow_schema, preferred_scanner, scheduler_next_due_ms, scheduler_tick,
+    CellId, IncarnationId, SessionId, WorkflowAction, WorkflowContext, WorkflowDecision,
+    WorkflowDefinition, WorkflowStatus, effect_id, install_kv_schema, install_queue_schema,
+    install_runtime_schema, install_workflow_schema, preferred_scanner, scheduler_next_due_ms,
+    scheduler_tick,
 };
 
 struct ExpiryDefinition;
@@ -28,6 +29,34 @@ impl WorkflowDefinition for ExpiryDefinition {
 }
 
 static EXPIRY_DEFINITION: ExpiryDefinition = ExpiryDefinition;
+
+struct EffectDefinition;
+
+impl WorkflowDefinition for EffectDefinition {
+    fn digest(&self) -> crab_cell_runtime::Digest {
+        crab_cell_runtime::Digest::from_bytes([10; 32])
+    }
+
+    fn transition(
+        &self,
+        _state: &[u8],
+        event: &[u8],
+        _context: WorkflowContext,
+    ) -> crab_cell_runtime::Result<WorkflowDecision> {
+        Ok(WorkflowDecision {
+            status: WorkflowStatus::Failed,
+            state: b"activity-expired".to_vec(),
+            result: Some(event.to_vec()),
+            actions: vec![WorkflowAction::Effect {
+                destination: CellId::from_bytes([8; 32]),
+                operation: event.to_vec(),
+                expires_at_ms: 20_000,
+            }],
+        })
+    }
+}
+
+static EFFECT_DEFINITION: EffectDefinition = EffectDefinition;
 
 fn connection() -> crab_ltx::rusqlite::Connection {
     let mut connection = crab_ltx::rusqlite::Connection::open_in_memory().unwrap();
@@ -107,6 +136,65 @@ fn tick_terminalizes_expired_ready_work_and_runs_workflow_failure_transition() {
         )
         .unwrap();
     assert_eq!(states, (3, 3, 2));
+}
+
+#[test]
+fn tick_assigns_unique_command_ordinals_to_effects_from_multiple_runs() {
+    let mut connection = connection();
+    let transaction = connection.transaction().unwrap();
+    install_workflow_schema(&transaction).unwrap();
+    for byte in [3_u8, 4_u8] {
+        transaction
+            .execute(
+                "INSERT INTO workflow_runs VALUES (?1, ?2, ?3, 0, X'', 1, NULL, NULL)",
+                (
+                    [byte].as_slice(),
+                    [byte; 16].as_slice(),
+                    EFFECT_DEFINITION.digest().as_bytes().as_slice(),
+                ),
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO workflow_activities VALUES (?1, ?2, 'job', X'', 0, 0, 1, 5, NULL, NULL, NULL, NULL, NULL)",
+                ([byte; 16].as_slice(), [byte + 10; 16].as_slice()),
+            )
+            .unwrap();
+    }
+
+    assert_eq!(
+        scheduler_tick(&transaction, 10, &[&EFFECT_DEFINITION])
+            .unwrap()
+            .processed,
+        2
+    );
+    let mut statement = transaction
+        .prepare("SELECT effect_id FROM sys_effects ORDER BY effect_id")
+        .unwrap();
+    let mut stored = statement
+        .query_map([], |row| row.get::<_, Vec<u8>>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let mut expected = vec![
+        effect_id(
+            CellId::from_bytes([1; 32]),
+            IncarnationId::from_bytes([2; 16]),
+            1,
+            0,
+        )
+        .to_vec(),
+        effect_id(
+            CellId::from_bytes([1; 32]),
+            IncarnationId::from_bytes([2; 16]),
+            1,
+            1,
+        )
+        .to_vec(),
+    ];
+    expected.sort();
+    stored.sort();
+    assert_eq!(stored, expected);
 }
 
 #[test]

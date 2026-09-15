@@ -1,6 +1,9 @@
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
-use crate::{Digest, Error, NamespaceId, RequestId, Result};
+use crate::{
+    Digest, EffectBatch, EffectIntent, Error, NamespaceId, RequestId, Result,
+    effects::validate_effect_intent,
+};
 
 mod activity;
 mod activity_api;
@@ -74,6 +77,11 @@ pub enum WorkflowAction {
     },
     Timer {
         due_at_ms: i64,
+    },
+    Effect {
+        destination: crate::CellId,
+        operation: Vec<u8>,
+        expires_at_ms: i64,
     },
 }
 
@@ -192,6 +200,25 @@ pub fn workflow_start(
     request: &WorkflowStart,
     definition: &dyn WorkflowDefinition,
 ) -> Result<WorkflowOutcome> {
+    let mut effects = next_effect_batch(transaction, now_ms)?;
+    workflow_start_with_effects(
+        transaction,
+        &mut effects,
+        namespace,
+        now_ms,
+        request,
+        definition,
+    )
+}
+
+fn workflow_start_with_effects(
+    transaction: &Transaction<'_>,
+    effects: &mut EffectBatch,
+    namespace: NamespaceId,
+    now_ms: i64,
+    request: &WorkflowStart,
+    definition: &dyn WorkflowDefinition,
+) -> Result<WorkflowOutcome> {
     validate_now(now_ms)?;
     validate_identifier(&request.workflow_id)?;
     validate_event(&request.event)?;
@@ -234,12 +261,23 @@ pub fn workflow_start(
         event_id(run_id, request.request_id.as_bytes()),
         &request.event,
     )?;
-    apply_decision(transaction, run_id, sequence, now_ms, decision)
+    apply_decision(transaction, effects, run_id, sequence, now_ms, decision)
 }
 
 /// Applies one idempotent signal to a running workflow.
 pub fn workflow_signal(
     transaction: &Transaction<'_>,
+    now_ms: i64,
+    signal: &WorkflowSignal,
+    definition: &dyn WorkflowDefinition,
+) -> Result<WorkflowOutcome> {
+    let mut effects = next_effect_batch(transaction, now_ms)?;
+    workflow_signal_with_effects(transaction, &mut effects, now_ms, signal, definition)
+}
+
+fn workflow_signal_with_effects(
+    transaction: &Transaction<'_>,
+    effects: &mut EffectBatch,
     now_ms: i64,
     signal: &WorkflowSignal,
     definition: &dyn WorkflowDefinition,
@@ -274,6 +312,7 @@ pub fn workflow_signal(
         prepare_transition(transaction, &run, definition, &signal.event, now_ms)?;
     commit_transition(
         transaction,
+        effects,
         run.run_id,
         sequence,
         id,
@@ -338,6 +377,25 @@ pub fn workflow_fire_timer(
     timer_id: [u8; 16],
     definition: &dyn WorkflowDefinition,
 ) -> Result<WorkflowOutcome> {
+    let mut effects = next_effect_batch(transaction, now_ms)?;
+    workflow_fire_timer_with_effects(
+        transaction,
+        &mut effects,
+        now_ms,
+        run_id,
+        timer_id,
+        definition,
+    )
+}
+
+fn workflow_fire_timer_with_effects(
+    transaction: &Transaction<'_>,
+    effects: &mut EffectBatch,
+    now_ms: i64,
+    run_id: [u8; 16],
+    timer_id: [u8; 16],
+    definition: &dyn WorkflowDefinition,
+) -> Result<WorkflowOutcome> {
     validate_now(now_ms)?;
     let Some(run) = load_run_by_id(transaction, run_id)? else {
         return Ok(WorkflowOutcome::RunMismatch);
@@ -378,6 +436,7 @@ pub fn workflow_fire_timer(
     }
     commit_transition(
         transaction,
+        effects,
         run_id,
         sequence,
         timer_event_id(run_id, timer_id),
@@ -389,6 +448,7 @@ pub fn workflow_fire_timer(
 
 pub(crate) fn workflow_fail_one_expired_activity(
     transaction: &Transaction<'_>,
+    effects: &mut EffectBatch,
     now_ms: i64,
     definitions: &[&'static dyn WorkflowDefinition],
 ) -> Result<bool> {
@@ -445,6 +505,7 @@ pub(crate) fn workflow_fail_one_expired_activity(
     }
     commit_transition(
         transaction,
+        effects,
         run_id,
         sequence,
         activity_failure_event_id(run_id, activity_id),
@@ -457,6 +518,7 @@ pub(crate) fn workflow_fail_one_expired_activity(
 
 pub(crate) fn workflow_fire_one_due_timer(
     transaction: &Transaction<'_>,
+    effects: &mut EffectBatch,
     now_ms: i64,
     definitions: &[&'static dyn WorkflowDefinition],
 ) -> Result<bool> {
@@ -483,14 +545,24 @@ pub(crate) fn workflow_fire_one_due_timer(
         digest,
         "invalid stored workflow definition digest",
     )?);
-    workflow_fire_timer(
+    workflow_fire_timer_with_effects(
         transaction,
+        effects,
         now_ms,
         run_id,
         timer_id,
         retained_definition(definitions, digest)?,
     )?;
     Ok(true)
+}
+
+fn next_effect_batch(transaction: &Transaction<'_>, now_ms: i64) -> Result<EffectBatch> {
+    let sequence = transaction.query_row(
+        "SELECT commit_sequence + 1 FROM sys_meta WHERE singleton = 1 AND commit_sequence < 9223372036854775807",
+        [],
+        |row| row.get::<_, u64>(0),
+    )?;
+    EffectBatch::new(transaction, sequence, now_ms)
 }
 
 fn retained_definition(
@@ -693,6 +765,7 @@ pub(super) fn prepare_transition(
 
 pub(super) fn commit_transition(
     transaction: &Transaction<'_>,
+    effects: &mut EffectBatch,
     run_id: [u8; 16],
     sequence: u64,
     id: [u8; 32],
@@ -701,7 +774,7 @@ pub(super) fn commit_transition(
     decision: WorkflowDecision,
 ) -> Result<WorkflowOutcome> {
     insert_event(transaction, run_id, sequence, id, event)?;
-    apply_decision(transaction, run_id, sequence, now_ms, decision)
+    apply_decision(transaction, effects, run_id, sequence, now_ms, decision)
 }
 
 pub(super) fn validate_decision(decision: &WorkflowDecision, now_ms: i64) -> Result<()> {
@@ -717,7 +790,12 @@ pub(super) fn validate_decision(decision: &WorkflowDecision, now_ms: i64) -> Res
     if decision.status == WorkflowStatus::Running && decision.result.is_some() {
         return Err(Error::Command("running workflow cannot have a result"));
     }
-    if decision.status != WorkflowStatus::Running && !decision.actions.is_empty() {
+    if decision.status != WorkflowStatus::Running
+        && decision
+            .actions
+            .iter()
+            .any(|action| !matches!(action, WorkflowAction::Effect { .. }))
+    {
         return Err(Error::Command(
             "terminal workflow cannot schedule local work",
         ));
@@ -755,6 +833,22 @@ pub(super) fn validate_decision(decision: &WorkflowDecision, now_ms: i64) -> Res
                     .checked_add(24)
                     .ok_or(Error::Command("workflow action byte count overflow"))?;
             }
+            WorkflowAction::Effect {
+                destination,
+                operation,
+                expires_at_ms,
+            } => {
+                let intent = EffectIntent {
+                    destination: *destination,
+                    operation: operation.clone(),
+                    expires_at_ms: *expires_at_ms,
+                };
+                validate_effect_intent(now_ms, &intent)?;
+                bytes = bytes
+                    .checked_add(operation.len())
+                    .and_then(|value| value.checked_add(64))
+                    .ok_or(Error::Command("workflow action byte count overflow"))?;
+            }
         }
     }
     if bytes > MAX_WORKFLOW_BYTES {
@@ -765,6 +859,7 @@ pub(super) fn validate_decision(decision: &WorkflowDecision, now_ms: i64) -> Res
 
 fn apply_decision(
     transaction: &Transaction<'_>,
+    effects: &mut EffectBatch,
     run_id: [u8; 16],
     sequence: u64,
     now_ms: i64,
@@ -775,9 +870,14 @@ fn apply_decision(
         [run_id.as_slice()],
         |row| row.get(0),
     )?;
+    let local_actions = decision
+        .actions
+        .iter()
+        .filter(|action| !matches!(action, WorkflowAction::Effect { .. }))
+        .count();
     let prospective = usize::try_from(existing)
         .ok()
-        .and_then(|value| value.checked_add(decision.actions.len()))
+        .and_then(|value| value.checked_add(local_actions))
         .ok_or(Error::Command("invalid outstanding workflow task count"))?;
     if prospective > MAX_ACTIONS {
         return Err(Error::Command(
@@ -812,6 +912,20 @@ fn apply_decision(
                 transaction.execute(
                     "INSERT INTO workflow_timers(run_id, timer_id, due_at_ms, state) VALUES (?1, ?2, ?3, 0)",
                     (run_id.as_slice(), id.as_slice(), due_at_ms),
+                )?;
+            }
+            WorkflowAction::Effect {
+                destination,
+                operation,
+                expires_at_ms,
+            } => {
+                effects.insert(
+                    transaction,
+                    &EffectIntent {
+                        destination: *destination,
+                        operation: operation.clone(),
+                        expires_at_ms: *expires_at_ms,
+                    },
                 )?;
             }
         }

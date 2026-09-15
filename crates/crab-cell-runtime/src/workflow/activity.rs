@@ -5,7 +5,7 @@ use super::{
     WorkflowDefinition, WorkflowOutcome, WorkflowStatus, commit_transition, load_run_by_id,
     prepare_transition, verify_definition,
 };
-use crate::{Digest, Error, Result};
+use crate::{Digest, EffectBatch, Error, Result};
 
 pub(super) const MAX_CLAIM_ITEMS: usize = 32;
 const MAX_CLAIM_BYTES: usize = 512 << 10;
@@ -311,6 +311,23 @@ pub fn workflow_complete_activity(
     completion: &ActivityCompletion,
     definition: &dyn WorkflowDefinition,
 ) -> Result<ActivityCompletionOutcome> {
+    let mut effects = super::next_effect_batch(transaction, now_ms)?;
+    workflow_complete_activity_with_effects(
+        transaction,
+        &mut effects,
+        now_ms,
+        completion,
+        definition,
+    )
+}
+
+pub(super) fn workflow_complete_activity_with_effects(
+    transaction: &Transaction<'_>,
+    effects: &mut EffectBatch,
+    now_ms: i64,
+    completion: &ActivityCompletion,
+    definition: &dyn WorkflowDefinition,
+) -> Result<ActivityCompletionOutcome> {
     validate_now(now_ms)?;
     if completion.result.len() > MAX_ACTIVITY_BYTES || (!completion.failed && completion.retryable)
     {
@@ -367,6 +384,7 @@ pub fn workflow_complete_activity(
     )?;
     let outcome = commit_transition(
         transaction,
+        effects,
         completion.run_id,
         sequence,
         completion_event_id(completion),

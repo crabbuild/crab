@@ -104,6 +104,11 @@ impl CommandContext<'_, '_> {
         self.now_ms
     }
 
+    /// Creates the one command-scoped effect identity allocator.
+    pub fn effect_batch(&self) -> Result<crate::EffectBatch> {
+        crate::EffectBatch::new(self.transaction, self.sequence, self.now_ms)
+    }
+
     /// Executes bounded application SQL under the runtime authorizer.
     pub fn sql(&self, batch: &SqlBatch) -> Result<Vec<SqlResultSet>> {
         sql_batch(self.transaction, batch)

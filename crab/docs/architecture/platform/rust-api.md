@@ -618,6 +618,19 @@ pub fn register_effect_delivery<M: EffectModule>(
     registry: &mut RegistryBuilder,
 ) -> Result<()>;
 
+impl EffectBatch {
+    pub fn new(
+        transaction: &Transaction<'_>,
+        command_sequence: u64,
+        now_ms: i64,
+    ) -> Result<Self>;
+    pub fn insert(
+        &mut self,
+        transaction: &Transaction<'_>,
+        intent: &EffectIntent,
+    ) -> Result<[u8; 32]>;
+}
+
 impl<M: EffectModule> EffectSource<M> {
     pub fn new(client: CellClient, target: CellTarget) -> Self;
     pub async fn claim(
@@ -653,6 +666,14 @@ impl<M: EffectModule> EffectSupervisor<M> {
         -> Result<EffectRunOutcome, EffectSupervisorError>;
 }
 ```
+
+`WorkflowAction::Effect` is applied through the same `EffectBatch` as other
+transitions in the command. Ordinary workflow commands reconstruct the next
+Cell commit sequence from `sys_meta`; Tick constructs the batch from its exact
+`CommandContext::sequence()` and shares it across every due transition. A
+terminal decision may contain only effect actions, never a new timer or
+activity. This preserves atomic state/effect publication and prevents ordinal
+reuse when one Tick advances multiple runs.
 
 `run_once` owns the complete one-item protocol: publish a source claim, validate
 the lease after that receipt, deliver to the destination, Resolve an ambiguous

@@ -90,8 +90,11 @@ one intention, performs a minimum-receipt lease validation, delivers it through
 the signed peer path, resolves an ambiguous target result, then publishes the
 exact source acknowledgement or bounded retry. It surfaces non-transient
 authorization/protocol failures without releasing the live lease; normal lease
-reclamation remains the recovery path. Workflow/Queue effect insertion adapters
-and catalog-driven node polling remain. Ack/retry codecs carry only effect ID,
+reclamation remains the recovery path. Workflow decisions now insert effect
+actions atomically through a command-scoped `EffectBatch`. The batch binds the
+persisted Cell/incarnation and Cell commit sequence and shares its ordinal across
+all transitions performed by one Tick. Queue dead-letter effect insertion and
+catalog-driven node polling remain. Ack/retry codecs carry only effect ID,
 attempt, token and expiry rather than repeating operation bytes. Ack results are
 capped at 1,048,503 bytes so that identity plus result remains within the same
 1 MiB registered-command input ceiling.

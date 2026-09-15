@@ -51,7 +51,7 @@ owner and epoch. Local tentative state remains quarantined; a changed owner is
 left untouched. The next idle acquisition reopens the exact authoritative root,
 so it cannot publish a late tentative commit. Streaming initial directory construction
 and directory-backed capture checksums, shared directory caching, prepared compaction/bundles,
-Workflow/Queue effect adapters, catalog-driven effect/activity scheduling, scheduler
+Queue dead-letter effect adapters, catalog-driven effect/activity scheduling, scheduler
 progress advertisement and remote/idle scheduler routing, remaining HTTP domain
 cutovers and capacity qualification remain incomplete. The scoped
 KV primitive now installs
@@ -92,7 +92,7 @@ root to publish, validates its exact lease, runs only the statically bound Rust
 future outside SQLite, heartbeats through durable commands and publishes its
 completion or retry transition. Its mutation evidence survives unknown outcomes,
 and dropping the supervisor cycle signals cooperative cancellation. Catalog-driven
-shard polling, bounded multi-activity orchestration, effect actions and the due-Cell
+shard polling, bounded multi-activity orchestration and the due-Cell
 scanner remain. A typed `WorkflowNamespace` now
 binds each namespace and its current-plus-retained definition inventory to fixed
 command/query IDs at startup, derives its shard only from the workflow ID and compiled registry,
@@ -119,8 +119,12 @@ compiled registry, and `EffectSource` publishes every claim, acknowledgement
 and retry through `CellClient`. `EffectSupervisor` claims one published
 intention, revalidates its exact lease at the claim receipt, delivers or
 resolves it through the signed peer client, and then publishes the matching
-source acknowledgement or retry. Workflow/Queue effect adapters and
-catalog-driven node polling still remain.
+source acknowledgement or retry. Workflow transitions now atomically insert
+bounded effect actions through one command-scoped `EffectBatch`; terminal
+decisions may emit effects while still rejecting new local work. The batch uses
+the Cell commit sequence and assigns ordinals across every transition in one
+scheduler Tick, so different runs cannot collide in `sys_effects`. Queue
+dead-letter effect insertion and catalog-driven node polling still remain.
 Bootstrap and every committed command now derive the earliest durable work or
 retention deadline from SQLite inside the same transaction. The runtime binds
 that summary to the pending LTX cut and publishes it in control; application

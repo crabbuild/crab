@@ -2,7 +2,8 @@ use std::marker::PhantomData;
 
 use crate::{
     BoundedDecoder, BoundedEncoder, CodecError, Command, CommandContext, CommandResult, Error,
-    RegistryBuilder, SchedulerTickOutcome, WireValue, WorkflowDefinition, scheduler_tick,
+    RegistryBuilder, SchedulerTickOutcome, WireValue, WorkflowDefinition,
+    scheduler::scheduler_tick_at,
 };
 
 /// Compile-time binding for the internal maintenance command of one module.
@@ -54,8 +55,9 @@ impl<M: MaintenanceModule> Command for MaintenanceTickCommand<M> {
         if expected_next != context.sequence() {
             return Ok(CommandResult::Success(MaintenanceTickOutcome::Stale));
         }
-        let SchedulerTickOutcome { processed } = scheduler_tick(
+        let SchedulerTickOutcome { processed } = scheduler_tick_at(
             context.primitive_transaction(),
+            context.sequence(),
             context.now_ms(),
             M::WORKFLOW_DEFINITIONS,
         )?;

@@ -3,8 +3,8 @@ use std::collections::{HashSet, VecDeque};
 use crab_ltx::rusqlite::Transaction;
 
 use crate::{
-    CatalogProof, CatalogShardScan, CellAuthority, CellCatalog, Error, Result, SessionId,
-    VersionedControl, WorkflowDefinition,
+    CatalogProof, CatalogShardScan, CellAuthority, CellCatalog, EffectBatch, Error, Result,
+    SessionId, VersionedControl, WorkflowDefinition,
     effects::{
         effect_cleanup_terminal_bounded, effect_expire_ready_bounded,
         effect_reclaim_expired_bounded, inbox_cleanup_expired_bounded,
@@ -139,10 +139,30 @@ pub fn scheduler_tick(
     logical_time_ms: i64,
     workflow_definitions: &[&'static dyn WorkflowDefinition],
 ) -> Result<SchedulerTickOutcome> {
+    let command_sequence = transaction.query_row(
+        "SELECT commit_sequence + 1 FROM sys_meta WHERE singleton = 1 AND commit_sequence < 9223372036854775807",
+        [],
+        |row| row.get::<_, u64>(0),
+    )?;
+    scheduler_tick_at(
+        transaction,
+        command_sequence,
+        logical_time_ms,
+        workflow_definitions,
+    )
+}
+
+pub(crate) fn scheduler_tick_at(
+    transaction: &Transaction<'_>,
+    command_sequence: u64,
+    logical_time_ms: i64,
+    workflow_definitions: &[&'static dyn WorkflowDefinition],
+) -> Result<SchedulerTickOutcome> {
     if logical_time_ms < 0 {
         return Err(Error::Command("negative scheduler logical time"));
     }
     let tables = installed_tables(transaction)?;
+    let mut effects = EffectBatch::new(transaction, command_sequence, logical_time_ms)?;
     let mut remaining = MAX_TICK_ITEMS;
 
     consume_with(&mut remaining, |limit| {
@@ -189,6 +209,7 @@ pub fn scheduler_tick(
         while remaining != 0
             && workflow_fail_one_expired_activity(
                 transaction,
+                &mut effects,
                 logical_time_ms,
                 workflow_definitions,
             )?
@@ -199,7 +220,12 @@ pub fn scheduler_tick(
             workflow_reclaim_expired_bounded(transaction, logical_time_ms, limit)
         })?;
         while remaining != 0
-            && workflow_fire_one_due_timer(transaction, logical_time_ms, workflow_definitions)?
+            && workflow_fire_one_due_timer(
+                transaction,
+                &mut effects,
+                logical_time_ms,
+                workflow_definitions,
+            )?
         {
             remaining -= 1;
         }
