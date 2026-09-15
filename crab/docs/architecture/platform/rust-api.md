@@ -537,8 +537,10 @@ rendezvous candidate to scan; progress recovery readmits it. Local readiness and
 Prometheus scheduler health/progress/lag use the same completion timestamp, and
 readiness cannot open before the first completed cycle. Exact compiled operation
 IDs/codecs map peer requests to scheduler, activity or effect grants;
-unregistered and product operations fail closed. Durable retry queues,
-per-namespace fairness and multi-node activity failure qualification remain. For a locally owned Cell,
+unregistered and product operations fail closed. Transactional maintenance now
+protects every installed work class from starvation and passes unused capacity
+forward. Durable node retry queues, cross-Cell/per-namespace
+admission fairness and multi-node activity failure qualification remain. For a locally owned Cell,
 `CellRuntime::local_handle` asks the dispatcher for a capability and
 returns one only if the scanned control's session/incarnation/code/schema still
 match an unfenced, non-draining active entry. Callers never inspect the runtime's

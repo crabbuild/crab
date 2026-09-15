@@ -227,100 +227,231 @@ pub(crate) fn scheduler_tick_at(
     }
     let tables = installed_tables(transaction)?;
     let mut effects = EffectBatch::new(transaction, source, command_sequence, logical_time_ms)?;
-    let mut remaining = MAX_TICK_ITEMS;
+    let classes = 5
+        + usize::from(tables.contains("kv_entries"))
+        + 3 * usize::from(tables.contains("queue_messages"))
+        + 4 * usize::from(tables.contains("workflow_activities"));
+    let mut budget = MaintenanceBudget::new(classes)?;
 
-    consume_with(&mut remaining, |limit| {
+    budget.run(|limit| {
         transaction
             .execute(
-            "DELETE FROM sys_requests WHERE request_id IN (SELECT request_id FROM sys_requests INDEXED BY sys_requests_expiry WHERE retain_until_ms <= ?1 ORDER BY retain_until_ms, request_id LIMIT ?2)",
+                "DELETE FROM sys_requests WHERE request_id IN (SELECT request_id FROM sys_requests INDEXED BY sys_requests_expiry WHERE retain_until_ms <= ?1 ORDER BY retain_until_ms, request_id LIMIT ?2)",
                 (logical_time_ms, limit as i64),
             )
             .map_err(Into::into)
     })?;
-    consume_with(&mut remaining, |limit| {
-        inbox_cleanup_expired_bounded(transaction, logical_time_ms, limit)
-    })?;
-    consume_with(&mut remaining, |limit| {
-        effect_cleanup_terminal_bounded(transaction, logical_time_ms, limit)
-    })?;
-    consume_with(&mut remaining, |limit| {
-        effect_expire_ready_bounded(transaction, logical_time_ms, limit)
-    })?;
-    consume_with(&mut remaining, |limit| {
-        effect_reclaim_expired_bounded(transaction, logical_time_ms, limit)
-    })?;
+    budget.run(|limit| inbox_cleanup_expired_bounded(transaction, logical_time_ms, limit))?;
+    budget.run(|limit| effect_cleanup_terminal_bounded(transaction, logical_time_ms, limit))?;
+    budget.run(|limit| effect_expire_ready_bounded(transaction, logical_time_ms, limit))?;
+    budget.run(|limit| effect_reclaim_expired_bounded(transaction, logical_time_ms, limit))?;
 
     if tables.contains("kv_entries") {
-        consume_with(&mut remaining, |limit| {
-            kv_cleanup_expired_bounded(transaction, logical_time_ms, limit)
-        })?;
+        budget.run(|limit| kv_cleanup_expired_bounded(transaction, logical_time_ms, limit))?;
     }
     if tables.contains("queue_messages") {
-        consume_with(&mut remaining, |limit| {
-            queue_cleanup_expired_bounded(transaction, logical_time_ms, limit)
-        })?;
-        if let Some(target) = queue_dead_letter {
-            let mut dead_letter = QueueDeadLetterWriter::new(target, &mut effects);
-            consume_with(&mut remaining, |limit| {
+        budget.run(|limit| queue_cleanup_expired_bounded(transaction, logical_time_ms, limit))?;
+        budget.run(|limit| {
+            if let Some(target) = queue_dead_letter {
+                let mut dead_letter = QueueDeadLetterWriter::new(target, &mut effects);
                 queue_expire_ready_bounded_with_dead_letter(
                     transaction,
                     logical_time_ms,
                     limit,
                     Some(&mut dead_letter),
                 )
-            })?;
-            consume_with(&mut remaining, |limit| {
+            } else {
+                queue_expire_ready_bounded(transaction, logical_time_ms, limit)
+            }
+        })?;
+        budget.run(|limit| {
+            if let Some(target) = queue_dead_letter {
+                let mut dead_letter = QueueDeadLetterWriter::new(target, &mut effects);
                 queue_reclaim_expired_bounded_with_dead_letter(
                     transaction,
                     logical_time_ms,
                     limit,
                     Some(&mut dead_letter),
                 )
-            })?;
-        } else {
-            consume_with(&mut remaining, |limit| {
-                queue_expire_ready_bounded(transaction, logical_time_ms, limit)
-            })?;
-            consume_with(&mut remaining, |limit| {
+            } else {
                 queue_reclaim_expired_bounded(transaction, logical_time_ms, limit)
-            })?;
-        }
+            }
+        })?;
     }
     if tables.contains("workflow_activities") {
-        consume_with(&mut remaining, |limit| {
-            workflow_cleanup_terminal_bounded(transaction, logical_time_ms, limit)
+        budget
+            .run(|limit| workflow_cleanup_terminal_bounded(transaction, logical_time_ms, limit))?;
+        budget.run(|limit| {
+            repeat(limit, || {
+                workflow_fail_one_expired_activity(
+                    transaction,
+                    &mut effects,
+                    source,
+                    logical_time_ms,
+                    workflow_definitions,
+                )
+            })
         })?;
-        while remaining != 0
-            && workflow_fail_one_expired_activity(
-                transaction,
-                &mut effects,
-                source,
-                logical_time_ms,
-                workflow_definitions,
-            )?
-        {
-            remaining -= 1;
-        }
-        consume_with(&mut remaining, |limit| {
-            workflow_reclaim_expired_bounded(transaction, logical_time_ms, limit)
+        budget
+            .run(|limit| workflow_reclaim_expired_bounded(transaction, logical_time_ms, limit))?;
+        budget.run(|limit| {
+            repeat(limit, || {
+                workflow_fire_one_due_timer(
+                    transaction,
+                    &mut effects,
+                    source,
+                    logical_time_ms,
+                    workflow_definitions,
+                )
+            })
         })?;
-        while remaining != 0
-            && workflow_fire_one_due_timer(
-                transaction,
-                &mut effects,
-                source,
-                logical_time_ms,
-                workflow_definitions,
-            )?
-        {
-            remaining -= 1;
-        }
+    }
+
+    // Cleanup classes run only once so rows terminalized above remain observable
+    // until the next Tick. Other classes can safely consume unused capacity.
+    budget.fill(|limit| {
+        transaction
+            .execute(
+                "DELETE FROM sys_requests WHERE request_id IN (SELECT request_id FROM sys_requests INDEXED BY sys_requests_expiry WHERE retain_until_ms <= ?1 ORDER BY retain_until_ms, request_id LIMIT ?2)",
+                (logical_time_ms, limit as i64),
+            )
+            .map_err(Into::into)
+    })?;
+    budget.fill(|limit| inbox_cleanup_expired_bounded(transaction, logical_time_ms, limit))?;
+    budget.fill(|limit| effect_expire_ready_bounded(transaction, logical_time_ms, limit))?;
+    budget.fill(|limit| effect_reclaim_expired_bounded(transaction, logical_time_ms, limit))?;
+    if tables.contains("kv_entries") {
+        budget.fill(|limit| kv_cleanup_expired_bounded(transaction, logical_time_ms, limit))?;
+    }
+    if tables.contains("queue_messages") {
+        budget.fill(|limit| {
+            if let Some(target) = queue_dead_letter {
+                let mut dead_letter = QueueDeadLetterWriter::new(target, &mut effects);
+                queue_expire_ready_bounded_with_dead_letter(
+                    transaction,
+                    logical_time_ms,
+                    limit,
+                    Some(&mut dead_letter),
+                )
+            } else {
+                queue_expire_ready_bounded(transaction, logical_time_ms, limit)
+            }
+        })?;
+        budget.fill(|limit| {
+            if let Some(target) = queue_dead_letter {
+                let mut dead_letter = QueueDeadLetterWriter::new(target, &mut effects);
+                queue_reclaim_expired_bounded_with_dead_letter(
+                    transaction,
+                    logical_time_ms,
+                    limit,
+                    Some(&mut dead_letter),
+                )
+            } else {
+                queue_reclaim_expired_bounded(transaction, logical_time_ms, limit)
+            }
+        })?;
+    }
+    if tables.contains("workflow_activities") {
+        budget.fill(|limit| {
+            repeat(limit, || {
+                workflow_fail_one_expired_activity(
+                    transaction,
+                    &mut effects,
+                    source,
+                    logical_time_ms,
+                    workflow_definitions,
+                )
+            })
+        })?;
+        budget
+            .fill(|limit| workflow_reclaim_expired_bounded(transaction, logical_time_ms, limit))?;
+        budget.fill(|limit| {
+            repeat(limit, || {
+                workflow_fire_one_due_timer(
+                    transaction,
+                    &mut effects,
+                    source,
+                    logical_time_ms,
+                    workflow_definitions,
+                )
+            })
+        })?;
     }
 
     Ok(SchedulerTickOutcome {
-        processed: u32::try_from(MAX_TICK_ITEMS - remaining)
+        processed: u32::try_from(budget.processed())
             .map_err(|_| Error::Command("scheduler Tick count overflow"))?,
     })
+}
+
+struct MaintenanceBudget {
+    remaining: usize,
+    remaining_classes: usize,
+    fair_share: usize,
+}
+
+impl MaintenanceBudget {
+    fn new(classes: usize) -> Result<Self> {
+        if classes == 0 {
+            return Err(Error::Command("scheduler has no maintenance classes"));
+        }
+        Ok(Self {
+            remaining: MAX_TICK_ITEMS,
+            remaining_classes: classes,
+            fair_share: MAX_TICK_ITEMS / classes,
+        })
+    }
+
+    fn run(&mut self, operation: impl FnOnce(usize) -> Result<usize>) -> Result<()> {
+        self.remaining_classes = self
+            .remaining_classes
+            .checked_sub(1)
+            .ok_or(Error::Command("scheduler maintenance class mismatch"))?;
+        // Unused work flows forward, but every later class retains one share.
+        let reserved = self.fair_share * self.remaining_classes;
+        let limit = self.remaining.saturating_sub(reserved);
+        let processed = operation(limit)?;
+        if processed > limit {
+            return Err(Error::Command(
+                "scheduler maintenance class exceeded its budget",
+            ));
+        }
+        self.remaining = self
+            .remaining
+            .checked_sub(processed)
+            .ok_or(Error::Command("scheduler Tick exceeded 128 items"))?;
+        Ok(())
+    }
+
+    fn fill(&mut self, operation: impl FnOnce(usize) -> Result<usize>) -> Result<()> {
+        if self.remaining == 0 {
+            return Ok(());
+        }
+        let limit = self.remaining;
+        let processed = operation(limit)?;
+        if processed > limit {
+            return Err(Error::Command(
+                "scheduler maintenance class exceeded its budget",
+            ));
+        }
+        self.remaining = self
+            .remaining
+            .checked_sub(processed)
+            .ok_or(Error::Command("scheduler Tick exceeded 128 items"))?;
+        Ok(())
+    }
+
+    fn processed(&self) -> usize {
+        MAX_TICK_ITEMS - self.remaining
+    }
+}
+
+fn repeat(limit: usize, mut operation: impl FnMut() -> Result<bool>) -> Result<usize> {
+    let mut processed = 0;
+    while processed < limit && operation()? {
+        processed += 1;
+    }
+    Ok(processed)
 }
 
 /// Computes the earliest durable work or retention deadline after a command.
@@ -474,19 +605,4 @@ fn merge_due(value: i64, logical_time_ms: i64, next: &mut Option<i64>) -> Result
     let value = value.max(logical_time_ms);
     *next = Some(next.map_or(value, |current| current.min(value)));
     Ok(())
-}
-
-fn consume(remaining: &mut usize, processed: usize) -> Result<()> {
-    *remaining = remaining
-        .checked_sub(processed)
-        .ok_or(Error::Command("scheduler Tick exceeded 128 items"))?;
-    Ok(())
-}
-
-fn consume_with(
-    remaining: &mut usize,
-    operation: impl FnOnce(usize) -> Result<usize>,
-) -> Result<()> {
-    let processed = operation(*remaining)?;
-    consume(remaining, processed)
 }

@@ -146,6 +146,13 @@ cat > "${work_dir}/restore.server.toml" <<EOF
 listen = "127.0.0.1:8788"
 management_listen = "127.0.0.1:8789"
 
+[cells]
+data_dir = "/var/lib/crab/cells"
+peer_advertise = "https://localhost:8789"
+peer_certificate = "/run/secrets/crab-peer/peer.crt"
+peer_private_key = "/run/secrets/crab-peer/peer.key"
+peer_ca = "/run/secrets/crab-peer/ca.crt"
+
 [storage]
 url = "s3://crab-http-server/${restore_prefix}"
 EOF
@@ -155,6 +162,12 @@ network_name="$(docker inspect "$rustfs_id" \
   --format '{{json .NetworkSettings.Networks}}' | jq --raw-output 'keys[0]')"
 server_image="$(docker inspect "$server_id" --format '{{.Config.Image}}')"
 proxy_image="$(docker inspect "$proxy_id" --format '{{.Config.Image}}')"
+peer_identity_volume="$(docker inspect "$server_id" \
+  --format '{{range .Mounts}}{{if eq .Destination "/run/secrets/crab-peer"}}{{.Name}}{{end}}{{end}}')"
+if [ -z "$peer_identity_volume" ]; then
+  echo "The Compose server peer identity volume could not be resolved." >&2
+  exit 1
+fi
 
 docker run --detach --name "$restore_server" \
   --network "$network_name" \
@@ -170,6 +183,7 @@ docker run --detach --name "$restore_server" \
   --tmpfs /var/lib/crab/tmp:rw,noexec,nosuid,nodev,size=2g,uid=10001,gid=10001,mode=0700 \
   --tmpfs /var/lib/crab/cells:rw,noexec,nosuid,nodev,size=32g,uid=10001,gid=10001,mode=0700 \
   --volume "${work_dir}/restore.server.toml:/etc/crab/server.toml:ro" \
+  --volume "${peer_identity_volume}:/run/secrets/crab-peer:ro" \
   "$server_image" >/dev/null
 docker run --detach --name "$restore_proxy" \
   --network "container:${restore_server}" \

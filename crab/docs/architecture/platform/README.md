@@ -179,8 +179,11 @@ every scheduler tracks the last observed change per live session. A node with no
 advertised progress for 15 seconds is removed from rendezvous assignment until
 it advances again; its own readiness stays closed until the first complete cycle
 and fails again on the same deadline. Prometheus
-exports scheduler health, progress and lag. Durable scheduler retry queues,
-per-namespace fairness and multi-node activity failure qualification remain.
+exports scheduler health, progress and lag. The transactional Tick now reserves
+work for every installed maintenance class and passes unused capacity forward,
+so request retention cannot starve Queue or Workflow deadlines. Durable node
+retry queues, cross-Cell/per-namespace admission fairness
+and multi-node activity failure qualification remain.
 `CellRuntime::local_handle` now resolves a due Cell
 only when the dispatcher still owns the exact incarnation/code/schema under the
 current session and the admission is neither fenced nor draining; it never

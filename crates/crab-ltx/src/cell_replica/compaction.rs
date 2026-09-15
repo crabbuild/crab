@@ -210,7 +210,7 @@ async fn spool_indexes(
             let returned = replica
                 .host
                 .run(move || {
-                    for entry in bytes.chunks_exact(crate::paged::ENTRY_BYTES) {
+                    for entry in bytes.as_chunks::<{ crate::paged::ENTRY_BYTES }>().0 {
                         validator.validate(crate::paged::decode_index_entry(entry)?)?;
                     }
                     file.write_all(&bytes)?;

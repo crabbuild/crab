@@ -482,8 +482,10 @@ without claiming scanner progress. Every scanner excludes a session after 15
 seconds without progress and restores it after the counter advances. The local
 readiness gate opens only after the first complete cycle, then uses the same
 deadline as scheduler health/progress/lag metrics.
-Durable retry queues, per-namespace fairness and multi-node activity failure
-qualification remain. Active-local routing recovers a capability
+The transactional Tick gives every installed maintenance class a protected
+share and passes unused capacity forward. Durable node retry queues,
+cross-Cell/per-namespace admission fairness and multi-node activity
+failure qualification remain. Active-local routing recovers a capability
 from the dispatcher only when session, incarnation, code and schema match the
 scanned control and the Cell is not fenced or draining.
 

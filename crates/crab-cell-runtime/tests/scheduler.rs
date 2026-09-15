@@ -131,6 +131,47 @@ fn tick_processes_at_most_128_due_items() {
 }
 
 #[test]
+fn tick_request_cleanup_cannot_starve_queue_expiry() {
+    let mut connection = connection();
+    let transaction = connection.transaction().unwrap();
+    install_queue_schema(&transaction).unwrap();
+    for ordinal in 0_u16..200 {
+        let mut request_id = [0; 16];
+        request_id[..2].copy_from_slice(&ordinal.to_be_bytes());
+        transaction
+            .execute(
+                "INSERT INTO sys_requests VALUES (?1, ?2, 1, X'', 1, 1, 2)",
+                (request_id.as_slice(), [4_u8; 32].as_slice()),
+            )
+            .unwrap();
+    }
+    transaction
+        .execute(
+            "INSERT INTO queue_messages VALUES (zeroblob(16), X'02', 0, 0, 1, 5, NULL, NULL, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+
+    let outcome = scheduler_tick(&transaction, &source_target(), 10, &[]).unwrap();
+
+    assert_eq!(outcome.processed, 128);
+    assert_eq!(
+        transaction
+            .query_row("SELECT state FROM queue_messages", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        3
+    );
+    assert!(
+        transaction
+            .query_row("SELECT count(*) FROM sys_requests", [], |row| row
+                .get::<_, usize>(0))
+            .unwrap()
+            > 0
+    );
+}
+
+#[test]
 fn tick_terminalizes_expired_ready_work_and_runs_workflow_failure_transition() {
     let mut connection = connection();
     let transaction = connection.transaction().unwrap();
