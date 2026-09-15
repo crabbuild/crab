@@ -51,9 +51,9 @@ owner and epoch. Local tentative state remains quarantined; a changed owner is
 left untouched. The next idle acquisition reopens the exact authoritative root,
 so it cannot publish a late tentative commit. Streaming initial directory construction
 and directory-backed capture checksums, shared directory caching, prepared compaction/bundles,
-Queue dead-letter effect adapters, catalog-driven effect/activity scheduling, scheduler
-progress advertisement and remote/idle scheduler routing, remaining HTTP domain
-cutovers and capacity qualification remain incomplete. The scoped
+Queue dead-letter effect adapters, catalog-driven Workflow activity scheduling,
+scheduler progress advertisement/fallback, remaining HTTP domain cutovers and
+capacity qualification remain incomplete. The scoped
 KV primitive now installs
 the normative schema and implements atomic checks/mutations, incarnation/sequence
 versions, logical TTL, bounded binary-prefix reads and cleanup through the same
@@ -64,7 +64,7 @@ receipted point/list reads using owner-sampled logical time. Queue now implement
 producer dedup, bounded claims,
 unpredictable lease tokens, published-token validation, ack/retry/extend, expired
 lease reclamation, attempt limits and terminal cleanup. Dead-letter delivery
-still depends on the remaining effect subsystem. Its typed `QueueNamespace`
+still needs to insert into the implemented effect subsystem. Its typed `QueueNamespace`
 derives send shards from producer IDs, requires consumers to select one fixed
 shard, publishes claims before returning payloads, revalidates exact leases at a
 minimum receipt and exposes token-bound ack/retry/extend commands. Shard counts
@@ -92,8 +92,7 @@ root to publish, validates its exact lease, runs only the statically bound Rust
 future outside SQLite, heartbeats through durable commands and publishes its
 completion or retry transition. Its mutation evidence survives unknown outcomes,
 and dropping the supervisor cycle signals cooperative cancellation. Catalog-driven
-shard polling, bounded multi-activity orchestration and the due-Cell
-scanner remain. A typed `WorkflowNamespace` now
+Workflow-namespace polling and bounded multi-activity orchestration remain. A typed `WorkflowNamespace` now
 binds each namespace and its current-plus-retained definition inventory to fixed
 command/query IDs at startup, derives its shard only from the workflow ID and compiled registry,
 and exposes receipted start, signal, cancel and state operations. Registry
@@ -124,7 +123,7 @@ bounded effect actions through one command-scoped `EffectBatch`; terminal
 decisions may emit effects while still rejecting new local work. The batch uses
 the Cell commit sequence and assigns ordinals across every transition in one
 scheduler Tick, so different runs cannot collide in `sys_effects`. Queue
-dead-letter effect insertion and catalog-driven node polling still remain.
+dead-letter effect insertion and generic non-repository effect polling still remain.
 Bootstrap and every committed command now derive the earliest durable work or
 retention deadline from SQLite inside the same transaction. The runtime binds
 that summary to the pending LTX cut and publishes it in control; application
@@ -135,8 +134,16 @@ summary. It dispatches timer and terminal activity events through the run's
 retained definition. Revision-pinned catalog iteration now verifies one immutable
 256-entry page at a time; due filtering reads at most 32 controls per step, and
 the preferred scanner is selected by order-independent rendezvous hashing.
-Node-progress advertisements, 15-second fallback, remote/idle route orchestration
-and retry supervision remain. `CellRuntime::local_handle` now resolves a due Cell
+`crab-http-server` now runs the repository scanner once per second. A cycle
+enumerates the exact live fleet, rendezvous-assigns all 256 shards, processes at
+most 128 due Cells, routes Tick to an existing local or authenticated remote
+owner, or temporarily acquires an idle/stale-owner Cell from its exact root. A
+temporary local activation drains back to `Idle` after processing. When Tick
+reports no maintenance item, the same cycle runs one source effect supervision
+step. Tick/effect peer operations use fleet/session-bound internal grants, not a
+browser principal. Node-progress advertisements, 15-second scanner fallback,
+bounded retry queues and general Workflow activity polling remain.
+`CellRuntime::local_handle` now resolves a due Cell
 only when the dispatcher still owns the exact incarnation/code/schema under the
 current session and the admission is neither fenced nor draining; it never
 exposes the internal Cell map or SQLite handle.
@@ -163,7 +170,8 @@ reuses the canonical local transport rather than opening a second SQL execution
 path. The server composition root now owns one process-session
 `CellRuntime`, validates the compiled registry before admission, publishes its
 signed node session, serves its management router through mandatory fleet mTLS,
-and shuts the heartbeat and runtime down with the server. The server-side peer
+and supervises the repository due scanner until cancellation. Shutdown joins the
+scanner before draining the runtime. The server-side peer
 round trip now reloads authoritative ownership, requires the owner endpoint to
 match a live signed node advertisement, pins CA/hostname/leaf/SPKI through mTLS,
 reuses a bounded client pool and retries only definitely-not-started failures

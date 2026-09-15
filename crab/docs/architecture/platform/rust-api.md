@@ -90,12 +90,16 @@ roots during rollout.
 | command | 2 | `CreateComment` | 80 KiB | 80 KiB | Reject if issue is absent; otherwise allocate number, insert row, advance app revision |
 | command | 3 | `UpdateIssue` | 96 KiB | 80 KiB | Check actor/metadata permission and version, replace supplied fields, advance app revision |
 | command | 4 | `UpdateComment` | 80 KiB | 80 KiB | Check author and version, replace body, advance app revision |
+| command | 5 | `MaintenanceTick` | 8 B | 5 B | Reject stale root position or advance at most 128 due items and recompute summary |
+| command | 6 | `EffectClaim` | 8 B | 1 MiB | Claim at most one due source effect under a published lease |
+| command | 7 | `EffectLease` | 1 MiB | 9 B | Acknowledge delivery or schedule the same effect bytes for retry |
 | query | 1 | `GetIssue` | 8 B | 80 KiB | Primary-key read |
 | query | 2 | `GetComment` | 16 B | 80 KiB | `(issue, number)` primary-key read |
 | query | 3 | `ListIssues` | 1 KiB | 1 MiB | Descending cursor/state/search page, at most 50 results and 200 number probes |
 | query | 4 | `ListComments` | 32 B | 1 MiB | Descending cursor page, at most 50 results and 200 number probes |
+| query | 5 | `EffectValidate` | 1 MiB | 1 B | Validate the exact published source lease at a minimum receipt |
 
-All eight use codec version 1 and schema version 1. Issue/comment numbers and
+All twelve use codec version 1 and schema version 1. Issue/comment numbers and
 versions are positive integers no larger than 9,007,199,254,740,991. The
 initializer writes the catalog repository UUID to the singleton identity row;
 handlers fail the complete application savepoint if that row is missing or its
@@ -428,8 +432,9 @@ from the workflow ID and registry topology, binds the start run identity to the
 runtime mutation identity, returns durable typed rejection for non-applied
 outcomes and supports bounded minimum-receipt state reads. Its integration test
 proves start, signal, duplicate replay, conflict rejection, exact-root restore,
-state and cancellation. Catalog-driven activity/effect polling remains a node
-service outside this application capability. `WorkflowActivities<M>` and
+state and cancellation. Catalog-driven Workflow activity polling remains a
+node service outside this application capability; repository effects are now
+polled by the server scheduler. `WorkflowActivities<M>` and
 `ActivitySupervisor<M>` now implement the first native execution unit: registry
 freeze verifies the exact definition/type/handler matrix, claims and validation
 cross a published receipt, the statically linked future runs without a SQLite
@@ -437,8 +442,8 @@ borrow, heartbeat extensions publish as independent commands, and completion or
 retry feeds the pinned state machine. The activity context exposes stable run,
 activity and external-idempotency identities, the current durable lease deadline
 and cooperative cancellation. Pending mutations retain their exact identity for
-resolution. Catalog-driven shard polling and bounded concurrent cycles remain;
-the maintenance Tick owns timer dispatch.
+resolution. Catalog-driven Workflow shard polling and bounded concurrent cycles
+remain; the maintenance Tick owns timer dispatch.
 
 `MaintenanceModule` binds one private Tick operation ID. A scanner submits the
 published root's commit sequence; `MaintenanceTickCommand` no-ops stale scans,
@@ -447,9 +452,15 @@ publish the new scheduler summary. Application routes never construct Tick
 requests. `CatalogShardScan` keeps a fixed head revision while reading one
 digest-verified page at a time. `DueCellScan` bounds each step to 32 control
 reads; a zero-result batch still advances the scan. Rendezvous selection is pure
-and independent of node-list ordering. Liveness advertisements, fallback and
-route/acquire orchestration remain node-supervisor work. For a locally owned
-Cell, `CellRuntime::local_handle` asks the dispatcher for a capability and
+and independent of node-list ordering. `RepositoryCellScheduler` performs that
+orchestration every second: it loads at most 10,000 exact live sessions, assigns
+all 256 shards, processes at most 128 due Cells, and routes each one to the
+existing local or authenticated remote owner. It may acquire an Idle Cell or
+perform the normal observed stale-owner takeover; activations created solely for
+the scheduler drain after the Tick/effect cycle, while already-active Cells stay
+owned. Node-progress advertisement, 15-second scanner fallback, bounded retry
+queues and generic Workflow activity polling remain. For a locally owned Cell,
+`CellRuntime::local_handle` asks the dispatcher for a capability and
 returns one only if the scanned control's session/incarnation/code/schema still
 match an unfenced, non-draining active entry. Callers never inspect the runtime's
 Cell map.
@@ -525,7 +536,7 @@ Rust cannot prevent hidden clocks, randomness or network calls in trusted code.
 
 | Existing source | Integration change to implement |
 | --- | --- |
-| [server.rs](../../../../crates/crab-http-server/src/server.rs) | Construct one runtime with existing resolved Store; retain handle and join/drain ownership in Server |
+| [server.rs](../../../../crates/crab-http-server/src/server.rs) | Constructs one runtime with the existing resolved Store, starts the catalog-driven repository scheduler after node publication, cancels/joins it during shutdown and then drains/joins the runtime |
 | [app.rs](../../../../crates/crab-http-server/src/app.rs) | Keep Principal/repository admission before native commands; map durable, rejected and unknown outcomes |
 | [app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Replace collaboration JSON persistence with typed SQL handlers after hard cutover |
 | [config.rs](../../../../crates/crab-http-server/src/config.rs) | Extend existing config for local Cell data and private peers; do not add a second provider/auth stack |
@@ -539,7 +550,9 @@ The server startup order is normative:
 4. Start bounded SQL/page-I/O/activity workers and the Cell supervisor.
 5. Register the private peer route on the management router.
 6. Construct product routes with a cloneable `CellClient` capability.
-7. Become ready only after the management listener and public listener can use
+7. Publish the signed node session and start the repository due scanner using
+   the same registry, directory, owner and router.
+8. Become ready only after the management listener and public listener can use
    the same validated registry/runtime generation.
 
 Shutdown reverses ownership: remove readiness, reject new work/acquisition,
@@ -684,8 +697,8 @@ retry. Non-transient authorization, registry and malformed-protocol failures
 return `EffectSupervisorError::Runtime` and leave the lease to expire/reclaim.
 An unknown source mutation returns `Pending` with its original resolution
 evidence. A node scheduler may call `run_once` only after selecting and routing
-an explicit due source Cell; catalog-driven polling is not implemented by this
-type.
+an explicit due source Cell. `RepositoryCellScheduler` supplies that outer loop;
+the reusable effect type deliberately does not own catalog or product routing.
 
 The claim command's complete encoded output and lease command's complete input
 must each remain within the registry's 1 MiB operation limit. Therefore the

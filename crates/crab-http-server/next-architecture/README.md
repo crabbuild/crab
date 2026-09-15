@@ -15,7 +15,11 @@ counters, visible edits and incomplete reservations, with two-pass source
 verification, immutable evidence and crash-resumable LTX publication. The
 repository router now distinguishes a live signed remote owner from an absent or
 expired session and uses the runtime's unchanged-control observation before
-takeover. Remaining collaboration-domain import, old-version migration/configured
+takeover. The server now also runs a bounded catalog-driven repository scheduler:
+live-node rendezvous ownership selects shards, typed Tick and effect operations
+route to local/remote owners, and scheduler-only activations drain back to Idle.
+Scheduler progress/fallback and Workflow activity polling remain. Remaining
+collaboration-domain import, old-version migration/configured
 multi-node quorum and the remaining product-domain route cuts are not yet
 integrated. New repository creation explicitly publishes an empty Cell and marks
 the catalog ready; adoption remains blocked until verified import. Startup

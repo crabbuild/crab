@@ -270,6 +270,14 @@ impl PeerAuthorizer for Server {
                 .ok_or_else(denied)?;
             return authorize_runtime_effect(fleet, request);
         }
+        if let Some(action) = runtime_cell_action(request) {
+            let fleet = self
+                .peer_receiver
+                .as_ref()
+                .map(|receiver| receiver.directory.fleet())
+                .ok_or_else(denied)?;
+            return authorize_runtime_action(fleet, request, action);
+        }
         let issuer = self
             .auth
             .as_ref()
@@ -282,12 +290,20 @@ fn authorize_runtime_effect(
     fleet: Digest,
     request: &VerifiedPeerRequest,
 ) -> crab_cell_runtime::Result<()> {
-    let principal = request.principal();
     let action = match request.operation() {
         Some(peer_wire::peer_request::Operation::DeliverEffect(_)) => "cell.effect.deliver",
         Some(peer_wire::peer_request::Operation::ResolveEffect(_)) => "cell.effect.resolve",
         _ => return Err(denied()),
     };
+    authorize_runtime_action(fleet, request, action)
+}
+
+fn authorize_runtime_action(
+    fleet: Digest,
+    request: &VerifiedPeerRequest,
+    action: &'static str,
+) -> crab_cell_runtime::Result<()> {
+    let principal = request.principal();
     if principal.issuer != format!("crab-runtime:{}", encode_digest(fleet))
         || principal.subject != encode_session(request.origin_session())
         || !request.permits(action)
@@ -295,6 +311,53 @@ fn authorize_runtime_effect(
         return Err(denied());
     }
     Ok(())
+}
+
+fn runtime_cell_action(request: &VerifiedPeerRequest) -> Option<&'static str> {
+    match request.operation() {
+        Some(peer_wire::peer_request::Operation::Mutate(mutation)) => {
+            match mutation.operation.as_ref() {
+                Some(peer_wire::mutation_request::Operation::CellCommand(command)) => {
+                    match command.command_id {
+                        crate::cells::REPOSITORY_TICK_COMMAND_ID => Some("cell.scheduler.tick"),
+                        crate::cells::REPOSITORY_EFFECT_CLAIM_COMMAND_ID
+                        | crate::cells::REPOSITORY_EFFECT_LEASE_COMMAND_ID => {
+                            Some("cell.effect.source")
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        }
+        Some(peer_wire::peer_request::Operation::Read(read)) => match read.operation.as_ref() {
+            Some(peer_wire::read_request::Operation::Describe(true)) => {
+                if request.permits("cell.scheduler.tick") {
+                    Some("cell.scheduler.tick")
+                } else if request.permits("cell.effect.source") {
+                    Some("cell.effect.source")
+                } else {
+                    None
+                }
+            }
+            Some(peer_wire::read_request::Operation::CellQuery(query))
+                if query.query_id == crate::cells::REPOSITORY_EFFECT_VALIDATE_QUERY_ID =>
+            {
+                Some("cell.effect.source")
+            }
+            _ => None,
+        },
+        Some(peer_wire::peer_request::Operation::Resolve(_)) => {
+            if request.permits("cell.scheduler.tick") {
+                Some("cell.scheduler.tick")
+            } else if request.permits("cell.effect.source") {
+                Some("cell.effect.source")
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 pub(crate) async fn forward(
@@ -758,7 +821,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_effect_requires_fleet_issuer_session_subject_and_internal_action() {
+    fn runtime_operations_require_fleet_issuer_session_subject_and_internal_action() {
         let fleet = Digest::from_bytes([10; 32]);
         let request = verified_runtime_effect(
             format!("crab-runtime:{}", encode_digest(fleet)),
@@ -779,6 +842,27 @@ mod tests {
             "cell.effect.deliver",
         );
         assert!(authorize_runtime_effect(fleet, &browser).is_err());
+
+        assert_eq!(
+            runtime_cell_action(&verified(5, vec!["cell.scheduler.tick".into()])),
+            Some("cell.scheduler.tick")
+        );
+        assert_eq!(
+            runtime_cell_action(&verified(6, vec!["cell.effect.source".into()])),
+            Some("cell.effect.source")
+        );
+        assert!(
+            authorize_runtime_action(
+                fleet,
+                &verified_runtime_effect(
+                    format!("crab-runtime:{}", encode_digest(fleet)),
+                    encode_session(SessionId::from_bytes([2; 16])),
+                    "cell.scheduler.tick",
+                ),
+                "cell.scheduler.tick",
+            )
+            .is_ok()
+        );
     }
 
     #[test]

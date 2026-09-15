@@ -2,8 +2,8 @@ use std::{path::PathBuf, sync::Arc};
 
 use crab_cell_runtime::{
     ApplicationIdentity, CatalogProof, CellAuthority, CellCatalog, CellClient, CellReplica,
-    CellRuntime, CellTarget, ControlState, NodeDirectory, Owner, PeerPrincipal, PeerRoundTrip,
-    PeerSigner, Registry, ReplicaLimits, VersionedControl,
+    CellRuntime, CellTarget, ControlState, EffectPeerClient, NodeDirectory, Owner, PeerPrincipal,
+    PeerRoundTrip, PeerSigner, Registry, ReplicaLimits, VersionedControl,
 };
 use crab_storage::CellStorageLayout;
 use tokio::sync::Mutex;
@@ -38,6 +38,17 @@ pub(crate) struct RepositoryCellPeer {
 pub(crate) struct RepositoryCell {
     pub(crate) target: CellTarget,
     pub(crate) client: CellClient,
+}
+
+pub(crate) struct ScheduledRepositoryCell {
+    pub(crate) cell: RepositoryCell,
+    release_after: bool,
+}
+
+impl ScheduledRepositoryCell {
+    pub(crate) fn should_release(&self) -> bool {
+        self.release_after
+    }
 }
 
 impl RepositoryCellRouter {
@@ -77,20 +88,62 @@ impl RepositoryCellRouter {
         action: &'static str,
     ) -> crate::Result<RepositoryCell> {
         validate_action(action)?;
+        self.route_principal(
+            repository,
+            PeerPrincipal {
+                issuer: principal.issuer.clone(),
+                subject: principal.subject.clone(),
+                actions: vec![action.to_owned()],
+            },
+        )
+        .await
+        .map(|scheduled| scheduled.cell)
+    }
+
+    pub(crate) async fn route_scheduler(
+        &self,
+        repository: Uuid,
+    ) -> crate::Result<ScheduledRepositoryCell> {
+        self.route_principal(
+            repository,
+            self.runtime_principal(&["cell.effect.source", "cell.scheduler.tick"]),
+        )
+        .await
+    }
+
+    pub(crate) fn effect_peer_client(&self) -> EffectPeerClient {
+        EffectPeerClient::new(
+            Arc::clone(&self.peer.signer),
+            self.runtime_principal(&["cell.effect.deliver", "cell.effect.resolve"]),
+            Arc::clone(&self.peer.round_trip),
+        )
+    }
+
+    async fn route_principal(
+        &self,
+        repository: Uuid,
+        principal: PeerPrincipal,
+    ) -> crate::Result<ScheduledRepositoryCell> {
         let target = CellTarget::new(
             self.identity.tenant(),
             self.identity.application(),
             REPOSITORY_NAMESPACE,
             repository.as_bytes(),
         )?;
-        if let Some(routed) = self.route_existing(&target, principal, action).await? {
-            return Ok(routed);
+        if let Some(routed) = self.route_existing(&target, &principal).await? {
+            return Ok(ScheduledRepositoryCell {
+                cell: routed,
+                release_after: false,
+            });
         }
 
         let shard = activation_shard(&target);
         let _activation = self.activation[shard].lock().await;
-        if let Some(routed) = self.route_existing(&target, principal, action).await? {
-            return Ok(routed);
+        if let Some(routed) = self.route_existing(&target, &principal).await? {
+            return Ok(ScheduledRepositoryCell {
+                cell: routed,
+                release_after: false,
+            });
         }
 
         let proof = self
@@ -106,7 +159,7 @@ impl RepositoryCellRouter {
         if observed.value().root.is_none() {
             return Err(crab_cell_runtime::Error::CellNotActive.into());
         }
-        self.activate_or_route(target, proof, observed, principal, action)
+        self.activate_or_route(target, proof, observed, &principal)
             .await
     }
 
@@ -120,8 +173,7 @@ impl RepositoryCellRouter {
     async fn route_existing(
         &self,
         target: &CellTarget,
-        principal: &Identity,
-        action: &'static str,
+        principal: &PeerPrincipal,
     ) -> crate::Result<Option<RepositoryCell>> {
         let Some(proof) = self.catalog.lookup(target.cell_id()).await? else {
             return Ok(None);
@@ -142,7 +194,7 @@ impl RepositoryCellRouter {
             // Only a missing or canonically expired session can begin takeover.
             // Corrupt or foreign directory state must fail closed.
             return if self.remote_owner_is_live(owner).await? {
-                Ok(Some(self.peer(target.clone(), principal, action)))
+                Ok(Some(self.peer(target.clone(), principal.clone())))
             } else {
                 Ok(None)
             };
@@ -165,9 +217,8 @@ impl RepositoryCellRouter {
         target: CellTarget,
         proof: CatalogProof,
         observed: VersionedControl,
-        principal: &Identity,
-        action: &'static str,
-    ) -> crate::Result<RepositoryCell> {
+        principal: &PeerPrincipal,
+    ) -> crate::Result<ScheduledRepositoryCell> {
         if observed.value().state == ControlState::Tombstoned {
             return Err(crab_cell_runtime::Error::CellNotActive.into());
         }
@@ -179,7 +230,10 @@ impl RepositoryCellRouter {
         if let Some(owner) = remote_owner
             && self.remote_owner_is_live(owner).await?
         {
-            return Ok(self.peer(target, principal, action));
+            return Ok(ScheduledRepositoryCell {
+                cell: self.peer(target, principal.clone()),
+                release_after: false,
+            });
         }
         let takeover = remote_owner.is_some();
         if observed.value().owner.as_ref().is_some_and(|owner| {
@@ -237,30 +291,35 @@ impl RepositoryCellRouter {
                 return Err(crab_cell_runtime::Error::CellNotActive.into());
             }
         };
-        Ok(RepositoryCell {
-            target,
-            client: CellClient::local(Arc::clone(&self.registry), handle),
+        Ok(ScheduledRepositoryCell {
+            cell: RepositoryCell {
+                target,
+                client: CellClient::local(Arc::clone(&self.registry), handle),
+            },
+            release_after: true,
         })
     }
 
-    fn peer(
-        &self,
-        target: CellTarget,
-        principal: &Identity,
-        action: &'static str,
-    ) -> RepositoryCell {
+    fn peer(&self, target: CellTarget, principal: PeerPrincipal) -> RepositoryCell {
         RepositoryCell {
             target,
             client: CellClient::peer(
                 Arc::clone(&self.registry),
                 Arc::clone(&self.peer.signer),
-                PeerPrincipal {
-                    issuer: principal.issuer.clone(),
-                    subject: principal.subject.clone(),
-                    actions: vec![action.to_owned()],
-                },
+                principal,
                 Arc::clone(&self.peer.round_trip),
             ),
+        }
+    }
+
+    fn runtime_principal(&self, actions: &[&str]) -> PeerPrincipal {
+        PeerPrincipal {
+            issuer: format!(
+                "crab-runtime:{}",
+                encode_hex(self.peer.directory.fleet().as_bytes())
+            ),
+            subject: encode_hex(self.peer.owner.session.as_bytes()),
+            actions: actions.iter().map(|action| (*action).to_owned()).collect(),
         }
     }
 
@@ -280,7 +339,6 @@ impl RepositoryCellRouter {
         Ok(directory.join(format!("{}.sqlite", Uuid::now_v7())))
     }
 
-    #[cfg(test)]
     pub(crate) async fn drain_local(&self, repository: Uuid) -> crate::Result<()> {
         let target = CellTarget::new(
             self.identity.tenant(),

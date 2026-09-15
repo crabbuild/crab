@@ -94,7 +94,8 @@ reclamation remains the recovery path. Workflow decisions now insert effect
 actions atomically through a command-scoped `EffectBatch`. The batch binds the
 persisted Cell/incarnation and Cell commit sequence and shares its ordinal across
 all transitions performed by one Tick. Queue dead-letter effect insertion and
-catalog-driven node polling remain. Ack/retry codecs carry only effect ID,
+generic non-repository node polling remain; the repository module is now polled
+by the server scheduler. Ack/retry codecs carry only effect ID,
 attempt, token and expiry rather than repeating operation bytes. Ack results are
 capped at 1,048,503 bytes so that identity plus result remains within the same
 1 MiB registered-command input ceiling.
@@ -325,9 +326,10 @@ lease tokens; completion identity is deterministic per attempt. Pending command
 outcomes retain their mutation evidence, and cancellation is signalled if the
 cycle is dropped or loses its lease. Integration coverage holds an activity
 past its first heartbeat, completes its state-machine transition, then restores
-and reads that terminal result from the exact LTX root. Effect actions,
-catalog-driven shard polling and bounded concurrent orchestration remain to
-implement; the maintenance Tick now dispatches timers across retained definitions.
+and reads that terminal result from the exact LTX root. Effect actions are now
+persisted atomically. Catalog-driven Workflow-namespace polling and bounded
+concurrent activity orchestration remain to implement; the maintenance Tick now
+dispatches timers across retained definitions.
 
 `WorkflowModule` binds one namespace, one current definition, a bounded static
 inventory of retained definitions, and fixed start/signal/cancel/state operation
@@ -425,10 +427,16 @@ root position before doing maintenance, and its resulting summary publishes
 through the ordinary actor/LTX/control path. `CatalogShardScan` pins one head
 revision and verifies one immutable page per call; `DueCellScan` inspects at
 most 32 controls per step, and `preferred_scanner` implements deterministic
-rendezvous assignment. Node advertisements and fallback, remote/idle routing
-and Tick retry supervision remain to implement. Active-local routing can already
-recover a capability from the dispatcher only when session, incarnation, code
-and schema match the scanned control and the Cell is not fenced or draining.
+rendezvous assignment. The server's repository scheduler now loads the exact
+live node directory, rendezvous-assigns all 256 shards, caps each one-second
+cycle at 128 due Cells, and routes Tick through an existing local owner,
+authenticated remote owner or temporary exact-root activation. Temporary local
+acquisitions drain back to Idle. A zero-item Tick triggers one effect-supervisor
+step because a published effect deadline may be the due source. Node-progress
+advertisement, 15-second scanner fallback, bounded retry queues and generic
+Workflow-activity routing remain. Active-local routing recovers a capability
+from the dispatcher only when session, incarnation, code and schema match the
+scanned control and the Cell is not fenced or draining.
 
 After every commit, compute minimum outstanding due time using indexed minima
 for ready effects, leased-effect deadlines, KV expirations, ready queue rows,

@@ -2,9 +2,10 @@ use std::sync::OnceLock;
 
 use crab_cell_runtime::{
     ApplicationId, ApplicationIdentity, ApplicationIdentityStore, BuildDescriptor, CatalogRole,
-    CellAuthority, CellCatalog, CellModule, ControlState, Digest, MigrationDescriptor,
-    ModuleDescriptor, NamespaceDescriptor, NamespaceId, NodeDirectory, OperationDescriptor,
-    Registry, RegistryBuilder, ReleaseState, ReleaseStore, RequestId, TenantId,
+    CellAuthority, CellCatalog, CellModule, ControlState, Digest, EffectModule, MaintenanceModule,
+    MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor, NamespaceId, NodeDirectory,
+    OperationDescriptor, Registry, RegistryBuilder, ReleaseState, ReleaseStore, RequestId,
+    TenantId, register_effect_delivery, register_maintenance,
 };
 use crab_storage::CellStorageLayout;
 use object_store::path::Path;
@@ -16,6 +17,7 @@ mod importer;
 mod initializer;
 pub(crate) mod repository;
 mod router;
+mod scheduler;
 
 pub(crate) use importer::import_repository_issues;
 #[cfg(test)]
@@ -23,21 +25,30 @@ pub(crate) use initializer::initialize_repository_at;
 pub(super) use initializer::provision_repository;
 pub(crate) use initializer::{initialize_repository, verify_repository_cells};
 pub(crate) use router::{RepositoryCell, RepositoryCellPeer, RepositoryCellRouter};
+pub(crate) use scheduler::RepositoryCellScheduler;
 
 const REPOSITORY_MIGRATION: &str = include_str!("cells/migrations/0001_repository_identity.sql");
 pub(crate) const REPOSITORY_NAMESPACE: NamespaceId = NamespaceId::from_bytes(*b"crab-repository1");
+pub(crate) const REPOSITORY_TICK_COMMAND_ID: u32 = 5;
+pub(crate) const REPOSITORY_EFFECT_CLAIM_COMMAND_ID: u32 = 6;
+pub(crate) const REPOSITORY_EFFECT_LEASE_COMMAND_ID: u32 = 7;
+pub(crate) const REPOSITORY_EFFECT_VALIDATE_QUERY_ID: u32 = 5;
 const MAX_LIVE_NODES: usize = 10_000;
 const REPOSITORY_COMMANDS: &[OperationDescriptor] = &[
     operation(1, 80 * 1024, 80 * 1024),
     operation(2, 80 * 1024, 80 * 1024),
     operation(3, 96 * 1024, 80 * 1024),
     operation(4, 80 * 1024, 80 * 1024),
+    operation(REPOSITORY_TICK_COMMAND_ID, 8, 5),
+    operation(REPOSITORY_EFFECT_CLAIM_COMMAND_ID, 8, 1024 * 1024),
+    operation(REPOSITORY_EFFECT_LEASE_COMMAND_ID, 1024 * 1024, 9),
 ];
 const REPOSITORY_QUERIES: &[OperationDescriptor] = &[
     operation(1, 8, 80 * 1024),
     operation(2, 16, 80 * 1024),
     operation(3, 1024, 1024 * 1024),
     operation(4, 32, 1024 * 1024),
+    operation(REPOSITORY_EFFECT_VALIDATE_QUERY_ID, 1024 * 1024, 1),
 ];
 
 struct RepositoryModule;
@@ -50,8 +61,22 @@ impl CellModule for RepositoryModule {
     }
 
     fn register(self, registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
-        repository::register(registry)
+        repository::register(registry)?;
+        register_maintenance::<Self>(registry)?;
+        register_effect_delivery::<Self>(registry)
     }
+}
+
+impl MaintenanceModule for RepositoryModule {
+    const MODULE: &'static str = Self::NAME;
+    const TICK_COMMAND_ID: u32 = REPOSITORY_TICK_COMMAND_ID;
+}
+
+impl EffectModule for RepositoryModule {
+    const MODULE: &'static str = Self::NAME;
+    const CLAIM_COMMAND_ID: u32 = REPOSITORY_EFFECT_CLAIM_COMMAND_ID;
+    const LEASE_COMMAND_ID: u32 = REPOSITORY_EFFECT_LEASE_COMMAND_ID;
+    const VALIDATE_QUERY_ID: u32 = REPOSITORY_EFFECT_VALIDATE_QUERY_ID;
 }
 
 pub(crate) fn compiled_registry() -> crab_cell_runtime::Result<Registry> {
@@ -553,7 +578,7 @@ mod tests {
         assert_eq!(descriptor["modules"][0]["name"], "repository");
         assert_eq!(
             descriptor["modules"][0]["code"],
-            "d8592cba8054a11332d32fe8254e8d2ee690ada6d4bd5783d0925161ad6f55b4"
+            "266bfe0422f9f8a0e440929211fa3a4423194493e8bfb8e0c14684202bc05647"
         );
         assert_eq!(descriptor["modules"][0]["schema_min"], 1);
         assert_eq!(descriptor["modules"][0]["schema_max"], 1);
@@ -562,14 +587,14 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            4
+            7
         );
         assert_eq!(
             descriptor["modules"][0]["queries"]
                 .as_array()
                 .unwrap()
                 .len(),
-            4
+            5
         );
         assert_eq!(descriptor["namespaces"][0]["role"], "repository");
         assert_eq!(descriptor["namespaces"][0]["shards"], 1);

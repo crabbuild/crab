@@ -476,11 +476,11 @@ pub async fn serve(config: Config) -> Result<()> {
     );
     let repository_cells = crate::cells::RepositoryCellRouter::new(
         startup.identity,
-        startup.layout,
+        startup.layout.clone(),
         Arc::clone(&registry),
         cell_runtime.clone(),
         crate::cells::RepositoryCellPeer::new(
-            directory,
+            directory.clone(),
             Arc::new(PeerSigner::new(
                 session,
                 registry.release_digest(),
@@ -494,6 +494,13 @@ pub async fn serve(config: Config) -> Result<()> {
         ),
         session_dir,
     )?;
+    let cell_scheduler = crate::cells::RepositoryCellScheduler::new(
+        startup.identity,
+        startup.layout,
+        directory.clone(),
+        repository_cells.clone(),
+        session,
+    );
     let advertised = match node_publisher.publish_initial().await {
         Ok(advertised) => advertised,
         Err(error) => {
@@ -540,6 +547,8 @@ pub async fn serve(config: Config) -> Result<()> {
         tokio::spawn(async move { refresh_catalog(refresh_server, catalog_version).await });
     let node_server = Arc::clone(&server);
     let heartbeat = tokio::spawn(async move { node_publisher.run(node_server, advertised).await });
+    let scheduler_cancellation = cancellation.clone();
+    let scheduler = tokio::spawn(async move { cell_scheduler.run(scheduler_cancellation).await });
     let public_shutdown = cancellation.clone();
     let management_shutdown = cancellation.clone();
     let result = tokio::try_join!(
@@ -559,6 +568,10 @@ pub async fn serve(config: Config) -> Result<()> {
         Ok(result) => result,
         Err(error) => Err(error.into()),
     };
+    let scheduler = match scheduler.await {
+        Ok(result) => result,
+        Err(error) => Err(error.into()),
+    };
     // Axum has drained its connections, so no handler can register a new
     // receive after the tracker becomes empty. Close readers only after that drain.
     server.cancellation.cancel();
@@ -572,6 +585,7 @@ pub async fn serve(config: Config) -> Result<()> {
         .map(|_| ())
         .map_err(crate::Error::from)
         .and(heartbeat)
+        .and(scheduler)
         .and(maintenance)
         .and(runtimes)
 }
