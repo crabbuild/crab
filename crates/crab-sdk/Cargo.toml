@@ -83,5 +83,9 @@ name = "remote_edit"
 required-features = ["content", "write"]
 
 [[example]]
+name = "s3_gateway_fixture"
+required-features = ["content", "write"]
+
+[[example]]
 name = "resolve_conflict"
 required-features = ["local"]
