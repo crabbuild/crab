@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::capsule_protocol::{
     CapsuleGitPack, CapsuleGitPackDescriptor, CapsuleSectionKind, CapsuleSectionLocation,
-    PointerCatalog,
+    CapsuleVisibilitySnapshot, PointerCatalog,
 };
 use crate::error::{MetadataError, Result};
 use crate::validation::{validate_content_hash, validate_sha1};
@@ -53,6 +53,23 @@ impl Checkpoint {
         covered_root_digest: &str,
         git_packs: Vec<CapsuleGitPack>,
         pointer_catalog: PointerCatalog,
+    ) -> Result<Self> {
+        Self::build_with_catalogs(
+            covered_generation,
+            covered_root_digest,
+            git_packs,
+            pointer_catalog,
+            None,
+        )
+    }
+
+    /// Build a complete Git checkpoint carrying pointer and visibility catalogs.
+    pub fn build_with_catalogs(
+        covered_generation: u64,
+        covered_root_digest: &str,
+        git_packs: Vec<CapsuleGitPack>,
+        pointer_catalog: PointerCatalog,
+        visibility: Option<CapsuleVisibilitySnapshot>,
     ) -> Result<Self> {
         validate_content_hash(
             covered_root_digest,
@@ -120,6 +137,14 @@ impl Checkpoint {
                 &mut sections,
                 CapsuleSectionKind::CatalogDelta,
                 pointer_catalog.encode()?,
+            )?;
+        }
+        if let Some(visibility) = visibility {
+            append_section(
+                &mut body,
+                &mut sections,
+                CapsuleSectionKind::VisibilitySnapshot,
+                visibility.encode()?,
             )?;
         }
         let footer = CheckpointFooter {
@@ -248,6 +273,27 @@ impl Checkpoint {
             .map_err(|_| corrupt("pointer catalog section index cannot be represented"))?;
         PointerCatalog::decode(&self.section_bytes(index)?)
     }
+
+    /// Decode the complete Git visibility state compacted by this checkpoint.
+    pub fn visibility_snapshot(&self) -> Result<Option<CapsuleVisibilitySnapshot>> {
+        let mut sections = self
+            .footer
+            .sections
+            .iter()
+            .enumerate()
+            .filter(|(_, section)| section.kind == CapsuleSectionKind::VisibilitySnapshot);
+        let Some((index, _)) = sections.next() else {
+            return Ok(None);
+        };
+        if sections.next().is_some() {
+            return Err(corrupt(
+                "checkpoint contains more than one Git visibility snapshot",
+            ));
+        }
+        let index = u32::try_from(index)
+            .map_err(|_| corrupt("visibility snapshot section index cannot be represented"))?;
+        CapsuleVisibilitySnapshot::decode(&self.section_bytes(index)?).map(Some)
+    }
 }
 
 fn append_section(
@@ -279,7 +325,7 @@ fn validate_footer(footer: &CheckpointFooter, body: &[u8]) -> Result<()> {
                 .sections
                 .len()
                 .checked_sub(footer.git_packs.len() * 4),
-            Some(0 | 1)
+            Some(0..=2)
         )
     {
         return Err(corrupt("checkpoint footer shape is invalid"));
@@ -356,13 +402,36 @@ fn validate_footer(footer: &CheckpointFooter, body: &[u8]) -> Result<()> {
             }
         }
     }
-    if footer.sections.len() == footer.git_packs.len() * 4 + 1
-        && footer.sections.last().map(|section| section.kind)
-            != Some(CapsuleSectionKind::CatalogDelta)
-    {
-        return Err(corrupt(
-            "checkpoint trailing section must be the pointer catalog",
-        ));
+    let trailing = &footer.sections[footer.git_packs.len() * 4..];
+    match trailing {
+        []
+        | [
+            CapsuleSectionLocation {
+                kind: CapsuleSectionKind::CatalogDelta,
+                ..
+            },
+        ]
+        | [
+            CapsuleSectionLocation {
+                kind: CapsuleSectionKind::VisibilitySnapshot,
+                ..
+            },
+        ]
+        | [
+            CapsuleSectionLocation {
+                kind: CapsuleSectionKind::CatalogDelta,
+                ..
+            },
+            CapsuleSectionLocation {
+                kind: CapsuleSectionKind::VisibilitySnapshot,
+                ..
+            },
+        ] => {}
+        _ => {
+            return Err(corrupt(
+                "checkpoint trailing catalogs are not canonically ordered",
+            ));
+        }
     }
     Ok(())
 }
@@ -378,5 +447,53 @@ fn corrupt(reason: impl Into<String>) -> MetadataError {
     MetadataError::CorruptObject {
         path: "capsule-protocol checkpoint".to_owned(),
         reason: reason.into(),
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "test assertions")]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::git_visibility::GitVisibilityIndex;
+
+    #[test]
+    fn checkpoint_round_trip_preserves_visibility_snapshot() {
+        let tip = "1".repeat(40);
+        let refs = BTreeMap::from([("refs/heads/main".to_owned(), vec![tip])]);
+        let visibility = CapsuleVisibilitySnapshot::from_index(
+            &GitVisibilityIndex::new(7, "2".repeat(64), "3".repeat(64), refs.clone())
+                .expect("visibility index"),
+        )
+        .expect("visibility snapshot");
+        let git_pack = CapsuleGitPack::new(
+            Bytes::from_static(b"pack"),
+            Bytes::from_static(b"index"),
+            Bytes::from_static(b"reverse"),
+            Bytes::from_static(b"locator"),
+            "4".repeat(40),
+            1,
+        )
+        .expect("Git pack");
+        let checkpoint = Checkpoint::build_with_catalogs(
+            7,
+            &"5".repeat(64),
+            vec![git_pack],
+            PointerCatalog::new(),
+            Some(visibility),
+        )
+        .expect("checkpoint");
+
+        let decoded = Checkpoint::decode(checkpoint.bytes().clone()).expect("decoded checkpoint");
+
+        assert_eq!(
+            decoded
+                .visibility_snapshot()
+                .expect("decoded visibility")
+                .expect("visibility section")
+                .refs(),
+            &refs
+        );
     }
 }

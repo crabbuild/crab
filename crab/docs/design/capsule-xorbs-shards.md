@@ -601,7 +601,9 @@ Implemented:
    xorb create conflicts, and finalizes dependency-closed shards.
 4. Xorbs use bounded parallel verified create-only writes, and shards use
    verified create-only writes, before their closure is unioned into the
-   bucket registry and before capsule/root publication.
+   bucket registry and before capsule/root publication. Successful writes
+   warm verified local and optional service caches; cross-client cache-service
+   hits are only candidates and still require a full canonical-origin proof.
 5. Pointer-bearing pushes hold global and repository GC writer admission across
    external-object verification, registry union, and root CAS; Git-only pushes
    retain the capsule-protocol path without those leases.
@@ -676,6 +678,17 @@ unreachable-object deletion, post-GC v2 fsck, byte-identical fresh-clone
 readback, writer-race fencing, both injected crash-resume points, bounded
 memory, and bounded writer pause. Peak RSS was 144,310,272 bytes and measured
 writer pause was 349 ms.
+
+The post-read-path `capsule-xet-current-20260915b` regression run passed 74
+checks with two distinct 512 MiB files over five versions. Its 5 GiB logical
+history retained 1,084,259,598 xorb bytes (20.20%); a cold independent
+repository reused a 513 MiB file while creating only two xorbs totaling
+68,537,033 bytes. Independent clone, two hydrate/dehydrate cycles, strict Git
+fsck, and byte-digest comparisons all passed. The companion cache-service
+RustFS run passed 1,258 checks: an independent client resolved all 18 queried
+chunks, performed one canonical xorb GET and one shard GET, and performed zero
+xorb PUTs; an injected cache-warm failure did not affect publication or later
+byte-identical hydration.
 
 This qualifies the ordinary RustFS whole-object path. Hosted-provider,
 multipart, mount-range, replica, tiering, and browsing coverage remain release

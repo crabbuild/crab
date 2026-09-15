@@ -22,8 +22,12 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
   CAS;
 - `crab-read::capsule_protocol` loads the root and its bounded capsule frontier
   concurrently, verifying every size, content, transaction, and base binding;
-- `crab init`, native and remote-helper push, full clone/fetch/pull, `crab
-  repack`, and repository GC use protocol v2 without a v1 fallback;
+- `crab init`, native and remote-helper push, full and filtered
+  clone/fetch/pull, `crab repack`, and repository GC use protocol v2 without
+  a v1 fallback;
+- capsule and checkpoint records persist ref-keyed Git visibility closures;
+  upload-pack authenticates those closures before reading embedded packs and
+  uses embedded locator metadata for exact filtered-object selection;
 - equal-size capsule runs merge as a binary counter, so a 500-push checkpoint
   window has no more than eight run objects and contains six after push 500;
 - the executable clean-path test proves exactly four object-store operations,
@@ -35,6 +39,9 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
   custom S3 endpoints and other providers retain mandatory readback;
 - the executable one-capsule read test proves exactly two object-store
   operations: root GET and capsule-run GET;
+- the RustFS protocol-v2 partial-clone smoke passes 92 checks; hidden,
+  dangling, and unknown wants read zero pack bytes, while full and filtered
+  clones complete from the same authenticated capsule view;
 - a 500-push executable model proves 1,994 qualified object-store operations,
   or 3.988 per push including advertisement and binary carry compaction;
 - CAS-loser, expected-old mismatch, payload corruption, and lost-root-response
@@ -46,11 +53,11 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
   at binary carry boundaries. Incremental latency was p50 273 ms, p95 545 ms,
   and p99 927 ms.
 
-The hard cutover deliberately has no v1 fallback. Shallow and filtered fetch,
-raw promisor recovery, protocol-v2 Crab pointer publication, managed protected
-push, active-active publication, and prepared mirror/recovery push currently
-fail closed until their protocol-v2 contracts are implemented. Those failures
-do not reinterpret a v2 repository as v1 or publish partial state.
+The hard cutover deliberately has no v1 fallback. Raw promisor recovery,
+managed protected push, active-active publication, and prepared
+mirror/recovery push currently fail closed until their protocol-v2 contracts
+are implemented. Those failures do not reinterpret a v2 repository as v1 or
+publish partial state.
 
 ## 1. Decision summary
 
@@ -840,12 +847,12 @@ safe while omitted required bytes violate reconstruction.
    S3 endpoints and unqualified providers retain mandatory readback.
 5. **Complete:** publish ordinary native and remote-helper pushes with capsule
    upload plus root CAS.
-6. **Complete for full reads:** checkpoint and capsule packs carry authenticated
-   indexes, reverse indexes, and object locators; full readers install them
-   without per-object storage requests.
-7. **Complete for ordinary full clone/fetch/pull:** remove their v1 runtime
-   path. Shallow, partial, pointer-data, mount, and browsing adapters remain
-   explicit fail-closed follow-up work.
+6. **Complete for Git reads:** checkpoint and capsule packs carry authenticated
+   indexes, reverse indexes, object locators, and visibility closures; readers
+   install them without per-object storage requests.
+7. **Complete for ordinary full, shallow, and filtered clone/fetch/pull:**
+   remove their v1 runtime path. Raw lazy-object recovery remains an explicit
+   fail-closed follow-up work.
 8. **Complete:** enforce bounded binary-run traversal and checkpoint after each
    500-push qualification window.
 9. **Complete:** fence repository GC with one root transition, recheck object

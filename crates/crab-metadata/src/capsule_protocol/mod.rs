@@ -10,6 +10,7 @@ mod run;
 #[cfg(feature = "storage")]
 mod store;
 mod transaction;
+mod visibility;
 
 pub use capsule::{
     Capsule, CapsuleGitPack, CapsuleGitPackDescriptor, CapsuleSection, CapsuleSectionKind,
@@ -27,6 +28,7 @@ pub use run::{CapsuleRun, MAX_CAPSULES_PER_RUN};
 #[cfg(feature = "storage")]
 pub use store::{RootSnapshot, create_root, load_pointer_catalog, load_root};
 pub use transaction::{CapsuleRefEdit, CapsuleTransaction};
+pub use visibility::{CapsuleVisibilityDelta, CapsuleVisibilitySnapshot};
 
 fn valid_ref_name(name: &str) -> bool {
     gix_validate::reference::name_partial(name.as_bytes().as_bstr()).is_ok()

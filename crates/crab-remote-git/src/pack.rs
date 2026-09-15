@@ -41,6 +41,7 @@ const GENERATED_PACK_CACHE_POLL_MAX: Duration = Duration::from_secs(30);
 const GENERATED_PACK_LEASE_PROBE_MAX: Duration = Duration::from_secs(60);
 const GENERATED_PACK_TAKEOVER_JITTER_MAX: Duration = Duration::from_secs(30);
 const COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS: usize = 100_000;
+const SELECTED_PACK_ASSEMBLY_MIN_OBJECTS: usize = 1;
 const SELECTED_PACK_REPACK_MIN_OBJECTS: usize = 100_000;
 const SOURCE_PACK_DOWNLOAD_CONCURRENCY: usize = 4;
 
@@ -840,7 +841,7 @@ impl RemoteGitRepository {
         if !Self::selected_pack_repack_candidate(
             inventory_objects,
             object_ids.len(),
-            SELECTED_PACK_REPACK_MIN_OBJECTS,
+            SELECTED_PACK_ASSEMBLY_MIN_OBJECTS,
         ) || inventory_bytes > operation.max_fetched_bytes()
         {
             return Ok(None);

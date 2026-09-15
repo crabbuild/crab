@@ -894,6 +894,7 @@ where
                     &hidden_ref_patterns,
                     &fetch_policy,
                     options.progress,
+                    cache.capsule_root.take(),
                     &cancel,
                 )
                 .await
@@ -1346,7 +1347,7 @@ async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
     // Capsule-aware shallow and terminal upload-pack are advertised only after
     // their v2 readers are wired. The ordinary fetch/push helper path remains
     // complete and capabilities themselves require no storage probe.
-    let caps = format_capabilities_with_v2(false, false);
+    let caps = format_capabilities_with_v2(false, true);
     writer.write_all(caps.as_bytes()).await?;
     writer.flush().await?;
     Ok(())
@@ -1655,6 +1656,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                         cache.capsule_root.take(),
                         &config.transfer_hide_refs,
                         staging.reader(),
+                        caching_store,
                         cancel,
                     )
                     .await
@@ -3248,7 +3250,7 @@ mod tests {
     async fn capabilities_response() {
         let output = run("capabilities\n").await;
         let expected = format!(
-            "fetch\npush\noption\ncheck-connectivity\nagent=crab/{}\n\n",
+            "fetch\npush\noption\ncheck-connectivity\nstateless-connect\nagent=crab/{}\n\n",
             env!("CARGO_PKG_VERSION")
         );
         assert_eq!(output, expected);
@@ -4624,7 +4626,7 @@ mod tests {
         let input = "capabilities\noption progress false\nlist\n";
         let output = run(input).await;
         let expected = format!(
-            "fetch\npush\noption\ncheck-connectivity\nagent=crab/{}\n\nok\n\n",
+            "fetch\npush\noption\ncheck-connectivity\nstateless-connect\nagent=crab/{}\n\nok\n\n",
             env!("CARGO_PKG_VERSION")
         );
         assert_eq!(output, expected);

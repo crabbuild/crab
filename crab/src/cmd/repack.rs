@@ -270,15 +270,19 @@ async fn run_capsule_repack(
         2 * 1024 * 1024 * 1024,
     )
     .await?;
+    let visibility = crab_metadata::capsule_protocol::CapsuleVisibilitySnapshot::from_index(
+        &view.git_visibility_index()?,
+    )?;
     let pack_sizes = packs
         .iter()
         .map(crab_metadata::capsule_protocol::CapsuleGitPack::pack_size)
         .collect::<Vec<_>>();
-    let checkpoint = crab_metadata::capsule_protocol::Checkpoint::build_with_pointer_catalog(
+    let checkpoint = crab_metadata::capsule_protocol::Checkpoint::build_with_catalogs(
         root.generation(),
         view.root().digest(),
         packs,
         view.pointer_catalog()?,
+        Some(visibility),
     )?;
     let packs_before = view
         .checkpoint()

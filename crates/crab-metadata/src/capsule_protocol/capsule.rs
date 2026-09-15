@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-use crate::capsule_protocol::{CapsuleTransaction, PointerCatalog};
+use crate::capsule_protocol::{CapsuleTransaction, CapsuleVisibilityDelta, PointerCatalog};
 use crate::error::{MetadataError, Result};
 use crate::validation::{validate_content_hash, validate_sha1};
 
@@ -33,6 +33,8 @@ pub enum CapsuleSectionKind {
     CatalogDelta,
     /// Authorization visibility changes introduced by the transaction.
     VisibilityDelta,
+    /// Complete authorization visibility state compacted into a checkpoint.
+    VisibilitySnapshot,
 }
 
 /// One locally prepared capsule payload section.
@@ -402,6 +404,32 @@ impl Capsule {
         let index = u32::try_from(index)
             .map_err(|_| corrupt("pointer catalog section index cannot be represented"))?;
         PointerCatalog::decode_delta(&self.section_bytes(index)?).map(Some)
+    }
+
+    /// Decode the canonical ref transaction authenticated by this capsule.
+    pub fn transaction(&self) -> Result<CapsuleTransaction> {
+        CapsuleTransaction::decode(&self.section_bytes(0)?)
+    }
+
+    /// Decode the authenticated Git visibility delta.
+    pub fn visibility_delta(&self) -> Result<Option<CapsuleVisibilityDelta>> {
+        let mut sections = self
+            .footer
+            .sections
+            .iter()
+            .enumerate()
+            .filter(|(_, section)| section.kind == CapsuleSectionKind::VisibilityDelta);
+        let Some((index, _)) = sections.next() else {
+            return Ok(None);
+        };
+        if sections.next().is_some() {
+            return Err(corrupt(
+                "capsule contains more than one Git visibility delta",
+            ));
+        }
+        let index = u32::try_from(index)
+            .map_err(|_| corrupt("visibility delta section index cannot be represented"))?;
+        CapsuleVisibilityDelta::decode(&self.section_bytes(index)?).map(Some)
     }
 }
 
