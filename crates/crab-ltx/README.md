@@ -10,7 +10,7 @@ shared-bundle LTX cuts can be prepared as immutable Cell/incarnation-scoped root
 and exact range/full compaction can produce a representation-only prepared root.
 These roots are bound to checked `crab-cell-runtime` control successors and the
 runtime is composed by `crab-http-server`. Directory-backed capture checksums,
-shared directory caching, streaming initial construction, external-merge
+streaming initial construction, external-merge
 compaction and the complete product hard cutover still remain. See the
 [next architecture](../crab-http-server/next-architecture/README.md).
 
@@ -150,8 +150,9 @@ database page before opening SQLite. Incremental preparation copy-on-writes only
 changed leaves and ancestors, prunes truncated subtrees by their authenticated
 ranges and reuses every untouched digest; it does not fetch historical indexes or
 materialize all live locators. Initial root construction still materializes its
-full locator set, no shared directory-node cache exists, and Cell compaction
-currently holds all selected bodies in memory. This is therefore not yet the
+full locator set, and Cell compaction currently holds all selected bodies in
+memory. Directory nodes do share a process-wide 8 MiB verified-byte cache whose
+key isolates backing Store instances and exact Cell/incarnation paths. This is therefore not yet the
 complete streaming 5 GB write path required by the platform capacity gate. A
 full sequential Cell-root restore API also remains.
 

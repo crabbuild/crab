@@ -121,7 +121,8 @@ discovery, complete virtual-filesystem simulation and B-tree prediction heuristi
 Native and canonical rows from shared multi-Cell bundles now use Crab's immutable
 Cell root and authenticated radix-directory format. Exact range/full compaction
 produces representation-only prepared roots, and the Cell VFS activates lazily
-through the runtime/server integration. Node-wide bundle scheduling, bounded
+through the runtime/server integration. Directory metadata reads use Crab's
+process-wide bounded verified-node cache. Node-wide bundle scheduling, bounded
 external-merge Cell compaction and remaining product-domain cutovers remain.
 Retention planning, leases, permission checks and durable HTTP responses remain
 server policy.

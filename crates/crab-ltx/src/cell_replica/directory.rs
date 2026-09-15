@@ -1,4 +1,7 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, HashMap, VecDeque},
+    sync::{Arc, Mutex, OnceLock},
+};
 
 use crab_storage::{CellObjectKind, CellStorageLayout};
 
@@ -12,6 +15,50 @@ const LEAF_RECORD_BYTES: usize = 88;
 const BRANCH_RECORD_BYTES: usize = 56;
 const FANOUT: usize = 256;
 const MAX_NODE_BYTES: u64 = (HEADER_BYTES + FANOUT * LEAF_RECORD_BYTES) as u64;
+const DIRECTORY_CACHE_BYTES: usize = 8 << 20;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct CacheKey {
+    store: u64,
+    path: String,
+    digest: [u8; 32],
+}
+
+#[derive(Default)]
+struct NodeCache {
+    nodes: HashMap<CacheKey, Arc<[u8]>>,
+    order: VecDeque<CacheKey>,
+    bytes: usize,
+}
+
+impl NodeCache {
+    fn get(&self, key: &CacheKey) -> Option<Arc<[u8]>> {
+        self.nodes.get(key).cloned()
+    }
+
+    fn insert(&mut self, key: CacheKey, bytes: Arc<[u8]>) -> Arc<[u8]> {
+        if let Some(existing) = self.nodes.get(&key) {
+            return Arc::clone(existing);
+        }
+        while self.bytes.saturating_add(bytes.len()) > DIRECTORY_CACHE_BYTES {
+            let Some(old) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(removed) = self.nodes.remove(&old) {
+                self.bytes -= removed.len();
+            }
+        }
+        self.bytes += bytes.len();
+        self.order.push_back(key.clone());
+        self.nodes.insert(key, Arc::clone(&bytes));
+        bytes
+    }
+}
+
+fn node_cache() -> &'static Mutex<NodeCache> {
+    static CACHE: OnceLock<Mutex<NodeCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(NodeCache::default()))
+}
 
 #[derive(Clone)]
 pub(super) struct DirectoryEntry {
@@ -389,13 +436,25 @@ pub(super) async fn load_checksums(
     crate::pages::PageChecksums::from_dense(verification.page_size, checksums)
 }
 
-async fn read_node(verification: &Verification<'_>, digest: [u8; 32]) -> Result<Vec<u8>> {
+async fn read_node(verification: &Verification<'_>, digest: [u8; 32]) -> Result<Arc<[u8]>> {
     let path = verification.layout.incarnation_object_path(
         verification.cell,
         verification.incarnation,
         &digest,
         CellObjectKind::Directory,
     );
+    let key = CacheKey {
+        store: verification.layout.immutable_cache_identity(),
+        path: path.to_string(),
+        digest,
+    };
+    if let Some(bytes) = node_cache()
+        .lock()
+        .map_err(|_| CrabError::InvalidState("Cell directory cache poisoned"))?
+        .get(&key)
+    {
+        return Ok(bytes);
+    }
     let _permit = verification.host.io_permit().await?;
     let (bytes, _) = verification
         .layout
@@ -405,7 +464,11 @@ async fn read_node(verification: &Verification<'_>, digest: [u8; 32]) -> Result<
     if *blake3::hash(&bytes).as_bytes() != digest {
         return Err(CrabError::ChecksumMismatch);
     }
-    Ok(bytes.to_vec())
+    let bytes: Arc<[u8]> = bytes.to_vec().into();
+    Ok(node_cache()
+        .lock()
+        .map_err(|_| CrabError::InvalidState("Cell directory cache poisoned"))?
+        .insert(key, bytes))
 }
 
 fn encode_leaf(entries: &[DirectoryEntry]) -> Result<Vec<u8>> {
@@ -661,5 +724,32 @@ mod tests {
             })
             .collect();
         assert!(DirectoryTree::build(entries, 4096, 3).is_err());
+    }
+
+    #[test]
+    fn node_cache_is_byte_bounded_and_store_isolated() {
+        let mut cache = NodeCache::default();
+        for store in 0..10 {
+            let key = CacheKey {
+                store,
+                path: "same/path.dir".into(),
+                digest: [1; 32],
+            };
+            let bytes: Arc<[u8]> = vec![store as u8; 1 << 20].into();
+            cache.insert(key, bytes);
+        }
+        assert_eq!(cache.bytes, DIRECTORY_CACHE_BYTES);
+        assert_eq!(cache.nodes.len(), 8);
+        assert!(!cache.nodes.keys().any(|key| key.store < 2));
+        for store in 2..10 {
+            assert_eq!(
+                cache.nodes[&CacheKey {
+                    store,
+                    path: "same/path.dir".into(),
+                    digest: [1; 32],
+                }][0],
+                store as u8
+            );
+        }
     }
 }

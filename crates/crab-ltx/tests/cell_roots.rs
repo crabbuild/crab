@@ -10,7 +10,7 @@ use crab_ltx::{
     bundle::{Bundle, BundleEntry},
     restore_exact,
 };
-use crab_storage::{CellStorageLayout, Store};
+use crab_storage::{CellStorageLayout, StorageReadKind, Store};
 use object_store::{memory::InMemory, path::Path};
 
 fn replica(store: Store, cell: [u8; 32], incarnation: [u8; 16]) -> CellReplica {
@@ -251,6 +251,49 @@ async fn changed_cut_loads_only_touched_directory_nodes() {
     );
     assert_eq!(second.root().position, next.position);
     writer.close().unwrap();
+}
+
+#[tokio::test]
+async fn directory_nodes_are_shared_across_exact_root_views() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let mut writer =
+        ManagedDb::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE payload(value BLOB NOT NULL);\
+                 INSERT INTO payload VALUES(randomblob(2000000))",
+            )
+        })
+        .unwrap();
+    let metadata_reads = Arc::new(AtomicU64::new(0));
+    let observed = Arc::clone(&metadata_reads);
+    let store =
+        Store::new(Arc::new(InMemory::new())).with_read_request_observer(Arc::new(move |kind| {
+            if kind == StorageReadKind::Get {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+    let replica = replica(store, [81; 32], [82; 16]);
+    let root = replica
+        .prepare(None, &writer.capture().unwrap(), 1, 1)
+        .await
+        .unwrap()
+        .root();
+    writer.close().unwrap();
+
+    metadata_reads.store(0, Ordering::SeqCst);
+    let first = replica.open_root(&root).await.unwrap();
+    assert_eq!(first.directory_height(), 1);
+    first.paged().read_page(1).await.unwrap();
+    let after_first_fault = metadata_reads.load(Ordering::SeqCst);
+    first.paged().read_page(1).await.unwrap();
+    assert_eq!(metadata_reads.load(Ordering::SeqCst), after_first_fault);
+
+    let second = replica.clone().open_root(&root).await.unwrap();
+    let before_second_fault = metadata_reads.load(Ordering::SeqCst);
+    second.paged().read_page(1).await.unwrap();
+    assert_eq!(metadata_reads.load(Ordering::SeqCst), before_second_fault);
 }
 
 #[tokio::test]

@@ -50,6 +50,11 @@ pub type ETag = object_store::UpdateVersion;
 /// Bounded-memory byte stream returned by object reads.
 pub type StorageByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'static>>;
 
+fn next_cache_identity() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// CAS-aware facade over an `object_store::ObjectStore`.
 ///
 /// Cheap to clone: the inner store is held behind `Arc`, the retry
@@ -58,6 +63,7 @@ pub type StorageByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + '
 #[derive(Clone)]
 pub struct Store {
     inner: Arc<dyn ObjectStore>,
+    immutable_cache_identity: u64,
     retry: RetryPolicy,
     /// Stable bucket identity used for cross-scheme equality (same-
     /// bucket detection, safety rails). Defaults to
@@ -134,6 +140,7 @@ impl Store {
     pub fn new(inner: Arc<dyn ObjectStore>) -> Self {
         Self {
             inner,
+            immutable_cache_identity: next_cache_identity(),
             retry: RetryPolicy::DEFAULT,
             identity: BucketIdentity::local_unset(),
             target_identity: None,
@@ -157,6 +164,7 @@ impl Store {
     pub fn with_retry(inner: Arc<dyn ObjectStore>, retry: RetryPolicy) -> Self {
         Self {
             inner,
+            immutable_cache_identity: next_cache_identity(),
             retry,
             identity: BucketIdentity::local_unset(),
             target_identity: None,
@@ -488,6 +496,10 @@ impl Store {
     #[must_use]
     pub fn inner(&self) -> &Arc<dyn ObjectStore> {
         &self.inner
+    }
+
+    pub(crate) const fn immutable_cache_identity(&self) -> u64 {
+        self.immutable_cache_identity
     }
 
     /// Writes `bytes` at `path` iff nothing exists there yet.

@@ -53,6 +53,12 @@ impl CellStorageLayout {
         &self.application
     }
 
+    /// Returns the process-local identity used to isolate immutable read caches.
+    #[must_use]
+    pub fn immutable_cache_identity(&self) -> u64 {
+        self.store.immutable_cache_identity()
+    }
+
     #[must_use]
     pub fn identity_path(&self) -> Path {
         Self::root_identity_path(&self.root)
@@ -189,6 +195,24 @@ mod tests {
                 .incarnation_object_path(&[0xcd; 32], &[0xef; 16], &[1; 32], CellObjectKind::Root,)
                 .as_ref(),
             "tenant-root/cells/v1/apps/abababababababababababababababab/cells/cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd/inc/efefefefefefefefefefefefefefefef/objects/0101010101010101010101010101010101010101010101010101010101010101.root"
+        );
+    }
+
+    #[test]
+    fn immutable_cache_identity_is_shared_only_by_store_clones() {
+        let inner = Arc::new(InMemory::new());
+        let first =
+            CellStorageLayout::new(Store::new(inner.clone()), Path::from("same-root"), [1; 16]);
+        let clone = first.clone();
+        let independent =
+            CellStorageLayout::new(Store::new(inner), Path::from("same-root"), [1; 16]);
+        assert_eq!(
+            first.immutable_cache_identity(),
+            clone.immutable_cache_identity()
+        );
+        assert_ne!(
+            first.immutable_cache_identity(),
+            independent.immutable_cache_identity()
         );
     }
 }

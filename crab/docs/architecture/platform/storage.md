@@ -163,8 +163,10 @@ in managed capture; otherwise sparse reads would be bounded while every write
 still allocates database-proportional checksum state. Checkpoint and snapshot
 paths share that interface, and verify each cut's checksum before sealing it.
 
-Resident node cache uses a process-wide byte ceiling, keyed by storage identity,
-Cell/incarnation and node digest. Eviction loses only verified cached bytes.
+The resident node cache now uses an 8 MiB process-wide byte ceiling, keyed by a
+non-reusable Store instance identity, complete typed Cell/incarnation object path
+and node digest. It inserts only after BLAKE3 verification; FIFO eviction loses
+only verified cached bytes and a different backing Store cannot reuse an entry.
 Disk cache uses the same key and verifies BLAKE3 after reopening. Fault reads
 verify node path, frame hash, decoded page identity and CRC before installation.
 Hydration and foreground writes retain the existing writable-VFS overwrite and

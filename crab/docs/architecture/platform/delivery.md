@@ -9,7 +9,7 @@ does not establish a working runtime.
 | Source | Current behavior | Required change |
 | --- | --- | --- |
 | [managed.rs](../../../../crates/crab-ltx/src/managed.rs) | Typed mutation callbacks, capture ownership and a temporary SQLite `query_only` read boundary | Keep raw connection access inside the runtime; typed application SQL authorization is implemented above this layer |
-| [cell_replica.rs](../../../../crates/crab-ltx/src/cell_replica.rs) | Native and canonical Cell-selected bundle cuts prepare immutable roots; exact range/full compaction produces representation-only prepared roots; cold reads and sparse writable activation use exact digest-pinned radix paths; incremental publication copy-on-writes only changed directory paths and safely prunes truncation | Add shared node cache, streaming initial construction, external-merge compaction and directory-backed capture checksums |
+| [cell_replica.rs](../../../../crates/crab-ltx/src/cell_replica.rs) | Native and canonical Cell-selected bundle cuts prepare immutable roots; exact range/full compaction produces representation-only prepared roots; cold reads and sparse writable activation use exact digest-pinned radix paths backed by a process-wide bounded directory cache; incremental publication copy-on-writes only changed directory paths and safely prunes truncation | Add streaming initial construction, external-merge compaction and directory-backed capture checksums |
 | [replica.rs](../../../../crates/crab-ltx/src/replica.rs) | Standalone immutable manifest plus per-epoch mutable head | Keep existing callers working; Cell runtime uses only `CellReplica` and never treats this head as authority |
 | [append.rs](../../../../crates/crab-ltx/src/replica/append.rs) | Shared native/bundle append verification | Reuse verification under the prepared-root API |
 | [paged.rs](../../../../crates/crab-ltx/src/paged.rs) | Authenticated but resident page map; sparse writable SQL | Bounded directory nodes/cache and capture checksum tracker |
@@ -49,9 +49,12 @@ multi-Cell bundle, independently verified and retained under one immutable bundl
 digest. Exact range/full compaction verifies only selected LTX bodies plus their
 indexes, preserves TXID/checksum/commit sequence/schema and returns a normal
 representation-only `PreparedRoot`; suffix indexes rebuild changed directory
-locators without downloading unselected bodies. Complete this package with
+locators without downloading unselected bodies. Directory reads now share an
+8 MiB process-wide verified-byte cache keyed by Store instance, complete typed
+Cell/incarnation path and node digest; eviction cannot change correctness and
+distinct backing Store instances cannot alias. Complete this package with
 streaming initial directory construction, external-merge compaction, replacing the dense
-capture/activation checksum array and adding the shared node cache. Exact
+capture/activation checksum array. Exact
 Cell roots now load authenticated directory checksums without LTX bodies and
 open a sparse writable continuation through the existing VFS.
 Existing standalone `Replica` callers retain their current API; Cell runtime
@@ -72,7 +75,9 @@ Current local coverage is in `crates/crab-ltx/tests/cell_roots.rs` and
 proves local source deletion, exact sparse activation and successor publication.
 `changed_cut_loads_only_touched_directory_nodes` proves a one-page update does
 not reload a 20 MB snapshot index; `truncate_regrow_cannot_reuse_old_locator`
-proves a truncated locator cannot reappear after database growth.
+proves a truncated locator cannot reappear after database growth; and
+`directory_nodes_are_shared_across_exact_root_views` proves a second view faults
+through the verified shared directory cache without another metadata GET.
 
 Exit: default/replica builds and existing tests pass, plus live source-loss test.
 
