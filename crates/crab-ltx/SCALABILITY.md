@@ -45,6 +45,7 @@ does not imply that all of those bytes must reside on local disk.
 | Small remote appends cloned/scanned all locators | Copy-on-write 256-page metadata blocks, cached block/global XOR checksums | `paged::map` tests copy one changed block out of a 4,096-page map and compare 4,000 updates/shrinks with a full-scan oracle |
 | Cell-root appends reloaded every historical index and rebuilt every locator | Authenticated radix copy-on-write reads changed leaves/ancestors, prunes truncated subtrees and reuses untouched digests | `cell_roots::changed_cut_loads_only_touched_directory_nodes` stays below 100 KiB of origin reads after changing one page in a 20 MB database; `truncate_regrow_cannot_reuse_old_locator` restores newly written bytes after shrink/regrowth |
 | Initial Cell roots materialized every final locator and encoded directory node | K-way ordered index merge with suffix truncation fences; each 256-page leaf uploads before the next and only radix summaries remain resident | `cell_replica::directory::tests::streamed_tree_matches_canonical_root_without_retaining_objects` matches the canonical 70,000-page root and `cell_roots::initial_streaming_directory_merges_truncation_and_regrowth` restores the newest bytes from a multi-cut initial root |
+| Writable Cell activation and each cut allocated/cloned/scanned one checksum per page | Authenticated directory leaves stream to a local 8-byte/page file in 64 KiB chunks; capture keeps a changed-page overlay, maintains the aggregate incrementally and persists positional updates only after sealing the LTX cut | `cell_roots::exact_cell_root_opens_sparse_writer_and_publishes_incrementally` checks the disk index and successor restore; `host_hooks::cell_checksum_write_failure_fences_after_sealing_the_cut` proves a partial index update cannot keep serving |
 | Partial compaction downloaded unrelated bodies | Verify the original indexed plan; fetch only selected bodies; authenticate regenerated indexes; compare independently reduced page bytes; verify replacement indexed state | `publication::range_compaction_does_not_download_unselected_bodies`: before, 2,026,087 downloaded bytes; after, under 100,000; restored bytes identical |
 | Independent replicas multiplied remote/recovery work | Shared I/O, CPU-job and large-recovery admission; ordered concurrent input/index reads | `replica::io` tests overlap two cohorts while enforcing one three-request ceiling and preserving input order |
 | Cancelling a waiter could release capacity before its work stopped | CPU/recovery permits travel with dispatched non-cancellable closures; network child tasks abort on cohort drop | `environment` cancellation regression and `replica::io` cancellation regression |
@@ -94,16 +95,18 @@ admit 5 GB databases. Raising it requires a separately sized recovery budget.
    authenticated block-addressable radix directory, and incremental publication
    reads/copy-on-writes only changed paths while preserving truncation/regrowth
    coverage. Initial construction now streams its final locator merge and radix
-   uploads while retaining the already authenticated index bytes; writable
-   activation loads an eight-byte checksum per database page, and the standalone
-   `Replica` page map remains resident. The shared verified directory-node cache
+   uploads while retaining the already authenticated index bytes. Writable Cell
+   activation streams its eight-byte-per-page checksum index to local disk and
+   capture retains only the changed-page overlay; the standalone `Replica` page
+   map remains resident. The shared verified directory-node cache
    is bounded but has no local persistence/rebuild contract. Finish those paths before
    claiming the 5 GB/10K target; do not add an implicit fallback reader.
-2. **Streaming large-database operations.** Capture checksum arrays still
-   clone/scan per cut. Snapshot, restore and compaction can hold database-sized
-   decoded buffers. Replace these with bounded scratch-backed processing and
-   incremental checksum state; qualify 5 GB incompressible data and low-disk
-   failures. Keep cryptographic body/index binding and exact output verification.
+2. **Streaming large-database operations.** Cell capture checksum updates are
+   incremental and disk-backed, but a large truncation still reads its removed
+   checksum suffix. Snapshot and compaction can hold database-sized decoded
+   buffers. Replace those with bounded scratch-backed processing and qualify
+   5 GB incompressible data and low-disk failures. Keep cryptographic body/index
+   binding and exact output verification.
 3. **Resident lifecycle and SQL scheduling.** The server has bounded activation
    queues, a shared SQL executor, per-database serialization and FD/page-cache-
    derived active admission. Managed sessions own three 64 KiB-cache SQLite

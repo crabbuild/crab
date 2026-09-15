@@ -56,7 +56,10 @@ left untouched. The next idle acquisition reopens the exact authoritative root,
 so it cannot publish a late tentative commit. Initial directory construction now
 k-way merges ordered authenticated index streams, removes locators invalidated by
 later truncation, uploads each 256-page leaf immediately and retains only radix
-node summaries. External-merge compaction and directory-backed capture checksums,
+node summaries. Writable activation now streams authenticated checksums to a
+local fixed-width file; capture keeps only changed checksums resident, updates
+the aggregate incrementally and persists them after sealing the LTX cut.
+External-merge compaction,
 catalog-driven Workflow activity scheduling,
 remaining HTTP domain cutovers and capacity qualification remain incomplete. The scoped
 KV primitive now installs

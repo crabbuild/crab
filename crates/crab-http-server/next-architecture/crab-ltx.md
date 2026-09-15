@@ -318,7 +318,11 @@ not inferred from the count of frames or files.
 A checksum index is disposable local state. Rebuild it from verified pages after
 restore; do not trust a stale index from another activation. At 4 KiB pages, a
 packed eight-byte checksum entry per page costs about 2 MiB per GiB of database,
-before container/allocator overhead. Budget and measure the actual representation.
+on local SSD. Cell writable preparation now streams that file from authenticated
+directory leaves in 64 KiB chunks. Capture keeps only changed entries resident,
+updates the aggregate incrementally, then persists positional entries after its
+LTX cut is durable. Any write/sync error fences the activation. Budget and
+measure disk use and the changed-page overlay separately.
 
 Qualification must compare incremental checksums with a full page checksum at
 each generated cut, including repeated writes to one page, truncation, growth,
@@ -448,10 +452,11 @@ plus a node-wide concurrency budget. The implemented `Limits` defaults are
 plan/retained artifacts and 1,024 segments. These are not RSS or disk quotas;
 verification and compaction retain multiple buffers, and aggregate capture
 accounting can fail after local files have been installed. Reserve headroom.
-The current checksum index is packed but cloned/scanned per cut, so this is not
-an O(changed-pages)-only implementation. Oversized cells receive a clear capacity
-failure. A bounded streaming implementation is a measured follow-up, not an
-assumed property of the reused APIs.
+The Cell checksum index is disk-backed and its ordinary capture path is
+O(changed pages); truncation must additionally read the removed checksum suffix.
+Standalone local capture still uses an in-memory dense base. Oversized cells
+receive a clear capacity failure. Snapshot/compaction streaming and measured
+5 GB qualification remain follow-up evidence, not assumed properties.
 
 ## Compaction and cleanup
 

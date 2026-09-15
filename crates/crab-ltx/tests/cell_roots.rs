@@ -13,6 +13,12 @@ use crab_ltx::{
 use crab_storage::{CellStorageLayout, StorageReadKind, Store};
 use object_store::{memory::InMemory, path::Path};
 
+fn checksum_path(database: &std::path::Path) -> std::path::PathBuf {
+    let mut path = database.as_os_str().to_owned();
+    path.push(".crab-ltx-checksums");
+    path.into()
+}
+
 fn replica(store: Store, cell: [u8; 32], incarnation: [u8; 16]) -> CellReplica {
     CellReplica::new(
         CellStorageLayout::new(store, Path::from("runtime"), [3; 16]),
@@ -151,15 +157,19 @@ async fn exact_cell_root_opens_sparse_writer_and_publishes_incrementally() {
     source.close().unwrap();
 
     let active = tempfile::TempDir::new().unwrap();
+    let active_path = active.path().join("active.sqlite");
     let writable = replica
         .open_root(&root)
         .await
         .unwrap()
         .paged()
-        .prepare_writable()
+        .prepare_writable(&active_path)
         .await
         .unwrap();
-    let active_path = active.path().join("active.sqlite");
+    let checksum_bytes = std::fs::metadata(checksum_path(&active_path))
+        .unwrap()
+        .len();
+    assert!(checksum_bytes > 0 && checksum_bytes.is_multiple_of(8));
     let mut writer = tokio::task::spawn_blocking(move || writable.open_writable(&active_path))
         .await
         .unwrap()
@@ -186,15 +196,15 @@ async fn exact_cell_root_opens_sparse_writer_and_publishes_incrementally() {
     assert_eq!(next.commit_sequence, 1);
 
     let replacement = tempfile::TempDir::new().unwrap();
+    let replacement_path = replacement.path().join("replacement.sqlite");
     let writable = replica
         .open_root(&next)
         .await
         .unwrap()
         .paged()
-        .prepare_writable()
+        .prepare_writable(&replacement_path)
         .await
         .unwrap();
-    let replacement_path = replacement.path().join("replacement.sqlite");
     let mut replacement =
         tokio::task::spawn_blocking(move || writable.open_writable(&replacement_path))
             .await
@@ -329,16 +339,16 @@ async fn sparse_hydration_coalesces_contiguous_cell_frames() {
         .root();
     writer.close().unwrap();
 
+    let destination = directory.path().join("sparse.sqlite");
     let writable = replica
         .open_root(&root)
         .await
         .unwrap()
         .paged()
-        .prepare_writable()
+        .prepare_writable(&destination)
         .await
         .unwrap();
     range_reads.store(0, Ordering::SeqCst);
-    let destination = directory.path().join("sparse.sqlite");
     let (before, after, reads) = tokio::task::spawn_blocking(move || {
         let mut writer = writable.open_writable(&destination).unwrap();
         let before = writer.hydration().unwrap().unwrap();
@@ -467,7 +477,7 @@ async fn truncate_regrow_cannot_reuse_old_locator() {
         .await
         .unwrap()
         .paged()
-        .prepare_writable()
+        .prepare_writable(&restored)
         .await
         .unwrap();
     let restored_for_open = restored.clone();
@@ -649,15 +659,15 @@ async fn prepare_does_not_write_mutable_keys() {
         "root preparation must write only immutable dependency objects"
     );
     let destination = tempfile::TempDir::new().unwrap();
+    let path = destination.path().join("restored.sqlite");
     let writable = replica
         .open_root(&snapshot.root())
         .await
         .unwrap()
         .paged()
-        .prepare_writable()
+        .prepare_writable(&path)
         .await
         .unwrap();
-    let path = destination.path().join("restored.sqlite");
     let mut restored = tokio::task::spawn_blocking(move || writable.open_writable(&path))
         .await
         .unwrap()

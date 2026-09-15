@@ -432,7 +432,7 @@ impl CellRuntime {
                 "immutable root schema does not match control",
             ));
         }
-        let database = verified.paged().prepare_writable().await?;
+        let database = verified.paged().prepare_writable(&destination).await?;
         let current = authority.load(cell).await?.ok_or(Error::Fenced)?;
         if !current.value().is_same_or_pure_renewal_of(observed.value()) {
             return Err(Error::Fenced);

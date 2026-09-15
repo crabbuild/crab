@@ -47,6 +47,13 @@ impl FileIo for File {
         }
         self.inner.write_all(bytes)
     }
+    fn write_all_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()> {
+        if let Err(error) = self.faults.check("write_all_at") {
+            self.inner.write_all_at(offset, &bytes[..bytes.len() / 2])?;
+            return Err(error);
+        }
+        self.inner.write_all_at(offset, bytes)
+    }
     fn read_exact_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
         self.faults.check("read_exact_at")?;
         self.inner.read_exact_at(offset, len)
@@ -78,6 +85,13 @@ impl FileSystem for Faults {
         self.check("open")?;
         Ok(Box::new(File {
             inner: DirectFileSystem.open(path)?,
+            faults: self.clone(),
+        }))
+    }
+    fn open_rw(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
+        self.check("open_rw")?;
+        Ok(Box::new(File {
+            inner: DirectFileSystem.open_rw(path)?,
             faults: self.clone(),
         }))
     }
@@ -162,6 +176,48 @@ async fn cell_restore_install_failure_cleans_owned_scratch() {
 
     faults.arm(None);
     assert_eq!(verified.restore(&destination).await.unwrap(), root.position);
+}
+
+#[cfg(feature = "replica")]
+#[tokio::test(flavor = "multi_thread")]
+async fn cell_checksum_write_failure_fences_after_sealing_the_cut() {
+    let (directory, faults, host, mut source) = fixture();
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("cell-checksums"),
+            [4; 16],
+        ),
+        [5; 32],
+        [6; 16],
+        Limits::default(),
+    )
+    .unwrap()
+    .with_host(host);
+    let root = replica
+        .prepare(None, &source.capture().unwrap(), 1, 1)
+        .await
+        .unwrap()
+        .root();
+    source.close().unwrap();
+
+    let destination = directory.path().join("cell-active.sqlite");
+    let writable = replica
+        .open_root(&root)
+        .await
+        .unwrap()
+        .paged()
+        .prepare_writable(&destination)
+        .await
+        .unwrap();
+    let mut writer = writable.open_writable(&destination).unwrap();
+    writer
+        .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(2)"))
+        .unwrap();
+    faults.arm(Some("write_all_at"));
+    injected(writer.capture());
+    faults.arm(None);
+    assert!(matches!(writer.capture(), Err(CrabError::Fenced)));
 }
 
 #[test]

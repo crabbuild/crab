@@ -153,15 +153,19 @@ leaves, and untouched child digests remain shared with historical roots. Coverag
 and the root checksum must equal the new LTX endpoint before `PreparedRoot` is
 created. `changed_cut_loads_only_touched_directory_nodes` and
 `truncate_regrow_cannot_reuse_old_locator` cover origin-read bounds and the
-truncate/regrow safety invariant. Initial tree construction is still dense and
-must be replaced by the streaming builder described above.
+truncate/regrow safety invariant. Initial tree construction now k-way merges
+authenticated index streams and uploads leaves as they are completed; it retains
+the source index bytes but no complete locator map or directory body set.
 
-The local capture checksum tracker must use this same bounded directory through
-an injected page-state interface: lookup/update a changed page CRC, truncate a
-suffix, and read the aggregate checksum. Replace the current Vec/whole-map clone
-in managed capture; otherwise sparse reads would be bounded while every write
-still allocates database-proportional checksum state. Checkpoint and snapshot
-paths share that interface, and verify each cut's checksum before sealing it.
+The local capture checksum tracker is now a disposable fixed-width file created
+from the authenticated directory during writable preparation. Construction emits
+big-endian eight-byte entries in 64 KiB chunks and never downloads LTX bodies.
+Each capture candidate clones only its changed-page overlay, reads old values for
+changed pages or a removed truncation suffix, and maintains the aggregate XOR in
+constant time per touched checksum. After the matching LTX cut is synced and
+renamed, positional writes update the file and `sync_all` completes before the
+capture position advances. Any failure fences the session; the local file is
+never publication authority and is rebuilt for a new exact-root activation.
 
 The resident node cache now uses an 8 MiB process-wide byte ceiling, keyed by a
 non-reusable Store instance identity, complete typed Cell/incarnation object path

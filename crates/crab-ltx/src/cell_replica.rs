@@ -138,6 +138,7 @@ pub struct CellPagedDatabase {
 pub struct CellWritableDatabase {
     database: CellPagedDatabase,
     checksums: crate::pages::PageChecksums,
+    destination: std::path::PathBuf,
 }
 
 impl CellPagedDatabase {
@@ -156,8 +157,14 @@ impl CellPagedDatabase {
         self.database_pages
     }
 
-    /// Loads the authenticated checksum index needed by incremental WAL capture.
-    pub async fn prepare_writable(self) -> Result<CellWritableDatabase> {
+    /// Streams the authenticated checksum index to this activation's local disk.
+    ///
+    /// The destination must be fresh and must later be passed unchanged to
+    /// `CellWritableDatabase::open_writable`.
+    pub async fn prepare_writable(
+        self,
+        destination: &std::path::Path,
+    ) -> Result<CellWritableDatabase> {
         let checksums = directory::load_checksums(
             directory::Verification {
                 layout: &self.replica.layout,
@@ -170,11 +177,14 @@ impl CellPagedDatabase {
             },
             self.directory_digest,
             self.directory_height,
+            destination,
+            self.replica.limits,
         )
         .await?;
         Ok(CellWritableDatabase {
             database: self,
             checksums,
+            destination: destination.to_owned(),
         })
     }
 
@@ -362,6 +372,11 @@ impl CellWritableDatabase {
 
     /// Opens a fresh sparse SQLite file pinned to this exact Cell root.
     pub fn open_writable(self, destination: &std::path::Path) -> Result<crate::ManagedDb> {
+        if destination != self.destination {
+            return Err(CrabError::InvalidState(
+                "writable destination differs from prepared destination",
+            ));
+        }
         crate::ManagedDb::open_cell_paged(self, destination)
     }
 }

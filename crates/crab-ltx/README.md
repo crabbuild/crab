@@ -11,8 +11,9 @@ and exact range/full compaction can produce a representation-only prepared root.
 These roots are bound to checked `crab-cell-runtime` control successors and the
 runtime is composed by `crab-http-server`. Initial directories are constructed
 from a streaming k-way index merge and uploaded one radix leaf at a time.
-Directory-backed capture checksums, external-merge compaction and the complete
-product hard cutover still remain. See the
+Writable Cell activation now streams authenticated checksums to a local
+fixed-width file and capture updates it incrementally. External-merge compaction
+and the complete product hard cutover still remain. See the
 [next architecture](../crab-http-server/next-architecture/README.md).
 
 ## Contract
@@ -130,7 +131,7 @@ The next Cell runtime uses `CellReplica`, not the standalone epoch head:
 | `prepare_compaction(base, range, level).await` | Verifies the exact selected bodies and indexes, replaces that range while preserving logical position/sequence/schema, and returns a representation-only prepared root for the normal authority CAS |
 | `open_root(root).await` | Reopens the exact digest, validates canonical metadata, scope, chain and the authenticated radix root without downloading LTX bodies or every directory leaf |
 | `VerifiedRoot::paged().read_page(page).await` | Walks only the selected hash-pinned radix path, range-reads its LTX frame and verifies frame BLAKE3, decoded page number and page checksum |
-| `VerifiedRoot::paged().prepare_writable().await` | Loads authenticated directory checksums without LTX bodies and returns an exact-root writable activation value |
+| `VerifiedRoot::paged().prepare_writable(path).await` | Streams authenticated directory checksums to a fresh local file without LTX bodies and returns an exact-root writable activation value bound to `path` |
 | `CellWritableDatabase::open_writable(path)` | Creates a fresh sparse SQLite file, seeds exact TXID/checksum continuation and faults verified pages through the shared VFS driver |
 | `PreparedRoot::{root,predecessor,verified}` | Supplies the exact publication proposal and predecessor proof without exposing an unchecked constructor |
 
@@ -146,8 +147,12 @@ compact v1 and references at most 64 pages of 96 segment descriptors. Its binary
 `CRBDIR01` radix tree has 256-entry leaves/branches, hashes every node and binds
 the live-page count and rolling SQLite checksum. Cold open reads bounded root
 metadata and one directory root; page bodies and descendant directory nodes fault
-on demand. Writable activation currently materializes one eight-byte checksum per
-database page before opening SQLite. Incremental preparation copy-on-writes only
+on demand. Writable activation walks the authenticated directory once and streams
+one big-endian eight-byte checksum per database page to a fresh local sidecar in
+64 KiB chunks. Capture clones only its pending overlay, updates the rolling
+checksum from changed pages and a truncated suffix, then applies positional
+sidecar writes only after the matching LTX cut is synced and renamed. A sidecar
+write or sync failure fences the session. Incremental preparation copy-on-writes only
 changed leaves and ancestors, prunes truncated subtrees by their authenticated
 ranges and reuses every untouched digest; it does not fetch historical indexes or
 materialize all live locators. Initial root construction still materializes its
@@ -401,9 +406,12 @@ handle. A session at its retention limit must be published/rotated by the caller
 These are admission bounds, **not an RSS or disk quota**. Snapshot capture and
 restore materialize database-sized buffers. Plans retain compressed input bytes;
 verification/restore/compaction may hold multiple database images and page
-buffers. Each cut clones/scans the packed checksum index (eight bytes per page,
-about 2 MiB per GiB at 4 KiB pages). Compaction buffers selected decoded pages and
-encoded output rather than providing bounded streaming memory. One failed capture
+buffers. Cell capture keeps its packed checksum index on local disk (about 2 MiB
+per GiB at 4 KiB pages) and keeps only the current changed-page overlay resident;
+large truncations still read the removed suffix to update the exact rolling sum.
+Standalone local capture retains its dense in-memory checksum base. Compaction
+buffers selected decoded pages and encoded output rather than providing bounded
+streaming memory. One failed capture
 can leave additional bounded artifacts on disk before aggregate accounting
 rejects its result. The server must reserve headroom and throttle aggregate cells.
 

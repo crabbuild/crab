@@ -138,7 +138,9 @@ remain resident. Cell roots instead use an authenticated radix directory whose
 incremental publisher reads only changed leaves/ancestors. Initial construction
 k-way merges ordered index streams and uploads each leaf without retaining a
 complete locator map or directory body set; writable checksum seeding and
-persistent cache rebuild remain scalability gates.
+capture now stream through a disposable local fixed-width checksum file with an
+O(changed-pages) resident overlay. Persistent cache rebuild and 5 GB measured
+qualification remain scalability gates.
 See [SCALABILITY.md](SCALABILITY.md) for the 1K–10K database target and remaining gates.
 The feature set is not yet a production-ready HTTP backend,
 nor a claim of complete Celld performance, simulator or operational parity.

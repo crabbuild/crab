@@ -136,8 +136,9 @@ measured accounting; reservations are not an RSS guarantee by themselves.
 Each of the three SQLite connections retained by an open ManagedDb has a 64 KiB
 page-cache target. Their combined 192 KiB is charged against the 35% pool when
 deriving the active-Cell limit. The same limit reserves eight descriptors for
-the three database/WAL handles, shared-memory sidecar and capture reader. Startup
-subtracts files already open from the process limit and retains ten percent or
+the three database/WAL handles, shared-memory sidecar and capture reader. The
+disk-backed checksum index is opened transiently within the capture allowance.
+Startup subtracts files already open from the process limit and retains ten percent or
 128 descriptors, whichever is larger, for HTTP, Git and transient work. A profile
 with insufficient memory or FDs rejects activation rather than substituting cold
 registrations for the requested open-DB target.

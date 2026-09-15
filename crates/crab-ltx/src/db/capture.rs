@@ -239,6 +239,10 @@ impl Db {
             }
             other => other?,
         };
+        // The checksum candidate remains isolated until the cut is durable. A
+        // failed local index update fences the owning ManagedDb, so partially
+        // updated ephemeral state can never authorize another capture.
+        checksums.persist()?;
         // The next verify reads exactly these fields back; caching them —
         // plus the final consumed WAL frame for the page check — is what
         // spares it re-reading the file it just watched being written.

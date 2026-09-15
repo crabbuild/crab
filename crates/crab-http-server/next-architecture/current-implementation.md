@@ -40,7 +40,10 @@ remote manifests, epoch-head CAS, inherited exact recovery/resume, bundles,
 range/level compaction, immutable views and writable sparse SQL with hydration.
 Cell-root bootstrap k-way merges ordered index streams, fences locators removed by
 later truncation, uploads each completed 256-page radix leaf immediately and
-retains only node summaries while constructing parent levels.
+retains only node summaries while constructing parent levels. Writable Cell
+activation streams authenticated directory checksums to a disposable local
+eight-byte-per-page file; capture keeps only changed checksums resident and
+persists them after its matching LTX cut is durable.
 It does not introduce a second SQLite library. See the
 [parity matrix](../../crab-ltx/PARITY.md) for API and qualification boundaries.
 

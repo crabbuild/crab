@@ -8,8 +8,12 @@ use std::{
 };
 
 /// An open local artifact/WAL handle supplied by a host filesystem.
+///
+/// Positional reads and writes use their explicit offsets. A handle returned by
+/// `FileSystem::open_rw` supports both operations.
 pub trait FileIo: Send {
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()>;
+    fn write_all_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()>;
     fn read_exact_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>>;
     fn sync_all(&mut self) -> io::Result<()>;
     fn file_len(&self) -> io::Result<u64>;
@@ -18,8 +22,9 @@ pub trait FileIo: Send {
 
 /// Local filesystem boundary; SQLite pager I/O remains under its selected VFS.
 ///
-/// `create` must exclusively create a new file. `rename` must sync the destination
-/// parent before succeeding. Implementations must preserve underlying I/O errors.
+/// `create` must exclusively create a new file. `open_rw` must not create.
+/// `rename` must sync the destination parent before succeeding. Implementations
+/// must preserve underlying I/O errors.
 /// `exists` must detect dangling symlinks. `create_dir` is an exclusive claim.
 /// `persist_new` atomically installs fully synced bytes without replacing any
 /// destination and syncs its parent; `persist_file_new` does the same for an
@@ -27,6 +32,7 @@ pub trait FileIo: Send {
 /// ambiguous.
 pub trait FileSystem: Send + Sync {
     fn open(&self, path: &Path) -> io::Result<Box<dyn FileIo>>;
+    fn open_rw(&self, path: &Path) -> io::Result<Box<dyn FileIo>>;
     fn create(&self, path: &Path) -> io::Result<Box<dyn FileIo>>;
     fn file_len(&self, path: &Path) -> io::Result<u64>;
     fn create_dir_all(&self, path: &Path) -> io::Result<()>;
@@ -300,6 +306,10 @@ impl FileIo for std::fs::File {
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
         io::Write::write_all(self, bytes)
     }
+    fn write_all_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()> {
+        io::Seek::seek(self, io::SeekFrom::Start(offset))?;
+        io::Write::write_all(self, bytes)
+    }
     fn read_exact_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
         io::Seek::seek(self, io::SeekFrom::Start(offset))?;
         let mut bytes = vec![0; len];
@@ -320,6 +330,14 @@ impl FileIo for std::fs::File {
 impl FileSystem for DirectFileSystem {
     fn open(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
         Ok(Box::new(std::fs::File::open(path)?))
+    }
+    fn open_rw(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
+        Ok(Box::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)?,
+        ))
     }
     fn create(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
         let mut options = std::fs::OpenOptions::new();
@@ -450,6 +468,9 @@ mod tests {
     impl FileSystem for FaultFs {
         fn open(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
             DirectFileSystem.open(path)
+        }
+        fn open_rw(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
+            DirectFileSystem.open_rw(path)
         }
         fn create(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
             if self.0.load(Ordering::SeqCst) {
