@@ -6,12 +6,12 @@ use std::sync::{
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, oneshot};
 
 use super::{
-    Message, QueuedCommand, QueuedOperation, QueuedQuery, QueuedResolve, ResolveOperation,
-    RuntimeInner,
+    Message, QueuedCommand, QueuedMigration, QueuedOperation, QueuedQuery, QueuedResolve,
+    ResolveOperation, RuntimeInner,
 };
 use crate::{
-    CatalogProof, CellId, Digest, Error, InboxDelivery, IncarnationId, MutationIdentity,
-    Resolution, StoredOutcome,
+    CatalogProof, CellId, Digest, Error, InboxDelivery, IncarnationId, MigratedCell, MigrationPlan,
+    MutationIdentity, Resolution, StoredOutcome,
 };
 
 const MAX_OPERATION_BYTES: usize = 1024 * 1024;
@@ -255,6 +255,53 @@ impl CellHandle {
             Ok(result) => result,
             Err(_) => Ok(Resolution::Unknown),
         }
+    }
+
+    /// Drains the old capability and publishes one registry-verified schema step.
+    pub async fn migrate(&self, plan: MigrationPlan, now_ms: i64) -> crate::Result<MigratedCell> {
+        if plan.code() != self.code
+            || plan.from_schema() != self.schema
+            || plan.sql().len() > MAX_OPERATION_BYTES
+        {
+            return Err(Error::Registry("migration plan does not match Cell handle"));
+        }
+        let work = self.reserve_work(plan.sql().len(), 0)?;
+        if self
+            .admission
+            .draining
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(Error::CellDraining);
+        }
+        self.admission.requests.close();
+        self.admission.bytes.close();
+        let (reply, response) = oneshot::channel();
+        self.inner
+            .sender
+            .send(Message::Migrate(Box::new(QueuedMigration {
+                cell: self.cell,
+                admission: self.admission.clone(),
+                plan,
+                now_ms,
+                reply: Some(reply),
+                _work: work,
+            })))
+            .await
+            .map_err(|_| Error::RuntimeClosed)?;
+        let migrated = response.await.map_err(|_| Error::Fenced)??;
+        Ok(MigratedCell {
+            handle: Self {
+                cell: self.cell,
+                incarnation: self.incarnation,
+                code: migrated.outcome.code,
+                schema: migrated.outcome.schema,
+                catalog: self.catalog.clone(),
+                inner: self.inner.clone(),
+                admission: migrated.admission,
+            },
+            outcome: migrated.outcome,
+        })
     }
 
     /// Stops admission, publishes accepted commands, then closes the SQLite handle.

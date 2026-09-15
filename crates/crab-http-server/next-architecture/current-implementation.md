@@ -68,8 +68,12 @@ descriptor through activating to ready after checking all catalog shards and liv
 control code/schema pairs against the exact binary registry; retries retain the
 same operation, and a real RustFS run reached canonical `current=desired` state.
 Explicit activation now also requires the operator-selected 1–10,000 live signed
-node quorum with the exact fleet, image, release and module inventory.
-Old-version migration is not implemented. The complete issue/comment HTTP route
+node quorum with the exact fleet, image, release and module inventory. The shared
+runtime now selects, commits and atomically publishes one adjacent schema step
+when the Cell already uses the current compiled code; it replaces the old
+capability and restores the migrated root after local loss. The server release
+activator does not yet enumerate and migrate the catalog or support retained
+predecessor code/code-only rollover. The complete issue/comment HTTP route
 group now calls the typed repository module and publishes through LTX. The
 private management route can dispatch or forward registered calls between
 compatible nodes. The repository module additionally registers private Tick and

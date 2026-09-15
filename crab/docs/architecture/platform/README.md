@@ -249,8 +249,12 @@ the catalog application ready; imported repositories receive the same marker
 only after verified publication. Serving fails before listener bind when any
 cataloged repository is pending import/initialization or lacks a published root,
 and request routing never authorizes an empty bootstrap. The complete public
-issue/comment route group now uses typed Cell commands and queries. Upgrade
-migrations, native task/actor and dirty-job admission and the remaining
+issue/comment route group now uses typed Cell commands and queries. The runtime
+now executes one registry-verified `N→N+1` migration on the Cell's fixed SQL
+worker, records its digest, captures its LTX cut, publishes root/schema/code in
+one fenced control transition, and replaces the old capability only after that
+transition is authoritative. Fleet-wide release activation, predecessor-code and
+code-only rollover, native task/actor and dirty-job admission, and the remaining
 collaboration-domain route cuts remain; effective-memory and free-volume startup
 floors, a resource-derived node mailbox and page-cache/file-descriptor-derived
 active-Cell admission are implemented. A single 110-second absolute shutdown
@@ -358,8 +362,10 @@ completed import; interruption after root publication restores and verifies that
 root before writing completion evidence. The command refuses a live signed Cell
 fleet, but operators must still independently prove that every legacy writer has
 stopped because the legacy deployment did not publish those node records.
-Old-code/schema migration, remaining collaboration-domain import/adapters and
-capacity qualification remain.
+The single-Cell, same-code schema migration mechanism is implemented and proven
+through exact-root restoration. Catalog-wide migration progress,
+predecessor-code/code-only rollover, remaining collaboration-domain
+import/adapters and capacity qualification remain.
 Issue/comment HTTP reads and mutations now enter
 through the authenticated repository router and typed Cell API; legacy issue
 objects are maintenance-import input only and are ignored by serving code.

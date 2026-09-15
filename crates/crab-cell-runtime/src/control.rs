@@ -87,6 +87,7 @@ pub struct Control {
 pub enum Transition {
     Renew,
     Publish,
+    Migrate,
     Release,
     Takeover,
     Tombstone,
@@ -232,6 +233,45 @@ impl Control {
         Ok(next)
     }
 
+    /// Builds the sole valid successor for one published schema migration.
+    pub fn migrate_prepared(
+        &self,
+        prepared: &crab_ltx::PreparedRoot,
+        next_due_ms: Option<i64>,
+        code: Digest,
+        schema: u32,
+    ) -> Result<Self> {
+        if prepared.predecessor() != self.ltx_root()
+            || prepared.verified().schema() != schema
+            || self.schema.checked_add(1) != Some(schema)
+            || code.as_bytes().iter().all(|byte| *byte == 0)
+        {
+            return Err(Error::Control(
+                "prepared migration does not continue control",
+            ));
+        }
+        let mut next = self.clone();
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or(Error::Control("revision overflow"))?;
+        next.progress = next
+            .progress
+            .checked_add(1)
+            .ok_or(Error::Control("progress overflow"))?;
+        next.state = ControlState::Serving;
+        next.root = Some(RootRef::from_ltx(
+            self.cell,
+            self.incarnation,
+            prepared.root(),
+        )?);
+        next.code = code;
+        next.schema = schema;
+        next.next_due_ms = next_due_ms;
+        self.validate_transition(&next, Transition::Migrate)?;
+        Ok(next)
+    }
+
     /// Builds the sole valid successor that releases a drained Cell owner.
     pub(crate) fn release(&self) -> Result<Self> {
         let mut next = self.clone();
@@ -280,9 +320,24 @@ impl Control {
                     || self.epoch != next.epoch
                     || self.owner != next.owner
                     || next.root.is_none()
+                    || self.code != next.code
+                    || self.schema != next.schema
                     || !valid_root_successor(self.root.as_ref(), next.root.as_ref())
                 {
                     return Err(Error::Control("invalid publish transition"));
+                }
+            }
+            Transition::Migrate => {
+                if !matches!(self.state, ControlState::Recovering | ControlState::Serving)
+                    || next.state != ControlState::Serving
+                    || self.epoch != next.epoch
+                    || self.owner != next.owner
+                    || next.root.is_none()
+                    || self.schema.checked_add(1) != Some(next.schema)
+                    || next.code.as_bytes().iter().all(|byte| *byte == 0)
+                    || !valid_root_successor(self.root.as_ref(), next.root.as_ref())
+                {
+                    return Err(Error::Control("invalid migration transition"));
                 }
             }
             Transition::Release => {
@@ -567,6 +622,16 @@ mod tests {
         recovering
             .validate_transition(&serving, Transition::Publish)
             .unwrap();
+        let mut unlabelled_migration = serving.clone();
+        unlabelled_migration.schema = 2;
+        unlabelled_migration.root = Some(root(2));
+        unlabelled_migration.revision += 1;
+        unlabelled_migration.progress += 1;
+        assert!(
+            serving
+                .validate_transition(&unlabelled_migration, Transition::Publish)
+                .is_err()
+        );
 
         let renewed = serving.renew().unwrap();
         assert!(serving.is_same_or_pure_renewal_of(&serving));

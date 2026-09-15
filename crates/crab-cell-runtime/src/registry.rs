@@ -26,6 +26,7 @@ use crate::{
 const MAX_DESCRIPTOR_BYTES: usize = 256 * 1024;
 const MAX_MODULES: usize = 128;
 const MAX_NAMESPACES: usize = 128;
+const MAX_MIGRATION_BYTES: usize = 1024 * 1024;
 const MAX_OPERATION_BYTES: u32 = 1024 * 1024;
 
 /// Registry construction error returned before server readiness.
@@ -44,6 +45,47 @@ pub struct MigrationDescriptor {
     pub version: u32,
     pub sql: &'static str,
     pub digest: Digest,
+}
+
+/// One registry-verified, single-version migration for an active Cell.
+#[derive(Clone, Copy, Debug)]
+pub struct MigrationPlan {
+    module: &'static str,
+    code: Digest,
+    from_schema: u32,
+    migration: MigrationDescriptor,
+}
+
+impl MigrationPlan {
+    #[must_use]
+    pub const fn module(&self) -> &'static str {
+        self.module
+    }
+
+    #[must_use]
+    pub const fn code(&self) -> Digest {
+        self.code
+    }
+
+    #[must_use]
+    pub const fn from_schema(&self) -> u32 {
+        self.from_schema
+    }
+
+    #[must_use]
+    pub const fn to_schema(&self) -> u32 {
+        self.migration.version
+    }
+
+    #[must_use]
+    pub const fn digest(&self) -> Digest {
+        self.migration.digest
+    }
+
+    #[must_use]
+    pub const fn sql(&self) -> &'static str {
+        self.migration.sql
+    }
 }
 
 /// One registered command or query codec and its schema compatibility range.
@@ -642,6 +684,11 @@ impl RegistryBuilder {
                 )
             })
             .collect();
+        let module_migrations = self
+            .modules
+            .iter()
+            .map(|module| (module.name, module.migrations))
+            .collect();
 
         let (release_bytes, module_codes) = encode_release(&self.build, &self.modules)?;
         if release_bytes.len() > MAX_DESCRIPTOR_BYTES {
@@ -667,6 +714,7 @@ impl RegistryBuilder {
             release_digest,
             module_codes,
             module_schemas,
+            module_migrations,
             commands: self.commands,
             command_descriptors,
             queries: self.queries,
@@ -699,6 +747,7 @@ pub struct Registry {
     release_digest: Digest,
     module_codes: BTreeMap<String, Digest>,
     module_schemas: BTreeMap<String, (u32, u32)>,
+    module_migrations: BTreeMap<&'static str, &'static [MigrationDescriptor]>,
     commands: BTreeMap<BindingKey, CommandHandler>,
     command_descriptors: BTreeMap<BindingKey, OperationDescriptor>,
     queries: BTreeMap<BindingKey, QueryHandler>,
@@ -757,6 +806,53 @@ impl Registry {
         descriptor.role == role
             && self.module_codes.get(*module) == Some(&code)
             && (*schema_min..=*schema_max).contains(&schema)
+    }
+
+    /// Selects the next compiled migration for one exact Cell code/schema pair.
+    pub fn next_migration(
+        &self,
+        namespace: NamespaceId,
+        code: Digest,
+        schema: u32,
+    ) -> Result<Option<MigrationPlan>> {
+        let (module, _) = self
+            .namespace_modules
+            .get(&namespace)
+            .ok_or(Error::Registry("namespace is unavailable"))?;
+        let current_code = self
+            .module_codes
+            .get(*module)
+            .copied()
+            .ok_or(Error::Registry("module code is unavailable"))?;
+        let (schema_min, schema_max) = self
+            .module_schemas
+            .get(*module)
+            .copied()
+            .ok_or(Error::Registry("module schema range is unavailable"))?;
+        if code != current_code || !(schema_min..=schema_max).contains(&schema) {
+            return Err(Error::Registry(
+                "Cell code/schema is not executable by this registry",
+            ));
+        }
+        let Some(to_schema) = schema.checked_add(1).filter(|next| *next <= schema_max) else {
+            return Ok(None);
+        };
+        let migration = self
+            .module_migrations
+            .get(module)
+            .and_then(|migrations| {
+                migrations
+                    .iter()
+                    .find(|migration| migration.version == to_schema)
+            })
+            .copied()
+            .ok_or(Error::Registry("next migration is unavailable"))?;
+        Ok(Some(MigrationPlan {
+            module,
+            code,
+            from_schema: schema,
+            migration,
+        }))
     }
 
     pub(crate) fn activity_support(
@@ -1348,6 +1444,7 @@ fn validate_module(
     for migration in module.migrations {
         if migration.version != expected_version
             || migration.sql.is_empty()
+            || migration.sql.len() > MAX_MIGRATION_BYTES
             || migration.digest
                 != Digest::from_bytes(*blake3::hash(migration.sql.as_bytes()).as_bytes())
         {

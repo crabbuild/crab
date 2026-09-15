@@ -107,6 +107,7 @@ impl CellPublisher {
             base.as_ref(),
             pending.cuts(),
             pending.outcome().commit_sequence(),
+            self.observed.value().schema,
         )
         .await
     }
@@ -118,7 +119,26 @@ impl CellPublisher {
         if self.observed.value().root.is_some() {
             return Err(Error::Control("bootstrap control already has a root"));
         }
-        self.prepare_cuts(None, cuts, 0).await
+        self.prepare_cuts(None, cuts, 0, self.observed.value().schema)
+            .await
+    }
+
+    /// Prepares the captured cut under its registry-selected target schema.
+    pub async fn prepare_migration(
+        &mut self,
+        pending: &crate::PendingMigration,
+    ) -> Result<crab_ltx::PreparedRoot> {
+        if self.observed.value().schema != pending.from_schema() {
+            return Err(Error::Fenced);
+        }
+        let base = self.observed.value().ltx_root();
+        self.prepare_cuts(
+            base.as_ref(),
+            pending.cuts(),
+            pending.commit_sequence(),
+            pending.to_schema(),
+        )
+        .await
     }
 
     async fn prepare_cuts(
@@ -126,11 +146,11 @@ impl CellPublisher {
         base: Option<&crab_ltx::RootRef>,
         cuts: &crab_ltx::CaptureBatch,
         commit_sequence: u64,
+        schema: u32,
     ) -> Result<crab_ltx::PreparedRoot> {
         let mut backoff = PublicationBackoff::default();
         loop {
             let replica = self.replica.clone();
-            let schema = self.observed.value().schema;
             let attempt = replica.prepare(base, cuts, commit_sequence, schema);
             tokio::pin!(attempt);
             let result = loop {
@@ -156,15 +176,46 @@ impl CellPublisher {
         prepared: &crab_ltx::PreparedRoot,
         next_due_ms: Option<i64>,
     ) -> Result<crab_ltx::RootRef> {
+        self.publish_proposal(prepared, next_due_ms, None).await
+    }
+
+    /// Publishes one root together with its new executable code/schema pair.
+    pub async fn publish_migration(
+        &mut self,
+        prepared: &crab_ltx::PreparedRoot,
+        next_due_ms: Option<i64>,
+        code: crate::Digest,
+        schema: u32,
+    ) -> Result<crab_ltx::RootRef> {
+        self.publish_proposal(prepared, next_due_ms, Some((code, schema)))
+            .await
+    }
+
+    async fn publish_proposal(
+        &mut self,
+        prepared: &crab_ltx::PreparedRoot,
+        next_due_ms: Option<i64>,
+        migration: Option<(crate::Digest, u32)>,
+    ) -> Result<crab_ltx::RootRef> {
         let mut backoff = PublicationBackoff::default();
         loop {
-            let successor = self
-                .observed
-                .value()
-                .publish_prepared(prepared, next_due_ms)?;
+            let (successor, transition) = match migration {
+                Some((code, schema)) => (
+                    self.observed
+                        .value()
+                        .migrate_prepared(prepared, next_due_ms, code, schema)?,
+                    Transition::Migrate,
+                ),
+                None => (
+                    self.observed
+                        .value()
+                        .publish_prepared(prepared, next_due_ms)?,
+                    Transition::Publish,
+                ),
+            };
             match self
                 .authority
-                .transition(&self.observed, successor.clone(), Transition::Publish)
+                .transition(&self.observed, successor.clone(), transition)
                 .await
             {
                 Ok(published) => {

@@ -101,6 +101,64 @@ pub struct PendingCommit {
     prepared: Option<crab_ltx::RootRef>,
 }
 
+/// Locally committed schema step retained until its root and control pair publish.
+#[derive(Clone)]
+pub struct PendingMigration {
+    code: Digest,
+    from_schema: u32,
+    to_schema: u32,
+    digest: Digest,
+    commit_sequence: u64,
+    next_due_ms: Option<i64>,
+    cuts: CaptureBatch,
+    prepared: Option<crab_ltx::RootRef>,
+}
+
+impl PendingMigration {
+    #[must_use]
+    pub const fn code(&self) -> Digest {
+        self.code
+    }
+
+    #[must_use]
+    pub const fn from_schema(&self) -> u32 {
+        self.from_schema
+    }
+
+    #[must_use]
+    pub const fn to_schema(&self) -> u32 {
+        self.to_schema
+    }
+
+    #[must_use]
+    pub const fn digest(&self) -> Digest {
+        self.digest
+    }
+
+    #[must_use]
+    pub const fn commit_sequence(&self) -> u64 {
+        self.commit_sequence
+    }
+
+    #[must_use]
+    pub const fn next_due_ms(&self) -> Option<i64> {
+        self.next_due_ms
+    }
+
+    #[must_use]
+    pub const fn cuts(&self) -> &CaptureBatch {
+        &self.cuts
+    }
+}
+
+/// Published identity of one completed schema migration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MigrationOutcome {
+    pub code: Digest,
+    pub schema: u32,
+    pub commit_sequence: u64,
+}
+
 impl PendingCommit {
     #[must_use]
     pub fn outcome(&self) -> &StoredOutcome {
@@ -146,6 +204,7 @@ pub struct CellExecutor {
     incarnation: IncarnationId,
     schema: u32,
     pending: Option<PendingCommit>,
+    pending_migration: Option<PendingMigration>,
     fenced: bool,
 }
 
@@ -162,6 +221,7 @@ impl CellExecutor {
             incarnation,
             schema,
             pending: None,
+            pending_migration: None,
             fenced: false,
         }
     }
@@ -275,7 +335,7 @@ impl CellExecutor {
         if self.fenced {
             return Err(Error::Fenced);
         }
-        if self.pending.is_some() {
+        if self.has_pending() {
             return Err(Error::PendingPublication);
         }
         if max_result_bytes > MAX_RESULT_BYTES {
@@ -381,7 +441,7 @@ impl CellExecutor {
         if self.fenced {
             return Err(Error::Fenced);
         }
-        if self.pending.is_some() {
+        if self.has_pending() {
             return Err(Error::PendingPublication);
         }
         if max_result_bytes > MAX_RESULT_BYTES {
@@ -465,7 +525,7 @@ impl CellExecutor {
         if self.fenced {
             return Err(Error::Fenced);
         }
-        if self.pending.is_some() {
+        if self.has_pending() {
             return Err(Error::PendingPublication);
         }
         if max_result_bytes > MAX_RESULT_BYTES {
@@ -502,7 +562,7 @@ impl CellExecutor {
         if self.fenced {
             return Ok(Resolution::Unknown);
         }
-        if self.pending.is_some() {
+        if self.has_pending() {
             return Ok(Resolution::Unknown);
         }
         if identity.expired(now_ms)? {
@@ -563,7 +623,7 @@ impl CellExecutor {
         now_ms: i64,
         max_result_bytes: usize,
     ) -> Result<Resolution> {
-        if self.fenced || self.pending.is_some() {
+        if self.fenced || self.has_pending() {
             return Ok(Resolution::Unknown);
         }
         let result = self.db.query_with(|connection| {
@@ -592,6 +652,111 @@ impl CellExecutor {
         self.pending.as_ref()
     }
 
+    #[must_use]
+    pub fn pending_migration(&self) -> Option<&PendingMigration> {
+        self.pending_migration.as_ref()
+    }
+
+    /// Applies one trusted registry migration and retains its captured cut.
+    pub fn migrate(&mut self, plan: crate::MigrationPlan, now_ms: i64) -> Result<()> {
+        if self.fenced {
+            return Err(Error::Fenced);
+        }
+        if self.has_pending() {
+            return Err(Error::PendingPublication);
+        }
+        if now_ms < 0
+            || plan.from_schema() != self.schema
+            || self.schema.checked_add(1) != Some(plan.to_schema())
+            || plan.digest() != Digest::from_bytes(*blake3::hash(plan.sql().as_bytes()).as_bytes())
+        {
+            return Err(Error::Registry("invalid Cell migration plan"));
+        }
+        let cell = self.cell;
+        let incarnation = self.incarnation;
+        let from_schema = self.schema;
+        let to_schema = plan.to_schema();
+        let digest = plan.digest();
+        let transaction = self.db.transaction_with(|transaction| {
+            let (commit_sequence, prior_logical_time_ms) =
+                runtime_metadata(transaction, cell, incarnation, from_schema)?;
+            let existing = transaction
+                .query_row(
+                    "SELECT digest, applied_sequence FROM sys_migrations WHERE version = ?1",
+                    [to_schema],
+                    |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .optional()?;
+            if let Some((existing_digest, _)) = existing {
+                return Err(if existing_digest.as_slice() == digest.as_bytes() {
+                    Error::Control("migration is recorded ahead of runtime schema")
+                } else {
+                    Error::Registry("migration digest conflicts with SQLite history")
+                });
+            }
+            let sequence = commit_sequence
+                .checked_add(1)
+                .filter(|value| *value > 0)
+                .ok_or(Error::Command("commit sequence overflow"))?;
+            let logical_time_ms = now_ms.max(prior_logical_time_ms);
+            transaction.execute_batch(plan.sql())?;
+            transaction.execute(
+                "INSERT INTO sys_migrations(version, digest, applied_sequence) VALUES (?1, ?2, ?3)",
+                (to_schema, digest.as_bytes().as_slice(), sequence),
+            )?;
+            if transaction.execute(
+                "UPDATE sys_meta SET commit_sequence = ?1, logical_time_ms = ?2, schema_version = ?3 WHERE singleton = 1 AND schema_version = ?4",
+                (sequence, logical_time_ms, to_schema, from_schema),
+            )? != 1
+            {
+                return Err(Error::Control("migration metadata changed during execution"));
+            }
+            let metadata = runtime_metadata(transaction, cell, incarnation, to_schema)?;
+            if metadata != (sequence, logical_time_ms) {
+                return Err(Error::Control("migration metadata did not validate"));
+            }
+            let next_due_ms = crate::scheduler_next_due_ms(transaction, logical_time_ms)?;
+            Ok((sequence, next_due_ms))
+        });
+        if let Some(error) = self.db.take_io_error() {
+            self.fenced = true;
+            return Err(ltx_error(error));
+        }
+        let (sequence, next_due_ms) = match transaction {
+            Ok(value) => value,
+            Err(TransactionError::Operation(error)) => return Err(error),
+            Err(error) => {
+                self.fenced = true;
+                return Err(transaction_error(error));
+            }
+        };
+        let cuts = match self.db.capture() {
+            Ok(cuts) if !cuts.segments.is_empty() => cuts,
+            Ok(_) => {
+                self.fenced = true;
+                return Err(Error::Control("migration produced no LTX cut"));
+            }
+            Err(error) => {
+                self.fenced = true;
+                return Err(error.into());
+            }
+        };
+        let commit_sequence =
+            u64::try_from(sequence).map_err(|_| Error::Command("migration sequence overflow"))?;
+        self.schema = to_schema;
+        self.pending_migration = Some(PendingMigration {
+            code: plan.code(),
+            from_schema,
+            to_schema,
+            digest,
+            commit_sequence,
+            next_due_ms,
+            cuts,
+            prepared: None,
+        });
+        Ok(())
+    }
+
     /// Pins the one immutable proposal that may satisfy the pending commit.
     pub fn bind_prepared(&mut self, prepared: &crab_ltx::PreparedRoot) -> Result<()> {
         let pending = self.pending.as_mut().ok_or(Error::PendingPublication)?;
@@ -605,6 +770,28 @@ impl CellExecutor {
         {
             return Err(Error::Command(
                 "prepared root does not match pending commit",
+            ));
+        }
+        pending.prepared = Some(root);
+        Ok(())
+    }
+
+    /// Pins the immutable proposal for the pending schema migration.
+    pub fn bind_migration_prepared(&mut self, prepared: &crab_ltx::PreparedRoot) -> Result<()> {
+        let pending = self
+            .pending_migration
+            .as_mut()
+            .ok_or(Error::PendingPublication)?;
+        let root = prepared.root();
+        if root.cell != *self.cell.as_bytes()
+            || root.incarnation != *self.incarnation.as_bytes()
+            || root.position != pending.cuts.position
+            || root.commit_sequence != pending.commit_sequence
+            || prepared.verified().schema() != pending.to_schema
+            || pending.prepared.is_some_and(|existing| existing != root)
+        {
+            return Err(Error::Command(
+                "prepared root does not match pending migration",
             ));
         }
         pending.prepared = Some(root);
@@ -625,9 +812,33 @@ impl CellExecutor {
             .ok_or(Error::PendingPublication)
     }
 
+    /// Releases one migration only after its exact schema-bearing root publishes.
+    pub fn confirm_migration_published(
+        &mut self,
+        root: &crab_ltx::RootRef,
+    ) -> Result<MigrationOutcome> {
+        let pending = self
+            .pending_migration
+            .as_ref()
+            .ok_or(Error::PendingPublication)?;
+        if pending.prepared.as_ref() != Some(root) {
+            return Err(Error::Command(
+                "published root does not match prepared migration",
+            ));
+        }
+        self.pending_migration
+            .take()
+            .map(|pending| MigrationOutcome {
+                code: pending.code,
+                schema: pending.to_schema,
+                commit_sequence: pending.commit_sequence,
+            })
+            .ok_or(Error::PendingPublication)
+    }
+
     /// Closes a drained executor; pending or fenced state requires recovery.
     pub fn close(self) -> Result<()> {
-        if self.pending.is_some() || self.fenced {
+        if self.has_pending() || self.fenced {
             return Err(Error::Fenced);
         }
         self.db.close()?;
@@ -648,17 +859,21 @@ impl CellExecutor {
     }
 
     pub(crate) fn drained(&self) -> bool {
-        self.pending.is_none() && !self.fenced
+        !self.has_pending() && !self.fenced
     }
 
     pub(crate) fn worker_state(&self) -> crate::worker::WorkerState {
         if self.fenced {
             crate::worker::WorkerState::Fenced
-        } else if self.pending.is_some() {
+        } else if self.has_pending() {
             crate::worker::WorkerState::Pending
         } else {
             crate::worker::WorkerState::Ready
         }
+    }
+
+    fn has_pending(&self) -> bool {
+        self.pending.is_some() || self.pending_migration.is_some()
     }
 
     fn finish_transaction(

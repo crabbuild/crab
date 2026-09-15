@@ -395,6 +395,18 @@ A routing rollback cannot undo migrated data. Retain rollback images and release
 descriptors alongside backups. Queue payload changes require compatibility
 or drained/transformed messages; never implicitly coerce bytes.
 
+Implementation status: the runtime-level adjacent-schema path is complete for a
+Cell already using the current compiled module code. The frozen registry selects
+the next verified migration; the old capability becomes terminal; the fixed SQL
+worker commits migration SQL, `sys_migrations` and `sys_meta`; LTX captures the
+cut; and `Transition::Migrate` publishes root/schema/code atomically before a new
+capability is returned. Tests cover digest conflict without authority movement,
+old-capability rejection, a post-migration write, local-source loss and
+exact-root restore. Release activation does not yet walk the catalog, persist
+per-Cell migration progress, retain predecessor module code, or emit a code-only
+root transition. Until those pieces exist, operators cannot treat a prepared
+release as an automatic fleet schema rollout.
+
 ## Kubernetes and VM process lifecycle
 
 One existing Crab container per Pod owns HTTP, peer routing, Cell runtime, SQL
@@ -438,8 +450,9 @@ The initial wiring uses CPU-derived 1..16 workers and a 10,000 active-Cell
 ceiling. It derives the node retained-byte semaphore as five percent of the Cell
 memory budget, derives active-Cell admission from the page-cache and descriptor
 budgets, and enforces the effective-memory and free-volume startup floors above.
-Native task/actor and dirty-job reservations and full use of the configured Cell
-directory remain delivery work. Cross-session activity takeover, local-volume
+Native task/actor and dirty-job reservations remain delivery work. The configured
+Cell directory now owns per-process session paths and per-Cell activation files;
+capacity checks use that same volume. Cross-session activity takeover, local-volume
 loss, exact-root restore, expired-lease reclaim and attempt-two completion are
 covered by runtime integration; real Kubernetes/ECS process and network fault
 qualification remains. Scheduler shutdown already aborts and joins

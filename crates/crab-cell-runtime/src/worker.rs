@@ -14,7 +14,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     CellExecutor, CellId, CommandExecution, Digest, Error, HandlerOutcome, InboxDelivery,
-    MutationIdentity, PendingCommit, Resolution, Result, StoredOutcome,
+    MigrationOutcome, MigrationPlan, MutationIdentity, PendingCommit, PendingMigration, Resolution,
+    Result, StoredOutcome,
 };
 
 const MAX_WORKERS: usize = 16;
@@ -257,6 +258,29 @@ impl SqlWorkerPool {
         receive(response).await
     }
 
+    /// Runs one registry-verified schema step on the Cell's assigned worker.
+    pub(crate) async fn migrate(
+        &self,
+        cell: CellId,
+        plan: MigrationPlan,
+        now_ms: i64,
+        deadline: Instant,
+    ) -> Result<PendingMigration> {
+        let (reply, response) = oneshot::channel();
+        self.send(
+            cell,
+            WorkerCommand::Migrate {
+                cell,
+                plan,
+                now_ms,
+                deadline,
+                reply,
+            },
+        )
+        .await?;
+        receive(response).await
+    }
+
     /// Applies one destination inbox delivery on the Cell's assigned worker.
     pub(crate) async fn deliver_effect(
         &self,
@@ -378,6 +402,24 @@ impl SqlWorkerPool {
         receive(response).await
     }
 
+    pub(crate) async fn bind_migration_prepared(
+        &self,
+        cell: CellId,
+        prepared: crab_ltx::PreparedRoot,
+    ) -> Result<()> {
+        let (reply, response) = oneshot::channel();
+        self.send(
+            cell,
+            WorkerCommand::BindMigrationPrepared {
+                cell,
+                prepared: Box::new(prepared),
+                reply,
+            },
+        )
+        .await?;
+        receive(response).await
+    }
+
     /// Returns a clone of worker-owned publication state without releasing it.
     pub async fn pending(&self, cell: CellId) -> Result<Option<PendingCommit>> {
         let (reply, response) = oneshot::channel();
@@ -395,6 +437,20 @@ impl SqlWorkerPool {
         let (reply, response) = oneshot::channel();
         self.send(cell, WorkerCommand::ConfirmPublished { cell, root, reply })
             .await?;
+        receive(response).await
+    }
+
+    pub(crate) async fn confirm_migration_published(
+        &self,
+        cell: CellId,
+        root: crab_ltx::RootRef,
+    ) -> Result<MigrationOutcome> {
+        let (reply, response) = oneshot::channel();
+        self.send(
+            cell,
+            WorkerCommand::ConfirmMigrationPublished { cell, root, reply },
+        )
+        .await?;
         receive(response).await
     }
 
@@ -571,6 +627,13 @@ enum WorkerCommand {
         handler: Handler,
         reply: oneshot::Sender<Result<WorkerExecution>>,
     },
+    Migrate {
+        cell: CellId,
+        plan: MigrationPlan,
+        now_ms: i64,
+        deadline: Instant,
+        reply: oneshot::Sender<Result<PendingMigration>>,
+    },
     DeliverEffect {
         cell: CellId,
         delivery: InboxDelivery,
@@ -609,6 +672,11 @@ enum WorkerCommand {
         prepared: Box<crab_ltx::PreparedRoot>,
         reply: oneshot::Sender<Result<()>>,
     },
+    BindMigrationPrepared {
+        cell: CellId,
+        prepared: Box<crab_ltx::PreparedRoot>,
+        reply: oneshot::Sender<Result<()>>,
+    },
     Pending {
         cell: CellId,
         reply: oneshot::Sender<Result<Option<PendingCommit>>>,
@@ -617,6 +685,11 @@ enum WorkerCommand {
         cell: CellId,
         root: crab_ltx::RootRef,
         reply: oneshot::Sender<Result<StoredOutcome>>,
+    },
+    ConfirmMigrationPublished {
+        cell: CellId,
+        root: crab_ltx::RootRef,
+        reply: oneshot::Sender<Result<MigrationOutcome>>,
     },
     Fence {
         cell: CellId,
@@ -779,6 +852,23 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                 });
                 let _ = reply.send(result);
             }
+            WorkerCommand::Migrate {
+                cell,
+                plan,
+                now_ms,
+                deadline,
+                reply,
+            } => {
+                let result = run_native_callback(&mut cells, cell, deadline, move |active| {
+                    active.executor.migrate(plan, now_ms)?;
+                    active
+                        .executor
+                        .pending_migration()
+                        .cloned()
+                        .ok_or(Error::Fenced)
+                });
+                let _ = reply.send(result);
+            }
             WorkerCommand::DeliverEffect {
                 cell,
                 delivery,
@@ -875,6 +965,17 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                     .and_then(|cell| cell.executor.bind_prepared(&prepared));
                 let _ = reply.send(result);
             }
+            WorkerCommand::BindMigrationPrepared {
+                cell,
+                prepared,
+                reply,
+            } => {
+                let result = cells
+                    .get_mut(&cell)
+                    .ok_or(Error::CellNotActive)
+                    .and_then(|cell| cell.executor.bind_migration_prepared(&prepared));
+                let _ = reply.send(result);
+            }
             WorkerCommand::Pending { cell, reply } => {
                 let result = cells
                     .get(&cell)
@@ -887,6 +988,13 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                     .get_mut(&cell)
                     .ok_or(Error::CellNotActive)
                     .and_then(|cell| cell.executor.confirm_published(&root));
+                let _ = reply.send(result);
+            }
+            WorkerCommand::ConfirmMigrationPublished { cell, root, reply } => {
+                let result = cells
+                    .get_mut(&cell)
+                    .ok_or(Error::CellNotActive)
+                    .and_then(|cell| cell.executor.confirm_migration_published(&root));
                 let _ = reply.send(result);
             }
             WorkerCommand::Fence { cell, reply } => {

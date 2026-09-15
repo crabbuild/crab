@@ -24,9 +24,12 @@ Cell, so they do not block later scans or race a temporary-activation drain.
 Completed cycles advance signed node progress; a node stalled for 15 seconds
 loses readiness and is excluded so the next rendezvous candidate takes over.
 Durable scheduler retry/fairness and multi-node activity failure qualification
-remain. Remaining collaboration-domain import, old-version migration/configured
-multi-node quorum and the remaining product-domain route cuts are not yet
-integrated. New repository creation explicitly publishes an empty Cell and marks
+remain. The shared runtime can now publish one adjacent schema step for a Cell
+already on the current compiled code, but the HTTP release activator does not yet
+orchestrate catalog-wide migration or predecessor-code/code-only rollover.
+Remaining collaboration-domain import, configured multi-node quorum and the
+remaining product-domain route cuts are not yet integrated. New repository
+creation explicitly publishes an empty Cell and marks
 the catalog ready; adoption remains blocked until verified import. Startup
 rejects every missing or rootless repository Cell. The issue/comment HTTP group
 now uses the release-aware router, which reuses local handles, selects

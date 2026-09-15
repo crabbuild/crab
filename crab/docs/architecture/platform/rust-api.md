@@ -247,6 +247,12 @@ pub async fn resolve_effect(
     now_ms: i64,
     max_result_bytes: usize,
 ) -> Result<Resolution>;
+
+pub async fn migrate(
+    &self,
+    plan: MigrationPlan,
+    now_ms: i64,
+) -> Result<MigratedCell>;
 ```
 
 This is an internal construction API, not the final application surface. The
@@ -262,6 +268,31 @@ APIs: they share Cell admission, FIFO actor ordering, SQL-worker affinity,
 cancellation-safe execution, exact-root publication and fence/unknown semantics.
 They are not exposed to application or browser callers; the implemented peer
 translator derives `InboxDelivery` only from authenticated source evidence.
+
+Schema migration is likewise a private Rust control capability. The caller can
+obtain SQL only through the frozen registry, and migration consumes the old
+handle rather than letting old schema-bound codecs continue through its clones:
+
+```rust,ignore
+let Some(plan) = registry.next_migration(
+    repository_namespace,
+    handle.code(),
+    handle.schema(),
+)? else {
+    return Ok(handle);
+};
+
+let MigratedCell { handle, outcome } = handle.migrate(plan, now_ms).await?;
+assert_eq!(handle.schema(), outcome.schema);
+```
+
+`next_migration` currently accepts only the exact current module code and returns
+one adjacent schema step. `migrate` places that step behind already accepted Cell
+work, executes the static SQL on the assigned worker, records its digest, captures
+LTX and publishes root/schema/code together. It returns the replacement handle
+only after the authority CAS is proven. Catalog iteration, predecessor-code
+retention and code-only rollover belong to release activation and are not yet
+implemented by `crab-http-server`.
 
 ```rust,ignore
 pub trait WireValue: Sized + Send + 'static {

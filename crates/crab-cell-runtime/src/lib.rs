@@ -32,7 +32,7 @@ mod worker;
 mod workflow;
 
 pub use activity_pool::{BlockingActivityPool, BlockingActivityReservation};
-pub use actor::{CellHandle, CellRuntime, NodeByteReservation};
+pub use actor::{CellHandle, CellRuntime, MigratedCell, NodeByteReservation};
 pub use application::{ApplicationIdentity, ApplicationIdentityStore};
 pub use authority::{CellAuthority, VersionedControl};
 pub use catalog::{
@@ -57,8 +57,8 @@ pub use effects::{
 };
 pub use error::{Error, Result};
 pub use executor::{
-    CellExecutor, CommandExecution, HandlerOutcome, MutationIdentity, PendingCommit, Resolution,
-    StoredOutcome,
+    CellExecutor, CommandExecution, HandlerOutcome, MigrationOutcome, MutationIdentity,
+    PendingCommit, PendingMigration, Resolution, StoredOutcome,
 };
 pub use identity::{
     ApplicationId, CellId, CellTarget, Digest, IncarnationId, NamespaceId, RequestId, SessionId,
@@ -90,8 +90,8 @@ pub use queue::{
 };
 pub use registry::{
     BuildDescriptor, CellModule, Command, CommandContext, CommandInvocation, CommandResult,
-    MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor, OperationDescriptor, Query,
-    QueryContext, QueryInvocation, Registry, RegistryBuilder, RegistryError,
+    MigrationDescriptor, MigrationPlan, ModuleDescriptor, NamespaceDescriptor, OperationDescriptor,
+    Query, QueryContext, QueryInvocation, Registry, RegistryBuilder, RegistryError,
 };
 pub use release::{ReleaseRecord, ReleaseState, ReleaseStore, VersionedRelease};
 pub use scheduler::{

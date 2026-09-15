@@ -19,8 +19,8 @@ use handle::{CellAdmission, WorkAdmission};
 
 use crate::{
     CatalogProof, CellAuthority, CellId, CellPublisher, Digest, Error, InboxDelivery,
-    MutationIdentity, Owner, Resolution, SessionId, SqlWorkerPool, StoredOutcome, Transition,
-    VersionedControl, WorkerExecution,
+    MigrationOutcome, MigrationPlan, MutationIdentity, Owner, Resolution, SessionId, SqlWorkerPool,
+    StoredOutcome, Transition, VersionedControl, WorkerExecution,
     worker::{CellReservation, Handler, Initializer, QueryHandler, WorkerState},
 };
 
@@ -42,6 +42,12 @@ pub struct CellRuntime {
 #[must_use = "dropping the reservation immediately releases its capacity"]
 pub struct NodeByteReservation {
     _permit: OwnedSemaphorePermit,
+}
+
+/// New capability and publication receipt returned by one schema migration.
+pub struct MigratedCell {
+    pub handle: CellHandle,
+    pub outcome: MigrationOutcome,
 }
 
 pub(super) struct RuntimeInner {
@@ -599,6 +605,7 @@ enum Message {
     Execute(Box<QueuedCommand>),
     Query(Box<QueuedQuery>),
     Resolve(Box<QueuedResolve>),
+    Migrate(Box<QueuedMigration>),
     Lookup {
         cell: CellId,
         reply: oneshot::Sender<Option<LocalCell>>,
@@ -674,6 +681,20 @@ struct QueuedResolve {
     _work: WorkAdmission,
 }
 
+struct QueuedMigration {
+    cell: CellId,
+    admission: Arc<CellAdmission>,
+    plan: MigrationPlan,
+    now_ms: i64,
+    reply: Option<oneshot::Sender<crate::Result<MigratedAdmission>>>,
+    _work: WorkAdmission,
+}
+
+struct MigratedAdmission {
+    admission: Arc<CellAdmission>,
+    outcome: MigrationOutcome,
+}
+
 #[derive(Clone, Copy)]
 enum ResolveOperation {
     Mutation {
@@ -689,6 +710,7 @@ enum QueuedWork {
     Command(Box<QueuedCommand>),
     Query(Box<QueuedQuery>),
     Resolve(Box<QueuedResolve>),
+    Migration(Box<QueuedMigration>),
 }
 
 struct ActiveCell {
@@ -703,12 +725,13 @@ struct ActiveCell {
     renewing: bool,
     fenced: bool,
     drain: Option<oneshot::Sender<crate::Result<()>>>,
+    migrating: bool,
     shutdown_drain: bool,
 }
 
 impl ActiveCell {
     fn draining(&self) -> bool {
-        self.drain.is_some() || self.shutdown_drain
+        self.drain.is_some() || self.migrating || self.shutdown_drain
     }
 }
 
@@ -750,6 +773,13 @@ enum TaskResult {
         cell: CellId,
         resolve: Box<QueuedResolve>,
         result: crate::Result<Resolution>,
+        fenced: bool,
+    },
+    Migrated {
+        cell: CellId,
+        publisher: Box<CellPublisher>,
+        migration: Box<QueuedMigration>,
+        result: crate::Result<MigrationOutcome>,
         fenced: bool,
     },
     Renewed {
@@ -915,12 +945,7 @@ fn handle_message(
                 let _ = reply.send(Err(Error::CellAlreadyActive));
                 return;
             }
-            let admission = Arc::new(CellAdmission {
-                requests: Arc::new(Semaphore::new(CELL_REQUESTS)),
-                bytes: Arc::new(Semaphore::new(CELL_BYTES)),
-                draining: AtomicBool::new(false),
-                fenced: AtomicBool::new(false),
-            });
+            let admission = new_cell_admission();
             let pool = pool.clone();
             tasks.spawn(async move {
                 let mut publisher = publisher;
@@ -1022,6 +1047,36 @@ fn handle_message(
                 return;
             }
             active.queue.push_back(QueuedWork::Resolve(resolve));
+            start_next(active, pool, tasks);
+        }
+        Message::Migrate(mut migration) => {
+            let Some(active) = cells.get_mut(&migration.cell) else {
+                send_migration_reply(&mut migration, Err(Error::CellNotActive));
+                return;
+            };
+            if !Arc::ptr_eq(&active.admission, &migration.admission) {
+                send_migration_reply(&mut migration, Err(Error::CellNotActive));
+                return;
+            }
+            if active.fenced || active.draining() {
+                let error = if active.fenced {
+                    Error::Fenced
+                } else {
+                    Error::CellDraining
+                };
+                send_migration_reply(&mut migration, Err(error));
+                return;
+            }
+            if active.code != migration.plan.code() || active.schema != migration.plan.from_schema()
+            {
+                send_migration_reply(
+                    &mut migration,
+                    Err(Error::Registry("migration plan does not match active Cell")),
+                );
+                return;
+            }
+            active.migrating = true;
+            active.queue.push_back(QueuedWork::Migration(migration));
             start_next(active, pool, tasks);
         }
         Message::Lookup { cell, reply } => {
@@ -1163,6 +1218,77 @@ fn start_next(active: &mut ActiveCell, pool: &SqlWorkerPool, tasks: &mut JoinSet
         QueuedWork::Resolve(resolve) => {
             tasks.spawn(async move { execute_resolve(pool, resolve, interrupt).await });
         }
+        QueuedWork::Migration(migration) => {
+            let Some(publisher) = active.publisher.take() else {
+                let mut migration = migration;
+                send_migration_reply(&mut migration, Err(Error::Fenced));
+                active.fenced = true;
+                active.busy = false;
+                return;
+            };
+            tasks.spawn(async move {
+                execute_migration(pool, Box::new(publisher), migration, interrupt).await
+            });
+        }
+    }
+}
+
+async fn execute_migration(
+    pool: SqlWorkerPool,
+    mut publisher: Box<CellPublisher>,
+    mut migration: Box<QueuedMigration>,
+    interrupt: Arc<crab_ltx::rusqlite::InterruptHandle>,
+) -> TaskResult {
+    let deadline = std::time::Instant::now() + SQL_WALL_DEADLINE;
+    let operation = pool.migrate(migration.cell, migration.plan, migration.now_ms, deadline);
+    tokio::pin!(operation);
+    let pending = match tokio::time::timeout_at(deadline.into(), &mut operation).await {
+        Ok(result) => result,
+        Err(_) => {
+            interrupt.interrupt();
+            fence_admission(&migration.admission);
+            send_migration_reply(&mut migration, Err(Error::Deadline));
+            let _ = operation.await;
+            let _ = pool.fence(migration.cell).await;
+            return TaskResult::Migrated {
+                cell: migration.cell,
+                publisher,
+                migration,
+                result: Err(Error::Deadline),
+                fenced: true,
+            };
+        }
+    };
+    let result = match pending {
+        Ok(pending) => {
+            async {
+                let prepared = publisher.prepare_migration(&pending).await?;
+                pool.bind_migration_prepared(migration.cell, prepared.clone())
+                    .await?;
+                let root = publisher
+                    .publish_migration(
+                        &prepared,
+                        pending.next_due_ms(),
+                        pending.code(),
+                        pending.to_schema(),
+                    )
+                    .await?;
+                pool.confirm_migration_published(migration.cell, root).await
+            }
+            .await
+        }
+        Err(error) => Err(error),
+    };
+    let fenced = result.is_err();
+    if fenced {
+        let _ = pool.fence(migration.cell).await;
+    }
+    TaskResult::Migrated {
+        cell: migration.cell,
+        publisher,
+        migration,
+        result,
+        fenced,
     }
 }
 
@@ -1431,6 +1557,7 @@ fn handle_task(
                         renewing: false,
                         fenced: false,
                         drain: None,
+                        migrating: false,
                         shutdown_drain: false,
                     },
                 );
@@ -1496,6 +1623,40 @@ fn handle_task(
             send_resolve_reply(&mut resolve, result);
             continue_cell(cell, pool, cells, transitioning, tasks);
         }
+        TaskResult::Migrated {
+            cell,
+            publisher,
+            mut migration,
+            result,
+            fenced,
+        } => {
+            let Some(active) = cells.get_mut(&cell) else {
+                send_migration_reply(&mut migration, Err(Error::CellNotActive));
+                return;
+            };
+            active.busy = false;
+            active.migrating = false;
+            active.publisher = Some(*publisher);
+            active.fenced |= fenced;
+            match result {
+                Ok(outcome) if !active.fenced => {
+                    active.code = outcome.code;
+                    active.schema = outcome.schema;
+                    let admission = new_cell_admission();
+                    active.admission = admission.clone();
+                    send_migration_reply(
+                        &mut migration,
+                        Ok(MigratedAdmission { admission, outcome }),
+                    );
+                }
+                Ok(_) => send_migration_reply(&mut migration, Err(Error::Fenced)),
+                Err(error) => send_migration_reply(&mut migration, Err(error)),
+            }
+            if active.fenced {
+                fence_active(active);
+            }
+            continue_cell(cell, pool, cells, transitioning, tasks);
+        }
         TaskResult::Renewed {
             cell,
             publisher,
@@ -1558,6 +1719,9 @@ fn fence_active(active: &mut ActiveCell) {
             QueuedWork::Resolve(mut resolve) => {
                 send_resolve_reply(&mut resolve, Ok(Resolution::Unknown));
             }
+            QueuedWork::Migration(mut migration) => {
+                send_migration_reply(&mut migration, Err(Error::Fenced));
+            }
         }
     }
 }
@@ -1591,6 +1755,15 @@ fn fence_admission(admission: &CellAdmission) {
     admission.bytes.close();
 }
 
+fn new_cell_admission() -> Arc<CellAdmission> {
+    Arc::new(CellAdmission {
+        requests: Arc::new(Semaphore::new(CELL_REQUESTS)),
+        bytes: Arc::new(Semaphore::new(CELL_BYTES)),
+        draining: AtomicBool::new(false),
+        fenced: AtomicBool::new(false),
+    })
+}
+
 fn send_command_reply(command: &mut QueuedCommand, result: crate::Result<StoredOutcome>) {
     if let Some(reply) = command.reply.take() {
         let _ = reply.send(result);
@@ -1605,6 +1778,12 @@ fn send_query_reply(query: &mut QueuedQuery, result: crate::Result<Vec<u8>>) {
 
 fn send_resolve_reply(resolve: &mut QueuedResolve, result: crate::Result<Resolution>) {
     if let Some(reply) = resolve.reply.take() {
+        let _ = reply.send(result);
+    }
+}
+
+fn send_migration_reply(migration: &mut QueuedMigration, result: crate::Result<MigratedAdmission>) {
+    if let Some(reply) = migration.reply.take() {
         let _ = reply.send(result);
     }
 }
