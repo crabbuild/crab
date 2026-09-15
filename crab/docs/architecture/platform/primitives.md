@@ -178,8 +178,9 @@ read and durable precondition rejection, releases the owner, restores on a new
 owner and reads the same value. `KvModule` supplies compile-time operation IDs;
 `register_kv` binds stable bounded codecs for atomic, get and list without
 exposing handler selection. Scope determines the fixed shard before routing,
-and query TTL uses owner-sampled logical time. Scheduler invocation of cleanup
-remains to implement.
+and query TTL uses owner-sampled logical time. The registered maintenance Tick
+invokes bounded KV expiry cleanup from the same transaction that recomputes the
+Cell's next durable scheduler deadline; no separate KV cleanup process exists.
 
 V1 KV is scoped. `Target.partition` must equal u32(hash(scope) % shard_count);
 Rust recomputes and rejects mismatches. Keys are 1..1024 bytes, scope <=1024,

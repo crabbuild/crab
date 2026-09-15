@@ -54,6 +54,9 @@ this server remains the sole registry composition root, executable and deployabl
 unit. Kubernetes balances complete Crab nodes; it does not schedule application
 modules independently. Product HTTP/Git routes remain the only public API, while
 Cell and primitive capabilities remain private Rust contracts.
+The exact source-change, registration, route-adapter, compatibility-test and
+whole-image rollout sequence is the
+[native contributor procedure](../../../crab/docs/architecture/platform/rust-api.md#contributor-change-and-release-procedure).
 
 This design replaces collaboration JSON documents with one SQLite database per
 cataloged repository. A Rust subsystem captures SQLite WAL changes into LTX

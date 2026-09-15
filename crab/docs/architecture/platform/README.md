@@ -480,9 +480,10 @@ deployment indirection solely to preserve a possible future non-Rust host.
 
 ## Source ownership and target files
 
-Create one new crate, `crab-cell-runtime`, with its first working Crab caller.
-Primitive modules share its transaction and publication owner; separate facade,
-protocol, SDK and platform-server crates are unnecessary.
+Keep reusable Cell mechanics in the existing `crab-cell-runtime` crate and keep
+its working product caller in `crab-http-server`. Primitive modules share its
+transaction and publication owner; separate facade, protocol, SDK and
+platform-server crates are unnecessary.
 
 ```text
 crates/crab-http-server/src/
