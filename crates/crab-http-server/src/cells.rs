@@ -62,6 +62,9 @@ const REPOSITORY_COMMANDS: &[OperationDescriptor] = &[
     operation(REPOSITORY_TICK_COMMAND_ID, 8, 5),
     operation(REPOSITORY_EFFECT_CLAIM_COMMAND_ID, 8, 1024 * 1024),
     operation(REPOSITORY_EFFECT_LEASE_COMMAND_ID, 1024 * 1024, 9),
+    operation(8, 8 * 1024, 4 * 1024),
+    operation(9, 8 * 1024, 4 * 1024),
+    operation(10, 16, 1),
 ];
 const REPOSITORY_QUERIES: &[OperationDescriptor] = &[
     operation(1, 8, 80 * 1024),
@@ -69,6 +72,7 @@ const REPOSITORY_QUERIES: &[OperationDescriptor] = &[
     operation(3, 1024, 1024 * 1024),
     operation(4, 32, 1024 * 1024),
     operation(REPOSITORY_EFFECT_VALIDATE_QUERY_ID, 1024 * 1024, 1),
+    operation(6, 8, 384 * 1024),
 ];
 
 struct RepositoryModule;
@@ -1324,8 +1328,9 @@ mod tests {
 
     use super::repository::{
         CommentKey, CommentPage, CreateComment, CreateCommentInput, CreateCommentOutcome,
-        CreateIssue, CreateIssueInput, CreateIssueOutcome, GetComment, GetIssue, IssuePage,
-        ListComments, ListCommentsInput, ListIssues, ListIssuesInput, RepositoryAuthor,
+        CreateIssue, CreateIssueInput, CreateIssueOutcome, CreateLabel, CreateLabelInput,
+        CreateLabelOutcome, GetComment, GetIssue, IssuePage, LabelCatalog, ListComments,
+        ListCommentsInput, ListIssues, ListIssuesInput, ListLabels, RepositoryAuthor,
         UpdateComment, UpdateCommentInput, UpdateCommentOutcome, UpdateIssue, UpdateIssueInput,
         UpdateIssueOutcome,
     };
@@ -1405,7 +1410,7 @@ mod tests {
         assert_eq!(descriptor["modules"][0]["name"], "repository");
         assert_eq!(
             descriptor["modules"][0]["code"],
-            "266bfe0422f9f8a0e440929211fa3a4423194493e8bfb8e0c14684202bc05647"
+            "2501a79d687e3cf8b895752359c72ddf7b5033886895d9d34953076831220a84"
         );
         assert_eq!(descriptor["modules"][0]["schema_min"], 1);
         assert_eq!(descriptor["modules"][0]["schema_max"], 1);
@@ -1414,14 +1419,14 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            7
+            10
         );
         assert_eq!(
             descriptor["modules"][0]["queries"]
                 .as_array()
                 .unwrap()
                 .len(),
-            5
+            6
         );
         assert_eq!(descriptor["namespaces"][0]["role"], "repository");
         assert_eq!(descriptor["namespaces"][0]["shards"], 1);
@@ -2702,6 +2707,68 @@ mod tests {
                     && outcome.receipt.commit_sequence == 6
         ));
 
+        let invalid_label = first_client
+            .command::<UpdateIssue>(
+                &target,
+                mutation(16),
+                UpdateIssueInput {
+                    number: issue_record.number,
+                    actor: author.clone(),
+                    can_manage_metadata: true,
+                    version: issue_record.version,
+                    title: None,
+                    body: None,
+                    state: None,
+                    label_ids: Some(vec![5]),
+                    assignee_subjects: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            invalid_label,
+            InvocationError::Rejected(ref outcome)
+                if outcome.output == UpdateIssueOutcome::LabelInvalid
+                    && outcome.receipt.commit_sequence == 7
+        ));
+
+        let first_label = first_client
+            .command::<CreateLabel>(
+                &target,
+                mutation(14),
+                CreateLabelInput {
+                    submission_id: [14; 16],
+                    author: author.clone(),
+                    name: "bug".into(),
+                    color: "d73a4a".into(),
+                    description: None,
+                },
+            )
+            .await
+            .unwrap();
+        let CreateLabelOutcome::Created(first_label_record) = &first_label.output else {
+            panic!("successful label command returned a rejection outcome");
+        };
+        assert_eq!(first_label.receipt.commit_sequence, 8);
+        let second_label = first_client
+            .command::<CreateLabel>(
+                &target,
+                mutation(15),
+                CreateLabelInput {
+                    submission_id: [15; 16],
+                    author: author.clone(),
+                    name: "enhancement".into(),
+                    color: "84b6eb".into(),
+                    description: Some("New capability".into()),
+                },
+            )
+            .await
+            .unwrap();
+        let CreateLabelOutcome::Created(second_label_record) = &second_label.output else {
+            panic!("successful label command returned a rejection outcome");
+        };
+        assert_eq!(second_label.receipt.commit_sequence, 9);
+
         let updated_issue = first_client
             .command::<UpdateIssue>(
                 &target,
@@ -2714,7 +2781,7 @@ mod tests {
                     title: Some("Durable issue updated".into()),
                     body: None,
                     state: Some(1),
-                    label_ids: Some(vec![5, 8]),
+                    label_ids: Some(vec![first_label_record.number, second_label_record.number]),
                     assignee_subjects: Some(vec!["user-1".into()]),
                 },
             )
@@ -2724,8 +2791,8 @@ mod tests {
             panic!("successful issue update returned a rejection outcome");
         };
         assert_eq!(updated_issue_record.version, 2);
-        assert_eq!(updated_issue_record.label_ids, [5, 8]);
-        assert_eq!(updated_issue.receipt.commit_sequence, 7);
+        assert_eq!(updated_issue_record.label_ids, [1, 2]);
+        assert_eq!(updated_issue.receipt.commit_sequence, 10);
 
         let updated_comment = first_client
             .command::<UpdateComment>(
@@ -2747,7 +2814,7 @@ mod tests {
             panic!("successful comment update returned a rejection outcome");
         };
         assert_eq!(updated_comment_record.version, 2);
-        assert_eq!(updated_comment.receipt.commit_sequence, 8);
+        assert_eq!(updated_comment.receipt.commit_sequence, 11);
 
         assert_eq!(
             first_client
@@ -2767,6 +2834,16 @@ mod tests {
             IssuePage {
                 items: vec![updated_issue_record.as_ref().clone().into()],
                 next: None,
+            }
+        );
+        assert_eq!(
+            first_client
+                .query::<ListLabels>(&target, Some(updated_comment.receipt), ())
+                .await
+                .unwrap()
+                .output,
+            LabelCatalog {
+                labels: vec![first_label_record.clone(), second_label_record.clone()],
             }
         );
         assert_eq!(
@@ -2838,6 +2915,16 @@ mod tests {
                 .unwrap()
                 .output,
             Some(updated_comment_record.clone())
+        );
+        assert_eq!(
+            second_client
+                .query::<ListLabels>(&target, Some(updated_comment.receipt), ())
+                .await
+                .unwrap()
+                .output,
+            LabelCatalog {
+                labels: vec![first_label_record.clone(), second_label_record.clone()],
+            }
         );
         assert_eq!(
             second_client
@@ -2946,10 +3033,19 @@ mod tests {
             author: issue_input.author.clone(),
             body: "repair this incomplete comment".into(),
         };
+        let label_input = CreateLabelInput {
+            submission_id: [30; 16],
+            author: issue_input.author.clone(),
+            name: "reserved".into(),
+            color: "123abc".into(),
+            description: Some("repair this incomplete label".into()),
+        };
         let issue_digest = repository::issue_submission_digest(&issue_input);
         let comment_digest = repository::comment_submission_digest(&comment_input);
+        let label_digest = repository::label_submission_digest(&label_input);
         let issue_submission_id = issue_input.submission_id;
         let comment_submission_id = comment_input.submission_id;
+        let label_submission_id = label_input.submission_id;
         let local = tempfile::TempDir::new().unwrap();
         let runtime = CellRuntime::new(
             SqlWorkerPool::new(1, 10).unwrap(),
@@ -2993,6 +3089,17 @@ mod tests {
                             comment_digest.as_bytes().as_slice(),
                         ),
                     )?;
+                    transaction.execute(
+                        "UPDATE repository_sequences SET last = 5 WHERE kind = 'label'",
+                        [],
+                    )?;
+                    transaction.execute(
+                        "INSERT INTO repository_label_submissions(request_id, payload_digest, label_number, author_name, created_at_ms) VALUES (?1, ?2, 5, 'Original Label Name', 4000)",
+                        (
+                            label_submission_id.as_slice(),
+                            label_digest.as_bytes().as_slice(),
+                        ),
+                    )?;
                     Ok(())
                 },
             )
@@ -3020,6 +3127,15 @@ mod tests {
         assert_eq!(repaired_comment.number, 4);
         assert_eq!(repaired_comment.author.name, "Original Comment Name");
         assert_eq!(repaired_comment.created_at_ms, 3000);
+        let repaired_label = client
+            .command::<CreateLabel>(&target, mutation(31), label_input)
+            .await
+            .unwrap();
+        let CreateLabelOutcome::Created(repaired_label) = repaired_label.output else {
+            panic!("reserved label did not become visible");
+        };
+        assert_eq!(repaired_label.number, 5);
+        assert_eq!(repaired_label.created_at_ms, 4000);
         handle.drain().await.unwrap();
         runtime.shutdown().await.unwrap();
     }

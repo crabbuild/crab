@@ -69,6 +69,7 @@ pub(crate) async fn import_repository_issues(
     let repository_id = record.id;
     let repository = record.runtime_config(catalog.root(), "main")?;
     let repository_layout = StoreLayout::new(catalog.root().store.clone(), repository.prefix);
+    require_no_legacy_label_source(&repository_layout).await?;
     let target = CellTarget::new(
         startup.identity.tenant(),
         startup.identity.application(),
@@ -171,6 +172,22 @@ enum ImportWork {
         source: source::StagedSource,
         evidence: evidence::SourceEvidence,
     },
+}
+
+async fn require_no_legacy_label_source(
+    repository_layout: &StoreLayout<crab_storage::Store>,
+) -> Result<()> {
+    if repository_layout
+        .store()
+        .list_prefix_bounded(&repository_layout.repo_path("app/v1/labels"), 0)
+        .await?
+        .is_none()
+    {
+        return Err(Error::Config(
+            "legacy repository labels require a label-aware import before Cell activation",
+        ));
+    }
+    Ok(())
 }
 
 async fn require_ready_release(
@@ -563,7 +580,7 @@ pub(super) fn semantic_summary(connection: &Connection) -> Result<SemanticSummar
     hasher.update(b"crab.repository.issue-import.semantic.v1\0");
     for query in [
         "SELECT app_revision FROM repository_identity WHERE singleton = 1",
-        "SELECT kind, last FROM repository_sequences ORDER BY kind",
+        "SELECT kind, last FROM repository_sequences WHERE kind = 'issue'",
         "SELECT request_id, payload_digest, issue_number, author_name, created_at_ms FROM repository_issue_submissions ORDER BY request_id",
         "SELECT number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms FROM repository_issues ORDER BY number",
         "SELECT issue_number, last FROM repository_comment_sequences ORDER BY issue_number",

@@ -238,6 +238,7 @@ async fn finish(
     pull_view(
         &pull,
         &app::actor(principal)?,
+        server,
         repo,
         principal.can_write(&repo.config),
         None,
@@ -304,7 +305,7 @@ async fn execute(
         }
         return Ok((
             StatusCode::OK,
-            Json(pull_view(&pull, &candidate.author, repo, true, None).await?),
+            Json(pull_view(&pull, &candidate.author, &server, repo, true, None).await?),
         ));
     }
     if let Some(record) = &pull.merge_pending {

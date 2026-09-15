@@ -104,14 +104,16 @@ versions and incomplete request reservations; records exact source object
 identity and body hashes; verifies a second inventory; performs one SQLite
 bootstrap transaction; publishes/restores the initial LTX root; and writes
 operation-bound completion evidence. It refuses a live signed new Cell fleet.
+It also refuses any legacy label object until the importer can preserve the
+label sequence, submissions, active catalog and deletion tombstones.
 That check does not observe legacy processes, so step 1's independent proof that
 old processes and schedulers are stopped and lack write authority remains
 mandatory. On exact completion it moves the repository catalog from
 `import_required` to `cell_ready`; a different operation is rejected after that
-transition. Public issue/comment routes are now native typed Cell consumers and
-ignore legacy issue objects. Startup and catalog refresh reject any repository
+transition. Public issue/comment/label routes are now native typed Cell consumers
+and ignore legacy issue and label objects. Startup and catalog refresh reject any repository
 that is not ready or lacks a published root, while request routing has no
-bootstrap path. Other collaboration domains and the fleet-wide completion
+bootstrap path. Legacy label import, other collaboration domains and the fleet-wide completion
 checklist are not implemented.
 
 An uncertain head publication requires rereading authority and matching import

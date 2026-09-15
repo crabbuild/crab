@@ -169,6 +169,81 @@ fn repository_codec_v1_pins_list_and_update_fixtures() {
     );
 }
 
+#[test]
+fn repository_codec_v1_pins_label_fixtures() {
+    let author = RepositoryAuthor {
+        issuer: "i".into(),
+        subject: "s".into(),
+        name: "n".into(),
+    };
+    let label = LabelRecord {
+        number: 9,
+        name: "bug".into(),
+        color: "123abc".into(),
+        description: Some("x".into()),
+        version: 2,
+        created_at_ms: 3,
+        updated_at_ms: 4,
+    };
+    assert_fixture(
+        &CreateLabelInput {
+            submission_id: [3; 16],
+            author,
+            name: "bug".into(),
+            color: "123abc".into(),
+            description: Some("x".into()),
+        },
+        "000000100303030303030303030303030303030300000001690000000173000000016e0000000362756700000006313233616263010000000178",
+    );
+    assert_fixture(
+        &CreateLabelOutcome::Created(label.clone()),
+        "0100000000000000090000000362756700000006313233616263010000000178000000000000000200000000000000030000000000000004",
+    );
+    assert_fixture(
+        &UpdateLabelInput {
+            number: 9,
+            version: 2,
+            name: "bug".into(),
+            color: "123abc".into(),
+            description: Some("x".into()),
+        },
+        "000000000000000900000000000000020000000362756700000006313233616263010000000178",
+    );
+    assert_fixture(
+        &LabelCatalog {
+            labels: vec![label],
+        },
+        "0000000100000000000000090000000362756700000006313233616263010000000178000000000000000200000000000000030000000000000004",
+    );
+    assert_fixture(
+        &DeleteLabelInput {
+            number: 9,
+            version: 2,
+        },
+        "00000000000000090000000000000002",
+    );
+    assert_fixture(&DeleteLabelOutcome::Deleted, "01");
+}
+
+#[test]
+fn maximum_utf8_label_catalog_fits_its_registered_output_bound() {
+    let label = LabelRecord {
+        number: 1,
+        name: "🦀".repeat(50),
+        color: "123abc".into(),
+        description: Some("🦀".repeat(100)),
+        version: 1,
+        created_at_ms: 1,
+        updated_at_ms: 1,
+    };
+    let catalog = LabelCatalog {
+        labels: vec![label; 500],
+    };
+    let mut encoder = BoundedEncoder::new(384 * 1024).unwrap();
+    catalog.encode(&mut encoder).unwrap();
+    assert!(encoder.finish().len() <= 384 * 1024);
+}
+
 fn assert_fixture<T: WireValue + PartialEq + std::fmt::Debug>(value: &T, fixture: &str) {
     let bytes = decode_hex(fixture);
     let mut encoder = BoundedEncoder::new(80 * 1024).unwrap();

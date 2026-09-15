@@ -39,6 +39,21 @@ impl Command for UpdateIssue {
         }
         if let Some(labels) = input.label_ids.as_deref() {
             validate_label_ids(labels)?;
+            if !labels.is_empty() {
+                let statements = labels
+                    .iter()
+                    .map(|label| {
+                        Ok(statement(
+                            "SELECT 1 FROM repository_labels WHERE number = ? AND deleted_version IS NULL",
+                            vec![integer(*label)?],
+                        ))
+                    })
+                    .collect::<crab_cell_runtime::Result<Vec<_>>>()?;
+                let existing = context.sql(&SqlBatch { statements })?;
+                if existing.iter().any(|result| result.rows.is_empty()) {
+                    return Ok(CommandResult::Rejected(UpdateIssueOutcome::LabelInvalid));
+                }
+            }
         }
         if let Some(assignees) = input.assignee_subjects.as_deref() {
             validate_assignees(assignees)?;
@@ -359,5 +374,327 @@ impl From<IssueRecord> for IssueSummary {
             created_at_ms: issue.created_at_ms,
             updated_at_ms: issue.updated_at_ms,
         }
+    }
+}
+
+pub(crate) struct CreateLabel;
+
+impl Command for CreateLabel {
+    const MODULE: &'static str = RepositoryModule::NAME;
+    const ID: u32 = 8;
+    const CODEC_VERSION: u32 = 1;
+    type Input = CreateLabelInput;
+    type Output = CreateLabelOutcome;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        input: Self::Input,
+    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+        validate_author(&input.author)?;
+        validate_label_fields(&input.name, &input.color, input.description.as_deref())?;
+        let payload_digest = label_submission_digest(&input);
+        let reservation = context.sql(&SqlBatch {
+            statements: vec![statement(
+                "SELECT payload_digest, label_number, author_name, created_at_ms FROM repository_label_submissions WHERE request_id = ?",
+                vec![SqlValue::Blob(input.submission_id.to_vec())],
+            )],
+        })?;
+        if let Some(row) = reservation[0].rows.first() {
+            if result_blob(row, 0)? != payload_digest.as_bytes() {
+                return Ok(CommandResult::Rejected(CreateLabelOutcome::RequestConflict));
+            }
+            let number = result_u64_from_row(row, 1)?;
+            let current = context.sql(&SqlBatch {
+                statements: vec![statement(
+                    "SELECT number, name, color, description, version, created_at_ms, updated_at_ms, deleted_version FROM repository_labels WHERE number = ?",
+                    vec![integer(number)?],
+                )],
+            })?;
+            if let Some(label) = current[0].rows.first() {
+                if !matches!(label.get(7), Some(SqlValue::Null)) {
+                    return Ok(CommandResult::Rejected(CreateLabelOutcome::NotFound));
+                }
+                return Ok(CommandResult::Success(CreateLabelOutcome::Created(
+                    label_from_row(label)?,
+                )));
+            }
+            let name_key = input.name.to_lowercase();
+            let conflict = context.sql(&SqlBatch {
+                statements: vec![statement(
+                    "SELECT 1 FROM repository_labels WHERE name_key = ? AND deleted_version IS NULL",
+                    vec![SqlValue::Text(name_key.clone())],
+                )],
+            })?;
+            if !conflict[0].rows.is_empty() {
+                return Ok(CommandResult::Rejected(CreateLabelOutcome::NameConflict));
+            }
+            let created_at_ms = result_u64_from_row(row, 3)?;
+            let label = LabelRecord {
+                number,
+                name: input.name,
+                color: input.color,
+                description: input.description,
+                version: 1,
+                created_at_ms,
+                updated_at_ms: created_at_ms,
+            };
+            context.sql(&SqlBatch {
+                statements: vec![statement(
+                    "INSERT INTO repository_labels(number, name_key, name, color, description, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    vec![
+                        integer(label.number)?,
+                        SqlValue::Text(name_key),
+                        SqlValue::Text(label.name.clone()),
+                        SqlValue::Text(label.color.clone()),
+                        label
+                            .description
+                            .clone()
+                            .map_or(SqlValue::Null, SqlValue::Text),
+                        integer(label.version)?,
+                        integer(label.created_at_ms)?,
+                        integer(label.updated_at_ms)?,
+                    ],
+                )],
+            })?;
+            advance_revision(context)?;
+            return Ok(CommandResult::Success(CreateLabelOutcome::Created(label)));
+        }
+
+        let name_key = input.name.to_lowercase();
+        let conflict = context.sql(&SqlBatch {
+            statements: vec![statement(
+                "SELECT 1 FROM repository_labels WHERE name_key = ? AND deleted_version IS NULL",
+                vec![SqlValue::Text(name_key.clone())],
+            )],
+        })?;
+        if !conflict[0].rows.is_empty() {
+            return Ok(CommandResult::Rejected(CreateLabelOutcome::NameConflict));
+        }
+        let sequence = context.sql(&SqlBatch {
+            statements: vec![
+                statement(
+                    "UPDATE repository_sequences SET last = last + 1 WHERE kind = 'label' AND last < 500",
+                    vec![],
+                ),
+                statement(
+                    "SELECT last FROM repository_sequences WHERE kind = 'label'",
+                    vec![],
+                ),
+            ],
+        })?;
+        if sequence[0].rows_affected != 1 {
+            return Ok(CommandResult::Rejected(CreateLabelOutcome::LimitReached));
+        }
+        let now = timestamp(context.now_ms())?;
+        let label = LabelRecord {
+            number: result_u64(&sequence, 1, 0)?,
+            name: input.name,
+            color: input.color,
+            description: input.description,
+            version: 1,
+            created_at_ms: now,
+            updated_at_ms: now,
+        };
+        context.sql(&SqlBatch {
+            statements: vec![
+                statement(
+                    "INSERT INTO repository_label_submissions(request_id, payload_digest, label_number, author_name, created_at_ms) VALUES (?, ?, ?, ?, ?)",
+                    vec![
+                        SqlValue::Blob(input.submission_id.to_vec()),
+                        SqlValue::Blob(payload_digest.as_bytes().to_vec()),
+                        integer(label.number)?,
+                        SqlValue::Text(input.author.name),
+                        integer(now)?,
+                    ],
+                ),
+                statement(
+                    "INSERT INTO repository_labels(number, name_key, name, color, description, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    vec![
+                        integer(label.number)?,
+                        SqlValue::Text(name_key),
+                        SqlValue::Text(label.name.clone()),
+                        SqlValue::Text(label.color.clone()),
+                        label
+                            .description
+                            .clone()
+                            .map_or(SqlValue::Null, SqlValue::Text),
+                        integer(label.version)?,
+                        integer(label.created_at_ms)?,
+                        integer(label.updated_at_ms)?,
+                    ],
+                ),
+            ],
+        })?;
+        advance_revision(context)?;
+        Ok(CommandResult::Success(CreateLabelOutcome::Created(label)))
+    }
+}
+
+pub(crate) struct UpdateLabel;
+
+impl Command for UpdateLabel {
+    const MODULE: &'static str = RepositoryModule::NAME;
+    const ID: u32 = 9;
+    const CODEC_VERSION: u32 = 1;
+    type Input = UpdateLabelInput;
+    type Output = UpdateLabelOutcome;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        input: Self::Input,
+    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+        if input.number == 0 || input.number > MAX_REPOSITORY_LABELS {
+            return Err(crab_cell_runtime::Error::Command(
+                "repository label number is invalid",
+            ));
+        }
+        validate_number(input.version)?;
+        validate_label_fields(&input.name, &input.color, input.description.as_deref())?;
+        let current = context.sql(&SqlBatch {
+            statements: vec![statement(
+                "SELECT number, name, color, description, version, created_at_ms, updated_at_ms FROM repository_labels WHERE number = ? AND deleted_version IS NULL",
+                vec![integer(input.number)?],
+            )],
+        })?;
+        let Some(row) = current[0].rows.first() else {
+            return Ok(CommandResult::Rejected(UpdateLabelOutcome::NotFound));
+        };
+        let mut label = label_from_row(row)?;
+        if label.version != input.version {
+            return Ok(CommandResult::Rejected(UpdateLabelOutcome::Conflict));
+        }
+        let name_key = input.name.to_lowercase();
+        let conflict = context.sql(&SqlBatch {
+            statements: vec![statement(
+                "SELECT 1 FROM repository_labels WHERE name_key = ? AND number != ? AND deleted_version IS NULL",
+                vec![SqlValue::Text(name_key.clone()), integer(input.number)?],
+            )],
+        })?;
+        if !conflict[0].rows.is_empty() {
+            return Ok(CommandResult::Rejected(UpdateLabelOutcome::NameConflict));
+        }
+        label.name = input.name;
+        label.color = input.color;
+        label.description = input.description;
+        label.version = label
+            .version
+            .checked_add(1)
+            .filter(|version| *version <= MAX_NUMBER)
+            .ok_or(crab_cell_runtime::Error::Command(
+                "repository label version is exhausted",
+            ))?;
+        label.updated_at_ms = timestamp(context.now_ms())?;
+        let updated = context.sql(&SqlBatch {
+            statements: vec![statement(
+                "UPDATE repository_labels SET name_key = ?, name = ?, color = ?, description = ?, version = ?, updated_at_ms = ? WHERE number = ? AND version = ? AND deleted_version IS NULL",
+                vec![
+                    SqlValue::Text(name_key),
+                    SqlValue::Text(label.name.clone()),
+                    SqlValue::Text(label.color.clone()),
+                    label
+                        .description
+                        .clone()
+                        .map_or(SqlValue::Null, SqlValue::Text),
+                    integer(label.version)?,
+                    integer(label.updated_at_ms)?,
+                    integer(label.number)?,
+                    integer(input.version)?,
+                ],
+            )],
+        })?;
+        if updated[0].rows_affected != 1 {
+            return Ok(CommandResult::Rejected(UpdateLabelOutcome::Conflict));
+        }
+        advance_revision(context)?;
+        Ok(CommandResult::Success(UpdateLabelOutcome::Updated(label)))
+    }
+}
+
+pub(crate) struct DeleteLabel;
+
+impl Command for DeleteLabel {
+    const MODULE: &'static str = RepositoryModule::NAME;
+    const ID: u32 = 10;
+    const CODEC_VERSION: u32 = 1;
+    type Input = DeleteLabelInput;
+    type Output = DeleteLabelOutcome;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        input: Self::Input,
+    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+        if input.number == 0 || input.number > MAX_REPOSITORY_LABELS {
+            return Err(crab_cell_runtime::Error::Command(
+                "repository label number is invalid",
+            ));
+        }
+        validate_number(input.version)?;
+        let current = context.sql(&SqlBatch {
+            statements: vec![statement(
+                "SELECT version, deleted_version FROM repository_labels WHERE number = ?",
+                vec![integer(input.number)?],
+            )],
+        })?;
+        let Some(row) = current[0].rows.first() else {
+            return Ok(CommandResult::Rejected(DeleteLabelOutcome::NotFound));
+        };
+        if let Some(SqlValue::Integer(deleted)) = row.get(1) {
+            return if u64::try_from(*deleted).ok() == Some(input.version) {
+                Ok(CommandResult::Success(DeleteLabelOutcome::Deleted))
+            } else {
+                Ok(CommandResult::Rejected(DeleteLabelOutcome::NotFound))
+            };
+        }
+        if result_u64_from_row(row, 0)? != input.version {
+            return Ok(CommandResult::Rejected(DeleteLabelOutcome::Conflict));
+        }
+        let deleted = context.sql(&SqlBatch {
+            statements: vec![statement(
+                "UPDATE repository_labels SET deleted_version = ? WHERE number = ? AND version = ? AND deleted_version IS NULL",
+                vec![
+                    integer(input.version)?,
+                    integer(input.number)?,
+                    integer(input.version)?,
+                ],
+            )],
+        })?;
+        if deleted[0].rows_affected != 1 {
+            return Ok(CommandResult::Rejected(DeleteLabelOutcome::Conflict));
+        }
+        advance_revision(context)?;
+        Ok(CommandResult::Success(DeleteLabelOutcome::Deleted))
+    }
+}
+
+pub(crate) struct ListLabels;
+
+impl Query for ListLabels {
+    const MODULE: &'static str = RepositoryModule::NAME;
+    const ID: u32 = 6;
+    const CODEC_VERSION: u32 = 1;
+    type Input = ();
+    type Output = LabelCatalog;
+
+    fn execute(
+        context: &mut QueryContext<'_>,
+        (): Self::Input,
+    ) -> crab_cell_runtime::Result<Self::Output> {
+        let result = context.sql(&SqlBatch {
+            statements: vec![statement(
+                "SELECT number, name, color, description, version, created_at_ms, updated_at_ms FROM repository_labels WHERE deleted_version IS NULL ORDER BY name_key, number",
+                vec![],
+            )],
+        })?;
+        if result[0].rows.len() > MAX_REPOSITORY_LABELS as usize {
+            return Err(crab_cell_runtime::Error::Command(
+                "repository label catalog exceeds its bound",
+            ));
+        }
+        let labels = result[0]
+            .rows
+            .iter()
+            .map(|row| label_from_row(row))
+            .collect::<crab_cell_runtime::Result<Vec<_>>>()?;
+        Ok(LabelCatalog { labels })
     }
 }

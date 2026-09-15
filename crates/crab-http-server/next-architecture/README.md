@@ -2,8 +2,10 @@
 
 Status: target server architecture. Local and optional remote `crab-ltx`
 mechanics are implemented, and the server now has a statically registered
-repository issue/comment module proven through local LTX publication and
-source-loss restore. The HTTP composition root now starts that native runtime,
+repository issue/comment/label module proven through local LTX publication and
+source-loss restore. Label create/edit/delete/list and issue label assignment now
+share one repository transaction boundary; Pull metadata consumes the same Cell
+catalog while its own record remains on legacy storage. The HTTP composition root now starts that native runtime,
 withdraws readiness when it drains and joins its SQL workers during ordinary
 server shutdown. The release CLI now provides resumable exact-compatible
 activation and publishes a verified descriptor as current. Private routing now
@@ -32,11 +34,11 @@ authenticated peer migrations concurrently, and persists monotonic terminal
 progress under the release operation. The final gate refuses `ready` while any
 retained predecessor remains, and `cells release migrations` exposes a bounded
 cursor view of pending and failed Cells.
-Remaining collaboration-domain import, configured multi-node quorum and the
+Remaining collaboration-domain import, including legacy label import, configured multi-node quorum and the
 remaining product-domain route cuts are not yet integrated. New repository
 creation explicitly publishes an empty Cell and marks
 the catalog ready; adoption remains blocked until verified import. Startup
-rejects every missing or rootless repository Cell. The issue/comment HTTP group
+rejects every missing or rootless repository Cell. The issue/comment/label HTTP group
 now uses the release-aware router, which reuses local handles, selects
 authenticated remote owners and restores idle Cells without request-time empty
 bootstrap.

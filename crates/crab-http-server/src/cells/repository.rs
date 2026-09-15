@@ -5,12 +5,16 @@ use crab_cell_runtime::{
 
 use super::RepositoryModule;
 
-pub(crate) use operations::{ListComments, ListIssues, UpdateComment, UpdateIssue};
+pub(crate) use operations::{
+    CreateLabel, DeleteLabel, ListComments, ListIssues, ListLabels, UpdateComment, UpdateIssue,
+    UpdateLabel,
+};
 
 const MAX_NUMBER: u64 = 9_007_199_254_740_991;
 const MAX_LIST_ITEMS: usize = 50;
 const MAX_LIST_SCAN: u64 = 200;
 const MAX_LABELS: usize = 20;
+const MAX_REPOSITORY_LABELS: u64 = 500;
 const MAX_ASSIGNEES: usize = 10;
 const MAX_LIST_OUTPUT_BYTES: usize = 1024 * 1024;
 
@@ -19,6 +23,70 @@ pub(crate) struct RepositoryAuthor {
     pub issuer: String,
     pub subject: String,
     pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LabelRecord {
+    pub number: u64,
+    pub name: String,
+    pub color: String,
+    pub description: Option<String>,
+    pub version: u64,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LabelCatalog {
+    pub labels: Vec<LabelRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CreateLabelInput {
+    pub submission_id: [u8; 16],
+    pub author: RepositoryAuthor,
+    pub name: String,
+    pub color: String,
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CreateLabelOutcome {
+    Created(LabelRecord),
+    RequestConflict,
+    NameConflict,
+    NotFound,
+    LimitReached,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UpdateLabelInput {
+    pub number: u64,
+    pub version: u64,
+    pub name: String,
+    pub color: String,
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum UpdateLabelOutcome {
+    Updated(LabelRecord),
+    NotFound,
+    NameConflict,
+    Conflict,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DeleteLabelInput {
+    pub number: u64,
+    pub version: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DeleteLabelOutcome {
+    Deleted,
+    NotFound,
+    Conflict,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -100,6 +168,7 @@ pub(crate) enum UpdateIssueOutcome {
     NotFound,
     Forbidden,
     LabelForbidden,
+    LabelInvalid,
     AssigneeForbidden,
     Conflict,
 }
@@ -459,10 +528,14 @@ pub(crate) fn register(registry: &mut RegistryBuilder) -> crab_cell_runtime::Res
     registry.bind_command::<CreateComment>()?;
     registry.bind_command::<UpdateIssue>()?;
     registry.bind_command::<UpdateComment>()?;
+    registry.bind_command::<CreateLabel>()?;
+    registry.bind_command::<UpdateLabel>()?;
+    registry.bind_command::<DeleteLabel>()?;
     registry.bind_query::<GetIssue>()?;
     registry.bind_query::<GetComment>()?;
     registry.bind_query::<ListIssues>()?;
-    registry.bind_query::<ListComments>()
+    registry.bind_query::<ListComments>()?;
+    registry.bind_query::<ListLabels>()
 }
 
 fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlStatement {
@@ -544,6 +617,25 @@ pub(super) fn comment_submission_digest(input: &CreateCommentInput) -> blake3::H
     hasher.finalize()
 }
 
+pub(super) fn label_submission_digest(input: &CreateLabelInput) -> blake3::Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"crab.repository.label-submission.v1\0");
+    hash_text(&mut hasher, &input.author.issuer);
+    hash_text(&mut hasher, &input.author.subject);
+    hash_text(&mut hasher, &input.name);
+    hash_text(&mut hasher, &input.color);
+    match &input.description {
+        Some(description) => {
+            hasher.update(&[1]);
+            hash_text(&mut hasher, description);
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+    hasher.finalize()
+}
+
 fn hash_text(hasher: &mut blake3::Hasher, value: &str) {
     hasher.update(&(value.len() as u64).to_be_bytes());
     hasher.update(value.as_bytes());
@@ -600,6 +692,33 @@ fn result_blob(row: &[SqlValue], column: usize) -> crab_cell_runtime::Result<&[u
             "repository query returned invalid bytes",
         )),
     }
+}
+
+fn result_optional_text(
+    row: &[SqlValue],
+    column: usize,
+) -> crab_cell_runtime::Result<Option<String>> {
+    match row.get(column) {
+        Some(SqlValue::Null) => Ok(None),
+        Some(SqlValue::Text(value)) => Ok(Some(value.clone())),
+        _ => Err(crab_cell_runtime::Error::Command(
+            "repository query returned invalid optional text",
+        )),
+    }
+}
+
+fn label_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<LabelRecord> {
+    let record = LabelRecord {
+        number: result_u64_from_row(row, 0)?,
+        name: result_text(row, 1)?,
+        color: result_text(row, 2)?,
+        description: result_optional_text(row, 3)?,
+        version: result_u64_from_row(row, 4)?,
+        created_at_ms: result_u64_from_row(row, 5)?,
+        updated_at_ms: result_u64_from_row(row, 6)?,
+    };
+    validate_label(&record)?;
+    Ok(record)
 }
 
 fn issue_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<IssueRecord> {
@@ -705,6 +824,48 @@ fn validate_body(body: &str, required: bool) -> crab_cell_runtime::Result<()> {
     if (required && body.trim().is_empty()) || body.len() > 64 * 1024 || body.contains('\0') {
         return Err(crab_cell_runtime::Error::Command(
             "repository discussion body is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_label_fields(
+    name: &str,
+    color: &str,
+    description: Option<&str>,
+) -> crab_cell_runtime::Result<()> {
+    if name.is_empty()
+        || name.trim() != name
+        || name.chars().count() > 50
+        || name.chars().any(char::is_control)
+        || color.len() != 6
+        || !color.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || color.to_ascii_lowercase() != color
+        || description.is_some_and(|value| {
+            value.is_empty()
+                || value.trim() != value
+                || value.chars().count() > 100
+                || value.chars().any(char::is_control)
+        })
+    {
+        return Err(crab_cell_runtime::Error::Command(
+            "repository label fields are invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_label(record: &LabelRecord) -> crab_cell_runtime::Result<()> {
+    if record.number == 0 || record.number > MAX_REPOSITORY_LABELS {
+        return Err(crab_cell_runtime::Error::Command(
+            "repository label number is invalid",
+        ));
+    }
+    validate_label_fields(&record.name, &record.color, record.description.as_deref())?;
+    validate_number(record.version)?;
+    if record.updated_at_ms < record.created_at_ms {
+        return Err(crab_cell_runtime::Error::Command(
+            "repository label row is invalid",
         ));
     }
     Ok(())

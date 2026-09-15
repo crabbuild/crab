@@ -1047,7 +1047,7 @@ Create the temporary directory first. Replace the test name with `receive_faults
 
 ## Issues, pull requests and reviews
 
-Issue and issue-comment state uses one repository SQLite Cell whose committed
+Issue, issue-comment and label state use one repository SQLite Cell whose committed
 LTX roots are authoritative in object storage. Remaining collaboration domains
 still use versioned JSON documents under the repository prefix. Collaboration
 does not mutate Git refs unless a pull request merge publishes a ref update.
@@ -1131,7 +1131,7 @@ Stored assignments use stable IDs or subjects. Label renames appear immediately.
 
 ### Understand pagination and storage
 
-Issue, pull, comment, and review lists default to 30 items and accept 1 to 50. Each page scans at most 200 allocated numbers. A filtered page can be empty and still return `next`; clients must follow that cursor.
+Issue, pull, comment, and review lists default to 30 items and accept 1 to 50. Each page scans at most 200 allocated numbers. A filtered page can be empty and still return `next`; clients must follow that cursor. Label lists return the complete bounded catalog of at most 500 active labels.
 
 Titles accept 1 to 256 characters. Markdown bodies accept 64 KiB. Collaboration requests use an 80 KiB body limit, eight concurrent application slots, and a 30-second handler deadline.
 
@@ -1139,10 +1139,10 @@ Serving data currently uses these roots:
 
 | Root | Content |
 | --- | --- |
-| Repository Cell/LTX namespace | Issues, issue comments, counters, and permanent product submission ledgers |
+| Repository Cell/LTX namespace | Issues, issue comments, labels, label deletion tombstones, counters, and permanent product submission ledgers |
 | `app/v1/issues` | Legacy issue import input only; serving ignores these objects after cutover |
 | `app/v1/pulls` | Pulls, comments, reviews, merge state, counters, and reservations |
-| `app/v1/labels` | Label catalog, claims, reservations, and tombstones |
+| `app/v1/labels` | Legacy label import input only; serving ignores these objects after cutover, and current import refuses them until label-aware migration lands |
 | `app/v1/releases` | Releases, tags, assets, reservations, and tombstones |
 | `app/v1/statuses` | Commit statuses and immutable requests |
 | `app/v1/check-runs` | Check catalogs, versioned output, and requests |

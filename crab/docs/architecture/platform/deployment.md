@@ -381,7 +381,8 @@ an observed stale interval, or restores an already published root before
 finishing evidence. The exact completed operation then moves the catalog from
 `import_required` to `cell_ready`. A different operation cannot overwrite a
 ready repository. This slice intentionally excludes pull requests, releases,
-labels, milestones and their pending cross-domain work.
+labels, milestones and their pending cross-domain work; it refuses any object
+under the legacy label prefix before publication so exclusion cannot lose data.
 
 An empty signed node directory is only a mutual-exclusion check for the new Cell
 fleet. It cannot prove that a legacy server has stopped because legacy servers

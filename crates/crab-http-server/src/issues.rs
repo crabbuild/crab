@@ -193,7 +193,7 @@ async fn list(
 ) -> Result<Json<Value>> {
     let repo = repository(&server, &principal, &key)?;
     let author = actor(&principal)?;
-    let labels = labels::catalog(&repo).await?;
+    let labels = labels::catalog(&server, &repo, &author).await?;
     let assignees = assignees::available(&repo, &author);
     let can_manage_metadata = principal.can_write(&repo.config);
     let routed = route(&server, &repo, &author, "repository.read").await?;
@@ -259,7 +259,7 @@ async fn create(
         CreateIssueOutcome::Created(issue) => issue,
         CreateIssueOutcome::RequestConflict => return Err(Error::RequestConflict),
     };
-    let labels = labels::catalog(&repo).await?;
+    let labels = labels::catalog(&server, &repo, &author).await?;
     let assignees = assignees::available(&repo, &author);
     Ok((
         StatusCode::CREATED,
@@ -289,7 +289,7 @@ async fn detail(
             .await,
     )?
     .ok_or(Error::NotFound)?;
-    let labels = labels::catalog(&repo).await?;
+    let labels = labels::catalog(&server, &repo, &author).await?;
     let assignees = assignees::available(&repo, &author);
     Ok(Json(issue_view(
         &issue,
@@ -336,7 +336,7 @@ async fn edit(
     if input.assignees.is_some() && !can_manage_metadata {
         return Err(Error::AssigneePermission);
     }
-    let labels = labels::catalog(&repo).await?;
+    let labels = labels::catalog(&server, &repo, &author).await?;
     let assignees = assignees::available(&repo, &author);
     let title = input.title.as_deref().map(title).transpose()?;
     if let Some(value) = input.body.as_deref() {
@@ -376,6 +376,11 @@ async fn edit(
         UpdateIssueOutcome::NotFound => return Err(Error::NotFound),
         UpdateIssueOutcome::Forbidden => return Err(Error::Forbidden),
         UpdateIssueOutcome::LabelForbidden => return Err(Error::LabelPermission),
+        UpdateIssueOutcome::LabelInvalid => {
+            return Err(Error::Invalid(
+                "Label selection contains an unknown or duplicate label",
+            ));
+        }
         UpdateIssueOutcome::AssigneeForbidden => return Err(Error::AssigneePermission),
         UpdateIssueOutcome::Conflict => return Err(Error::Conflict),
     };

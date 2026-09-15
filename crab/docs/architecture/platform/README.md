@@ -255,7 +255,7 @@ the catalog application ready; imported repositories receive the same marker
 only after verified publication. Serving fails before listener bind when any
 cataloged repository is pending import/initialization or lacks a published root,
 and request routing never authorizes an empty bootstrap. The complete public
-issue/comment route group now uses typed Cell commands and queries. The runtime
+issue/comment/label route group now uses typed Cell commands and queries. The runtime
 now declares bounded predecessor-code compatibility in the compiled Rust
 registry. It can execute typed local and peer operations for those declared
 code/schema pairs, publish either one verified `N→N+1` SQL migration or one
@@ -264,8 +264,9 @@ after the new LTX root/schema/code control transition is authoritative.
 Fleet-wide catalog migration orchestration now walks rendezvous-assigned shards,
 routes each transition through local or authenticated peer ownership, caps work
 at 16 concurrent Cells per node, and conditionally stores monotonic terminal
-progress for the activating release. Native task/actor and dirty-job admission,
-and the remaining collaboration-domain route cuts remain;
+progress for the activating release. Native task/actor and dirty-job admission
+remain. Label create/edit/delete/list and issue-label validation now use the same
+Cell; legacy label import and the remaining collaboration-domain route cuts remain;
 effective-memory and free-volume startup
 floors, a resource-derived node mailbox and page-cache/file-descriptor-derived
 active-Cell admission are implemented. A single 110-second absolute shutdown
@@ -336,21 +337,23 @@ body, authenticates the live node session before dispatch, and returns a strict
 Protobuf reply. A stale receiving node can reauthorize and forward those same
 signed operation bytes once more, with a reduced deadline and maximum hop count
 of two. The outbound client never follows redirects or trusts a control-record
-endpoint without the matching live advertisement. The issue/comment product
+endpoint without the matching live advertisement. The issue/comment/label product
 routes construct this capability, acquire idle Cells through exact-root restore
 and preserve the public browser JSON contract. A two-node acceptance test starts
 the public listener on an ingress node and the mandatory mTLS management listener
-on a distinct owner node, creates an issue through the ingress, reads it back
-through the same public API, and proves that the owner advanced the published LTX
+on a distinct owner node, creates an issue and label through the ingress, assigns
+the label, reads both back through the public API, and proves that the owner advanced the published LTX
 root. Other product domains do not yet use it. The server now compiles and binds
-the complete internal issue/comment operation
-set: create and update commands plus get and bounded list queries for both
-resources. Stable codecs include issue label and assignee selections; SQLite
-owns repository identity, sequences, issues, comments and permanent create
+the internal issue/comment/label operation set: create and update commands plus
+get and bounded list queries for discussions, and create/update/delete/list
+operations for labels. Stable codecs include issue label and assignee selections;
+SQLite owns repository identity, sequences, issues, comments, active labels,
+label tombstones and permanent create
 submission ledgers. The ledgers preserve browser idempotency beyond bounded
 runtime request retention and can complete imported reservations whose allocated
-object was not yet visible. Integration tests execute all eight typed operations
-through `CellClient`, prove exact runtime replay, later same-submission replay,
+object was not yet visible. Integration tests execute all discussion operations
+through `CellClient` and the Label HTTP contract through the same router, prove
+exact runtime replay, later same-submission replay,
 payload conflict rejection, incomplete-reservation repair and durable
 missing-resource/author rejection, then delete the first owner's complete local
 database and read the published detail and list results after exact-root
@@ -389,7 +392,7 @@ selected descriptor bytes and complete Cell inventory before binding either
 listener. A candidate binary is eligible while its exact digest is `prepared` or
 `activating`; a steady server requires its exact `ready.current`. Compose, Helm
 and the ECS evaluation task execute bootstrap before first start. The server
-constructs one repository router before readiness; every public issue/comment
+constructs one repository router before readiness; every public issue/comment/label
 route now invokes it.
 `cells release activate --strategy maintenance --expected-revision N` verifies
 this binary's prepared descriptor, CASes only that operation from `prepared` to
@@ -432,7 +435,9 @@ the source with a second complete listing, imports visible records, counters and
 incomplete reservations in one transaction, publishes an initial LTX root, and
 records content-addressed source and completion evidence. Exact retries adopt a
 completed import; interruption after root publication restores and verifies that
-root before writing completion evidence. The command refuses a live signed Cell
+root before writing completion evidence. It also refuses any legacy label object
+until a label-aware importer can preserve its allocation and tombstone history.
+The command refuses a live signed Cell
 fleet, but operators must still independently prove that every legacy writer has
 stopped because the legacy deployment did not publish those node records.
 Single-Cell migration now covers current or explicitly retained predecessor code,

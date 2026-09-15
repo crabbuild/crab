@@ -72,9 +72,9 @@ authoritative owner, authenticates its live advertisement, uses pinned mTLS and
 retries one definitely-not-started stale-owner attempt without retrying ambiguous
 mutations. Typed local SQL, KV, Queue
 and Workflow capabilities are implemented. The server composition root now
-compiles and binds create/update and get/list operations for issues and comments
-with its repository identity/sequence/issue/comment migration. A server
-integration test drives all eight bindings through the runtime, publishes each
+compiles and binds create/update and get/list operations for issues and comments,
+plus create/update/delete/list operations for labels, with its repository
+identity and collaboration migration. Server integration tests drive these bindings through the runtime, publish each
 decision through LTX, removes the first local SQLite database and restores the
 updated detail and list results under a second owner. The built-binary release
 inspection command exposes the resulting exact canonical registry bytes.
@@ -93,13 +93,17 @@ roots during rollout.
 | command | 5 | `MaintenanceTick` | 8 B | 5 B | Reject stale root position or advance at most 128 due items and recompute summary |
 | command | 6 | `EffectClaim` | 8 B | 1 MiB | Claim at most one due source effect under a published lease |
 | command | 7 | `EffectLease` | 1 MiB | 9 B | Acknowledge delivery or schedule the same effect bytes for retry |
+| command | 8 | `CreateLabel` | 8 KiB | 4 KiB | Enforce permanent submission and name uniqueness, allocate a lifetime number, insert the label, advance app revision |
+| command | 9 | `UpdateLabel` | 8 KiB | 4 KiB | Check active row, version and normalized name uniqueness; update display fields and app revision |
+| command | 10 | `DeleteLabel` | 16 B | 1 B | Persist the deletion version tombstone and advance app revision; exact retries are idempotent |
 | query | 1 | `GetIssue` | 8 B | 80 KiB | Primary-key read |
 | query | 2 | `GetComment` | 16 B | 80 KiB | `(issue, number)` primary-key read |
 | query | 3 | `ListIssues` | 1 KiB | 1 MiB | Descending cursor/state/search page, at most 50 results and 200 number probes |
 | query | 4 | `ListComments` | 32 B | 1 MiB | Descending cursor page, at most 50 results and 200 number probes |
 | query | 5 | `EffectValidate` | 1 MiB | 1 B | Validate the exact published source lease at a minimum receipt |
+| query | 6 | `ListLabels` | 8 B | 384 KiB | Return at most 500 active labels in normalized-name order, including maximum UTF-8 fields |
 
-All twelve use codec version 1 and schema version 1. Issue/comment numbers and
+All sixteen use codec version 1 and schema version 1. Issue/comment numbers and
 versions are positive integers no larger than 9,007,199,254,740,991. The
 initializer writes the catalog repository UUID to the singleton identity row;
 handlers fail the complete application savepoint if that row is missing or its
@@ -108,8 +112,9 @@ consume a comment number or advance the application revision, but does advance
 the runtime command sequence and therefore carries a receipt. Author, metadata
 permission, missing-row and version failures on updates are also durable typed
 rejections. Label IDs and assignee subjects are canonical sorted bounded vectors
-stored with each issue; the HTTP adapter remains responsible for checking them
-against the current label and repository-member catalogs before dispatch.
+stored with each issue. The adapter validates both catalogs before dispatch, and
+the issue command rechecks active label existence in its SQLite transaction to
+close the delete/assignment race; repository membership remains an HTTP authority.
 One exact byte fixture for every command input/output and query input/output
 pins codec v1 independently of descriptor construction and runtime dispatch.
 
@@ -778,7 +783,7 @@ SQLite handles, join workers, then stop listeners. `Server` owns the runtime
 join handle; a detached global runtime or handler-created runtime is invalid.
 
 Resolve repository UUID from the durable catalog; renaming owner/name must not
-change its Cell ID. Keep issues/comments/pulls and their related application
+change its Cell ID. Keep issues/comments/labels/pulls and their related application
 tables in that repository Cell so their invariants can share one transaction.
 Fixed primitive namespaces are provisioned only for actual callers, not empty
 shards for every repository.
@@ -1034,12 +1039,13 @@ ready record with a missing control/root fails verification rather than
 bootstrapping again. `serve` verifies this state and root for every repository
 before binding either listener.
 
-The router and authenticated issue/comment HTTP routes are integration-qualified
+The router and authenticated issue/comment/label HTTP routes are integration-qualified
 for explicit bootstrap, local reuse, clean idle release, source-independent
 exact-root restoration and stable submission replay. The maintenance CLI imports
 the legacy issue/comment object tree with bounded two-pass source verification,
 immutable evidence, LTX publication and exact crash-resume checks. Remaining
-collaboration-domain import and route cuts remain. A live remote owner is
+collaboration-domain import and route cuts remain; the current importer rejects
+legacy label state instead of silently dropping it. A live remote owner is
 forwarded to rather than stolen; absent/expired active owners use the bounded
 ownership procedure above. Tests cover live mTLS forwarding, idle restoration,
 the full 15-second no-progress observation and exact-root takeover.

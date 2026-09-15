@@ -31,7 +31,7 @@ impl PeerRoundTrip for UnavailablePeer {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn public_issue_request_reaches_remote_owner_over_mtls_and_publishes_ltx() {
+async fn public_collaboration_requests_reach_remote_owner_over_mtls_and_publish_ltx() {
     let store = Store::new(Arc::new(InMemory::new()));
     let repository = repository(store.clone()).await;
     let repository_id = repository.id;
@@ -268,6 +268,34 @@ async fn public_issue_request_reaches_remote_owner_over_mtls_and_publishes_ltx()
     );
     let created: Value = serde_json::from_slice(&created_bytes).unwrap();
     assert_eq!(created["number"], 1);
+    let label = client
+        .post(format!("{public_origin}/api/repos/team/repo/labels"))
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(
+            serde_json::json!({
+                "request_id": "00000000-0000-4000-8000-000000000002",
+                "name": "remote",
+                "color": "123abc",
+                "description": "Created on the owner node"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(label.status(), StatusCode::CREATED);
+    let label: Value = serde_json::from_slice(&label.bytes().await.unwrap()).unwrap();
+    assert_eq!(label["id"], 1);
+    let assigned = client
+        .patch(format!("{public_origin}/api/repos/team/repo/issues/1"))
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(serde_json::json!({"version":1,"label_ids":[1]}).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(assigned.status(), StatusCode::OK);
+    let assigned: Value = serde_json::from_slice(&assigned.bytes().await.unwrap()).unwrap();
+    assert_eq!(assigned["labels"][0]["name"], "remote");
     let listed = client
         .get(format!(
             "{public_origin}/api/repos/team/repo/issues?state=all"
@@ -278,6 +306,7 @@ async fn public_issue_request_reaches_remote_owner_over_mtls_and_publishes_ltx()
     assert_eq!(listed.status(), StatusCode::OK);
     let listed: Value = serde_json::from_slice(&listed.bytes().await.unwrap()).unwrap();
     assert_eq!(listed["items"][0]["title"], "Remote Cell");
+    assert_eq!(listed["items"][0]["labels"][0]["id"], 1);
     let root_after = authority
         .load(target.cell_id())
         .await

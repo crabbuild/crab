@@ -1,6 +1,6 @@
 # SQLite runtime and application data model
 
-[Design index](README.md) · Repository issue/comment schema implemented; remaining domains proposed.
+[Design index](README.md) · Repository issue/comment/label schema implemented; remaining domains proposed.
 
 The SQL transaction and WAL boundaries here feed the
 [publication coordinator](storage-protocol.md#commit-publication-and-response-gating).
@@ -9,8 +9,8 @@ snapshot and exact restore, plus optional remote transport, immutable views and
 writable sparse SQL with checksum-seeded continuation. Full restoration remains
 the initial server activation policy; sparse support is a library capability,
 not yet a wired AppCell workflow. The fixed SQL worker executor, repository
-identity, issue/comment schema, typed operations, publication barrier and public
-HTTP adapter are implemented. Pulls, releases, labels, checks, outbox/workflow
+identity, issue/comment/label schema, typed operations, publication barrier and public
+HTTP adapter are implemented. Pulls, releases, checks, outbox/workflow
 tables and their route cuts remain proposed.
 Restore and takeover follow [recovery rules](recovery-and-retention.md);
 the [offline importer](hard-cutover.md) must preserve domain identities and retry
@@ -202,7 +202,9 @@ second executable schema into this design. Schema v1 currently contains:
 | Table | Key | Purpose |
 | --- | --- | --- |
 | `repository_identity` | singleton `1` | 16-byte catalog repository UUID and checked application revision |
-| `repository_sequences` | kind | issue-number allocator, initially `('issue', 0)` |
+| `repository_sequences` | kind | issue- and label-number allocators, initially zero |
+| `repository_label_submissions` | 16-byte submission ID | permanent payload digest, allocated label number, original display name and creation time |
+| `repository_labels` | number | normalized unique name, display fields, version, timestamps and deletion-version tombstone |
 | `repository_issue_submissions` | 16-byte submission ID | permanent payload digest, allocated issue number, original display name and creation time |
 | `repository_issues` | number | author snapshot, title/body, state, version and timestamps |
 | `repository_comment_sequences` | issue number | independent checked comment allocator per issue |
@@ -239,7 +241,7 @@ historical presentation fields.
 | --- | --- | --- |
 | PRs | `pulls`, `pull_comments`, `pull_reviews`, review comments if supported | Base/head refs, recorded OIDs, method, state, version, immutable merge intent |
 | Assignments | `issue_assignees`, `pull_assignees` | Distinct stable subjects; resolve against current membership |
-| Labels | `pull_labels`, allocation history and reservation records | Preserve existing lifetime allocation and tombstone rules |
+| Pull labels | relational pull-to-label selection | Validate active label IDs transactionally when Pull records move into SQLite |
 | Statuses | `commit_statuses` | Immutable status events, exact commit OID and context, deterministic latest selection |
 | Checks | `check_runs`, `check_outputs`, supported annotation rows | Existing state transitions, revision checks, bounded output and request replay |
 | Releases | `releases`, `release_assets`, tag/name claims and upload reservations | Tag identity, asset integrity, metadata tombstones, uniqueness rules |

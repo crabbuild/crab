@@ -55,6 +55,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
 async fn pull_view(
     pull: &PullRequest,
     actor: &Identity,
+    server: &Server,
     repo: &Repository,
     can_write: bool,
     current: Option<&(String, String)>,
@@ -77,7 +78,11 @@ async fn pull_view(
         ),
         _ => (vec![], vec![]),
     };
-    let labels = labels::catalog(repo).await?;
+    let labels = if pull.label_ids.is_empty() {
+        vec![]
+    } else {
+        labels::catalog(server, repo, actor).await?
+    };
     let assignees = assignees::available(repo, actor);
     let requirements = merge_requirements(pull, protection, head_oid, &statuses, &check_runs);
     Ok(json!({
@@ -334,17 +339,16 @@ async fn list(
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &key)?;
     let repo = repo.as_ref();
-    app::actor(&principal)?;
+    let actor = app::actor(&principal)?;
     let limit = params.limit()?;
     let state = params.state()?;
     let query = app::search_query(params.q.as_deref())?;
-    let labels = labels::catalog(repo).await?;
-    let assignees = assignees::available(repo, &app::actor(&principal)?);
+    let assignees = assignees::available(repo, &actor);
     let last = app_storage::last_number(repo, storage::ROOT).await?;
     let mut next = last.min(params.before.map_or(last, |before| before - 1));
-    let mut items = Vec::new();
+    let mut pulls = Vec::new();
     let mut scanned = 0;
-    while next > 0 && items.len() < limit && scanned < 200 {
+    while next > 0 && pulls.len() < limit && scanned < 200 {
         let bottom = next.saturating_sub(8);
         let batch = futures_util::stream::iter(((bottom + 1)..=next).rev().map(|id| async move {
             app_storage::read::<PullRequest>(repo, &storage::pull_path(id)).await
@@ -362,13 +366,22 @@ async fn list(
                     &[&pull.title, &pull.body, &pull.author.name],
                 )
             {
-                items.push(pull_list_view(&pull, &labels, &assignees));
+                pulls.push(pull);
             }
-            if items.len() == limit || scanned == 200 {
+            if pulls.len() == limit || scanned == 200 {
                 break;
             }
         }
     }
+    let labels = if pulls.iter().all(|pull| pull.label_ids.is_empty()) {
+        vec![]
+    } else {
+        labels::catalog(&server, repo, &actor).await?
+    };
+    let items = pulls
+        .iter()
+        .map(|pull| pull_list_view(pull, &labels, &assignees))
+        .collect::<Vec<_>>();
     Ok(Json(
         json!({"items":items,"next":(next > 0).then_some(next + 1)}),
     ))
@@ -454,6 +467,7 @@ async fn create(
                 pull_view(
                     &pull,
                     &actor,
+                    &server,
                     repo,
                     principal.can_write(&repo.config),
                     current.as_ref(),
@@ -491,6 +505,7 @@ async fn create(
             pull_view(
                 &pull,
                 &actor,
+                &server,
                 repo,
                 principal.can_write(&repo.config),
                 current.as_ref(),
@@ -522,6 +537,7 @@ async fn detail(
         pull_view(
             &pull,
             &actor,
+            &server,
             repo,
             principal.can_write(&repo.config),
             current.as_ref(),
@@ -556,6 +572,11 @@ async fn edit(
         .await?
         .ok_or(Error::NotFound)?;
     let label_change = input.label_ids.is_some();
+    let needs_label_catalog = input
+        .label_ids
+        .as_ref()
+        .is_some_and(|labels| !labels.is_empty())
+        || (input.label_ids.is_none() && !pull.label_ids.is_empty());
     let assignee_change = input.assignees.is_some();
     let author = app_storage::same_author(&pull.author, &actor);
     if pull.merge_pending.is_some() {
@@ -587,7 +608,11 @@ async fn edit(
     {
         return Err(Error::Invalid("No pull request changes supplied"));
     }
-    let labels = labels::catalog(repo).await?;
+    let labels = if needs_label_catalog {
+        labels::catalog(&server, repo, &actor).await?
+    } else {
+        vec![]
+    };
     let assignees = assignees::available(repo, &actor);
     if let Some(value) = input.title {
         pull.title = app::title(&value)?;
@@ -629,6 +654,7 @@ async fn edit(
         pull_view(
             &pull,
             &actor,
+            &server,
             repo,
             principal.can_write(&repo.config),
             current.as_ref(),

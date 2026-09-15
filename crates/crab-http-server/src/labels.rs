@@ -8,55 +8,27 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use serde::{Deserialize, Serialize};
+use crab_cell_runtime::{Committed, InvocationError, MutationIdentity, Observed, RequestId};
+use serde::Deserialize;
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::{
     app::{self, Error, Result},
-    app_storage,
     auth::{Identity, Principal},
+    cells::{
+        RepositoryCell, RepositoryCellRouter,
+        repository::{
+            CreateLabel, CreateLabelInput, CreateLabelOutcome, DeleteLabel, DeleteLabelInput,
+            DeleteLabelOutcome, LabelRecord, ListLabels, RepositoryAuthor, UpdateLabel,
+            UpdateLabelInput, UpdateLabelOutcome,
+        },
+    },
     server::{Repository, Server},
 };
 
-pub(crate) const ROOT: &str = "app/v1/labels";
-const CATALOG: &str = "app/v1/labels/catalog.json";
-const MAX_LABELS: u64 = 500;
+pub(crate) type Label = LabelRecord;
 const MAX_SELECTION: usize = 20;
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Label {
-    pub number: u64,
-    pub name: String,
-    pub color: String,
-    pub description: Option<String>,
-    pub version: u64,
-    pub created_at: u64,
-    pub updated_at: u64,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct LabelReservation {
-    request_id: String,
-    author: Identity,
-    label: Label,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct DeletedLabel {
-    number: u64,
-    version: u64,
-}
-
-#[derive(Clone, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Catalog {
-    labels: Vec<Label>,
-    #[serde(default)]
-    deleted: Vec<DeletedLabel>,
-}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -91,10 +63,6 @@ pub(crate) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         )
         .layer(axum::extract::DefaultBodyLimit::max(8 * 1024))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
-}
-
-fn reservation(request_id: &str) -> String {
-    format!("{ROOT}/requests/{request_id}.json")
 }
 
 fn name(value: &str) -> Result<String> {
@@ -142,25 +110,6 @@ fn description(value: Option<String>) -> Result<Option<String>> {
     Ok(value.filter(|value| !value.is_empty()))
 }
 
-fn same_name(left: &str, right: &str) -> bool {
-    left.to_lowercase() == right.to_lowercase()
-}
-
-fn same_request(
-    saved: &LabelReservation,
-    request_id: &str,
-    author: &Identity,
-    name: &str,
-    color: &str,
-    description: &Option<String>,
-) -> bool {
-    saved.request_id == request_id
-        && app_storage::same_author(&saved.author, author)
-        && saved.label.name == name
-        && saved.label.color == color
-        && &saved.label.description == description
-}
-
 fn view(label: &Label) -> Value {
     json!({
         "id": label.number,
@@ -168,16 +117,24 @@ fn view(label: &Label) -> Value {
         "color": label.color,
         "description": label.description,
         "version": label.version,
-        "created_at": label.created_at,
-        "updated_at": label.updated_at,
+        "created_at": label.created_at_ms,
+        "updated_at": label.updated_at_ms,
     })
 }
 
-pub(crate) async fn catalog(repo: &Repository) -> Result<Vec<Label>> {
-    let Some((catalog, _)) = app_storage::read::<Catalog>(repo, CATALOG).await? else {
-        return Ok(vec![]);
-    };
-    Ok(catalog.labels)
+pub(crate) async fn catalog(
+    server: &Server,
+    repo: &Repository,
+    principal: &Identity,
+) -> Result<Vec<Label>> {
+    let routed = route(server, repo, principal, "repository.read").await?;
+    Ok(query_output(
+        routed
+            .client
+            .query::<ListLabels>(&routed.target, None, ())
+            .await,
+    )?
+    .labels)
 }
 
 pub(crate) fn selection_view(ids: &[u64], catalog: &[Label]) -> Vec<Value> {
@@ -205,76 +162,14 @@ pub(crate) fn validate_selection(mut ids: Vec<u64>, catalog: &[Label]) -> Result
     Ok(ids)
 }
 
-async fn publish(repo: &Repository, proposed: &Label) -> Result<Label> {
-    for _ in 0..10 {
-        let Some((mut catalog, etag)) = app_storage::read::<Catalog>(repo, CATALOG).await? else {
-            let created = app_storage::create_or_read(
-                repo,
-                CATALOG,
-                Catalog {
-                    labels: vec![proposed.clone()],
-                    deleted: vec![],
-                },
-            )
-            .await?;
-            if created
-                .deleted
-                .iter()
-                .any(|label| label.number == proposed.number)
-            {
-                return Err(Error::LabelNotFound);
-            }
-            if let Some(label) = created
-                .labels
-                .iter()
-                .find(|label| label.number == proposed.number)
-            {
-                return Ok(label.clone());
-            }
-            continue;
-        };
-        if catalog
-            .deleted
-            .iter()
-            .any(|label| label.number == proposed.number)
-        {
-            return Err(Error::LabelNotFound);
-        }
-        if let Some(label) = catalog
-            .labels
-            .iter()
-            .find(|label| label.number == proposed.number)
-        {
-            return Ok(label.clone());
-        }
-        if catalog
-            .labels
-            .iter()
-            .any(|label| same_name(&label.name, &proposed.name))
-        {
-            return Err(Error::LabelConflict);
-        }
-        catalog.labels.push(proposed.clone());
-        catalog
-            .labels
-            .sort_by_cached_key(|label| label.name.to_lowercase());
-        match app_storage::update(repo, CATALOG, &catalog, etag).await {
-            Ok(()) => return Ok(proposed.clone()),
-            Err(Error::Storage(crab_storage::StorageError::StateConflict { .. })) => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    Err(Error::Conflict)
-}
-
 async fn list(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path(key): Path<(String, String)>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &key)?;
-    let repo = repo.as_ref();
-    let labels = catalog(repo).await?;
+    let actor = app::actor(&principal)?;
+    let labels = catalog(&server, &repo, &actor).await?;
     Ok(Json(json!({
         "items": labels.iter().map(view).collect::<Vec<_>>(),
         "can_manage": principal.can_write(&repo.config),
@@ -288,54 +183,39 @@ async fn create(
     input: std::result::Result<Json<NewLabel>, JsonRejection>,
 ) -> Result<impl IntoResponse> {
     let repo = app::repository(&server, &principal, &key)?;
-    let repo = repo.as_ref();
     if !principal.can_write(&repo.config) {
         return Err(Error::LabelPermission);
     }
     let Json(input) = input?;
-    let request_id = app::submission(&input.request_id)?;
     let actor = app::actor(&principal)?;
-    let name = name(&input.name)?;
-    let color = color(&input.color)?;
-    let description = description(input.description)?;
-    let path = reservation(&request_id);
-    let saved = match app_storage::read::<LabelReservation>(repo, &path).await? {
-        Some((saved, _)) => saved,
-        None => {
-            let number = app_storage::reserve_number(repo, ROOT).await?;
-            if number > MAX_LABELS {
-                return Err(Error::Invalid(
-                    "A repository supports at most 500 labels over its lifetime",
-                ));
-            }
-            let timestamp = app_storage::now()?;
-            app_storage::create_or_read(
-                repo,
-                &path,
-                LabelReservation {
-                    request_id: request_id.clone(),
-                    author: actor.clone(),
-                    label: Label {
-                        number,
-                        name: name.clone(),
-                        color: color.clone(),
-                        description: description.clone(),
-                        version: 1,
-                        created_at: timestamp,
-                        updated_at: timestamp,
-                    },
+    let routed = route(&server, &repo, &actor, "repository.label.create").await?;
+    let output = command_output(
+        routed
+            .client
+            .command::<CreateLabel>(
+                &routed.target,
+                mutation_identity()?,
+                CreateLabelInput {
+                    submission_id: submission_id(&input.request_id)?,
+                    author: repository_author(&actor),
+                    name: name(&input.name)?,
+                    color: color(&input.color)?,
+                    description: description(input.description)?,
                 },
             )
-            .await?
+            .await,
+    )?;
+    let label = match output {
+        CreateLabelOutcome::Created(label) => label,
+        CreateLabelOutcome::RequestConflict => return Err(Error::RequestConflict),
+        CreateLabelOutcome::NameConflict => return Err(Error::LabelConflict),
+        CreateLabelOutcome::NotFound => return Err(Error::LabelNotFound),
+        CreateLabelOutcome::LimitReached => {
+            return Err(Error::Invalid(
+                "A repository supports at most 500 labels over its lifetime",
+            ));
         }
     };
-    if !same_request(&saved, &request_id, &actor, &name, &color, &description) {
-        return Err(Error::RequestConflict);
-    }
-    if !principal.can_write(&repo.config) {
-        return Err(Error::LabelPermission);
-    }
-    let label = publish(repo, &saved.label).await?;
     Ok((StatusCode::CREATED, Json(view(&label))))
 }
 
@@ -346,52 +226,34 @@ async fn edit(
     input: std::result::Result<Json<LabelEdit>, JsonRejection>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name_key))?;
-    let repo = repo.as_ref();
     if !principal.can_write(&repo.config) {
         return Err(Error::LabelPermission);
     }
     let Json(input) = input?;
-    let number = app::number(number)?;
-    let name = name(&input.name)?;
-    let color = color(&input.color)?;
-    let description = description(input.description)?;
-    let (mut catalog, etag) = app_storage::read::<Catalog>(repo, CATALOG)
-        .await?
-        .ok_or(Error::LabelNotFound)?;
-    let index = catalog
-        .labels
-        .iter()
-        .position(|label| label.number == number)
-        .ok_or(Error::LabelNotFound)?;
-    if catalog.labels[index].version != input.version {
-        return Err(Error::Conflict);
-    }
-    if catalog
-        .labels
-        .iter()
-        .enumerate()
-        .any(|(other, label)| other != index && same_name(&label.name, &name))
-    {
-        return Err(Error::LabelConflict);
-    }
-    let label = &mut catalog.labels[index];
-    label.name = name;
-    label.color = color;
-    label.description = description;
-    label.version = label
-        .version
-        .checked_add(1)
-        .filter(|version| *version < app_storage::MAX_NUMBER)
-        .ok_or(Error::Conflict)?;
-    label.updated_at = app_storage::now()?;
-    let label = label.clone();
-    catalog
-        .labels
-        .sort_by_cached_key(|label| label.name.to_lowercase());
-    if !principal.can_write(&repo.config) {
-        return Err(Error::LabelPermission);
-    }
-    app_storage::update(repo, CATALOG, &catalog, etag).await?;
+    let actor = app::actor(&principal)?;
+    let routed = route(&server, &repo, &actor, "repository.label.update").await?;
+    let output = command_output(
+        routed
+            .client
+            .command::<UpdateLabel>(
+                &routed.target,
+                mutation_identity()?,
+                UpdateLabelInput {
+                    number: app::number(number)?,
+                    version: input.version,
+                    name: name(&input.name)?,
+                    color: color(&input.color)?,
+                    description: description(input.description)?,
+                },
+            )
+            .await,
+    )?;
+    let label = match output {
+        UpdateLabelOutcome::Updated(label) => label,
+        UpdateLabelOutcome::NotFound => return Err(Error::LabelNotFound),
+        UpdateLabelOutcome::NameConflict => return Err(Error::LabelConflict),
+        UpdateLabelOutcome::Conflict => return Err(Error::Conflict),
+    };
     Ok(Json(view(&label)))
 }
 
@@ -402,38 +264,96 @@ async fn remove(
     input: std::result::Result<Json<LabelDelete>, JsonRejection>,
 ) -> Result<StatusCode> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
-    let repo = repo.as_ref();
     if !principal.can_write(&repo.config) {
         return Err(Error::LabelPermission);
     }
     let Json(input) = input?;
-    let number = app::number(number)?;
-    let (mut catalog, etag) = app_storage::read::<Catalog>(repo, CATALOG)
-        .await?
-        .ok_or(Error::LabelNotFound)?;
-    if let Some(deleted) = catalog.deleted.iter().find(|label| label.number == number) {
-        return if deleted.version == input.version {
-            Ok(StatusCode::NO_CONTENT)
-        } else {
-            Err(Error::LabelNotFound)
-        };
+    let actor = app::actor(&principal)?;
+    let routed = route(&server, &repo, &actor, "repository.label.delete").await?;
+    match command_output(
+        routed
+            .client
+            .command::<DeleteLabel>(
+                &routed.target,
+                mutation_identity()?,
+                DeleteLabelInput {
+                    number: app::number(number)?,
+                    version: input.version,
+                },
+            )
+            .await,
+    )? {
+        DeleteLabelOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        DeleteLabelOutcome::NotFound => Err(Error::LabelNotFound),
+        DeleteLabelOutcome::Conflict => Err(Error::Conflict),
     }
-    let index = catalog
-        .labels
-        .iter()
-        .position(|label| label.number == number)
-        .ok_or(Error::LabelNotFound)?;
-    if catalog.labels[index].version != input.version {
-        return Err(Error::Conflict);
+}
+
+async fn route(
+    server: &Server,
+    repository: &Repository,
+    principal: &Identity,
+    action: &'static str,
+) -> Result<RepositoryCell> {
+    let router: &RepositoryCellRouter = server
+        .repository_cells
+        .as_ref()
+        .ok_or(Error::CellUnavailable)?;
+    router
+        .route(repository.id, principal, action)
+        .await
+        .map_err(|error| match error {
+            crate::Error::Cell(source) => Error::Cell(source),
+            source => Error::Repository(source),
+        })
+}
+
+fn repository_author(identity: &Identity) -> RepositoryAuthor {
+    RepositoryAuthor {
+        issuer: identity.issuer.clone(),
+        subject: identity.subject.clone(),
+        name: identity.name.clone(),
     }
-    catalog.labels.remove(index);
-    catalog.deleted.push(DeletedLabel {
-        number,
-        version: input.version,
-    });
-    if !principal.can_write(&repo.config) {
-        return Err(Error::LabelPermission);
+}
+
+fn mutation_identity() -> Result<MutationIdentity> {
+    let now_ms = crate::cells::unix_now_ms().map_err(Error::Repository)?;
+    let expires_at_ms = now_ms
+        .checked_add(60_000)
+        .ok_or(Error::CellContract("Cell request expiry overflowed"))?;
+    Ok(MutationIdentity {
+        request_id: RequestId::from_bytes(Uuid::now_v7().into_bytes()),
+        issued_at_ms: now_ms,
+        expires_at_ms,
+    })
+}
+
+fn submission_id(value: &str) -> Result<[u8; 16]> {
+    Uuid::parse_str(&app::submission(value)?)
+        .map(Uuid::into_bytes)
+        .map_err(|_| Error::Invalid("Submission ID must be a UUID"))
+}
+
+fn command_output<T>(result: std::result::Result<Committed<T>, InvocationError<T>>) -> Result<T> {
+    match result {
+        Ok(committed) => Ok(committed.output),
+        Err(InvocationError::Rejected(committed)) => Ok(committed.output),
+        Err(InvocationError::Pending(_)) => Err(Error::CellPending),
+        Err(InvocationError::InvalidPublishedResult { source, .. }) => Err(Error::Cell(*source)),
+        Err(InvocationError::NotStarted(source)) => Err(Error::Cell(source)),
     }
-    app_storage::update(repo, CATALOG, &catalog, etag).await?;
-    Ok(StatusCode::NO_CONTENT)
+}
+
+fn query_output<T>(result: std::result::Result<Observed<T>, InvocationError<T>>) -> Result<T> {
+    match result {
+        Ok(observed) => Ok(observed.output),
+        Err(InvocationError::Rejected(_)) => Err(Error::CellContract(
+            "Cell query returned a durable rejection",
+        )),
+        Err(InvocationError::Pending(_)) => Err(Error::CellContract(
+            "Cell query returned pending mutation evidence",
+        )),
+        Err(InvocationError::InvalidPublishedResult { source, .. }) => Err(Error::Cell(*source)),
+        Err(InvocationError::NotStarted(source)) => Err(Error::Cell(source)),
+    }
 }

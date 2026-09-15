@@ -2,10 +2,177 @@ use crab_cell_runtime::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 
 use super::{
     CommentKey, CommentPage, CommentRecord, CreateCommentInput, CreateCommentOutcome,
-    CreateIssueInput, CreateIssueOutcome, IssuePage, IssueRecord, IssueSummary, ListCommentsInput,
-    ListIssuesInput, RepositoryAuthor, UpdateCommentInput, UpdateCommentOutcome, UpdateIssueInput,
-    UpdateIssueOutcome,
+    CreateIssueInput, CreateIssueOutcome, CreateLabelInput, CreateLabelOutcome, DeleteLabelInput,
+    DeleteLabelOutcome, IssuePage, IssueRecord, IssueSummary, LabelCatalog, LabelRecord,
+    ListCommentsInput, ListIssuesInput, RepositoryAuthor, UpdateCommentInput, UpdateCommentOutcome,
+    UpdateIssueInput, UpdateIssueOutcome, UpdateLabelInput, UpdateLabelOutcome,
 };
+
+impl WireValue for LabelRecord {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        encoder.write_u64(self.number)?;
+        encoder.write_text(&self.name)?;
+        encoder.write_text(&self.color)?;
+        self.description.encode(encoder)?;
+        encoder.write_u64(self.version)?;
+        encoder.write_u64(self.created_at_ms)?;
+        encoder.write_u64(self.updated_at_ms)
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
+        Ok(Self {
+            number: decoder.read_u64()?,
+            name: decoder.read_text()?.to_owned(),
+            color: decoder.read_text()?.to_owned(),
+            description: Option::<String>::decode(decoder)?,
+            version: decoder.read_u64()?,
+            created_at_ms: decoder.read_u64()?,
+            updated_at_ms: decoder.read_u64()?,
+        })
+    }
+}
+
+impl WireValue for LabelCatalog {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        encoder.write_count(self.labels.len())?;
+        for label in &self.labels {
+            label.encode(encoder)?;
+        }
+        Ok(())
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
+        let count = bounded_count(decoder, 500)?;
+        let mut labels = Vec::with_capacity(count);
+        for _ in 0..count {
+            labels.push(LabelRecord::decode(decoder)?);
+        }
+        Ok(Self { labels })
+    }
+}
+
+impl WireValue for CreateLabelInput {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        encoder.write_bytes(&self.submission_id)?;
+        self.author.encode(encoder)?;
+        encoder.write_text(&self.name)?;
+        encoder.write_text(&self.color)?;
+        self.description.encode(encoder)
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
+        Ok(Self {
+            submission_id: read_fixed(decoder, "label submission ID length")?,
+            author: RepositoryAuthor::decode(decoder)?,
+            name: decoder.read_text()?.to_owned(),
+            color: decoder.read_text()?.to_owned(),
+            description: Option::<String>::decode(decoder)?,
+        })
+    }
+}
+
+impl WireValue for CreateLabelOutcome {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        match self {
+            Self::Created(label) => {
+                encoder.write_u8(1)?;
+                label.encode(encoder)
+            }
+            Self::RequestConflict => encoder.write_u8(2),
+            Self::NameConflict => encoder.write_u8(3),
+            Self::NotFound => encoder.write_u8(4),
+            Self::LimitReached => encoder.write_u8(5),
+        }
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
+        match decoder.read_u8()? {
+            1 => Ok(Self::Created(LabelRecord::decode(decoder)?)),
+            2 => Ok(Self::RequestConflict),
+            3 => Ok(Self::NameConflict),
+            4 => Ok(Self::NotFound),
+            5 => Ok(Self::LimitReached),
+            _ => Err(CodecError::Invalid("invalid create-label outcome")),
+        }
+    }
+}
+
+impl WireValue for UpdateLabelInput {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        encoder.write_u64(self.number)?;
+        encoder.write_u64(self.version)?;
+        encoder.write_text(&self.name)?;
+        encoder.write_text(&self.color)?;
+        self.description.encode(encoder)
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
+        Ok(Self {
+            number: decoder.read_u64()?,
+            version: decoder.read_u64()?,
+            name: decoder.read_text()?.to_owned(),
+            color: decoder.read_text()?.to_owned(),
+            description: Option::<String>::decode(decoder)?,
+        })
+    }
+}
+
+impl WireValue for UpdateLabelOutcome {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        match self {
+            Self::Updated(label) => {
+                encoder.write_u8(1)?;
+                label.encode(encoder)
+            }
+            Self::NotFound => encoder.write_u8(2),
+            Self::NameConflict => encoder.write_u8(3),
+            Self::Conflict => encoder.write_u8(4),
+        }
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
+        match decoder.read_u8()? {
+            1 => Ok(Self::Updated(LabelRecord::decode(decoder)?)),
+            2 => Ok(Self::NotFound),
+            3 => Ok(Self::NameConflict),
+            4 => Ok(Self::Conflict),
+            _ => Err(CodecError::Invalid("invalid update-label outcome")),
+        }
+    }
+}
+
+impl WireValue for DeleteLabelInput {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        encoder.write_u64(self.number)?;
+        encoder.write_u64(self.version)
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
+        Ok(Self {
+            number: decoder.read_u64()?,
+            version: decoder.read_u64()?,
+        })
+    }
+}
+
+impl WireValue for DeleteLabelOutcome {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        encoder.write_u8(match self {
+            Self::Deleted => 1,
+            Self::NotFound => 2,
+            Self::Conflict => 3,
+        })
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
+        match decoder.read_u8()? {
+            1 => Ok(Self::Deleted),
+            2 => Ok(Self::NotFound),
+            3 => Ok(Self::Conflict),
+            _ => Err(CodecError::Invalid("invalid delete-label outcome")),
+        }
+    }
+}
 
 impl WireValue for RepositoryAuthor {
     fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
@@ -217,8 +384,9 @@ impl WireValue for UpdateIssueOutcome {
             Self::NotFound => encoder.write_u8(2),
             Self::Forbidden => encoder.write_u8(3),
             Self::LabelForbidden => encoder.write_u8(4),
-            Self::AssigneeForbidden => encoder.write_u8(5),
-            Self::Conflict => encoder.write_u8(6),
+            Self::LabelInvalid => encoder.write_u8(5),
+            Self::AssigneeForbidden => encoder.write_u8(6),
+            Self::Conflict => encoder.write_u8(7),
         }
     }
 
@@ -228,8 +396,9 @@ impl WireValue for UpdateIssueOutcome {
             2 => Ok(Self::NotFound),
             3 => Ok(Self::Forbidden),
             4 => Ok(Self::LabelForbidden),
-            5 => Ok(Self::AssigneeForbidden),
-            6 => Ok(Self::Conflict),
+            5 => Ok(Self::LabelInvalid),
+            6 => Ok(Self::AssigneeForbidden),
+            7 => Ok(Self::Conflict),
             _ => Err(CodecError::Invalid("invalid update-issue outcome")),
         }
     }

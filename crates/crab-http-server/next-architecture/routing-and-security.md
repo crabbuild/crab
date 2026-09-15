@@ -1,6 +1,6 @@
 # HTTP routing, peer protocol, and security
 
-[Design index](README.md) · Private authenticated transport and issue/comment route cutover implemented.
+[Design index](README.md) · Private authenticated transport and issue/comment/label route cutover implemented.
 
 Read [ownership and load balancing](ownership-and-load-balancing.md) for acquisition
 and movement, and [commit publication](storage-protocol.md#commit-publication-and-response-gating)
@@ -107,7 +107,7 @@ Cold acquisition is a sender-side runtime operation, not a peer-protocol mode.
 it serializes the local cold path by Cell ID, reloads proof and control, wins the
 idle owner CAS, restores the exact root, and exposes only a typed local client.
 Rootless Cells are accepted only by the explicit new-repository initializer or
-offline importer, never by a product request. The issue/comment handlers now
+offline importer, never by a product request. The issue/comment/label handlers now
 invoke this router after public authorization. A missing proof, control or root
 returns unavailable and never authorizes execution without acquisition and
 restore.

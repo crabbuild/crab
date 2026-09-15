@@ -18,6 +18,26 @@ const COMMENT_REQUEST: &str = "00000000-0000-0000-0000-000000000002";
 const RESERVED_COMMENT_REQUEST: &str = "00000000-0000-0000-0000-000000000004";
 
 #[tokio::test]
+async fn issue_import_refuses_unmigrated_label_state() {
+    let layout = StoreLayout::new(
+        Store::new(Arc::new(InMemory::new())),
+        "label-import-guard".to_owned(),
+    );
+    put(
+        &layout,
+        "app/v1/labels/catalog.json",
+        json!({"labels":[],"deleted":[]}),
+    )
+    .await;
+    assert!(matches!(
+        require_no_legacy_label_source(&layout).await,
+        Err(Error::Config(
+            "legacy repository labels require a label-aware import before Cell activation"
+        ))
+    ));
+}
+
+#[tokio::test]
 async fn issue_import_publishes_verifies_releases_and_replays_completion() {
     let store = Store::new(Arc::new(InMemory::new()));
     let identity = ApplicationIdentity::new(

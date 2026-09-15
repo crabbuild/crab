@@ -10,7 +10,31 @@ CREATE TABLE repository_sequences (
     last INTEGER NOT NULL CHECK (last BETWEEN 0 AND 9007199254740991)
 ) STRICT;
 
-INSERT INTO repository_sequences(kind, last) VALUES ('issue', 0);
+INSERT INTO repository_sequences(kind, last) VALUES ('issue', 0), ('label', 0);
+
+CREATE TABLE repository_label_submissions (
+    request_id BLOB PRIMARY KEY CHECK (length(request_id) = 16),
+    payload_digest BLOB NOT NULL CHECK (length(payload_digest) = 32),
+    label_number INTEGER NOT NULL UNIQUE CHECK (label_number BETWEEN 1 AND 500),
+    author_name TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE repository_labels (
+    number INTEGER PRIMARY KEY CHECK (number BETWEEN 1 AND 500),
+    name_key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    color TEXT NOT NULL,
+    description TEXT,
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 9007199254740991),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    deleted_version INTEGER CHECK (deleted_version BETWEEN 1 AND 9007199254740991)
+) STRICT;
+
+CREATE UNIQUE INDEX repository_active_label_names
+ON repository_labels(name_key)
+WHERE deleted_version IS NULL;
 
 -- This row may precede its visible issue during offline import and retry repair.
 CREATE TABLE repository_issue_submissions (
