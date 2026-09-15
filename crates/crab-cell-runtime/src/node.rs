@@ -433,6 +433,46 @@ impl NodeDirectory {
         Ok(removed)
     }
 
+    /// Conditionally withdraws the exact advertisement owned by a shutting-down node.
+    pub async fn withdraw(&self, observed: &VersionedNodeAdvertisement, now_ms: i64) -> Result<()> {
+        if now_ms < 0 {
+            return Err(Error::Node("node withdrawal time is invalid"));
+        }
+        self.validate_scope(&observed.advertisement)?;
+        let path = self
+            .layout
+            .node_path(observed.advertisement.session.as_bytes());
+        let tombstone = NodeTombstone::new(
+            observed.advertisement.session,
+            observed.advertisement.expires_at_ms,
+            now_ms,
+        )?;
+        match self
+            .layout
+            .store()
+            .update(
+                &path,
+                Bytes::from(tombstone.encode()?),
+                observed.token.clone(),
+            )
+            .await
+        {
+            Ok(_) => self.delete_collected(&path).await,
+            Err(update_error) => match self.load_record_at(&path).await? {
+                None => Ok(()),
+                Some((NodeRecord::Tombstone(_), _)) => self.delete_collected(&path).await,
+                Some((NodeRecord::Advertisement(current), _))
+                    if *current == observed.advertisement =>
+                {
+                    Err(update_error.into())
+                }
+                Some((NodeRecord::Advertisement(_), _)) => {
+                    Err(Error::Node("advertisement changed during node withdrawal"))
+                }
+            },
+        }
+    }
+
     /// Authenticates one request against its live advertisement and mTLS leaf digest.
     pub async fn verify_peer_request(
         &self,
@@ -584,15 +624,15 @@ impl NodeRecord {
 struct NodeTombstone {
     session: SessionId,
     expires_at_ms: i64,
-    collected_at_ms: i64,
+    retired_at_ms: i64,
 }
 
 impl NodeTombstone {
-    fn new(session: SessionId, expires_at_ms: i64, collected_at_ms: i64) -> Result<Self> {
+    fn new(session: SessionId, expires_at_ms: i64, retired_at_ms: i64) -> Result<Self> {
         let tombstone = Self {
             session,
             expires_at_ms,
-            collected_at_ms,
+            retired_at_ms,
         };
         tombstone.validate()?;
         Ok(tombstone)
@@ -618,7 +658,7 @@ impl NodeTombstone {
         let tombstone = Self {
             session: SessionId::from_bytes(decode_hex(&raw.tombstone.session)?),
             expires_at_ms: canonical_i64(&raw.tombstone.expires_at_ms)?,
-            collected_at_ms: canonical_i64(&raw.tombstone.collected_at_ms)?,
+            retired_at_ms: canonical_i64(&raw.tombstone.retired_at_ms)?,
         };
         tombstone.validate()?;
         if tombstone.encode()?.as_slice() != bytes {
@@ -630,10 +670,7 @@ impl NodeTombstone {
     fn validate(&self) -> Result<()> {
         if self.session.as_bytes().iter().all(|byte| *byte == 0)
             || self.expires_at_ms < 0
-            || self.collected_at_ms
-                < self
-                    .expires_at_ms
-                    .saturating_add(STALE_ADVERTISEMENT_RETENTION_MS)
+            || self.retired_at_ms < 0
         {
             return Err(Error::Node("node tombstone is invalid"));
         }
@@ -771,7 +808,7 @@ impl From<&NodeTombstone> for RawNodeTombstoneEnvelope {
                 version: 1,
                 session: encode_hex(value.session.as_bytes()),
                 expires_at_ms: value.expires_at_ms.to_string(),
-                collected_at_ms: value.collected_at_ms.to_string(),
+                retired_at_ms: value.retired_at_ms.to_string(),
             },
         }
     }
@@ -783,7 +820,7 @@ struct RawNodeTombstone {
     version: u8,
     session: String,
     expires_at_ms: String,
-    collected_at_ms: String,
+    retired_at_ms: String,
 }
 
 impl From<&NodeAdvertisement> for RawUnsignedAdvertisement {

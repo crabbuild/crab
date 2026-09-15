@@ -131,6 +131,42 @@ async fn stale_collection_preserves_a_session_refreshed_before_fencing() {
 }
 
 #[tokio::test]
+async fn withdrawal_removes_only_the_exact_observed_advertisement() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    let session = SessionId::from_bytes([1; 16]);
+    let created = directory
+        .create(advertisement(&key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    directory.withdraw(&created, NOW_MS + 1).await.unwrap();
+    assert!(directory.load_canonical(session).await.unwrap().is_none());
+
+    let created = directory
+        .create(advertisement(&key, 1, NOW_MS + 20_000), NOW_MS + 20_000)
+        .await
+        .unwrap();
+    let refreshed = directory
+        .refresh(
+            &created,
+            advertisement(&key, 2, NOW_MS + 21_000),
+            NOW_MS + 21_000,
+        )
+        .await
+        .unwrap();
+    assert!(directory.withdraw(&created, NOW_MS + 21_001).await.is_err());
+    assert_eq!(
+        directory
+            .load(session, NOW_MS + 21_001)
+            .await
+            .unwrap()
+            .unwrap()
+            .advertisement(),
+        refreshed.advertisement()
+    );
+}
+
+#[tokio::test]
 async fn live_listing_rejects_misplaced_or_foreign_active_records() {
     let key = SigningKey::from_bytes(&[7; 32]);
     let subject = directory();

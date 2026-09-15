@@ -73,7 +73,8 @@ heartbeats retain node liveness without hiding a stalled scanner; peers exclude
 unchanged progress after 15 seconds, and local readiness plus Prometheus health,
 progress and lag use the same deadline. The shard-zero rendezvous owner performs
 bounded minute-level stale-node collection through an ETag-fenced tombstone, so
-a racing heartbeat cannot be deleted. Generic Workflow activity polling remains;
+a racing heartbeat cannot be deleted. Shutdown uses the same exact-ETag
+tombstone path to withdraw the latest local advertisement immediately. Generic Workflow activity polling remains;
 other collaboration domains still use application JSON.
 Git publication behavior remains unchanged. See
 [remaining gates](validation-and-delivery.md#verification-scope-for-the-current-implementation).

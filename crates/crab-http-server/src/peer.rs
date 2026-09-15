@@ -133,9 +133,9 @@ impl NodePublisher {
         server: Arc<Server>,
         mut observed: VersionedNodeAdvertisement,
     ) -> crate::Result<()> {
-        loop {
+        let heartbeat = 'heartbeat: loop {
             tokio::select! {
-                () = server.cancellation.cancelled() => return Ok(()),
+                () = server.cancellation.cancelled() => break Ok(()),
                 () = tokio::time::sleep(HEARTBEAT_INTERVAL) => {}
             }
             loop {
@@ -154,18 +154,34 @@ impl NodePublisher {
                         if now_ms >= retry_deadline {
                             server.node_healthy.store(false, Ordering::Release);
                             server.cancellation.cancel();
-                            return Err(error.into());
+                            break 'heartbeat Err(error.into());
                         }
                         let retry_ms = retry_deadline
                             .saturating_sub(now_ms)
                             .min(HEARTBEAT_RETRY.as_millis() as i64);
                         tokio::select! {
-                            () = server.cancellation.cancelled() => return Ok(()),
+                            () = server.cancellation.cancelled() => break 'heartbeat Ok(()),
                             () = tokio::time::sleep(Duration::from_millis(retry_ms as u64)) => {}
                         }
                     }
                 }
             }
+        };
+        let withdrawal = match now_ms() {
+            Ok(now_ms) => self
+                .directory
+                .withdraw(&observed, now_ms)
+                .await
+                .map_err(crate::Error::from),
+            Err(error) => Err(error),
+        };
+        match (heartbeat, withdrawal) {
+            (Err(error), Err(withdrawal)) => {
+                tracing::warn!(error = %withdrawal, "failed to withdraw unhealthy node advertisement");
+                Err(error)
+            }
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), withdrawal) => withdrawal,
         }
     }
 

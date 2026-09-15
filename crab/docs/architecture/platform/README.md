@@ -236,7 +236,10 @@ identities, proves the leaf certificate covers its advertised host and both TLS
 roles, binds its SHA-256 and public key to enrollment, measures current memory,
 volume and CPU hints, strict-publishes before readiness and refreshes every three
 seconds. A failed refresh retries while the current advertisement remains safely
-valid; approaching its expiry withdraws readiness and drains the process.
+valid; approaching its expiry withdraws readiness and drains the process. Every
+normal or unhealthy heartbeat-loop exit conditionally tombstones and deletes its
+latest observed advertisement before server shutdown completes. A successor
+heartbeat that won the ETag race is retained rather than deleted.
 `crab-http-server` now retains repository UUIDs in its live catalog index and
 implements the receiving product boundary: it accepts only the repository
 namespace, maps the target partition to the stable repository UUID, rechecks the
