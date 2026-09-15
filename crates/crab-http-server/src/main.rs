@@ -45,7 +45,7 @@ enum CellsCommand {
         command: CellReleaseCommand,
     },
     /// Run a bounded, resumable offline repository migration.
-    ImportRepositoryIssues {
+    ImportRepository {
         #[arg(long)]
         owner: String,
         #[arg(long)]
@@ -290,11 +290,11 @@ async fn cells(
         CellsCommand::Release {
             command: CellReleaseCommand::Migrations { after, limit },
         } => crab_http_server::cell_release_migrations(config, after.as_deref(), limit).await?,
-        CellsCommand::ImportRepositoryIssues {
+        CellsCommand::ImportRepository {
             owner,
             name,
             operation,
-        } => crab_http_server::import_repository_issues(config, &owner, &name, operation).await?,
+        } => crab_http_server::import_repository(config, &owner, &name, operation).await?,
     };
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(&bytes)?;
@@ -602,14 +602,14 @@ mod tests {
     }
 
     #[test]
-    fn repository_issue_import_requires_explicit_repository_and_operation() {
+    fn repository_import_requires_explicit_repository_and_operation() {
         let operation = "00000000-0000-0000-0000-000000000001";
         let arguments = Arguments::try_parse_from([
             "crab-http-server",
             "--config",
             "server.toml",
             "cells",
-            "import-repository-issues",
+            "import-repository",
             "--owner",
             "team",
             "--name",
@@ -621,7 +621,7 @@ mod tests {
         assert!(matches!(
             arguments.command,
             Some(Command::Cells {
-                command: CellsCommand::ImportRepositoryIssues {
+                command: CellsCommand::ImportRepository {
                     owner,
                     name,
                     operation: parsed,
@@ -634,7 +634,7 @@ mod tests {
                 "--config",
                 "server.toml",
                 "cells",
-                "import-repository-issues",
+                "import-repository",
                 "--owner",
                 "team",
                 "--name",

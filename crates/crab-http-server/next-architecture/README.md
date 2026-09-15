@@ -12,9 +12,9 @@ activation and publishes a verified descriptor as current. Private routing now
 includes mandatory mTLS ingress, live enrollment, authoritative outbound owner
 lookup and one bounded stale-owner retry. Explicit release activation now also
 requires one live exact fleet/image/release/module-compatible candidate. The
-maintenance importer now covers the legacy issue/comment tree, including
-counters, visible edits and incomplete reservations, with two-pass source
-verification, immutable evidence and crash-resumable LTX publication. The
+maintenance importer now covers the legacy issue/comment and Label trees,
+including counters, visible edits, Label tombstones and incomplete reservations,
+with two-pass source verification, immutable evidence and crash-resumable LTX publication. The
 repository router now distinguishes a live signed remote owner from an absent or
 expired session and uses the runtime's unchanged-control observation before
 takeover. The server now also runs a bounded catalog-driven Cell scheduler:
@@ -34,7 +34,7 @@ authenticated peer migrations concurrently, and persists monotonic terminal
 progress under the release operation. The final gate refuses `ready` while any
 retained predecessor remains, and `cells release migrations` exposes a bounded
 cursor view of pending and failed Cells.
-Remaining collaboration-domain import, including legacy label import, configured multi-node quorum and the
+Remaining collaboration-domain import, configured multi-node quorum and the
 remaining product-domain route cuts are not yet integrated. New repository
 creation explicitly publishes an empty Cell and marks
 the catalog ready; adoption remains blocked until verified import. Startup

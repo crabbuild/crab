@@ -8,6 +8,7 @@ use rusqlite::{Connection, OptionalExtension as _, params};
 use tokio::sync::mpsc;
 
 mod decode;
+mod labels;
 
 use decode::{SourceKind, StageRecord, classify, decode_record};
 
@@ -41,6 +42,30 @@ CREATE TABLE repository_sequences (
     kind TEXT PRIMARY KEY,
     last INTEGER NOT NULL
 ) STRICT;
+CREATE TABLE repository_label_submissions (
+    request_id BLOB PRIMARY KEY,
+    payload_digest BLOB NOT NULL,
+    label_number INTEGER NOT NULL UNIQUE,
+    author_name TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    initial_name TEXT NOT NULL,
+    initial_color TEXT NOT NULL,
+    initial_description TEXT
+) STRICT, WITHOUT ROWID;
+CREATE TABLE repository_labels (
+    number INTEGER PRIMARY KEY,
+    name_key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    color TEXT NOT NULL,
+    description TEXT,
+    version INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    deleted_version INTEGER
+) STRICT;
+CREATE UNIQUE INDEX repository_active_label_names
+ON repository_labels(name_key)
+WHERE deleted_version IS NULL;
 CREATE TABLE repository_issue_submissions (
     request_id BLOB PRIMARY KEY,
     payload_digest BLOB NOT NULL,
@@ -132,10 +157,24 @@ struct VerifyItem {
 
 pub(super) async fn capture(
     store: &Store,
-    prefix: &Path,
+    issue_prefix: &Path,
+    label_prefix: &Path,
     data_dir: &FilePath,
 ) -> crate::Result<StagedSource> {
-    let (expected_objects, expected_bytes) = preflight(store, prefix).await?;
+    let (issue_objects, issue_bytes) = preflight(store, issue_prefix, "issues").await?;
+    let (label_objects, label_bytes) = preflight(store, label_prefix, "labels").await?;
+    let expected_objects = issue_objects
+        .checked_add(label_objects)
+        .filter(|value| *value <= MAX_SOURCE_OBJECTS)
+        .ok_or(crate::Error::Config(
+            "legacy repository source exceeds the object limit",
+        ))?;
+    let expected_bytes = issue_bytes
+        .checked_add(label_bytes)
+        .filter(|value| *value <= MAX_SOURCE_BYTES)
+        .ok_or(crate::Error::Config(
+            "legacy repository source exceeds the byte limit",
+        ))?;
     admit_disk(data_dir, expected_bytes)?;
     let directory = tempfile::Builder::new()
         .prefix("crab-repository-import-")
@@ -144,16 +183,27 @@ pub(super) async fn capture(
     let (sender, receiver) = mpsc::channel(WRITER_QUEUE);
     let writer_database = database.clone();
     let writer = tokio::task::spawn_blocking(move || stage(writer_database, receiver));
-    let feed = feed_source(store, prefix, sender).await;
+    let feed = async {
+        feed_source(store, issue_prefix, "issues", sender.clone()).await?;
+        feed_source(store, label_prefix, "labels", sender).await
+    }
+    .await;
     let written = writer.await?;
     feed?;
     let (objects, bytes) = written?;
     if objects != expected_objects || bytes != expected_bytes {
         return Err(crate::Error::Config(
-            "legacy issue source changed during inventory",
+            "legacy repository source changed during inventory",
         ));
     }
-    verify_source(store, prefix, database.clone(), expected_objects).await?;
+    verify_source(
+        store,
+        issue_prefix,
+        label_prefix,
+        database.clone(),
+        expected_objects,
+    )
+    .await?;
     let summary_database = database.clone();
     let semantic = tokio::task::spawn_blocking(move || {
         let connection = Connection::open_with_flags(
@@ -174,24 +224,24 @@ pub(super) async fn capture(
     })
 }
 
-async fn preflight(store: &Store, prefix: &Path) -> crate::Result<(u64, u64)> {
+async fn preflight(store: &Store, prefix: &Path, domain: &str) -> crate::Result<(u64, u64)> {
     let mut stream = store.inner().list(Some(prefix));
     let mut objects = 0_u64;
     let mut bytes = 0_u64;
     while let Some(item) = stream.next().await {
         let meta = item.map_err(|error| map_object_store_error(error, prefix.as_ref()))?;
-        validate_meta(prefix, &meta)?;
+        validate_meta(prefix, domain, &meta)?;
         objects = objects
             .checked_add(1)
             .filter(|value| *value <= MAX_SOURCE_OBJECTS)
             .ok_or(crate::Error::Config(
-                "legacy issue source exceeds the object limit",
+                "legacy repository source exceeds the object limit",
             ))?;
         bytes = bytes
             .checked_add(meta.size)
             .filter(|value| *value <= MAX_SOURCE_BYTES)
             .ok_or(crate::Error::Config(
-                "legacy issue source exceeds the byte limit",
+                "legacy repository source exceeds the byte limit",
             ))?;
     }
     Ok((objects, bytes))
@@ -203,11 +253,11 @@ fn admit_disk(data_dir: &FilePath, source_bytes: u64) -> crate::Result<()> {
         .checked_mul(3)
         .and_then(|bytes| bytes.checked_add(MIN_WORKING_BYTES))
         .ok_or(crate::Error::Config(
-            "legacy issue import disk admission overflow",
+            "legacy repository import disk admission overflow",
         ))?;
     if fs4::available_space(data_dir)? < required {
         return Err(crate::Error::Config(
-            "Cell data directory lacks space for legacy issue import",
+            "Cell data directory lacks space for legacy repository import",
         ));
     }
     Ok(())
@@ -216,12 +266,13 @@ fn admit_disk(data_dir: &FilePath, source_bytes: u64) -> crate::Result<()> {
 async fn feed_source(
     store: &Store,
     prefix: &Path,
+    domain: &str,
     sender: mpsc::Sender<StageItem>,
 ) -> crate::Result<()> {
     let mut stream = store.inner().list(Some(prefix));
     while let Some(item) = stream.next().await {
         let meta = item.map_err(|error| map_object_store_error(error, prefix.as_ref()))?;
-        let kind = validate_meta(prefix, &meta)?;
+        let kind = validate_meta(prefix, domain, &meta)?;
         let (body, version) = store
             .get_with_etag_bounded(&meta.location, MAX_DOCUMENT_BYTES)
             .await?;
@@ -230,13 +281,13 @@ async fn feed_source(
             || version.version != meta.version
         {
             return Err(crate::Error::Config(
-                "legacy issue source changed while reading an object",
+                "legacy repository source changed while reading an object",
             ));
         }
-        let relative = relative_path(prefix, &meta.location)?;
-        let record = decode_record(kind, relative, &body)?;
+        let relative = format!("{domain}/{}", relative_path(prefix, &meta.location)?);
+        let record = decode_record(kind, &relative, &body)?;
         let item = StageItem {
-            path: format!("app/v1/issues/{relative}"),
+            path: format!("app/v1/{relative}"),
             size: meta.size,
             etag: meta.e_tag,
             version: meta.version,
@@ -246,33 +297,36 @@ async fn feed_source(
         sender
             .send(item)
             .await
-            .map_err(|_| crate::Error::Config("legacy issue staging writer stopped"))?;
+            .map_err(|_| crate::Error::Config("legacy repository staging writer stopped"))?;
     }
     Ok(())
 }
 
 async fn verify_source(
     store: &Store,
-    prefix: &Path,
+    issue_prefix: &Path,
+    label_prefix: &Path,
     database: PathBuf,
     expected_objects: u64,
 ) -> crate::Result<()> {
     let (sender, receiver) = mpsc::channel(WRITER_QUEUE);
     let writer = tokio::task::spawn_blocking(move || verify(database, receiver, expected_objects));
-    let mut stream = store.inner().list(Some(prefix));
     let feed: crate::Result<()> = async {
-        while let Some(item) = stream.next().await {
-            let meta = item.map_err(|error| map_object_store_error(error, prefix.as_ref()))?;
-            validate_meta(prefix, &meta)?;
-            sender
-                .send(VerifyItem {
-                    path: format!("app/v1/issues/{}", relative_path(prefix, &meta.location)?),
-                    size: meta.size,
-                    etag: meta.e_tag,
-                    version: meta.version,
-                })
-                .await
-                .map_err(|_| crate::Error::Config("legacy issue verifier stopped"))?;
+        for (prefix, domain) in [(issue_prefix, "issues"), (label_prefix, "labels")] {
+            let mut stream = store.inner().list(Some(prefix));
+            while let Some(item) = stream.next().await {
+                let meta = item.map_err(|error| map_object_store_error(error, prefix.as_ref()))?;
+                validate_meta(prefix, domain, &meta)?;
+                sender
+                    .send(VerifyItem {
+                        path: format!("app/v1/{domain}/{}", relative_path(prefix, &meta.location)?),
+                        size: meta.size,
+                        etag: meta.e_tag,
+                        version: meta.version,
+                    })
+                    .await
+                    .map_err(|_| crate::Error::Config("legacy repository verifier stopped"))?;
+            }
         }
         Ok(())
     }
@@ -291,23 +345,38 @@ fn stage(database: PathBuf, mut receiver: mpsc::Receiver<StageItem>) -> crate::R
     let transaction = connection.transaction().map_err(sqlite_error)?;
     let mut objects = 0_u64;
     let mut bytes = 0_u64;
+    let mut label_catalog = None;
     while let Some(item) = receiver.blocking_recv() {
-        insert_stage_item(&transaction, item, &mut bytes)?;
-        objects = objects
-            .checked_add(1)
-            .ok_or(crate::Error::Config("legacy issue object count overflow"))?;
+        insert_stage_item(&transaction, item, &mut bytes, &mut label_catalog)?;
+        objects = objects.checked_add(1).ok_or(crate::Error::Config(
+            "legacy repository object count overflow",
+        ))?;
     }
     transaction
         .execute(
-            "INSERT OR IGNORE INTO repository_sequences(kind, last) VALUES ('issue', 0)",
+            "INSERT OR IGNORE INTO repository_sequences(kind, last) VALUES ('issue', 0), ('label', 0)",
             [],
         )
         .map_err(sqlite_error)?;
+    let (labels, deleted) = label_catalog.unwrap_or_default();
+    labels::materialize(&transaction, labels, deleted)?;
+    let label_versions = super::sum_versions(&transaction, "repository_labels")?;
+    let deleted_labels: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM repository_labels WHERE deleted_version IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_error)?;
+    let deleted_labels = u64::try_from(deleted_labels)
+        .map_err(|_| crate::Error::Config("legacy label count is negative"))?;
     let app_revision = super::sum_versions(&transaction, "repository_issues")?
         .checked_add(super::sum_versions(
             &transaction,
             "repository_issue_comments",
         )?)
+        .and_then(|value| value.checked_add(label_versions))
+        .and_then(|value| value.checked_add(deleted_labels))
         .filter(|value| *value <= crate::app_storage::MAX_NUMBER)
         .ok_or(crate::Error::Config(
             "imported application revision exceeds its limit",
@@ -326,6 +395,7 @@ fn insert_stage_item(
     transaction: &rusqlite::Transaction<'_>,
     item: StageItem,
     bytes: &mut u64,
+    label_catalog: &mut Option<labels::Catalog>,
 ) -> crate::Result<()> {
     let kind = match &item.record {
         StageRecord::IssueSequence(_) => SourceKind::IssueSequence,
@@ -339,6 +409,9 @@ fn insert_stage_item(
             issue: record.issue,
             number: record.number,
         },
+        StageRecord::LabelSequence(_) => SourceKind::LabelSequence,
+        StageRecord::LabelReservation { .. } => SourceKind::LabelReservation,
+        StageRecord::LabelCatalog { .. } => SourceKind::LabelCatalog,
     };
     transaction
         .execute(
@@ -407,10 +480,31 @@ fn insert_stage_item(
                 )
                 .map_err(sqlite_error)?;
         }
+        StageRecord::LabelSequence(last) => {
+            transaction
+                .execute(
+                    "INSERT INTO repository_sequences(kind, last) VALUES ('label', ?1)",
+                    [to_i64(last)?],
+                )
+                .map_err(sqlite_error)?;
+        }
+        StageRecord::LabelReservation {
+            request,
+            record,
+            author,
+            digest,
+        } => labels::insert_submission(transaction, request, &record, &author, digest)?,
+        StageRecord::LabelCatalog { labels, deleted } => {
+            if label_catalog.replace((labels, deleted)).is_some() {
+                return Err(crate::Error::Config(
+                    "legacy label source contains multiple catalogs",
+                ));
+            }
+        }
     }
-    *bytes = bytes
-        .checked_add(item.size)
-        .ok_or(crate::Error::Config("legacy issue byte count overflow"))?;
+    *bytes = bytes.checked_add(item.size).ok_or(crate::Error::Config(
+        "legacy repository byte count overflow",
+    ))?;
     Ok(())
 }
 
@@ -469,12 +563,12 @@ fn verify(
             .map_err(sqlite_error)?;
         if changed != 1 {
             return Err(crate::Error::Config(
-                "legacy issue source changed before verification",
+                "legacy repository source changed before verification",
             ));
         }
-        observed = observed
-            .checked_add(1)
-            .ok_or(crate::Error::Config("legacy issue object count overflow"))?;
+        observed = observed.checked_add(1).ok_or(crate::Error::Config(
+            "legacy repository object count overflow",
+        ))?;
     }
     let missing: i64 = transaction
         .query_row(
@@ -485,7 +579,7 @@ fn verify(
         .map_err(sqlite_error)?;
     if observed != expected_objects || missing != 0 {
         return Err(crate::Error::Config(
-            "legacy issue source changed before verification",
+            "legacy repository source changed before verification",
         ));
     }
     transaction.commit().map_err(sqlite_error)?;
@@ -498,6 +592,13 @@ fn validate_staged(connection: &Connection) -> crate::Result<()> {
             "SELECT 1 WHERE
                 (SELECT last FROM repository_sequences WHERE kind = 'issue') < COALESCE((SELECT MAX(number) FROM repository_issues), 0)
                 OR (SELECT last FROM repository_sequences WHERE kind = 'issue') < COALESCE((SELECT MAX(issue_number) FROM repository_issue_submissions), 0)
+                OR (SELECT last FROM repository_sequences WHERE kind = 'label') < COALESCE((SELECT MAX(number) FROM repository_labels), 0)
+                OR (SELECT last FROM repository_sequences WHERE kind = 'label') < COALESCE((SELECT MAX(label_number) FROM repository_label_submissions), 0)
+                OR EXISTS (
+                    SELECT 1 FROM repository_labels l
+                    LEFT JOIN repository_label_submissions s ON s.label_number = l.number
+                    WHERE s.request_id IS NULL OR s.created_at_ms != l.created_at_ms
+                )
                 OR EXISTS (
                     SELECT 1 FROM repository_issues i
                     LEFT JOIN repository_issue_submissions s ON s.request_id = i.source_request_id
@@ -534,7 +635,7 @@ fn validate_staged(connection: &Connection) -> crate::Result<()> {
         .map_err(sqlite_error)?;
     if invalid.is_some() {
         return Err(crate::Error::Config(
-            "legacy issue source violates sequence or reservation invariants",
+            "legacy repository source violates sequence or reservation invariants",
         ));
     }
     let integrity: String = connection
@@ -542,24 +643,27 @@ fn validate_staged(connection: &Connection) -> crate::Result<()> {
         .map_err(sqlite_error)?;
     if integrity != "ok" {
         return Err(crate::Error::Config(
-            "legacy issue staging database failed integrity_check",
+            "legacy repository staging database failed integrity_check",
         ));
     }
     Ok(())
 }
 
-fn validate_meta(prefix: &Path, meta: &ObjectMeta) -> crate::Result<SourceKind> {
+fn validate_meta(prefix: &Path, domain: &str, meta: &ObjectMeta) -> crate::Result<SourceKind> {
     if meta.size == 0 || meta.size > MAX_DOCUMENT_BYTES {
         return Err(crate::Error::Config(
-            "legacy issue document exceeds its size contract",
+            "legacy repository document exceeds its size contract",
         ));
     }
     if meta.e_tag.is_none() && meta.version.is_none() {
         return Err(crate::Error::Config(
-            "legacy issue import requires versioned source objects",
+            "legacy repository import requires versioned source objects",
         ));
     }
-    classify(relative_path(prefix, &meta.location)?)
+    classify(&format!(
+        "{domain}/{}",
+        relative_path(prefix, &meta.location)?
+    ))
 }
 
 fn relative_path<'a>(prefix: &Path, location: &'a Path) -> crate::Result<&'a str> {
@@ -569,7 +673,7 @@ fn relative_path<'a>(prefix: &Path, location: &'a Path) -> crate::Result<&'a str
         .and_then(|value| value.strip_prefix('/'))
         .filter(|value| !value.is_empty() && value.len() <= 1024)
         .ok_or(crate::Error::Config(
-            "legacy issue object escaped its source prefix",
+            "legacy repository object escaped its source prefix",
         ))
 }
 
@@ -621,7 +725,7 @@ pub(super) fn validate_comment_v1(record: &CommentRecord) -> crate::Result<()> {
     validate_number_v1(record.version)
 }
 
-fn validate_number_v1(value: u64) -> crate::Result<()> {
+pub(super) fn validate_number_v1(value: u64) -> crate::Result<()> {
     if value == 0 || value > crate::app_storage::MAX_NUMBER {
         return Err(crate::Error::Config(
             "legacy repository number violates schema v1",
@@ -630,7 +734,7 @@ fn validate_number_v1(value: u64) -> crate::Result<()> {
     Ok(())
 }
 
-fn validate_author_v1(author: &RepositoryAuthor) -> crate::Result<()> {
+pub(super) fn validate_author_v1(author: &RepositoryAuthor) -> crate::Result<()> {
     if [
         (&author.issuer, 512),
         (&author.subject, 512),
@@ -675,6 +779,6 @@ fn encode_assignees_v1(assignees: &[String]) -> crate::Result<Vec<u8>> {
     Ok(encoder.finish())
 }
 
-fn to_i64(value: u64) -> crate::Result<i64> {
-    i64::try_from(value).map_err(|_| crate::Error::Config("legacy issue value exceeds SQLite"))
+pub(super) fn to_i64(value: u64) -> crate::Result<i64> {
+    i64::try_from(value).map_err(|_| crate::Error::Config("legacy repository value exceeds SQLite"))
 }

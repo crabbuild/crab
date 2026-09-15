@@ -11,7 +11,7 @@ use uuid::Uuid;
 use super::source::StagedSource;
 use super::{SemanticSummary, sqlite_error};
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const PAGE_ENTRIES: usize = 256;
 const MAX_PAGE_BYTES: u64 = 256 * 1024;
 const MAX_SOURCE_BYTES: u64 = 1024 * 1024;
@@ -49,7 +49,7 @@ impl SourceEvidence {
             || self.source_digest != derive_source_digest(self)
         {
             return Err(crate::Error::Config(
-                "legacy issue source evidence is invalid",
+                "legacy repository source evidence is invalid",
             ));
         }
         Ok(())
@@ -60,7 +60,7 @@ impl SourceEvidence {
         let bytes = serde_json::to_vec(self)?;
         if bytes.len() as u64 > MAX_SOURCE_BYTES {
             return Err(crate::Error::Config(
-                "legacy issue source evidence exceeds its limit",
+                "legacy repository source evidence exceeds its limit",
             ));
         }
         Ok(bytes)
@@ -152,7 +152,7 @@ impl CompleteEvidence {
             || self.txid == 0
         {
             return Err(crate::Error::Config(
-                "legacy issue completion evidence is invalid",
+                "legacy repository completion evidence is invalid",
             ));
         }
         Ok(())
@@ -163,7 +163,7 @@ impl CompleteEvidence {
         let bytes = serde_json::to_vec(self)?;
         if bytes.len() as u64 > MAX_COMPLETE_BYTES {
             return Err(crate::Error::Config(
-                "legacy issue completion evidence exceeds its limit",
+                "legacy repository completion evidence exceeds its limit",
             ));
         }
         Ok(bytes)
@@ -174,7 +174,7 @@ impl CompleteEvidence {
         value.validate()?;
         if value.encode()? != bytes {
             return Err(crate::Error::Config(
-                "legacy issue completion evidence is not canonical",
+                "legacy repository completion evidence is not canonical",
             ));
         }
         Ok(value)
@@ -275,7 +275,7 @@ pub(super) async fn load_complete(
         || evidence.cell != hex(cell.as_bytes())
     {
         return Err(crate::Error::Config(
-            "legacy issue completion evidence has the wrong scope",
+            "legacy repository completion evidence has the wrong scope",
         ));
     }
     Ok(Some(evidence))
@@ -298,13 +298,13 @@ fn encode_pages(
         let digest: Vec<u8> = row.get(4).map_err(sqlite_error)?;
         if digest.len() != 32 {
             return Err(crate::Error::Config(
-                "legacy issue inventory digest is invalid",
+                "legacy repository inventory digest is invalid",
             ));
         }
         entries.push(InventoryEntry {
             path: row.get(0).map_err(sqlite_error)?,
             size: u64::try_from(size)
-                .map_err(|_| crate::Error::Config("legacy issue object size is invalid"))?,
+                .map_err(|_| crate::Error::Config("legacy repository object size is invalid"))?,
             etag: row.get(2).map_err(sqlite_error)?,
             version: row.get(3).map_err(sqlite_error)?,
             digest: hex(&digest),
@@ -330,7 +330,7 @@ fn send_page(
     })?;
     if bytes.len() as u64 > MAX_PAGE_BYTES {
         return Err(crate::Error::Config(
-            "legacy issue inventory page exceeds its limit",
+            "legacy repository inventory page exceeds its limit",
         ));
     }
     let page = EncodedPage {
@@ -339,7 +339,7 @@ fn send_page(
     };
     sender
         .blocking_send(Ok(page))
-        .map_err(|_| crate::Error::Config("legacy issue evidence uploader stopped"))
+        .map_err(|_| crate::Error::Config("legacy repository evidence uploader stopped"))
 }
 
 async fn create_exact(
@@ -363,7 +363,7 @@ async fn create_exact(
                 Ok(())
             } else {
                 Err(crate::Error::Config(
-                    "legacy issue import operation was reused for different evidence",
+                    "legacy repository import operation was reused for different evidence",
                 ))
             }
         }
@@ -373,7 +373,7 @@ async fn create_exact(
 
 fn derive_source_digest(evidence: &SourceEvidence) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"crab.repository.issue-import.source.v1\0");
+    hasher.update(b"crab.repository.import.source.v2\0");
     hasher.update(evidence.repository.as_bytes());
     hasher.update(evidence.cell.as_bytes());
     hasher.update(&evidence.objects.to_be_bytes());
@@ -388,7 +388,7 @@ fn derive_source_digest(evidence: &SourceEvidence) -> String {
 fn canonical_uuid(value: &str) -> crate::Result<String> {
     Uuid::parse_str(value)
         .map(|uuid| uuid.hyphenated().to_string())
-        .map_err(|_| crate::Error::Config("legacy issue evidence UUID is invalid"))
+        .map_err(|_| crate::Error::Config("legacy repository evidence UUID is invalid"))
 }
 
 fn canonical_digest(value: &str) -> bool {

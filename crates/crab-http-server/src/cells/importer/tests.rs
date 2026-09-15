@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use crab_cell_runtime::{
-    ApplicationId, ApplicationIdentity, CellAuthority, CellRuntime, CellTarget, ControlState,
-    SessionId, SqlWorkerPool, TenantId,
+    ApplicationId, ApplicationIdentity, CellAuthority, CellReplica, CellRuntime, CellTarget,
+    ControlState, ReplicaLimits, SessionId, SqlWorkerPool, TenantId,
 };
 use crab_storage::{CellStorageLayout, Store, StoreLayout};
 use object_store::{memory::InMemory, path::Path};
@@ -16,29 +16,50 @@ const ISSUE_REQUEST: &str = "00000000-0000-0000-0000-000000000001";
 const RESERVED_ISSUE_REQUEST: &str = "00000000-0000-0000-0000-000000000008";
 const COMMENT_REQUEST: &str = "00000000-0000-0000-0000-000000000002";
 const RESERVED_COMMENT_REQUEST: &str = "00000000-0000-0000-0000-000000000004";
+const LABEL_REQUEST: &str = "00000000-0000-0000-0000-000000000005";
+const DELETED_LABEL_REQUEST: &str = "00000000-0000-0000-0000-000000000006";
+const RESERVED_LABEL_REQUEST: &str = "00000000-0000-0000-0000-000000000007";
 
 #[tokio::test]
-async fn issue_import_refuses_unmigrated_label_state() {
+async fn repository_import_rejects_a_label_without_its_reservation() {
     let layout = StoreLayout::new(
         Store::new(Arc::new(InMemory::new())),
-        "label-import-guard".to_owned(),
+        "invalid-label-import".to_owned(),
     );
     put(
         &layout,
         "app/v1/labels/catalog.json",
-        json!({"labels":[],"deleted":[]}),
+        json!({
+            "labels": [{
+                "number": 1,
+                "name": "Bug",
+                "color": "d73a4a",
+                "description": null,
+                "version": 1,
+                "created_at": 1000,
+                "updated_at": 1000
+            }],
+            "deleted": []
+        }),
     )
     .await;
+    let files = tempfile::TempDir::new().unwrap();
     assert!(matches!(
-        require_no_legacy_label_source(&layout).await,
+        source::capture(
+            layout.store(),
+            &layout.repo_path("app/v1/issues"),
+            &layout.repo_path("app/v1/labels"),
+            files.path(),
+        )
+        .await,
         Err(Error::Config(
-            "legacy repository labels require a label-aware import before Cell activation"
+            "legacy label catalog has no matching reservation"
         ))
     ));
 }
 
 #[tokio::test]
-async fn issue_import_publishes_verifies_releases_and_replays_completion() {
+async fn repository_import_publishes_verifies_releases_and_replays_completion() {
     let store = Store::new(Arc::new(InMemory::new()));
     let identity = ApplicationIdentity::new(
         TenantId::from_bytes([1; 16]),
@@ -66,6 +87,7 @@ async fn issue_import_publishes_verifies_releases_and_replays_completion() {
     let source = source::capture(
         repository_layout.store(),
         &repository_layout.repo_path("app/v1/issues"),
+        &repository_layout.repo_path("app/v1/labels"),
         files.path(),
     )
     .await
@@ -74,7 +96,10 @@ async fn issue_import_publishes_verifies_releases_and_replays_completion() {
     assert_eq!(source.semantic.issue_submissions, 2);
     assert_eq!(source.semantic.comments, 1);
     assert_eq!(source.semantic.comment_submissions, 2);
-    assert_eq!(source.semantic.app_revision, 4);
+    assert_eq!(source.semantic.labels, 1);
+    assert_eq!(source.semantic.deleted_labels, 1);
+    assert_eq!(source.semantic.label_submissions, 3);
+    assert_eq!(source.semantic.app_revision, 8);
 
     let target = CellTarget::new(
         identity.tenant(),
@@ -118,6 +143,58 @@ async fn issue_import_publishes_verifies_releases_and_replays_completion() {
         .unwrap();
     assert_eq!(idle.value().state, ControlState::Idle);
     assert!(idle.value().owner.is_none());
+    let replica = CellReplica::new(
+        layout.clone(),
+        *target.cell_id().as_bytes(),
+        *idle.value().incarnation.as_bytes(),
+        ReplicaLimits::default(),
+    )
+    .unwrap();
+    let root = idle.value().ltx_root().unwrap();
+    let restored = files.path().join("restored-import.sqlite");
+    replica
+        .open_root(&root)
+        .await
+        .unwrap()
+        .restore(&restored)
+        .await
+        .unwrap();
+    let connection =
+        rusqlite::Connection::open_with_flags(restored, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let active: (String, i64) = connection
+        .query_row(
+            "SELECT name, version FROM repository_labels WHERE number = 1 AND deleted_version IS NULL",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(active, ("Defect".to_owned(), 2));
+    let deleted: (i64, i64) = connection
+        .query_row(
+            "SELECT version, deleted_version FROM repository_labels WHERE number = 2",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(deleted, (1, 1));
+    let incomplete: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM repository_label_submissions s LEFT JOIN repository_labels l ON l.number = s.label_number WHERE s.label_number = 4 AND l.number IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(incomplete, 1);
+    let revision: i64 = connection
+        .query_row(
+            "SELECT app_revision FROM repository_identity WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(revision, 8);
+    drop(connection);
 
     layout
         .store()
@@ -226,7 +303,7 @@ async fn write_source(layout: &StoreLayout<Store>) {
         1,
         2,
     );
-    visible["label_ids"] = json!([3, 9]);
+    visible["label_ids"] = json!([1]);
     visible["assignee_subjects"] = json!(["user-2"]);
     visible["updated_at"] = json!(2000);
     put(layout, "app/v1/issues/0000000000000001/issue.json", visible).await;
@@ -256,7 +333,7 @@ async fn write_source(layout: &StoreLayout<Store>) {
         ),
     )
     .await;
-    let mut visible_comment = comment(1, COMMENT_REQUEST, author, "Edited comment", 2);
+    let mut visible_comment = comment(1, COMMENT_REQUEST, author.clone(), "Edited comment", 2);
     visible_comment["updated_at"] = json!(2000);
     put(
         layout,
@@ -264,6 +341,64 @@ async fn write_source(layout: &StoreLayout<Store>) {
         visible_comment,
     )
     .await;
+    put(layout, "app/v1/labels/sequence.json", json!({"last": 4})).await;
+    put(
+        layout,
+        &format!("app/v1/labels/requests/{LABEL_REQUEST}.json"),
+        label_reservation(1, LABEL_REQUEST, author.clone(), "Bug", "d73a4a"),
+    )
+    .await;
+    put(
+        layout,
+        &format!("app/v1/labels/requests/{DELETED_LABEL_REQUEST}.json"),
+        label_reservation(2, DELETED_LABEL_REQUEST, author.clone(), "Docs", "0075ca"),
+    )
+    .await;
+    put(
+        layout,
+        &format!("app/v1/labels/requests/{RESERVED_LABEL_REQUEST}.json"),
+        label_reservation(4, RESERVED_LABEL_REQUEST, author, "Future", "ffffff"),
+    )
+    .await;
+    put(
+        layout,
+        "app/v1/labels/catalog.json",
+        json!({
+            "labels": [{
+                "number": 1,
+                "name": "Defect",
+                "color": "d73a4a",
+                "description": "Imported and edited",
+                "version": 2,
+                "created_at": 1000,
+                "updated_at": 2000
+            }],
+            "deleted": [{"number": 2, "version": 1}]
+        }),
+    )
+    .await;
+}
+
+fn label_reservation(
+    number: u64,
+    request: &str,
+    author: serde_json::Value,
+    name: &str,
+    color: &str,
+) -> serde_json::Value {
+    json!({
+        "request_id": request,
+        "author": author,
+        "label": {
+            "number": number,
+            "name": name,
+            "color": color,
+            "description": null,
+            "version": 1,
+            "created_at": 1000,
+            "updated_at": 1000
+        }
+    })
 }
 
 fn issue(

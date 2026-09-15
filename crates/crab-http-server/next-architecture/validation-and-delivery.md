@@ -181,7 +181,7 @@ Do not introduce placeholder backends or partially wired production routes.
 | 2. Replication mechanics — library capabilities implemented | [Pinned Celld integration](crab-ltx.md), capture/checkpoints, checksums, exact/inherited recovery, bundles, range compaction and sparse SQL/hydration | Local/process-kill/CRC and real RustFS round-trip proof; external interoperability, broad platform/fault/memory proof remains |
 | 3. Single-node collaboration slice — local implementation present | SQL issue/comment/label model, dedup, response barrier, tracked cancellation | Browser create/edit/retry, kill process, restore from real RustFS still required |
 | 4. Multi-node ownership | Session identity, leases, peer TLS, route policy, cold capacity admission, strong owner reads | Wrong-node routing, competing acquisition, overload, stale owner and lost-response tests |
-| 5. Domain parity | PR/reviews, assignees, statuses/checks, release metadata/assets; legacy label import | Existing domain/API suites plus real UI workflows |
+| 5. Domain parity | PR/reviews, assignees, statuses/checks and release metadata/assets | Existing domain/API suites plus real UI workflows |
 | 6. Cross-domain recovery | Durable outbox, canonical Git evidence and pending-work rules | Merge/tag crash and ABA/later-push qualification |
 | 7. Hard cutover | Stop old fleet, offline full inventory import, verify every repository, start SQL/LTX-only fleet | Real copied dataset comparison, interrupted import/resume and full-fleet acceptance before reopening |
 | 8. Operational completeness | Kubernetes lifecycle, idle handoff, backups, schema/format rollout, resource limits | Three-Pod rolling update, scale-out/in, disk loss and backup restore |

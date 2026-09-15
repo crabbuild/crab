@@ -39,3 +39,38 @@ pub(super) struct Comment {
     pub created_at: u64,
     pub updated_at: u64,
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Label {
+    pub number: u64,
+    pub name: String,
+    pub color: String,
+    pub description: Option<String>,
+    pub version: u64,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct LabelReservation {
+    pub request_id: String,
+    pub author: Identity,
+    pub label: Label,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DeletedLabel {
+    pub number: u64,
+    pub version: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct LabelCatalog {
+    pub labels: Vec<Label>,
+    #[serde(default)]
+    pub deleted: Vec<DeletedLabel>,
+}

@@ -1,13 +1,16 @@
 use bytes::Bytes;
 use uuid::Uuid;
 
-use super::super::legacy::{Comment, Issue, IssueState};
+use super::super::legacy::{
+    Comment, DeletedLabel, Issue, IssueState, Label, LabelCatalog, LabelReservation,
+};
 use crate::cells::repository::{
-    CommentRecord, CreateCommentInput, CreateIssueInput, IssueRecord, RepositoryAuthor,
-    comment_submission_digest, issue_submission_digest,
+    CommentRecord, CreateCommentInput, CreateIssueInput, CreateLabelInput, IssueRecord,
+    LabelRecord, RepositoryAuthor, comment_submission_digest, issue_submission_digest,
+    label_submission_digest,
 };
 
-use super::{validate_comment_v1, validate_issue_v1};
+use super::{labels, validate_author_v1, validate_comment_v1, validate_issue_v1};
 
 #[derive(Clone, Copy)]
 pub(super) enum SourceKind {
@@ -17,6 +20,9 @@ pub(super) enum SourceKind {
     CommentSequence { issue: u64 },
     CommentReservation { issue: u64 },
     Comment { issue: u64, number: u64 },
+    LabelSequence,
+    LabelReservation,
+    LabelCatalog,
 }
 
 impl SourceKind {
@@ -28,6 +34,9 @@ impl SourceKind {
             Self::CommentSequence { .. } => "comment_sequence",
             Self::CommentReservation { .. } => "comment_reservation",
             Self::Comment { .. } => "comment",
+            Self::LabelSequence => "label_sequence",
+            Self::LabelReservation => "label_reservation",
+            Self::LabelCatalog => "label_catalog",
         }
     }
 }
@@ -56,35 +65,52 @@ pub(super) enum StageRecord {
         request: [u8; 16],
         record: CommentRecord,
     },
+    LabelSequence(u64),
+    LabelReservation {
+        request: [u8; 16],
+        record: LabelRecord,
+        author: RepositoryAuthor,
+        digest: [u8; 32],
+    },
+    LabelCatalog {
+        labels: Vec<LabelRecord>,
+        deleted: Vec<DeletedLabel>,
+    },
 }
 
 pub(super) fn classify(relative: &str) -> crate::Result<SourceKind> {
     let parts = relative.split('/').collect::<Vec<_>>();
     match parts.as_slice() {
-        ["sequence.json"] => Ok(SourceKind::IssueSequence),
-        ["requests", request] => {
+        ["issues", "sequence.json"] => Ok(SourceKind::IssueSequence),
+        ["issues", "requests", request] => {
             parse_request_filename(request)?;
             Ok(SourceKind::IssueReservation)
         }
-        [issue, "issue.json"] => {
+        ["issues", issue, "issue.json"] => {
             parse_number(issue)?;
             Ok(SourceKind::Issue)
         }
-        [issue, "comments", "sequence.json"] => Ok(SourceKind::CommentSequence {
+        ["issues", issue, "comments", "sequence.json"] => Ok(SourceKind::CommentSequence {
             issue: parse_number(issue)?,
         }),
-        [issue, "comments", "requests", request] => {
+        ["issues", issue, "comments", "requests", request] => {
             parse_request_filename(request)?;
             Ok(SourceKind::CommentReservation {
                 issue: parse_number(issue)?,
             })
         }
-        [issue, "comments", comment] => Ok(SourceKind::Comment {
+        ["issues", issue, "comments", comment] => Ok(SourceKind::Comment {
             issue: parse_number(issue)?,
             number: parse_number_filename(comment)?,
         }),
+        ["labels", "sequence.json"] => Ok(SourceKind::LabelSequence),
+        ["labels", "requests", request] => {
+            parse_request_filename(request)?;
+            Ok(SourceKind::LabelReservation)
+        }
+        ["labels", "catalog.json"] => Ok(SourceKind::LabelCatalog),
         _ => Err(crate::Error::Config(
-            "legacy issue source contains an unknown object",
+            "legacy repository source contains an unknown object",
         )),
     }
 }
@@ -129,7 +155,7 @@ pub(super) fn decode_record(
             let legacy = crate::app_storage::decode::<Issue>(body)?;
             let expected = relative
                 .split('/')
-                .next()
+                .nth(1)
                 .ok_or(crate::Error::Config("legacy issue path is invalid"))?;
             if legacy.number != parse_number(expected)? {
                 return Err(crate::Error::Config("legacy issue path and number differ"));
@@ -179,6 +205,51 @@ pub(super) fn decode_record(
                 record: comment_record(issue, legacy)?,
             })
         }
+        SourceKind::LabelSequence => Ok(StageRecord::LabelSequence(
+            crate::app_storage::decode_sequence(body)?,
+        )),
+        SourceKind::LabelReservation => {
+            let legacy = crate::app_storage::decode::<LabelReservation>(body)?;
+            let request = request_id(&legacy.request_id, request_from_relative(relative)?)?;
+            let author = author(legacy.author);
+            validate_author_v1(&author)?;
+            let record = label_record(legacy.label)?;
+            if record.version != 1 || record.updated_at_ms != record.created_at_ms {
+                return Err(crate::Error::Config(
+                    "legacy label reservation is not an initial proposal",
+                ));
+            }
+            let digest = *label_submission_digest(&CreateLabelInput {
+                submission_id: request,
+                author: author.clone(),
+                name: record.name.clone(),
+                color: record.color.clone(),
+                description: record.description.clone(),
+            })
+            .as_bytes();
+            Ok(StageRecord::LabelReservation {
+                request,
+                record,
+                author,
+                digest,
+            })
+        }
+        SourceKind::LabelCatalog => {
+            let legacy = crate::app_storage::decode::<LabelCatalog>(body)?;
+            let labels = legacy
+                .labels
+                .into_iter()
+                .map(label_record)
+                .collect::<crate::Result<Vec<_>>>()?;
+            for deleted in &legacy.deleted {
+                validate_label_number(deleted.number)?;
+                validate_version(deleted.version)?;
+            }
+            Ok(StageRecord::LabelCatalog {
+                labels,
+                deleted: legacy.deleted,
+            })
+        }
     }
 }
 
@@ -216,6 +287,38 @@ fn comment_record(issue: u64, legacy: Comment) -> crate::Result<CommentRecord> {
     Ok(record)
 }
 
+fn label_record(legacy: Label) -> crate::Result<LabelRecord> {
+    let record = LabelRecord {
+        number: legacy.number,
+        name: legacy.name,
+        color: legacy.color,
+        description: legacy.description,
+        version: legacy.version,
+        created_at_ms: legacy.created_at,
+        updated_at_ms: legacy.updated_at,
+    };
+    labels::validate_v1(&record)?;
+    Ok(record)
+}
+
+fn validate_label_number(number: u64) -> crate::Result<()> {
+    if number == 0 || number > 500 {
+        return Err(crate::Error::Config(
+            "legacy label number violates repository schema v1",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_version(version: u64) -> crate::Result<()> {
+    if version == 0 || version > crate::app_storage::MAX_NUMBER {
+        return Err(crate::Error::Config(
+            "legacy label version violates repository schema v1",
+        ));
+    }
+    Ok(())
+}
+
 fn author(identity: crate::auth::Identity) -> RepositoryAuthor {
     RepositoryAuthor {
         issuer: identity.issuer,
@@ -230,7 +333,7 @@ fn request_from_relative(relative: &str) -> crate::Result<&str> {
         .map(|(_, request)| request)
         .and_then(|request| request.strip_suffix(".json"))
         .ok_or(crate::Error::Config(
-            "legacy issue reservation path is invalid",
+            "legacy repository reservation path is invalid",
         ))
 }
 
@@ -248,7 +351,7 @@ fn request_id(value: &str, expected: &str) -> crate::Result<[u8; 16]> {
 
 fn parse_request_filename(value: &str) -> crate::Result<[u8; 16]> {
     let request = value.strip_suffix(".json").ok_or(crate::Error::Config(
-        "legacy issue reservation filename is invalid",
+        "legacy repository reservation filename is invalid",
     ))?;
     request_id(request, request)
 }
@@ -279,18 +382,22 @@ mod tests {
     #[test]
     fn source_paths_are_exact_and_canonical() {
         assert!(matches!(
-            classify("0000000000000001/comments/0000000000000002.json").unwrap(),
+            classify("issues/0000000000000001/comments/0000000000000002.json").unwrap(),
             SourceKind::Comment {
                 issue: 1,
                 number: 2
             }
         ));
+        assert!(matches!(
+            classify("labels/catalog.json").unwrap(),
+            SourceKind::LabelCatalog
+        ));
         for invalid in [
-            "1/issue.json",
-            "0000000000000000/issue.json",
-            "0000000000000001/comments/2.json",
-            "0000000000000001/comments/unknown.json",
-            "labels/sequence.json",
+            "issues/1/issue.json",
+            "issues/0000000000000000/issue.json",
+            "issues/0000000000000001/comments/2.json",
+            "issues/0000000000000001/comments/unknown.json",
+            "labels/unknown.json",
         ] {
             assert!(classify(invalid).is_err(), "{invalid}");
         }

@@ -30,7 +30,7 @@ pub(crate) mod repository;
 mod router;
 mod scheduler;
 
-pub(crate) use importer::import_repository_issues;
+pub(crate) use importer::import_repository;
 #[cfg(test)]
 pub(crate) use initializer::initialize_repository_at;
 pub(super) use initializer::provision_repository;

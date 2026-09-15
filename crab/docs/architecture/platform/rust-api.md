@@ -1042,10 +1042,10 @@ before binding either listener.
 The router and authenticated issue/comment/label HTTP routes are integration-qualified
 for explicit bootstrap, local reuse, clean idle release, source-independent
 exact-root restoration and stable submission replay. The maintenance CLI imports
-the legacy issue/comment object tree with bounded two-pass source verification,
-immutable evidence, LTX publication and exact crash-resume checks. Remaining
-collaboration-domain import and route cuts remain; the current importer rejects
-legacy label state instead of silently dropping it. A live remote owner is
+the legacy issue/comment and Label object trees with bounded two-pass source
+verification, immutable evidence, LTX publication and exact crash-resume checks.
+It preserves active Labels, deletion tombstones and incomplete reservations.
+Remaining collaboration-domain import and route cuts remain. A live remote owner is
 forwarded to rather than stolen; absent/expired active owners use the bounded
 ownership procedure above. Tests cover live mTLS forwarding, idle restoration,
 the full 15-second no-progress observation and exact-root takeover.

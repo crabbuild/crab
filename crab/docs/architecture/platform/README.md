@@ -266,7 +266,8 @@ routes each transition through local or authenticated peer ownership, caps work
 at 16 concurrent Cells per node, and conditionally stores monotonic terminal
 progress for the activating release. Native task/actor and dirty-job admission
 remain. Label create/edit/delete/list and issue-label validation now use the same
-Cell; legacy label import and the remaining collaboration-domain route cuts remain;
+Cell; the offline importer preserves legacy Label state, while the remaining
+collaboration-domain imports and route cuts remain;
 effective-memory and free-volume startup
 floors, a resource-derived node mailbox and page-cache/file-descriptor-derived
 active-Cell admission are implemented. A single 110-second absolute shutdown
@@ -428,15 +429,15 @@ check `queue_messages` and `queue_dedup`, and Workflow Cells check
 not infer payload compatibility: operators must let retention cleanup complete,
 drain the primitive, or provide a purpose-built transform before removing the
 old binding.
-The maintenance CLI now implements a resumable issue/comment repository import:
-`cells import-repository-issues --owner OWNER --name NAME --operation UUID`.
-It stages a bounded, version-pinned `app/v1/issues` inventory in SQLite, verifies
-the source with a second complete listing, imports visible records, counters and
-incomplete reservations in one transaction, publishes an initial LTX root, and
+The maintenance CLI now implements a resumable repository import:
+`cells import-repository --owner OWNER --name NAME --operation UUID`.
+It stages bounded, version-pinned `app/v1/issues` and `app/v1/labels`
+inventories in SQLite, verifies both sources with a second complete listing,
+and imports visible records, counters, deletion tombstones and incomplete
+reservations in one transaction. It then publishes an initial LTX root and
 records content-addressed source and completion evidence. Exact retries adopt a
-completed import; interruption after root publication restores and verifies that
-root before writing completion evidence. It also refuses any legacy label object
-until a label-aware importer can preserve its allocation and tombstone history.
+completed import; interruption after root publication restores and verifies
+that root before writing completion evidence.
 The command refuses a live signed Cell
 fleet, but operators must still independently prove that every legacy writer has
 stopped because the legacy deployment did not publish those node records.

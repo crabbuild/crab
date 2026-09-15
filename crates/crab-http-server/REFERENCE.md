@@ -1142,7 +1142,7 @@ Serving data currently uses these roots:
 | Repository Cell/LTX namespace | Issues, issue comments, labels, label deletion tombstones, counters, and permanent product submission ledgers |
 | `app/v1/issues` | Legacy issue import input only; serving ignores these objects after cutover |
 | `app/v1/pulls` | Pulls, comments, reviews, merge state, counters, and reservations |
-| `app/v1/labels` | Legacy label import input only; serving ignores these objects after cutover, and current import refuses them until label-aware migration lands |
+| `app/v1/labels` | Legacy Label import input only; serving ignores these objects after cutover, and offline import preserves its sequence, active rows, tombstones and incomplete reservations |
 | `app/v1/releases` | Releases, tags, assets, reservations, and tombstones |
 | `app/v1/statuses` | Commit statuses and immutable requests |
 | `app/v1/check-runs` | Check catalogs, versioned output, and requests |

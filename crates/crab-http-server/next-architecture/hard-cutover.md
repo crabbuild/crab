@@ -1,6 +1,6 @@
 # Hard cutover and future upgrades
 
-[Design index](README.md) · Target architecture; issue/comment import slice implemented.
+[Design index](README.md) · Target architecture; issue/comment/Label import slice implemented.
 
 The transition imports the [current collaboration storage](current-implementation.md)
 into the [repository SQL model](sqlite-and-data-model.md), then publishes each
@@ -98,14 +98,13 @@ advertised into this directory. Persisted-work inventory and multi-domain or
 unsupported-source transforms remain required for release changes that need
 them; such a command fails and leaves the release in `maintenance`.
 
-The current issue import command implements steps 3 through 7 only for the
-legacy `app/v1/issues` tree. It retains issue/comment sequences, all visible
-versions and incomplete request reservations; records exact source object
-identity and body hashes; verifies a second inventory; performs one SQLite
-bootstrap transaction; publishes/restores the initial LTX root; and writes
-operation-bound completion evidence. It refuses a live signed new Cell fleet.
-It also refuses any legacy label object until the importer can preserve the
-label sequence, submissions, active catalog and deletion tombstones.
+The current repository import command implements steps 3 through 7 for the
+legacy `app/v1/issues` and `app/v1/labels` trees. It retains issue/comment/Label
+sequences, all visible versions, Label deletion tombstones and incomplete
+request reservations; records exact source object identity and body hashes;
+verifies a second inventory; performs one SQLite bootstrap transaction;
+publishes/restores the initial LTX root; and writes operation-bound completion
+evidence. It refuses a live signed new Cell fleet.
 That check does not observe legacy processes, so step 1's independent proof that
 old processes and schedulers are stopped and lack write authority remains
 mandatory. On exact completion it moves the repository catalog from
@@ -113,7 +112,7 @@ mandatory. On exact completion it moves the repository catalog from
 transition. Public issue/comment/label routes are now native typed Cell consumers
 and ignore legacy issue and label objects. Startup and catalog refresh reject any repository
 that is not ready or lacks a published root, while request routing has no
-bootstrap path. Legacy label import, other collaboration domains and the fleet-wide completion
+bootstrap path. Other collaboration domains and the fleet-wide completion
 checklist are not implemented.
 
 An uncertain head publication requires rereading authority and matching import

@@ -31,6 +31,9 @@ const IMPORT_MAILBOX_BYTES: usize = 16 * 1024 * 1024;
 #[serde(deny_unknown_fields)]
 pub(super) struct SemanticSummary {
     digest: String,
+    labels: u64,
+    deleted_labels: u64,
+    label_submissions: u64,
     issues: u64,
     issue_submissions: u64,
     comments: u64,
@@ -38,7 +41,7 @@ pub(super) struct SemanticSummary {
     app_revision: u64,
 }
 
-pub(crate) async fn import_repository_issues(
+pub(crate) async fn import_repository(
     config: &Config,
     owner: &str,
     name: &str,
@@ -59,7 +62,7 @@ pub(crate) async fn import_repository_issues(
         .is_empty()
     {
         return Err(Error::Config(
-            "legacy issue import requires every Cell node to be offline",
+            "legacy repository import requires every Cell node to be offline",
         ));
     }
 
@@ -69,7 +72,6 @@ pub(crate) async fn import_repository_issues(
     let repository_id = record.id;
     let repository = record.runtime_config(catalog.root(), "main")?;
     let repository_layout = StoreLayout::new(catalog.root().store.clone(), repository.prefix);
-    require_no_legacy_label_source(&repository_layout).await?;
     let target = CellTarget::new(
         startup.identity.tenant(),
         startup.identity.application(),
@@ -103,6 +105,7 @@ pub(crate) async fn import_repository_issues(
         let source = source::capture(
             repository_layout.store(),
             &repository_layout.repo_path("app/v1/issues"),
+            &repository_layout.repo_path("app/v1/labels"),
             directory.path(),
         )
         .await?;
@@ -174,22 +177,6 @@ enum ImportWork {
     },
 }
 
-async fn require_no_legacy_label_source(
-    repository_layout: &StoreLayout<crab_storage::Store>,
-) -> Result<()> {
-    if repository_layout
-        .store()
-        .list_prefix_bounded(&repository_layout.repo_path("app/v1/labels"), 0)
-        .await?
-        .is_none()
-    {
-        return Err(Error::Config(
-            "legacy repository labels require a label-aware import before Cell activation",
-        ));
-    }
-    Ok(())
-}
-
 async fn require_ready_release(
     layout: &CellStorageLayout,
     identity: crab_cell_runtime::ApplicationIdentity,
@@ -200,7 +187,7 @@ async fn require_ready_release(
         .ok_or(Error::Config("Cell application release is not activated"))?;
     if release.record().state() != ReleaseState::Ready {
         return Err(Error::Config(
-            "legacy issue import requires a ready Cell release",
+            "legacy repository import requires a ready Cell release",
         ));
     }
     Ok(())
@@ -322,7 +309,7 @@ async fn import_staged(
                 .await?
         }
         ControlState::Tombstoned => {
-            return Err(Error::Config("legacy issue import Cell is tombstoned"));
+            return Err(Error::Config("legacy repository import Cell is tombstoned"));
         }
     };
     verify_and_complete(
@@ -472,6 +459,17 @@ fn copy_staged(
         "UPDATE repository_sequences SET last = ?1 WHERE kind = 'issue'",
         [issue_sequence],
     )?;
+    let label_sequence: i64 = source.query_row(
+        "SELECT last FROM repository_sequences WHERE kind = 'label'",
+        [],
+        |row| row.get(0),
+    )?;
+    target.execute(
+        "UPDATE repository_sequences SET last = ?1 WHERE kind = 'label'",
+        [label_sequence],
+    )?;
+    copy_label_submissions(&source, target)?;
+    copy_labels(&source, target)?;
     copy_issue_submissions(&source, target)?;
     copy_issues(&source, target)?;
     copy_comment_sequences(&source, target)?;
@@ -495,6 +493,30 @@ fn copy_staged(
         ));
     }
     Ok(())
+}
+
+fn copy_label_submissions(
+    source: &Connection,
+    target: &rusqlite::Transaction<'_>,
+) -> crab_cell_runtime::Result<()> {
+    copy_rows(
+        source,
+        target,
+        "SELECT request_id, payload_digest, label_number, author_name, created_at_ms FROM repository_label_submissions ORDER BY request_id",
+        "INSERT INTO repository_label_submissions(request_id, payload_digest, label_number, author_name, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
+    )
+}
+
+fn copy_labels(
+    source: &Connection,
+    target: &rusqlite::Transaction<'_>,
+) -> crab_cell_runtime::Result<()> {
+    copy_rows(
+        source,
+        target,
+        "SELECT number, name_key, name, color, description, version, created_at_ms, updated_at_ms, deleted_version FROM repository_labels ORDER BY number",
+        "INSERT INTO repository_labels(number, name_key, name, color, description, version, created_at_ms, updated_at_ms, deleted_version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+    )
 }
 
 fn copy_issue_submissions(
@@ -577,10 +599,12 @@ fn copy_rows(
 
 pub(super) fn semantic_summary(connection: &Connection) -> Result<SemanticSummary> {
     let mut hasher = Hasher::new();
-    hasher.update(b"crab.repository.issue-import.semantic.v1\0");
+    hasher.update(b"crab.repository.import.semantic.v2\0");
     for query in [
         "SELECT app_revision FROM repository_identity WHERE singleton = 1",
-        "SELECT kind, last FROM repository_sequences WHERE kind = 'issue'",
+        "SELECT kind, last FROM repository_sequences WHERE kind IN ('issue', 'label') ORDER BY kind",
+        "SELECT request_id, payload_digest, label_number, author_name, created_at_ms FROM repository_label_submissions ORDER BY request_id",
+        "SELECT number, name_key, name, color, description, version, created_at_ms, updated_at_ms, deleted_version FROM repository_labels ORDER BY number",
         "SELECT request_id, payload_digest, issue_number, author_name, created_at_ms FROM repository_issue_submissions ORDER BY request_id",
         "SELECT number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms FROM repository_issues ORDER BY number",
         "SELECT issue_number, last FROM repository_comment_sequences ORDER BY issue_number",
@@ -589,12 +613,22 @@ pub(super) fn semantic_summary(connection: &Connection) -> Result<SemanticSummar
     ] {
         hash_query(connection, &mut hasher, query)?;
     }
+    let labels = count_where(connection, "repository_labels", "deleted_version IS NULL")?;
+    let deleted_labels = count_where(
+        connection,
+        "repository_labels",
+        "deleted_version IS NOT NULL",
+    )?;
+    let label_submissions = count(connection, "repository_label_submissions")?;
     let issues = count(connection, "repository_issues")?;
     let issue_submissions = count(connection, "repository_issue_submissions")?;
     let comments = count(connection, "repository_issue_comments")?;
     let comment_submissions = count(connection, "repository_comment_submissions")?;
+    let label_versions = sum_versions(connection, "repository_labels")?;
     let app_revision = sum_versions(connection, "repository_issues")?
         .checked_add(sum_versions(connection, "repository_issue_comments")?)
+        .and_then(|value| value.checked_add(label_versions))
+        .and_then(|value| value.checked_add(deleted_labels))
         .filter(|value| *value <= crate::app_storage::MAX_NUMBER)
         .ok_or(Error::Config(
             "imported application revision exceeds its limit",
@@ -613,6 +647,9 @@ pub(super) fn semantic_summary(connection: &Connection) -> Result<SemanticSummar
     }
     Ok(SemanticSummary {
         digest: hasher.finalize().to_hex().to_string(),
+        labels,
+        deleted_labels,
+        label_submissions,
         issues,
         issue_submissions,
         comments,
@@ -670,6 +707,14 @@ fn hash_bytes(hasher: &mut Hasher, value: &[u8]) -> Result<()> {
 
 fn count(connection: &Connection, table: &str) -> Result<u64> {
     let sql = format!("SELECT COUNT(*) FROM {table}");
+    let value: i64 = connection
+        .query_row(&sql, [], |row| row.get(0))
+        .map_err(sqlite_error)?;
+    u64::try_from(value).map_err(|_| Error::Config("repository count is negative"))
+}
+
+fn count_where(connection: &Connection, table: &str, predicate: &str) -> Result<u64> {
+    let sql = format!("SELECT COUNT(*) FROM {table} WHERE {predicate}");
     let value: i64 = connection
         .query_row(&sql, [], |row| row.get(0))
         .map_err(sqlite_error)?;

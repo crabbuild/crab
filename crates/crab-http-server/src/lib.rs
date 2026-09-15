@@ -95,15 +95,15 @@ pub async fn initialize_repository_cell(config: &Config, repository: uuid::Uuid)
     cells::initialize_repository(config, repository).await
 }
 
-/// Imports one repository's legacy issue and comment documents into its Cell.
-pub async fn import_repository_issues(
+/// Imports one repository's legacy application documents into its Cell.
+pub async fn import_repository(
     config: &Config,
     owner: &str,
     name: &str,
     operation: uuid::Uuid,
 ) -> Result<Vec<u8>> {
     config.validate()?;
-    cells::import_repository_issues(config, owner, name, operation).await
+    cells::import_repository(config, owner, name, operation).await
 }
 
 /// Startup and server lifecycle errors with their original sources retained.
