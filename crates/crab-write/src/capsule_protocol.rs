@@ -705,15 +705,17 @@ pub async fn publish_ref_checkpoint(
     .await
 }
 
+type CheckpointRefState = (
+    std::collections::BTreeMap<String, String>,
+    std::collections::BTreeMap<String, String>,
+    std::collections::BTreeMap<String, String>,
+);
+
 async fn publish_checkpoint_inner(
     router: &StoreLayout<Store>,
     base: RootSnapshot,
     checkpoint: &Checkpoint,
-    ref_state: Option<(
-        std::collections::BTreeMap<String, String>,
-        std::collections::BTreeMap<String, String>,
-        std::collections::BTreeMap<String, String>,
-    )>,
+    ref_state: Option<CheckpointRefState>,
 ) -> Result<RootSnapshot> {
     if let Some(fence) = base.record().root().gc_fence() {
         return Err(WriteError::CapsuleGcFenced {

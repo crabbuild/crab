@@ -218,7 +218,9 @@ pub fn capsule_ref_name_from_key(key: &str) -> Result<String> {
     }
     let bytes = key
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let pair = std::str::from_utf8(pair)
                 .map_err(|_| contract_error("ref-head object key is invalid UTF-8"))?;
@@ -345,11 +347,11 @@ mod tests {
 
     fn pointer(transaction_id: &str) -> CapsulePointer {
         CapsulePointer::new(
-            &"3".repeat(64),
+            "3".repeat(64),
             1,
             0,
             vec![transaction_id.to_owned()],
-            &"4".repeat(64),
+            "4".repeat(64),
         )
         .unwrap()
     }
