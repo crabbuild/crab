@@ -21,6 +21,7 @@ x-server-service: &server-service
   environment: *storage-environment
   volumes:
     - ./compose.server.toml:/etc/crab/server.toml:ro
+    - peer-identity:/run/secrets/crab-peer:ro
   read_only: true
   cap_drop:
     - ALL
@@ -28,6 +29,7 @@ x-server-service: &server-service
     - no-new-privileges:true
   tmpfs:
     - /var/lib/crab/tmp:rw,noexec,nosuid,nodev,size=${CRAB_TMP_SIZE:-2g},uid=10001,gid=10001,mode=0700
+    - /var/lib/crab/cells:rw,noexec,nosuid,nodev,size=${CRAB_CELL_SIZE:-4g},uid=10001,gid=10001,mode=0700
 
 services:
   rustfs:
@@ -74,6 +76,29 @@ services:
       - /tmp:rw,noexec,nosuid,nodev,size=16m,uid=65534,gid=65534,mode=0700
     restart: "no"
 
+  peer-pki-init:
+    image: ${RUSTFS_IMAGE:-rustfs/rustfs:1.0.0-beta.8-glibc@sha256:040304b66e029a5cde4bed140b41513e925909839a9b912a40a98340610d1f66}
+    user: "10001:10001"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        umask 077
+        openssl genpkey -algorithm ED25519 -out /identity/ca.key
+        openssl req -x509 -new -days 7 -subj /CN=crab-compose-peer-ca -addext basicConstraints=critical,CA:TRUE -key /identity/ca.key -out /identity/ca.crt
+        openssl genpkey -algorithm ED25519 -out /identity/peer.key
+        openssl req -new -subj /CN=localhost -key /identity/peer.key -out /identity/peer.csr
+        printf '%s\n' basicConstraints=critical,CA:FALSE keyUsage=critical,digitalSignature extendedKeyUsage=serverAuth,clientAuth subjectAltName=DNS:localhost > /identity/peer.ext
+        openssl x509 -req -days 7 -CAcreateserial -in /identity/peer.csr -CA /identity/ca.crt -CAkey /identity/ca.key -extfile /identity/peer.ext -out /identity/peer.crt
+        rm /identity/ca.key /identity/peer.csr /identity/peer.ext /identity/ca.srl
+    volumes:
+      - peer-identity:/identity
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
   release-init:
     <<: *server-service
     command:
@@ -116,6 +141,8 @@ services:
     depends_on:
       repository-init:
         condition: service_completed_successfully
+      peer-pki-init:
+        condition: service_completed_successfully
     stop_grace_period: 10m
     restart: unless-stopped
 
@@ -148,3 +175,4 @@ services:
 
 volumes:
   repository-data:
+  peer-identity:

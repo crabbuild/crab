@@ -126,6 +126,13 @@ they are not repeated in every pod's configuration.
 listen = "127.0.0.1:8788"
 management_listen = "127.0.0.1:8789"
 
+[cells]
+data_dir = "/var/lib/crab/cells"
+peer_advertise = "https://localhost:8789"
+peer_certificate = "/run/secrets/crab-peer/tls.crt"
+peer_private_key = "/run/secrets/crab-peer/tls.key"
+peer_ca = "/run/secrets/crab-peer/ca.crt"
+
 [storage]
 url = "s3://your-bucket/repositories"
 ```
@@ -617,6 +624,13 @@ Use the provider's exact issuer string, including its path and trailing-slash po
 ```toml
 listen = "0.0.0.0:8788"
 management_listen = "0.0.0.0:8789"
+
+[cells]
+data_dir = "/var/lib/crab/cells"
+peer_advertise = "https://node-1.internal.example:8789"
+peer_certificate = "/run/secrets/crab-peer/tls.crt"
+peer_private_key = "/run/secrets/crab-peer/tls.key"
+peer_ca = "/run/secrets/crab-peer/ca.crt"
 
 [storage]
 url = "s3://your-bucket/repositories"

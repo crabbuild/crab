@@ -69,9 +69,9 @@ pub use maintenance::{
 };
 pub use node::{NodeAdvertisement, NodeCapacity, NodeDirectory, VersionedNodeAdvertisement};
 pub use peer::{
-    PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerOperation, PeerPrincipal, PeerRoundTrip,
-    PeerSigner, PeerVerifier, VerifiedPeerRequest, claimed_peer_session, decode_peer_reply,
-    encode_peer_reply, wire as peer_wire,
+    MAX_PEER_REQUEST_BYTES, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerOperation,
+    PeerPrincipal, PeerRoundTrip, PeerSigner, PeerVerifier, VerifiedPeerRequest,
+    claimed_peer_session, decode_peer_reply, encode_peer_reply, wire as peer_wire,
 };
 pub use publication::CellPublisher;
 pub use queue::{

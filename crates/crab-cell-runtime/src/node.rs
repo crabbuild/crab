@@ -321,6 +321,7 @@ impl NodeDirectory {
         &self,
         input: &[u8],
         certificate: Digest,
+        certificate_public_key: [u8; 32],
         now_ms: i64,
     ) -> Result<crate::VerifiedPeerRequest> {
         let session = crate::claimed_peer_session(input)?;
@@ -331,6 +332,11 @@ impl NodeDirectory {
         if enrolled.advertisement.certificate != certificate {
             return Err(Error::PeerAuthorization(
                 "mTLS certificate does not match peer session",
+            ));
+        }
+        if enrolled.advertisement.public_key != certificate_public_key {
+            return Err(Error::PeerAuthorization(
+                "mTLS certificate key does not match peer session",
             ));
         }
         crate::PeerVerifier::new(

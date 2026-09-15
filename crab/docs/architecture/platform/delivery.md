@@ -16,7 +16,7 @@ does not establish a working runtime.
 | [environment.rs](../../../../crates/crab-ltx/src/environment.rs) | Filesystem/executor hooks and count admission | Byte reservations held through actual job completion |
 | [store.rs](../../../../crates/crab-storage/src/store.rs) | Conditional updates; ambiguous update not retried | Preserve behavior; runtime owns CAS reconciliation |
 | [cell_layout.rs](../../../../crates/crab-storage/src/cell_layout.rs) | Typed application/Cell/incarnation object paths | Reuse from authority, immutable-root and backup code; never rebuild path strings in callers |
-| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, verified CAS catalog, worker-owned bootstrap, exact-root sparse activation, fixed SQL workers, ordered bounded reads, FIFO publication, retry, unknown outcomes, five-second SQL/native watchdog, bounded owner renewal, idle acquisition, observed takeover, per-Cell drain, node-wide terminal drain with explicit worker join, transactional scheduler summaries, revision-pinned due scans and bounded typed Tick, typed registry/CellClient and bounded authorized SQL/KV/Queue/Workflow capabilities, exact native activity execution, plus strict signed peer client/dispatch contracts | Add sparse page-I/O deadlines, automatic fenced recovery, fleet enrollment and mTLS peer HTTP routing, owner selection/stale retry, Workflow effects, catalog-driven activity scheduling and scheduler liveness/routing |
+| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, verified CAS catalog, worker-owned bootstrap, exact-root sparse activation, fixed SQL workers, ordered bounded reads, FIFO publication, retry, unknown outcomes, five-second SQL/native watchdog, bounded owner renewal, idle acquisition, observed takeover, per-Cell drain, node-wide terminal drain with explicit worker join, transactional scheduler summaries, revision-pinned due scans and bounded typed Tick, typed registry/CellClient and bounded authorized SQL/KV/Queue/Workflow capabilities, exact native activity execution, signed node enrollment plus strict peer client/dispatch contracts | Add sparse page-I/O deadlines, automatic fenced recovery, fleet listing, owner selection/stale retry, Workflow effects, catalog-driven activity scheduling and scheduler liveness/routing |
 | [sql.rs](../../../../crates/crab-cell-runtime/src/sql.rs) | Typed 128-statement/1-MiB batches, read/write classification, 1,000-row/1-MiB materialization, scoped SQLite authorizers, registered codecs and a role-checked SqlCell proven through publish and exact-root restore | Use the completed handle from the repository HTTP adapter |
 | [kv.rs](../../../../crates/crab-cell-runtime/src/kv.rs) | Normative schema install, bounded atomic check/write, stable versions, TTL get/list/cleanup, binary pagination and typed scope-sharded KvNamespace/registry codecs | Add scheduler cleanup invocation |
 | [queue.rs](../../../../crates/crab-cell-runtime/src/queue.rs) | Normative schema, producer dedup, bounded claim, token validation, lease mutations/reclaim and retention cleanup plus typed producer-sharded QueueNamespace and registry codecs | Add DLQ effects and native polling scheduler |
@@ -25,10 +25,10 @@ does not establish a working runtime.
 | [scheduler.rs](../../../../crates/crab-cell-runtime/src/scheduler.rs) | Derives the earliest durable work/lease/expiry/retention deadline inside bootstrap and every command transaction; publication binds it to the exact pending root | Add catalog shard assignment/scanning and bounded idempotent Tick dispatch |
 | [registry.rs](../../../../crates/crab-cell-runtime/src/registry.rs) | Startup-only static module registration, migration/schema/namespace validation, exact descriptor/function/Workflow-definition/native-activity inventory matching, canonical module/release digests, typed Command/Query trampolines, transaction-scoped compiled dispatch, async activity dispatch and exact namespace/role/code/schema support checks | Add retained old-code dispatch and remote dispatch support |
 | [application.rs](../../../../crates/crab-cell-runtime/src/application.rs), [release.rs](../../../../crates/crab-cell-runtime/src/release.rs) | Canonical immutable root identity, exact-winner initialization, immutable descriptor upload, expected-revision prepared CAS, verified descriptor reads, operation-bound resumable activating/ready transitions and release-aware catalog provisioning with post-publication operation recheck | Add eligible-node quorum, Cell migration progress and maintenance activation |
-| [node.rs](../../../../crates/crab-cell-runtime/src/node.rs) | Canonical signed 15-second node advertisements, strict-create/ETag refresh with exact ambiguous-write reconciliation, fleet/certificate/release/key/inventory/capacity binding, monotonic progress and verified session lookup | Add server resource measurement, key/certificate loading, three-second publishing and mTLS certificate matching |
-| [codec.rs](../../../../crates/crab-cell-runtime/src/codec.rs), [peer.rs](../../../../crates/crab-cell-runtime/src/peer.rs) | Canonical bounded scalar/bytes/text/option encoding; generated peer Protobuf messages; strict request/reply unknown/duplicate/oneof rejection; exact nested-payload BLAKE3; canonical Ed25519 signing; enrollment/release/time binding; two-hop forwarding; mandatory authorization; active-owner resolution; and canonical local dispatch | Add mTLS session enrollment lookup and management-listener integration |
+| [node.rs](../../../../crates/crab-cell-runtime/src/node.rs) | Canonical signed 15-second node advertisements, strict-create/ETag refresh with exact ambiguous-write reconciliation, fleet/certificate/release/key/inventory/capacity binding, monotonic progress and certificate-SPKI-bound session verification | Add fleet listing/eligibility and scheduler progress aggregation |
+| [codec.rs](../../../../crates/crab-cell-runtime/src/codec.rs), [peer.rs](../../../../crates/crab-cell-runtime/src/peer.rs) | Canonical bounded scalar/bytes/text/option encoding; generated peer Protobuf messages; strict request/reply unknown/duplicate/oneof rejection; exact nested-payload BLAKE3; canonical Ed25519 signing; enrollment/release/time binding; two-hop forwarding; mandatory authorization; active-owner resolution; canonical local dispatch; and bounded mTLS management ingress | Add owner-selecting outbound HTTP round trip and stale-owner retry |
 | [client.rs](../../../../crates/crab-cell-runtime/src/client.rs) | Typed local and authenticated peer command/query/Resolve capabilities, namespace/code/schema/incarnation checks, canonical operation digest, outcome classification and minimum receipts; typed KV, SQL, Queue and Workflow handles use it | Add owner-selecting round trip and bounded stale-owner retry |
-| [HTTP server.rs](../../../../crates/crab-http-server/src/server.rs), [peer.rs](../../../../crates/crab-http-server/src/peer.rs), [cells.rs](../../../../crates/crab-http-server/src/cells.rs), [cells/repository.rs](../../../../crates/crab-http-server/src/cells/repository.rs) | Static repository registry with UUID lookup; typed issue/comment bindings; exact replay, durable rejection and source-loss restore; process-session runtime lifecycle; authoritative local peer resolution; current repository issuer/member/action reauthorization; compatible activation and release-aware provisioning; idempotent first-install bootstrap plus descriptor/inventory startup gate before listener binding | Add mTLS/enrollment route composition, migration/node eligibility quorum, resource-derived local Cell configuration, owner-selecting client routing and hard-cut the authorized product routes |
+| [HTTP server.rs](../../../../crates/crab-http-server/src/server.rs), [peer.rs](../../../../crates/crab-http-server/src/peer.rs), [peer_tls.rs](../../../../crates/crab-http-server/src/peer_tls.rs), [cells.rs](../../../../crates/crab-http-server/src/cells.rs), [cells/repository.rs](../../../../crates/crab-http-server/src/cells/repository.rs) | Static repository registry with UUID lookup; typed issue/comment bindings; exact replay, durable rejection and source-loss restore; process-session runtime lifecycle; authoritative local peer resolution; current repository issuer/member/action reauthorization; strict Ed25519 certificate/key/CA loading; mandatory management mTLS; initial node publication and heartbeat; compatible activation and release-aware provisioning; idempotent first-install bootstrap plus descriptor/inventory startup gate before listener binding | Add migration/node eligibility quorum, complete resource-derived Cell budgets, owner-selecting client routing and hard-cut the authorized product routes |
 | [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Existing object application storage still serves product routes | Retain only as offline importer input after the coherent HTTP hard cut |
 
 Reuse existing [publication tests](../../../../crates/crab-ltx/tests/publication.rs),
@@ -245,16 +245,17 @@ enum and size validation. `CellClient::peer` maps typed calls and unknown outcom
 evidence through an injected `PeerRoundTrip`; `PeerDispatcher` mandates current
 product authorization, resolves only an active local handle and reuses the local
 transport. The local/peer integration test proves one operation digest, one
-dedup entry and one result across both paths. This is not yet a reachable server
-endpoint: fleet enrollment lookup, mTLS listener integration, owner-selecting
-round trip and stale-owner retry remain.
+dedup entry and one result across both paths. The server now exposes that receive
+path only on its mandatory mTLS management listener, binds the client leaf and
+SPKI to the live signed node advertisement, and rechecks repository authority.
+Owner-selecting outbound round trip and stale-owner retry remain.
 
-Next, construct the long-lived runtime from the existing resolved Store, add
-private peer forwarding to the management router and preserve product HTTP
-authorization in app.rs. Switch the complete issue/comment route group only
-after its offline importer and route-level recovery test exist. Do not ship a
-selectable second persistence backend or route some mutations to JSON while
-related reads use SQLite.
+Next, add owner selection and the bounded mTLS peer client to the long-lived
+runtime already constructed by the server. Preserve product HTTP authorization
+in app.rs. Switch the complete issue/comment route group only after its offline
+importer and route-level recovery test exist. Do not ship a selectable second
+persistence backend or route some mutations to JSON while related reads use
+SQLite.
 
 Add tests:
 
@@ -293,8 +294,9 @@ registration-order-independent release bytes, bounded compiled command/query
 execution, schema rejection, startup failure for missing or extra function
 bindings, canonical operation-digest fixtures, published typed execution,
 idempotent replay, durable rejection rollback and minimum receipts. Authenticated
-`CellClient` forwarding and local peer dispatch are now covered; server-owned
-owner selection, HTTP/mTLS transport and stale-owner retry remain.
+`CellClient` forwarding, live session/certificate verification and mTLS receive
+dispatch are now covered; server-owned owner selection, outbound HTTP transport
+and stale-owner retry remain.
 `crab-http-server` now supplies the
 first compiled repository implementation, including migration, descriptors,
 typed codecs and bindings. Its runtime test

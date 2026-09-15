@@ -138,11 +138,12 @@ original mutation identity and digest for unknown outcomes. `PeerDispatcher`
 rechecks product authorization, resolves only an active local owner, and then
 reuses the canonical local transport rather than opening a second SQL execution
 path. The server composition root now owns one process-session
-`CellRuntime`, validates the compiled registry before admission, and shuts it
-down with the server. Fleet enrollment lookup, mTLS HTTP routing, owner selection
-and bounded stale-owner retry, upgrade migrations, resource-
-derived budgets and repository Cell routing remain; KV, SQL, Queue and Workflow
-primitive handles are complete for local routing.
+`CellRuntime`, validates the compiled registry before admission, publishes its
+signed node session, serves its management router through mandatory fleet mTLS,
+and shuts the heartbeat and runtime down with the server. Owner selection and
+bounded stale-owner retry, upgrade migrations, complete resource-derived
+budgets and repository Cell routing remain; KV, SQL, Queue and Workflow primitive
+handles are complete for local routing.
 The object-store node directory now strict-creates and conditionally refreshes
 canonical, short-lived advertisements. Each record binds one nonzero boot
 session, HTTPS endpoint, fleet and certificate digests, compiled release,
@@ -151,8 +152,12 @@ capacity hints under a signed canonical encoding. Loads verify the signature,
 scope, time and exact session path before returning an ETag-bearing observation;
 ambiguous creates/refreshes adopt only the exact published record. The peer
 pre-decoder can extract the structurally valid but explicitly untrusted session
-claim for that lookup. Server key/certificate loading, mTLS binding and the
-three-second advertisement supervisor remain.
+claim for that lookup. The server now loads only CA-trusted Ed25519 PKCS#8
+identities, proves the leaf certificate covers its advertised host and both TLS
+roles, binds its SHA-256 and public key to enrollment, measures current memory,
+volume and CPU hints, strict-publishes before readiness and refreshes every three
+seconds. A failed refresh retries while the current advertisement remains safely
+valid; approaching its expiry withdraws readiness and drains the process.
 `crab-http-server` now retains repository UUIDs in its live catalog index and
 implements the receiving product boundary: it accepts only the repository
 namespace, maps the target partition to the stable repository UUID, rechecks the
@@ -161,8 +166,10 @@ rejects revoked membership before dispatch. Its production startup also builds
 one `LocalCellResolver` from the authoritative application identity/layout. The
 resolver reloads the verified Cell catalog entry and control, then returns a
 handle only when the process runtime still owns the exact published
-incarnation/code/schema. The management mTLS route has not yet composed these
-pieces into a reachable endpoint.
+incarnation/code/schema. `POST /internal/cells/v1/forward` is registered only on
+the mTLS management listener, requires the exact Protobuf media type and bounded
+body, authenticates the live node session before dispatch, and returns a strict
+Protobuf reply. Outbound owner selection and the peer HTTP client remain.
 The server now compiles and binds the first repository module slice: stable
 create-issue/create-comment commands, get-issue/get-comment queries, bounded
 codecs, and the schema that owns repository identity, sequences, issues and

@@ -13,13 +13,12 @@ use axum::{
     routing::{get, post},
 };
 use bytes::Bytes;
-use crab_cell_runtime::{ApplicationIdentityStore, CellRuntime, SessionId, SqlWorkerPool};
+use crab_cell_runtime::{CellRuntime, NodeDirectory, SessionId, SqlWorkerPool};
 use crab_metadata::manifest_store::read_manifest;
 use crab_remote_git::{
     OperationLimits, RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
 };
 use crab_storage::{StorageError, Store, StoreLayout};
-use object_store::path::Path as ObjectPath;
 use serde_json::json;
 use tokio::sync::{Mutex, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
@@ -323,7 +322,7 @@ pub(crate) struct Server {
     pub repositories: RepositorySet,
     pub runtime: Arc<RemoteGitRuntime>,
     pub cell_runtime: CellRuntime,
-    pub(crate) cell_resolver: Option<crate::peer::LocalCellResolver>,
+    pub(crate) peer_receiver: Option<crate::peer::PeerReceiver>,
     pub options: RepositoryOptions,
     pub cursor_key: [u8; 32],
     pub admission: Semaphore,
@@ -335,6 +334,7 @@ pub(crate) struct Server {
     pub auth: Option<Authentication>,
     catalog: Option<CatalogStore>,
     catalog_healthy: AtomicBool,
+    pub(crate) node_healthy: AtomicBool,
     metrics: crate::metrics::Metrics,
 }
 
@@ -417,29 +417,55 @@ pub async fn serve(config: Config) -> Result<()> {
     )?;
     let transfer_admission = transfer_admission(&catalog);
     probe_storage_contract(&catalog, &transfer_admission).await?;
-    crate::cells::verify_startup_release(&config).await?;
-    let identities = ApplicationIdentityStore::new(
-        catalog.root().store.clone(),
-        ObjectPath::from(catalog.root().prefix.clone()),
+    let startup = crate::cells::verify_startup_release(&config).await?;
+    let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
+    let session = SessionId::from_bytes(Uuid::now_v7().into_bytes());
+    let registry = Arc::new(startup.registry);
+    let directory = NodeDirectory::new(
+        startup.layout.clone(),
+        peer_tls.fleet(),
+        startup.image,
+        registry.release_digest(),
     );
-    let cell_identity = identities
-        .load()
-        .await?
-        .ok_or(crate::Error::Config("Cell application is not initialized"))?;
-    let cell_layout = identities.layout(cell_identity).await?;
+    let node_publisher = crate::peer::NodePublisher::new(
+        directory.clone(),
+        peer_tls.signing_key().clone(),
+        session,
+        config.cells.peer_advertise.to_string(),
+        peer_tls.fleet(),
+        peer_tls.certificate(),
+        startup.image,
+        registry.release_digest(),
+        registry.module_digests(),
+        config.cells.data_dir.clone(),
+    )?;
     // A pod must prove the complete storage contract before it owns any socket;
     // otherwise incomplete cloud permissions can look partially started.
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
     let metrics = crate::metrics::Metrics::new()?;
-    let cell_runtime = start_cell_runtime(SessionId::from_bytes(Uuid::now_v7().into_bytes()))?;
-    let cell_resolver =
-        crate::peer::LocalCellResolver::new(cell_layout, cell_identity, cell_runtime.clone());
+    let cell_runtime = start_cell_runtime(session)?;
+    let cell_resolver = crate::peer::LocalCellResolver::new(
+        startup.layout.clone(),
+        startup.identity,
+        cell_runtime.clone(),
+    );
+    let peer_receiver =
+        crate::peer::PeerReceiver::new(directory.clone(), Arc::clone(&registry), cell_resolver);
+    let advertised = match node_publisher.publish_initial().await {
+        Ok(advertised) => advertised,
+        Err(error) => {
+            if let Err(shutdown_error) = cell_runtime.shutdown().await {
+                tracing::warn!(error = %shutdown_error, "Cell runtime startup cleanup failed");
+            }
+            return Err(error);
+        }
+    };
     let server = Arc::new(Server {
         repositories: repositories.into(),
         runtime: Arc::clone(&runtime),
         cell_runtime,
-        cell_resolver: Some(cell_resolver),
+        peer_receiver: Some(peer_receiver),
         cancellation: cancellation.clone(),
         receives: tokio_util::task::TaskTracker::new(),
         options,
@@ -454,6 +480,7 @@ pub async fn serve(config: Config) -> Result<()> {
         auth,
         catalog: Some(catalog),
         catalog_healthy: AtomicBool::new(true),
+        node_healthy: AtomicBool::new(true),
         metrics,
     });
     let app = router(Arc::clone(&server));
@@ -468,18 +495,27 @@ pub async fn serve(config: Config) -> Result<()> {
     let refresh_server = Arc::clone(&server);
     let refresh =
         tokio::spawn(async move { refresh_catalog(refresh_server, catalog_version).await });
+    let node_server = Arc::clone(&server);
+    let heartbeat = tokio::spawn(async move { node_publisher.run(node_server, advertised).await });
     let public_shutdown = cancellation.clone();
     let management_shutdown = cancellation.clone();
     let result = tokio::try_join!(
         axum::serve(listener, app).with_graceful_shutdown(public_shutdown.cancelled_owned()),
-        axum::serve(management_listener, management)
-            .with_graceful_shutdown(management_shutdown.cancelled_owned()),
+        axum::serve(
+            peer_tls.listener(management_listener),
+            management.into_make_service_with_connect_info::<crate::peer_tls::PeerTlsIdentity>(),
+        )
+        .with_graceful_shutdown(management_shutdown.cancelled_owned()),
     );
     cancellation.cancel();
     signal.abort();
     if let Err(error) = refresh.await {
         tracing::warn!(error = %error, "repository catalog refresh task failed");
     }
+    let heartbeat = match heartbeat.await {
+        Ok(result) => result,
+        Err(error) => Err(error.into()),
+    };
     // Axum has drained its connections, so no handler can register a new
     // receive after the tracker becomes empty. Close readers only after that drain.
     server.cancellation.cancel();
@@ -492,6 +528,7 @@ pub async fn serve(config: Config) -> Result<()> {
     result
         .map(|_| ())
         .map_err(crate::Error::from)
+        .and(heartbeat)
         .and(maintenance)
         .and(runtimes)
 }
@@ -713,6 +750,12 @@ fn management_router(server: Arc<Server>) -> Router {
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/readyz", get(readiness))
         .route("/metrics", get(render_metrics))
+        .route(
+            "/internal/cells/v1/forward",
+            post(crate::peer::forward).layer(axum::extract::DefaultBodyLimit::max(
+                crab_cell_runtime::MAX_PEER_REQUEST_BYTES,
+            )),
+        )
         .with_state(server)
 }
 
@@ -769,8 +812,11 @@ async fn check_readiness(server: &Server) -> Result<()> {
     if server.cell_runtime.is_shutting_down() {
         return Err(crate::Error::Config("embedded Cell runtime is draining"));
     }
-    if server.catalog.is_some() && server.cell_resolver.is_none() {
-        return Err(crate::Error::Config("Cell peer resolver is unavailable"));
+    if server.catalog.is_some() && server.peer_receiver.is_none() {
+        return Err(crate::Error::Config("Cell peer receiver is unavailable"));
+    }
+    if !server.node_healthy.load(Ordering::Acquire) {
+        return Err(crate::Error::Config("Cell node advertisement is unhealthy"));
     }
     if !server.catalog_healthy.load(Ordering::Acquire) {
         return Err(crate::Error::Config("catalog refresh is unhealthy"));
@@ -1074,7 +1120,7 @@ mod tests {
             repositories: RepositorySet::from(BTreeMap::<(String, String), Repository>::new()),
             runtime: Arc::clone(&runtime),
             cell_runtime: start_test_cell_runtime(),
-            cell_resolver: None,
+            peer_receiver: None,
             options: RepositoryOptions::default(),
             cursor_key: [0; 32],
             admission: Semaphore::new(1),
@@ -1090,6 +1136,7 @@ mod tests {
             auth: None,
             catalog: None,
             catalog_healthy: AtomicBool::new(false),
+            node_healthy: AtomicBool::new(false),
             metrics: crate::metrics::Metrics::new().unwrap(),
         });
         let app = router(Arc::clone(&server));

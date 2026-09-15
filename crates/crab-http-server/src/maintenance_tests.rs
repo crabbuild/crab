@@ -45,7 +45,7 @@ pub(super) async fn fixture() -> Arc<Server> {
         .into(),
         runtime: Arc::new(RemoteGitRuntime::default()),
         cell_runtime: start_test_cell_runtime(),
-        cell_resolver: None,
+        peer_receiver: None,
         options: RepositoryOptions::default(),
         cursor_key: [0; 32],
         admission: Semaphore::new(16),
@@ -61,6 +61,7 @@ pub(super) async fn fixture() -> Arc<Server> {
         auth: None,
         catalog: None,
         catalog_healthy: AtomicBool::new(false),
+        node_healthy: AtomicBool::new(false),
         metrics: crate::metrics::Metrics::new().unwrap(),
     })
 }
@@ -141,16 +142,26 @@ fn enable_catalog_readiness(server: &mut Arc<Server>) {
         crab_cell_runtime::TenantId::from_bytes([1; 16]),
         crab_cell_runtime::ApplicationId::from_bytes([2; 16]),
     );
-    server.cell_resolver = Some(crate::peer::LocalCellResolver::new(
-        crab_storage::CellStorageLayout::new(
-            store,
-            object_store::path::Path::from("catalog"),
-            *identity.application().as_bytes(),
+    let layout = crab_storage::CellStorageLayout::new(
+        store,
+        object_store::path::Path::from("catalog"),
+        *identity.application().as_bytes(),
+    );
+    let registry = Arc::new(crate::cells::compiled_registry().unwrap());
+    let resolver =
+        crate::peer::LocalCellResolver::new(layout.clone(), identity, server.cell_runtime.clone());
+    server.peer_receiver = Some(crate::peer::PeerReceiver::new(
+        crab_cell_runtime::NodeDirectory::new(
+            layout,
+            crab_cell_runtime::Digest::from_bytes([3; 32]),
+            crab_cell_runtime::Digest::from_bytes([4; 32]),
+            registry.release_digest(),
         ),
-        identity,
-        server.cell_runtime.clone(),
+        registry,
+        resolver,
     ));
     server.catalog_healthy.store(true, Ordering::Release);
+    server.node_healthy.store(true, Ordering::Release);
 }
 
 #[tokio::test]

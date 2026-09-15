@@ -455,6 +455,15 @@ impl Registry {
         self.module_codes.get(module).copied()
     }
 
+    /// Returns the sorted module-code inventory advertised by eligible nodes.
+    #[must_use]
+    pub fn module_digests(&self) -> Vec<Digest> {
+        let mut digests = self.module_codes.values().copied().collect::<Vec<_>>();
+        digests.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        digests.dedup();
+        digests
+    }
+
     /// Reports whether this binary can execute one authoritative Cell pair.
     #[must_use]
     pub fn supports_cell(

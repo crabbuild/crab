@@ -18,7 +18,7 @@ use protobuf::{
 const PROTOCOL_VERSION: u32 = 1;
 const MAX_AUTHORIZATION_BYTES: usize = 16 * 1024;
 const MAX_OPERATION_BYTES: usize = 1024 * 1024;
-const MAX_REQUEST_BYTES: usize = MAX_AUTHORIZATION_BYTES + MAX_OPERATION_BYTES + 128;
+pub const MAX_PEER_REQUEST_BYTES: usize = MAX_AUTHORIZATION_BYTES + MAX_OPERATION_BYTES + 128;
 const MAX_ACTIONS: usize = 128;
 const MAX_PRINCIPAL_BYTES: usize = 512;
 const MAX_AUTH_LIFETIME_MS: i64 = 60_000;
@@ -149,7 +149,7 @@ impl PeerVerifier {
 
     /// Strictly decodes and authenticates one request before actor admission.
     pub fn verify(&self, input: &[u8], now_ms: i64) -> Result<VerifiedPeerRequest> {
-        if input.len() > MAX_REQUEST_BYTES {
+        if input.len() > MAX_PEER_REQUEST_BYTES {
             return Err(Error::Peer("request exceeds peer byte limit"));
         }
         let fields = validate_message(input, MessageKind::PeerRequest)?;
@@ -214,7 +214,7 @@ impl PeerVerifier {
 /// Callers use this value solely to locate an enrollment key. The returned
 /// session is not authenticated until [`PeerVerifier::verify`] succeeds.
 pub fn claimed_peer_session(input: &[u8]) -> Result<SessionId> {
-    if input.len() > MAX_REQUEST_BYTES {
+    if input.len() > MAX_PEER_REQUEST_BYTES {
         return Err(Error::Peer("request exceeds peer byte limit"));
     }
     let fields = validate_message(input, MessageKind::PeerRequest)?;
@@ -307,7 +307,7 @@ impl VerifiedPeerRequest {
 pub fn encode_peer_reply(reply: &wire::PeerReply) -> Result<Vec<u8>> {
     validate_reply(reply)?;
     let encoded = reply.encode_to_vec();
-    if encoded.len() > MAX_REQUEST_BYTES {
+    if encoded.len() > MAX_PEER_REQUEST_BYTES {
         return Err(Error::Peer("reply exceeds peer byte limit"));
     }
     Ok(encoded)
@@ -315,7 +315,7 @@ pub fn encode_peer_reply(reply: &wire::PeerReply) -> Result<Vec<u8>> {
 
 /// Strictly decodes a reply without allowing Prost to discard unknown fields.
 pub fn decode_peer_reply(input: &[u8]) -> Result<wire::PeerReply> {
-    if input.len() > MAX_REQUEST_BYTES {
+    if input.len() > MAX_PEER_REQUEST_BYTES {
         return Err(Error::Peer("reply exceeds peer byte limit"));
     }
     let fields = validate_message(input, MessageKind::PeerReply)?;
@@ -701,7 +701,7 @@ fn encode_request(
     encode_varint_field(&mut output, 3, u64::from(hop_count));
     encode_varint_field(&mut output, 4, u64::from(remaining_ms));
     encode_bytes_field(&mut output, operation_tag, operation)?;
-    if output.len() > MAX_REQUEST_BYTES {
+    if output.len() > MAX_PEER_REQUEST_BYTES {
         return Err(Error::Peer("request exceeds peer byte limit"));
     }
     Ok(output)

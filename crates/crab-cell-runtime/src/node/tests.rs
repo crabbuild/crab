@@ -156,6 +156,7 @@ async fn request_requires_the_live_sessions_mtls_certificate_and_signing_key() {
         Digest::from_bytes([5; 32]),
         key,
     );
+    let certificate_key = signer.verifying_key().to_bytes();
     let request = signer
         .sign(
             PeerPrincipal {
@@ -182,13 +183,29 @@ async fn request_requires_the_live_sessions_mtls_certificate_and_signing_key() {
 
     assert!(
         directory
-            .verify_peer_request(&request, Digest::from_bytes([3; 32]), NOW_MS + 1)
+            .verify_peer_request(
+                &request,
+                Digest::from_bytes([3; 32]),
+                certificate_key,
+                NOW_MS + 1,
+            )
             .await
             .is_ok()
     );
     assert!(matches!(
         directory
-            .verify_peer_request(&request, Digest::from_bytes([11; 32]), NOW_MS + 1)
+            .verify_peer_request(
+                &request,
+                Digest::from_bytes([11; 32]),
+                certificate_key,
+                NOW_MS + 1,
+            )
+            .await,
+        Err(Error::PeerAuthorization(_))
+    ));
+    assert!(matches!(
+        directory
+            .verify_peer_request(&request, Digest::from_bytes([3; 32]), [12; 32], NOW_MS + 1,)
             .await,
         Err(Error::PeerAuthorization(_))
     ));

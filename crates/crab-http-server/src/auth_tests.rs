@@ -229,7 +229,7 @@ impl Harness {
             repositories: BTreeMap::from([(("team".into(), "private".into()), repository)]).into(),
             runtime: Arc::new(RemoteGitRuntime::default()),
             cell_runtime: start_test_cell_runtime(),
-            cell_resolver: None,
+            peer_receiver: None,
             options: RepositoryOptions::default(),
             cursor_key: [7; 32],
             admission: Semaphore::new(16),
@@ -245,6 +245,7 @@ impl Harness {
             auth: Some(auth),
             catalog: None,
             catalog_healthy: AtomicBool::new(false),
+            node_healthy: AtomicBool::new(false),
             metrics: crate::metrics::Metrics::new().unwrap(),
         });
         let app = router(Arc::clone(&server));

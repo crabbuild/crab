@@ -18,16 +18,18 @@ that current configuration cannot identify:
 | --- | --- | --- |
 | cells.data_dir | Required absolute directory on private node volume | SQLite/WAL/scratch need durable filesystem semantics; not present in current HTTP config |
 | cells.peer_advertise | Required HTTPS URL, <=512 bytes, direct Pod/VM endpoint on management_listen | A Service address cannot identify the current owner |
-| cells.peer_identity | Required PEM path containing node key/cert chain | Private mTLS and signed delegation, separate trust from browser login |
+| cells.peer_certificate | Required PEM path containing the leaf-first node certificate chain | Private mTLS identity, separate from browser login |
+| cells.peer_private_key | Required PEM path containing its matching Ed25519 PKCS#8 key | TLS proof and signed peer envelopes use one enrolled key |
 | cells.peer_ca | Required PEM path for fleet trust root | Reject nodes from another fleet |
 
 No separate public/peer port setting: use listen and management_listen. No
 new storage credential or OIDC issuer settings. Detect CPU, effective memory and
 usable local disk from process/cgroup/volume limits; operators adjust Pod/VM
 resources instead of parallel runtime budget knobs. Single-node development is
-one replica with a local test CA and direct loopback endpoint, not an insecure
-peer bypass. Existing healthcheck must gain management CA verification; never
-disable TLS verification to preserve an old probe invocation.
+one replica with a local test CA and direct endpoint, not an insecure peer
+bypass. The healthcheck uses the configured client identity, only the configured
+fleet CA roots and the advertised HTTPS URL; never disable TLS verification to
+preserve an old probe invocation.
 
 The peer certificate uses an Ed25519 enrollment key; the same key signs private
 delegation envelopes. Enrollment binds the fleet trust-root fingerprint,
@@ -62,8 +64,16 @@ identity or inventory changes and progress/time regression; ambiguous writes
 are accepted only when an exact successor is readable. `claimed_peer_session`
 strictly validates the request structure before returning an untrusted lookup
 key; only subsequent advertisement, certificate and envelope verification can
-authenticate it. Server configuration, PEM/Ed25519 extraction, mTLS certificate
-matching and the three-second publisher remain to implement.
+authenticate it. `crab-http-server` now loads and verifies the leaf-first chain,
+PKCS#8 key and CA set before binding; requires the same leaf to pass client and
+advertised-host server validation; derives the fleet digest from the sorted CA
+DER set; and carries the verified leaf SHA-256 plus Ed25519 SPKI from the TLS
+connection into request verification. It exclusively creates the boot-session
+directory, publishes before readiness, refreshes every three seconds and drains
+when a refresh cannot complete before the existing advertisement's one-second
+expiry margin. Capacity hints currently measure OS/cgroup-available memory,
+volume free space and 1–16 CPU job credits; full budget reservation and admission
+remain.
 
 ## Resource profiles and capacity targets
 
@@ -344,8 +354,11 @@ closes the fixed pool and joins all SQL worker threads before process return.
 The initial wiring uses CPU-derived 1..16 workers, a 10,000 active-Cell ceiling and
 a 32 MiB node mailbox byte semaphore. Those are conservative implementation
 constants, not a completed resource-profile contract. Effective cgroup memory,
-local-volume/FD admission, configured Cell directories, activity cancellation,
-the 110-second escalation and peer advertisement remain delivery work.
+local-volume/FD admission, full use of the configured Cell directory, activity
+cancellation and the 110-second escalation remain delivery work. Node identity,
+mandatory management mTLS, initial advertisement, refresh supervision and an
+mTLS-aware binary healthcheck are implemented; production Kubernetes and ECS
+manifests still need per-node direct endpoints and per-node certificate delivery.
 
 ## Backup, restore and offline collection
 

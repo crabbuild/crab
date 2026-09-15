@@ -236,17 +236,26 @@ async fn cells(
 }
 
 async fn healthcheck(config: &crab_http_server::Config) -> crab_http_server::Result<()> {
-    let mut address = config.management_listen;
-    if address.ip().is_unspecified() {
-        address.set_ip(if address.is_ipv4() {
-            std::net::Ipv4Addr::LOCALHOST.into()
-        } else {
-            std::net::Ipv6Addr::LOCALHOST.into()
-        });
-    }
-    let url = format!("http://{address}/readyz");
-    reqwest::Client::builder()
+    let mut identity = std::fs::read(&config.cells.peer_certificate)?;
+    identity.extend_from_slice(&std::fs::read(&config.cells.peer_private_key)?);
+    let identity = reqwest::Identity::from_pem(&identity)
+        .map_err(|source| crab_http_server::Error::Healthcheck { source })?;
+    let authorities = reqwest::Certificate::from_pem_bundle(&std::fs::read(&config.cells.peer_ca)?)
+        .map_err(|source| crab_http_server::Error::Healthcheck { source })?;
+    let url = config
+        .cells
+        .peer_advertise
+        .join("readyz")
+        .map_err(|_| crab_http_server::Error::Config("cells.peer_advertise is invalid"))?;
+    let mut client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        .https_only(true)
+        .identity(identity)
+        .tls_built_in_root_certs(false);
+    for authority in authorities {
+        client = client.add_root_certificate(authority);
+    }
+    client
         .build()
         .map_err(|source| crab_http_server::Error::Healthcheck { source })?
         .get(url)

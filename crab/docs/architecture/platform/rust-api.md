@@ -586,8 +586,14 @@ current configured issuer, subject membership, access level and exact registered
 repository action, and builds a `LocalCellResolver` from the authoritative
 application identity at startup. That resolver reloads catalog proof and control
 and delegates to `CellRuntime::local_handle`, so it cannot serve a stale local
-incarnation. The next routing slice must read a cached owner hint; local requests
-go to CellHandle, remote requests go
+incarnation. The management listener now requires a CA-verified Ed25519 client
+certificate for every connection. Its private forwarding route checks the exact
+media type and byte limit, matches both the leaf SHA-256 and SPKI to the live
+signed node advertisement, verifies the peer envelope, reauthorizes it and then
+dispatches through that resolver. Health, readiness and metrics use the same
+mTLS listener and the binary healthcheck supplies the configured identity and
+CA. The next routing slice must read a cached owner hint; local requests go to
+CellHandle, remote requests go
 directly to the enrolled owner's advertised endpoint. Maximum two forwards;
 reject a third. On stale-owner response reload origin control once, then route
 or acquire within remaining deadline. Never use the public Service for private

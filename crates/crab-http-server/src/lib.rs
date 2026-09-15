@@ -20,6 +20,7 @@ mod lfs;
 mod maintenance;
 mod metrics;
 mod peer;
+mod peer_tls;
 mod pulls;
 mod receive;
 mod releases;
@@ -30,8 +31,8 @@ mod storage_root;
 mod transfer_admission;
 
 pub use config::{
-    BranchProtection, Config, OidcConfig, RepositoryAccess, RepositoryConfig, RepositoryMember,
-    StorageConfig,
+    BranchProtection, CellsConfig, Config, OidcConfig, RepositoryAccess, RepositoryConfig,
+    RepositoryMember, StorageConfig,
 };
 pub use server::{probe_storage, serve};
 
@@ -90,6 +91,12 @@ pub enum Error {
     Coordination(#[from] crab_coordination::CoordinationError),
     #[error("embedded Cell runtime initialization failed")]
     Cell(#[from] crab_cell_runtime::Error),
+    #[error("private Cell TLS setup failed: {context}")]
+    PeerTls {
+        context: &'static str,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     #[error("object storage preflight failed: {0}")]
     StorageProbe(&'static str),
     #[error("repository initialization failed")]

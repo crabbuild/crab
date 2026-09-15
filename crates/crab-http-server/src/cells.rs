@@ -46,6 +46,13 @@ pub(crate) fn compiled_registry() -> crab_cell_runtime::Result<Registry> {
     builder.finish()
 }
 
+pub(crate) struct VerifiedStartupCells {
+    pub(crate) identity: ApplicationIdentity,
+    pub(crate) layout: CellStorageLayout,
+    pub(crate) registry: Registry,
+    pub(crate) image: Digest,
+}
+
 pub(crate) async fn prepare_release(
     config: &Config,
     expected_revision: u64,
@@ -209,7 +216,7 @@ pub(crate) async fn release_status(config: &Config) -> Result<Vec<u8>> {
         .map_err(Error::from)
 }
 
-pub(crate) async fn verify_startup_release(config: &Config) -> Result<()> {
+pub(crate) async fn verify_startup_release(config: &Config) -> Result<VerifiedStartupCells> {
     let root = StorageRoot::build(&config.storage)?;
     let identities =
         ApplicationIdentityStore::new(root.store.clone(), Path::from(root.prefix.clone()));
@@ -218,14 +225,21 @@ pub(crate) async fn verify_startup_release(config: &Config) -> Result<()> {
         .await?
         .ok_or(Error::Config("Cell application is not initialized"))?;
     let layout = identities.layout(identity).await?;
-    verify_startup_release_at(&layout, identity, &compiled_registry()?).await
+    let registry = compiled_registry()?;
+    let image = verify_startup_release_at(&layout, identity, &registry).await?;
+    Ok(VerifiedStartupCells {
+        identity,
+        layout,
+        registry,
+        image,
+    })
 }
 
 async fn verify_startup_release_at(
     layout: &CellStorageLayout,
     identity: ApplicationIdentity,
     registry: &Registry,
-) -> Result<()> {
+) -> Result<Digest> {
     let releases = ReleaseStore::new(layout.clone(), identity)?;
     let observed = releases
         .load()
@@ -246,7 +260,34 @@ async fn verify_startup_release_at(
             "selected Cell descriptor differs from this binary",
         ));
     }
-    verify_compatible_cells(layout, identity, registry).await
+    verify_compatible_cells(layout, identity, registry).await?;
+    image_digest(observed.record().desired_image())
+}
+
+fn image_digest(image: &str) -> Result<Digest> {
+    let value = image
+        .strip_prefix("sha256:")
+        .ok_or(Error::Config("selected Cell image digest is invalid"))?;
+    if value.len() != 64 {
+        return Err(Error::Config("selected Cell image digest is invalid"));
+    }
+    let mut bytes = [0; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high =
+            image_nibble(pair[0]).ok_or(Error::Config("selected Cell image digest is invalid"))?;
+        let low =
+            image_nibble(pair[1]).ok_or(Error::Config("selected Cell image digest is invalid"))?;
+        bytes[index] = (high << 4) | low;
+    }
+    Ok(Digest::from_bytes(bytes))
+}
+
+const fn image_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
 }
 
 pub(crate) async fn activate_release(config: &Config, expected_revision: u64) -> Result<Vec<u8>> {
