@@ -52,24 +52,31 @@ representation-only `PreparedRoot`; suffix indexes rebuild changed directory
 locators without downloading unselected bodies. Directory reads now share an
 8 MiB process-wide verified-byte cache keyed by Store instance, complete typed
 Cell/incarnation path and node digest; eviction cannot change correctness and
-distinct backing Store instances cannot alias. Complete this package with
-streaming initial directory construction, external-merge compaction, replacing the dense
-capture/activation checksum array. Exact
-Cell roots now load authenticated directory checksums without LTX bodies and
-open a sparse writable continuation through the existing VFS.
+distinct backing Store instances cannot alias. Sparse reads coalesce adjacent
+frames into bounded range requests, while exact-root restore streams those runs
+through exclusive scratch and no-clobber installation. Complete this package
+with streaming initial directory construction, external-merge compaction and
+replacement of the dense capture/activation checksum array. Exact Cell roots
+load authenticated directory checksums without LTX bodies and open a sparse
+writable continuation through the existing VFS.
 Existing standalone `Replica` callers retain their current API; Cell runtime
 code must not call its mutable epoch head.
 
-Current local coverage is in `crates/crab-ltx/tests/cell_roots.rs` and
-`crates/crab-cell-runtime/tests/publication.rs`. Add the remaining cases:
+Current local coverage is in `crates/crab-ltx/tests/cell_roots.rs`,
+`crates/crab-ltx/tests/host_hooks.rs` and
+`crates/crab-cell-runtime/tests/publication.rs`:
 
 - `prepare_does_not_write_mutable_keys`: covered for native, bundled and
   compaction preparation by asserting every emitted key is below `objects/`.
-- `prepared_root_restores_after_source_loss`: real RustFS upload, delete local
-  source, reopen exact root and compare SQL and database checksums.
-- `root_rejects_other_cell_or_incarnation`: reuse a valid digest in another scope.
-- `snapshot_transfers_all_pending_cuts`: interleave transaction/checkpoint/snapshot;
-  verify no local committed cut disappears from the caller-owned batch.
+- `prepared_root_reopens_without_a_mutable_head` removes the local source,
+  streams a byte-identical database, and rejects destination replacement before
+  remote reads; real RustFS repetition remains part of capacity qualification.
+- `root_scope_and_commit_sequence_are_fenced` rejects a valid root reference in
+  another Cell scope.
+- `snapshot_returns_pending_cuts_and_publication_continues` and managed capture
+  tests prove snapshot returns every pending cut needed for continuation.
+- `cell_restore_install_failure_cleans_owned_scratch` proves injected installation
+  failure removes the owned scratch and permits a successful exact retry.
 
 `exact_cell_root_opens_sparse_writer_and_publishes_incrementally` currently
 proves local source deletion, exact sparse activation and successor publication.
@@ -233,12 +240,11 @@ external-merge compaction and directory-backed capture checksum updates. Remove
 whole-DB buffers from active paths; do not preserve a second unbounded
 implementation as fallback.
 
-Add tests `directory_hash_and_coverage_reject_missing_page`,
-`truncate_regrow_cannot_reuse_old_locator`, `changed_cut_loads_only_touched_nodes`,
-`five_gb_restore_stays_within_job_reservation`, and
-`sparse_fault_pool_progresses_under_saturated_sql_workers`. Run large tests in
-dedicated infrastructure. Assert actual peak RSS/scratch and requested bytes,
-not just configured semaphore counts.
+Directory coverage rejection, truncation/regrowth and changed-node read bounds
+have local tests. Add `sparse_fault_pool_progresses_under_saturated_sql_workers`
+locally and the dedicated-infrastructure
+`five_gb_restore_stays_within_job_reservation` capacity test. Assert actual peak
+RSS/scratch and requested bytes, not just configured semaphore counts.
 
 Exit: 5,000 MB incompressible source-loss restore, low-disk failure and concurrent
 capture/compaction pass without memory proportional to database size.
