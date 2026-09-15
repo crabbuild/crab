@@ -59,10 +59,11 @@ impl<M: MaintenanceModule> Command for MaintenanceTickCommand<M> {
         }
         let SchedulerTickOutcome { processed } = scheduler_tick_at(
             context.primitive_transaction(),
+            context.target(),
             context.sequence(),
             context.now_ms(),
             M::WORKFLOW_DEFINITIONS,
-            M::QUEUE_DEAD_LETTER.map(|target| (context.target().clone(), target)),
+            M::QUEUE_DEAD_LETTER,
         )?;
         Ok(CommandResult::Success(MaintenanceTickOutcome::Applied {
             processed,

@@ -6,7 +6,7 @@ fn connection() -> Connection {
     let mut connection = Connection::open_in_memory().unwrap();
     crate::install_runtime_schema(
         &mut connection,
-        CellId::from_bytes([1; 32]),
+        source_target().cell_id(),
         IncarnationId::from_bytes([2; 16]),
         1,
     )
@@ -84,9 +84,8 @@ fn dead_transition_atomically_links_one_canonical_queue_effect() {
     let mut connection = connection();
     let message_id = insert_leased_message(&mut connection);
     let transaction = connection.transaction().unwrap();
-    let mut effects = EffectBatch::new(&transaction, 1, 10).unwrap();
-    let mut dead_letter =
-        QueueDeadLetterWriter::new(source_target(), dead_letter_target(1), &mut effects);
+    let mut effects = EffectBatch::new(&transaction, &source_target(), 1, 10).unwrap();
+    let mut dead_letter = QueueDeadLetterWriter::new(dead_letter_target(1), &mut effects);
     assert_eq!(
         queue_apply_lease_with_dead_letter(
             &transaction,
@@ -131,9 +130,8 @@ fn dead_payload_is_retained_until_its_effect_is_terminal() {
     let mut connection = connection();
     let message_id = insert_leased_message(&mut connection);
     let transaction = connection.transaction().unwrap();
-    let mut effects = EffectBatch::new(&transaction, 1, 10).unwrap();
-    let mut dead_letter =
-        QueueDeadLetterWriter::new(source_target(), dead_letter_target(1), &mut effects);
+    let mut effects = EffectBatch::new(&transaction, &source_target(), 1, 10).unwrap();
+    let mut dead_letter = QueueDeadLetterWriter::new(dead_letter_target(1), &mut effects);
     queue_apply_lease_with_dead_letter(
         &transaction,
         10,
@@ -194,9 +192,8 @@ fn repeated_ready_expiry_does_not_duplicate_dead_letter() {
             [message_id.as_slice()],
         )
         .unwrap();
-    let mut effects = EffectBatch::new(&transaction, 1, 1).unwrap();
-    let mut dead_letter =
-        QueueDeadLetterWriter::new(source_target(), dead_letter_target(1), &mut effects);
+    let mut effects = EffectBatch::new(&transaction, &source_target(), 1, 1).unwrap();
+    let mut dead_letter = QueueDeadLetterWriter::new(dead_letter_target(1), &mut effects);
     assert_eq!(
         queue_expire_ready_bounded_with_dead_letter(&transaction, 1, 128, Some(&mut dead_letter),)
             .unwrap(),
@@ -222,9 +219,8 @@ fn failed_dead_letter_insert_rolls_back_queue_transition() {
     let mut connection = connection();
     let message_id = insert_leased_message(&mut connection);
     let transaction = connection.transaction().unwrap();
-    let mut effects = EffectBatch::new(&transaction, 1, 10).unwrap();
-    let mut dead_letter =
-        QueueDeadLetterWriter::new(source_target(), dead_letter_target(0), &mut effects);
+    let mut effects = EffectBatch::new(&transaction, &source_target(), 1, 10).unwrap();
+    let mut dead_letter = QueueDeadLetterWriter::new(dead_letter_target(0), &mut effects);
     assert!(
         queue_apply_lease_with_dead_letter(
             &transaction,

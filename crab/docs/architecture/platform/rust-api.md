@@ -491,8 +491,9 @@ static retained-definition inventory, and fixed start/signal/cancel/state IDs;
 `register_workflow` installs their typed codecs and every exact definition-digest
 binding. Signal and activity completion load the stored run digest before
 selecting transition code, so a rollout can start new runs without stranding old
-ones. Registry freeze rejects descriptor, transition-function and
-definition/activity-matrix drift. `WorkflowNamespace` derives its shard solely
+ones. Each definition declares its effect-target namespace set; registry freeze
+rejects descriptor, transition-function, definition/activity-matrix and target-union
+drift. `WorkflowNamespace` derives its shard solely
 from the workflow ID and registry topology, binds the start run identity to the
 runtime mutation identity, returns durable typed rejection for non-applied
 outcomes and supports bounded minimum-receipt state reads. Its integration test
@@ -560,6 +561,9 @@ lease token and cancellation signal. No SQLite transaction spans their future.
 ```rust,ignore
 pub trait WorkflowDefinition: Send + Sync + 'static {
     fn digest(&self) -> Digest;
+    fn effect_targets(&self) -> &'static [NamespaceId] {
+        &[]
+    }
     fn transition(
         &self,
         state: &[u8],
@@ -581,11 +585,7 @@ pub enum WorkflowAction {
         expires_at_ms: i64,
     },
     Timer { due_at_ms: i64 },
-    Effect {
-        destination: CellId,
-        operation: Vec<u8>,
-        expires_at_ms: i64,
-    },
+    Effect { intent: EffectCommandIntent },
 }
 pub trait ActivityHandler: Send + Sync + 'static {
     const TYPE: &'static str;
@@ -601,10 +601,13 @@ and its state/event codecs. Activity is registered generically; private
 type-erasure is an implementation detail, not a dynamic-library ABI. Validate
 `WorkflowDecision` bounds before any writes and apply all actions in the same
 transaction. Action IDs come from `WorkflowContext`, never random callback-local
-state. The current legacy `WorkflowAction::Effect { destination, operation }`
-still stores caller-preencoded bytes; it must move to `EffectCommandIntent`
-before workflow-emitted effects can claim the same takeover-safe typed-delivery
-contract as Queue dead letters.
+state. `WorkflowContext::source()` exposes the validated source target.
+Definitions construct effect targets with the same tenant/application and
+declare every allowed destination namespace through `effect_targets()`; a
+cross-tenant, cross-application or undeclared target is rejected before
+event/state writes. The action contains only `EffectCommandIntent`, so
+definitions cannot persist pre-encoded peer requests or pin an owner
+incarnation.
 
 Use a node-wide Tokio supervisor with at most min(32, 2 * vCPU) running activities
 and byte reservations for input/output. It cycles eligible shards, backs off
@@ -726,14 +729,10 @@ pub fn register_effect_delivery<M: EffectModule>(
 impl EffectBatch {
     pub fn new(
         transaction: &Transaction<'_>,
+        source: &CellTarget,
         command_sequence: u64,
         now_ms: i64,
     ) -> Result<Self>;
-    pub fn insert(
-        &mut self,
-        transaction: &Transaction<'_>,
-        intent: &EffectIntent,
-    ) -> Result<[u8; 32]>;
     pub fn insert_command(
         &mut self,
         transaction: &Transaction<'_>,
@@ -779,12 +778,13 @@ impl<M: EffectModule> EffectSupervisor<M> {
 
 `EffectCommandIntent` carries a validated `CellTarget`, fixed command ID/codec,
 bounded encoded input and expiry. Its stored `EffectRequest` deliberately has no
-destination incarnation. Queue DLQ uses this API. The lower-level `EffectIntent`
-exists for current workflow compatibility but is not a takeover-safe typed
-application surface and remains a migration item.
+destination incarnation. Queue DLQ and Workflow effects use this API. Raw
+insertion is private; there is no public pre-encoded effect application surface.
 
 `WorkflowAction::Effect` is applied through the same `EffectBatch` as other
-transitions in the command. Ordinary workflow commands reconstruct the next
+transitions in the command. Batch creation proves its source `CellTarget`
+derives `sys_meta.cell_id`; Queue and Workflow cannot emit under another Cell's
+identity. Ordinary workflow commands reconstruct the next
 Cell commit sequence from `sys_meta`; Tick constructs the batch from its exact
 `CommandContext::sequence()` and shares it across every due transition. A
 terminal decision may contain only effect actions, never a new timer or

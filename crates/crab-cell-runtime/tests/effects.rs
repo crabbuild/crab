@@ -1,9 +1,9 @@
 use crab_cell_runtime::{
-    ApplicationId, CellId, CellTarget, Digest, EffectBatch, EffectCommandIntent, EffectIntent,
+    ApplicationId, CellId, CellTarget, Digest, EffectBatch, EffectCommandIntent,
     EffectLeaseOutcome, EffectTokenSource, HandlerOutcome, InboxApplyOutcome, InboxDelivery,
     IncarnationId, NamespaceId, TenantId, effect_ack_delivered, effect_claim,
-    effect_cleanup_terminal, effect_insert, effect_validate_claim, inbox_apply,
-    inbox_cleanup_expired, install_runtime_schema, peer_wire,
+    effect_cleanup_terminal, effect_validate_claim, inbox_apply, inbox_cleanup_expired,
+    install_runtime_schema, peer_wire,
 };
 use prost::Message;
 
@@ -36,17 +36,42 @@ fn connection(cell: u8, incarnation: u8) -> crab_ltx::rusqlite::Connection {
     connection
 }
 
-fn intent(destination: CellId, operation: &[u8], expires_at_ms: i64) -> EffectIntent {
-    EffectIntent {
-        destination,
-        operation: operation.to_vec(),
+fn source_target() -> CellTarget {
+    CellTarget::new(
+        TenantId::from_bytes([9; 16]),
+        ApplicationId::from_bytes([10; 16]),
+        NamespaceId::from_bytes([11; 16]),
+        b"source-partition",
+    )
+    .unwrap()
+}
+
+fn source_connection() -> crab_ltx::rusqlite::Connection {
+    let mut connection = crab_ltx::rusqlite::Connection::open_in_memory().unwrap();
+    install_runtime_schema(
+        &mut connection,
+        source_target().cell_id(),
+        IncarnationId::from_bytes([2; 16]),
+        1,
+    )
+    .unwrap();
+    connection
+}
+
+fn command_intent(target: CellTarget, input: &[u8], expires_at_ms: i64) -> EffectCommandIntent {
+    EffectCommandIntent {
+        target,
+        command_id: 1,
+        codec_version: 1,
+        input: input.to_vec(),
         expires_at_ms,
     }
 }
 
 #[test]
 fn command_effect_is_canonical_and_does_not_pin_destination_incarnation() {
-    let mut source = connection(1, 2);
+    let mut source = source_connection();
+    let source_target = source_target();
     let target = CellTarget::new(
         TenantId::from_bytes([3; 16]),
         ApplicationId::from_bytes([4; 16]),
@@ -55,7 +80,7 @@ fn command_effect_is_canonical_and_does_not_pin_destination_incarnation() {
     )
     .unwrap();
     let transaction = source.transaction().unwrap();
-    let mut batch = EffectBatch::new(&transaction, 1, 10).unwrap();
+    let mut batch = EffectBatch::new(&transaction, &source_target, 1, 10).unwrap();
     let effect_id = batch
         .insert_command(
             &transaction,
@@ -81,7 +106,7 @@ fn command_effect_is_canonical_and_does_not_pin_destination_incarnation() {
     assert_eq!(request.encode_to_vec(), operation);
     let identity = request.identity.unwrap();
     assert_eq!(identity.effect_id, effect_id);
-    assert_eq!(identity.source_cell, [1; 32]);
+    assert_eq!(identity.source_cell, source_target.cell_id().as_bytes());
     assert_eq!(identity.source_incarnation, [2; 16]);
     assert_eq!(identity.source_sequence, 1);
     assert_eq!(identity.ordinal, 0);
@@ -89,51 +114,55 @@ fn command_effect_is_canonical_and_does_not_pin_destination_incarnation() {
 }
 
 #[test]
+fn command_effect_rejects_a_source_target_for_another_cell() {
+    let mut source = source_connection();
+    let other = CellTarget::new(
+        source_target().tenant(),
+        source_target().application(),
+        source_target().namespace(),
+        b"another-source",
+    )
+    .unwrap();
+    let transaction = source.transaction().unwrap();
+    assert!(EffectBatch::new(&transaction, &other, 1, 10).is_err());
+}
+
+#[test]
 fn target_commit_and_lost_response_retry_execute_destination_once() {
     const EXPIRES_AT_MS: i64 = 10_000;
     const INBOX_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
-    let source_cell = CellId::from_bytes([1; 32]);
-    let source_incarnation = IncarnationId::from_bytes([2; 16]);
-    let destination = CellId::from_bytes([3; 32]);
-    let mut source = connection(1, 2);
+    let source_target = source_target();
+    let destination = CellTarget::new(
+        TenantId::from_bytes([3; 16]),
+        ApplicationId::from_bytes([4; 16]),
+        NamespaceId::from_bytes([5; 16]),
+        b"destination",
+    )
+    .unwrap();
+    let mut source = source_connection();
     let mut target = connection(3, 4);
 
     let source_transaction = source.transaction().unwrap();
-    let operation = intent(destination, b"apply-value", EXPIRES_AT_MS);
-    let effect_id = effect_insert(
-        &source_transaction,
-        source_cell,
-        source_incarnation,
-        1,
-        0,
-        0,
-        &operation,
-    )
-    .unwrap();
+    let operation = command_intent(destination.clone(), b"apply-value", EXPIRES_AT_MS);
+    let effect_id = EffectBatch::new(&source_transaction, &source_target, 1, 0)
+        .unwrap()
+        .insert_command(&source_transaction, &operation)
+        .unwrap();
     assert_eq!(
-        effect_insert(
-            &source_transaction,
-            source_cell,
-            source_incarnation,
-            1,
-            0,
-            0,
-            &operation,
-        )
-        .unwrap(),
+        EffectBatch::new(&source_transaction, &source_target, 1, 0)
+            .unwrap()
+            .insert_command(&source_transaction, &operation)
+            .unwrap(),
         effect_id
     );
     assert!(
-        effect_insert(
-            &source_transaction,
-            source_cell,
-            source_incarnation,
-            1,
-            0,
-            0,
-            &intent(destination, b"changed", EXPIRES_AT_MS),
-        )
-        .is_err()
+        EffectBatch::new(&source_transaction, &source_target, 1, 0)
+            .unwrap()
+            .insert_command(
+                &source_transaction,
+                &command_intent(destination, b"changed", EXPIRES_AT_MS),
+            )
+            .is_err()
     );
     source_transaction.commit().unwrap();
 
@@ -291,46 +320,40 @@ fn rejected_effect_rolls_back_target_writes_but_publishes_inbox_result() {
 
 #[test]
 fn one_command_cannot_exceed_effect_count_or_byte_limits() {
-    let source_cell = CellId::from_bytes([1; 32]);
-    let incarnation = IncarnationId::from_bytes([2; 16]);
-    let destination = CellId::from_bytes([3; 32]);
-    let mut source = connection(1, 2);
+    let source_target = source_target();
+    let destination = CellTarget::new(
+        TenantId::from_bytes([3; 16]),
+        ApplicationId::from_bytes([4; 16]),
+        NamespaceId::from_bytes([5; 16]),
+        b"destination",
+    )
+    .unwrap();
+    let mut source = source_connection();
     let transaction = source.transaction().unwrap();
+    let mut effects = EffectBatch::new(&transaction, &source_target, 1, 0).unwrap();
     assert!(
-        effect_insert(
-            &transaction,
-            source_cell,
-            incarnation,
-            1,
-            0,
-            0,
-            &intent(destination, &vec![0; 1 << 20], 10_000),
-        )
-        .is_err()
+        effects
+            .insert_command(
+                &transaction,
+                &command_intent(destination.clone(), &vec![0; 1 << 20], 10_000),
+            )
+            .is_err()
     );
     for ordinal in 0..128 {
-        effect_insert(
-            &transaction,
-            source_cell,
-            incarnation,
-            1,
-            ordinal,
-            0,
-            &intent(destination, &[ordinal as u8], 10_000),
-        )
-        .unwrap();
+        effects
+            .insert_command(
+                &transaction,
+                &command_intent(destination.clone(), &[ordinal as u8], 10_000),
+            )
+            .unwrap();
     }
     assert!(
-        effect_insert(
-            &transaction,
-            source_cell,
-            incarnation,
-            1,
-            128,
-            0,
-            &intent(destination, b"overflow", 10_000),
-        )
-        .is_err()
+        effects
+            .insert_command(
+                &transaction,
+                &command_intent(destination, b"overflow", 10_000),
+            )
+            .is_err()
     );
     transaction.commit().unwrap();
     assert_eq!(
@@ -344,21 +367,20 @@ fn one_command_cannot_exceed_effect_count_or_byte_limits() {
 
 #[test]
 fn manual_retry_preserves_identity_and_never_reopens_terminal_effect() {
-    let source_cell = CellId::from_bytes([1; 32]);
-    let incarnation = IncarnationId::from_bytes([2; 16]);
-    let destination = CellId::from_bytes([3; 32]);
-    let mut source = connection(1, 2);
-    let transaction = source.transaction().unwrap();
-    effect_insert(
-        &transaction,
-        source_cell,
-        incarnation,
-        1,
-        0,
-        0,
-        &intent(destination, b"work", 5_100),
+    let source_target = source_target();
+    let destination = CellTarget::new(
+        TenantId::from_bytes([3; 16]),
+        ApplicationId::from_bytes([4; 16]),
+        NamespaceId::from_bytes([5; 16]),
+        b"destination",
     )
     .unwrap();
+    let mut source = source_connection();
+    let transaction = source.transaction().unwrap();
+    EffectBatch::new(&transaction, &source_target, 1, 0)
+        .unwrap()
+        .insert_command(&transaction, &command_intent(destination, b"work", 5_100))
+        .unwrap();
     let mut tokens = Tokens(0);
     let claim = effect_claim(&transaction, 0, 1, 5_000, &mut tokens)
         .unwrap()

@@ -65,9 +65,8 @@ impl EffectState {
     }
 }
 
-/// One pre-resolved destination operation emitted by a source command.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EffectIntent {
+struct EffectIntent {
     pub destination: CellId,
     pub operation: Vec<u8>,
     pub expires_at_ms: i64,
@@ -88,7 +87,7 @@ pub struct EffectCommandIntent {
 /// One batch must be shared by every primitive transition performed by the
 /// same Cell command so each emitted effect receives a unique ordinal.
 pub struct EffectBatch {
-    cell: CellId,
+    source: CellTarget,
     incarnation: IncarnationId,
     sequence: u64,
     now_ms: i64,
@@ -96,8 +95,13 @@ pub struct EffectBatch {
 }
 
 impl EffectBatch {
-    /// Reconstructs the authoritative source identity from the command transaction.
-    pub fn new(transaction: &Transaction<'_>, sequence: u64, now_ms: i64) -> Result<Self> {
+    /// Verifies the supplied source against the authoritative command transaction.
+    pub fn new(
+        transaction: &Transaction<'_>,
+        source: &CellTarget,
+        sequence: u64,
+        now_ms: i64,
+    ) -> Result<Self> {
         if sequence == 0 {
             return Err(Error::Command("effect batch sequence is zero"));
         }
@@ -118,11 +122,17 @@ impl EffectBatch {
                 "effect batch sequence is not the next Cell commit",
             ));
         }
+        let cell = CellId::from_bytes(
+            cell.try_into()
+                .map_err(|_| Error::Command("invalid stored effect source Cell"))?,
+        );
+        if source.cell_id() != cell {
+            return Err(Error::Command(
+                "effect source target does not match its Cell",
+            ));
+        }
         Ok(Self {
-            cell: CellId::from_bytes(
-                cell.try_into()
-                    .map_err(|_| Error::Command("invalid stored effect source Cell"))?,
-            ),
+            source: source.clone(),
             incarnation: IncarnationId::from_bytes(
                 incarnation
                     .try_into()
@@ -134,35 +144,20 @@ impl EffectBatch {
         })
     }
 
-    /// Inserts one intention and advances the command-wide ordinal.
-    pub fn insert(
-        &mut self,
-        transaction: &Transaction<'_>,
-        intent: &EffectIntent,
-    ) -> Result<[u8; 32]> {
-        let ordinal = self.take_ordinal()?;
-        effect_insert(
-            transaction,
-            self.cell,
-            self.incarnation,
-            self.sequence,
-            ordinal,
-            self.now_ms,
-            intent,
-        )
-    }
-
     /// Inserts one canonical Cell command without pinning a destination owner incarnation.
     pub fn insert_command(
         &mut self,
         transaction: &Transaction<'_>,
         intent: &EffectCommandIntent,
     ) -> Result<[u8; 32]> {
-        if intent.command_id == 0 || intent.codec_version == 0 {
-            return Err(Error::Command("invalid effect Cell command identifier"));
-        }
+        validate_effect_command_intent(self.now_ms, intent)?;
         let ordinal = self.take_ordinal()?;
-        let id = effect_id(self.cell, self.incarnation, self.sequence, ordinal);
+        let id = effect_id(
+            self.source.cell_id(),
+            self.incarnation,
+            self.sequence,
+            ordinal,
+        );
         let operation = wire::EffectRequest {
             target: Some(wire::Target {
                 tenant_id: intent.target.tenant().as_bytes().to_vec(),
@@ -175,7 +170,7 @@ impl EffectBatch {
             destination_incarnation: Vec::new(),
             identity: Some(wire::EffectIdentity {
                 effect_id: id.to_vec(),
-                source_cell: self.cell.as_bytes().to_vec(),
+                source_cell: self.source.cell_id().as_bytes().to_vec(),
                 source_incarnation: self.incarnation.as_bytes().to_vec(),
                 source_sequence: self.sequence,
                 ordinal,
@@ -192,7 +187,7 @@ impl EffectBatch {
         .encode_to_vec();
         effect_insert(
             transaction,
-            self.cell,
+            self.source.cell_id(),
             self.incarnation,
             self.sequence,
             ordinal,
@@ -207,6 +202,10 @@ impl EffectBatch {
 
     pub(crate) const fn source_incarnation(&self) -> IncarnationId {
         self.incarnation
+    }
+
+    pub(crate) const fn source_target(&self) -> &CellTarget {
+        &self.source
     }
 
     fn take_ordinal(&mut self) -> Result<u32> {
@@ -299,7 +298,7 @@ pub enum InboxApplyOutcome {
 }
 
 /// Inserts one immutable effect intention inside its source command.
-pub fn effect_insert(
+fn effect_insert(
     transaction: &Transaction<'_>,
     cell: CellId,
     incarnation: IncarnationId,
@@ -366,7 +365,7 @@ pub fn effect_insert(
     Ok(id)
 }
 
-pub(crate) fn validate_effect_intent(now_ms: i64, intent: &EffectIntent) -> Result<()> {
+fn validate_effect_intent(now_ms: i64, intent: &EffectIntent) -> Result<()> {
     validate_now(now_ms)?;
     if intent.operation.is_empty()
         || intent.operation.len() > MAX_EFFECT_OPERATION_BYTES
@@ -376,6 +375,48 @@ pub(crate) fn validate_effect_intent(now_ms: i64, intent: &EffectIntent) -> Resu
         return Err(Error::Command("invalid effect intention"));
     }
     Ok(())
+}
+
+pub(crate) fn validate_effect_command_intent(
+    now_ms: i64,
+    intent: &EffectCommandIntent,
+) -> Result<()> {
+    if intent.command_id == 0 || intent.codec_version == 0 {
+        return Err(Error::Command("invalid effect Cell command identifier"));
+    }
+    let operation = wire::EffectRequest {
+        target: Some(wire::Target {
+            tenant_id: intent.target.tenant().as_bytes().to_vec(),
+            application_id: intent.target.application().as_bytes().to_vec(),
+            namespace_id: intent.target.namespace().as_bytes().to_vec(),
+            partition: intent.target.partition().to_vec(),
+        }),
+        destination_incarnation: Vec::new(),
+        identity: Some(wire::EffectIdentity {
+            effect_id: vec![u8::MAX; 32],
+            source_cell: vec![u8::MAX; 32],
+            source_incarnation: vec![u8::MAX; 16],
+            source_sequence: u64::MAX,
+            ordinal: u32::MAX,
+            expires_at_ms: intent.expires_at_ms,
+        }),
+        operation: Some(wire::effect_request::Operation::CellCommand(
+            wire::CellCommand {
+                command_id: intent.command_id,
+                codec_version: intent.codec_version,
+                input: intent.input.clone(),
+            },
+        )),
+    }
+    .encode_to_vec();
+    validate_effect_intent(
+        now_ms,
+        &EffectIntent {
+            destination: intent.target.cell_id(),
+            operation,
+            expires_at_ms: intent.expires_at_ms,
+        },
+    )
 }
 
 /// Reclaims expired leases and claims bounded due effects for private delivery.

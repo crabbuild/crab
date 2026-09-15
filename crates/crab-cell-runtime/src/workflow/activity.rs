@@ -307,14 +307,16 @@ pub fn workflow_extend_activity(
 /// Completes, fails or reschedules one exact activity attempt atomically.
 pub fn workflow_complete_activity(
     transaction: &Transaction<'_>,
+    source: &crate::CellTarget,
     now_ms: i64,
     completion: &ActivityCompletion,
     definition: &dyn WorkflowDefinition,
 ) -> Result<ActivityCompletionOutcome> {
-    let mut effects = super::next_effect_batch(transaction, now_ms)?;
+    let mut effects = super::next_effect_batch(transaction, source, now_ms)?;
     workflow_complete_activity_with_effects(
         transaction,
         &mut effects,
+        source,
         now_ms,
         completion,
         definition,
@@ -324,6 +326,7 @@ pub fn workflow_complete_activity(
 pub(super) fn workflow_complete_activity_with_effects(
     transaction: &Transaction<'_>,
     effects: &mut EffectBatch,
+    source: &crate::CellTarget,
     now_ms: i64,
     completion: &ActivityCompletion,
     definition: &dyn WorkflowDefinition,
@@ -373,7 +376,8 @@ pub(super) fn workflow_complete_activity_with_effects(
     }
 
     let event = completion_event(completion);
-    let (sequence, decision) = prepare_transition(transaction, &run, definition, &event, now_ms)?;
+    let (sequence, decision) =
+        prepare_transition(transaction, source, &run, definition, &event, now_ms)?;
     update_completion(
         transaction,
         completion,

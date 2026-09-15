@@ -1,8 +1,9 @@
 use crab_cell_runtime::{
-    CellId, Digest, IncarnationId, NodeAdvertisement, NodeCapacity, SchedulerFleet, SessionId,
-    WorkflowAction, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowStatus,
-    effect_id, install_kv_schema, install_queue_schema, install_runtime_schema,
-    install_workflow_schema, preferred_scanner, scheduler_next_due_ms, scheduler_tick,
+    ApplicationId, CellTarget, Digest, EffectCommandIntent, IncarnationId, NamespaceId,
+    NodeAdvertisement, NodeCapacity, SchedulerFleet, SessionId, TenantId, WorkflowAction,
+    WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowStatus, effect_id,
+    install_kv_schema, install_queue_schema, install_runtime_schema, install_workflow_schema,
+    preferred_scanner, scheduler_next_due_ms, scheduler_tick,
 };
 use ed25519_dalek::SigningKey;
 
@@ -33,25 +34,41 @@ static EXPIRY_DEFINITION: ExpiryDefinition = ExpiryDefinition;
 
 struct EffectDefinition;
 
+const EFFECT_NAMESPACE: NamespaceId = NamespaceId::from_bytes([8; 16]);
+static EFFECT_TARGETS: [NamespaceId; 1] = [EFFECT_NAMESPACE];
+
 impl WorkflowDefinition for EffectDefinition {
     fn digest(&self) -> crab_cell_runtime::Digest {
         crab_cell_runtime::Digest::from_bytes([10; 32])
+    }
+
+    fn effect_targets(&self) -> &'static [NamespaceId] {
+        &EFFECT_TARGETS
     }
 
     fn transition(
         &self,
         _state: &[u8],
         event: &[u8],
-        _context: WorkflowContext,
+        context: WorkflowContext,
     ) -> crab_cell_runtime::Result<WorkflowDecision> {
         Ok(WorkflowDecision {
             status: WorkflowStatus::Failed,
             state: b"activity-expired".to_vec(),
             result: Some(event.to_vec()),
             actions: vec![WorkflowAction::Effect {
-                destination: CellId::from_bytes([8; 32]),
-                operation: event.to_vec(),
-                expires_at_ms: 20_000,
+                intent: EffectCommandIntent {
+                    target: CellTarget::new(
+                        context.source().tenant(),
+                        context.source().application(),
+                        EFFECT_NAMESPACE,
+                        b"destination",
+                    )?,
+                    command_id: 7,
+                    codec_version: 1,
+                    input: event.to_vec(),
+                    expires_at_ms: 20_000,
+                },
             }],
         })
     }
@@ -63,12 +80,22 @@ fn connection() -> crab_ltx::rusqlite::Connection {
     let mut connection = crab_ltx::rusqlite::Connection::open_in_memory().unwrap();
     install_runtime_schema(
         &mut connection,
-        CellId::from_bytes([1; 32]),
+        source_target().cell_id(),
         IncarnationId::from_bytes([2; 16]),
         1,
     )
     .unwrap();
     connection
+}
+
+fn source_target() -> CellTarget {
+    CellTarget::new(
+        TenantId::from_bytes([1; 16]),
+        ApplicationId::from_bytes([2; 16]),
+        NamespaceId::from_bytes([3; 16]),
+        b"scheduler",
+    )
+    .unwrap()
 }
 
 #[test]
@@ -86,14 +113,21 @@ fn tick_processes_at_most_128_due_items() {
             .unwrap();
     }
     assert_eq!(
-        scheduler_tick(&transaction, 10, &[]).unwrap().processed,
+        scheduler_tick(&transaction, &source_target(), 10, &[])
+            .unwrap()
+            .processed,
         128
     );
     let remaining: usize = transaction
         .query_row("SELECT count(*) FROM sys_requests", [], |row| row.get(0))
         .unwrap();
     assert_eq!(remaining, 12);
-    assert_eq!(scheduler_tick(&transaction, 10, &[]).unwrap().processed, 12);
+    assert_eq!(
+        scheduler_tick(&transaction, &source_target(), 10, &[])
+            .unwrap()
+            .processed,
+        12
+    );
 }
 
 #[test]
@@ -127,7 +161,8 @@ fn tick_terminalizes_expired_ready_work_and_runs_workflow_failure_transition() {
         )
         .unwrap();
 
-    let outcome = scheduler_tick(&transaction, 10, &[&EXPIRY_DEFINITION]).unwrap();
+    let outcome =
+        scheduler_tick(&transaction, &source_target(), 10, &[&EXPIRY_DEFINITION]).unwrap();
     assert_eq!(outcome.processed, 3);
     let states: (i64, i64, i64) = transaction
         .query_row(
@@ -164,7 +199,7 @@ fn tick_assigns_unique_command_ordinals_to_effects_from_multiple_runs() {
     }
 
     assert_eq!(
-        scheduler_tick(&transaction, 10, &[&EFFECT_DEFINITION])
+        scheduler_tick(&transaction, &source_target(), 10, &[&EFFECT_DEFINITION])
             .unwrap()
             .processed,
         2
@@ -179,14 +214,14 @@ fn tick_assigns_unique_command_ordinals_to_effects_from_multiple_runs() {
         .unwrap();
     let mut expected = vec![
         effect_id(
-            CellId::from_bytes([1; 32]),
+            source_target().cell_id(),
             IncarnationId::from_bytes([2; 16]),
             1,
             0,
         )
         .to_vec(),
         effect_id(
-            CellId::from_bytes([1; 32]),
+            source_target().cell_id(),
             IncarnationId::from_bytes([2; 16]),
             1,
             1,

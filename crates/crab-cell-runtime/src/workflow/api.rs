@@ -59,9 +59,10 @@ impl<M: WorkflowModule> Command for WorkflowStartCommand<M> {
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
     ) -> crate::Result<CommandResult<Self::Output>> {
+        let source = context.target().clone();
         classify(workflow_start(
             context.primitive_transaction(),
-            M::NAMESPACE,
+            &source,
             context.now_ms(),
             &input,
             M::CURRENT_DEFINITION,
@@ -83,6 +84,7 @@ impl<M: WorkflowModule> Command for WorkflowSignalCommand<M> {
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
     ) -> crate::Result<CommandResult<Self::Output>> {
+        let source = context.target().clone();
         let Some(definition) =
             definition_for_workflow::<M>(context.primitive_transaction(), &input.workflow_id)?
         else {
@@ -90,6 +92,7 @@ impl<M: WorkflowModule> Command for WorkflowSignalCommand<M> {
         };
         classify(workflow_signal(
             context.primitive_transaction(),
+            &source,
             context.now_ms(),
             &input,
             definition,
@@ -638,9 +641,16 @@ mod tests {
     fn persisted_definition_digest_dispatches_to_retained_old_code() {
         let mut connection = Connection::open_in_memory().unwrap();
         let transaction = connection.transaction().unwrap();
+        let source = CellTarget::new(
+            TenantId::from_bytes([1; 16]),
+            ApplicationId::from_bytes([2; 16]),
+            RolloverWorkflow::NAMESPACE,
+            b"rollover",
+        )
+        .unwrap();
         crate::schema::install_runtime_schema_in(
             &transaction,
-            crate::CellId::from_bytes([1; 32]),
+            source.cell_id(),
             crate::IncarnationId::from_bytes([2; 16]),
             1,
         )
@@ -651,14 +661,9 @@ mod tests {
             request_id: RequestId::from_bytes([14; 16]),
             event: b"start".to_vec(),
         };
-        let started = super::super::workflow_start(
-            &transaction,
-            RolloverWorkflow::NAMESPACE,
-            10,
-            &request,
-            &OLD_DEFINITION,
-        )
-        .unwrap();
+        let started =
+            super::super::workflow_start(&transaction, &source, 10, &request, &OLD_DEFINITION)
+                .unwrap();
         let WorkflowOutcome::Applied { run_id, .. } = started else {
             panic!("old workflow did not start");
         };
@@ -670,6 +675,7 @@ mod tests {
         assert_eq!(retained.digest(), OLD_DEFINITION.digest());
         super::super::workflow_signal(
             &transaction,
+            &source,
             11,
             &WorkflowSignal {
                 workflow_id: request.workflow_id.clone(),

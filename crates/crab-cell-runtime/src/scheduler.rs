@@ -195,6 +195,7 @@ pub struct SchedulerTickOutcome {
 /// Rechecks and advances at most 128 due maintenance items in one transaction.
 pub fn scheduler_tick(
     transaction: &Transaction<'_>,
+    source: &CellTarget,
     logical_time_ms: i64,
     workflow_definitions: &[&'static dyn WorkflowDefinition],
 ) -> Result<SchedulerTickOutcome> {
@@ -205,6 +206,7 @@ pub fn scheduler_tick(
     )?;
     scheduler_tick_at(
         transaction,
+        source,
         command_sequence,
         logical_time_ms,
         workflow_definitions,
@@ -214,16 +216,17 @@ pub fn scheduler_tick(
 
 pub(crate) fn scheduler_tick_at(
     transaction: &Transaction<'_>,
+    source: &CellTarget,
     command_sequence: u64,
     logical_time_ms: i64,
     workflow_definitions: &[&'static dyn WorkflowDefinition],
-    queue_dead_letter: Option<(CellTarget, QueueDeadLetterTarget)>,
+    queue_dead_letter: Option<QueueDeadLetterTarget>,
 ) -> Result<SchedulerTickOutcome> {
     if logical_time_ms < 0 {
         return Err(Error::Command("negative scheduler logical time"));
     }
     let tables = installed_tables(transaction)?;
-    let mut effects = EffectBatch::new(transaction, command_sequence, logical_time_ms)?;
+    let mut effects = EffectBatch::new(transaction, source, command_sequence, logical_time_ms)?;
     let mut remaining = MAX_TICK_ITEMS;
 
     consume_with(&mut remaining, |limit| {
@@ -256,8 +259,8 @@ pub(crate) fn scheduler_tick_at(
         consume_with(&mut remaining, |limit| {
             queue_cleanup_expired_bounded(transaction, logical_time_ms, limit)
         })?;
-        if let Some((source, target)) = queue_dead_letter {
-            let mut dead_letter = QueueDeadLetterWriter::new(source, target, &mut effects);
+        if let Some(target) = queue_dead_letter {
+            let mut dead_letter = QueueDeadLetterWriter::new(target, &mut effects);
             consume_with(&mut remaining, |limit| {
                 queue_expire_ready_bounded_with_dead_letter(
                     transaction,
@@ -291,6 +294,7 @@ pub(crate) fn scheduler_tick_at(
             && workflow_fail_one_expired_activity(
                 transaction,
                 &mut effects,
+                source,
                 logical_time_ms,
                 workflow_definitions,
             )?
@@ -304,6 +308,7 @@ pub(crate) fn scheduler_tick_at(
             && workflow_fire_one_due_timer(
                 transaction,
                 &mut effects,
+                source,
                 logical_time_ms,
                 workflow_definitions,
             )?

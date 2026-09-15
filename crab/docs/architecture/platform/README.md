@@ -104,7 +104,11 @@ and exposes receipted start, signal, cancel and state operations. Registry
 freeze fails unless every declared definition and activity pair has an exact
 statically linked binding. Unit coverage proves a run pinned by an old binary
 continues through retained old transition code while new starts select the
-current definition. Its integration path proves start, idempotent signal,
+current definition. Each definition declares its effect-target namespace set;
+registry freeze requires their union to equal the Workflow namespace descriptor.
+Effects carry only typed Cell commands, inherit the source tenant/application,
+and are rejected before writes if their target is cross-tenant or undeclared.
+Its integration path proves start, idempotent signal,
 durable identity-conflict rejection, cancellation and minimum-receipt state
 after exact-root restoration. The source effect ledger and target
 inbox mechanics now derive immutable identities/digests, enforce command and
@@ -128,7 +132,8 @@ and retry through `CellClient`. `EffectSupervisor` claims one published
 intention, revalidates its exact lease at the claim receipt, delivers or
 resolves it through the signed peer client, and then publishes the matching
 source acknowledgement or retry. Workflow transitions now atomically insert
-bounded effect actions through one command-scoped `EffectBatch`; terminal
+owner-independent typed command effects through one source-target-bound
+`EffectBatch`; terminal
 decisions may emit effects while still rejecting new local work. The batch uses
 the Cell commit sequence and assigns ordinals across every transition in one
 scheduler Tick, so different runs cannot collide in `sys_effects`. Queue
@@ -165,7 +170,8 @@ exposes the internal Cell map or SQLite handle.
 The startup-only compiled registry now validates module names, exact migration
 bytes/digests and contiguous schema ranges, command/query codec ranges and byte
 limits, namespace topology/effect targets/DLQ cycles, exact Queue bindings and
-DLQ module/namespace/shard/send-codec equality, workflow/activity
+DLQ module/namespace/shard/send-codec equality, exact compiled Workflow
+effect-target unions, workflow/activity
 inventories, and exact descriptor-to-command/query/definition/activity binding
 equality. It produces
 order-independent canonical release bytes, module code digests and one release

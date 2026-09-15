@@ -149,8 +149,7 @@ impl<M: QueueModule> Command for QueueClaimCommand<M> {
         let mut tokens = SystemQueueTokens;
         let claimed = if let Some(target) = M::QUEUE_DEAD_LETTER {
             let mut effects = context.effect_batch()?;
-            let mut writer =
-                QueueDeadLetterWriter::new(context.target().clone(), target, &mut effects);
+            let mut writer = QueueDeadLetterWriter::new(target, &mut effects);
             queue_claim_with_dead_letter(
                 context.primitive_transaction(),
                 context.now_ms(),
@@ -196,8 +195,7 @@ impl<M: QueueModule> Command for QueueLeaseCommand<M> {
     ) -> crate::Result<CommandResult<Self::Output>> {
         let outcome = if let Some(target) = M::QUEUE_DEAD_LETTER {
             let mut effects = context.effect_batch()?;
-            let mut writer =
-                QueueDeadLetterWriter::new(context.target().clone(), target, &mut effects);
+            let mut writer = QueueDeadLetterWriter::new(target, &mut effects);
             queue_apply_lease_with_dead_letter(
                 context.primitive_transaction(),
                 context.now_ms(),

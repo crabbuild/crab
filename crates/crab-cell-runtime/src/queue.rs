@@ -30,22 +30,13 @@ const DELIVERY_MARGIN_MS: i64 = 1_000;
 const DEAD_LETTER_EFFECT_LIFETIME_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 
 pub(crate) struct QueueDeadLetterWriter<'a> {
-    source: CellTarget,
     target: QueueDeadLetterTarget,
     effects: &'a mut EffectBatch,
 }
 
 impl<'a> QueueDeadLetterWriter<'a> {
-    pub(crate) const fn new(
-        source: CellTarget,
-        target: QueueDeadLetterTarget,
-        effects: &'a mut EffectBatch,
-    ) -> Self {
-        Self {
-            source,
-            target,
-            effects,
-        }
+    pub(crate) const fn new(target: QueueDeadLetterTarget, effects: &'a mut EffectBatch) -> Self {
+        Self { target, effects }
     }
 
     fn insert(
@@ -55,16 +46,17 @@ impl<'a> QueueDeadLetterWriter<'a> {
         payload: &[u8],
         now_ms: i64,
     ) -> Result<[u8; 32]> {
+        let source = self.effects.source_target();
         let producer_id = dead_letter_producer_id(
             self.target.namespace(),
-            self.source.cell_id(),
+            source.cell_id(),
             self.effects.source_incarnation(),
             message_id,
         );
         let shard = shard_for_scope(self.target.namespace(), &producer_id, self.target.shards())?;
         let target = CellTarget::new(
-            self.source.tenant(),
-            self.source.application(),
+            source.tenant(),
+            source.application(),
             self.target.namespace(),
             &partition_for_shard(shard),
         )?;

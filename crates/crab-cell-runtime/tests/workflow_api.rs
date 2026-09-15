@@ -29,6 +29,44 @@ use object_store::{memory::InMemory, path::Path};
 
 const WORKFLOW_MODULE: &str = "workflow-api-test";
 const WORKFLOW_NAMESPACE: NamespaceId = NamespaceId::from_bytes([8; 16]);
+const EFFECT_NAMESPACE: NamespaceId = NamespaceId::from_bytes([9; 16]);
+static EFFECT_TARGETS: [NamespaceId; 1] = [EFFECT_NAMESPACE];
+static WORKFLOW_NAMESPACES: [NamespaceDescriptor; 2] = [
+    NamespaceDescriptor {
+        id: WORKFLOW_NAMESPACE,
+        name: WORKFLOW_MODULE,
+        role: CatalogRole::Workflow,
+        shards: 1,
+        effect_targets: &EFFECT_TARGETS,
+        dead_letter: None,
+    },
+    NamespaceDescriptor {
+        id: EFFECT_NAMESPACE,
+        name: "workflow-effect-target",
+        role: CatalogRole::Repository,
+        shards: 1,
+        effect_targets: &[],
+        dead_letter: None,
+    },
+];
+static DRIFT_NAMESPACES: [NamespaceDescriptor; 2] = [
+    NamespaceDescriptor {
+        id: WORKFLOW_NAMESPACE,
+        name: WORKFLOW_MODULE,
+        role: CatalogRole::Workflow,
+        shards: 1,
+        effect_targets: &[],
+        dead_letter: None,
+    },
+    NamespaceDescriptor {
+        id: EFFECT_NAMESPACE,
+        name: "workflow-effect-target",
+        role: CatalogRole::Repository,
+        shards: 1,
+        effect_targets: &[],
+        dead_letter: None,
+    },
+];
 const WORKFLOW_MIGRATION: &str = include_str!("../src/migrations/workflow.sql");
 const DEFINITION_DIGEST: Digest = Digest::from_bytes([6; 32]);
 const LEGACY_DEFINITION_DIGEST: Digest = Digest::from_bytes([7; 32]);
@@ -56,6 +94,10 @@ static DEFINITIONS: [&dyn WorkflowDefinition; 2] = [&LEGACY_DEFINITION, &DEFINIT
 impl WorkflowDefinition for Definition {
     fn digest(&self) -> Digest {
         DEFINITION_DIGEST
+    }
+
+    fn effect_targets(&self) -> &'static [NamespaceId] {
+        &EFFECT_TARGETS
     }
 
     fn transition(
@@ -226,14 +268,7 @@ impl CellModule for TestWorkflow {
             queries: QUERIES,
             workflow_definitions: &[LEGACY_DEFINITION_DIGEST, DEFINITION_DIGEST],
             activity_types: &["echo"],
-            namespaces: &[NamespaceDescriptor {
-                id: WORKFLOW_NAMESPACE,
-                name: WORKFLOW_MODULE,
-                role: CatalogRole::Workflow,
-                shards: 1,
-                effect_targets: &[],
-                dead_letter: None,
-            }],
+            namespaces: &WORKFLOW_NAMESPACES,
         })
     }
 
@@ -242,6 +277,31 @@ impl CellModule for TestWorkflow {
         register_workflow_activities::<Self>(registry)?;
         register_activity::<Self, EchoActivity>(registry)?;
         register_maintenance::<Self>(registry)
+    }
+}
+
+struct EffectTargetDrift;
+
+impl CellModule for EffectTargetDrift {
+    const NAME: &'static str = WORKFLOW_MODULE;
+
+    fn descriptor(&self) -> &'static ModuleDescriptor {
+        Box::leak(Box::new(ModuleDescriptor {
+            name: WORKFLOW_MODULE,
+            source_digest: Digest::from_bytes([4; 32]),
+            schema_min: 1,
+            schema_max: 1,
+            migrations: TestWorkflow.descriptor().migrations,
+            commands: COMMANDS,
+            queries: QUERIES,
+            workflow_definitions: &[LEGACY_DEFINITION_DIGEST, DEFINITION_DIGEST],
+            activity_types: &["echo"],
+            namespaces: &DRIFT_NAMESPACES,
+        }))
+    }
+
+    fn register(self, registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
+        TestWorkflow.register(registry)
     }
 }
 
@@ -317,6 +377,21 @@ fn registry_rejects_a_declared_activity_without_its_native_binding() {
     assert!(matches!(
         builder.finish(),
         Err(Error::Registry("descriptor and activity bindings differ"))
+    ));
+}
+
+#[test]
+fn registry_rejects_workflow_effect_target_drift() {
+    let mut builder = RegistryBuilder::new(BuildDescriptor {
+        source_revision: "workflow-effect-target-test".into(),
+        cargo_lock_digest: Digest::from_bytes([5; 32]),
+    });
+    builder.register(EffectTargetDrift).unwrap();
+    assert!(matches!(
+        builder.finish(),
+        Err(Error::Registry(
+            "Workflow effect targets and compiled definitions differ"
+        ))
     ));
 }
 

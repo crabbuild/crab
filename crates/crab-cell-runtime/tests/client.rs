@@ -3,15 +3,15 @@ use std::{future::Future, pin::Pin, sync::Arc, time::UNIX_EPOCH};
 use crab_cell_runtime::{
     ApplicationId, BoundedDecoder, BoundedEncoder, BuildDescriptor, CatalogEntry, CatalogRole,
     CellAuthority, CellClient, CellDescription, CellModule, CellTarget, CodecError, Command,
-    CommandContext, CommandResult, Digest, EffectClaim, EffectClaimRequest, EffectIntent,
-    EffectLeaseOutcome, EffectModule, EffectPeerClient, EffectRunOutcome, EffectSource,
-    EffectSupervisor, IncarnationId, InvocationError, MigrationDescriptor, ModuleDescriptor,
-    MutationIdentity, NamespaceDescriptor, NamespaceId, OperationDescriptor, Owner, PeerAuthorizer,
-    PeerCellResolver, PeerDispatcher, PeerPrincipal, PeerRoundTrip, PeerSigner, PeerVerifier,
-    Query, QueryContext, Receipt, Registry, RegistryBuilder, RequestId, Resolution, SessionId,
-    SqlBatch, SqlStatement, SqlValue, SqlWorkerPool, TenantId, VerifiedPeerRequest, WireValue,
-    command_operation_digest, effect_id, effect_insert, effect_operation_digest, peer_wire as wire,
-    register_effect_delivery,
+    CommandContext, CommandResult, Digest, EffectBatch, EffectClaim, EffectClaimRequest,
+    EffectCommandIntent, EffectLeaseOutcome, EffectModule, EffectPeerClient, EffectRunOutcome,
+    EffectSource, EffectSupervisor, IncarnationId, InvocationError, MigrationDescriptor,
+    ModuleDescriptor, MutationIdentity, NamespaceDescriptor, NamespaceId, OperationDescriptor,
+    Owner, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerPrincipal, PeerRoundTrip,
+    PeerSigner, PeerVerifier, Query, QueryContext, Receipt, Registry, RegistryBuilder, RequestId,
+    Resolution, SessionId, SqlBatch, SqlStatement, SqlValue, SqlWorkerPool, TenantId,
+    VerifiedPeerRequest, WireValue, command_operation_digest, effect_id, effect_operation_digest,
+    peer_wire as wire, register_effect_delivery,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{CellStorageLayout, Store};
@@ -654,51 +654,31 @@ async fn typed_effect_source_publishes_claim_validation_ack_and_lost_lease() {
     let expires_at_ms = identity.issued_at_ms + 60_000;
     let mut encoder = BoundedEncoder::new(64).unwrap();
     b"effect-source".to_vec().encode(&mut encoder).unwrap();
-    let request = wire::EffectRequest {
-        target: Some(wire::Target {
-            tenant_id: fixture.target.tenant().as_bytes().to_vec(),
-            application_id: fixture.target.application().as_bytes().to_vec(),
-            namespace_id: fixture.target.namespace().as_bytes().to_vec(),
-            partition: fixture.target.partition().to_vec(),
-        }),
-        destination_incarnation: Vec::new(),
-        identity: Some(wire::EffectIdentity {
-            effect_id: effect_id.to_vec(),
-            source_cell: source_cell.as_bytes().to_vec(),
-            source_incarnation: source_incarnation.as_bytes().to_vec(),
-            source_sequence,
-            ordinal,
-            expires_at_ms,
-        }),
-        operation: Some(wire::effect_request::Operation::CellCommand(
-            wire::CellCommand {
-                command_id: CreateComment::ID,
-                codec_version: CreateComment::CODEC_VERSION,
-                input: encoder.finish(),
-            },
-        )),
-    };
-    let operation = prost::Message::encode_to_vec(&request);
-    let operation_bytes = operation.len();
+    let input = encoder.finish();
+    let source_target = fixture.target.clone();
+    let effect_target = fixture.target.clone();
     fixture
         .handle
         .execute(
             identity,
             Digest::from_bytes([31; 32]),
             identity.issued_at_ms,
-            operation_bytes,
+            1024,
             1,
             move |transaction| {
-                effect_insert(
+                EffectBatch::new(
                     transaction,
-                    source_cell,
-                    source_incarnation,
+                    &source_target,
                     source_sequence,
-                    ordinal,
                     identity.issued_at_ms,
-                    &EffectIntent {
-                        destination: source_cell,
-                        operation,
+                )?
+                .insert_command(
+                    transaction,
+                    &EffectCommandIntent {
+                        target: effect_target,
+                        command_id: CreateComment::ID,
+                        codec_version: CreateComment::CODEC_VERSION,
+                        input,
                         expires_at_ms,
                     },
                 )?;
@@ -755,59 +735,36 @@ async fn typed_effect_source_publishes_claim_validation_ack_and_lost_lease() {
 #[tokio::test]
 async fn effect_supervisor_delivers_to_inbox_and_acknowledges_source() {
     let fixture = fixture().await;
-    let source_cell = fixture.target.cell_id();
-    let source_incarnation = fixture.handle.incarnation();
     let source_sequence = 1;
     let identity = mutation(40);
-    let effect_id = effect_id(source_cell, source_incarnation, source_sequence, 0);
     let expires_at_ms = identity.issued_at_ms + 60_000;
     let mut encoder = BoundedEncoder::new(64).unwrap();
     b"supervised".to_vec().encode(&mut encoder).unwrap();
-    let request = wire::EffectRequest {
-        target: Some(wire::Target {
-            tenant_id: fixture.target.tenant().as_bytes().to_vec(),
-            application_id: fixture.target.application().as_bytes().to_vec(),
-            namespace_id: fixture.target.namespace().as_bytes().to_vec(),
-            partition: fixture.target.partition().to_vec(),
-        }),
-        destination_incarnation: Vec::new(),
-        identity: Some(wire::EffectIdentity {
-            effect_id: effect_id.to_vec(),
-            source_cell: source_cell.as_bytes().to_vec(),
-            source_incarnation: source_incarnation.as_bytes().to_vec(),
-            source_sequence,
-            ordinal: 0,
-            expires_at_ms,
-        }),
-        operation: Some(wire::effect_request::Operation::CellCommand(
-            wire::CellCommand {
-                command_id: CreateComment::ID,
-                codec_version: CreateComment::CODEC_VERSION,
-                input: encoder.finish(),
-            },
-        )),
-    };
-    let operation = prost::Message::encode_to_vec(&request);
-    let operation_bytes = operation.len();
+    let input = encoder.finish();
+    let source_target = fixture.target.clone();
+    let effect_target = fixture.target.clone();
     fixture
         .handle
         .execute(
             identity,
             Digest::from_bytes([41; 32]),
             identity.issued_at_ms,
-            operation_bytes,
+            1024,
             1,
             move |transaction| {
-                effect_insert(
+                EffectBatch::new(
                     transaction,
-                    source_cell,
-                    source_incarnation,
+                    &source_target,
                     source_sequence,
-                    0,
                     identity.issued_at_ms,
-                    &EffectIntent {
-                        destination: source_cell,
-                        operation,
+                )?
+                .insert_command(
+                    transaction,
+                    &EffectCommandIntent {
+                        target: effect_target,
+                        command_id: CreateComment::ID,
+                        codec_version: CreateComment::CODEC_VERSION,
+                        input,
                         expires_at_ms,
                     },
                 )?;

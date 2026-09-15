@@ -226,6 +226,7 @@ impl<M: WorkflowActivityModule> Command for WorkflowActivityCompleteCommand<M> {
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
     ) -> crate::Result<CommandResult<Self::Output>> {
+        let source = context.target().clone();
         let Some(digest) =
             workflow_definition_digest_by_run(context.primitive_transaction(), input.run_id)?
         else {
@@ -235,6 +236,7 @@ impl<M: WorkflowActivityModule> Command for WorkflowActivityCompleteCommand<M> {
         };
         let outcome = workflow_complete_activity(
             context.primitive_transaction(),
+            &source,
             context.now_ms(),
             &input,
             definition::<M>(digest)?,

@@ -112,7 +112,7 @@ impl CommandContext<'_, '_> {
 
     /// Creates the one command-scoped effect identity allocator.
     pub fn effect_batch(&self) -> Result<crate::EffectBatch> {
-        crate::EffectBatch::new(self.transaction, self.sequence, self.now_ms)
+        crate::EffectBatch::new(self.transaction, &self.target, self.sequence, self.now_ms)
     }
 
     /// Executes bounded application SQL under the runtime authorizer.
@@ -239,7 +239,7 @@ pub struct RegistryBuilder {
     modules: Vec<&'static ModuleDescriptor>,
     commands: BTreeMap<BindingKey, CommandHandler>,
     queries: BTreeMap<BindingKey, QueryHandler>,
-    workflow_definitions: HashSet<(String, [u8; 32])>,
+    workflow_definitions: HashMap<(String, [u8; 32]), Vec<NamespaceId>>,
     activities: BTreeMap<ActivityKey, ActivityFunction>,
     activity_claims: BTreeSet<ActivityKey>,
     queue_bindings: Vec<QueueBinding>,
@@ -254,7 +254,7 @@ impl RegistryBuilder {
             modules: Vec::new(),
             commands: BTreeMap::new(),
             queries: BTreeMap::new(),
-            workflow_definitions: HashSet::new(),
+            workflow_definitions: HashMap::new(),
             activities: BTreeMap::new(),
             activity_claims: BTreeSet::new(),
             queue_bindings: Vec::new(),
@@ -340,11 +340,15 @@ impl RegistryBuilder {
         definition: &'static dyn WorkflowDefinition,
     ) -> std::result::Result<(), RegistryError> {
         let digest = *definition.digest().as_bytes();
+        let targets = definition.effect_targets();
+        let unique_targets = targets.iter().copied().collect::<HashSet<_>>();
         if !valid_name(module)
             || digest.iter().all(|byte| *byte == 0)
-            || !self
+            || unique_targets.len() != targets.len()
+            || self
                 .workflow_definitions
-                .insert((module.to_owned(), digest))
+                .insert((module.to_owned(), digest), targets.to_vec())
+                .is_some()
         {
             return Err(Error::Registry("invalid workflow definition binding"));
         }
@@ -422,7 +426,13 @@ impl RegistryBuilder {
                     .map(|digest| (module.name.to_owned(), *digest.as_bytes()))
             })
             .collect::<HashSet<_>>();
-        if expected_workflows != self.workflow_definitions {
+        if expected_workflows
+            != self
+                .workflow_definitions
+                .keys()
+                .cloned()
+                .collect::<HashSet<_>>()
+        {
             return Err(Error::Registry(
                 "descriptor and workflow definition bindings differ",
             ));
@@ -446,6 +456,11 @@ impl RegistryBuilder {
             return Err(Error::Registry("descriptor and activity bindings differ"));
         }
         validate_namespaces(&namespace_owners)?;
+        validate_workflow_effect_targets(
+            &self.workflow_definitions,
+            &namespace_owners,
+            &self.modules,
+        )?;
         validate_queue_bindings(&self.queue_bindings, &namespace_owners, &self.modules)?;
         validate_maintenance_bindings(&self.maintenance_bindings, &self.queue_bindings)?;
 
@@ -988,6 +1003,51 @@ fn validate_namespaces(
                 return Err(Error::Registry("dead-letter cycle"));
             }
             current = namespaces.get(&id).and_then(|(_, value)| value.dead_letter);
+        }
+    }
+    Ok(())
+}
+
+fn validate_workflow_effect_targets(
+    bindings: &HashMap<(String, [u8; 32]), Vec<NamespaceId>>,
+    namespaces: &HashMap<NamespaceId, (&'static str, NamespaceDescriptor)>,
+    modules: &[&ModuleDescriptor],
+) -> Result<()> {
+    for module in modules
+        .iter()
+        .copied()
+        .filter(|module| !module.workflow_definitions.is_empty())
+    {
+        let mut workflow_namespaces = module
+            .namespaces
+            .iter()
+            .filter(|namespace| namespace.role == CatalogRole::Workflow);
+        let namespace = workflow_namespaces.next().ok_or(Error::Registry(
+            "workflow definitions require one Workflow namespace",
+        ))?;
+        if workflow_namespaces.next().is_some() {
+            return Err(Error::Registry(
+                "workflow definitions require one Workflow namespace",
+            ));
+        }
+        let compiled = bindings
+            .iter()
+            .filter(|((owner, _), _)| owner == module.name)
+            .flat_map(|(_, targets)| targets.iter().copied())
+            .collect::<HashSet<_>>();
+        let declared = namespace
+            .effect_targets
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        if compiled != declared
+            || compiled
+                .iter()
+                .any(|target| !namespaces.contains_key(target))
+        {
+            return Err(Error::Registry(
+                "Workflow effect targets and compiled definitions differ",
+            ));
         }
     }
     Ok(())

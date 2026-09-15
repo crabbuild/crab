@@ -3,17 +3,22 @@ use std::sync::Arc;
 use crab_cell_runtime::{
     ActivityCompletion, ActivityCompletionOutcome, ActivityLeaseOutcome, ActivitySupport,
     ActivityTokenSource, ApplicationId, CatalogEntry, CatalogRole, CellAuthority, CellCatalog,
-    CellRuntime, CellTarget, Digest, HandlerOutcome, IncarnationId, MutationIdentity, NamespaceId,
-    Owner, RequestId, SessionId, SqlWorkerPool, TenantId, WorkflowAction, WorkflowContext,
-    WorkflowDecision, WorkflowDefinition, WorkflowOutcome, WorkflowSignal, WorkflowStart,
-    WorkflowStatus, install_runtime_schema, install_workflow_schema, workflow_cancel,
-    workflow_claim_activities, workflow_cleanup_terminal, workflow_complete_activity,
-    workflow_extend_activity, workflow_fire_timer, workflow_signal, workflow_start,
-    workflow_validate_activity_claim,
+    CellRuntime, CellTarget, Digest, EffectCommandIntent, HandlerOutcome, IncarnationId,
+    MutationIdentity, NamespaceId, Owner, RequestId, SessionId, SqlWorkerPool, TenantId,
+    WorkflowAction, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowOutcome,
+    WorkflowSignal, WorkflowStart, WorkflowStatus, install_runtime_schema, install_workflow_schema,
+    peer_wire, workflow_cancel, workflow_claim_activities, workflow_cleanup_terminal,
+    workflow_complete_activity, workflow_extend_activity, workflow_fire_timer, workflow_signal,
+    workflow_start, workflow_validate_activity_claim,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{CellStorageLayout, Store};
 use object_store::{memory::InMemory, path::Path};
+use prost::Message;
+
+const WORKFLOW_NAMESPACE: NamespaceId = NamespaceId::from_bytes([3; 16]);
+const EFFECT_NAMESPACE: NamespaceId = NamespaceId::from_bytes([8; 16]);
+static EFFECT_TARGETS: [NamespaceId; 1] = [EFFECT_NAMESPACE];
 
 #[derive(Clone, Copy)]
 struct Definition {
@@ -23,6 +28,10 @@ struct Definition {
 impl WorkflowDefinition for Definition {
     fn digest(&self) -> Digest {
         self.digest
+    }
+
+    fn effect_targets(&self) -> &'static [NamespaceId] {
+        &EFFECT_TARGETS
     }
 
     fn transition(
@@ -64,16 +73,17 @@ impl WorkflowDefinition for Definition {
                 result: Some(b"signalled".to_vec()),
                 actions: Vec::new(),
             }),
-            b"finish-with-effect" => Ok(WorkflowDecision {
-                status: WorkflowStatus::Completed,
-                state: b"done".to_vec(),
-                result: Some(b"effect-scheduled".to_vec()),
-                actions: vec![WorkflowAction::Effect {
-                    destination: crab_cell_runtime::CellId::from_bytes([8; 32]),
-                    operation: b"canonical-destination-command".to_vec(),
-                    expires_at_ms: 20_000,
-                }],
-            }),
+            b"finish-with-effect" => {
+                effect_decision(&context, context.source().tenant(), EFFECT_NAMESPACE)
+            }
+            b"finish-with-undeclared-effect" => effect_decision(
+                &context,
+                context.source().tenant(),
+                NamespaceId::from_bytes([9; 16]),
+            ),
+            b"finish-with-cross-tenant-effect" => {
+                effect_decision(&context, TenantId::from_bytes([99; 16]), EFFECT_NAMESPACE)
+            }
             event => Ok(WorkflowDecision {
                 status: WorkflowStatus::Running,
                 state: event.to_vec(),
@@ -82,6 +92,32 @@ impl WorkflowDefinition for Definition {
             }),
         }
     }
+}
+
+fn effect_decision(
+    context: &WorkflowContext,
+    tenant: TenantId,
+    namespace: NamespaceId,
+) -> crab_cell_runtime::Result<WorkflowDecision> {
+    Ok(WorkflowDecision {
+        status: WorkflowStatus::Completed,
+        state: b"done".to_vec(),
+        result: Some(b"effect-scheduled".to_vec()),
+        actions: vec![WorkflowAction::Effect {
+            intent: EffectCommandIntent {
+                target: CellTarget::new(
+                    tenant,
+                    context.source().application(),
+                    namespace,
+                    b"destination",
+                )?,
+                command_id: 7,
+                codec_version: 1,
+                input: b"canonical-destination-command".to_vec(),
+                expires_at_ms: 20_000,
+            },
+        }],
+    })
 }
 
 struct InvalidDefinition;
@@ -124,7 +160,7 @@ fn connection() -> crab_ltx::rusqlite::Connection {
     let mut connection = crab_ltx::rusqlite::Connection::open_in_memory().unwrap();
     install_runtime_schema(
         &mut connection,
-        crab_cell_runtime::CellId::from_bytes([1; 32]),
+        source_target().cell_id(),
         IncarnationId::from_bytes([2; 16]),
         1,
     )
@@ -133,6 +169,16 @@ fn connection() -> crab_ltx::rusqlite::Connection {
     install_workflow_schema(&transaction).unwrap();
     transaction.commit().unwrap();
     connection
+}
+
+fn source_target() -> CellTarget {
+    CellTarget::new(
+        TenantId::from_bytes([1; 16]),
+        ApplicationId::from_bytes([2; 16]),
+        WORKFLOW_NAMESPACE,
+        b"workflow",
+    )
+    .unwrap()
 }
 
 fn start(request_id: u8) -> WorkflowStart {
@@ -157,13 +203,13 @@ fn applied(outcome: WorkflowOutcome) -> ([u8; 16], WorkflowStatus, u64) {
 #[test]
 fn start_allocates_stable_actions_and_signal_identity_is_conflict_safe() {
     let mut connection = connection();
-    let namespace = NamespaceId::from_bytes([3; 16]);
+    let source = source_target();
     let definition = Definition {
         digest: Digest::from_bytes([4; 32]),
     };
     let transaction = connection.transaction().unwrap();
     let (run_id, status, sequence) =
-        applied(workflow_start(&transaction, namespace, 10, &start(5), &definition).unwrap());
+        applied(workflow_start(&transaction, &source, 10, &start(5), &definition).unwrap());
     assert_eq!((status, sequence), (WorkflowStatus::Running, 1));
     let state: Vec<u8> = transaction
         .query_row(
@@ -199,13 +245,13 @@ fn start_allocates_stable_actions_and_signal_identity_is_conflict_safe() {
     let wrong = Definition {
         digest: Digest::from_bytes([9; 32]),
     };
-    assert!(workflow_signal(&transaction, 11, &signal, &wrong).is_err());
+    assert!(workflow_signal(&transaction, &source, 11, &signal, &wrong).is_err());
     assert_eq!(
-        applied(workflow_signal(&transaction, 11, &signal, &definition).unwrap()),
+        applied(workflow_signal(&transaction, &source, 11, &signal, &definition).unwrap()),
         (run_id, WorkflowStatus::Running, 2)
     );
     assert_eq!(
-        workflow_signal(&transaction, 12, &signal, &definition).unwrap(),
+        workflow_signal(&transaction, &source, 12, &signal, &definition).unwrap(),
         WorkflowOutcome::Duplicate {
             run_id,
             status: WorkflowStatus::Running,
@@ -215,7 +261,7 @@ fn start_allocates_stable_actions_and_signal_identity_is_conflict_safe() {
     let mut changed = signal.clone();
     changed.event = b"changed".to_vec();
     assert_eq!(
-        workflow_signal(&transaction, 12, &changed, &definition).unwrap(),
+        workflow_signal(&transaction, &source, 12, &changed, &definition).unwrap(),
         WorkflowOutcome::IdentityConflict
     );
     transaction.commit().unwrap();
@@ -228,7 +274,7 @@ fn invalid_decision_is_rejected_before_any_workflow_rows_are_written() {
     assert!(
         workflow_start(
             &transaction,
-            NamespaceId::from_bytes([3; 16]),
+            &source_target(),
             10,
             &start(5),
             &InvalidDefinition,
@@ -249,15 +295,16 @@ fn invalid_decision_is_rejected_before_any_workflow_rows_are_written() {
 #[test]
 fn terminal_transition_inserts_effect_with_cell_command_identity() {
     let mut connection = connection();
-    let namespace = NamespaceId::from_bytes([3; 16]);
+    let source = source_target();
     let definition = Definition {
         digest: Digest::from_bytes([4; 32]),
     };
     let transaction = connection.transaction().unwrap();
     let (run_id, _, _) =
-        applied(workflow_start(&transaction, namespace, 10, &start(5), &definition).unwrap());
+        applied(workflow_start(&transaction, &source, 10, &start(5), &definition).unwrap());
     let outcome = workflow_signal(
         &transaction,
+        &source,
         11,
         &WorkflowSignal {
             workflow_id: b"build-42".to_vec(),
@@ -277,20 +324,59 @@ fn terminal_transition_inserts_effect_with_cell_command_identity() {
         )
         .unwrap();
     assert_eq!(
-        stored,
-        (
-            crab_cell_runtime::effect_id(
-                crab_cell_runtime::CellId::from_bytes([1; 32]),
-                IncarnationId::from_bytes([2; 16]),
-                1,
-                0,
-            )
-            .to_vec(),
-            b"canonical-destination-command".to_vec(),
-            20_000,
-        )
+        stored.0,
+        crab_cell_runtime::effect_id(source.cell_id(), IncarnationId::from_bytes([2; 16]), 1, 0,)
+            .to_vec()
     );
+    assert_eq!(stored.2, 20_000);
+    let request = peer_wire::EffectRequest::decode(stored.1.as_slice()).unwrap();
+    assert!(request.destination_incarnation.is_empty());
+    let command = match request.operation.unwrap() {
+        peer_wire::effect_request::Operation::CellCommand(command) => command,
+        _ => panic!("workflow effect must contain a typed Cell command"),
+    };
+    assert_eq!((command.command_id, command.codec_version), (7, 1));
+    assert_eq!(command.input, b"canonical-destination-command");
     transaction.commit().unwrap();
+}
+
+#[test]
+fn effect_transition_rejects_undeclared_or_cross_tenant_targets_before_writes() {
+    for event in [
+        b"finish-with-undeclared-effect".as_slice(),
+        b"finish-with-cross-tenant-effect".as_slice(),
+    ] {
+        let mut connection = connection();
+        let source = source_target();
+        let definition = Definition {
+            digest: Digest::from_bytes([4; 32]),
+        };
+        let transaction = connection.transaction().unwrap();
+        let (run_id, _, _) =
+            applied(workflow_start(&transaction, &source, 10, &start(5), &definition).unwrap());
+        let result = workflow_signal(
+            &transaction,
+            &source,
+            11,
+            &WorkflowSignal {
+                workflow_id: b"build-42".to_vec(),
+                run_id,
+                signal_id: [7; 16],
+                event: event.to_vec(),
+            },
+            &definition,
+        );
+        assert!(result.is_err());
+        let unchanged: (i64, i64, i64) = transaction
+            .query_row(
+                "SELECT status, (SELECT count(*) FROM workflow_events), (SELECT count(*) FROM sys_effects) FROM workflow_runs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(unchanged, (0, 1, 0));
+        transaction.commit().unwrap();
+    }
 }
 
 #[test]
@@ -301,14 +387,7 @@ fn cancellation_is_idempotent_and_clears_all_outstanding_work() {
     };
     let transaction = connection.transaction().unwrap();
     let (run_id, _, _) = applied(
-        workflow_start(
-            &transaction,
-            NamespaceId::from_bytes([3; 16]),
-            10,
-            &start(5),
-            &definition,
-        )
-        .unwrap(),
+        workflow_start(&transaction, &source_target(), 10, &start(5), &definition).unwrap(),
     );
     let cancellation = WorkflowSignal {
         workflow_id: b"build-42".to_vec(),
@@ -347,14 +426,7 @@ fn due_timer_fires_once_and_terminal_transition_cancels_sibling_activity() {
     };
     let transaction = connection.transaction().unwrap();
     let (run_id, _, _) = applied(
-        workflow_start(
-            &transaction,
-            NamespaceId::from_bytes([3; 16]),
-            10,
-            &start(5),
-            &definition,
-        )
-        .unwrap(),
+        workflow_start(&transaction, &source_target(), 10, &start(5), &definition).unwrap(),
     );
     let timer_id: [u8; 16] = transaction
         .query_row("SELECT timer_id FROM workflow_timers", [], |row| {
@@ -364,15 +436,41 @@ fn due_timer_fires_once_and_terminal_transition_cancels_sibling_activity() {
         .try_into()
         .unwrap();
     assert_eq!(
-        workflow_fire_timer(&transaction, 19, run_id, timer_id, &definition).unwrap(),
+        workflow_fire_timer(
+            &transaction,
+            &source_target(),
+            19,
+            run_id,
+            timer_id,
+            &definition
+        )
+        .unwrap(),
         WorkflowOutcome::NotDue
     );
     assert_eq!(
-        applied(workflow_fire_timer(&transaction, 20, run_id, timer_id, &definition).unwrap()),
+        applied(
+            workflow_fire_timer(
+                &transaction,
+                &source_target(),
+                20,
+                run_id,
+                timer_id,
+                &definition
+            )
+            .unwrap(),
+        ),
         (run_id, WorkflowStatus::Completed, 2)
     );
     assert_eq!(
-        workflow_fire_timer(&transaction, 21, run_id, timer_id, &definition).unwrap(),
+        workflow_fire_timer(
+            &transaction,
+            &source_target(),
+            21,
+            run_id,
+            timer_id,
+            &definition
+        )
+        .unwrap(),
         WorkflowOutcome::Duplicate {
             run_id,
             status: WorkflowStatus::Completed,
@@ -400,14 +498,7 @@ fn activity_claim_retry_extension_and_completion_bind_exact_attempt() {
     };
     let transaction = connection.transaction().unwrap();
     let (run_id, _, _) = applied(
-        workflow_start(
-            &transaction,
-            NamespaceId::from_bytes([3; 16]),
-            10,
-            &start(5),
-            &definition,
-        )
-        .unwrap(),
+        workflow_start(&transaction, &source_target(), 10, &start(5), &definition).unwrap(),
     );
     let mut tokens = Tokens(0);
     assert!(
@@ -461,11 +552,13 @@ fn activity_claim_retry_extension_and_completion_bind_exact_attempt() {
         retryable: true,
     };
     assert_eq!(
-        workflow_complete_activity(&transaction, 101, &failed, &definition).unwrap(),
+        workflow_complete_activity(&transaction, &source_target(), 101, &failed, &definition)
+            .unwrap(),
         ActivityCompletionOutcome::Retrying { due_at_ms: 301 }
     );
     assert_eq!(
-        workflow_complete_activity(&transaction, 102, &failed, &definition).unwrap(),
+        workflow_complete_activity(&transaction, &source_target(), 102, &failed, &definition)
+            .unwrap(),
         ActivityCompletionOutcome::Duplicate {
             result: b"transient".to_vec(),
         }
@@ -473,7 +566,8 @@ fn activity_claim_retry_extension_and_completion_bind_exact_attempt() {
     let mut conflict = failed.clone();
     conflict.result = b"different".to_vec();
     assert_eq!(
-        workflow_complete_activity(&transaction, 102, &conflict, &definition).unwrap(),
+        workflow_complete_activity(&transaction, &source_target(), 102, &conflict, &definition)
+            .unwrap(),
         ActivityCompletionOutcome::IdentityConflict
     );
 
@@ -482,7 +576,8 @@ fn activity_claim_retry_extension_and_completion_bind_exact_attempt() {
         .remove(0);
     assert_eq!(second.attempt, 2);
     assert_eq!(
-        workflow_complete_activity(&transaction, 302, &failed, &definition).unwrap(),
+        workflow_complete_activity(&transaction, &source_target(), 302, &failed, &definition)
+            .unwrap(),
         ActivityCompletionOutcome::LeaseLost
     );
     let completed = ActivityCompletion {
@@ -496,7 +591,8 @@ fn activity_claim_retry_extension_and_completion_bind_exact_attempt() {
         retryable: false,
     };
     assert_eq!(
-        workflow_complete_activity(&transaction, 302, &completed, &definition).unwrap(),
+        workflow_complete_activity(&transaction, &source_target(), 302, &completed, &definition)
+            .unwrap(),
         ActivityCompletionOutcome::Applied(WorkflowOutcome::Applied {
             run_id,
             status: WorkflowStatus::Running,
@@ -515,14 +611,7 @@ fn terminal_cleanup_removes_children_only_after_retention() {
     };
     let transaction = connection.transaction().unwrap();
     let (run_id, _, _) = applied(
-        workflow_start(
-            &transaction,
-            NamespaceId::from_bytes([3; 16]),
-            10,
-            &start(5),
-            &definition,
-        )
-        .unwrap(),
+        workflow_start(&transaction, &source_target(), 10, &start(5), &definition).unwrap(),
     );
     let timer_id: [u8; 16] = transaction
         .query_row("SELECT timer_id FROM workflow_timers", [], |row| {
@@ -531,7 +620,17 @@ fn terminal_cleanup_removes_children_only_after_retention() {
         .unwrap()
         .try_into()
         .unwrap();
-    applied(workflow_fire_timer(&transaction, 20, run_id, timer_id, &definition).unwrap());
+    applied(
+        workflow_fire_timer(
+            &transaction,
+            &source_target(),
+            20,
+            run_id,
+            timer_id,
+            &definition,
+        )
+        .unwrap(),
+    );
     assert_eq!(
         workflow_cleanup_terminal(&transaction, RETENTION_MS + 19).unwrap(),
         0
@@ -620,6 +719,7 @@ async fn published_workflow_restores_from_exact_root_on_a_new_owner() {
         digest: Digest::from_bytes([5; 32]),
     };
     let request = start(7);
+    let workflow_target = target.clone();
     handle
         .execute(
             MutationIdentity {
@@ -633,7 +733,7 @@ async fn published_workflow_restores_from_exact_root_on_a_new_owner() {
             128,
             move |transaction| match workflow_start(
                 transaction,
-                namespace,
+                &workflow_target,
                 10,
                 &request,
                 &definition,
@@ -739,6 +839,7 @@ async fn published_workflow_restores_from_exact_root_on_a_new_owner() {
             .unwrap(),
         vec![1]
     );
+    let workflow_target = target.clone();
     restored
         .execute(
             MutationIdentity {
@@ -763,6 +864,7 @@ async fn published_workflow_restores_from_exact_root_on_a_new_owner() {
                 };
                 match workflow_complete_activity(
                     transaction,
+                    &workflow_target,
                     13,
                     &completion,
                     &Definition {

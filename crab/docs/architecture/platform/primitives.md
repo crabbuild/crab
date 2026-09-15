@@ -102,9 +102,11 @@ one intention, performs a minimum-receipt lease validation, delivers it through
 the signed peer path, resolves an ambiguous target result, then publishes the
 exact source acknowledgement or bounded retry. It surfaces non-transient
 authorization/protocol failures without releasing the live lease; normal lease
-reclamation remains the recovery path. Workflow decisions now insert effect
-actions atomically through a command-scoped `EffectBatch`. The batch binds the
-persisted Cell/incarnation and Cell commit sequence and shares its ordinal across
+reclamation remains the recovery path. Workflow decisions now insert only typed
+command effects atomically through a command-scoped `EffectBatch`. The batch
+binds and verifies the full source target, and each definition's declared
+namespace set is checked at registry freeze and before transition writes. It
+also binds the persisted Cell/incarnation and Cell commit sequence and shares its ordinal across
 all transitions performed by one Tick. `EffectBatch::insert_command` now stores
 one canonical typed target and command without a destination incarnation. Each
 delivery attempt performs a fresh Describe, fills the currently published
@@ -360,7 +362,8 @@ outcomes retain their mutation evidence, and cancellation is signalled if the
 cycle is dropped or loses its lease. Integration coverage holds an activity
 past its first heartbeat, completes its state-machine transition, then restores
 and reads that terminal result from the exact LTX root. Effect actions are now
-persisted atomically. Catalog-driven Workflow-namespace polling and bounded
+persisted as owner-independent typed commands; raw peer requests are not an
+application surface. Catalog-driven Workflow-namespace polling and bounded
 concurrent activity orchestration remain to implement; the maintenance Tick now
 dispatches timers across retained definitions.
 
@@ -370,9 +373,9 @@ IDs. New runs use `CURRENT_DEFINITION`; signal and activity completion first
 read the run's persisted digest and dispatch the matching entry from
 `DEFINITIONS`. `register_workflow` installs every transition function together
 with the typed codecs; activity registration expands the exact definition/type
-matrix. Registry freeze rejects any descriptor whose digest or activity
-inventory differs from those bindings, and startup rejects a current definition
-absent from the retained inventory.
+matrix. Registry freeze rejects any descriptor whose digest, activity inventory
+or union of definition-declared effect targets differs from those bindings, and
+startup rejects a current definition absent from the retained inventory.
 
 `WorkflowNamespace` hashes only the workflow ID through the registry-owned
 shard count, binds start identity to `MutationIdentity.request_id`, maps every
