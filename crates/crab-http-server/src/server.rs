@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock as SyncRwLock};
@@ -13,12 +13,13 @@ use axum::{
     routing::{get, post},
 };
 use bytes::Bytes;
-use crab_cell_runtime::{CellRuntime, SessionId, SqlWorkerPool};
+use crab_cell_runtime::{ApplicationIdentityStore, CellRuntime, SessionId, SqlWorkerPool};
 use crab_metadata::manifest_store::read_manifest;
 use crab_remote_git::{
     OperationLimits, RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
 };
 use crab_storage::{StorageError, Store, StoreLayout};
+use object_store::path::Path as ObjectPath;
 use serde_json::json;
 use tokio::sync::{Mutex, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
@@ -107,6 +108,7 @@ async fn probe_storage_contract(
 }
 
 pub(crate) struct Repository {
+    pub id: Uuid,
     pub config: RepositoryConfig,
     pub store: Store,
     pub layout: StoreLayout<Store>,
@@ -118,7 +120,12 @@ pub(crate) struct Repository {
 }
 
 pub(crate) struct RepositorySet {
-    current: SyncRwLock<BTreeMap<(String, String), Arc<Repository>>>,
+    current: SyncRwLock<RepositoryIndex>,
+}
+
+struct RepositoryIndex {
+    by_name: BTreeMap<(String, String), Arc<Repository>>,
+    by_id: HashMap<Uuid, (String, String)>,
 }
 
 impl RepositorySet {
@@ -126,7 +133,20 @@ impl RepositorySet {
         self.current
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .by_name
             .get(key)
+            .cloned()
+    }
+
+    pub(crate) fn by_id(&self, id: Uuid) -> Option<Arc<Repository>> {
+        let current = self
+            .current
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        current
+            .by_id
+            .get(&id)
+            .and_then(|key| current.by_name.get(key))
             .cloned()
     }
 
@@ -134,6 +154,7 @@ impl RepositorySet {
         self.current
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .by_name
             .values()
             .cloned()
             .collect()
@@ -143,6 +164,7 @@ impl RepositorySet {
         self.current
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .by_name
             .len()
     }
 
@@ -150,7 +172,7 @@ impl RepositorySet {
         *self
             .current
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = RepositoryIndex::new(next);
     }
 
     #[cfg(test)]
@@ -158,6 +180,7 @@ impl RepositorySet {
         self.current
             .get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .by_name
             .get_mut(key)
             .and_then(Arc::get_mut)
     }
@@ -166,12 +189,12 @@ impl RepositorySet {
 impl From<BTreeMap<(String, String), Repository>> for RepositorySet {
     fn from(repositories: BTreeMap<(String, String), Repository>) -> Self {
         Self {
-            current: SyncRwLock::new(
+            current: SyncRwLock::new(RepositoryIndex::new(
                 repositories
                     .into_iter()
                     .map(|(key, repository)| (key, Arc::new(repository)))
                     .collect(),
-            ),
+            )),
         }
     }
 }
@@ -179,8 +202,18 @@ impl From<BTreeMap<(String, String), Repository>> for RepositorySet {
 impl From<BTreeMap<(String, String), Arc<Repository>>> for RepositorySet {
     fn from(repositories: BTreeMap<(String, String), Arc<Repository>>) -> Self {
         Self {
-            current: SyncRwLock::new(repositories),
+            current: SyncRwLock::new(RepositoryIndex::new(repositories)),
         }
+    }
+}
+
+impl RepositoryIndex {
+    fn new(by_name: BTreeMap<(String, String), Arc<Repository>>) -> Self {
+        let by_id = by_name
+            .iter()
+            .map(|(key, repository)| (repository.id, key.clone()))
+            .collect();
+        Self { by_name, by_id }
     }
 }
 
@@ -290,6 +323,7 @@ pub(crate) struct Server {
     pub repositories: RepositorySet,
     pub runtime: Arc<RemoteGitRuntime>,
     pub cell_runtime: CellRuntime,
+    pub(crate) cell_resolver: Option<crate::peer::LocalCellResolver>,
     pub options: RepositoryOptions,
     pub cursor_key: [u8; 32],
     pub admission: Semaphore,
@@ -384,16 +418,28 @@ pub async fn serve(config: Config) -> Result<()> {
     let transfer_admission = transfer_admission(&catalog);
     probe_storage_contract(&catalog, &transfer_admission).await?;
     crate::cells::verify_startup_release(&config).await?;
+    let identities = ApplicationIdentityStore::new(
+        catalog.root().store.clone(),
+        ObjectPath::from(catalog.root().prefix.clone()),
+    );
+    let cell_identity = identities
+        .load()
+        .await?
+        .ok_or(crate::Error::Config("Cell application is not initialized"))?;
+    let cell_layout = identities.layout(cell_identity).await?;
     // A pod must prove the complete storage contract before it owns any socket;
     // otherwise incomplete cloud permissions can look partially started.
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
     let metrics = crate::metrics::Metrics::new()?;
     let cell_runtime = start_cell_runtime(SessionId::from_bytes(Uuid::now_v7().into_bytes()))?;
+    let cell_resolver =
+        crate::peer::LocalCellResolver::new(cell_layout, cell_identity, cell_runtime.clone());
     let server = Arc::new(Server {
         repositories: repositories.into(),
         runtime: Arc::clone(&runtime),
         cell_runtime,
+        cell_resolver: Some(cell_resolver),
         cancellation: cancellation.clone(),
         receives: tokio_util::task::TaskTracker::new(),
         options,
@@ -487,6 +533,7 @@ async fn materialize_catalog(
         let entry = record.runtime_config(catalog.root(), default_branch)?;
         let configured_protections = BranchProtections::configured(&entry.protected_branches);
         let repository = Repository {
+            id: record.id,
             layout,
             identity: RepositoryIdentity::new(
                 catalog.root().provider_namespace.clone(),
@@ -721,6 +768,9 @@ async fn check_readiness(server: &Server) -> Result<()> {
     }
     if server.cell_runtime.is_shutting_down() {
         return Err(crate::Error::Config("embedded Cell runtime is draining"));
+    }
+    if server.catalog.is_some() && server.cell_resolver.is_none() {
+        return Err(crate::Error::Config("Cell peer resolver is unavailable"));
     }
     if !server.catalog_healthy.load(Ordering::Acquire) {
         return Err(crate::Error::Config("catalog refresh is unhealthy"));
@@ -1024,6 +1074,7 @@ mod tests {
             repositories: RepositorySet::from(BTreeMap::<(String, String), Repository>::new()),
             runtime: Arc::clone(&runtime),
             cell_runtime: start_test_cell_runtime(),
+            cell_resolver: None,
             options: RepositoryOptions::default(),
             cursor_key: [0; 32],
             admission: Semaphore::new(1),

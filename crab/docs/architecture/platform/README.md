@@ -143,6 +143,26 @@ down with the server. Fleet enrollment lookup, mTLS HTTP routing, owner selectio
 and bounded stale-owner retry, upgrade migrations, resource-
 derived budgets and repository Cell routing remain; KV, SQL, Queue and Workflow
 primitive handles are complete for local routing.
+The object-store node directory now strict-creates and conditionally refreshes
+canonical, short-lived advertisements. Each record binds one nonzero boot
+session, HTTPS endpoint, fleet and certificate digests, compiled release,
+Ed25519 peer key, sorted module/peer-version inventory, monotonic progress and
+capacity hints under a signed canonical encoding. Loads verify the signature,
+scope, time and exact session path before returning an ETag-bearing observation;
+ambiguous creates/refreshes adopt only the exact published record. The peer
+pre-decoder can extract the structurally valid but explicitly untrusted session
+claim for that lookup. Server key/certificate loading, mTLS binding and the
+three-second advertisement supervisor remain.
+`crab-http-server` now retains repository UUIDs in its live catalog index and
+implements the receiving product boundary: it accepts only the repository
+namespace, maps the target partition to the stable repository UUID, rechecks the
+current OIDC issuer/subject membership and exact read or mutation action, and
+rejects revoked membership before dispatch. Its production startup also builds
+one `LocalCellResolver` from the authoritative application identity/layout. The
+resolver reloads the verified Cell catalog entry and control, then returns a
+handle only when the process runtime still owns the exact published
+incarnation/code/schema. The management mTLS route has not yet composed these
+pieces into a reachable endpoint.
 The server now compiles and binds the first repository module slice: stable
 create-issue/create-comment commands, get-issue/get-comment queries, bounded
 codecs, and the schema that owns repository identity, sequences, issues and

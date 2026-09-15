@@ -209,6 +209,29 @@ impl PeerVerifier {
     }
 }
 
+/// Reads the untrusted session claim only after strict structural validation.
+///
+/// Callers use this value solely to locate an enrollment key. The returned
+/// session is not authenticated until [`PeerVerifier::verify`] succeeds.
+pub fn claimed_peer_session(input: &[u8]) -> Result<SessionId> {
+    if input.len() > MAX_REQUEST_BYTES {
+        return Err(Error::Peer("request exceeds peer byte limit"));
+    }
+    let fields = validate_message(input, MessageKind::PeerRequest)?;
+    require_fields(&fields, &[1, 2, 3, 4])?;
+    let authorization_range = field_payload(&fields, 2)?;
+    if authorization_range.len() > MAX_AUTHORIZATION_BYTES {
+        return Err(Error::Peer("authorization exceeds 16 KiB"));
+    }
+    let authorization_fields = validate_message(
+        &input[authorization_range.clone()],
+        MessageKind::Authorization,
+    )?;
+    require_fields(&authorization_fields, &[1, 2, 3, 5, 6, 7, 8, 9])?;
+    let authorization = wire::PeerAuthorization::decode(&input[authorization_range])?;
+    SessionId::try_from(authorization.origin_session.as_slice())
+}
+
 /// Authenticated request retaining the exact signed nested operation bytes.
 pub struct VerifiedPeerRequest {
     request: wire::PeerRequest,

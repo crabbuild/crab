@@ -439,6 +439,7 @@ fn error_reply(error: Error) -> wire::PeerReply {
         ),
         Error::Control(_)
         | Error::Catalog(_)
+        | Error::Node(_)
         | Error::Release(_)
         | Error::CatalogCollision
         | Error::CatalogFull

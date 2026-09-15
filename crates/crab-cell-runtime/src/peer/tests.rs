@@ -67,6 +67,10 @@ fn signed_request_verifies_and_forward_preserves_payload() {
             PeerOperation::Mutate(mutation()),
         )
         .unwrap();
+    assert_eq!(
+        claimed_peer_session(&encoded).unwrap(),
+        SessionId::from_bytes([1; 16])
+    );
     let verifier = verifier(&signer);
     let verified = verifier.verify(&encoded, NOW_MS + 1_000).unwrap();
     assert_eq!(verified.hop_count(), 1);

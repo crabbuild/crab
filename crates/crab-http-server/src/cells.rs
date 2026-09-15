@@ -15,7 +15,7 @@ use crate::{Config, Error, Result, storage_root::StorageRoot};
 mod repository;
 
 const REPOSITORY_MIGRATION: &str = include_str!("cells/migrations/0001_repository_identity.sql");
-const REPOSITORY_NAMESPACE: NamespaceId = NamespaceId::from_bytes(*b"crab-repository1");
+pub(crate) const REPOSITORY_NAMESPACE: NamespaceId = NamespaceId::from_bytes(*b"crab-repository1");
 const REPOSITORY_COMMANDS: &[OperationDescriptor] = &[
     operation(1, 80 * 1024, 80 * 1024),
     operation(2, 80 * 1024, 80 * 1024),
@@ -406,9 +406,9 @@ mod tests {
     use std::{sync::Arc, time::UNIX_EPOCH};
 
     use crab_cell_runtime::{
-        CatalogEntry, CellAuthority, CellClient, CellReplica, CellRuntime, CellTarget,
-        IncarnationId, InvocationError, MutationIdentity, Owner, ReplicaLimits, SessionId,
-        SqlWorkerPool,
+        ApplicationIdentity, CatalogEntry, CellAuthority, CellClient, CellReplica, CellRuntime,
+        CellTarget, IncarnationId, InvocationError, MutationIdentity, Owner, PeerCellResolver,
+        ReplicaLimits, SessionId, SqlWorkerPool,
     };
     use crab_storage::{CellStorageLayout, Store};
     use object_store::memory::InMemory;
@@ -754,7 +754,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let authority = CellAuthority::new(layout);
+        let authority = CellAuthority::new(layout.clone());
         let first_session = SessionId::from_bytes([5; 16]);
         let recovering = authority
             .create_initial(
@@ -792,6 +792,14 @@ mod tests {
             )
             .await
             .unwrap();
+        let peer_resolver = crate::peer::LocalCellResolver::new(
+            layout.clone(),
+            ApplicationIdentity::new(tenant, application),
+            first_runtime.clone(),
+        );
+        let peer_handle = peer_resolver.resolve(target.clone()).await.unwrap();
+        assert_eq!(peer_handle.cell_id(), first_handle.cell_id());
+        assert_eq!(peer_handle.incarnation(), first_handle.incarnation());
         let first_client = CellClient::local(registry.clone(), first_handle.clone());
         let author = RepositoryAuthor {
             issuer: "https://crab.build".into(),

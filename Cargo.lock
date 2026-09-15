@@ -2298,6 +2298,7 @@ dependencies = [
  "crab-remote-git",
  "crab-storage",
  "crab-write",
+ "ed25519-dalek",
  "flate2",
  "futures-util",
  "gix-diff",

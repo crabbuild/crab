@@ -247,6 +247,7 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
     );
 
     let external = Repository {
+        id: uuid::Uuid::from_bytes([2; 16]),
         config: repo.config.clone(),
         store: repo.store.clone(),
         layout: repo.layout.clone(),

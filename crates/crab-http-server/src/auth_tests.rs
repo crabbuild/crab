@@ -188,6 +188,7 @@ impl Harness {
         }];
         let admission_store = store.clone();
         let repository = Repository {
+            id: uuid::Uuid::from_bytes([1; 16]),
             config: RepositoryConfig {
                 owner: "team".into(),
                 name: "private".into(),
@@ -228,6 +229,7 @@ impl Harness {
             repositories: BTreeMap::from([(("team".into(), "private".into()), repository)]).into(),
             runtime: Arc::new(RemoteGitRuntime::default()),
             cell_runtime: start_test_cell_runtime(),
+            cell_resolver: None,
             options: RepositoryOptions::default(),
             cursor_key: [7; 32],
             admission: Semaphore::new(16),

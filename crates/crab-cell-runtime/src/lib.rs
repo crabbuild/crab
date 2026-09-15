@@ -18,6 +18,7 @@ mod executor;
 mod identity;
 mod kv;
 mod maintenance;
+mod node;
 mod peer;
 mod publication;
 mod queue;
@@ -66,10 +67,11 @@ pub use maintenance::{
     MaintenanceModule, MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest,
     register_maintenance,
 };
+pub use node::{NodeAdvertisement, NodeCapacity, NodeDirectory, VersionedNodeAdvertisement};
 pub use peer::{
     PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerOperation, PeerPrincipal, PeerRoundTrip,
-    PeerSigner, PeerVerifier, VerifiedPeerRequest, decode_peer_reply, encode_peer_reply,
-    wire as peer_wire,
+    PeerSigner, PeerVerifier, VerifiedPeerRequest, claimed_peer_session, decode_peer_reply,
+    encode_peer_reply, wire as peer_wire,
 };
 pub use publication::CellPublisher;
 pub use queue::{

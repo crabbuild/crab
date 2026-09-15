@@ -51,6 +51,20 @@ eligibility requires its control.code or bootstrap initial_code. Always
 reserve/check capacity locally again before acquiring the control CAS.
 Advertisements are hints, not ownership leases.
 
+Implementation status: `crab-cell-runtime::NodeDirectory` now owns the canonical
+object format and ETag transitions at `cells/v1/nodes/<session>.json`. A record
+has a 15-second maximum lifetime and signs its canonical fields with the same
+Ed25519 public key used by peer envelopes. It binds the fleet, leaf-certificate
+SHA-256 digest, release, endpoint, module inventory, peer versions, monotonic
+progress and capacity hints. Loading rejects expiry, noncanonical JSON, signature
+failure, wrong fleet/image/release and path/session mismatch. Refresh rejects boot
+identity or inventory changes and progress/time regression; ambiguous writes
+are accepted only when an exact successor is readable. `claimed_peer_session`
+strictly validates the request structure before returning an untrusted lookup
+key; only subsequent advertisement, certificate and envelope verification can
+authenticate it. Server configuration, PEM/Ed25519 extraction, mTLS certificate
+matching and the three-second publisher remain to implement.
+
 ## Resource profiles and capacity targets
 
 | Profile | vCPU | RAM | SSD |

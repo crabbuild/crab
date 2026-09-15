@@ -19,6 +19,7 @@ mod labels;
 mod lfs;
 mod maintenance;
 mod metrics;
+mod peer;
 mod pulls;
 mod receive;
 mod releases;

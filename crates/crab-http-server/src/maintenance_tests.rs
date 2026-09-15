@@ -22,6 +22,7 @@ pub(super) async fn fixture() -> Arc<Server> {
         repositories: BTreeMap::from([(
             ("team".into(), "repo".into()),
             Repository {
+                id: uuid::Uuid::from_bytes([1; 16]),
                 config: RepositoryConfig {
                     owner: "team".into(),
                     name: "repo".into(),
@@ -44,6 +45,7 @@ pub(super) async fn fixture() -> Arc<Server> {
         .into(),
         runtime: Arc::new(RemoteGitRuntime::default()),
         cell_runtime: start_test_cell_runtime(),
+        cell_resolver: None,
         options: RepositoryOptions::default(),
         cursor_key: [0; 32],
         admission: Semaphore::new(16),
@@ -132,8 +134,22 @@ fn enable_catalog_readiness(server: &mut Arc<Server>) {
     let store = repository(server).store.clone();
     let server = Arc::get_mut(server).unwrap();
     server.catalog = Some(CatalogStore::new(crate::storage_root::StorageRoot::memory(
-        store, "catalog",
+        store.clone(),
+        "catalog",
     )));
+    let identity = crab_cell_runtime::ApplicationIdentity::new(
+        crab_cell_runtime::TenantId::from_bytes([1; 16]),
+        crab_cell_runtime::ApplicationId::from_bytes([2; 16]),
+    );
+    server.cell_resolver = Some(crate::peer::LocalCellResolver::new(
+        crab_storage::CellStorageLayout::new(
+            store,
+            object_store::path::Path::from("catalog"),
+            *identity.application().as_bytes(),
+        ),
+        identity,
+        server.cell_runtime.clone(),
+    ));
     server.catalog_healthy.store(true, Ordering::Release);
 }
 

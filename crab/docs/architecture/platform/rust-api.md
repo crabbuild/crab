@@ -540,6 +540,13 @@ and executes through the same `LocalCellTransport` as an in-process call. This
 keeps registry selection, operation digests, receipts, durable rejections and
 unknown-outcome behavior identical across ingress nodes.
 
+Before constructing `PeerVerifier`, the HTTP receiver calls
+`claimed_peer_session` to obtain only a structurally validated lookup key. That
+value remains untrusted. It must load a current `NodeDirectory` advertisement,
+match the mTLS leaf certificate digest and Ed25519 public key, then construct
+the verifier with the advertised session and the server's selected release.
+No API returns an authenticated principal or operation before that final verify.
+
 Target contains resolved tenant/application/namespace IDs (16 bytes each) and
 partition (<=1024 bytes). Recompute Cell ID and shard; compare namespace role,
 operation and authenticated capability. Envelope metadata carries origin session,
@@ -574,8 +581,13 @@ it matches verified enrollment and its compiled namespace/action grants; empty
 browser identity fields never imply runtime authority. Browser-originated
 commands carry the original issuer/subject and undergo normal repository checks.
 
-The next server slice must read a cached owner hint; local requests go to
-CellHandle, remote requests go
+The receiving server slice now maintains a repository UUID index, rechecks the
+current configured issuer, subject membership, access level and exact registered
+repository action, and builds a `LocalCellResolver` from the authoritative
+application identity at startup. That resolver reloads catalog proof and control
+and delegates to `CellRuntime::local_handle`, so it cannot serve a stale local
+incarnation. The next routing slice must read a cached owner hint; local requests
+go to CellHandle, remote requests go
 directly to the enrolled owner's advertised endpoint. Maximum two forwards;
 reject a third. On stale-owner response reload origin control once, then route
 or acquire within remaining deadline. Never use the public Service for private
