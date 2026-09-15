@@ -1,10 +1,95 @@
 use std::marker::PhantomData;
 
+use crab_ltx::rusqlite::Connection;
+
 use crate::{
-    BoundedDecoder, BoundedEncoder, CodecError, Command, CommandContext, CommandResult, Error,
-    QueueDeadLetterTarget, RegistryBuilder, SchedulerTickOutcome, WireValue, WorkflowDefinition,
-    scheduler::scheduler_tick_at,
+    BoundedDecoder, BoundedEncoder, CatalogRole, CodecError, Command, CommandContext,
+    CommandResult, Error, QueueDeadLetterTarget, RegistryBuilder, SchedulerTickOutcome, WireValue,
+    WorkflowDefinition, scheduler::scheduler_tick_at,
 };
+
+const REQUESTS: u8 = 1 << 0;
+const INBOX: u8 = 1 << 1;
+const EFFECTS: u8 = 1 << 2;
+const QUEUE_MESSAGES: u8 = 1 << 3;
+const QUEUE_DEDUP: u8 = 1 << 4;
+const WORKFLOWS: u8 = 1 << 5;
+
+/// Conservative inventory of rows that can retain executable release contracts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PersistedWorkInventory(u8);
+
+impl PersistedWorkInventory {
+    /// Reports whether contract removal can proceed without transforming durable work.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Names the first durable work class blocking contract removal.
+    #[must_use]
+    pub const fn first_blocker(self) -> Option<&'static str> {
+        if self.0 & REQUESTS != 0 {
+            Some("maintenance release is blocked by retained request outcomes")
+        } else if self.0 & INBOX != 0 {
+            Some("maintenance release is blocked by retained effect inbox outcomes")
+        } else if self.0 & EFFECTS != 0 {
+            Some("maintenance release is blocked by retained source effects")
+        } else if self.0 & QUEUE_MESSAGES != 0 {
+            Some("maintenance release is blocked by retained Queue messages")
+        } else if self.0 & QUEUE_DEDUP != 0 {
+            Some("maintenance release is blocked by retained Queue producer identities")
+        } else if self.0 & WORKFLOWS != 0 {
+            Some("maintenance release is blocked by retained Workflow runs")
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn encode(self) -> Vec<u8> {
+        vec![self.0]
+    }
+
+    pub(crate) fn decode(bytes: &[u8]) -> crate::Result<Self> {
+        match bytes {
+            [bits]
+                if bits
+                    & !(REQUESTS | INBOX | EFFECTS | QUEUE_MESSAGES | QUEUE_DEDUP | WORKFLOWS)
+                    == 0 =>
+            {
+                Ok(Self(*bits))
+            }
+            _ => Err(Error::Command("invalid persisted-work inventory")),
+        }
+    }
+}
+
+pub(crate) fn inspect_persisted_work(
+    connection: &Connection,
+    role: CatalogRole,
+) -> crate::Result<PersistedWorkInventory> {
+    let mut bits = 0;
+    bits |= exists(connection, "SELECT EXISTS(SELECT 1 FROM sys_requests)")? * REQUESTS;
+    bits |= exists(connection, "SELECT EXISTS(SELECT 1 FROM sys_inbox)")? * INBOX;
+    bits |= exists(connection, "SELECT EXISTS(SELECT 1 FROM sys_effects)")? * EFFECTS;
+    if role == CatalogRole::Queue {
+        bits |= exists(connection, "SELECT EXISTS(SELECT 1 FROM queue_messages)")? * QUEUE_MESSAGES;
+        bits |= exists(connection, "SELECT EXISTS(SELECT 1 FROM queue_dedup)")? * QUEUE_DEDUP;
+    }
+    if role == CatalogRole::Workflow {
+        bits |= exists(connection, "SELECT EXISTS(SELECT 1 FROM workflow_runs)")? * WORKFLOWS;
+    }
+    Ok(PersistedWorkInventory(bits))
+}
+
+fn exists(connection: &Connection, sql: &str) -> crate::Result<u8> {
+    let exists = connection.query_row(sql, [], |row| row.get::<_, i64>(0))?;
+    match exists {
+        0 => Ok(0),
+        1 => Ok(1),
+        _ => Err(Error::Command("invalid persisted-work existence result")),
+    }
+}
 
 /// Compile-time binding for the internal maintenance command of one module.
 pub trait MaintenanceModule: Send + Sync + 'static {
@@ -115,7 +200,13 @@ impl WireValue for MaintenanceTickOutcome {
 
 #[cfg(test)]
 mod tests {
+    use crab_ltx::rusqlite::Connection;
+
     use super::*;
+    use crate::{
+        CellId, IncarnationId, install_queue_schema, install_runtime_schema,
+        install_workflow_schema,
+    };
 
     #[test]
     fn maintenance_codecs_reject_unbounded_results() {
@@ -124,6 +215,91 @@ mod tests {
             MaintenanceTickOutcome::Applied { processed: 129 }
                 .encode(&mut encoder)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn retained_runtime_outcome_blocks_contract_removal() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        install_runtime_schema(
+            &mut connection,
+            CellId::from_bytes([1; 32]),
+            IncarnationId::from_bytes([2; 16]),
+            1,
+        )
+        .unwrap();
+        assert!(
+            inspect_persisted_work(&connection, CatalogRole::Repository)
+                .unwrap()
+                .is_empty()
+        );
+        connection
+            .execute(
+                "INSERT INTO sys_requests VALUES (?1, ?2, 1, X'', 1, 1, 1)",
+                ([3_u8; 16].as_slice(), [4_u8; 32].as_slice()),
+            )
+            .unwrap();
+
+        assert_eq!(
+            inspect_persisted_work(&connection, CatalogRole::Repository)
+                .unwrap()
+                .first_blocker(),
+            Some("maintenance release is blocked by retained request outcomes")
+        );
+    }
+
+    #[test]
+    fn queue_and_workflow_roles_inventory_primitive_rows() {
+        let mut queue = Connection::open_in_memory().unwrap();
+        install_runtime_schema(
+            &mut queue,
+            CellId::from_bytes([5; 32]),
+            IncarnationId::from_bytes([6; 16]),
+            1,
+        )
+        .unwrap();
+        let transaction = queue.transaction().unwrap();
+        install_queue_schema(&transaction).unwrap();
+        transaction.commit().unwrap();
+        queue
+            .execute(
+                "INSERT INTO queue_dedup VALUES (?1, ?2, ?3, 1)",
+                (
+                    [7_u8; 16].as_slice(),
+                    [8_u8; 32].as_slice(),
+                    [9_u8; 16].as_slice(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            inspect_persisted_work(&queue, CatalogRole::Queue)
+                .unwrap()
+                .first_blocker(),
+            Some("maintenance release is blocked by retained Queue producer identities")
+        );
+
+        let mut workflow = Connection::open_in_memory().unwrap();
+        install_runtime_schema(
+            &mut workflow,
+            CellId::from_bytes([10; 32]),
+            IncarnationId::from_bytes([11; 16]),
+            1,
+        )
+        .unwrap();
+        let transaction = workflow.transaction().unwrap();
+        install_workflow_schema(&transaction).unwrap();
+        transaction.commit().unwrap();
+        workflow
+            .execute(
+                "INSERT INTO workflow_runs VALUES (X'01', ?1, ?2, 0, X'', 0, NULL, NULL)",
+                ([12_u8; 16].as_slice(), [13_u8; 32].as_slice()),
+            )
+            .unwrap();
+        assert_eq!(
+            inspect_persisted_work(&workflow, CatalogRole::Workflow)
+                .unwrap()
+                .first_blocker(),
+            Some("maintenance release is blocked by retained Workflow runs")
         );
     }
 }

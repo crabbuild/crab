@@ -291,12 +291,16 @@ fixed node-session path and starts one local-only, single-worker maintenance
 runtime. It scans all 256 catalog shards sequentially, restores each
 non-tombstoned Cell from its authoritative root, executes every
 registry-supported adjacent-schema or same-schema code migration, drains that
-runtime, requires the node directory to contain only its executor lease, checks
-the current Cell inventory, and only then CASes the same operation to `ready`.
-The executor withdraws its exact ETag after publication. Persisted
-Workflow/Queue/effect/request inventory, arbitrary transforms
-whose source code is absent from the candidate, namespace removal, and the
-remaining collaboration-domain imports still require explicit maintenance
+runtime, and—for a descriptor that removes or narrows a predecessor contract—
+reads every migrated Cell's persisted-work inventory through its FIFO actor.
+Any retained request outcome, effect inbox result, source effect, Queue message,
+Queue producer identity or Workflow run blocks publication and leaves the
+operation in `maintenance`. After the runtime drains, the command requires the
+node directory to contain only its executor lease, checks the current Cell
+inventory, and only then CASes the same operation to `ready`. The executor
+withdraws its exact ETag after publication. Arbitrary transforms whose source
+code is absent from the candidate, namespace removal, and the remaining
+collaboration-domain imports still require explicit maintenance
 implementations. The peer
 pre-decoder can extract the structurally valid but explicitly untrusted session
 claim for that lookup. The server now loads only CA-trusted Ed25519 PKCS#8
@@ -403,6 +407,18 @@ Lease loss prevents publication and drains the runtime. Retrying with the
 original prepared revision adopts either the same maintenance operation or its
 exact Ready successor; an abandoned executor is recoverable only after the
 existing node-advertisement expiry, clock-skew retention and ETag-tombstone fence.
+Before entering maintenance, the candidate compares its descriptor with
+`release.current`. A rolling-compatible candidate needs no extra work scan. A
+candidate that removes or narrows a code/schema, codec, migration, Workflow,
+activity or namespace contract enables conservative persisted-work admission.
+After migrating each Cell, the maintenance actor executes bounded `EXISTS`
+queries over `sys_requests`, `sys_inbox` and `sys_effects`; Queue Cells also
+check `queue_messages` and `queue_dedup`, and Workflow Cells check
+`workflow_runs`. One matching row fails the command, keeps the release in
+`maintenance`, and prevents the final Ready CAS. The check intentionally does
+not infer payload compatibility: operators must let retention cleanup complete,
+drain the primitive, or provide a purpose-built transform before removing the
+old binding.
 The maintenance CLI now implements a resumable issue/comment repository import:
 `cells import-repository-issues --owner OWNER --name NAME --operation UUID`.
 It stages a bounded, version-pinned `app/v1/issues` inventory in SQLite, verifies

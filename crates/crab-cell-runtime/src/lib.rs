@@ -72,7 +72,7 @@ pub use kv::{
 };
 pub use maintenance::{
     MaintenanceModule, MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest,
-    register_maintenance,
+    PersistedWorkInventory, register_maintenance,
 };
 pub use node::{NodeAdvertisement, NodeCapacity, NodeDirectory, VersionedNodeAdvertisement};
 pub use peer::{

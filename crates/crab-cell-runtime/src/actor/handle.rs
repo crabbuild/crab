@@ -10,8 +10,8 @@ use super::{
     ResolveOperation, RuntimeInner,
 };
 use crate::{
-    CatalogProof, CellId, Digest, Error, InboxDelivery, IncarnationId, MigratedCell, MigrationPlan,
-    MutationIdentity, Resolution, StoredOutcome,
+    CatalogProof, CatalogRole, CellId, Digest, Error, InboxDelivery, IncarnationId, MigratedCell,
+    MigrationPlan, MutationIdentity, PersistedWorkInventory, Resolution, StoredOutcome,
 };
 
 const MAX_OPERATION_BYTES: usize = 1024 * 1024;
@@ -175,6 +175,20 @@ impl CellHandle {
             .await
             .map_err(|_| Error::RuntimeClosed)?;
         response.await.map_err(|_| Error::RuntimeClosed)?
+    }
+
+    /// Reads durable work that can retain a removed release contract.
+    pub async fn persisted_work_inventory(
+        &self,
+        role: CatalogRole,
+    ) -> crate::Result<PersistedWorkInventory> {
+        let encoded = self
+            .query(1, 1, move |connection| {
+                crate::maintenance::inspect_persisted_work(connection, role)
+                    .map(PersistedWorkInventory::encode)
+            })
+            .await?;
+        PersistedWorkInventory::decode(&encoded)
     }
 
     /// Resolves a prior mutation without rerunning its handler.

@@ -333,11 +333,26 @@ replaceable only after normal advertisement expiry, clock-skew retention and
 ETag-tombstone collection.
 
 This runner can execute only migration source pairs and plans retained in the
-candidate registry. It does not yet authorize namespace removal, inspect
-persisted Workflow definitions, Queue payloads, effects or request outcomes for
-removed codecs, or execute arbitrary export/import transforms. A candidate
-requiring those changes remains in `maintenance` until a purpose-built verified
-transform and persisted-work admission are implemented.
+candidate registry. Before the state transition, it compares the immutable
+`release.current` descriptor with the candidate. If any module/code/schema,
+command/query codec or limit, migration, Workflow, activity or namespace
+contract was removed or narrowed, every non-tombstoned Cell must pass a
+post-migration persisted-work check. That FIFO actor query evaluates only
+bounded existence predicates: `sys_requests`, `sys_inbox` and `sys_effects` for
+all roles; `queue_messages` and `queue_dedup` for Queue; and `workflow_runs` for
+Workflow. Any row aborts the command before Ready and leaves the operation in
+`maintenance`. Exact retries rescan the complete catalog. A compatible
+maintenance rollout skips this additional check.
+
+This admission proves only that the listed durable work cannot require a removed
+handler, codec or definition. It does not authorize namespace removal, migrate
+an unsupported source code/schema pair, or execute arbitrary export/import
+transforms. A candidate requiring those changes remains in `maintenance` until
+a purpose-built verified transform is compiled into the candidate. Because the
+check is deliberately payload-agnostic, operators must first allow retention
+cleanup to remove old request/effect outcomes or explicitly drain/transform
+Queue and Workflow state; the runtime never guesses that retained bytes are
+compatible.
 
 Every serving process polls the canonical release once per second. `maintenance`
 and `failed` admit no process. `prepared` and `activating` admit only the current
@@ -448,10 +463,12 @@ in the rolling binary set; no automatic downmigration. Incompatible activation
 now enters maintenance, stops public admission and background activities, drains
 publishers, and verifies all old process sessions have stopped or been
 ETag-fenced. It then migrates every registry-supported Cell sequentially and
-publishes Ready only after a second empty-fleet and current-inventory check.
-Persisted-work inventory and arbitrary export/import transforms remain to be
-implemented; only those purpose-built maintenance steps may authorize contract
-removal or unsupported-source schema changes.
+performs the conservative role-aware persisted-work scan for any descriptor that
+removes or narrows a predecessor contract. It publishes Ready only after that
+scan, a second empty-fleet check and the current-inventory check all succeed.
+Arbitrary export/import transforms remain to be implemented; only those
+purpose-built maintenance steps may authorize namespace removal or
+unsupported-source schema changes.
 A release flag alone cannot fence a stale process because it is not the per-Cell
 CAS authority. Leave affected admission gated after failure. Resume using the
 same operation identity and already published roots.

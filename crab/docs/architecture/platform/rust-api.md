@@ -310,6 +310,14 @@ definitions and activity types, and requires exact namespace routing equality.
 This conservative online gate intentionally retains even a codec with no known
 pending row; proving that it is safe to delete belongs to explicit maintenance,
 where writers are fenced and the complete persisted-work inventory can be read.
+`Registry::requires_persisted_work_inventory_from` reuses the same descriptor
+comparison to select that offline check. The maintenance runner migrates a Cell,
+then calls `CellHandle::persisted_work_inventory` through the FIFO actor before
+draining it. The query checks `sys_requests`, `sys_inbox`, `sys_effects`, and the
+role-specific Queue or Workflow tables with bounded `EXISTS` statements. A
+nonempty `PersistedWorkInventory` is a hard release error, not a warning or an
+operator override. This is a conservative absence proof; content-specific
+rewrites still require compiled, purpose-built maintenance code.
 
 ```rust,ignore
 pub trait WireValue: Sized + Send + 'static {

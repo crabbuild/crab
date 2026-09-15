@@ -673,6 +673,12 @@ pub(crate) async fn enter_maintenance(config: &Config, expected_revision: u64) -
         .load()
         .await?
         .ok_or(Error::Config("Cell application release is not prepared"))?;
+    let inspect_persisted_work = match observed.record().current() {
+        Some(current) if current != registry.release_digest() => {
+            registry.requires_persisted_work_inventory_from(&releases.descriptor(current).await?)?
+        }
+        _ => false,
+    };
     let image = image_digest(observed.record().desired_image())?;
     let directory = NodeDirectory::new(
         layout.clone(),
@@ -756,6 +762,7 @@ pub(crate) async fn enter_maintenance(config: &Config, expected_revision: u64) -
         lease,
         advertised,
         maintenance,
+        inspect_persisted_work,
     )
     .await
 }
@@ -775,11 +782,12 @@ async fn complete_maintenance_inventory(
     lease: MaintenanceAdvertisement,
     advertised: VersionedNodeAdvertisement,
     maintenance: ReleaseRecord,
+    inspect_persisted_work: bool,
 ) -> Result<Vec<u8>> {
     let lease_session = lease.session;
     let lease_shutdown = CancellationToken::new();
     let mut heartbeat = tokio::spawn(lease.run(advertised, lease_shutdown.clone()));
-    let migration = migrate_maintenance_inventory(layout, identity, router);
+    let migration = migrate_maintenance_inventory(layout, identity, router, inspect_persisted_work);
     tokio::pin!(migration);
     let migrated = tokio::select! {
         result = &mut migration => result,
@@ -883,6 +891,7 @@ async fn migrate_maintenance_inventory(
     layout: &CellStorageLayout,
     identity: ApplicationIdentity,
     router: &RepositoryCellRouter,
+    inspect_persisted_work: bool,
 ) -> Result<()> {
     let catalog = CellCatalog::new(layout.clone(), identity.tenant());
     let authority = CellAuthority::new(layout.clone());
@@ -903,7 +912,13 @@ async fn migrate_maintenance_inventory(
                     proof.entry().namespace(),
                     proof.entry().partition(),
                 )?;
-                router.migrate_target(target).await?;
+                router.migrate_target(target.clone()).await?;
+                if inspect_persisted_work
+                    && let Some(blocker) =
+                        router.persisted_work_target(target).await?.first_blocker()
+                {
+                    return Err(crab_cell_runtime::Error::Release(blocker).into());
+                }
             }
         }
     }
@@ -1786,6 +1801,7 @@ mod tests {
             lease,
             advertised,
             maintenance,
+            false,
         )
         .await
         .unwrap();
@@ -1953,6 +1969,7 @@ mod tests {
             lease,
             advertised,
             maintenance,
+            true,
         )
         .await
         .unwrap();

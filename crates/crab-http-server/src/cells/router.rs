@@ -4,8 +4,8 @@ use crab_cell_runtime::{
     ApplicationIdentity, CatalogProof, CellAuthority, CellCatalog, CellClient, CellDescription,
     CellHandle, CellReplica, CellRuntime, CellTarget, ControlState, EffectPeerClient,
     MAX_ACTIVITY_PAYLOAD_BYTES, MigrationPeerClient, NodeByteReservation, NodeDirectory, Owner,
-    PeerPrincipal, PeerRoundTrip, PeerSigner, Registry, ReleaseState, ReleaseStore, ReplicaLimits,
-    VersionedControl,
+    PeerPrincipal, PeerRoundTrip, PeerSigner, PersistedWorkInventory, Registry, ReleaseState,
+    ReleaseStore, ReplicaLimits, VersionedControl,
 };
 use crab_storage::CellStorageLayout;
 use tokio::sync::Mutex;
@@ -226,6 +226,51 @@ impl RepositoryCellRouter {
             if release_after {
                 self.drain_local_target(&target).await?;
             }
+        }
+    }
+
+    pub(crate) async fn persisted_work_target(
+        &self,
+        target: CellTarget,
+    ) -> crate::Result<PersistedWorkInventory> {
+        if target.tenant() != self.identity.tenant()
+            || target.application() != self.identity.application()
+        {
+            return Err(crab_cell_runtime::Error::PeerAuthorization(
+                "persisted-work target belongs to another application",
+            )
+            .into());
+        }
+        let role = self
+            .catalog
+            .lookup(target.cell_id())
+            .await?
+            .ok_or(crab_cell_runtime::Error::CellNotActive)?
+            .entry()
+            .role();
+        let scheduled = self
+            .route_runtime(
+                target.clone(),
+                self.runtime_principal(&["cell.release.inspect"]),
+            )
+            .await?;
+        let inventory: crate::Result<PersistedWorkInventory> = match scheduled.cell.handle.as_ref()
+        {
+            Some(handle) => handle
+                .persisted_work_inventory(role)
+                .await
+                .map_err(Into::into),
+            None => Err(crab_cell_runtime::Error::CellNotActive.into()),
+        };
+        let drained = if scheduled.should_release() {
+            self.drain_local_target(&target).await
+        } else {
+            Ok(())
+        };
+        match (inventory, drained) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(inventory), Ok(())) => Ok(inventory),
         }
     }
 

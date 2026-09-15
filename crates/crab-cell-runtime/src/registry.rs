@@ -8,7 +8,7 @@ use crab_ltx::rusqlite::{Connection, Transaction};
 
 mod descriptor;
 
-use descriptor::{encode_release, verify_rolling_compatibility};
+use descriptor::{encode_release, requires_persisted_work_inventory, verify_rolling_compatibility};
 
 use crate::{
     ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome, ActivitySupervisor,
@@ -863,6 +863,14 @@ impl Registry {
     /// available. Removing one requires an offline maintenance activation.
     pub fn verify_rolling_from(&self, previous: &[u8]) -> Result<()> {
         verify_rolling_compatibility(previous, &self.release_bytes)
+    }
+
+    /// Reports whether an offline rollout removes or narrows a predecessor contract.
+    ///
+    /// A true result requires complete persisted-work admission before the
+    /// predecessor implementation or codec can be removed.
+    pub fn requires_persisted_work_inventory_from(&self, previous: &[u8]) -> Result<bool> {
+        requires_persisted_work_inventory(previous, &self.release_bytes)
     }
 
     /// Reports whether this binary can execute one authoritative Cell pair.

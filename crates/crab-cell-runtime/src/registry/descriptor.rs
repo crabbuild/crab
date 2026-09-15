@@ -38,21 +38,30 @@ pub(super) fn encode_release(
 }
 
 pub(super) fn verify_rolling_compatibility(previous: &[u8], candidate: &[u8]) -> Result<()> {
+    if let Some(reason) = rolling_incompatibility(previous, candidate)? {
+        return Err(crate::Error::Registry(reason));
+    }
+    Ok(())
+}
+
+pub(super) fn requires_persisted_work_inventory(previous: &[u8], candidate: &[u8]) -> Result<bool> {
+    Ok(rolling_incompatibility(previous, candidate)?.is_some())
+}
+
+fn rolling_incompatibility(previous: &[u8], candidate: &[u8]) -> Result<Option<&'static str>> {
     let previous = decode_compatibility_release(previous)?;
     let candidate = decode_compatibility_release(candidate)?;
 
     for old in &previous.modules {
-        let new = candidate
+        let Some(new) = candidate
             .modules
             .iter()
             .find(|module| module.name == old.name)
-            .ok_or(crate::Error::Registry(
-                "rolling release removes a compiled module",
-            ))?;
+        else {
+            return Ok(Some("rolling release removes a compiled module"));
+        };
         if new.schema_min > old.schema_min || new.schema_max < old.schema_max {
-            return Err(crate::Error::Registry(
-                "rolling release narrows a module schema range",
-            ));
+            return Ok(Some("rolling release narrows a module schema range"));
         }
         if new.code != old.code
             && !new.retained_codes.iter().any(|retained| {
@@ -61,48 +70,46 @@ pub(super) fn verify_rolling_compatibility(previous: &[u8], candidate: &[u8]) ->
                     && retained.schema_max >= old.schema_max
             })
         {
-            return Err(crate::Error::Registry(
+            return Ok(Some(
                 "rolling release does not retain predecessor module code",
             ));
         }
-        verify_operations(
+        if let Some(reason) = operation_incompatibility(
             &old.commands,
             &new.commands,
             "rolling release removes a command codec",
             "rolling release narrows a command contract",
-        )?;
-        verify_operations(
+        ) {
+            return Ok(Some(reason));
+        }
+        if let Some(reason) = operation_incompatibility(
             &old.queries,
             &new.queries,
             "rolling release removes a query codec",
             "rolling release narrows a query contract",
-        )?;
+        ) {
+            return Ok(Some(reason));
+        }
         if !old
             .migrations
             .iter()
             .all(|migration| new.migrations.contains(migration))
         {
-            return Err(crate::Error::Registry(
-                "rolling release removes a migration digest",
-            ));
+            return Ok(Some("rolling release removes a migration digest"));
         }
         if !old
             .workflows
             .iter()
             .all(|workflow| new.workflows.contains(workflow))
         {
-            return Err(crate::Error::Registry(
-                "rolling release removes a workflow definition",
-            ));
+            return Ok(Some("rolling release removes a workflow definition"));
         }
         if !old
             .activities
             .iter()
             .all(|activity| new.activities.contains(activity))
         {
-            return Err(crate::Error::Registry(
-                "rolling release removes an activity type",
-            ));
+            return Ok(Some("rolling release removes an activity type"));
         }
     }
     if !previous
@@ -110,35 +117,35 @@ pub(super) fn verify_rolling_compatibility(previous: &[u8], candidate: &[u8]) ->
         .iter()
         .all(|namespace| candidate.namespaces.contains(namespace))
     {
-        return Err(crate::Error::Registry(
+        return Ok(Some(
             "rolling release changes or removes a namespace contract",
         ));
     }
-    Ok(())
+    Ok(None)
 }
 
-fn verify_operations(
+fn operation_incompatibility(
     previous: &[RawOperation],
     candidate: &[RawOperation],
     missing: &'static str,
     narrowed: &'static str,
-) -> Result<()> {
+) -> Option<&'static str> {
     for old in previous {
         let Some(new) = candidate
             .iter()
             .find(|operation| operation.id == old.id && operation.codec == old.codec)
         else {
-            return Err(crate::Error::Registry(missing));
+            return Some(missing);
         };
         if new.schema_min > old.schema_min
             || new.schema_max < old.schema_max
             || new.input_limit < old.input_limit
             || new.output_limit < old.output_limit
         {
-            return Err(crate::Error::Registry(narrowed));
+            return Some(narrowed);
         }
     }
-    Ok(())
+    None
 }
 
 fn decode_compatibility_release(bytes: &[u8]) -> Result<RawRelease> {
@@ -385,7 +392,7 @@ fn role_name(role: CatalogRole) -> &'static str {
 mod tests {
     use serde_json::{Value, json};
 
-    use super::verify_rolling_compatibility;
+    use super::{requires_persisted_work_inventory, verify_rolling_compatibility};
 
     fn release(code: &str, retained_codes: Value) -> Value {
         json!({
@@ -449,6 +456,7 @@ mod tests {
         );
 
         verify_rolling_compatibility(&bytes(&previous), &bytes(&candidate)).unwrap();
+        assert!(!requires_persisted_work_inventory(&bytes(&previous), &bytes(&candidate)).unwrap());
     }
 
     #[test]
@@ -476,6 +484,9 @@ mod tests {
 
         for candidate in cases {
             assert!(verify_rolling_compatibility(&bytes(&previous), &bytes(&candidate)).is_err());
+            assert!(
+                requires_persisted_work_inventory(&bytes(&previous), &bytes(&candidate)).unwrap()
+            );
         }
     }
 }
