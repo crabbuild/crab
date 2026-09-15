@@ -44,6 +44,7 @@ does not imply that all of those bytes must reside on local disk.
 | Read-ahead cache multiplied with views | Shared FIFO cache capped at 8 MiB decoded payload, keyed by immutable view/page identity | `paged_io::tests::cache_bounds_payload_and_isolates_pinned_views` checks eviction, byte accounting and view isolation |
 | Small remote appends cloned/scanned all locators | Copy-on-write 256-page metadata blocks, cached block/global XOR checksums | `paged::map` tests copy one changed block out of a 4,096-page map and compare 4,000 updates/shrinks with a full-scan oracle |
 | Cell-root appends reloaded every historical index and rebuilt every locator | Authenticated radix copy-on-write reads changed leaves/ancestors, prunes truncated subtrees and reuses untouched digests | `cell_roots::changed_cut_loads_only_touched_directory_nodes` stays below 100 KiB of origin reads after changing one page in a 20 MB database; `truncate_regrow_cannot_reuse_old_locator` restores newly written bytes after shrink/regrowth |
+| Initial Cell roots materialized every final locator and encoded directory node | K-way ordered index merge with suffix truncation fences; each 256-page leaf uploads before the next and only radix summaries remain resident | `cell_replica::directory::tests::streamed_tree_matches_canonical_root_without_retaining_objects` matches the canonical 70,000-page root and `cell_roots::initial_streaming_directory_merges_truncation_and_regrowth` restores the newest bytes from a multi-cut initial root |
 | Partial compaction downloaded unrelated bodies | Verify the original indexed plan; fetch only selected bodies; authenticate regenerated indexes; compare independently reduced page bytes; verify replacement indexed state | `publication::range_compaction_does_not_download_unselected_bodies`: before, 2,026,087 downloaded bytes; after, under 100,000; restored bytes identical |
 | Independent replicas multiplied remote/recovery work | Shared I/O, CPU-job and large-recovery admission; ordered concurrent input/index reads | `replica::io` tests overlap two cohorts while enforcing one three-request ceiling and preserving input order |
 | Cancelling a waiter could release capacity before its work stopped | CPU/recovery permits travel with dispatched non-cancellable closures; network child tasks abort on cohort drop | `environment` cancellation regression and `replica::io` cancellation regression |
@@ -92,7 +93,8 @@ admit 5 GB databases. Raising it requires a separately sized recovery budget.
 1. **Finish bounded authenticated metadata residency.** Cell roots now use an
    authenticated block-addressable radix directory, and incremental publication
    reads/copy-on-writes only changed paths while preserving truncation/regrowth
-   coverage. Initial construction still materializes all locators, writable
+   coverage. Initial construction now streams its final locator merge and radix
+   uploads while retaining the already authenticated index bytes; writable
    activation loads an eight-byte checksum per database page, and the standalone
    `Replica` page map remains resident. The shared verified directory-node cache
    is bounded but has no local persistence/rebuild contract. Finish those paths before

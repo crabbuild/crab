@@ -7,7 +7,12 @@ use crab_storage::{CellObjectKind, CellStorageLayout};
 
 use crate::{CrabError, Host, Result};
 
+mod initial;
 mod update;
+
+pub(super) use initial::{
+    build_and_upload as build_initial_and_upload, entries as initial_entries,
+};
 
 const MAGIC: &[u8; 8] = b"CRBDIR01";
 const HEADER_BYTES: usize = 32;
@@ -82,6 +87,7 @@ pub(super) struct DirectoryTree {
 }
 
 impl DirectoryTree {
+    #[cfg(test)]
     pub(super) fn build(
         entries: BTreeMap<u32, DirectoryEntry>,
         page_size: u32,
@@ -680,6 +686,11 @@ fn array<const N: usize>(bytes: &[u8]) -> Result<[u8; N]> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use crab_storage::Store;
+    use object_store::{memory::InMemory, path::Path};
+
     use super::*;
 
     #[test]
@@ -703,6 +714,52 @@ mod tests {
         assert_eq!(tree.height(), 2);
         assert_eq!(tree.root.aggregate.live_pages, 70_000);
         assert!(tree.objects.len() > 256);
+    }
+
+    #[tokio::test]
+    async fn streamed_tree_matches_canonical_root_without_retaining_objects() {
+        let entries = (1..=70_000)
+            .map(|page| DirectoryEntry {
+                page,
+                object: [1; 32],
+                offset: u64::from(page) * 100,
+                length: 100,
+                frame_hash: [2; 32],
+                checksum: u64::from(page) | crate::CHECKSUM_FLAG,
+            })
+            .collect::<Vec<_>>();
+        let canonical = DirectoryTree::build(
+            entries
+                .iter()
+                .cloned()
+                .map(|entry| (entry.page, entry))
+                .collect(),
+            4096,
+            70_000,
+        )
+        .unwrap();
+        let store = Store::new(Arc::new(InMemory::new()));
+        let layout = CellStorageLayout::new(store.clone(), Path::from("streaming"), [3; 16]);
+        let replica =
+            super::super::CellReplica::new(layout, [1; 32], [2; 16], crate::Limits::default())
+                .unwrap();
+        let streamed =
+            build_initial_and_upload(entries.into_iter().map(Ok), 4096, 70_000, &replica)
+                .await
+                .unwrap();
+
+        assert_eq!(streamed.root_digest(), canonical.root_digest());
+        assert_eq!(streamed.height(), canonical.height());
+        assert_eq!(streamed.checksum(), canonical.checksum());
+        assert!(streamed.objects().is_empty());
+        assert_eq!(
+            store
+                .list_prefix(&Path::from("streaming/cells/v1"))
+                .await
+                .unwrap()
+                .len(),
+            canonical.objects().len()
+        );
     }
 
     #[test]

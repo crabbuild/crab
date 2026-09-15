@@ -737,13 +737,13 @@ impl CellReplica {
         for descriptor in &descriptors {
             descriptor.validate_published(self.limits)?;
         }
-        let base_pages = base_graph
-            .as_ref()
-            .map_or(0, |graph| graph.document.database_pages);
-        let (changes, retain_through, page_size, database_pages) =
-            directory_changes(directory_inputs, base_pages)?;
+        let endpoint = descriptors.last().ok_or(CrabError::LTXCorrupted)?;
+        let page_size = endpoint.info.page_size;
+        let database_pages = endpoint.info.database_pages;
         let extents = object_extents(&descriptors)?;
         let directory = if let Some(graph) = &base_graph {
+            let (changes, retain_through) =
+                directory_changes(directory_inputs, graph.document.database_pages)?;
             let base_extents = object_extents(&graph.descriptors)?;
             DirectoryTree::update(
                 directory::Verification {
@@ -773,7 +773,10 @@ impl CellReplica {
             )
             .await?
         } else {
-            let directory = DirectoryTree::build(changes, page_size, database_pages)?;
+            let entries = directory::initial_entries(directory_inputs)?;
+            let directory =
+                directory::build_initial_and_upload(entries, page_size, database_pages, self)
+                    .await?;
             if directory.checksum() != target.checksum {
                 return Err(CrabError::ChecksumMismatch);
             }
@@ -1139,20 +1142,16 @@ fn object_extents(descriptors: &[SegmentDescriptor]) -> Result<BTreeMap<[u8; 32]
 fn directory_changes(
     prepared: &[DirectoryInput],
     base_pages: u32,
-) -> Result<(BTreeMap<u32, DirectoryEntry>, u32, u32, u32)> {
+) -> Result<(BTreeMap<u32, DirectoryEntry>, u32)> {
     let mut changes = BTreeMap::new();
     let mut retain_through = base_pages;
-    let mut page_size = 0;
-    let mut database_pages = base_pages;
     for prepared in prepared {
         let info = &prepared.descriptor.info;
         let index = &prepared.index;
-        page_size = info.page_size;
-        database_pages = info.database_pages;
         // Once a cut truncates a page, later growth must provide a new frame;
         // retaining its old locator would resurrect bytes from before truncation.
-        retain_through = retain_through.min(database_pages);
-        changes.retain(|page, _| *page <= database_pages);
+        retain_through = retain_through.min(info.database_pages);
+        changes.retain(|page, _| *page <= info.database_pages);
         for entry in crate::paged::decode_index(index)? {
             changes.insert(
                 entry.page,
@@ -1171,5 +1170,5 @@ fn directory_changes(
             );
         }
     }
-    Ok((changes, retain_through, page_size, database_pages))
+    Ok((changes, retain_through))
 }

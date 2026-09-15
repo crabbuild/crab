@@ -53,8 +53,10 @@ callback exits, fenced recovery removes and closes the worker-owned SQLite handl
 reloads authority, and releases only the newest control still held by the same
 owner and epoch. Local tentative state remains quarantined; a changed owner is
 left untouched. The next idle acquisition reopens the exact authoritative root,
-so it cannot publish a late tentative commit. Streaming initial directory construction
-and directory-backed capture checksums,
+so it cannot publish a late tentative commit. Initial directory construction now
+k-way merges ordered authenticated index streams, removes locators invalidated by
+later truncation, uploads each 256-page leaf immediately and retains only radix
+node summaries. External-merge compaction and directory-backed capture checksums,
 catalog-driven Workflow activity scheduling,
 remaining HTTP domain cutovers and capacity qualification remain incomplete. The scoped
 KV primitive now installs

@@ -6,7 +6,7 @@ use std::sync::{
 };
 
 use crab_ltx::{
-    CellReplica, Limits, ManagedDb, RootRef, VerifiedLocalPlan,
+    CaptureBatch, CellReplica, Limits, ManagedDb, RootRef, VerifiedLocalPlan,
     bundle::{Bundle, BundleEntry},
     restore_exact,
 };
@@ -488,6 +488,67 @@ async fn truncate_regrow_cannot_reuse_old_locator() {
     assert_eq!(length, 4_000_000);
     assert!(!is_zero);
     replacement.close().unwrap();
+}
+
+#[tokio::test]
+async fn initial_streaming_directory_merges_truncation_and_regrowth() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let path = directory.path().join("cell.sqlite");
+    let initial = crab_ltx::rusqlite::Connection::open(&path).unwrap();
+    initial
+        .execute_batch("PRAGMA auto_vacuum = FULL; VACUUM")
+        .unwrap();
+    drop(initial);
+    let mut writer = ManagedDb::open(&path, Limits::default()).unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE payload(value BLOB NOT NULL);\
+                 INSERT INTO payload VALUES(zeroblob(4000000))",
+            )
+        })
+        .unwrap();
+    let first = writer.capture().unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute("DELETE FROM payload", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let truncated = writer.capture().unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute("INSERT INTO payload VALUES(randomblob(4000000))", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let regrown = writer.capture().unwrap();
+    let mut segments = first.segments;
+    segments.extend(truncated.segments);
+    segments.extend(regrown.segments);
+    let batch = CaptureBatch {
+        segments,
+        position: regrown.position,
+    };
+    let segment_count = batch.segments.len();
+
+    let replica = replica(Store::new(Arc::new(InMemory::new())), [53; 32], [54; 16]);
+    let prepared = replica.prepare(None, &batch, 1, 1).await.unwrap();
+    assert_eq!(prepared.verified().segment_count(), segment_count);
+    writer.close().unwrap();
+
+    let restored = directory.path().join("streamed.sqlite");
+    prepared.verified().restore(&restored).await.unwrap();
+    let connection = crab_ltx::rusqlite::Connection::open(restored).unwrap();
+    let (length, is_zero): (u32, bool) = connection
+        .query_row(
+            "SELECT length(value), value = zeroblob(length(value)) FROM payload",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(length, 4_000_000);
+    assert!(!is_zero);
 }
 
 #[tokio::test(flavor = "multi_thread")]

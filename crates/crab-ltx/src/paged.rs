@@ -17,6 +17,63 @@ pub(crate) struct IndexEntry {
     pub checksum: u64,
 }
 
+struct IndexEntries<'a> {
+    chunks: std::slice::ChunksExact<'a, u8>,
+}
+
+impl Iterator for IndexEntries<'_> {
+    type Item = Result<IndexEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.chunks.next().map(|entry| {
+            Ok(IndexEntry {
+                page: u32::from_be_bytes(array(&entry[..4])?),
+                offset: u64::from_be_bytes(array(&entry[4..12])?),
+                size: u64::from_be_bytes(array(&entry[12..20])?),
+                hash: array(&entry[20..52])?,
+                checksum: u64::from_be_bytes(array(&entry[52..60])?),
+            })
+        })
+    }
+}
+
+pub(crate) struct ValidatedIndexEntries<'a> {
+    entries: IndexEntries<'a>,
+    info: &'a crate::SegmentInfo,
+    previous_page: u32,
+    previous_end: u64,
+}
+
+impl Iterator for ValidatedIndexEntries<'_> {
+    type Item = Result<IndexEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.entries.next().map(|entry| {
+            let entry = entry?;
+            let lock = crate::ltx::lock_pgno(self.info.page_size);
+            let max_frame = crate::lz4_block::compress_bound(self.info.page_size as usize) as u64
+                + FRAME_PREFIX as u64;
+            let end = entry
+                .offset
+                .checked_add(entry.size)
+                .ok_or(CrabError::LTXCorrupted)?;
+            let footer = crate::ltx::PAGE_HEADER_SIZE + 8 + crate::ltx::TRAILER_SIZE + 1;
+            if entry.page <= self.previous_page
+                || entry.page > self.info.database_pages
+                || entry.page == lock
+                || entry.offset != self.previous_end
+                || !(FRAME_PREFIX as u64..=max_frame).contains(&entry.size)
+                || end > self.info.size_bytes.saturating_sub(footer as u64)
+            {
+                return Err(CrabError::LTXCorrupted);
+            }
+            self.previous_page = entry.page;
+            self.previous_end = end;
+            Ok(entry)
+        })
+    }
+}
+
 #[derive(Clone)]
 struct Locator {
     segment: Arc<RemoteSegment>,
@@ -209,32 +266,14 @@ pub(crate) fn extend(
         }
         page_size = info.page_size;
         count = info.database_pages;
-        let lock = crate::ltx::lock_pgno(page_size);
         // Apply each truncation before the next delta; a later regrowth must not
         // revive old pages from a version predating that truncation.
         pages.truncate(count);
-        let mut previous = 0;
-        let mut end = crate::ltx::HEADER_SIZE as u64;
-        for entry in decode_index(&bytes)? {
+        for entry in validated_index_entries(&bytes, info)? {
+            let entry = entry?;
             let pgno = entry.page;
             let offset = entry.offset;
             let size = entry.size;
-            if pgno <= previous
-                || pgno > count
-                || pgno == lock
-                || offset != end
-                || size < FRAME_PREFIX as u64
-                || size
-                    > crate::lz4_block::compress_bound(page_size as usize) as u64
-                        + FRAME_PREFIX as u64
-            {
-                return Err(CrabError::LTXCorrupted);
-            }
-            end = offset.checked_add(size).ok_or(CrabError::LTXCorrupted)?;
-            let footer = crate::ltx::PAGE_HEADER_SIZE + 8 + crate::ltx::TRAILER_SIZE + 1;
-            if end > info.size_bytes.saturating_sub(footer as u64) {
-                return Err(CrabError::LTXCorrupted);
-            }
             pages.insert(
                 pgno,
                 Locator {
@@ -245,8 +284,8 @@ pub(crate) fn extend(
                     checksum: entry.checksum,
                 },
             );
-            previous = pgno;
         }
+        let lock = crate::ltx::lock_pgno(page_size);
         if pages.len() as u64 != u64::from(count) - u64::from(lock <= count) {
             return Err(CrabError::LTXCorrupted);
         }
@@ -271,23 +310,28 @@ pub(crate) fn extend(
 }
 
 pub(crate) fn decode_index(bytes: &[u8]) -> Result<Vec<IndexEntry>> {
+    index_entries(bytes)?.collect()
+}
+
+fn index_entries(bytes: &[u8]) -> Result<IndexEntries<'_>> {
     if !bytes.len().is_multiple_of(ENTRY_BYTES) {
         return Err(CrabError::LTXCorrupted);
     }
-    bytes
-        .as_chunks::<ENTRY_BYTES>()
-        .0
-        .iter()
-        .map(|entry| {
-            Ok(IndexEntry {
-                page: u32::from_be_bytes(array(&entry[..4])?),
-                offset: u64::from_be_bytes(array(&entry[4..12])?),
-                size: u64::from_be_bytes(array(&entry[12..20])?),
-                hash: array(&entry[20..52])?,
-                checksum: u64::from_be_bytes(array(&entry[52..60])?),
-            })
-        })
-        .collect()
+    Ok(IndexEntries {
+        chunks: bytes.chunks_exact(ENTRY_BYTES),
+    })
+}
+
+pub(crate) fn validated_index_entries<'a>(
+    bytes: &'a [u8],
+    info: &'a crate::SegmentInfo,
+) -> Result<ValidatedIndexEntries<'a>> {
+    Ok(ValidatedIndexEntries {
+        entries: index_entries(bytes)?,
+        info,
+        previous_page: 0,
+        previous_end: crate::ltx::HEADER_SIZE as u64,
+    })
 }
 
 // The sidecar binds offsets and compressed-frame digests to the CAS head. The

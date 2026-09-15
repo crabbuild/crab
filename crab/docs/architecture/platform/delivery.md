@@ -9,7 +9,7 @@ does not establish a working runtime.
 | Source | Current behavior | Required change |
 | --- | --- | --- |
 | [managed.rs](../../../../crates/crab-ltx/src/managed.rs) | Typed mutation callbacks, capture ownership and a temporary SQLite `query_only` read boundary | Keep raw connection access inside the runtime; typed application SQL authorization is implemented above this layer |
-| [cell_replica.rs](../../../../crates/crab-ltx/src/cell_replica.rs) | Native and canonical Cell-selected bundle cuts prepare immutable roots; exact range/full compaction produces representation-only prepared roots; cold reads and sparse writable activation use exact digest-pinned radix paths backed by a process-wide bounded directory cache and coalesce adjacent frames into at most 1 MiB range reads; full restore streams those verified runs through a recovery reservation and atomically installs a new SQLite file; incremental publication copy-on-writes only changed directory paths and safely prunes truncation | Add streaming initial construction, external-merge compaction and directory-backed capture checksums |
+| [cell_replica.rs](../../../../crates/crab-ltx/src/cell_replica.rs) | Native and canonical Cell-selected bundle cuts prepare immutable roots; initial construction k-way merges ordered index streams, rejects pre-truncation locators, uploads 256-page leaves as produced and retains only radix summaries; exact range/full compaction produces representation-only prepared roots; cold reads and sparse writable activation use exact digest-pinned radix paths backed by a process-wide bounded directory cache and coalesce adjacent frames into at most 1 MiB range reads; full restore streams those verified runs through a recovery reservation and atomically installs a new SQLite file; incremental publication copy-on-writes only changed directory paths and safely prunes truncation | Add external-merge compaction and directory-backed capture checksums |
 | [replica.rs](../../../../crates/crab-ltx/src/replica.rs) | Standalone immutable manifest plus per-epoch mutable head | Keep existing callers working; Cell runtime uses only `CellReplica` and never treats this head as authority |
 | [append.rs](../../../../crates/crab-ltx/src/replica/append.rs) | Shared native/bundle append verification | Reuse verification under the prepared-root API |
 | [paged.rs](../../../../crates/crab-ltx/src/paged.rs) | Authenticated but resident page map; sparse writable SQL | Bounded directory nodes/cache and capture checksum tracker |
@@ -54,9 +54,11 @@ locators without downloading unselected bodies. Directory reads now share an
 Cell/incarnation path and node digest; eviction cannot change correctness and
 distinct backing Store instances cannot alias. Sparse reads coalesce adjacent
 frames into bounded range requests, while exact-root restore streams those runs
-through exclusive scratch and no-clobber installation. Complete this package
-with streaming initial directory construction, external-merge compaction and
-replacement of the dense capture/activation checksum array. Exact Cell roots
+through exclusive scratch and no-clobber installation. Initial directory
+construction now streams a k-way final-locator merge into immediately uploaded
+radix leaves without a complete locator map or retained node bodies. Complete
+this package with external-merge compaction and replacement of the dense
+capture/activation checksum array. Exact Cell roots
 load authenticated directory checksums without LTX bodies and open a sparse
 writable continuation through the existing VFS.
 Existing standalone `Replica` callers retain their current API; Cell runtime
@@ -235,7 +237,8 @@ bounded node cache, adjacent-frame range coalescing and sequential exact-root
 restore are now implemented. Restore holds one recovery reservation, writes
 verified runs to an exclusive same-directory scratch file, checks the final
 database length and aggregate checksum, syncs the file, and installs it without
-replacing a destination. Continue with streaming initial root construction,
+replacing a destination. Initial root construction now merges authenticated
+index streams and uploads each completed leaf before continuing. Continue with
 external-merge compaction and directory-backed capture checksum updates. Remove
 whole-DB buffers from active paths; do not preserve a second unbounded
 implementation as fallback.

@@ -38,6 +38,9 @@ chain compaction. Empty default features keep the local library provider/runtime
 independent. Optional `replica` adds existing Crab storage/Tokio, immutable
 remote manifests, epoch-head CAS, inherited exact recovery/resume, bundles,
 range/level compaction, immutable views and writable sparse SQL with hydration.
+Cell-root bootstrap k-way merges ordered index streams, fences locators removed by
+later truncation, uploads each completed 256-page radix leaf immediately and
+retains only node summaries while constructing parent levels.
 It does not introduce a second SQLite library. See the
 [parity matrix](../../crab-ltx/PARITY.md) for API and qualification boundaries.
 

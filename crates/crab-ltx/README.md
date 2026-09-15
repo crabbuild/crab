@@ -9,9 +9,10 @@ Status: local and standalone remote replication are implemented. Native and
 shared-bundle LTX cuts can be prepared as immutable Cell/incarnation-scoped roots,
 and exact range/full compaction can produce a representation-only prepared root.
 These roots are bound to checked `crab-cell-runtime` control successors and the
-runtime is composed by `crab-http-server`. Directory-backed capture checksums,
-streaming initial construction, external-merge
-compaction and the complete product hard cutover still remain. See the
+runtime is composed by `crab-http-server`. Initial directories are constructed
+from a streaming k-way index merge and uploaded one radix leaf at a time.
+Directory-backed capture checksums, external-merge compaction and the complete
+product hard cutover still remain. See the
 [next architecture](../crab-http-server/next-architecture/README.md).
 
 ## Contract
@@ -150,8 +151,11 @@ database page before opening SQLite. Incremental preparation copy-on-writes only
 changed leaves and ancestors, prunes truncated subtrees by their authenticated
 ranges and reuses every untouched digest; it does not fetch historical indexes or
 materialize all live locators. Initial root construction still materializes its
-full locator set, and Cell compaction currently holds all selected bodies in
-memory. Directory nodes do share a process-wide 8 MiB verified-byte cache whose
+full authenticated index bytes, but it does not materialize a locator map or
+retain encoded directory bodies: it k-way merges final locators, filters entries
+invalidated by a later truncation and uploads each completed 256-page leaf before
+continuing. Cell compaction currently holds all selected bodies in memory.
+Directory nodes do share a process-wide 8 MiB verified-byte cache whose
 key isolates backing Store instances and exact Cell/incarnation paths. Sparse
 page faults coalesce adjacent frames from one immutable object into bounded 1 MiB
 range reads while retaining per-frame verification. `VerifiedRoot::restore`

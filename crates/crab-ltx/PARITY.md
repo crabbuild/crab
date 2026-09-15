@@ -135,8 +135,10 @@ the full replacement indexed plan. Sparse takeover is index/metadata-only until 
 faults pages. Copy-on-write metadata blocks and rolling checksums remove whole-map
 copying/scanning on each standalone remote append, but its live-page locators
 remain resident. Cell roots instead use an authenticated radix directory whose
-incremental publisher reads only changed leaves/ancestors; initial construction,
-writable checksum seeding and persistent cache rebuild remain scalability gates.
+incremental publisher reads only changed leaves/ancestors. Initial construction
+k-way merges ordered index streams and uploads each leaf without retaining a
+complete locator map or directory body set; writable checksum seeding and
+persistent cache rebuild remain scalability gates.
 See [SCALABILITY.md](SCALABILITY.md) for the 1K–10K database target and remaining gates.
 The feature set is not yet a production-ready HTTP backend,
 nor a claim of complete Celld performance, simulator or operational parity.
