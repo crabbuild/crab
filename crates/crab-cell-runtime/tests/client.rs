@@ -3,12 +3,13 @@ use std::{future::Future, pin::Pin, sync::Arc, time::UNIX_EPOCH};
 use crab_cell_runtime::{
     ApplicationId, BoundedDecoder, BoundedEncoder, BuildDescriptor, CatalogEntry, CatalogRole,
     CellAuthority, CellClient, CellDescription, CellModule, CellTarget, CodecError, Command,
-    CommandContext, CommandResult, Digest, IncarnationId, InvocationError, MigrationDescriptor,
-    ModuleDescriptor, MutationIdentity, NamespaceDescriptor, NamespaceId, OperationDescriptor,
-    Owner, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerPrincipal, PeerRoundTrip,
-    PeerSigner, PeerVerifier, Query, QueryContext, Receipt, Registry, RegistryBuilder, RequestId,
-    SessionId, SqlBatch, SqlStatement, SqlValue, SqlWorkerPool, TenantId, VerifiedPeerRequest,
-    WireValue, command_operation_digest,
+    CommandContext, CommandResult, Digest, EffectClaim, EffectPeerClient, IncarnationId,
+    InvocationError, MigrationDescriptor, ModuleDescriptor, MutationIdentity, NamespaceDescriptor,
+    NamespaceId, OperationDescriptor, Owner, PeerAuthorizer, PeerCellResolver, PeerDispatcher,
+    PeerPrincipal, PeerRoundTrip, PeerSigner, PeerVerifier, Query, QueryContext, Receipt, Registry,
+    RegistryBuilder, RequestId, Resolution, SessionId, SqlBatch, SqlStatement, SqlValue,
+    SqlWorkerPool, TenantId, VerifiedPeerRequest, WireValue, command_operation_digest, effect_id,
+    effect_operation_digest, peer_wire as wire,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{CellStorageLayout, Store};
@@ -497,6 +498,111 @@ async fn local_and_peer_command_share_digest_dedup_and_query_state() {
     assert_eq!(observed.output, 1);
     assert_eq!(observed.receipt.commit_sequence, 1);
 
+    fixture.handle.drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn authenticated_effect_delivery_publishes_once_and_resolves_from_inbox() {
+    let fixture = fixture().await;
+    let signer = PeerSigner::new(
+        SessionId::from_bytes([12; 16]),
+        fixture.registry.release_digest(),
+        ed25519_dalek::SigningKey::from_bytes(&[13; 32]),
+    );
+    let verifier = Arc::new(PeerVerifier::new(
+        SessionId::from_bytes([12; 16]),
+        fixture.registry.release_digest(),
+        signer.verifying_key(),
+    ));
+    let dispatcher = Arc::new(PeerDispatcher::new(
+        Arc::clone(&fixture.registry),
+        Arc::new(LocalResolver {
+            target: fixture.target.clone(),
+            handle: fixture.handle.clone(),
+        }),
+        Arc::new(RepositoryAuthorizer),
+    ));
+    let round_trip = Arc::new(LoopbackRoundTrip {
+        verifier,
+        dispatcher,
+    });
+    let principal = PeerPrincipal {
+        issuer: "crab-runtime:test".into(),
+        subject: "source-session".into(),
+        actions: vec!["repository.issue.create".into()],
+    };
+    let now_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let source_cell = crab_cell_runtime::CellId::from_bytes([21; 32]);
+    let source_incarnation = IncarnationId::from_bytes([22; 16]);
+    let source_sequence = 9;
+    let ordinal = 3;
+    let effect_id = effect_id(source_cell, source_incarnation, source_sequence, ordinal);
+    let identity = wire::EffectIdentity {
+        effect_id: effect_id.to_vec(),
+        source_cell: source_cell.as_bytes().to_vec(),
+        source_incarnation: source_incarnation.as_bytes().to_vec(),
+        source_sequence,
+        ordinal,
+        expires_at_ms: now_ms + 60_000,
+    };
+    let mut encoder = BoundedEncoder::new(64).unwrap();
+    b"effect".to_vec().encode(&mut encoder).unwrap();
+    let request = wire::EffectRequest {
+        target: Some(wire::Target {
+            tenant_id: fixture.target.tenant().as_bytes().to_vec(),
+            application_id: fixture.target.application().as_bytes().to_vec(),
+            namespace_id: fixture.target.namespace().as_bytes().to_vec(),
+            partition: fixture.target.partition().to_vec(),
+        }),
+        destination_incarnation: fixture.handle.incarnation().as_bytes().to_vec(),
+        identity: Some(identity.clone()),
+        operation: Some(wire::effect_request::Operation::CellCommand(
+            wire::CellCommand {
+                command_id: CreateComment::ID,
+                codec_version: CreateComment::CODEC_VERSION,
+                input: encoder.finish(),
+            },
+        )),
+    };
+    let operation_digest = effect_operation_digest(
+        fixture.target.cell_id(),
+        effect_id,
+        &prost::Message::encode_to_vec(&request),
+    );
+    let claim = EffectClaim {
+        effect_id,
+        destination: fixture.target.cell_id(),
+        operation: prost::Message::encode_to_vec(&request),
+        operation_digest,
+        attempt: 1,
+        token: [23; 16],
+        lease_until_ms: now_ms + 30_000,
+        expires_at_ms: identity.expires_at_ms,
+        created_sequence: source_sequence,
+    };
+    let client = EffectPeerClient::new(Arc::new(signer), principal, round_trip);
+    let delivered = client.deliver(&claim, now_ms).await.unwrap();
+    assert_eq!(delivered.commit_sequence(), 1);
+    assert_eq!(client.deliver(&claim, now_ms + 1).await.unwrap(), delivered);
+    assert_eq!(
+        client.resolve(&claim, now_ms + 2).await.unwrap(),
+        Resolution::Committed(delivered)
+    );
+
+    assert_eq!(
+        CellClient::local(Arc::clone(&fixture.registry), fixture.handle.clone())
+            .query::<CountComments>(&fixture.target, None, ())
+            .await
+            .unwrap()
+            .output,
+        1
+    );
     fixture.handle.drain().await.unwrap();
 }
 

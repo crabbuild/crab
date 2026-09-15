@@ -77,10 +77,11 @@ cleanups are bounded. `CellHandle::deliver_effect` now applies destination work
 through the fixed SQL worker and ordinary LTX/control publication path;
 `resolve_effect` returns committed, absent, expired or unknown state from the
 published inbox, including after exact-root restoration. Accepted delivery
-continues after caller cancellation. The generic signed Cell peer transport and
-dispatcher exist, but Workflow/Queue effect insertion, effect codecs, peer
-DeliverEffect/ResolveEffect translation, source acknowledgement wiring and the
-node delivery supervisor remain.
+continues after caller cancellation. The signed peer transport strictly validates
+and dispatches generic compiled Cell-command DeliverEffect/ResolveEffect messages;
+`EffectPeerClient` validates a canonical stored request against its published
+claim before signing it. Workflow/Queue effect insertion and codecs, source
+claim/ack orchestration and the node delivery supervisor remain.
 
 Runtime request outcome values: 1=success, 2=business rejection. Its result is
 the encoded MutationResult or Error, not a transport header. The stored sequence

@@ -256,12 +256,45 @@ impl PeerAuthorizer for Server {
                 .map_err(|_| denied())?,
         );
         let repository = self.repositories.by_id(repository_id).ok_or_else(denied)?;
+        if matches!(
+            request.operation(),
+            Some(
+                peer_wire::peer_request::Operation::DeliverEffect(_)
+                    | peer_wire::peer_request::Operation::ResolveEffect(_)
+            )
+        ) {
+            let fleet = self
+                .peer_receiver
+                .as_ref()
+                .map(|receiver| receiver.directory.fleet())
+                .ok_or_else(denied)?;
+            return authorize_runtime_effect(fleet, request);
+        }
         let issuer = self
             .auth
             .as_ref()
             .map(crate::auth::Authentication::peer_issuer);
         authorize_repository(&repository.config, issuer.as_deref(), request)
     }
+}
+
+fn authorize_runtime_effect(
+    fleet: Digest,
+    request: &VerifiedPeerRequest,
+) -> crab_cell_runtime::Result<()> {
+    let principal = request.principal();
+    let action = match request.operation() {
+        Some(peer_wire::peer_request::Operation::DeliverEffect(_)) => "cell.effect.deliver",
+        Some(peer_wire::peer_request::Operation::ResolveEffect(_)) => "cell.effect.resolve",
+        _ => return Err(denied()),
+    };
+    if principal.issuer != format!("crab-runtime:{}", encode_digest(fleet))
+        || principal.subject != encode_session(request.origin_session())
+        || !request.permits(action)
+    {
+        return Err(denied());
+    }
+    Ok(())
 }
 
 pub(crate) async fn forward(
@@ -415,9 +448,17 @@ fn cgroup_available_memory(limit_path: &str, usage_path: &str) -> Option<u64> {
 }
 
 fn encode_session(session: SessionId) -> String {
+    encode_hex(session.as_bytes())
+}
+
+fn encode_digest(digest: Digest) -> String {
+    encode_hex(digest.as_bytes())
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(32);
-    for byte in session.as_bytes() {
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
         encoded.push(HEX[(byte >> 4) as usize] as char);
         encoded.push(HEX[(byte & 0x0f) as usize] as char);
     }
@@ -623,6 +664,68 @@ mod tests {
         .unwrap()
     }
 
+    fn verified_runtime_effect(
+        issuer: String,
+        subject: String,
+        action: &str,
+    ) -> VerifiedPeerRequest {
+        let session = SessionId::from_bytes([2; 16]);
+        let signer = PeerSigner::new(
+            session,
+            Digest::from_bytes([3; 32]),
+            SigningKey::from_bytes(&[1; 32]),
+        );
+        let source_cell = crab_cell_runtime::CellId::from_bytes([20; 32]);
+        let source_incarnation = crab_cell_runtime::IncarnationId::from_bytes([21; 16]);
+        let source_sequence = 4;
+        let ordinal = 1;
+        let encoded = signer
+            .sign(
+                PeerPrincipal {
+                    issuer,
+                    subject,
+                    actions: vec![action.into()],
+                },
+                NOW_MS,
+                NOW_MS + 60_000,
+                30_000,
+                PeerOperation::DeliverEffect(peer_wire::EffectRequest {
+                    target: Some(peer_wire::Target {
+                        tenant_id: vec![4; 16],
+                        application_id: vec![5; 16],
+                        namespace_id: crate::cells::REPOSITORY_NAMESPACE.as_bytes().to_vec(),
+                        partition: [6; 16].to_vec(),
+                    }),
+                    destination_incarnation: vec![8; 16],
+                    identity: Some(peer_wire::EffectIdentity {
+                        effect_id: crab_cell_runtime::effect_id(
+                            source_cell,
+                            source_incarnation,
+                            source_sequence,
+                            ordinal,
+                        )
+                        .to_vec(),
+                        source_cell: source_cell.as_bytes().to_vec(),
+                        source_incarnation: source_incarnation.as_bytes().to_vec(),
+                        source_sequence,
+                        ordinal,
+                        expires_at_ms: NOW_MS + 5 * 60_000,
+                    }),
+                    operation: Some(peer_wire::effect_request::Operation::CellCommand(
+                        peer_wire::CellCommand {
+                            command_id: 1,
+                            codec_version: 1,
+                            input: Vec::new(),
+                        },
+                    )),
+                }),
+            )
+            .unwrap();
+        PeerVerifier::new(session, Digest::from_bytes([3; 32]), signer.verifying_key())
+            .verify(&encoded, NOW_MS)
+            .unwrap()
+    }
+
     #[test]
     fn current_membership_and_exact_action_are_required() {
         let request = verified(1, vec!["repository.issue.create".into()]);
@@ -652,6 +755,30 @@ mod tests {
                     .is_ok()
             );
         }
+    }
+
+    #[test]
+    fn runtime_effect_requires_fleet_issuer_session_subject_and_internal_action() {
+        let fleet = Digest::from_bytes([10; 32]);
+        let request = verified_runtime_effect(
+            format!("crab-runtime:{}", encode_digest(fleet)),
+            encode_session(SessionId::from_bytes([2; 16])),
+            "cell.effect.deliver",
+        );
+        assert!(authorize_runtime_effect(fleet, &request).is_ok());
+
+        let wrong_action = verified_runtime_effect(
+            format!("crab-runtime:{}", encode_digest(fleet)),
+            encode_session(SessionId::from_bytes([2; 16])),
+            "cell.effect.resolve",
+        );
+        assert!(authorize_runtime_effect(fleet, &wrong_action).is_err());
+        let browser = verified_runtime_effect(
+            "https://issuer.example".into(),
+            "alice".into(),
+            "cell.effect.deliver",
+        );
+        assert!(authorize_runtime_effect(fleet, &browser).is_err());
     }
 
     #[test]

@@ -636,7 +636,14 @@ pub fn effect_operation_digest(
     Digest::from_bytes(*hasher.finalize().as_bytes())
 }
 
-fn effect_id(cell: CellId, incarnation: IncarnationId, sequence: u64, ordinal: u32) -> [u8; 32] {
+/// Derives the immutable identity for one source transaction effect ordinal.
+#[must_use]
+pub fn effect_id(
+    cell: CellId,
+    incarnation: IncarnationId,
+    sequence: u64,
+    ordinal: u32,
+) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"crab.effect.v1\0");
     hasher.update(cell.as_bytes());

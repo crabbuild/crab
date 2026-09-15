@@ -5,9 +5,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use prost::Message;
+
 use crate::{
-    CellDescription, CellId, CellTarget, Digest, Error, IncarnationId, MutationIdentity, Receipt,
-    Resolution, Result, StoredOutcome,
+    CellDescription, CellId, CellTarget, Digest, EffectClaim, Error, IncarnationId,
+    MutationIdentity, Receipt, Resolution, Result, StoredOutcome,
     client::{CellTransport, EncodedCommand, EncodedObservation, EncodedQuery, EncodedResolve},
 };
 
@@ -29,6 +31,93 @@ pub(crate) struct PeerClientTransport {
     signer: Arc<PeerSigner>,
     principal: PeerPrincipal,
     round_trip: Arc<dyn PeerRoundTrip>,
+}
+
+/// Authenticated private transport for one already-published source effect lease.
+#[derive(Clone)]
+pub struct EffectPeerClient {
+    transport: PeerClientTransport,
+}
+
+impl EffectPeerClient {
+    #[must_use]
+    pub fn new(
+        signer: Arc<PeerSigner>,
+        principal: PeerPrincipal,
+        round_trip: Arc<dyn PeerRoundTrip>,
+    ) -> Self {
+        Self {
+            transport: PeerClientTransport::new(signer, principal, round_trip),
+        }
+    }
+
+    /// Delivers one exact lease after the caller has validated its published token.
+    pub async fn deliver(&self, claim: &EffectClaim, now_ms: i64) -> Result<StoredOutcome> {
+        if claim.lease_until_ms < now_ms.saturating_add(1_000) {
+            return Err(Error::Command(
+                "effect lease has insufficient delivery margin",
+            ));
+        }
+        let (request, target, expected) = checked_effect_request(claim, now_ms)?;
+        let expires_at_ms = now_ms.saturating_add(60_000).min(claim.expires_at_ms);
+        let reply = match self
+            .transport
+            .exchange(
+                target,
+                now_ms,
+                expires_at_ms,
+                PeerOperation::DeliverEffect(request),
+            )
+            .await
+        {
+            Err(source @ Error::PeerTransportUnknown { .. }) => {
+                return Err(Error::EffectOutcomeUnknown {
+                    effect_id: claim.effect_id,
+                    operation_digest: claim.operation_digest,
+                    source: Box::new(source),
+                });
+            }
+            result => result?,
+        };
+        match reply.outcome {
+            Some(wire::peer_reply::Outcome::Mutation(reply)) => {
+                effect_mutation_outcome(reply, expected, claim)
+            }
+            Some(wire::peer_reply::Outcome::Error(error)) => {
+                Err(effect_error(error, claim.effect_id, claim.operation_digest))
+            }
+            _ => Err(Error::Peer("unexpected effect delivery reply")),
+        }
+    }
+
+    /// Resolves one ambiguous delivery against the destination inbox.
+    pub async fn resolve(&self, claim: &EffectClaim, now_ms: i64) -> Result<Resolution> {
+        let (request, target, expected) = checked_effect_request(claim, now_ms)?;
+        let expires_at_ms = now_ms.saturating_add(60_000).min(claim.expires_at_ms);
+        let reply = self
+            .transport
+            .exchange(
+                target,
+                now_ms,
+                expires_at_ms,
+                PeerOperation::ResolveEffect(wire::EffectResolveRequest {
+                    target: request.target,
+                    destination_incarnation: request.destination_incarnation,
+                    identity: request.identity,
+                    operation_digest: claim.operation_digest.as_bytes().to_vec(),
+                }),
+            )
+            .await?;
+        match reply.outcome {
+            Some(wire::peer_reply::Outcome::Resolve(reply)) => {
+                effect_resolution_outcome(reply, expected, claim)
+            }
+            Some(wire::peer_reply::Outcome::Error(error)) => {
+                Err(effect_error(error, claim.effect_id, claim.operation_digest))
+            }
+            _ => Err(Error::Peer("unexpected effect Resolve reply")),
+        }
+    }
 }
 
 impl PeerClientTransport {
@@ -246,6 +335,140 @@ impl Clone for PeerClientTransport {
             round_trip: Arc::clone(&self.round_trip),
         }
     }
+}
+
+fn checked_effect_request(
+    claim: &EffectClaim,
+    now_ms: i64,
+) -> Result<(wire::EffectRequest, CellTarget, CellDescription)> {
+    if claim.attempt == 0
+        || claim.token.iter().all(|byte| *byte == 0)
+        || claim.operation.is_empty()
+        || claim.expires_at_ms <= now_ms
+    {
+        return Err(Error::Command("invalid effect claim for delivery"));
+    }
+    let request = wire::EffectRequest::decode(claim.operation.as_slice())?;
+    PeerOperation::DeliverEffect(request.clone()).validate(now_ms)?;
+    if request.encode_to_vec() != claim.operation {
+        return Err(Error::Peer("stored effect request is not canonical"));
+    }
+    let target = runtime_target(
+        request
+            .target
+            .as_ref()
+            .ok_or(Error::Peer("effect target is missing"))?,
+    )?;
+    if target.cell_id() != claim.destination
+        || crate::effect_operation_digest(target.cell_id(), claim.effect_id, &claim.operation)
+            != claim.operation_digest
+    {
+        return Err(Error::Command("effect claim target or digest changed"));
+    }
+    let identity = request
+        .identity
+        .as_ref()
+        .ok_or(Error::Peer("effect identity is missing"))?;
+    if identity.effect_id.as_slice() != claim.effect_id
+        || identity.source_sequence != claim.created_sequence
+        || identity.expires_at_ms != claim.expires_at_ms
+    {
+        return Err(Error::Command("effect claim source identity changed"));
+    }
+    let incarnation = IncarnationId::try_from(request.destination_incarnation.as_slice())?;
+    Ok((
+        request,
+        target.clone(),
+        CellDescription {
+            cell: target.cell_id(),
+            incarnation,
+            code: Digest::from_bytes([0; 32]),
+            schema: 1,
+        },
+    ))
+}
+
+fn runtime_target(value: &wire::Target) -> Result<CellTarget> {
+    CellTarget::new(
+        crate::TenantId::try_from(value.tenant_id.as_slice())?,
+        crate::ApplicationId::try_from(value.application_id.as_slice())?,
+        crate::NamespaceId::try_from(value.namespace_id.as_slice())?,
+        &value.partition,
+    )
+}
+
+fn effect_mutation_outcome(
+    reply: wire::MutationReply,
+    expected: CellDescription,
+    claim: &EffectClaim,
+) -> Result<StoredOutcome> {
+    let receipt = checked_receipt(
+        reply
+            .receipt
+            .ok_or(Error::Peer("effect reply receipt is missing"))?,
+        expected,
+    )?;
+    match reply.outcome {
+        Some(wire::mutation_reply::Outcome::Result(wire::MutationResult {
+            result: Some(wire::mutation_result::Result::CommandOutput(result)),
+        })) => Ok(StoredOutcome::Success {
+            result,
+            commit_sequence: receipt.commit_sequence,
+        }),
+        Some(wire::mutation_reply::Outcome::Error(error))
+            if error.code == wire::error::Code::PreconditionFailed as i32
+                && error.outcome == wire::error::Outcome::Rejected as i32 =>
+        {
+            Ok(StoredOutcome::Rejected {
+                result: error.application_details,
+                commit_sequence: receipt.commit_sequence,
+            })
+        }
+        Some(wire::mutation_reply::Outcome::Error(error)) => {
+            Err(effect_error(error, claim.effect_id, claim.operation_digest))
+        }
+        _ => Err(Error::Peer("unexpected effect mutation result")),
+    }
+}
+
+fn effect_resolution_outcome(
+    reply: wire::ResolveReply,
+    expected: CellDescription,
+    claim: &EffectClaim,
+) -> Result<Resolution> {
+    match wire::resolve_reply::State::try_from(reply.state)
+        .map_err(|_| Error::Peer("unknown effect Resolve state"))?
+    {
+        wire::resolve_reply::State::Committed | wire::resolve_reply::State::Rejected => {
+            Ok(Resolution::Committed(effect_mutation_outcome(
+                reply
+                    .reply
+                    .ok_or(Error::Peer("resolved effect reply is missing"))?,
+                expected,
+                claim,
+            )?))
+        }
+        wire::resolve_reply::State::Absent => Ok(Resolution::Absent),
+        wire::resolve_reply::State::Unknown => Ok(Resolution::Unknown),
+        wire::resolve_reply::State::Expired => Ok(Resolution::Expired),
+        wire::resolve_reply::State::Invalid => Err(Error::Peer("invalid effect Resolve state")),
+    }
+}
+
+fn effect_error(error: wire::Error, effect_id: [u8; 32], digest: Digest) -> Error {
+    if error.code == wire::error::Code::OutcomeUnknown as i32
+        || error.outcome == wire::error::Outcome::Unknown as i32
+    {
+        return Error::EffectOutcomeUnknown {
+            effect_id,
+            operation_digest: digest,
+            source: Box::new(runtime_error(error)),
+        };
+    }
+    if error.code == wire::error::Code::RequestExpired as i32 {
+        return Error::EffectExpired;
+    }
+    runtime_error(error)
 }
 
 fn mutation_outcome(

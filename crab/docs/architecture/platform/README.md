@@ -110,8 +110,11 @@ clean terminal rows in bounded batches. Destination delivery now enters the
 same bounded Cell actor as commands, records `sys_inbox`, advances `sys_meta`,
 captures LTX and waits for the exact control root before success. A cancelled
 caller does not cancel accepted work; stable retries return the stored outcome,
-and private Resolve reads the inbox after exact-root restoration. Compiled effect
-codecs, authenticated peer translation, source acknowledgement and the node
+and private Resolve reads the inbox after exact-root restoration. The strict
+signed peer protocol now carries generic compiled Cell-command effects and
+effect Resolve, verifies the source-derived identity, destination incarnation
+and operation digest, and exposes a typed source-side `EffectPeerClient`.
+Workflow/Queue effect adapters, source claim/ack orchestration and the node
 effect supervisor still remain.
 Bootstrap and every committed command now derive the earliest durable work or
 retention deadline from SQLite inside the same transaction. The runtime binds

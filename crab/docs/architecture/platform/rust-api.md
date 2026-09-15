@@ -595,6 +595,16 @@ and executes through the same `LocalCellTransport` as an in-process call. This
 keeps registry selection, operation digests, receipts, durable rejections and
 unknown-outcome behavior identical across ingress nodes.
 
+Generic compiled Cell-command effects now use the same strict boundary.
+`EffectPeerClient::deliver` accepts only an `EffectClaim` whose caller has
+validated the published lease, decodes its canonical stored `EffectRequest`,
+rechecks source Cell/incarnation/sequence, target Cell, expiry and digest, then
+signs and routes it. `PeerDispatcher` rechecks the derived effect ID and target
+incarnation before calling `CellHandle::deliver_effect`. Ambiguous transport or
+publication returns `EffectOutcomeUnknown`; `EffectPeerClient::resolve` queries
+the destination inbox with the same identity and digest. The remaining
+supervisor must own claim validation, retry, Resolve and source acknowledgement.
+
 Before constructing `PeerVerifier`, the HTTP receiver calls
 `claimed_peer_session` to obtain only a structurally validated lookup key. That
 value remains untrusted. It must load a current `NodeDirectory` advertisement,

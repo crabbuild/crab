@@ -1,8 +1,11 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
+use prost::Message;
+
 use crate::{
-    CellDescription, CellHandle, CellTarget, Digest, Error, IncarnationId, MutationIdentity,
-    Receipt, Registry, RequestId, Resolution, Result, StoredOutcome,
+    CellDescription, CellHandle, CellTarget, CommandInvocation, Digest, Error, InboxDelivery,
+    IncarnationId, MutationIdentity, Receipt, Registry, RequestId, Resolution, Result,
+    StoredOutcome,
     client::{
         CellTransport, EncodedCommand, EncodedObservation, EncodedQuery, EncodedResolve,
         LocalCellTransport, encoded_command_operation_digest, local_description, receipt,
@@ -70,11 +73,13 @@ impl PeerDispatcher {
             Some(wire::peer_request::Operation::Resolve(resolve)) => {
                 self.resolve(&transport, resolve, now_ms).await
             }
-            Some(
-                wire::peer_request::Operation::DeliverEffect(_)
-                | wire::peer_request::Operation::ResolveEffect(_),
-            )
-            | None => error_reply(Error::Peer("peer operation is not implemented")),
+            Some(wire::peer_request::Operation::DeliverEffect(effect)) => {
+                self.deliver_effect(&transport, effect, now_ms).await
+            }
+            Some(wire::peer_request::Operation::ResolveEffect(resolve)) => {
+                self.resolve_effect(&transport, resolve, now_ms).await
+            }
+            None => error_reply(Error::Peer("peer operation is missing")),
         }
     }
 
@@ -260,6 +265,160 @@ impl PeerDispatcher {
             ))),
         }
     }
+
+    async fn deliver_effect(
+        &self,
+        transport: &LocalCellTransport,
+        request: &wire::EffectRequest,
+        now_ms: i64,
+    ) -> wire::PeerReply {
+        let result = self.deliver_effect_inner(transport, request, now_ms).await;
+        let outcome = match result {
+            Ok(outcome) => mutation_reply(transport, outcome),
+            Err(error) => return error_reply(error),
+        };
+        wire::PeerReply {
+            outcome: Some(wire::peer_reply::Outcome::Mutation(outcome)),
+        }
+    }
+
+    async fn deliver_effect_inner(
+        &self,
+        transport: &LocalCellTransport,
+        request: &wire::EffectRequest,
+        now_ms: i64,
+    ) -> Result<StoredOutcome> {
+        let expected = local_description(&transport.handle);
+        validate_effect_incarnation(request.destination_incarnation.as_slice(), expected)?;
+        let target = request_target(request.target.as_ref())?;
+        let identity = request
+            .identity
+            .as_ref()
+            .ok_or(Error::Peer("effect identity is missing"))?;
+        let command = match request.operation.as_ref() {
+            Some(wire::effect_request::Operation::CellCommand(command)) => command,
+            _ => return Err(Error::Peer("typed effect operation is not implemented")),
+        };
+        let (module, descriptor, code) = self.registry.routed_command_contract(
+            target.namespace(),
+            command.command_id,
+            command.codec_version,
+        )?;
+        validate_description(expected, code, descriptor.schema_min, descriptor.schema_max)?;
+        if command.input.len() > descriptor.input_limit as usize {
+            return Err(Error::Command("encoded effect input exceeds limit"));
+        }
+        let effect_id = exact_effect_id(identity)?;
+        let encoded_request = request.encode_to_vec();
+        let delivery = InboxDelivery {
+            effect_id,
+            operation_digest: crate::effect_operation_digest(
+                target.cell_id(),
+                effect_id,
+                &encoded_request,
+            ),
+            expires_at_ms: identity.expires_at_ms,
+        };
+        let registry = Arc::clone(&self.registry);
+        let cell = transport.handle.cell_id();
+        let schema = transport.handle.schema();
+        let input = command.input.clone();
+        let operation_id = command.command_id;
+        let codec_version = command.codec_version;
+        transport
+            .handle
+            .deliver_effect(
+                delivery,
+                now_ms,
+                encoded_request.len(),
+                descriptor.output_limit as usize,
+                move |transaction| {
+                    registry.execute_command(
+                        transaction,
+                        CommandInvocation {
+                            module,
+                            operation_id,
+                            codec_version,
+                            schema,
+                            cell,
+                            sequence: next_sequence(transaction)?,
+                            now_ms,
+                            input: &input,
+                        },
+                    )
+                },
+            )
+            .await
+    }
+
+    async fn resolve_effect(
+        &self,
+        transport: &LocalCellTransport,
+        request: &wire::EffectResolveRequest,
+        now_ms: i64,
+    ) -> wire::PeerReply {
+        let result = async {
+            let expected = local_description(&transport.handle);
+            validate_effect_incarnation(request.destination_incarnation.as_slice(), expected)?;
+            let identity = request
+                .identity
+                .as_ref()
+                .ok_or(Error::Peer("effect Resolve identity is missing"))?;
+            let delivery = InboxDelivery {
+                effect_id: exact_effect_id(identity)?,
+                operation_digest: Digest::try_from(request.operation_digest.as_slice())?,
+                expires_at_ms: identity.expires_at_ms,
+            };
+            transport
+                .handle
+                .resolve_effect(delivery, now_ms, MAX_RESULT_BYTES)
+                .await
+        }
+        .await;
+        let resolution = match result {
+            Ok(value) => value,
+            Err(error) => return error_reply(error),
+        };
+        wire::PeerReply {
+            outcome: Some(wire::peer_reply::Outcome::Resolve(resolve_reply(
+                transport, resolution,
+            ))),
+        }
+    }
+}
+
+fn validate_effect_incarnation(value: &[u8], expected: CellDescription) -> Result<()> {
+    if IncarnationId::try_from(value)? != expected.incarnation {
+        return Err(Error::Fenced);
+    }
+    Ok(())
+}
+
+fn exact_effect_id(identity: &wire::EffectIdentity) -> Result<[u8; 32]> {
+    let effect_id = <[u8; 32]>::try_from(identity.effect_id.as_slice())
+        .map_err(|_| Error::Peer("invalid effect ID length"))?;
+    let expected = crate::effect_id(
+        crate::CellId::try_from(identity.source_cell.as_slice())?,
+        IncarnationId::try_from(identity.source_incarnation.as_slice())?,
+        identity.source_sequence,
+        identity.ordinal,
+    );
+    if effect_id != expected {
+        return Err(Error::Peer("effect identity derivation does not match"));
+    }
+    Ok(effect_id)
+}
+
+fn next_sequence(transaction: &crab_ltx::rusqlite::Transaction<'_>) -> Result<u64> {
+    let sequence = transaction.query_row(
+        "SELECT commit_sequence + 1 FROM sys_meta WHERE singleton = 1",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    u64::try_from(sequence)
+        .ok()
+        .filter(|sequence| *sequence != 0)
+        .ok_or(Error::Command("invalid next Cell sequence"))
 }
 
 fn mutation_identity(

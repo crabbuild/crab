@@ -1,13 +1,17 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use prost::Message;
 
-use crate::{ApplicationId, CellTarget, Digest, Error, NamespaceId, Result, SessionId, TenantId};
+use crate::{
+    ApplicationId, CellTarget, Digest, Error, IncarnationId, NamespaceId, Result, SessionId,
+    TenantId,
+};
 
 mod dispatch;
 mod protobuf;
 mod transport;
 
 pub use dispatch::{PeerAuthorizer, PeerCellResolver, PeerDispatcher};
+pub use transport::EffectPeerClient;
 pub(crate) use transport::PeerClientTransport;
 pub use transport::PeerRoundTrip;
 
@@ -24,6 +28,7 @@ const MAX_PRINCIPAL_BYTES: usize = 512;
 const MAX_AUTH_LIFETIME_MS: i64 = 60_000;
 const MAX_CLOCK_SKEW_MS: i64 = 5 * 60_000;
 const MAX_MUTATION_LIFETIME_MS: i64 = 24 * 60 * 60_000;
+const MAX_EFFECT_LIFETIME_MS: i64 = 7 * 24 * 60 * 60_000;
 
 /// Generated private peer messages. They are not a public service or application API.
 pub mod wire {
@@ -36,6 +41,8 @@ pub enum PeerOperation {
     Mutate(wire::MutationRequest),
     Read(wire::ReadRequest),
     Resolve(wire::ResolveRequest),
+    DeliverEffect(wire::EffectRequest),
+    ResolveEffect(wire::EffectResolveRequest),
 }
 
 impl PeerOperation {
@@ -44,6 +51,8 @@ impl PeerOperation {
             Self::Mutate(_) => 10,
             Self::Read(_) => 11,
             Self::Resolve(_) => 12,
+            Self::DeliverEffect(_) => 13,
+            Self::ResolveEffect(_) => 14,
         }
     }
 
@@ -52,6 +61,8 @@ impl PeerOperation {
             Self::Mutate(value) => value.encode_to_vec(),
             Self::Read(value) => value.encode_to_vec(),
             Self::Resolve(value) => value.encode_to_vec(),
+            Self::DeliverEffect(value) => value.encode_to_vec(),
+            Self::ResolveEffect(value) => value.encode_to_vec(),
         }
     }
 
@@ -60,6 +71,8 @@ impl PeerOperation {
             Self::Mutate(value) => validate_mutation(value, now_ms),
             Self::Read(value) => validate_read(value),
             Self::Resolve(value) => validate_resolve(value, now_ms),
+            Self::DeliverEffect(value) => validate_effect(value, now_ms),
+            Self::ResolveEffect(value) => validate_effect_resolve(value, now_ms),
         }
     }
 }
@@ -155,9 +168,6 @@ impl PeerVerifier {
         let fields = validate_message(input, MessageKind::PeerRequest)?;
         require_fields(&fields, &[1, 2, 3, 4])?;
         let (tag, payload) = oneof_payload(input, &fields, &[10, 11, 12, 13, 14])?;
-        if !matches!(tag, 10..=12) {
-            return Err(Error::Peer("peer operation is not implemented"));
-        }
         if payload.len() > MAX_OPERATION_BYTES {
             return Err(Error::Peer("operation exceeds one MiB"));
         }
@@ -203,6 +213,7 @@ impl PeerVerifier {
             request,
             target,
             principal,
+            origin_session: self.session,
             operation_tag: tag,
             operation_bytes: payload.to_vec(),
         })
@@ -237,6 +248,7 @@ pub struct VerifiedPeerRequest {
     request: wire::PeerRequest,
     target: CellTarget,
     principal: PeerPrincipal,
+    origin_session: SessionId,
     operation_tag: u32,
     operation_bytes: Vec<u8>,
 }
@@ -250,6 +262,11 @@ impl VerifiedPeerRequest {
     #[must_use]
     pub const fn principal(&self) -> &PeerPrincipal {
         &self.principal
+    }
+
+    #[must_use]
+    pub const fn origin_session(&self) -> SessionId {
+        self.origin_session
     }
 
     #[must_use]
@@ -522,11 +539,9 @@ fn operation_target(operation: Option<&wire::peer_request::Operation>) -> Result
         Some(wire::peer_request::Operation::Mutate(value)) => value.target.as_ref(),
         Some(wire::peer_request::Operation::Read(value)) => value.target.as_ref(),
         Some(wire::peer_request::Operation::Resolve(value)) => value.target.as_ref(),
-        Some(
-            wire::peer_request::Operation::DeliverEffect(_)
-            | wire::peer_request::Operation::ResolveEffect(_),
-        )
-        | None => return Err(Error::Peer("peer operation is not implemented")),
+        Some(wire::peer_request::Operation::DeliverEffect(value)) => value.target.as_ref(),
+        Some(wire::peer_request::Operation::ResolveEffect(value)) => value.target.as_ref(),
+        None => return Err(Error::Peer("peer operation is missing")),
     }
     .ok_or(Error::Peer("peer target is missing"))?;
     CellTarget::new(
@@ -545,11 +560,11 @@ fn validate_decoded_operation(
         Some(wire::peer_request::Operation::Mutate(value)) => validate_mutation(value, now_ms),
         Some(wire::peer_request::Operation::Read(value)) => validate_read(value),
         Some(wire::peer_request::Operation::Resolve(value)) => validate_resolve(value, now_ms),
-        Some(
-            wire::peer_request::Operation::DeliverEffect(_)
-            | wire::peer_request::Operation::ResolveEffect(_),
-        )
-        | None => Err(Error::Peer("peer operation is not implemented")),
+        Some(wire::peer_request::Operation::DeliverEffect(value)) => validate_effect(value, now_ms),
+        Some(wire::peer_request::Operation::ResolveEffect(value)) => {
+            validate_effect_resolve(value, now_ms)
+        }
+        None => Err(Error::Peer("peer operation is missing")),
     }
 }
 
@@ -610,6 +625,72 @@ fn validate_resolve(request: &wire::ResolveRequest, now_ms: i64) -> Result<()> {
     validate_mutation_identity(identity, now_ms)?;
     if request.operation_digest.len() != 32 {
         return Err(Error::Peer("invalid operation digest length"));
+    }
+    Ok(())
+}
+
+fn validate_effect(request: &wire::EffectRequest, now_ms: i64) -> Result<()> {
+    validate_target_wire(request.target.as_ref())?;
+    if request.destination_incarnation.len() != 16 {
+        return Err(Error::Peer("invalid effect destination incarnation"));
+    }
+    validate_effect_identity(
+        request
+            .identity
+            .as_ref()
+            .ok_or(Error::Peer("effect identity is missing"))?,
+        now_ms,
+    )?;
+    match request.operation.as_ref() {
+        Some(wire::effect_request::Operation::CellCommand(command))
+            if command.command_id != 0 && command.codec_version != 0 =>
+        {
+            Ok(())
+        }
+        Some(wire::effect_request::Operation::CellCommand(_)) => {
+            Err(Error::Peer("invalid effect Cell command identifier"))
+        }
+        Some(_) => Err(Error::Peer("typed effect operation is not implemented")),
+        None => Err(Error::Peer("effect operation is missing")),
+    }
+}
+
+fn validate_effect_resolve(request: &wire::EffectResolveRequest, now_ms: i64) -> Result<()> {
+    validate_target_wire(request.target.as_ref())?;
+    if request.destination_incarnation.len() != 16 || request.operation_digest.len() != 32 {
+        return Err(Error::Peer("invalid effect Resolve identity"));
+    }
+    validate_effect_identity(
+        request
+            .identity
+            .as_ref()
+            .ok_or(Error::Peer("effect Resolve identity is missing"))?,
+        now_ms,
+    )
+}
+
+fn validate_effect_identity(identity: &wire::EffectIdentity, now_ms: i64) -> Result<()> {
+    let remaining_ms = identity.expires_at_ms.checked_sub(now_ms);
+    if identity.effect_id.len() != 32
+        || identity.source_cell.len() != 32
+        || identity.source_incarnation.len() != 16
+        || identity.source_sequence == 0
+        || now_ms < 0
+        || remaining_ms.is_none_or(|remaining| remaining <= 0 || remaining > MAX_EFFECT_LIFETIME_MS)
+    {
+        return Err(Error::Peer("invalid or expired effect identity"));
+    }
+    let source_cell = crate::CellId::try_from(identity.source_cell.as_slice())?;
+    let source_incarnation = IncarnationId::try_from(identity.source_incarnation.as_slice())?;
+    if identity.effect_id.as_slice()
+        != crate::effect_id(
+            source_cell,
+            source_incarnation,
+            identity.source_sequence,
+            identity.ordinal,
+        )
+    {
+        return Err(Error::Peer("effect identity derivation does not match"));
     }
     Ok(())
 }

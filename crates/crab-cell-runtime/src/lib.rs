@@ -46,8 +46,8 @@ pub use crab_ltx::{CellReplica, Limits as ReplicaLimits};
 pub use effects::{
     EffectClaim, EffectIntent, EffectLeaseOutcome, EffectState, EffectTokenSource,
     InboxApplyOutcome, InboxDelivery, SystemEffectTokens, effect_ack_delivered, effect_claim,
-    effect_cleanup_terminal, effect_extend, effect_insert, effect_operation_digest, effect_retry,
-    effect_validate_claim, inbox_apply, inbox_cleanup_expired, inbox_resolve,
+    effect_cleanup_terminal, effect_extend, effect_id, effect_insert, effect_operation_digest,
+    effect_retry, effect_validate_claim, inbox_apply, inbox_cleanup_expired, inbox_resolve,
 };
 pub use error::{Error, Result};
 pub use executor::{
@@ -69,8 +69,8 @@ pub use maintenance::{
 };
 pub use node::{NodeAdvertisement, NodeCapacity, NodeDirectory, VersionedNodeAdvertisement};
 pub use peer::{
-    MAX_PEER_REQUEST_BYTES, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerOperation,
-    PeerPrincipal, PeerRoundTrip, PeerSigner, PeerVerifier, VerifiedPeerRequest,
+    EffectPeerClient, MAX_PEER_REQUEST_BYTES, PeerAuthorizer, PeerCellResolver, PeerDispatcher,
+    PeerOperation, PeerPrincipal, PeerRoundTrip, PeerSigner, PeerVerifier, VerifiedPeerRequest,
     claimed_peer_session, decode_peer_reply, encode_peer_reply, wire as peer_wire,
 };
 pub use publication::CellPublisher;

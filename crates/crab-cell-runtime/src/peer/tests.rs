@@ -47,6 +47,37 @@ fn mutation() -> wire::MutationRequest {
     }
 }
 
+fn effect_identity() -> wire::EffectIdentity {
+    let source_cell = crate::CellId::from_bytes([9; 32]);
+    let source_incarnation = IncarnationId::from_bytes([10; 16]);
+    let source_sequence = 3;
+    let ordinal = 2;
+    wire::EffectIdentity {
+        effect_id: crate::effect_id(source_cell, source_incarnation, source_sequence, ordinal)
+            .to_vec(),
+        source_cell: source_cell.as_bytes().to_vec(),
+        source_incarnation: source_incarnation.as_bytes().to_vec(),
+        source_sequence,
+        ordinal,
+        expires_at_ms: NOW_MS + 5 * 60_000,
+    }
+}
+
+fn effect() -> wire::EffectRequest {
+    wire::EffectRequest {
+        target: Some(target()),
+        destination_incarnation: vec![8; 16],
+        identity: Some(effect_identity()),
+        operation: Some(wire::effect_request::Operation::CellCommand(
+            wire::CellCommand {
+                command_id: 7,
+                codec_version: 1,
+                input: b"effect-input".to_vec(),
+            },
+        )),
+    }
+}
+
 fn verifier(signer: &PeerSigner) -> PeerVerifier {
     PeerVerifier::new(
         SessionId::from_bytes([1; 16]),
@@ -83,6 +114,69 @@ fn signed_request_verifies_and_forward_preserves_payload() {
     assert_eq!(forwarded.hop_count(), 2);
     assert_eq!(forwarded.remaining_ms(), 20_000);
     assert!(forwarded.forward(10_000).is_err());
+}
+
+#[test]
+fn signed_effect_delivery_and_resolve_bind_derived_identity() {
+    let signer = signer();
+    let delivery = effect();
+    let encoded = signer
+        .sign(
+            principal(),
+            NOW_MS,
+            NOW_MS + 60_000,
+            30_000,
+            PeerOperation::DeliverEffect(delivery.clone()),
+        )
+        .unwrap();
+    let verified = verifier(&signer).verify(&encoded, NOW_MS + 1_000).unwrap();
+    assert_eq!(verified.operation_tag(), 13);
+    assert!(matches!(
+        verified.operation(),
+        Some(wire::peer_request::Operation::DeliverEffect(_))
+    ));
+
+    let digest = crate::effect_operation_digest(
+        verified.target().cell_id(),
+        <[u8; 32]>::try_from(effect_identity().effect_id).unwrap(),
+        &delivery.encode_to_vec(),
+    );
+    let resolve = wire::EffectResolveRequest {
+        target: delivery.target,
+        destination_incarnation: delivery.destination_incarnation,
+        identity: delivery.identity,
+        operation_digest: digest.as_bytes().to_vec(),
+    };
+    let encoded = signer
+        .sign(
+            principal(),
+            NOW_MS,
+            NOW_MS + 60_000,
+            30_000,
+            PeerOperation::ResolveEffect(resolve),
+        )
+        .unwrap();
+    assert_eq!(
+        verifier(&signer)
+            .verify(&encoded, NOW_MS + 1_000)
+            .unwrap()
+            .operation_tag(),
+        14
+    );
+
+    let mut invalid = effect();
+    invalid.identity.as_mut().unwrap().effect_id[0] ^= 1;
+    assert!(
+        signer
+            .sign(
+                principal(),
+                NOW_MS,
+                NOW_MS + 60_000,
+                30_000,
+                PeerOperation::DeliverEffect(invalid),
+            )
+            .is_err()
+    );
 }
 
 #[test]

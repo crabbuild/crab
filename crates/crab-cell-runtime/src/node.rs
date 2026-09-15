@@ -263,6 +263,11 @@ impl NodeDirectory {
         }
     }
 
+    #[must_use]
+    pub const fn fleet(&self) -> Digest {
+        self.fleet
+    }
+
     /// Strict-creates one signed boot-session advertisement.
     pub async fn create(
         &self,
