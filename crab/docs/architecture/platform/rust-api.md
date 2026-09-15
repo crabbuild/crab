@@ -342,30 +342,43 @@ lifetimes; it cannot retry old bytes against silently changed semantics.
 
 ## Transaction-scoped application API
 
-CommandContext has private transaction and identity fields. It exposes sql(),
-now_ms(), sequence(), cell_id() and emit(resolved_target, operation). QueryContext
-exposes only read SQL and the observed receipt. Scoped SQL handles borrow the
-context; statements/rows are materialized and cannot escape it. Neither context
-is Send; neither exposes a raw connection, COMMIT or an async method.
+`CommandContext` has private transaction and identity fields. It exposes
+`sql(&SqlBatch)`, `now_ms()`, `sequence()`, `cell_id()` and one
+command-scoped `effect_batch()`. `QueryContext` exposes `sql(&SqlBatch)`,
+`now_ms()`, `commit_sequence()` and `cell_id()`. Results are materialized and
+cannot retain a SQLite statement or row. Neither context exposes a raw
+connection, COMMIT or an async method.
 
 ```rust,ignore
-// Target API sketch inside crab-http-server; input/output implement WireValue.
-impl Command for AddComment {
+// Compiled inside crab-http-server; input/output implement WireValue.
+impl Command for RecordNote {
+    const MODULE: &'static str = RepositoryModule::NAME;
     const ID: u32 = 1;
     const CODEC_VERSION: u32 = 1;
-    type Input = AddCommentInput;
-    type Output = CommentId;
+    type Input = RecordNoteInput;
+    type Output = RecordNoteOutcome;
 
-    fn execute(&self, ctx: &mut CommandContext<'_>, input: Self::Input)
-        -> Result<Self::Output, CommandError>
-    {
-        let id = input.comment_id;
-        let now = ctx.now_ms();
-        ctx.sql().execute(
-            "INSERT INTO comments(id, issue_id, author_id, body, created_at_ms) VALUES (?, ?, ?, ?, ?)",
-            params![id, input.issue_id, input.author_id, input.body, now],
-        )?;
-        Ok(id)
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        input: Self::Input,
+    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+        let results = context.sql(&SqlBatch {
+            statements: vec![SqlStatement {
+                sql: "INSERT INTO repository_notes(note_id, body) VALUES (?, ?)".into(),
+                parameters: vec![
+                    SqlValue::Integer(input.note_id),
+                    SqlValue::Text(input.body),
+                ],
+            }],
+        })?;
+        if results[0].rows_affected != 1 {
+            return Err(crab_cell_runtime::Error::Command(
+                "note insert changed an unexpected row count",
+            ));
+        }
+        Ok(CommandResult::Success(RecordNoteOutcome {
+            note_id: input.note_id,
+        }))
     }
 }
 ```
@@ -486,32 +499,48 @@ digest. `CURRENT_DEFINITION` must be one of those entries. Adding a new current
 definition is an ordinary fleet release; removing old code is a separately
 gated cleanup release.
 
-WorkflowDefinition::transition(state, event, TransitionContext) -> Decision is
-synchronous; Decision/Action are native owned Rust values. Activities are
+`WorkflowDefinition::transition(state, event, WorkflowContext) -> WorkflowDecision` is
+synchronous; decisions/actions are native owned Rust values. Activities are
 registered asynchronous functions returning bounded bytes and typed failures.
 Their context contains run/activity IDs, stable external idempotency key, attempt,
 lease token and cancellation signal. No SQLite transaction spans their future.
 
 ```rust,ignore
 pub trait WorkflowDefinition: Send + Sync + 'static {
-    fn transition(&self, state: &[u8], event: &[u8], ctx: &TransitionContext)
-        -> Result<Decision, CommandError>;
+    fn digest(&self) -> Digest;
+    fn transition(
+        &self,
+        state: &[u8],
+        event: &[u8],
+        context: WorkflowContext,
+    ) -> Result<WorkflowDecision>;
 }
-pub struct Decision {
-    pub status: RunStatus,
-    pub next_state: Vec<u8>,
+pub struct WorkflowDecision {
+    pub status: WorkflowStatus,
+    pub state: Vec<u8>,
     pub result: Option<Vec<u8>>,
-    pub actions: Vec<Action>,
+    pub actions: Vec<WorkflowAction>,
 }
-pub enum RunStatus { Running, Completed, Failed, Cancelled }
-pub enum Action {
-    Activity { activity_type: String, input: Vec<u8> },
+pub enum WorkflowAction {
+    Activity {
+        activity_type: String,
+        input: Vec<u8>,
+        due_at_ms: i64,
+        expires_at_ms: i64,
+    },
     Timer { due_at_ms: i64 },
-    Emit { target: ResolvedEffectTarget, operation: EffectOperation },
+    Effect {
+        destination: CellId,
+        operation: Vec<u8>,
+        expires_at_ms: i64,
+    },
 }
-pub trait Activity: Send + Sync + 'static {
-    fn run(&self, ctx: ActivityContext, input: Vec<u8>)
-        -> impl Future<Output = Result<Vec<u8>, ActivityError>> + Send;
+pub trait ActivityHandler: Send + Sync + 'static {
+    const TYPE: &'static str;
+    fn execute(
+        context: ActivityContext,
+        input: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = ActivityExecution> + Send + 'static>>;
 }
 ```
 

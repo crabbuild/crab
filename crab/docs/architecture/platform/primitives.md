@@ -8,23 +8,35 @@ Cell identity already selects exactly one namespace and shard.
 ## Handler boundary and SQL authorization
 
 ```rust,ignore
-pub trait CommandHandler {
+pub trait Command: Send + Sync + 'static {
+    const MODULE: &'static str;
+    const ID: u32;
+    const CODEC_VERSION: u32;
+    type Input: WireValue;
+    type Output: WireValue;
+
     fn execute(
-        &self, tx: &mut CommandContext<'_>, op: &Operation,
-    ) -> Result<MutationResult, CommandError>;
+        context: &mut CommandContext<'_, '_>,
+        input: Self::Input,
+    ) -> Result<CommandResult<Self::Output>>;
 }
-pub struct CommandContext<'a> {
-    tx: &'a rusqlite::Transaction<'a>,
-    cell: CellId,
-    incarnation: [u8; 16],
-    sequence: u64,
-    now_ms: i64,
-    next_effect: u32,
+
+impl CommandContext<'_, '_> {
+    pub const fn cell_id(&self) -> CellId;
+    pub const fn sequence(&self) -> u64;
+    pub const fn now_ms(&self) -> i64;
+    pub fn effect_batch(&self) -> Result<EffectBatch>;
+    pub fn sql(&self, batch: &SqlBatch) -> Result<Vec<SqlResultSet>>;
 }
 ```
 
-Only the runtime constructs CommandContext. Primitive modules have trusted SQL
-access; application SQL uses a scoped SQLite authorizer. Reject ATTACH,
+These are the implemented `crab-cell-runtime` interfaces, not an ABI sketch.
+Only the runtime constructs `CommandContext`; its transaction accessor remains
+crate-private. A handler returns `CommandResult::Success` or
+`CommandResult::Rejected`, and the runtime persists either outcome after rolling
+back application writes for a rejection. One command-scoped `EffectBatch`
+allocates every effect ordinal for that transaction. Primitive internals have
+trusted SQL access; application SQL uses a scoped SQLite authorizer. Reject ATTACH,
 DETACH, transaction/savepoint commands, PRAGMA, extension loading and access to
 sys_* or primitive-owned tables. Match authorizer operations and resolved object
 names, not a regex over SQL text. Application migrations run only during trusted
