@@ -22,7 +22,9 @@ pub trait FileIo: Send {
 /// parent before succeeding. Implementations must preserve underlying I/O errors.
 /// `exists` must detect dangling symlinks. `create_dir` is an exclusive claim.
 /// `persist_new` atomically installs fully synced bytes without replacing any
-/// destination and syncs its parent; an error after installation is ambiguous.
+/// destination and syncs its parent; `persist_file_new` does the same for an
+/// already synced same-directory scratch file. An error after installation is
+/// ambiguous.
 pub trait FileSystem: Send + Sync {
     fn open(&self, path: &Path) -> io::Result<Box<dyn FileIo>>;
     fn create(&self, path: &Path) -> io::Result<Box<dyn FileIo>>;
@@ -35,6 +37,7 @@ pub trait FileSystem: Send + Sync {
     fn create_dir(&self, path: &Path) -> io::Result<()>;
     fn sync_parent(&self, path: &Path) -> io::Result<()>;
     fn persist_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
+    fn persist_file_new(&self, source: &Path, destination: &Path) -> io::Result<()>;
 }
 
 /// Wall-clock observations used in LTX timestamps and checkpoint eligibility.
@@ -368,6 +371,18 @@ impl FileSystem for DirectFileSystem {
         file.persist_noclobber(path).map_err(|error| error.error)?;
         self.sync_parent(path)
     }
+    fn persist_file_new(&self, source: &Path, destination: &Path) -> io::Result<()> {
+        if source.parent() != destination.parent() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "scratch and destination must share a directory",
+            ));
+        }
+        std::fs::hard_link(source, destination)?;
+        self.sync_parent(destination)?;
+        std::fs::remove_file(source)?;
+        self.sync_parent(destination)
+    }
 }
 
 /// Operating-system wall clock; future mtimes have age zero.
@@ -472,6 +487,9 @@ mod tests {
         fn persist_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
             DirectFileSystem.persist_new(path, bytes)
         }
+        fn persist_file_new(&self, source: &Path, destination: &Path) -> io::Result<()> {
+            DirectFileSystem.persist_file_new(source, destination)
+        }
     }
 
     #[test]
@@ -505,6 +523,37 @@ mod tests {
             db.transaction(|_| Ok(())),
             Err(crate::CrabError::Fenced)
         ));
+    }
+
+    #[test]
+    fn synced_scratch_install_never_replaces_a_destination() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let destination = directory.path().join("database.sqlite");
+        let first = directory.path().join("first.scratch");
+        let mut file = DirectFileSystem.create(&first).unwrap();
+        file.write_all(b"first").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        DirectFileSystem
+            .persist_file_new(&first, &destination)
+            .unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"first");
+        assert!(!first.exists());
+
+        let second = directory.path().join("second.scratch");
+        let mut file = DirectFileSystem.create(&second).unwrap();
+        file.write_all(b"second").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        assert_eq!(
+            DirectFileSystem
+                .persist_file_new(&second, &destination)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(destination).unwrap(), b"first");
+        assert_eq!(std::fs::read(second).unwrap(), b"second");
     }
 
     #[cfg(feature = "replica")]

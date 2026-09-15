@@ -201,6 +201,10 @@ impl CellReplica {
         &self, base: &RootRef, range: std::ops::Range<usize>, level: u8,
     ) -> Result<PreparedRoot>;
 }
+impl VerifiedRoot {
+    pub async fn restore(&self, destination: &std::path::Path)
+        -> Result<crab_ltx::Position>;
+}
 ```
 
 Native and bundled append preparation share the same segment/index verification
@@ -243,6 +247,17 @@ admission. Snapshot/restore write sequentially to exclusive scratch files and
 sync file then parent before installation. At 5,000 MB, reserve two database
 sizes plus 64 MiB scratch before full recovery/compaction; sparse activation
 reserves only dirty-page/WAL budgets plus bounded metadata.
+
+Exact Cell-root restore now holds the Host recovery permit, fetches authenticated
+adjacent-frame runs capped at 1 MiB, writes them sequentially through the Host
+executor to an exclusive private same-directory scratch file, and independently
+reduces the page checksums to the root position. It verifies final length, syncs
+the file, hard-links it into the absent destination, syncs the parent, and removes
+the scratch name. Existing destinations and SQLite sidecars fail before remote
+page reads; cancellation or verification failure removes the owned scratch best
+effort and never replaces another file. The 5,000 MB resource/RSS gate remains
+unqualified; this implementation removes the whole-database restore buffer but
+does not claim that capacity result.
 
 Compaction performs external merge by page number through bounded scratch runs,
 choosing the last page in the selected TXID range. Verify output against an

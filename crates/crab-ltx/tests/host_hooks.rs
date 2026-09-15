@@ -1,7 +1,13 @@
+#[cfg(feature = "replica")]
+use crab_ltx::CellReplica;
 use crab_ltx::{
     CheckpointMode, CrabError, Host, Limits, ManagedDb,
     environment::{DirectFileSystem, FileIo, FileSystem},
 };
+#[cfg(feature = "replica")]
+use crab_storage::{CellStorageLayout, Store};
+#[cfg(feature = "replica")]
+use object_store::{memory::InMemory, path::Path as ObjectPath};
 use std::{
     collections::BTreeSet,
     io,
@@ -91,6 +97,7 @@ impl FileSystem for Faults {
     filesystem_operation!(rename(from: &Path, to: &Path) -> ());
     filesystem_operation!(sync_parent(path: &Path) -> ());
     filesystem_operation!(persist_new(path: &Path, bytes: &[u8]) -> ());
+    filesystem_operation!(persist_file_new(source: &Path, destination: &Path) -> ());
 }
 
 fn fixture() -> (tempfile::TempDir, Arc<Faults>, Host, ManagedDb) {
@@ -115,6 +122,46 @@ fn injected<T>(result: crab_ltx::Result<T>) {
     assert!(
         matches!(result, Err(CrabError::Io(error)) if error.kind() == io::ErrorKind::StorageFull)
     );
+}
+
+#[cfg(feature = "replica")]
+#[tokio::test(flavor = "multi_thread")]
+async fn cell_restore_install_failure_cleans_owned_scratch() {
+    let (directory, faults, host, mut writer) = fixture();
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("cell-restore"),
+            [1; 16],
+        ),
+        [2; 32],
+        [3; 16],
+        Limits::default(),
+    )
+    .unwrap()
+    .with_host(host);
+    let root = replica
+        .prepare(None, &writer.capture().unwrap(), 1, 1)
+        .await
+        .unwrap()
+        .root();
+    writer.close().unwrap();
+    let verified = replica.open_root(&root).await.unwrap();
+    let destination = directory.path().join("cell-restored.sqlite");
+
+    faults.arm(Some("persist_file_new"));
+    injected(verified.restore(&destination).await);
+    assert!(!destination.exists());
+    assert!(!std::fs::read_dir(directory.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".crab-restore-")
+    }));
+
+    faults.arm(None);
+    assert_eq!(verified.restore(&destination).await.unwrap(), root.position);
 }
 
 #[test]

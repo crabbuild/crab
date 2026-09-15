@@ -1,6 +1,6 @@
 //! Immutable Cell-scoped LTX roots prepared independently of ownership CAS.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use bytes::Bytes;
 use crab_storage::{CellObjectKind, CellStorageLayout};
@@ -8,6 +8,7 @@ use crab_storage::{CellObjectKind, CellStorageLayout};
 use crate::{CaptureBatch, CrabError, Host, Limits, Position, Result};
 
 mod directory;
+mod restore;
 mod root;
 
 use directory::{DirectoryEntry, DirectoryTree, ObjectExtent};
@@ -106,6 +107,14 @@ impl VerifiedRoot {
     #[must_use]
     pub fn paged(&self) -> CellPagedDatabase {
         self.pages.clone()
+    }
+
+    /// Streams this exact root into a new local SQLite file.
+    ///
+    /// The destination and its SQLite sidecars must not exist. Every page is
+    /// authenticated before an atomically installed result becomes visible.
+    pub async fn restore(&self, destination: &Path) -> Result<Position> {
+        restore::run(&self.pages, destination).await
     }
 }
 

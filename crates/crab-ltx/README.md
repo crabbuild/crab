@@ -154,9 +154,11 @@ full locator set, and Cell compaction currently holds all selected bodies in
 memory. Directory nodes do share a process-wide 8 MiB verified-byte cache whose
 key isolates backing Store instances and exact Cell/incarnation paths. Sparse
 page faults coalesce adjacent frames from one immutable object into bounded 1 MiB
-range reads while retaining per-frame verification. This is therefore not yet
-the complete streaming 5 GB write path required by the platform capacity gate.
-A full sequential Cell-root restore API also remains.
+range reads while retaining per-frame verification. `VerifiedRoot::restore`
+streams those runs to a same-directory scratch file, verifies the final checksum
+and length, then atomically installs a new destination without replacement. This
+is therefore not yet the complete streaming 5 GB write path required by the
+platform capacity gate.
 
 The older `Replica` API below remains for standalone repository replication and
 its existing callers. Its mutable epoch head is not Cell ownership authority.

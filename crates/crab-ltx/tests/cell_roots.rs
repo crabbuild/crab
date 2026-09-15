@@ -92,12 +92,16 @@ async fn prepared_root_reopens_without_a_mutable_head() {
         read_bytes.load(Ordering::SeqCst) < 100_000,
         "activation must not fetch the LTX bodies or every directory leaf"
     );
-    let pages = reopened.paged();
-    let mut restored = Vec::with_capacity(expected.len());
-    for page in 1..=pages.page_count() {
-        restored.extend(pages.read_page(page).await.unwrap());
-    }
-    assert_eq!(restored, expected);
+    let restored_path = expected_dir.path().join("streamed.sqlite");
+    assert_eq!(
+        reopened.restore(&restored_path).await.unwrap(),
+        prepared.root().position
+    );
+    assert_eq!(std::fs::read(&restored_path).unwrap(), expected);
+    read_bytes.store(0, Ordering::SeqCst);
+    assert!(reopened.restore(&restored_path).await.is_err());
+    assert_eq!(read_bytes.load(Ordering::SeqCst), 0);
+    assert_eq!(std::fs::read(restored_path).unwrap(), expected);
 }
 
 #[tokio::test]
