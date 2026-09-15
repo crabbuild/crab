@@ -12,9 +12,9 @@ mod api;
 
 pub use activity::{
     ActivityClaim, ActivityCompletion, ActivityCompletionOutcome, ActivityLeaseOutcome,
-    ActivitySupport, ActivityTokenSource, SystemActivityTokens, workflow_claim_activities,
-    workflow_cleanup_terminal, workflow_complete_activity, workflow_extend_activity,
-    workflow_validate_activity_claim,
+    ActivitySupport, ActivityTokenSource, MAX_ACTIVITY_PAYLOAD_BYTES, SystemActivityTokens,
+    workflow_claim_activities, workflow_cleanup_terminal, workflow_complete_activity,
+    workflow_extend_activity, workflow_validate_activity_claim,
 };
 pub(crate) use activity::{workflow_cleanup_terminal_bounded, workflow_reclaim_expired_bounded};
 pub use activity_api::{
@@ -31,7 +31,6 @@ pub use api::{
 
 const WORKFLOW_SCHEMA: &str = include_str!("migrations/workflow.sql");
 const MAX_WORKFLOW_BYTES: usize = 1 << 20;
-const MAX_ACTIVITY_BYTES: usize = 256 << 10;
 const MAX_ACTIONS: usize = 128;
 const MAX_EVENTS_PER_CELL: u64 = 100_000;
 const MAX_ACTIVITY_LIFETIME_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
@@ -850,7 +849,7 @@ pub(super) fn validate_decision(
             } => {
                 if activity_type.is_empty()
                     || activity_type.len() > 256
-                    || input.len() > MAX_ACTIVITY_BYTES
+                    || input.len() > MAX_ACTIVITY_PAYLOAD_BYTES
                     || *due_at_ms < now_ms
                     || *expires_at_ms <= now_ms
                     || *expires_at_ms < *due_at_ms

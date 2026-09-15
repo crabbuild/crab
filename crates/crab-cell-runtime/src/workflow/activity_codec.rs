@@ -4,7 +4,7 @@ use super::{
     ActivityClaim, ActivityCompletion, ActivityCompletionOutcome, ActivityLeaseOutcome,
     WorkflowActivityClaimRequest, WorkflowActivityExtendRequest, WorkflowActivityValidateRequest,
     WorkflowOutcome,
-    activity::{MAX_ACTIVITY_BYTES, MAX_CLAIM_ITEMS},
+    activity::{MAX_ACTIVITY_PAYLOAD_BYTES, MAX_CLAIM_ITEMS},
 };
 
 const APPLIED_TAG: u8 = 0;
@@ -123,7 +123,7 @@ impl WireValue for ActivityLeaseOutcome {
 
 impl WireValue for ActivityCompletion {
     fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
-        if self.result.len() > MAX_ACTIVITY_BYTES || (!self.failed && self.retryable) {
+        if self.result.len() > MAX_ACTIVITY_PAYLOAD_BYTES || (!self.failed && self.retryable) {
             return Err(CodecError::Invalid("invalid activity completion"));
         }
         encoder.write_bytes(&self.run_id)?;
@@ -147,7 +147,7 @@ impl WireValue for ActivityCompletion {
             failed: decoder.read_bool()?,
             retryable: decoder.read_bool()?,
         };
-        if completion.result.len() > MAX_ACTIVITY_BYTES
+        if completion.result.len() > MAX_ACTIVITY_PAYLOAD_BYTES
             || (!completion.failed && completion.retryable)
         {
             return Err(CodecError::Invalid("invalid activity completion"));
@@ -184,7 +184,7 @@ impl WireValue for ActivityCompletionOutcome {
             }),
             DUPLICATE_TAG => {
                 let result = decoder.read_bytes()?.to_vec();
-                if result.len() > MAX_ACTIVITY_BYTES {
+                if result.len() > MAX_ACTIVITY_PAYLOAD_BYTES {
                     return Err(CodecError::Invalid("activity result exceeds 256 KiB"));
                 }
                 Ok(Self::Duplicate { result })
@@ -213,7 +213,7 @@ impl WireValue for WorkflowActivityValidateRequest {
 fn validate_claim(claim: &ActivityClaim) -> Result<(), CodecError> {
     if claim.activity_type.is_empty()
         || claim.activity_type.len() > 256
-        || claim.input.len() > MAX_ACTIVITY_BYTES
+        || claim.input.len() > MAX_ACTIVITY_PAYLOAD_BYTES
         || claim
             .definition_digest
             .as_bytes()

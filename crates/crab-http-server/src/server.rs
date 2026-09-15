@@ -54,7 +54,7 @@ const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(110);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CellRuntimeBudget {
-    node_mailbox_bytes: usize,
+    node_retained_bytes: usize,
     max_active_cells: usize,
 }
 
@@ -95,7 +95,7 @@ impl CellRuntimeBudget {
             .unwrap_or(usize::MAX)
             .min(tokio::sync::Semaphore::MAX_PERMITS);
         Ok(Self {
-            node_mailbox_bytes: mailbox,
+            node_retained_bytes: mailbox,
             max_active_cells,
         })
     }
@@ -116,7 +116,7 @@ fn start_cell_runtime(session: SessionId, budget: CellRuntimeBudget) -> Result<C
     crate::cells::compiled_registry()?;
     Ok(CellRuntime::new(
         SqlWorkerPool::for_system(budget.max_active_cells)?,
-        budget.node_mailbox_bytes,
+        budget.node_retained_bytes,
         session,
     )?)
 }
@@ -1269,7 +1269,7 @@ mod tests {
         assert_eq!(
             budget,
             CellRuntimeBudget {
-                node_mailbox_bytes: (3 * GIB / 2 / 20) as usize,
+                node_retained_bytes: (3 * GIB / 2 / 20) as usize,
                 max_active_cells: 1_125,
             }
         );

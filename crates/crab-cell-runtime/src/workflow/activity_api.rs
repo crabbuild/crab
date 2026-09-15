@@ -21,7 +21,7 @@ use crate::{
 use super::{
     ActivityClaim, ActivityCompletion, ActivityCompletionOutcome, ActivityLeaseOutcome,
     ActivitySupport, SystemActivityTokens, WorkflowModule, WorkflowOutcome,
-    activity::MAX_ACTIVITY_BYTES,
+    activity::MAX_ACTIVITY_PAYLOAD_BYTES,
     api::{definition, definitions},
     workflow_claim_activities, workflow_complete_activity, workflow_definition_digest_by_run,
     workflow_extend_activity, workflow_validate_activity_claim,
@@ -626,7 +626,7 @@ impl<M: WorkflowActivityModule> ActivitySupervisor<M> {
         };
 
         let (result, failed, retryable) = execution.payload();
-        if result.len() > MAX_ACTIVITY_BYTES {
+        if result.len() > MAX_ACTIVITY_PAYLOAD_BYTES {
             return Err(ActivitySupervisorError::Runtime(Error::Command(
                 "activity handler result exceeds 256 KiB",
             )));

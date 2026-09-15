@@ -626,9 +626,12 @@ second activity on the same actor. `ActivitySupervisor` renews at lease/3 and
 delivers completion through the command actor. Lease loss requests cancellation and prevents further
 completion with that token; cancellation cannot undo an already issued network
 effect. Scheduler shutdown aborts and joins every tracked future, which drops
-the attempt guard and signals cooperative cancellation. Input/output byte
-reservations, fair cycling/backoff between busy namespaces and a separate
-bounded blocking-activity pool remain delivery work. Neither future abortion
+the attempt guard and signals cooperative cancellation. Before claim, the
+server reserves the maximum 256 KiB input plus 256 KiB output from the same
+node-wide byte semaphore as queued Cell commands and holds it through
+completion; exhaustion leaves the durable activity unclaimed. Fair
+cycling/backoff between busy namespaces and a separate bounded blocking-activity
+pool remain delivery work. Neither future abortion
 nor `spawn_blocking` can terminate an arbitrary native CPU loop, so application
 handlers must honor the cancellation token.
 

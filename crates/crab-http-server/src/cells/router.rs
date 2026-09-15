@@ -2,8 +2,9 @@ use std::{path::PathBuf, sync::Arc};
 
 use crab_cell_runtime::{
     ApplicationIdentity, CatalogProof, CellAuthority, CellCatalog, CellClient, CellReplica,
-    CellRuntime, CellTarget, ControlState, EffectPeerClient, NodeDirectory, Owner, PeerPrincipal,
-    PeerRoundTrip, PeerSigner, Registry, ReplicaLimits, VersionedControl,
+    CellRuntime, CellTarget, ControlState, EffectPeerClient, MAX_ACTIVITY_PAYLOAD_BYTES,
+    NodeByteReservation, NodeDirectory, Owner, PeerPrincipal, PeerRoundTrip, PeerSigner, Registry,
+    ReplicaLimits, VersionedControl,
 };
 use crab_storage::CellStorageLayout;
 use tokio::sync::Mutex;
@@ -147,6 +148,12 @@ impl RepositoryCellRouter {
             self.runtime_principal(&["cell.effect.deliver", "cell.effect.resolve"]),
             Arc::clone(&self.peer.round_trip),
         )
+    }
+
+    pub(crate) fn reserve_activity_payloads(&self) -> crate::Result<NodeByteReservation> {
+        self.runtime
+            .try_reserve_node_bytes(2 * MAX_ACTIVITY_PAYLOAD_BYTES)
+            .map_err(Into::into)
     }
 
     async fn route_target(
@@ -735,6 +742,49 @@ mod tests {
             result,
             Err(crate::Error::Cell(crab_cell_runtime::Error::CellNotActive))
         ));
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn activity_payload_reservation_is_bounded_and_reusable() {
+        let identity = ApplicationIdentity::new(
+            TenantId::from_bytes([31; 16]),
+            ApplicationId::from_bytes([32; 16]),
+        );
+        let layout = CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("repository-router-activity-admission"),
+            *identity.application().as_bytes(),
+        );
+        let registry = Arc::new(crate::cells::compiled_registry().unwrap());
+        let session = SessionId::from_bytes([33; 16]);
+        let runtime = CellRuntime::new(
+            SqlWorkerPool::new(1, 1).unwrap(),
+            2 * MAX_ACTIVITY_PAYLOAD_BYTES,
+            session,
+        )
+        .unwrap();
+        let directory = tempfile::TempDir::new().unwrap();
+        let router = router(
+            identity,
+            layout,
+            registry,
+            runtime.clone(),
+            session,
+            directory.path().to_path_buf(),
+        );
+        let held = router.reserve_activity_payloads().unwrap();
+
+        assert!(matches!(
+            router.reserve_activity_payloads(),
+            Err(crate::Error::Cell(crab_cell_runtime::Error::Capacity(
+                "node retained bytes"
+            )))
+        ));
+        drop(held);
+        let released = router.reserve_activity_payloads().unwrap();
+        drop(released);
+
         runtime.shutdown().await.unwrap();
     }
 

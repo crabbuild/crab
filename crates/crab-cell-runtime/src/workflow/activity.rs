@@ -10,7 +10,8 @@ use crate::{Digest, EffectBatch, Error, Result};
 pub(super) const MAX_CLAIM_ITEMS: usize = 32;
 const MAX_CLAIM_BYTES: usize = 512 << 10;
 const MAX_SCAN_ITEMS: usize = 128;
-pub(super) const MAX_ACTIVITY_BYTES: usize = 256 << 10;
+/// Maximum encoded input or output retained by one native activity attempt.
+pub const MAX_ACTIVITY_PAYLOAD_BYTES: usize = 256 << 10;
 const MAX_ACTIVITY_TYPE_BYTES: usize = 256;
 pub(super) const MAX_ATTEMPTS: u32 = 20;
 const MIN_LEASE_MS: u32 = 5_000;
@@ -149,7 +150,7 @@ pub fn workflow_claim_activities(
         )?);
         if activity_type.is_empty()
             || activity_type.len() > MAX_ACTIVITY_TYPE_BYTES
-            || input.len() > MAX_ACTIVITY_BYTES
+            || input.len() > MAX_ACTIVITY_PAYLOAD_BYTES
             || attempt < 0
         {
             return Err(Error::Command("invalid stored workflow activity"));
@@ -227,7 +228,7 @@ pub fn workflow_validate_activity_claim(
         .checked_add(DELIVERY_MARGIN_MS)
         .ok_or(Error::Command("activity delivery margin overflow"))?;
     for activity in claimed {
-        if activity.input.len() > MAX_ACTIVITY_BYTES || activity.lease_until_ms < minimum {
+        if activity.input.len() > MAX_ACTIVITY_PAYLOAD_BYTES || activity.lease_until_ms < minimum {
             return Ok(false);
         }
         let live = connection
@@ -332,7 +333,8 @@ pub(super) fn workflow_complete_activity_with_effects(
     definition: &dyn WorkflowDefinition,
 ) -> Result<ActivityCompletionOutcome> {
     validate_now(now_ms)?;
-    if completion.result.len() > MAX_ACTIVITY_BYTES || (!completion.failed && completion.retryable)
+    if completion.result.len() > MAX_ACTIVITY_PAYLOAD_BYTES
+        || (!completion.failed && completion.retryable)
     {
         return Err(Error::Command("invalid activity completion"));
     }
@@ -489,7 +491,7 @@ fn load_activity(
                 if !(0..=4).contains(&state)
                     || attempt < 0
                     || expires_at_ms < 0
-                    || result.len() > MAX_ACTIVITY_BYTES
+                    || result.len() > MAX_ACTIVITY_PAYLOAD_BYTES
                 {
                     return Err(Error::Command("invalid stored workflow activity"));
                 }

@@ -126,6 +126,12 @@ scratch ceiling = usable disk / 3
 cache/WAL/pending cuts = usable disk - scratch ceiling
 ```
 
+The 5% payload budget is one shared node semaphore. A Cell command reserves its
+encoded request plus maximum response while queued or executing. A native
+activity reserves its maximum 256 KiB input plus 256 KiB output before claim and
+holds that reservation until completion, retry or cancellation; if capacity is
+unavailable, the scheduler leaves the activity unclaimed for a later scan.
+
 Reject startup if M<2 GiB or usable disk<20 GiB. Account actual HTTP/Git transfer
 reservations against the process reserve; exceeding that reserve reduces Cell
 admission, never silently consumes its memory. No JS heap reservation remains.

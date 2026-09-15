@@ -313,7 +313,7 @@ impl CellHandle {
             _node_bytes: try_many(
                 self.inner.node_bytes.clone(),
                 reservation_bytes,
-                "node mailbox bytes",
+                "node retained bytes",
             )?,
         };
         if self.admission.fenced.load(Ordering::Acquire) {

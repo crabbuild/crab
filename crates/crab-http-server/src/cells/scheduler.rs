@@ -250,6 +250,7 @@ impl RepositoryCellScheduler {
         }
         if self.registry.has_activity_runner(cell.target.namespace())
             && let Ok(permit) = Arc::clone(&self.activity_admission).try_acquire_owned()
+            && let Ok(activity_bytes) = self.router.reserve_activity_payloads()
             && let Some(activity_cell) = self.reserve_activity(cell.target.cell_id())
         {
             let registry = Arc::clone(&self.registry);
@@ -277,6 +278,7 @@ impl RepositoryCellScheduler {
                     tracing::warn!(error = %error, "Workflow scheduler Cell release failed");
                 }
                 drop(activity_cell);
+                drop(activity_bytes);
                 drop(permit);
             });
             return Ok(());

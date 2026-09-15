@@ -170,7 +170,10 @@ owner, or temporarily acquires an idle/stale-owner Cell from its exact root. A
 temporary local activation drains back to `Idle` after processing. When Tick
 reports no maintenance item, the registry identifies whether the due namespace
 has an activity or effect runner. Activity work runs in a CPU-derived bounded
-`JoinSet`; effects run after the activity or inline when no activity is admitted.
+`JoinSet`. Before claiming durable work, it reserves the maximum 256 KiB input
+plus 256 KiB output from the same node-wide byte budget used by Cell commands;
+capacity exhaustion leaves the activity unclaimed for a later scan. Effects run
+after the activity or inline when no activity is admitted.
 The scanner never waits for the activity future. Tick, activity and effect peer
 operations use exact registered operation IDs/codecs and fleet/session-bound
 internal grants, not a browser principal. Scheduler shutdown aborts and joins
@@ -185,7 +188,8 @@ exports scheduler health, progress and lag. The transactional Tick now reserves
 work for every installed maintenance class and passes unused capacity forward,
 so request retention cannot starve Queue or Workflow deadlines. Durable node
 retry queues, cross-Cell/per-namespace admission fairness
-and multi-node activity failure qualification remain.
+and multi-node activity failure qualification remain. Native blocking-handler
+isolation and dirty-job admission remain separate delivery work.
 `CellRuntime::local_handle` now resolves a due Cell
 only when the dispatcher still owns the exact incarnation/code/schema under the
 current session and the admission is neither fenced nor draining; it never

@@ -66,6 +66,23 @@ async fn activate_runtime(
     (runtime, handle, pool)
 }
 
+#[tokio::test]
+async fn node_byte_reservation_rejects_overcommit_and_releases_capacity() {
+    let session = SessionId::from_bytes([40; 16]);
+    let runtime = CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 1_024, session).unwrap();
+    let held = runtime.try_reserve_node_bytes(1_024).unwrap();
+
+    assert!(matches!(
+        runtime.try_reserve_node_bytes(1),
+        Err(crab_cell_runtime::Error::Capacity("node retained bytes"))
+    ));
+    drop(held);
+    let released = runtime.try_reserve_node_bytes(1_024).unwrap();
+    drop(released);
+
+    runtime.shutdown().await.unwrap();
+}
+
 async fn bootstrap_on(
     runtime: &CellRuntime,
     fixture: &Fixture,

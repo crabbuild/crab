@@ -8,7 +8,7 @@ use std::{
 };
 
 use tokio::{
-    sync::{Semaphore, mpsc, oneshot},
+    sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, mpsc, oneshot},
     task::JoinSet,
 };
 
@@ -38,6 +38,12 @@ pub struct CellRuntime {
     inner: Arc<RuntimeInner>,
 }
 
+/// Opaque node-wide byte reservation held until it is dropped.
+#[must_use = "dropping the reservation immediately releases its capacity"]
+pub struct NodeByteReservation {
+    _permit: OwnedSemaphorePermit,
+}
+
 pub(super) struct RuntimeInner {
     sender: mpsc::Sender<Message>,
     node_bytes: Arc<Semaphore>,
@@ -50,11 +56,11 @@ impl CellRuntime {
     /// Starts one dispatcher on the current Tokio runtime.
     pub fn new(
         pool: SqlWorkerPool,
-        node_mailbox_bytes: usize,
+        node_retained_bytes: usize,
         session: SessionId,
     ) -> crate::Result<Self> {
-        if node_mailbox_bytes == 0 || node_mailbox_bytes > Semaphore::MAX_PERMITS {
-            return Err(Error::Capacity("node mailbox bytes"));
+        if node_retained_bytes == 0 || node_retained_bytes > Semaphore::MAX_PERMITS {
+            return Err(Error::Capacity("node retained bytes"));
         }
         let runtime = tokio::runtime::Handle::try_current().map_err(Error::RuntimeStart)?;
         let (sender, receiver) = mpsc::channel(INGRESS_REQUESTS);
@@ -62,7 +68,7 @@ impl CellRuntime {
         Ok(Self {
             inner: Arc::new(RuntimeInner {
                 sender,
-                node_bytes: Arc::new(Semaphore::new(node_mailbox_bytes)),
+                node_bytes: Arc::new(Semaphore::new(node_retained_bytes)),
                 shutting_down: AtomicBool::new(false),
                 session,
                 pool,
@@ -99,6 +105,25 @@ impl CellRuntime {
     #[must_use]
     pub fn is_shutting_down(&self) -> bool {
         self.inner.shutting_down.load(Ordering::Acquire)
+    }
+
+    /// Reserves node-wide bytes for native work retained outside a Cell mailbox.
+    ///
+    /// Returns a capacity error without waiting when the shared budget is full,
+    /// and returns `RuntimeClosed` once terminal drain begins.
+    pub fn try_reserve_node_bytes(&self, bytes: usize) -> crate::Result<NodeByteReservation> {
+        self.ensure_running()?;
+        let permits = u32::try_from(bytes)
+            .ok()
+            .filter(|permits| *permits != 0)
+            .ok_or(Error::Capacity("node retained bytes"))?;
+        let permit = Arc::clone(&self.inner.node_bytes)
+            .try_acquire_many_owned(permits)
+            .map_err(|error| match error {
+                TryAcquireError::Closed => Error::RuntimeClosed,
+                TryAcquireError::NoPermits => Error::Capacity("node retained bytes"),
+            })?;
+        Ok(NodeByteReservation { _permit: permit })
     }
 
     /// Resolves an active local owner without exposing the dispatcher's Cell map.
