@@ -75,6 +75,7 @@ pub(crate) async fn prepare_release(
     expected_revision: u64,
     image: &str,
 ) -> Result<Vec<u8>> {
+    image_digest(image)?;
     let root = StorageRoot::build(&config.storage)?;
     let identities =
         ApplicationIdentityStore::new(root.store.clone(), Path::from(root.prefix.clone()));
@@ -140,6 +141,7 @@ pub(crate) async fn bootstrap_release_at(
     registry: &Registry,
     image: &str,
 ) -> Result<Vec<u8>> {
+    image_digest(image)?;
     let releases = ReleaseStore::new(layout.clone(), identity)?;
     let bootstrap_operation = bootstrap_operation(registry, image);
     let observed = match releases.load().await? {
@@ -299,6 +301,9 @@ fn image_digest(image: &str) -> Result<Digest> {
         let low =
             image_nibble(pair[1]).ok_or(Error::Config("selected Cell image digest is invalid"))?;
         *output = (high << 4) | low;
+    }
+    if bytes == [0; 32] {
+        return Err(Error::Config("selected Cell image digest is zero"));
     }
     Ok(Digest::from_bytes(bytes))
 }
@@ -528,6 +533,13 @@ mod tests {
         UpdateIssueOutcome,
     };
     use super::*;
+
+    #[test]
+    fn release_image_identity_must_be_a_nonzero_sha256_digest() {
+        assert!(image_digest(&format!("sha256:{}", "a".repeat(64))).is_ok());
+        assert!(image_digest(&format!("sha256:{}", "0".repeat(64))).is_err());
+        assert!(image_digest("latest").is_err());
+    }
 
     #[test]
     fn release_inspection_is_canonical_and_matches_repository_inventory() {

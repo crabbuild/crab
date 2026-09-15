@@ -241,7 +241,7 @@ the initial activation it created, admits an exact operator-prepared rollout
 candidate without completing that operator's activation, returns an already
 ready exact release, and refuses to replace another desired release. The
 first prepare strict-creates or adopts the root identity, uploads only the exact
-compiled descriptor, validates its digest and image digest, then strict-creates
+compiled descriptor, validates its digest and nonzero SHA-256 image digest, then strict-creates
 or ETag-updates canonical release state at the expected revision. Exact retries
 reuse the winning operation ID and bytes. Activate reloads the desired descriptor,
 requires byte equality with this binary, enters `activating` through CAS, scans

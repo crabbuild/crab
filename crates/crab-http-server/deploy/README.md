@@ -127,7 +127,7 @@ volume, including the catalog and every repository. The defaults need no
 | Variable | Default | Purpose |
 |---|---|---|
 | `CRAB_HTTP_SERVER_PORT` | `8788` | Localhost port published by Docker |
-| `CRAB_HTTP_SERVER_RELEASE_IMAGE` | `sha256:` plus 64 zeroes | Immutable image identity recorded by local release bootstrap |
+| `CRAB_HTTP_SERVER_RELEASE_IMAGE` | `sha256:` plus 64 `1` digits | Synthetic nonzero image identity recorded by local release bootstrap |
 | `CRAB_TMP_SIZE` | `2g` | Bounded receive-pack and index scratch space |
 | `CRAB_HTTP_SERVER_IMAGE` | `crab-http-server:local` | Server image name or prebuilt image reference |
 

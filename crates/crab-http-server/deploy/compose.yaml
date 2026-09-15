@@ -113,7 +113,7 @@ services:
       - release
       - bootstrap
       - --image
-      - ${CRAB_HTTP_SERVER_RELEASE_IMAGE:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+      - ${CRAB_HTTP_SERVER_RELEASE_IMAGE:-sha256:1111111111111111111111111111111111111111111111111111111111111111}
     depends_on:
       bucket-init:
         condition: service_completed_successfully
