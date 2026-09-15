@@ -588,6 +588,15 @@ impl CellExecutor {
         Ok(())
     }
 
+    /// Closes a fenced executor without treating local pending state as authority.
+    ///
+    /// The caller must recover only from the authoritative immutable root. Local
+    /// database and LTX artifacts remain quarantined for diagnosis.
+    pub(crate) fn discard(self) -> Result<()> {
+        self.db.close()?;
+        Ok(())
+    }
+
     pub(crate) fn fence(&mut self) {
         self.fenced = true;
     }

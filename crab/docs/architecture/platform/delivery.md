@@ -16,7 +16,7 @@ does not establish a working runtime.
 | [environment.rs](../../../../crates/crab-ltx/src/environment.rs) | Filesystem/executor hooks and count admission | Byte reservations held through actual job completion |
 | [store.rs](../../../../crates/crab-storage/src/store.rs) | Conditional updates; ambiguous update not retried | Preserve behavior; runtime owns CAS reconciliation |
 | [cell_layout.rs](../../../../crates/crab-storage/src/cell_layout.rs) | Typed application/Cell/incarnation object paths | Reuse from authority, immutable-root and backup code; never rebuild path strings in callers |
-| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, verified CAS catalog, worker-owned bootstrap, exact-root sparse activation, fixed SQL workers, ordered bounded reads, FIFO publication, retry, unknown outcomes, one absolute five-second SQL/native/sparse-page deadline, bounded owner renewal, idle acquisition, observed takeover, per-Cell drain, node-wide terminal drain with explicit worker join, transactional scheduler summaries, revision-pinned due scans and bounded typed Tick, typed registry/CellClient and bounded authorized SQL/KV/Queue/Workflow capabilities, exact native activity execution, signed node enrollment plus strict peer client/dispatch contracts | Add automatic fenced recovery, fleet listing, Workflow effects, catalog-driven activity scheduling and scheduler liveness/routing |
+| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, verified CAS catalog, worker-owned bootstrap, exact-root sparse activation, fixed SQL workers, ordered bounded reads, FIFO publication, retry, unknown outcomes, one absolute five-second SQL/native/sparse-page deadline, automatic fenced discard and authority-safe idle release, bounded owner renewal, idle acquisition, observed takeover, per-Cell drain, node-wide terminal drain with explicit worker join, transactional scheduler summaries, revision-pinned due scans and bounded typed Tick, typed registry/CellClient and bounded authorized SQL/KV/Queue/Workflow capabilities, exact native activity execution, signed node enrollment plus strict peer client/dispatch contracts | Add fleet listing, Workflow effects, catalog-driven activity scheduling and scheduler liveness/routing |
 | [sql.rs](../../../../crates/crab-cell-runtime/src/sql.rs) | Typed 128-statement/1-MiB batches, read/write classification, 1,000-row/1-MiB materialization, scoped SQLite authorizers, registered codecs and a role-checked SqlCell proven through publish and exact-root restore | Use the completed handle from the repository HTTP adapter |
 | [kv.rs](../../../../crates/crab-cell-runtime/src/kv.rs) | Normative schema install, bounded atomic check/write, stable versions, TTL get/list/cleanup, binary pagination and typed scope-sharded KvNamespace/registry codecs | Add scheduler cleanup invocation |
 | [queue.rs](../../../../crates/crab-cell-runtime/src/queue.rs) | Normative schema, producer dedup, bounded claim, token validation, lease mutations/reclaim and retention cleanup plus typed producer-sharded QueueNamespace and registry codecs | Add DLQ effects and native polling scheduler |
@@ -106,8 +106,11 @@ SQLite `query_only`, and enforce declared result bytes. Command, query and
 Resolve now carry one absolute five-second deadline into the SQL worker and
 sparse VFS; both the blocking page wait and asynchronous provider read stop at
 that instant, and the executor recovers the typed VFS source before fencing.
-Complete callback-side deadline checks, fenced takeover recovery and panic
-supervision. All transitions use the existing Store conditional
+Fenced task completion now closes the worker even with an unpublished local cut,
+reloads the newest authority state, releases only the same owner/epoch to Idle,
+and leaves a takeover untouched. A fresh idle acquisition restores the exact
+published root. Complete callback-side deadline checks and panic supervision.
+All transitions use the existing Store conditional
 primitives, preserving sources.
 Drained and orphaned activations close their SQL worker first, then release the
 same observed authority record to `Idle`; transient CAS failures retry across
@@ -168,6 +171,13 @@ Current dispatcher coverage is in `crates/crab-cell-runtime/tests/actor.rs`:
   typed resolution states and digest binding;
   `resolve_waits_for_inflight_publication_and_returns_unknown_after_fence` proves
   a queued resolver cannot claim absence while its publisher is unresolved.
+- `native_handler_deadline_discards_late_commit_and_reopens_authoritative_root`
+  proves timeout admission fencing, delayed callback ownership, recovery-only
+  worker close, Idle release, same-runtime acquisition and restoration without
+  the tentative mutation.
+- `observed_takeover_fences_the_old_cell_before_more_work` drains the old runtime
+  after recovery cleanup and proves it does not release or rewrite the new
+  owner's epoch.
 `publication_rebases_over_a_pure_lease_renewal_without_sql_replay` covers the
 coordinator's latest-token retry path;
 `published_root_observed_after_takeover_fences_the_old_executor` proves that

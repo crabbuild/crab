@@ -271,6 +271,51 @@ impl CellPublisher {
             }
         }
     }
+
+    /// Releases the newest control still owned by this fenced executor.
+    ///
+    /// Reloading first adopts an ambiguous publication or pure renewal. A new
+    /// epoch or owner proves that recovery already belongs to another executor.
+    pub(crate) async fn release_after_fence(&mut self) -> Result<()> {
+        let expected = self.observed.value().clone();
+        let expected_owner = expected.owner.clone().ok_or(Error::Fenced)?;
+        let expected_cell = expected.cell;
+        let expected_incarnation = expected.incarnation;
+        let expected_epoch = expected.epoch;
+        let mut backoff = PublicationBackoff::default();
+        let current = loop {
+            match self.authority.load(expected_cell).await {
+                Ok(Some(current)) => break current,
+                Ok(None) => return Err(Error::Fenced),
+                Err(error) if retryable_publication_error(&error) => {
+                    backoff.wait(runtime_retry_hint(&error)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let value = current.value();
+        if value.epoch != expected_epoch || value.owner.as_ref() != Some(&expected_owner) {
+            return Ok(());
+        }
+        if value.incarnation != expected_incarnation
+            || value.code != expected.code
+            || value.schema != expected.schema
+        {
+            return Err(Error::Control("fenced control changed runtime identity"));
+        }
+        if value.root.is_none()
+            || !matches!(
+                value.state,
+                crate::ControlState::Recovering | crate::ControlState::Serving
+            )
+        {
+            return Err(Error::Control(
+                "fenced active control lost its published root",
+            ));
+        }
+        self.observed = current;
+        self.release().await
+    }
 }
 
 fn retryable_publication_error(error: &Error) -> bool {

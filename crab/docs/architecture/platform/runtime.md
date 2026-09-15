@@ -37,8 +37,10 @@ declared output bound, and leaves the Cell usable after a proven query error.
 only for the original digest, `ABSENT` only after earlier accepted work drained,
 `UNKNOWN` when publication fenced, and `EXPIRED` for a structurally valid expired
 identity. A successor that restores a later authoritative root resolves the
-predecessor's ledger without replay. The automatic fenced recovery supervisor
-remains to implement. A single
+predecessor's ledger without replay. Fenced completion now closes and removes the
+worker-owned executor, reloads authority, conditionally releases the newest
+control still owned by the same epoch to `Idle`, and leaves a replacement owner
+untouched. A later idle acquisition restores only that authoritative root. A single
 dispatcher timer currently scans every 100 ms and admits at most 32 concurrent
 owner renewals. Each idle owner renews every 3 s without a permanent per-Cell
 task. Renewal uses the same strict control CAS, reconciles exact lost responses,
@@ -64,6 +66,18 @@ contract. Mutations therefore return `OUTCOME_UNKNOWN`, queries return deadline,
 and Resolve returns `UNKNOWN`, regardless of whether the inner VFS timer or the
 outer actor watchdog observes the instant first. The 30-second default remains
 only for standalone `crab-ltx` sparse calls without a caller scope.
+
+Fencing is a two-phase boundary. Admission closes immediately, but the runtime
+retains the accepted operation, worker slot and byte permits until synchronous
+Rust has actually returned. It then uses the worker's recovery-only `discard`
+command to close SQLite even when a pending cut exists; the database and LTX
+files are not reused or deleted. Only after that close succeeds does
+`CellPublisher::release_after_fence` reload control. It may adopt an ambiguous
+publication or intervening pure renewals, but releases only when Cell,
+incarnation, code, schema, owner and epoch still identify this executor. A new
+owner or epoch is already the recovery authority and is never overwritten. The
+closed admission keeps old handles fenced while the ordinary idle-acquisition
+path opens a fresh local file from the retained authoritative root.
 
 `CellRuntime::acquire_idle_restored` handles an `Idle` control immediately;
 `CellRuntime::takeover_restored` handles a published `Recovering` or `Serving`
@@ -307,12 +321,13 @@ handler rollback consults worker state and leaves the Cell usable.
 
 The dispatcher uses `pending`, `bind_prepared` and `confirm_published`; direct
 access to worker-owned executors is impossible. Reads enter the same FIFO and
-execute only after the publisher returns from every preceding mutation. The next
-supervision work must add automatic recovery of fenced Cells instead of only
-stopping admission.
+execute only after the publisher returns from every preceding mutation. Fenced
+task completion automatically enters the discard-and-conditional-release path;
+the same task participates in terminal shutdown instead of becoming detached.
 
 Per-Cell drain closes admission, resolves accepted publications, closes SQLite,
-then releases ownership. Node shutdown first closes node admission and runtime
+then releases ownership. Fenced cleanup instead discards local pending state,
+closes SQLite and reloads authority before a conditional release. Node shutdown first closes node admission and runtime
 ingress, drains every message accepted before the shutdown marker, applies the
 same close-before-release ordering to all Cells, and returns only after every
 deactivation task has settled. It then closes the shared `SqlWorkerPool` and

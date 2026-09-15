@@ -722,11 +722,15 @@ fn start_shutdown_drain(
         active.admission.requests.close();
         active.admission.bytes.close();
         if !active.busy && !active.renewing && active.queue.is_empty() {
-            ready.push(*cell);
+            ready.push((*cell, active.fenced));
         }
     }
-    for cell in ready {
-        start_deactivate(cell, pool, cells, transitioning, tasks);
+    for (cell, fenced) in ready {
+        if fenced {
+            start_fenced_deactivate(cell, pool, cells, transitioning, tasks);
+        } else {
+            start_deactivate(cell, pool, cells, transitioning, tasks);
+        }
     }
 }
 
@@ -1251,11 +1255,7 @@ fn handle_task(
                 fence_active(active);
             }
             send_command_reply(&mut command, result);
-            if active.draining() && !active.renewing && active.queue.is_empty() {
-                start_deactivate(cell, pool, cells, transitioning, tasks);
-            } else {
-                start_next(active, pool, tasks);
-            }
+            continue_cell(cell, pool, cells, transitioning, tasks);
         }
         TaskResult::Queried {
             cell,
@@ -1273,11 +1273,7 @@ fn handle_task(
                 fence_active(active);
             }
             send_query_reply(&mut query, result);
-            if active.draining() && !active.renewing && active.queue.is_empty() {
-                start_deactivate(cell, pool, cells, transitioning, tasks);
-            } else {
-                start_next(active, pool, tasks);
-            }
+            continue_cell(cell, pool, cells, transitioning, tasks);
         }
         TaskResult::Resolved {
             cell,
@@ -1295,11 +1291,7 @@ fn handle_task(
                 fence_active(active);
             }
             send_resolve_reply(&mut resolve, result);
-            if active.draining() && !active.renewing && active.queue.is_empty() {
-                start_deactivate(cell, pool, cells, transitioning, tasks);
-            } else {
-                start_next(active, pool, tasks);
-            }
+            continue_cell(cell, pool, cells, transitioning, tasks);
         }
         TaskResult::Renewed {
             cell,
@@ -1315,11 +1307,7 @@ fn handle_task(
                 active.fenced = true;
                 fence_active(active);
             }
-            if active.draining() && !active.busy && active.queue.is_empty() {
-                start_deactivate(cell, pool, cells, transitioning, tasks);
-            } else {
-                start_next(active, pool, tasks);
-            }
+            continue_cell(cell, pool, cells, transitioning, tasks);
         }
         TaskResult::Deactivated {
             cell,
@@ -1368,6 +1356,28 @@ fn fence_active(active: &mut ActiveCell) {
                 send_resolve_reply(&mut resolve, Ok(Resolution::Unknown));
             }
         }
+    }
+}
+
+fn continue_cell(
+    cell: CellId,
+    pool: &SqlWorkerPool,
+    cells: &mut HashMap<CellId, ActiveCell>,
+    transitioning: &mut HashSet<CellId>,
+    tasks: &mut JoinSet<TaskResult>,
+) {
+    let Some(active) = cells.get_mut(&cell) else {
+        return;
+    };
+    if active.busy || active.renewing {
+        return;
+    }
+    if active.fenced {
+        start_fenced_deactivate(cell, pool, cells, transitioning, tasks);
+    } else if active.draining() && active.queue.is_empty() {
+        start_deactivate(cell, pool, cells, transitioning, tasks);
+    } else {
+        start_next(active, pool, tasks);
     }
 }
 
@@ -1461,6 +1471,34 @@ fn start_deactivate(
             pool.deactivate(cell).await?;
             let mut publisher = active.publisher.ok_or(Error::Fenced)?;
             publisher.release().await
+        }
+        .await;
+        TaskResult::Deactivated {
+            cell,
+            reply: active.drain,
+            shutdown_drain: active.shutdown_drain,
+            result,
+        }
+    });
+}
+
+fn start_fenced_deactivate(
+    cell: CellId,
+    pool: &SqlWorkerPool,
+    cells: &mut HashMap<CellId, ActiveCell>,
+    transitioning: &mut HashSet<CellId>,
+    tasks: &mut JoinSet<TaskResult>,
+) {
+    let Some(active) = cells.remove(&cell) else {
+        return;
+    };
+    transitioning.insert(cell);
+    let pool = pool.clone();
+    tasks.spawn(async move {
+        let result = async {
+            pool.discard(cell).await?;
+            let mut publisher = active.publisher.ok_or(Error::Fenced)?;
+            publisher.release_after_fence().await
         }
         .await;
         TaskResult::Deactivated {

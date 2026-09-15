@@ -371,6 +371,14 @@ impl SqlWorkerPool {
         receive(response).await
     }
 
+    /// Removes and closes a fenced Cell for authoritative-root recovery.
+    pub(crate) async fn discard(&self, cell: CellId) -> Result<()> {
+        let (reply, response) = oneshot::channel();
+        self.send(cell, WorkerCommand::Discard { cell, reply })
+            .await?;
+        receive(response).await
+    }
+
     /// Closes the empty pool and joins every SQL worker thread.
     ///
     /// All Cells must first be drained and deactivated. Once shutdown starts,
@@ -546,6 +554,10 @@ enum WorkerCommand {
         reply: oneshot::Sender<Result<crab_ltx::rusqlite::InterruptHandle>>,
     },
     Deactivate {
+        cell: CellId,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    Discard {
         cell: CellId,
         reply: oneshot::Sender<Result<()>>,
     },
@@ -786,6 +798,13 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                         .ok_or(Error::CellNotActive)
                         .and_then(|cell| cell.executor.close()),
                 };
+                let _ = reply.send(result);
+            }
+            WorkerCommand::Discard { cell, reply } => {
+                let result = cells
+                    .remove(&cell)
+                    .ok_or(Error::CellNotActive)
+                    .and_then(|cell| cell.executor.discard());
                 let _ = reply.send(result);
             }
         }

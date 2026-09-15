@@ -44,9 +44,13 @@ unknown while its permits remain held until the callback exits. The same absolut
 deadline reaches the SQL worker and bounds both the blocking sparse VFS wait and
 its asynchronous object-store read; a recovered VFS deadline source fences the
 connection and preserves mutation/query/Resolve outcome semantics. A native
-callback that exits late cannot publish its tentative commit. Automatic fenced
-recovery, streaming initial directory construction and directory-backed capture
-checksums, shared directory caching, prepared compaction/bundles,
+callback that exits late cannot publish its tentative commit. After the accepted
+callback exits, fenced recovery removes and closes the worker-owned SQLite handle,
+reloads authority, and releases only the newest control still held by the same
+owner and epoch. Local tentative state remains quarantined; a changed owner is
+left untouched. The next idle acquisition reopens the exact authoritative root,
+so it cannot publish a late tentative commit. Streaming initial directory construction
+and directory-backed capture checksums, shared directory caching, prepared compaction/bundles,
 Workflow effect supervision, catalog-driven activity scheduling, scheduler
 progress advertisement and remote/idle routing, private peer routing, HTTP
 cutover and capacity qualification remain incomplete. The scoped

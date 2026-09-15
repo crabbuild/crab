@@ -330,7 +330,7 @@ async fn idle_owner_progress_is_renewed_without_a_per_cell_task() {
 #[tokio::test]
 async fn observed_takeover_fences_the_old_cell_before_more_work() {
     let fixture = fixture();
-    let handle = activate(&fixture, 16 * 1024 * 1024).await;
+    let (runtime, handle, _pool) = activate_runtime(&fixture, 16 * 1024 * 1024).await;
     let authority = CellAuthority::new(fixture.layout.clone());
     let observed = authority
         .load(fixture.target.cell_id())
@@ -344,7 +344,7 @@ async fn observed_takeover_fences_the_old_cell_before_more_work() {
             endpoint: "https://successor.internal:8081".into(),
         })
         .unwrap();
-    authority
+    let successor = authority
         .transition(&observed, successor, Transition::Takeover)
         .await
         .unwrap();
@@ -360,6 +360,13 @@ async fn observed_takeover_fences_the_old_cell_before_more_work() {
     })
     .await
     .unwrap();
+    runtime.shutdown().await.unwrap();
+    let current = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.value(), successor.value());
 }
 
 #[tokio::test]
@@ -488,9 +495,9 @@ async fn unchanged_dead_owner_is_taken_over_then_restored() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn native_handler_deadline_returns_unknown_and_never_publishes_late_commit() {
+async fn native_handler_deadline_discards_late_commit_and_reopens_authoritative_root() {
     let fixture = fixture();
-    let handle = activate(&fixture, 16 * 1024 * 1024).await;
+    let (runtime, handle, _pool) = activate_runtime(&fixture, 16 * 1024 * 1024).await;
     let authority = CellAuthority::new(fixture.layout.clone());
     let before = authority
         .load(fixture.target.cell_id())
@@ -541,13 +548,58 @@ async fn native_handler_deadline_returns_unknown_and_never_publishes_late_commit
     ));
 
     release_tx.send(()).unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let after = authority
-        .load(fixture.target.cell_id())
+    let after = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let current = authority
+                .load(fixture.target.cell_id())
+                .await
+                .unwrap()
+                .unwrap();
+            if current.value().state == ControlState::Idle {
+                break current;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(after.value().root, before);
+    assert!(after.value().owner.is_none());
+
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(after.value().root, before);
+    let session = SessionId::from_bytes([4; 16]);
+    let recovered = runtime
+        .acquire_idle_restored(
+            proof,
+            fixture.replica.clone(),
+            authority,
+            after,
+            fixture._directory.path().join("deadline-recovered.sqlite"),
+            Owner {
+                session,
+                endpoint: "https://deadline-recovered.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        recovered
+            .query(64, 64, |connection| {
+                let value = connection
+                    .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+                Ok(value.to_be_bytes().to_vec())
+            })
+            .await
+            .unwrap(),
+        0_i64.to_be_bytes()
+    );
+    recovered.drain().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
