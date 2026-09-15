@@ -109,7 +109,10 @@ that instant, and the executor recovers the typed VFS source before fencing.
 Fenced task completion now closes the worker even with an unpublished local cut,
 reloads the newest authority state, releases only the same owner/epoch to Idle,
 and leaves a takeover untouched. A fresh idle acquisition restores the exact
-published root. Complete callback-side deadline checks and panic supervision.
+published root. The fixed worker now catches native initializer/command/effect/
+query unwinds, fences only that Cell and stays alive for unrelated Cells;
+bootstrap releases capacity without publishing control, while accepted command
+panic recovery discards tentative SQL and reopens the exact authoritative root.
 All transitions use the existing Store conditional
 primitives, preserving sources.
 Drained and orphaned activations close their SQL worker first, then release the
@@ -136,6 +139,9 @@ Current worker coverage is in `crates/crab-cell-runtime/tests/workers.rs`:
 - `cancelled_waiter_does_not_cancel_an_accepted_sql_command` aborts the awaiting
   Tokio task after handler entry and proves the worker still commits and retains
   its pending publication for later preparation and confirmation.
+- `panicking_handler_fences_only_its_cell_and_worker_continues` mutates then
+  unwinds one Cell callback, proves that Cell is fenced and proves another Cell
+  assigned to the same OS thread still executes.
 - `active_cell_admission_is_global_and_released_after_drain` places Cells on
   different worker shards and proves the node-wide ceiling is returned only by
   a completed drain.
@@ -164,6 +170,9 @@ Current dispatcher coverage is in `crates/crab-cell-runtime/tests/actor.rs`:
 - `failed_bootstrap_keeps_control_unpublished_and_releases_cell_capacity` proves
   application migration rollback leaves no root and returns the one active-Cell
   slot for a successful retry at a fresh destination.
+- `panicking_bootstrap_keeps_worker_alive_and_releases_cell_capacity` proves the
+  same invariants for an unwinding initializer and then bootstraps successfully
+  through that same fixed worker.
 - `query_waits_for_preceding_publication_and_cannot_write` proves a concurrent
   read observes the preceding published mutation, a write through the query
   callback is rejected, and the Cell remains readable.
@@ -175,6 +184,9 @@ Current dispatcher coverage is in `crates/crab-cell-runtime/tests/actor.rs`:
   proves timeout admission fencing, delayed callback ownership, recovery-only
   worker close, Idle release, same-runtime acquisition and restoration without
   the tentative mutation.
+- `native_handler_panic_discards_transaction_and_reopens_authoritative_root`
+  proves an accepted panic returns outcome-unknown with the native-panic source,
+  releases only the same owner to Idle and restores without the tentative write.
 - `observed_takeover_fences_the_old_cell_before_more_work` drains the old runtime
   after recovery cleanup and proves it does not release or rewrite the new
   owner's epoch.

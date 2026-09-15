@@ -152,6 +152,56 @@ async fn cancelled_waiter_does_not_cancel_an_accepted_sql_command() {
 }
 
 #[tokio::test]
+async fn panicking_handler_fences_only_its_cell_and_worker_continues() {
+    let first = fixture(21);
+    let second = fixture(22);
+    let pool = SqlWorkerPool::new(1, 2).unwrap();
+    pool.activate(first.cell, first.executor).await.unwrap();
+    pool.activate(second.cell, second.executor).await.unwrap();
+
+    let panic = pool
+        .execute(
+            first.cell,
+            identity(21),
+            Digest::from_bytes([21; 32]),
+            20,
+            RESULT_LIMIT,
+            |transaction| {
+                transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                panic!("native handler panic")
+            },
+        )
+        .await;
+    assert!(matches!(panic, Err(Error::NativePanic)));
+    assert!(matches!(
+        pool.execute(
+            first.cell,
+            identity(22),
+            Digest::from_bytes([22; 32]),
+            21,
+            RESULT_LIMIT,
+            |_| Ok(HandlerOutcome::Success(Vec::new())),
+        )
+        .await,
+        Err(Error::Fenced)
+    ));
+
+    assert!(matches!(
+        pool.execute(
+            second.cell,
+            identity(23),
+            Digest::from_bytes([23; 32]),
+            22,
+            RESULT_LIMIT,
+            |_| Ok(HandlerOutcome::Success(b"worker survived".to_vec())),
+        )
+        .await
+        .unwrap(),
+        WorkerExecution::Pending(_)
+    ));
+}
+
+#[tokio::test]
 async fn active_cell_admission_is_global_and_released_after_drain() {
     let first = fixture(1);
     let second = fixture(2);

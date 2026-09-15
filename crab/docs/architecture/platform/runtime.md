@@ -286,8 +286,13 @@ but retains job permits/connection ownership until the job really ends. A
 callback stuck outside SQLite requires supervisor termination of this process;
 this can affect every Cell in it. Do not detach blocked work and recycle permits.
 Native handlers must not perform blocking network I/O or unbounded computation.
-The runtime fences before cleanup on unwind; panic=abort uses normal source-loss
-recovery. Neither policy turns a panic into a business rejection.
+The fixed worker catches unwind panics around bootstrap, command, destination
+effect and query callbacks. It fences the affected Cell before returning, while
+the same worker thread continues serving unrelated Cells. Actor recovery closes
+the fenced connection, releases only the still-owned control to Idle and restores
+from the authoritative root; a mutation/effect caller receives unknown outcome.
+With `panic=abort`, process restart follows the normal source-loss recovery path.
+Neither policy turns a panic into a business rejection.
 
 The implemented `SqlWorkerPool` supplies the SQL ownership half of this contract. Construction
 accepts one through sixteen workers and one through 10,000 active Cells. Each OS

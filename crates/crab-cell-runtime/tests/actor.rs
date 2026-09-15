@@ -913,6 +913,97 @@ async fn native_handler_deadline_discards_late_commit_and_reopens_authoritative_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn native_handler_panic_discards_transaction_and_reopens_authoritative_root() {
+    let fixture = fixture_for(b"panicking-command");
+    let (runtime, handle, _pool) = activate_runtime(&fixture, 16 * 1024 * 1024).await;
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let before = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap()
+        .value()
+        .root
+        .clone();
+
+    let outcome = handle
+        .execute(
+            identity(44),
+            Digest::from_bytes([45; 32]),
+            20,
+            1_024,
+            1_024,
+            |transaction| {
+                transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                panic!("command handler panic")
+            },
+        )
+        .await;
+    match outcome {
+        Err(crab_cell_runtime::Error::OutcomeUnknown { source, .. }) => {
+            assert!(matches!(*source, crab_cell_runtime::Error::NativePanic));
+        }
+        other => panic!("expected native panic outcome, got {other:?}"),
+    }
+    assert!(matches!(
+        handle.query(1, 1, |_| Ok(Vec::new())).await,
+        Err(crab_cell_runtime::Error::Fenced)
+    ));
+
+    let idle = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let current = authority
+                .load(fixture.target.cell_id())
+                .await
+                .unwrap()
+                .unwrap();
+            if current.value().state == ControlState::Idle {
+                break current;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(idle.value().root, before);
+    assert!(idle.value().owner.is_none());
+
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let recovered = runtime
+        .acquire_idle_restored(
+            proof,
+            fixture.replica.clone(),
+            authority,
+            idle,
+            fixture._directory.path().join("panic-recovered.sqlite"),
+            Owner {
+                session: SessionId::from_bytes([4; 16]),
+                endpoint: "https://panic-recovered.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        recovered
+            .query(64, 64, |connection| {
+                let value = connection
+                    .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+                Ok(value.to_be_bytes().to_vec())
+            })
+            .await
+            .unwrap(),
+        0_i64.to_be_bytes()
+    );
+    recovered.drain().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn sqlite_query_is_interrupted_at_wall_deadline() {
     let fixture = fixture();
     let handle = activate(&fixture, 16 * 1024 * 1024).await;
@@ -1412,6 +1503,79 @@ async fn failed_bootstrap_keeps_control_unpublished_and_releases_cell_capacity()
             authority,
             current,
             fixture.database.with_file_name("replacement.sqlite"),
+            |transaction| {
+                transaction.execute_batch(
+                    "CREATE TABLE counter(value INTEGER NOT NULL); INSERT INTO counter VALUES (0)",
+                )?;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    handle.drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn panicking_bootstrap_keeps_worker_alive_and_releases_cell_capacity() {
+    let fixture = fixture_for(b"panicking-bootstrap");
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .provision(
+            CatalogEntry::new(
+                &fixture.target,
+                CatalogRole::Repository,
+                Digest::from_bytes([5; 32]),
+                1,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let session = SessionId::from_bytes([4; 16]);
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let observed = authority
+        .create_initial(
+            &proof,
+            IncarnationId::from_bytes([2; 16]),
+            Owner {
+                session,
+                endpoint: "https://node.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 2 * 1024 * 1024, session).unwrap();
+
+    assert!(matches!(
+        runtime
+            .bootstrap(
+                proof.clone(),
+                fixture.replica.clone(),
+                authority.clone(),
+                observed,
+                fixture.database.clone(),
+                |_| panic!("bootstrap initializer panic"),
+            )
+            .await,
+        Err(crab_cell_runtime::Error::NativePanic)
+    ));
+    let current = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.value().state, ControlState::Recovering);
+    assert!(current.value().root.is_none());
+
+    let handle = runtime
+        .bootstrap(
+            proof,
+            fixture.replica,
+            authority,
+            current,
+            fixture.database.with_file_name("panic-replacement.sqlite"),
             |transaction| {
                 transaction.execute_batch(
                     "CREATE TABLE counter(value INTEGER NOT NULL); INSERT INTO counter VALUES (0)",

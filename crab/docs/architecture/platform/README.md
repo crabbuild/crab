@@ -44,7 +44,11 @@ unknown while its permits remain held until the callback exits. The same absolut
 deadline reaches the SQL worker and bounds both the blocking sparse VFS wait and
 its asynchronous object-store read; a recovered VFS deadline source fences the
 connection and preserves mutation/query/Resolve outcome semantics. A native
-callback that exits late cannot publish its tentative commit. After the accepted
+callback panic is now caught at the fixed worker boundary: its transaction
+unwinds, only that Cell is fenced, the worker continues serving its other Cells,
+and an accepted mutation returns outcome-unknown rather than a false rollback or
+business rejection. Bootstrap panics release admission and leave control
+unpublished. A callback that exits late cannot publish its tentative commit. After the accepted
 callback exits, fenced recovery removes and closes the worker-owned SQLite handle,
 reloads authority, and releases only the newest control still held by the same
 owner and epoch. Local tentative state remains quarantined; a changed owner is

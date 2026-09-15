@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -718,7 +719,7 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                     reservation,
                     reply,
                 } = *bootstrap;
-                let result = match cells.entry(cell) {
+                let result = match catch_unwind(AssertUnwindSafe(|| match cells.entry(cell) {
                     std::collections::hash_map::Entry::Occupied(_) => Err(Error::CellAlreadyActive),
                     std::collections::hash_map::Entry::Vacant(entry) => replica
                         .open_new(&destination)
@@ -733,6 +734,9 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                             });
                             BootstrapExecution { cuts, next_due_ms }
                         }),
+                })) {
+                    Ok(result) => result,
+                    Err(_) => Err(Error::NativePanic),
                 };
                 let _ = reply.send(result);
             }
@@ -746,30 +750,25 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                 handler,
                 reply,
             } => {
-                let result = crab_ltx::with_paged_io_deadline(deadline, || {
-                    cells
-                        .get_mut(&cell)
-                        .ok_or(Error::CellNotActive)
-                        .and_then(|cell| {
-                            match cell.executor.execute(
-                                identity,
-                                operation_digest,
-                                now_ms,
-                                max_result_bytes,
-                                handler,
-                            )? {
-                                CommandExecution::Recorded(outcome) => {
-                                    Ok(WorkerExecution::Recorded(outcome))
-                                }
-                                CommandExecution::Pending => cell
-                                    .executor
-                                    .pending()
-                                    .cloned()
-                                    .map(Box::new)
-                                    .map(WorkerExecution::Pending)
-                                    .ok_or(Error::Fenced),
-                            }
-                        })
+                let result = run_native_callback(&mut cells, cell, deadline, move |active| {
+                    match active.executor.execute(
+                        identity,
+                        operation_digest,
+                        now_ms,
+                        max_result_bytes,
+                        handler,
+                    )? {
+                        CommandExecution::Recorded(outcome) => {
+                            Ok(WorkerExecution::Recorded(outcome))
+                        }
+                        CommandExecution::Pending => active
+                            .executor
+                            .pending()
+                            .cloned()
+                            .map(Box::new)
+                            .map(WorkerExecution::Pending)
+                            .ok_or(Error::Fenced),
+                    }
                 });
                 let _ = reply.send(result);
             }
@@ -782,29 +781,24 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                 handler,
                 reply,
             } => {
-                let result = crab_ltx::with_paged_io_deadline(deadline, || {
-                    cells
-                        .get_mut(&cell)
-                        .ok_or(Error::CellNotActive)
-                        .and_then(|cell| {
-                            match cell.executor.deliver_effect(
-                                delivery,
-                                now_ms,
-                                max_result_bytes,
-                                handler,
-                            )? {
-                                CommandExecution::Recorded(outcome) => {
-                                    Ok(WorkerExecution::Recorded(outcome))
-                                }
-                                CommandExecution::Pending => cell
-                                    .executor
-                                    .pending()
-                                    .cloned()
-                                    .map(Box::new)
-                                    .map(WorkerExecution::Pending)
-                                    .ok_or(Error::Fenced),
-                            }
-                        })
+                let result = run_native_callback(&mut cells, cell, deadline, move |active| {
+                    match active.executor.deliver_effect(
+                        delivery,
+                        now_ms,
+                        max_result_bytes,
+                        handler,
+                    )? {
+                        CommandExecution::Recorded(outcome) => {
+                            Ok(WorkerExecution::Recorded(outcome))
+                        }
+                        CommandExecution::Pending => active
+                            .executor
+                            .pending()
+                            .cloned()
+                            .map(Box::new)
+                            .map(WorkerExecution::Pending)
+                            .ok_or(Error::Fenced),
+                    }
                 });
                 let _ = reply.send(result);
             }
@@ -815,11 +809,8 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                 handler,
                 reply,
             } => {
-                let result = crab_ltx::with_paged_io_deadline(deadline, || {
-                    cells
-                        .get_mut(&cell)
-                        .ok_or(Error::CellNotActive)
-                        .and_then(|cell| cell.executor.query(max_result_bytes, handler))
+                let result = run_native_callback(&mut cells, cell, deadline, move |active| {
+                    active.executor.query(max_result_bytes, handler)
                 });
                 let _ = reply.send(result);
             }
@@ -930,6 +921,31 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                     .and_then(|cell| cell.executor.discard());
                 let _ = reply.send(result);
             }
+        }
+    }
+}
+
+fn run_native_callback<T>(
+    cells: &mut HashMap<CellId, ActiveCell>,
+    cell: CellId,
+    deadline: Instant,
+    callback: impl FnOnce(&mut ActiveCell) -> Result<T>,
+) -> Result<T> {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        crab_ltx::with_paged_io_deadline(deadline, || {
+            cells
+                .get_mut(&cell)
+                .ok_or(Error::CellNotActive)
+                .and_then(callback)
+        })
+    }));
+    match result {
+        Ok(result) => result,
+        Err(_) => {
+            if let Some(active) = cells.get_mut(&cell) {
+                active.executor.fence();
+            }
+            Err(Error::NativePanic)
         }
     }
 }

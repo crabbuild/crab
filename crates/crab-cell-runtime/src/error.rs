@@ -94,6 +94,8 @@ pub enum Error {
     WorkerJoin(#[source] tokio::task::JoinError),
     #[error("a Cell SQL worker panicked during shutdown")]
     WorkerPanic,
+    #[error("a native Cell callback panicked; its activation was fenced")]
+    NativePanic,
     #[error("Cell runtime requires an active Tokio runtime")]
     RuntimeStart(#[source] tokio::runtime::TryCurrentError),
 }
