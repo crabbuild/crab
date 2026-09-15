@@ -53,11 +53,13 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
   at binary carry boundaries. Incremental latency was p50 273 ms, p95 545 ms,
   and p99 927 ms.
 
-The hard cutover deliberately has no v1 fallback. Raw promisor recovery,
-managed protected push, active-active publication, and prepared
-mirror/recovery push currently fail closed until their protocol-v2 contracts
-are implemented. Those failures do not reinterpret a v2 repository as v1 or
-publish partial state.
+The hard cutover never falls back after a v2 root is selected. The remote
+helper still recognizes a separately initialized canonical-v1 repository at
+admission for current SDK read interoperability; it does not combine formats
+or redirect v1 writes into v2. Raw promisor recovery, managed protected push,
+active-active publication, and prepared mirror/recovery push currently fail
+closed until their protocol-v2 contracts are implemented. Those failures do
+not reinterpret a v2 repository as v1 or publish partial state.
 
 ## 1. Decision summary
 

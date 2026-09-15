@@ -3,7 +3,7 @@ use crab_auth::token_cache::expand_token_cache_path;
 use crab_auth_store::ManagedRepositoryResolver;
 use tokio_util::sync::CancellationToken;
 
-use super::{build_store, open_repository_root};
+use super::{build_store, open_repository_root_for_read};
 use crate::core::config::Config;
 use crate::core::error::Result;
 use crate::storage::store::Store;
@@ -12,7 +12,7 @@ use crate::storage::store::Store;
 pub struct RepositoryStore {
     pub store: Store,
     pub repository_prefix: String,
-    pub capsule_root: crab_metadata::capsule_protocol::RootSnapshot,
+    pub capsule_root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
 }
 
 /// Resolves a direct or managed repository into the canonical store abstraction.
@@ -34,7 +34,7 @@ pub async fn build_repository_store(
             )
             .await?;
             let capsule_root =
-                open_repository_root(&store, &repository_prefix, &canonical_url).await?;
+                open_repository_root_for_read(&store, &repository_prefix, &canonical_url).await?;
             Ok(RepositoryStore {
                 store,
                 repository_prefix,
@@ -49,7 +49,8 @@ pub async fn build_repository_store(
                 .await?;
             let store = Store::from_storage(managed.store);
             let capsule_root =
-                open_repository_root(&store, &managed.repository_prefix, &canonical_url).await?;
+                open_repository_root_for_read(&store, &managed.repository_prefix, &canonical_url)
+                    .await?;
             Ok(RepositoryStore {
                 store,
                 repository_prefix: managed.repository_prefix,
