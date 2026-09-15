@@ -6,7 +6,7 @@
 | --- | --- |
 | Project | Crab |
 | Scope | Pointer push, clone, fetch, hydrate, mount, recovery, and GC |
-| Status | Core implementation and large-file RustFS qualification complete; hosted-provider and fault qualification pending |
+| Status | Protocol core and large-file RustFS qualification complete; v1 product parity and hosted-provider qualification open |
 | Priority | Correctness, large-file efficiency, then request latency and throughput |
 | Companion | [Capsule Publication Protocol](capsule-publication-protocol.md), [Push Pipeline Deep Dive](push.md), [Canonical Object Storage Layout V1](../architecture/object-storage-layout.md) |
 
@@ -732,18 +732,59 @@ Implemented:
    segments, keeping carry latency bounded while supporting more than the
    5,000-push qualification interval.
 
-Still required before release qualification:
+### 16.1 V1 product-parity inventory
 
-1. Hosted-provider tuning and multipart transport evidence for bounded
-   parallel uploads on very large pointer pushes.
-2. Fault injection around every external upload, registry update, ref-head CAS,
-   transaction-record transition, committed-marker write, and reader capture
-   retry.
-3. Concurrent repository and bucket GC qualification, including forced
-   resurrection of old content.
-4. Cross-repository dedup, replica repair, tiering, mount, and browsing matrix
-   coverage on every supported provider.
-5. Hosted-provider production workloads from section 17.
+Protocol v2 is not release-equivalent to v1 merely because ordinary push,
+clone, fetch, pull, Xet hydration, repack, fsck, and GC work. Parity requires
+every shipped user operation to either use v2 authority or be intentionally
+removed as a product decision. No command may silently fall back to v1, and an
+explicit `not yet part of the capsule protocol` error is a parity blocker.
+
+| Surface | Current v2 state | Work required for parity | Acceptance proof |
+| --- | --- | --- | --- |
+| Repository initialization and ordinary single-/multi-ref push | Implemented with per-ref heads and transaction records | Qualify provider conditional-write and uncertain-response behavior | Concurrent same-ref and disjoint-ref pushes on S3, GCS, and Azure; fresh clone and fsck after every run |
+| Full clone, fetch, pull, and ref advertisement | Implemented for complete repository views | Bound full-view read amplification as ref count grows; add derived indexes only if measurements require them | Repositories with thousands of refs; exact refs, byte-identical checkout, strict fsck, bounded requests and memory |
+| Shallow, deepen, unshallow, filtered/partial, and raw-object/promisor fetch | Rejected by the v2 remote helper | Add v2 closure negotiation, authenticated pack selection, and missing-object repair without weakening visibility | Git compatibility matrix for every fetch mode, including interrupted resume and adversarial missing objects |
+| Explicit tag push | Uses the ordinary ref transaction | Add `--follow-tags`; decide whether `--no-incremental` remains a supported contract or is removed | Annotated/lightweight tag creation, replacement, deletion, atomic branch-plus-tag push, and follow-tags behavior |
+| Managed/protected push and active-active publication | Rejected before v2 publication | Add authorization and external-consensus commit adapters whose decision is bound to the exact v2 transaction | Deny/allow/stale-policy races, lost responses, regional failover, and all-old/all-new multi-ref visibility |
+| Xet add, dedup, push, clone checkout, smudge, hydrate, prefetch, and diff | Whole-object RustFS path implemented | Finish hosted checksum/multipart, cross-repository reuse, cache, and corrupt-object qualification | Byte equality, dedup accounting, retry safety, and integrity failures across supported providers and object sizes |
+| FUSE/NFS mount | Shared v2 file-index and hydrator wiring implemented | Qualify range reads, cold/warm cache, eviction, cancellation, unmount, and restored-tier objects | Mount/read/stat/range/concurrent-reader suite on every supported mount platform and provider |
+| `download`, `export`, and remote `run` inputs | Remote snapshot materialization still reads the v1 manifest | Replace v1 snapshot/revision/pack loading with one authenticated v2 view adapter | Every revision form and missing/corrupt-pack failure; output equality against a local clone |
+| Import publication | Production path is disabled pending v2 file/recipe support | Make import populate canonical staging recipes and invoke the one v2 publisher, or implement the required capsule sections | Large-file import, resume, cancellation, dedup, clone, hydrate, and fsck without a v1 manifest |
+| HTTP server, repository browser, smart Git receive, and server maintenance | Catalog and receive paths still read and mutate the v1 manifest | Introduce a v2 repository-view adapter and route receive through the canonical v2 transaction publisher | Browser and smart-HTTP read/write/auth/maintenance suites against a v2-only repository |
+| S3 gateway read and mutation | Git snapshot and mutation publication still depend on the v1 manifest/journal | Resolve trees from v2 packs/refs and publish gateway mutations through v2 ref transactions | S3 read/list/write/delete/multipart semantics, concurrent mutations, restart, and clone/fsck verification |
+| Repack, repository GC, bucket GC, and fsck | V2 paths implemented | Complete crash/fault and forced-GC concurrency qualification | Injection at each publication boundary; resurrection, restart, no reachable deletion, and bounded writer pause |
+| Replica selection, readiness, repair, and active-active reconciliation | Root validation exists, but readiness and repair still use v1 manifest state | Define readiness from authenticated v2 root/ref/checkpoint/capsule closure and repair immutable dependencies before authority | Lag, partial replication, corrupt replica, failover/failback, repair, and concurrent publication matrix |
+| Tiering and archive restore | Canonical xorb identity is reusable, but v2 reachability integration is unqualified | Drive lifecycle and restore decisions from v2 reachability while keeping restore state non-authoritative | Transition/restore/hydrate/mount/GC race tests for every supported storage class |
+| Doctor, history inspection/restore, and v1-to-v2 cutover | Remote doctor and history recovery remain v1-shaped; the cutover procedure is designed but not implemented | Add v2-native diagnosis/recovery plus an offline, verified, one-way migration command | Migrate a populated v1 repository, reject dual authority, recover retained v2 history, then clone/hydrate/fsck |
+| Mirror plans and reconciliation | V2 intent/terminal receipts and marker repair implemented | Qualify process interruption, restart, hook delivery, authorization, and provider behavior | Repeated crash-resume and duplicate-delivery runs with exact final refs and no partial transaction |
+| Git LFS and backup/restore | Payload layouts are independent, but their product workflows have not been requalified with v2-only metadata | Prove LFS endpoints and repository-prefix backup/restore discover all v2 authority and dependencies | LFS push/clone plus backup/delete/restore/fresh-clone/fsck/hydrate on a v2-only repository |
+
+### 16.2 Parity closure order
+
+Parity closes in dependency order:
+
+1. **Complete Git semantics:** advanced fetch, tag options, managed/protected
+   authorization, and active-active consensus must operate on the canonical v2
+   view and publisher.
+2. **Remove v1 product adapters:** remote snapshot commands, import, HTTP
+   server/browser, and S3 gateway must use the same v2 read and publication
+   contracts. No second publisher is permitted.
+3. **Complete operations:** replica readiness/repair, tiering, doctor, history
+   recovery, migration, LFS, backup/restore, and mirror restart behavior must
+   understand v2 authority and reachability.
+4. **Qualify every boundary:** hosted checksums and multipart transport, fault
+   injection, concurrent normal and forced GC, mounts, caches, storage classes,
+   replicas, and production-scale workloads must pass on every supported
+   provider.
+
+Release requires every row above to have Level 3 end-to-end proof or stronger.
+Correctness rows involving publication, authorization, recovery, replication,
+or GC additionally require adversarial failure proof. Performance acceptance
+requires simple incremental pushes to remain under ten object-store requests
+on average with latency flat over history, and full-view operations to remain
+bounded and measured as refs and immutable history grow. A passing protocol
+core does not waive a missing product adapter or qualification row.
 
 ## 17. Verification gates
 
