@@ -2955,51 +2955,73 @@ async fn run_capsule_gc(
         router.repo_prefix().to_owned(),
         router.global_prefix().to_owned(),
     );
-    let base = crab_write::capsule_protocol::open_root(&layout).await?;
-    if base.record().root().generation() == 0 {
-        return Ok(GcOutcome {
-            dry_run: args.dry_run,
-            ..GcOutcome::default()
-        });
-    }
-    let fence_id = blake3::hash(uuid::Uuid::now_v7().as_bytes())
-        .to_hex()
-        .to_string();
-    let expires_at_unix = snapshot_at
-        .checked_add(FENCE_TTL)
-        .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs())
-        .ok_or_else(|| CrabError::Internal("GC fence expiry cannot be represented".to_owned()))?;
-    let fenced = if args.dry_run {
-        base
+    let sweep_lease = if args.dry_run {
+        None
     } else {
-        crab_write::capsule_protocol::begin_gc(
-            &layout,
-            base,
-            crab_metadata::capsule_protocol::GcFence::new(&fence_id, expires_at_unix)?,
-        )
-        .await?
+        Some(crate::maintenance::GcSweepLease::acquire(store, router.repo_prefix(), cancel).await?)
     };
-    let sweep = sweep_capsule_objects(
-        args,
-        store,
-        &layout,
-        fenced.record().root(),
-        coordinator_protected_keys,
-        cancel,
-        snapshot_at,
-        grace_period,
-        started,
-    )
-    .await;
-    if args.dry_run {
-        return sweep;
+    let operation = async {
+        let base = crab_write::capsule_protocol::open_root(&layout).await?;
+        let fence_id = blake3::hash(uuid::Uuid::now_v7().as_bytes())
+            .to_hex()
+            .to_string();
+        let expires_at_unix = snapshot_at
+            .checked_add(FENCE_TTL)
+            .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .ok_or_else(|| {
+                CrabError::Internal("GC fence expiry cannot be represented".to_owned())
+            })?;
+        let fenced = if args.dry_run {
+            base
+        } else {
+            crab_write::capsule_protocol::begin_gc(
+                &layout,
+                base,
+                crab_metadata::capsule_protocol::GcFence::new(&fence_id, expires_at_unix)?,
+            )
+            .await?
+        };
+        let view = crab_read::capsule_protocol::open_view_from_root(
+            &layout,
+            fenced.clone(),
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: u64::MAX,
+                max_frontier_bytes: u64::MAX,
+            },
+        )
+        .await?;
+        let sweep = sweep_capsule_objects(
+            args,
+            store,
+            &layout,
+            fenced.record().root(),
+            view.capsule_run_pointers(),
+            coordinator_protected_keys,
+            cancel,
+            snapshot_at,
+            grace_period,
+            started,
+        )
+        .await;
+        if args.dry_run {
+            return sweep;
+        }
+        let release = crab_write::capsule_protocol::end_gc(&layout, fenced, &fence_id).await;
+        match (sweep, release) {
+            (Ok(outcome), Ok(_)) => Ok(outcome),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error.into()),
+        }
     }
-    let release = crab_write::capsule_protocol::end_gc(&layout, fenced, &fence_id).await;
-    match (sweep, release) {
-        (Ok(outcome), Ok(_)) => Ok(outcome),
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error.into()),
+    .await;
+    let release = match sweep_lease {
+        Some(lease) => lease.release().await,
+        None => Ok(()),
+    };
+    match (operation, release) {
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
     }
 }
 
@@ -3012,6 +3034,7 @@ async fn sweep_capsule_objects(
     store: &Store,
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
     root: &crab_metadata::capsule_protocol::RepositoryRoot,
+    capsule_runs: &[crab_metadata::capsule_protocol::CapsulePointer],
     coordinator_protected_keys: &HashSet<String>,
     cancel: &CancellationToken,
     snapshot_at: SystemTime,
@@ -3027,7 +3050,7 @@ async fn sweep_capsule_objects(
         );
     }
     reachable.extend(
-        root.capsule_frontier()
+        capsule_runs
             .iter()
             .map(|run| layout.capsule_path(run.hash()).to_string()),
     );
@@ -3044,7 +3067,10 @@ async fn sweep_capsule_objects(
         .into_iter()
         .chain(checkpoints)
         .filter(|object| !reachable.contains(object.location.as_ref()))
-        .filter(|object| args.force || SystemTime::from(object.last_modified) < cutoff)
+        // Per-ref publications do not register in one shared writer object.
+        // Snapshot readers may still hold an older head, so even forced GC
+        // retains the immutable-object grace period instead of racing them.
+        .filter(|object| SystemTime::from(object.last_modified) < cutoff)
         .collect::<Vec<_>>();
     let bytes = candidates.iter().map(|object| object.size).sum();
     if !args.dry_run {
@@ -4841,7 +4867,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capsule_protocol_gc_retains_root_frontier_and_clears_fence() {
+    async fn capsule_protocol_gc_retains_visible_runs_and_fresh_orphans() {
         use bytes::Bytes;
         use crab_metadata::capsule_protocol::{Capsule, CapsuleRefEdit, CapsuleTransaction};
         use object_store::memory::InMemory;
@@ -4871,11 +4897,19 @@ mod tests {
         )
         .unwrap();
         let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
-        let published =
-            crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
-                .await
-                .unwrap();
-        let live = layout.capsule_path(published.record().root().capsule_frontier()[0].hash());
+        crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+            .await
+            .unwrap();
+        let view = crab_read::capsule_protocol::open_view(
+            &layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 1024 * 1024,
+                max_frontier_bytes: 8 * 1024 * 1024,
+            },
+        )
+        .await
+        .unwrap();
+        let live = layout.capsule_path(view.capsule_run_pointers()[0].hash());
         let orphan = layout.capsule_path(&"f".repeat(64));
         store
             .put(
@@ -4901,20 +4935,24 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(outcome.packs_deleted, 1);
+        assert_eq!(outcome.packs_deleted, 0);
         assert!(store.head(&live).await.is_ok());
-        assert!(matches!(
-            store.head(&orphan).await,
-            Err(CrabError::NotFound { .. })
-        ));
+        assert!(store.head(&orphan).await.is_ok());
         let root = crab_write::capsule_protocol::open_root(&layout)
             .await
             .unwrap();
         assert!(root.record().root().gc_fence().is_none());
-        assert_eq!(
-            root.record().root().refs().get("refs/heads/main"),
-            Some(&"2".repeat(40))
-        );
+        let view = crab_read::capsule_protocol::open_view_from_root(
+            &layout,
+            root,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 1024 * 1024,
+                max_frontier_bytes: 8 * 1024 * 1024,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(view.refs().get("refs/heads/main"), Some(&"2".repeat(40)));
     }
 
     #[tokio::test]

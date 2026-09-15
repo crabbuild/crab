@@ -129,6 +129,72 @@ fn memory_store() -> Store {
         .with_target_identity([0; 32])
 }
 
+fn capsule_layout(
+    store: &Store,
+    router: &StoreLayout,
+) -> crab_storage::StoreLayout<crab_storage::Store> {
+    crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    )
+}
+
+async fn initialize_capsule_repository(store: &Store, router: &StoreLayout, head: &str) {
+    crab_write::capsule_protocol::initialize(&capsule_layout(store, router), &"1".repeat(64), head)
+        .await
+        .unwrap();
+}
+
+async fn capsule_view(
+    store: &Store,
+    router: &StoreLayout,
+) -> crab_read::capsule_protocol::CapsuleRepositoryView {
+    crab_read::capsule_protocol::open_view(
+        &capsule_layout(store, router),
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 16 * 1024 * 1024,
+            max_frontier_bytes: 16 * 1024 * 1024,
+        },
+    )
+    .await
+    .unwrap()
+}
+
+async fn publish_capsule_ref(
+    store: &Store,
+    router: &StoreLayout,
+    plan_id: Option<&str>,
+    ref_name: &str,
+    old_oid: Option<String>,
+    new_oid: Option<String>,
+) {
+    let layout = capsule_layout(store, router);
+    let base = crab_write::capsule_protocol::open_root(&layout)
+        .await
+        .unwrap();
+    let edits = vec![crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+        ref_name, old_oid, new_oid, None,
+    )];
+    let transaction = match plan_id {
+        Some(plan_id) => crab_metadata::capsule_protocol::CapsuleTransaction::for_plan(
+            base.record().digest(),
+            plan_id,
+            edits,
+        ),
+        None => {
+            crab_metadata::capsule_protocol::CapsuleTransaction::new(base.record().digest(), edits)
+        }
+    }
+    .unwrap();
+    let capsule =
+        crab_metadata::capsule_protocol::Capsule::build(&transaction, Vec::new(), Vec::new())
+            .unwrap();
+    crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+        .await
+        .unwrap();
+}
+
 #[test]
 fn plan_identity_binds_metadata_and_recipe_proofs_with_unchanged_refs() {
     let observed = check(vec![status("refs/heads/main", MirrorRefState::SourceAhead)]);
@@ -303,29 +369,20 @@ async fn managed_receipt_for_another_result_cannot_satisfy_the_plan() {
 async fn snapshot_identity_requires_and_binds_the_resolved_transport() {
     let raw = Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
     let router = StoreLayout::new(raw.clone(), "repo".to_owned());
-    crate::core::remote_layout::initialize(&raw, &router)
-        .await
-        .unwrap();
-    crate::metadata::manifest::create_manifest(
-        &raw,
-        &router,
-        &crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main"),
-    )
-    .await
-    .unwrap();
-    let snapshot = read_repository_snapshot(&raw, &router).await.unwrap();
-    assert!(destination_identity(&raw, &router, &snapshot).is_err());
+    initialize_capsule_repository(&raw, &router, "refs/heads/main").await;
+    let view = capsule_view(&raw.clone().with_target_identity([1; 32]), &router).await;
+    assert!(capsule_destination_identity(&raw, &router, &view).is_err());
     let first = raw.clone().with_target_identity([1; 32]);
     let other = raw.with_target_identity([2; 32]);
     assert_ne!(
-        snapshot_identity(
-            &destination_identity(&first, &router, &snapshot).unwrap(),
-            &snapshot
+        capsule_snapshot_identity(
+            &capsule_destination_identity(&first, &router, &view).unwrap(),
+            &view,
         )
         .unwrap(),
-        snapshot_identity(
-            &destination_identity(&other, &router, &snapshot).unwrap(),
-            &snapshot
+        capsule_snapshot_identity(
+            &capsule_destination_identity(&other, &router, &view).unwrap(),
+            &view,
         )
         .unwrap()
     );
@@ -641,17 +698,8 @@ async fn corrupt_source_cache_blocks_plan_without_publishing_or_using_partial_pr
         args.write_plan = Some(dir.path().join("plan.json"));
         let store = memory_store();
         let router = StoreLayout::new(store.clone(), "repo".into());
-        crate::core::remote_layout::initialize(&store, &router)
-            .await
-            .unwrap();
-        crate::metadata::manifest::create_manifest(
-            &store,
-            &router,
-            &crate::metadata::manifest::Manifest::default_for_repo("refs/heads/main"),
-        )
-        .await
-        .unwrap();
-        let before = read_repository_snapshot(&store, &router).await.unwrap();
+        initialize_capsule_repository(&store, &router, "refs/heads/main").await;
+        let before = capsule_view(&store, &router).await.state_digest();
         let cancel = CancellationToken::new();
         let mut runner = DamagedCacheRunner {
             inner: SystemCommandRunner::new(cancel.clone()),
@@ -678,10 +726,7 @@ async fn corrupt_source_cache_blocks_plan_without_publishing_or_using_partial_pr
         );
         assert!(runner.damaged && !runner.pushed);
         assert_eq!(runner.streamed, oversized_header);
-        assert_eq!(
-            read_repository_snapshot(&store, &router).await.unwrap(),
-            before
-        );
+        assert_eq!(capsule_view(&store, &router).await.state_digest(), before);
         assert_eq!(
             run_local_git(&["-C", source_text, "cat-file", "-p", &blob]),
             String::from_utf8(pointer.serialize()).unwrap().trim()
@@ -722,16 +767,7 @@ async fn plan_replay_requires_the_same_verified_repository_identity() {
         args.write_plan = Some(plan_path.clone());
         let store = memory_store();
         let router = StoreLayout::new(store.clone(), "repo".to_owned());
-        crate::core::remote_layout::initialize(&store, &router)
-            .await
-            .unwrap();
-        crate::metadata::manifest::create_manifest(
-            &store,
-            &router,
-            &crate::metadata::manifest::Manifest::default_for_repo("refs/heads/main"),
-        )
-        .await
-        .unwrap();
+        initialize_capsule_repository(&store, &router, "refs/heads/main").await;
         let cancel = CancellationToken::new();
         let mut runner = SystemCommandRunner::new(cancel.clone());
         run_integrity_command(&args, &cancel, options(), &mut runner, Ok(store.clone()))
@@ -741,36 +777,33 @@ async fn plan_replay_requires_the_same_verified_repository_identity() {
         assert!(!plan.blocked);
         assert_eq!(!plan.actions.is_empty(), nonempty);
         if nonempty {
-            let ref_name = "refs/heads/main";
-            let head = crate::metadata::manifest::read_ref_journal_head(&store, &router, ref_name)
-                .await
-                .unwrap();
-            let transaction = crate::metadata::manifest::RefJournalTransaction::new(
-                BTreeMap::from([(ref_name.to_owned(), head.visible_transaction.clone())]),
-                vec![crate::metadata::manifest::RefJournalEdit {
-                    ref_name: ref_name.to_owned(),
-                    old_oid: None,
-                    new_oid: plan.source_refs.get(ref_name).cloned(),
-                    peeled_oid: None,
-                    lock_holder: None,
-                    visibility_evidence_hash: None,
-                }],
-                None,
-                Vec::new(),
-                Vec::new(),
-            )
-            .unwrap();
-            crate::metadata::manifest::commit_ref_journal_transaction_for_plan(
+            let config = crate::git::push::PushConfig {
+                git_dir: Some(source.clone()),
+                mirror_plan_id: Some(plan.plan_id.clone()),
+                atomic: true,
+                ..crate::git::push::PushConfig::default()
+            };
+            let spec = crate::git::remote_helper::PushSpec {
+                force: false,
+                src: "refs/heads/main".to_owned(),
+                dst: "refs/heads/main".to_owned(),
+            };
+            let (result, _) = crate::git::capsule_push::run(
+                &config,
+                &[spec],
                 &store,
                 &router,
-                &transaction,
-                &[head],
-                &plan.plan_id,
+                Some(capsule_view(&store, &router).await),
+                &[],
+                None,
+                None,
+                &cancel,
             )
             .await
             .unwrap();
+            assert!(result.all_ok());
         }
-        let captured = read_repository_snapshot(&store, &router).await.unwrap();
+        let captured = capsule_view(&store, &router).await.state_digest();
         args.check = false;
         args.write_plan = None;
         args.apply_plan = Some(plan_path);
@@ -800,36 +833,12 @@ async fn plan_replay_requires_the_same_verified_repository_identity() {
                 matches!(changed, Err(CrabError::Protocol(message)) if message.contains("storage target changed"))
             );
         }
-        assert_eq!(
-            read_repository_snapshot(&store, &router).await.unwrap(),
-            captured
-        );
+        assert_eq!(capsule_view(&store, &router).await.state_digest(), captured);
 
-        let path = router.layout_descriptor_path();
-        let (original, etag) = store.get_with_etag(&path).await.unwrap();
-        let formatted = serde_json::to_vec_pretty(&captured.layout).unwrap();
-        store.update(&path, formatted.into(), etag).await.unwrap();
-        let equivalent =
-            run_integrity_command(&args, &cancel, options(), &mut runner, Ok(store.clone())).await;
-        assert!(matches!(
-            equivalent,
-            Ok(MirrorCommandOutcome::Apply(MirrorApplySummary {
-                already_applied: true,
-                ..
-            }))
-        ));
-
+        let path = capsule_layout(&store, &router).capsule_root_path();
+        let (original, _) = store.get_with_etag(&path).await.unwrap();
         let plan_bytes = std::fs::read(args.apply_plan.as_ref().unwrap()).unwrap();
-        let mut unsupported = captured.layout.clone();
-        unsupported.recipe_page_entries += 1;
-        for (index, body) in [
-            None,
-            Some(b"{}".to_vec()),
-            Some(serde_json::to_vec(&unsupported).unwrap()),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        for (index, body) in [None, Some(b"{}".to_vec())].into_iter().enumerate() {
             let (_, etag) = store.get_with_etag(&path).await.unwrap();
             if let Some(body) = body {
                 store.update(&path, body.into(), etag).await.unwrap();
@@ -865,14 +874,7 @@ async fn plan_replay_requires_the_same_verified_repository_identity() {
                 std::fs::read(args.apply_plan.as_ref().unwrap()).unwrap(),
                 plan_bytes
             );
-            assert_eq!(
-                crate::metadata::manifest::read_manifest(&store, &router)
-                    .await
-                    .unwrap()
-                    .0,
-                captured.manifest
-            );
-            // Only this isolated fixture writer restores its descriptor. Neither
+            // Only this isolated fixture writer restores its root. Neither
             // inspection nor apply may initialize/repair a damaged repository.
             match store.get_with_etag(&path).await {
                 Ok((_, etag)) => {
@@ -881,8 +883,9 @@ async fn plan_replay_requires_the_same_verified_repository_identity() {
                 Err(CrabError::NotFound { .. }) => {
                     store.put(&path, original.clone()).await.unwrap();
                 }
-                Err(error) => panic!("fixture layout read failed: {error}"),
+                Err(error) => panic!("fixture root read failed: {error}"),
             }
+            assert_eq!(capsule_view(&store, &router).await.state_digest(), captured);
         }
     }
 }
@@ -985,35 +988,15 @@ impl CommandRunner for ApplyOwnershipRunner {
             std::thread::spawn(move || {
                 let runtime = tokio::runtime::Runtime::new().unwrap();
                 runtime.block_on(async move {
-                    let ref_name = "refs/heads/recover";
-                    let head =
-                        crate::metadata::manifest::read_ref_journal_head(&store, &router, ref_name)
-                            .await
-                            .unwrap();
-                    let transaction = crate::metadata::manifest::RefJournalTransaction::new(
-                        BTreeMap::from([(ref_name.to_owned(), head.visible_transaction.clone())]),
-                        vec![crate::metadata::manifest::RefJournalEdit {
-                            ref_name: ref_name.to_owned(),
-                            old_oid: Some("b".repeat(40)),
-                            new_oid: None,
-                            peeled_oid: None,
-                            lock_holder: None,
-                            visibility_evidence_hash: None,
-                        }],
-                        None,
-                        Vec::new(),
-                        Vec::new(),
-                    )
-                    .unwrap();
-                    crate::metadata::manifest::commit_ref_journal_transaction_for_plan(
+                    publish_capsule_ref(
                         &store,
                         &router,
-                        &transaction,
-                        &[head],
-                        &plan_id,
+                        Some(&plan_id),
+                        "refs/heads/recover",
+                        Some("b".repeat(40)),
+                        None,
                     )
-                    .await
-                    .unwrap();
+                    .await;
                 });
             })
             .join()
@@ -1063,23 +1046,22 @@ async fn run_delete_apply(
     observed.source = args.source.clone();
     let store = memory_store();
     let router = StoreLayout::new(store.clone(), "repo".to_owned());
-    let mut manifest = crate::metadata::manifest::Manifest::default_for_repo("refs/heads/recover");
-    crate::core::remote_layout::initialize(&store, &router)
-        .await
-        .unwrap();
-    manifest
-        .refs
-        .insert("refs/heads/recover".to_owned(), "b".repeat(40));
-    manifest.seal_git_validation();
-    crate::metadata::manifest::create_manifest(&store, &router, &manifest)
-        .await
-        .unwrap();
-    let snapshot = read_repository_snapshot(&store, &router).await.unwrap();
-    let identity = destination_identity(&store, &router, &snapshot).unwrap();
-    observed.destination_snapshot = Some(snapshot_identity(&identity, &snapshot).unwrap());
+    initialize_capsule_repository(&store, &router, "refs/heads/recover").await;
+    publish_capsule_ref(
+        &store,
+        &router,
+        None,
+        "refs/heads/recover",
+        None,
+        Some("b".repeat(40)),
+    )
+    .await;
+    let view = capsule_view(&store, &router).await;
+    let identity = capsule_destination_identity(&store, &router, &view).unwrap();
+    observed.destination_snapshot = Some(capsule_snapshot_identity(&identity, &view).unwrap());
     observed.destination_identity = Some(identity);
     observed.pointers =
-        verify_pointer_data(&store, "repo", &snapshot, &[], &CancellationToken::new()).await;
+        verify_capsule_pointer_data(&store, "repo", &view, &[], &CancellationToken::new()).await;
     let plan = test_plan(&observed, true).unwrap();
     write_plan(&plan_path, &plan).unwrap();
     let mut runner = ApplyOwnershipRunner {

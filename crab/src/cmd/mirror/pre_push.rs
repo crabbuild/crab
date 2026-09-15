@@ -69,7 +69,7 @@ pub async fn run_mirror_pre_push(
             .await?;
     let router = StoreLayout::new(store.clone(), parsed.repo_path);
     let before = destination_snapshot(&store, &router, cancel).await?;
-    let expected = admit_updates(&updates, &before.journal.refs)?;
+    let expected = admit_updates(&updates, before.refs())?;
     let refspecs = updates
         .iter()
         .map(|update| {
@@ -105,12 +105,17 @@ pub async fn run_mirror_pre_push(
         &refspecs,
         Some(expected),
         cancel,
-    )?;
-    let checker =
-        crate::cmd::fsck_store::StoreChecker::new(store.clone(), router.repo_prefix().to_owned());
+    )
+    .await?;
     let after = destination_snapshot(&store, &router, cancel).await?;
+    let checker = crate::cmd::fsck_store::StoreChecker::for_capsule_repository(
+        store.clone(),
+        router.repo_prefix().to_owned(),
+        after.root_snapshot().clone(),
+    )
+    .await?;
     let proof = checker
-        .verify_pointer_data(&after, &pointers, cancel)
+        .verify_capsule_pointer_data(&pointers, cancel)
         .await?;
     if !proof.issues.is_empty() || proof.verified != pointers.len() as u64 {
         let details = proof
@@ -126,8 +131,8 @@ pub async fn run_mirror_pre_push(
     let confirmed = destination_snapshot(&store, &router, cancel).await?;
     if updates
         .iter()
-        .any(|update| after.journal.refs.get(&update.remote_ref) != update.local_oid.as_ref())
-        || after != confirmed
+        .any(|update| after.refs().get(&update.remote_ref) != update.local_oid.as_ref())
+        || after.state_digest() != confirmed.state_digest()
     {
         return Err(CrabError::Protocol("Crab refs changed before mirror publication could be confirmed; run crab mirror --check".to_owned()));
     }
@@ -155,9 +160,21 @@ async fn destination_snapshot(
     store: &Store,
     router: &StoreLayout,
     cancel: &CancellationToken,
-) -> Result<crate::metadata::manifest::RepositorySnapshot> {
+) -> Result<crab_read::capsule_protocol::CapsuleRepositoryView> {
     check_cancelled(cancel)?;
-    let snapshot = crate::metadata::manifest::read_repository_snapshot(store, router).await?;
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let snapshot = crab_read::capsule_protocol::open_view(
+        &layout,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+            max_frontier_bytes: 8 * 1024 * 1024 * 1024,
+        },
+    )
+    .await?;
     check_cancelled(cancel)?;
     Ok(snapshot)
 }

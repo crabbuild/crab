@@ -17,7 +17,6 @@ use super::{
 use crate::core::error::{CrabError, Result};
 use crate::core::output::OutputMode;
 use crate::git::url::CrabUrl;
-use crate::metadata::manifest::{RepositorySnapshot, read_repository_snapshot};
 use crate::storage::{Store, StoreLayout};
 
 use super::types::{
@@ -162,12 +161,23 @@ async fn inspect(
     super::ensure_crab_remote(cache_dir, &args.destination, options, runner)?;
     check_cancelled(cancel)?;
     let router = StoreLayout::new(store.clone(), parsed.repo_path.clone());
+    let capsule_layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
     let snapshot_read = tokio::select! {
         biased;
         () = cancel.cancelled() => return Err(CrabError::Cancelled),
-        result = read_repository_snapshot(store, &router) => result,
+        result = crab_read::capsule_protocol::open_view(
+            &capsule_layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+                max_frontier_bytes: 8 * 1024 * 1024 * 1024,
+            },
+        ) => result.map_err(CrabError::from),
     };
-    let snapshot = match snapshot_read {
+    let view = match snapshot_read {
         Ok(snapshot) => snapshot,
         Err(error) => {
             return Ok(unverifiable_check(
@@ -178,18 +188,18 @@ async fn inspect(
             ));
         }
     };
-    let crab_refs = &snapshot.journal.refs;
-    let destination_identity = match destination_identity(store, &router, &snapshot) {
+    let crab_refs = view.refs();
+    let destination_identity = match capsule_destination_identity(store, &router, &view) {
         Ok(identity) => identity,
         Err(error) => return Ok(unverifiable_check(args, cache_dir, hook, error.to_string())),
     };
-    let destination_snapshot = Some(snapshot_identity(&destination_identity, &snapshot)?);
+    let destination_snapshot = Some(capsule_snapshot_identity(&destination_identity, &view)?);
     check_cancelled(cancel)?;
 
-    if let Err(error) = super::history::load_changed_history(
+    if let Err(error) = super::history::load_changed_capsule_history(
         Arc::clone(cache),
         &source_refs,
-        &snapshot,
+        &view,
         crab_storage::StoreLayout::new(store.as_storage().clone(), parsed.repo_path.clone()),
         cancel,
     )
@@ -219,7 +229,7 @@ async fn inspect(
     .await
     {
         Ok(pointers) => {
-            verify_pointer_data(store, &parsed.repo_path, &snapshot, &pointers, cancel).await
+            verify_capsule_pointer_data(store, &parsed.repo_path, &view, &pointers, cancel).await
         }
         Err(error) => {
             MirrorPointerStatus::unverifiable(format!("source pointer scan failed: {error}"))
@@ -394,18 +404,24 @@ fn aggregate_state(refs: &[MirrorRefStatus]) -> MirrorDriftState {
     }
 }
 
-async fn verify_pointer_data(
+async fn verify_capsule_pointer_data(
     store: &Store,
     repo_prefix: &str,
-    snapshot: &RepositorySnapshot,
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
     pointers: &[Pointer],
     cancel: &CancellationToken,
 ) -> MirrorPointerStatus {
-    let checker = crate::cmd::fsck_store::StoreChecker::new(store.clone(), repo_prefix.to_owned());
-    match checker
-        .verify_pointer_data(snapshot, pointers, cancel)
-        .await
+    let checker = match crate::cmd::fsck_store::StoreChecker::for_capsule_repository(
+        store.clone(),
+        repo_prefix.to_owned(),
+        view.root_snapshot().clone(),
+    )
+    .await
     {
+        Ok(checker) => checker,
+        Err(error) => return MirrorPointerStatus::unverifiable(error.to_string()),
+    };
+    match checker.verify_capsule_pointer_data(pointers, cancel).await {
         Ok(verification) => {
             let issues = verification
                 .issues
@@ -444,10 +460,10 @@ async fn verify_pointer_data(
     }
 }
 
-fn destination_identity(
+fn capsule_destination_identity(
     store: &Store,
     router: &StoreLayout,
-    snapshot: &RepositorySnapshot,
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
 ) -> Result<String> {
     let identity = store.bucket_identity();
     let target_identity = store.as_storage().target_identity().ok_or_else(|| {
@@ -461,16 +477,19 @@ fn destination_identity(
         router.repo_prefix(),
         router.global_prefix(),
         store.storage_scope(),
-        &snapshot.layout.digest,
+        view.root().root().repository_id(),
     );
-    let mut hasher = blake3::Hasher::new_derive_key("crab mirror destination identity v1");
+    let mut hasher = blake3::Hasher::new_derive_key("crab mirror destination identity v2");
     serde_json::to_writer(&mut hasher, &fields).map_err(std::io::Error::other)?;
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-fn snapshot_identity(identity: &str, snapshot: &RepositorySnapshot) -> Result<String> {
-    let fields = (identity, snapshot.digest()?);
-    let mut hasher = blake3::Hasher::new_derive_key("crab mirror destination snapshot v1");
+fn capsule_snapshot_identity(
+    identity: &str,
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+) -> Result<String> {
+    let fields = (identity, view.state_digest());
+    let mut hasher = blake3::Hasher::new_derive_key("crab mirror destination snapshot v2");
     serde_json::to_writer(&mut hasher, &fields).map_err(std::io::Error::other)?;
     Ok(hasher.finalize().to_hex().to_string())
 }
@@ -822,6 +841,61 @@ async fn resolve_plan_commit(
     router: &StoreLayout,
     plan: &MirrorReconciliationPlan,
 ) -> Result<Option<ResolvedPlanCommit>> {
+    let capsule_layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    if let Some(receipt) = crab_metadata::capsule_protocol::resolve_capsule_plan_receipt(
+        store.as_storage(),
+        &capsule_layout,
+        &plan.plan_id,
+    )
+    .await?
+    {
+        let expected = plan
+            .actions
+            .iter()
+            .map(|action| {
+                let next = match action.kind {
+                    MirrorPlanActionKind::UpdateCrabRef => action.expected_source_oid.clone(),
+                    MirrorPlanActionKind::DeleteCrabRef => None,
+                };
+                (
+                    action.ref_name.clone(),
+                    (action.expected_crab_oid.clone(), next),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let transaction = receipt.transaction();
+        let actual = transaction
+            .edits()
+            .iter()
+            .map(|edit| {
+                (
+                    edit.ref_name().to_owned(),
+                    (
+                        edit.expected_old().map(str::to_owned),
+                        edit.new_oid().map(str::to_owned),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        if receipt.plan_id() != plan.plan_id
+            || transaction.plan_id() != Some(plan.plan_id.as_str())
+            || expected.len() != plan.actions.len()
+            || actual.len() != transaction.edits().len()
+            || actual != expected
+        {
+            return Err(CrabError::Protocol(
+                "capsule mirror plan receipt does not match the reviewed ref edits".to_owned(),
+            ));
+        }
+        return Ok(Some(ResolvedPlanCommit {
+            transaction_id: Some(transaction.id()?),
+            manifest_digest: None,
+        }));
+    }
     let Some(receipt) =
         crate::metadata::manifest::resolve_mirror_plan_receipt(store, router, &plan.plan_id)
             .await?

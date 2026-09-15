@@ -200,13 +200,22 @@ identify the stored bytes. Verification writes no durable evidence and is not
 publication authority. A publisher must hold GC fences and recheck the exact
 base before exposing refs. Native HTTP receive/publication remains unfinished.
 
-`capsule_protocol::open_view` loads the v2 repository root and all of its
-post-checkpoint capsules. The root costs one GET and each capsule costs one
-concurrent GET; exact size, BLAKE3 identity, transaction identity, and base-root
-binding are verified before any capsule is returned. Callers supply individual
-and aggregate capsule-byte admission limits before the concurrent body reads.
-This is the shared verified metadata view, not yet a Git clone/fetch
-response-pack implementation.
+`capsule_protocol::open_view` loads the v2 checkpoint root, double-collects
+complete per-ref-head object metadata around concurrent head reads, and retries
+a changing snapshot. It resolves each activation record still referenced by a
+prepared head exactly once; committed selects all prepared states for that
+activation, while preparing or aborted selects every predecessor. It then loads
+the checkpoint and reachable capsule runs with caller-supplied individual and
+aggregate byte limits. Exact size, provider version, BLAKE3 identity,
+transaction identity, base-root binding, and materialized refs are verified
+before the view is returned. Git clone/fetch, pointer catalog lookup, checkout,
+and hydration consume this same view.
+
+`capsule_protocol::open_view_from_root_for_refs` is the explicit-push variant.
+It double-reads only the requested deterministic head keys and loads their
+authenticated run frontiers, avoiding repository-wide LIST and unrelated-head
+GET requests. Its non-selected ref values are not authoritative; complete
+advertisement and cross-ref pointer catalogs must continue to use `open_view`.
 
 - [`crab-metadata`](../crab-metadata/README.md) defines manifests, file
   indexes, and shard metadata; this crate consumes them.

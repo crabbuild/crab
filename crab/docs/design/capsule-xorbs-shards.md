@@ -17,13 +17,19 @@ store objects. It does not embed their payload bytes in publication capsules.
 
 The design combines the strongest responsibilities of both protocols:
 
-- v2 owns foreground transaction publication through one repository-root CAS;
+- v2 owns foreground transaction publication through independently mutable
+  per-ref heads; one ref-head CAS commits a single-ref push, while a unique
+  transaction-record CAS commits a prepared multi-ref push and an immutable
+  marker records its durable completion;
 - xorbs retain chunk aggregation, compression, immutable identity, independent
   caching, storage tiering, repair, and cross-file reuse;
 - shards retain complete file reconstruction terms;
 - capsules authenticate the ref transaction and the exact external dependency
   set, but remain bounded metadata and Git containers;
-- checkpoints compact derived catalogs without rewriting live xorb payloads;
+- the repository root is cold control-plane state for checkpoints, HEAD,
+  capabilities, and GC fencing rather than a foreground push bottleneck;
+- checkpoints compact per-ref histories and derived catalogs without rewriting
+  live xorb payloads;
 - the bucket ref registry protects shared objects before a root can publish a
   new reference to them.
 
@@ -41,7 +47,7 @@ The implementation MUST:
 2. Make every xorb and shard required by a new ref durable before that ref is
    visible.
 3. Publish Git refs, pointer visibility, shard recipes, and xorb dependencies
-   as one root generation.
+   as one per-ref transaction, atomically across all edited refs.
 4. Preserve stable xorb and shard content identities across files and
    repositories.
 5. Avoid foreground existence probes for dependencies already proven by the
@@ -75,8 +81,9 @@ It also does not:
 
 ## 4. Invariants
 
-1. **Durable before visible.** Root CAS occurs only after every newly required
-   xorb, shard, Git object, capsule, and GC protection record is durable.
+1. **Durable before visible.** Ref-head publication occurs only after every
+   newly required xorb, shard, Git object, capsule, and GC protection record is
+   durable.
 2. **Complete recipe.** A committed shard covers every byte of each file
    version it declares, in order, with no gap or overlap.
 3. **Authenticated closure.** A capsule commits to every shard introduced by
@@ -86,14 +93,18 @@ It also does not:
    base root and its verified catalogs prove that exact content identity
    reachable, or after it independently verifies and protects the shared
    canonical object.
-5. **Snapshot reads.** A read uses one root digest and never combines catalogs
-   or visibility from different generations.
+5. **Snapshot reads.** A read captures the root, lists complete ref-head object
+   metadata before and after loading the heads, and retries if any key or
+   provider version changed. It resolves each referenced activation record
+   exactly once. A committed record selects every prepared state for that
+   activation; a preparing or aborted record selects every predecessor, so a
+   multi-ref transaction and its later successors are never partially visible.
 6. **Independent verification.** Readers verify capsule, shard, xorb, chunk,
    file, and Git identities at their respective boundaries.
 7. **GC protection precedes publication.** Bucket-global objects are registered
-   conservatively before the repository root can reference them. Reuse outside
+   conservatively before a ref head can reference them. Reuse outside
    the pinned base also holds a GC publication guard across verification and
-   root CAS.
+   ref publication.
 8. **Conservative leaks are safe.** Failed pushes may leave immutable objects
    and protection records, but never a visible dangling pointer.
 
@@ -111,13 +122,22 @@ Paths are relative to the existing validated global and repository prefixes:
 
 {repo_prefix}/v2/
 ├── root
+├── refs/heads/{hex-encoded-ref}.json
+├── transactions/
+│   ├── records/{activation-id}.json
+│   └── committed/{activation-id}.json
+├── plans/{plan-id}/
+│   ├── intent.json
+│   └── terminal.json
 ├── capsules/{first-two-hex}/{capsule-blake3}
 └── checkpoints/{first-two-hex}/{checkpoint-blake3}
 ```
 
 Xorbs and shards preserve the canonical v1 keys. They are immutable and use
-create-only writes. Capsules and checkpoints are repository-local. The root is
-the only mutable reader-visible publication authority.
+create-only writes. Capsules and checkpoints are repository-local. Each ref
+head is the mutable authority for only that ref. The root changes only for
+bounded checkpoint or maintenance work, so pushes to disjoint refs never CAS
+one shared root object.
 
 The repository's ref-registry record is stable discovery metadata for bucket
 GC. It identifies the repository, layout version, and canonical v2 root key;
@@ -200,16 +220,78 @@ Dependencies already reachable from the exact base root need not be repeated
 as payload, but the resulting file catalog must still resolve their identities
 through the combined view.
 
-### 6.2 Root
+### 6.2 Ref heads and root
 
-The v2 root continues to contain refs, generation, parent digest, checkpoint,
-bounded capsule frontier, capabilities, GC fence, and root digest. It does not
-inline file, shard, or xorb catalogs.
+Each ref head contains committed state and, only for a multi-ref transaction,
+one prepared state. A state binds the ref OID, peeled OID, newest transaction,
+and a bounded frontier of immutable capsule runs. Runs merge geometrically up
+to 512 capsules; additional history is retained as another capped segment so
+carry work and object size stay bounded. Sixty-four segments admit at least
+32,768 pushes to one ref between administrative resets, including the required
+5,000-commit qualification.
+
+The v2 root contains the compacted ref baseline, exact per-ref checkpoint
+positions, generation, parent digest, checkpoint, capabilities, GC fence, and
+root digest. It does not inline file, shard, or xorb catalogs and is not changed
+by ordinary pushes.
 
 Pointer capability is advertised only when the root's checkpoint and frontier
 jointly provide complete file and xorb catalogs for that generation.
 
-### 6.3 Checkpoint
+### 6.3 Multi-ref atomicity without a hot root
+
+Every multi-ref publication attempt has a fresh activation ID, even when it
+retries the same content transaction. Its mutable transaction record begins in
+`preparing`. Each edited ref head is conditionally replaced with a two-version
+state containing the predecessor, successor, and activation ID. The writer
+then arbitrates `preparing -> committed` with one conditional record update and
+creates the matching immutable committed marker. The record CAS is the
+linearization point. No two attempts share either coordination object unless
+they edit the same ref heads.
+
+A competing writer that encounters `preparing` may conditionally change that
+record to `aborted` and advance from the predecessor. Commit and abort cannot
+both win the same record CAS. A committed record missing its marker remains
+visible and recoverable: a writer or plan resolver recreates the exact
+immutable marker. A unique activation ID prevents an aborted retry from
+reviving prepared heads from an earlier attempt.
+
+Readers list ref-head object metadata, fetch and authenticate those exact
+heads, resolve each distinct activation record referenced by a prepared head
+once, then list ref-head metadata again. A changed key, ETag, version, size, or
+modification time restarts the bounded capture. This double collection is
+required because a later single-ref successor may replace one prepared head;
+a one-sided snapshot could otherwise combine that successor with another
+ref's predecessor. The activation record is read once for all participating
+heads, so its single status selects all-old or all-new without a global marker
+scan.
+
+An explicit push does not enumerate the repository. It reads each destination
+head twice by its deterministic key, resolves only activation records named by
+those heads, and authenticates only their bounded run frontiers. Matching
+before/after head bodies and provider versions gives the same stable-snapshot
+property without work proportional to unrelated branches. If a selected head
+belongs to a multi-ref transaction, its capsule carries the complete atomic
+edit and the shared activation record still selects all-old or all-new.
+
+This removes the root hot spot for hundreds of branches. Updates to existing
+distinct refs share no mutable key. Same-ref writers still serialize at that
+ref head, as correctness requires. Ref creation and deletion conservatively
+share a hashed gate for the first component below `refs/<kind>/`; this protects
+Git directory/file conflicts, while steady-state updates bypass the gate.
+
+Per-ref authority removes write contention, but it does not by itself make a
+complete Git ref advertisement constant-cost. The exact full-view reader still
+lists the head namespace and authenticates each returned head. A long-lived
+remote-helper session reuses that view; many fresh processes over hundreds of
+branches can create linear read amplification even though their writes are
+independent. A request-minimal advertisement layer may add immutable,
+hash-partitioned ref-index snapshots and targeted `ls-refs`, but such an index
+is derived acceleration only: a push still validates and conditionally writes
+the destination's authoritative per-ref head, and a stale index can never
+authorize publication.
+
+### 6.4 Checkpoint
 
 A checkpoint compacts metadata, not large-file payloads. It contains:
 
@@ -229,14 +311,17 @@ checkpoint catalog reaches them.
 
 ### 7.1 Pin and validate the base
 
-Advertisement opens and verifies `v2/root`. Pointer preparation concurrently
-loads the referenced checkpoint and bounded frontier, then constructs one
-generation-pinned file, shard, and xorb catalog.
+An explicit push opens and verifies `v2/root`, directly captures only its
+destination heads, and resolves each activation referenced by those heads
+once. Pointer preparation then expands to the complete visible checkpoint and
+ref frontiers because cross-ref xorb reuse and GC safety require a complete
+snapshot-pinned file, shard, and xorb catalog. Pointer-free pushes remain on
+the targeted path.
 
 The writer validates expected-old refs, fast-forward policy, pointer
 visibility, catalog completeness, and the root's advertised pointer
-capability. It does not refresh the root merely because local preparation is
-slow; final CAS detects staleness.
+capability. Final ref-head CAS detects same-ref staleness without rejecting a
+concurrent push to another branch.
 
 ### 7.2 Discover pointers and staged content
 
@@ -292,7 +377,7 @@ GC publication guard for every pointer-bearing push. It cannot know before a
 create-only write whether a candidate xorb is new or an old globally shared
 object, so narrowing the guard without another request would permit a sweep
 race. The guard remains held through immutable verification, registry union,
-and root CAS. Git-only pushes do not acquire it.
+and ref publication. Git-only pushes do not acquire it.
 
 After hashes and any required guard are established, the writer starts these
 independent operations with bounded concurrency:
@@ -307,32 +392,34 @@ All immutable writes use provider-qualified cryptographic checksums when the
 endpoint has passed qualification. Other endpoints require full readback.
 ETags are version tokens, not content hashes.
 
-The registry union is monotonic before root publication. A failed push may
+The registry union is monotonic before ref publication. A failed push may
 over-retain its candidate closure until registry compaction, but GC cannot
-delete a candidate that a concurrent root CAS is about to publish: new objects
+delete a candidate that a concurrent ref-head CAS is about to publish: new objects
 are protected by age grace, base-reachable objects by the pinned old root, and
 externally reused objects by the publication guard.
 
 ### 7.6 Publish
 
 Only after all immutable writes, verification, and registry protection succeed
-does the writer conditionally replace `v2/root` using the version retained from
-advertisement.
+does the writer update ref authority:
 
-The root CAS is the sole linearization point:
-
-- success publishes all ref edits and pointer dependencies together;
-- precondition failure publishes none of them;
-- a same-ref loser revalidates and normally fails expected-old or
-  fast-forward policy;
-- a disjoint-ref loser may rebase its capsule metadata on the new root without
-  re-uploading verified xorbs or shards;
-- an uncertain response is reconciled using exact transaction identity.
+- a single-ref push conditionally replaces only that ref head; its CAS is the
+  linearization point;
+- a multi-ref push creates a unique preparing record, conditionally prepares
+  every edited head, wins the record's commit-vs-abort CAS, then creates the
+  matching immutable committed marker; the record CAS is the visibility point;
+- prepared heads retain their predecessor, and readers double-collect complete
+  head metadata around head and activation reads, so overlapping commits force
+  a retry instead of a partial view;
+- same-ref CAS failure rejects stale expected-old state;
+- disjoint-ref pushes share no mutable publication object;
+- an uncertain head, record, or marker response is reconciled against the exact
+  canonical body, activation ID, and transaction identity.
 
 ### 7.7 Cleanup
 
-Success retires local staging ownership only after the committed root is
-observed. Failure retains staged content for retry. Remote immutable objects
+Success retires local staging ownership only after the committed ref authority
+is observed. Failure retains staged content for retry. Remote immutable objects
 and monotonic registry entries are not synchronously deleted.
 
 ## 8. Clone, fetch, checkout, and hydrate
@@ -379,10 +466,10 @@ the cache and storage-tier unit, so no capsule range dependency is introduced.
 
 ### 8.5 Incremental pull
 
-Pull first performs the standard Git fetch against one pinned root. Worktree
-updates then resolve new pointer versions through that same generation or open
-a later explicit generation after Git completes. One file reconstruction never
-mixes shard or xorb catalog entries from two roots.
+Pull first performs the standard Git fetch against one captured repository
+view. Worktree updates then resolve new pointer versions through that same view
+or explicitly open a later one after Git completes. One file reconstruction
+never mixes shard or xorb catalog entries from two views.
 
 ## 9. Request and latency accounting
 
@@ -399,8 +486,24 @@ Let:
 - `R` be ref-registry transport attempts;
 - `G` be exceptional GC-publication-guard transport attempts.
 
-The pointer-free clean path remains `3 + C` requests on a checksum-qualified
-provider and `4 + C` with capsule readback.
+With an already captured remote-helper view, the pointer-free single-ref commit
+path is one ref-head GET, `C` carry GETs, one immutable run PUT, and one
+conditional ref-head PUT: `3 + C` successful requests. A cold explicit push
+uses one root GET and two direct GETs per destination head instead of listing
+unrelated refs, for `5 + C` successful single-ref requests. Creating a ref also
+uses two namespace-gate writes, for `7 + C`; these gates are partitioned by the
+first component below `refs/<kind>/`. A full clone, fetch, or advertisement
+instead adds two ref-head LISTs, one GET per visible ref head, one GET per
+distinct prepared multi-ref activation, and the bounded run/checkpoint reads.
+Those reads are parallelizable and do not serialize writers.
+
+A clean multi-ref publication touching `N` refs adds one preparing-record PUT,
+`N` conditional ref-head PUTs, one transaction-record CAS, and one immutable
+committed-marker PUT to the common immutable work and the `N` ref-head reads.
+The transaction record and marker are unique per attempt, so this adds requests
+but no repository-wide mutable contention. Readers perform no global marker
+scan and no GET per historical transaction: they resolve only activation
+records still named by prepared heads.
 
 With repository-local payloads and no bucket registry, a single-PUT pointer
 push needs at least:
@@ -422,11 +525,11 @@ readback global:  4 + B + 2Xw + 2Sw + V + C + P + R + G
 An uncontended registry GET plus CAS normally makes `R = 2`. In the current
 implementation `G` applies to every pointer-bearing push and is provider- and
 coordination-implementation-dependent; Git-only pushes have `G = 0`. A warm
-catalog makes `B = 0`; a cold writer loads the checkpoint and bounded frontier
-after pinning the root. Root CAS waits for immutable writes, registry union,
-and the capsule. Narrowing GC admission and adding bounded parallel immutable
-uploads require separate proof and qualification; neither may weaken the
-durable-before-visible contract.
+catalog makes `B = 0`; a cold writer loads the checkpoint and bounded visible
+ref frontiers after pinning the view. The ref-head CAS waits for immutable
+writes, registry union, and the capsule. Narrowing GC admission requires a
+separately proven reader/epoch protocol; it cannot be removed merely to improve
+the request count.
 
 An under-ten average is a valid gate for pointer-free pushes and measured
 small-pointer workloads. It is not a valid universal bound for a multi-gigabyte
@@ -436,7 +539,8 @@ For hydration, let `H` be distinct uncached xorbs after coalescing every
 requested file recipe. A cold operation requires approximately:
 
 ```text
-1 root GET + B catalog GETs + distinct shard GETs + H xorb GETs
+1 root GET + 2 index LISTs + ref-head GETs + B catalog GETs
+  + distinct shard GETs + H xorb GETs
 ```
 
 The root GET disappears when checkout already supplies a pinned view. Immutable
@@ -447,19 +551,22 @@ therefore scales with reusable content containers, not chunks or file paths.
 
 | Failure point | Reader-visible state | Recovery |
 | --- | --- | --- |
-| Before immutable upload | Old root | Return error |
-| Partial xorb/shard upload | Old root | Abort multipart or retry by content identity |
-| After payload upload | Old root plus unreachable objects | Reuse or collect after grace |
-| After registry protection | Old root plus conservative retention | Registry compaction removes stale roots later |
-| Root CAS conflict | Winner's root only | Revalidate refs and dependencies; retry or reject |
-| Root CAS response lost | Old or complete new root | Reconcile exact transaction identity |
+| Before immutable upload | Old ref head | Return error |
+| Partial xorb/shard upload | Old ref head | Abort multipart or retry by content identity |
+| After payload upload | Old ref head plus unreachable objects | Reuse or collect after grace |
+| After registry protection | Old ref head plus conservative retention | Registry compaction removes stale roots later |
+| Ref-head CAS conflict | Same-ref winner only | Revalidate refs and dependencies; retry or reject |
+| Ref-head response lost | Old or complete new ref state | Reconcile the exact canonical head body |
+| Multi-ref heads prepared, record still preparing | All-old | Abort by record CAS or roll back exact prepared heads |
+| Transaction record committed, marker absent | All-new | Recreate the exact immutable marker from the committed record |
+| Committed-marker response lost | All-new | Read the exact record and marker; repair the marker if absent |
 | Missing/corrupt dependency on read | No trusted reconstruction | Fail closed; repair from replica/source |
 
-Ref locks are not required for ordinary root publication correctness. The GC
-publication guard is required only for reuse of an old external dependency
-outside the pinned base. An optional admission policy may reduce large
-speculative uploads under contention, but it must be separately measured and
-must not become an implicit correctness dependency.
+Ref locks are not required for updates to existing refs: the ref-head CAS is
+the concurrency contract. Creation/deletion additionally coordinates only the
+top-level Git directory/file namespace that can conflict. The GC publication guard is
+required only for external xorb/shard safety; Git-only publication does not
+touch that shared coordination object.
 
 ## 11. GC and registry lifecycle
 
@@ -499,7 +606,7 @@ record references it. A conflict restarts that repository's compaction.
 ### 11.3 Forced GC
 
 GC that bypasses age grace requires an exclusive maintenance generation. It
-excludes GC publication guards and blocks root publication and registry
+excludes GC publication guards and blocks ref publication and registry
 compaction until deletion completes. It must never infer liveness only from a
 stale checkpoint.
 
@@ -512,13 +619,13 @@ stale checkpoint.
   location metadata when the provider changes versions.
 - Restore state is operational metadata, not repository authority.
 - Prepared mirror or recovery publication must verify the complete shard/xorb
-  closure before invoking the same root CAS protocol.
+  closure before invoking the same ref-head/transaction-record protocol.
 - Active-active writers still require an external consensus authority; one
   regional object-store root is not cross-region consensus.
 
 ## 13. Security and authorization
 
-Git visibility and file visibility are generation-bound. Authorization to read
+Git visibility and file visibility are exact-view-bound. Authorization to read
 a pointer does not imply authorization to enumerate arbitrary shard or xorb
 keys. Product endpoints resolve authorized file requests through the pinned
 catalog and issue only the required storage operations.
@@ -592,32 +699,46 @@ Implemented:
    `FileRecipes` remain unused.
 2. Checkpoints compact the complete pointer catalog, and read views apply
    checkpoint plus capsule deltas against one authenticated root.
-3. Pointer push consumes caller-verified canonical staging recipes without a
+3. Single-ref publication uses only that ref's conditional head update;
+   multi-ref publication uses prepared two-version heads, one unique
+   commit-vs-abort transaction record, and one immutable committed marker.
+   Readers double-collect ref-head object versions and resolve each referenced
+   activation record once. The repository root is a checkpoint and maintenance
+   authority, not a foreground push mutex.
+4. Pointer push consumes caller-verified canonical staging recipes without a
    redundant whole-file reconstruction, reuses base-generation chunk
    placements, fully reads and verifies cross-repository xorb candidates while
    holding GC publication admission, fully verifies adopted add-time xorbs,
    hash-checks newly read chunks, builds bounded canonical xorbs for remaining
    chunks, adopts only fully authenticated existing encodings after logical
    xorb create conflicts, and finalizes dependency-closed shards.
-4. Xorbs use bounded parallel verified create-only writes, and shards use
+5. Xorbs use bounded parallel verified create-only writes, and shards use
    verified create-only writes, before their closure is unioned into the
-   bucket registry and before capsule/root publication. Successful writes
+   bucket registry and before capsule/ref publication. Successful writes
    warm verified local and optional service caches; cross-client cache-service
    hits are only candidates and still require a full canonical-origin proof.
-5. Pointer-bearing pushes hold global and repository GC writer admission across
-   external-object verification, registry union, and root CAS; Git-only pushes
+6. Pointer-bearing pushes hold global and repository GC writer admission across
+   external-object verification, registry union, and ref publication; Git-only pushes
    retain the capsule-protocol path without those leases.
-6. The shared file-index session selects the v2 catalog when a v2 root exists,
+7. The shared file-index session selects the complete v2 checkpoint plus
+   visible per-ref capsule catalog when a v2 root exists,
    so clone checkout, smudge, hydrate, prefetch, diff, and mount retain the one
    canonical shard/xorb reconstruction path.
-7. Repack preserves the complete catalog without rewriting xorb or shard
-   payloads.
+8. Repack preserves the complete catalog without rewriting xorb or shard
+   payloads, records exact compacted positions for every ref, and readers
+   discard the whole compacted history prefix rather than only its last
+   transaction.
+9. Immutable runs cap at 512 capsules and per-ref frontiers retain up to 64
+   segments, keeping carry latency bounded while supporting more than the
+   5,000-push qualification interval.
 
 Still required before release qualification:
 
 1. Hosted-provider tuning and multipart transport evidence for bounded
    parallel uploads on very large pointer pushes.
-2. Fault injection around every external upload, registry update, and root CAS.
+2. Fault injection around every external upload, registry update, ref-head CAS,
+   transaction-record transition, committed-marker write, and reader capture
+   retry.
 3. Concurrent repository and bucket GC qualification, including forced
    resurrection of old content.
 4. Cross-repository dedup, replica repair, tiering, mount, and browsing matrix
@@ -632,7 +753,10 @@ The feature is not complete until tests prove:
 - incremental pointer replacement followed by fetch, pull, and hydrate;
 - multiple files and repositories reuse the same xorb identity;
 - interrupted upload and retry never publish a missing dependency;
-- same-ref and disjoint-ref CAS races preserve expected Git semantics;
+- ten same-ref agents integrate without corruption, while 50 and 100 agents
+  updating pre-existing distinct refs share no mutable publication object;
+- branch creation/deletion separately proves Git directory/file namespace
+  safety;
 - a force push resurrecting old content is protected from concurrent GC;
 - normal and forced GC retain every reachable shard and xorb;
 - shard gaps, reordered terms, wrong sizes, corrupt chunks, corrupt xorbs, and
@@ -697,7 +821,7 @@ gates; this evidence does not waive them.
 ## 18. Acceptance boundary
 
 Protocol-v2 pointer publication is enabled only through the dependency-closed
-path above. The writer still fails before root CAS when staging, catalog,
+path above. The writer still fails before ref publication when staging, catalog,
 external-object, shard, or registry proof is missing; it never publishes a Git
 ref whose large-file closure exists only in staging or v1 metadata.
 

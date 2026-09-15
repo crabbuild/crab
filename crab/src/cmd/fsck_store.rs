@@ -223,13 +223,199 @@ impl StoreChecker {
             self.router.global_prefix().to_owned(),
         );
         let current = crab_write::capsule_protocol::open_root(&layout).await?;
-        if current.record().digest() != state.view.root_snapshot().record().digest() {
+        let current = crab_read::capsule_protocol::open_view_from_root(
+            &layout,
+            current,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: MAX_FSCK_CAPSULE_BYTES,
+                max_frontier_bytes: MAX_FSCK_FRONTIER_BYTES,
+            },
+        )
+        .await?;
+        if current.state_digest() != state.view.state_digest() {
             return Err(CrabError::Protocol(
-                "repository root changed during fsck; retry against one stable generation"
+                "repository state changed during fsck; retry against one stable generation"
                     .to_owned(),
             ));
         }
         Ok(())
+    }
+
+    /// Prove source pointers against the exact catalog captured by a capsule view.
+    pub async fn verify_capsule_pointer_data(
+        &self,
+        pointers: &[Pointer],
+        cancel: &CancellationToken,
+    ) -> Result<PointerDataVerification> {
+        crate::core::error::check_cancelled(cancel)?;
+        let state = self.capsule.as_ref().ok_or_else(|| {
+            CrabError::Internal("capsule pointer verification requires a capsule view".to_owned())
+        })?;
+        let mut expected = BTreeMap::new();
+        for pointer in pointers {
+            let hash = MerkleHash::from(pointer.file_hash);
+            if expected
+                .insert(hash, pointer.size)
+                .is_some_and(|size| size != pointer.size)
+            {
+                return Err(CrabError::CorruptObject {
+                    path: hash.hex(),
+                    reason: "source pointers declare conflicting sizes for the same file hash"
+                        .to_owned(),
+                });
+            }
+        }
+        let origin_layout = crab_storage::StoreLayout::with_global_prefix(
+            self.store.as_storage().clone(),
+            self.router.repo_prefix().to_owned(),
+            self.router.global_prefix().to_owned(),
+        );
+        let mut issues = Vec::new();
+        let mut verified = 0u64;
+        let mut recipes = blake3::Hasher::new_derive_key("crab verified pointer recipes v1");
+        for (file_hash, expected_size) in expected {
+            crate::core::error::check_cancelled(cancel)?;
+            let Some(entry) = state.catalog.files().get(&file_hash.hex()) else {
+                issues.push(PointerDataIssue {
+                    file_hash: file_hash.hex(),
+                    expected_size,
+                    kind: PointerDataIssueKind::Missing,
+                    detail: format!(
+                        "pointer {} has no recipe in the captured capsule catalog",
+                        file_hash.hex()
+                    ),
+                });
+                continue;
+            };
+            let shard_hash = MerkleHash::from_hex(entry.shard_hash()).map_err(|error| {
+                CrabError::CorruptObject {
+                    path: entry.shard_hash().to_owned(),
+                    reason: format!("capsule catalog shard identity is invalid: {error}"),
+                }
+            })?;
+            let shard_path = self.router.shard_path(&shard_hash);
+            let result = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(CrabError::Cancelled),
+                result = self.store.get_with_etag_bounded(&shard_path, MAX_FSCK_SHARD_BYTES) => result,
+            };
+            let (body, _) = match result {
+                Ok(body) => body,
+                Err(error) => {
+                    issues.push(PointerDataIssue {
+                        file_hash: file_hash.hex(),
+                        expected_size,
+                        kind: PointerDataIssueKind::from_error(&error),
+                        detail: format!(
+                            "pointer {} shard {} is unavailable: {error}",
+                            file_hash.hex(),
+                            shard_hash.hex()
+                        ),
+                    });
+                    continue;
+                }
+            };
+            let actual_shard_hash = crab_xet::hash::compute_data_hash(&body);
+            if actual_shard_hash != shard_hash {
+                issues.push(PointerDataIssue {
+                    file_hash: file_hash.hex(),
+                    expected_size,
+                    kind: PointerDataIssueKind::Corrupt,
+                    detail: format!(
+                        "pointer {} shard content hash is {}, expected {}",
+                        file_hash.hex(),
+                        actual_shard_hash.hex(),
+                        shard_hash.hex()
+                    ),
+                });
+                continue;
+            }
+            let reader = ShardReader::from_bytes(body, shard_hash);
+            let file_info = match reader.get_file_info(&file_hash) {
+                Ok(info) => info,
+                Err(error) => {
+                    issues.push(PointerDataIssue {
+                        file_hash: file_hash.hex(),
+                        expected_size,
+                        kind: PointerDataIssueKind::Corrupt,
+                        detail: error.to_string(),
+                    });
+                    continue;
+                }
+            };
+            let Some(file_info) = file_info else {
+                issues.push(PointerDataIssue {
+                    file_hash: file_hash.hex(),
+                    expected_size,
+                    kind: PointerDataIssueKind::Corrupt,
+                    detail: format!(
+                        "pointer {} selected shard {} lacks its recipe",
+                        file_hash.hex(),
+                        shard_hash.hex()
+                    ),
+                });
+                continue;
+            };
+            if entry.size() != expected_size || file_info.file_size() != expected_size {
+                issues.push(PointerDataIssue {
+                    file_hash: file_hash.hex(),
+                    expected_size,
+                    kind: PointerDataIssueKind::Corrupt,
+                    detail: format!(
+                        "pointer {} declares {expected_size} bytes but its catalog and shard recipe declare {} and {}",
+                        file_hash.hex(),
+                        entry.size(),
+                        file_info.file_size()
+                    ),
+                });
+                continue;
+            }
+            let pointer = Pointer {
+                file_hash: file_hash.into(),
+                size: expected_size,
+                shard_hint: None,
+            };
+            match crab_read::verify_origin_recipe(&origin_layout, &pointer, &file_info, cancel)
+                .await
+            {
+                Ok(_) => {
+                    verified += 1;
+                    recipes.update(&pointer.file_hash);
+                    recipes.update(&pointer.size.to_le_bytes());
+                    recipes.update(shard_hash.as_bytes());
+                    let mut recipe = blake3::Hasher::new_derive_key("crab shard file recipe v1");
+                    file_info.serialize(&mut recipe)?;
+                    recipes.update(recipe.finalize().as_bytes());
+                }
+                Err(crab_read::ReadError::Cancelled) => return Err(CrabError::Cancelled),
+                Err(error) => {
+                    let kind = match &error {
+                        crab_read::ReadError::Xet(_) => PointerDataIssueKind::Corrupt,
+                        _ => PointerDataIssueKind::Unverifiable,
+                    };
+                    let error = CrabError::from(error);
+                    issues.push(PointerDataIssue {
+                        file_hash: file_hash.hex(),
+                        expected_size,
+                        kind: if kind == PointerDataIssueKind::Corrupt {
+                            kind
+                        } else {
+                            PointerDataIssueKind::from_error(&error)
+                        },
+                        detail: error.to_string(),
+                    });
+                }
+            }
+        }
+        self.check_capsule_root_stability(state).await?;
+        let recipe_digest = issues
+            .is_empty()
+            .then(|| recipes.finalize().to_hex().to_string());
+        Ok(PointerDataVerification {
+            verified,
+            issues,
+            recipe_digest,
+        })
     }
 
     /// Prove that every pointer resolves through the captured shard inventory to a

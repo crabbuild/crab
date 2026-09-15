@@ -7,7 +7,8 @@ two AI-agent push cases:
 
 * branch fanout: many agents push independent branches at the same time; all
   pushes must succeed, then fresh protocol-v2 clients must clone and fsck every
-  branch with byte-identical content.
+  branch with byte-identical content. Optional update rounds then push every
+  existing branch concurrently and verify each long-lived client can pull it.
 * same-branch contention: many agents push divergent commits to ``main`` at the
   same time; exactly one push may land, and all losers must fail with structured
   push statuses rather than corrupting remote state. With
@@ -98,6 +99,9 @@ class RequestCountingProxy:
 
     def start(self) -> None:
         proxy = self
+
+        class MeterServer(http.server.ThreadingHTTPServer):
+            request_queue_size = 256
 
         class Handler(http.server.BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
@@ -257,7 +261,7 @@ class RequestCountingProxy:
                 if self.command != "HEAD":
                     self.wfile.write(message)
 
-        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = MeterServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
         self.thread = threading.Thread(
             target=self.server.serve_forever,
@@ -501,6 +505,8 @@ class SmokeReport:
     checks: list[dict[str, Any]] = field(default_factory=list)
     branch_fanout: list[dict[str, Any]] = field(default_factory=list)
     branch_reads: list[dict[str, Any]] = field(default_factory=list)
+    branch_updates: list[dict[str, Any]] = field(default_factory=list)
+    branch_update_reads: list[dict[str, Any]] = field(default_factory=list)
     same_branch: list[dict[str, Any]] = field(default_factory=list)
     same_branch_read: dict[str, Any] = field(default_factory=dict)
     pre_marker_crash: dict[str, Any] = field(default_factory=dict)
@@ -644,7 +650,7 @@ class ConcurrentPushSmoke:
         self.store_inventory: dict[str, int] = {}
         self.report = SmokeReport(
             schema="crab.concurrent-push-smoke",
-            version="1.8",
+            version="1.9",
             run_id=self.run_id,
             status="running",
             remote_url=self.remote_url,
@@ -1118,7 +1124,7 @@ class ConcurrentPushSmoke:
         }
 
     def read_branch_tip(self, index: int) -> dict[str, Any]:
-        branch = f"agents/agent-{index:03d}"
+        branch = f"agent-{index:03d}"
         target = self.branch_readers / f"reader-{index:03d}"
         result = self.protocol_v2_clone(branch, target, f"protocol v2 clone {branch}")
         path = target / "agents" / f"agent-{index:03d}.txt"
@@ -1134,7 +1140,7 @@ class ConcurrentPushSmoke:
 
     def verify_branch_tip_reads(self) -> None:
         self.branch_readers.mkdir(parents=True, exist_ok=True)
-        max_workers = max(1, min(self.args.agents, self.args.max_parallel_pushes))
+        max_workers = max(1, min(self.args.agents, self.args.max_parallel_readers))
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [pool.submit(self.read_branch_tip, index) for index in range(self.args.agents)]
             results = [future.result() for future in concurrent.futures.as_completed(futures)]
@@ -1734,7 +1740,7 @@ class ConcurrentPushSmoke:
 
     def prepare_branch_agent(self, index: int) -> tuple[str, str, Path]:
         repo = self.clone_agent(self.branch_agents, index, "branch-agent")
-        branch = f"agents/agent-{index:03d}"
+        branch = f"agent-{index:03d}"
         dst = f"refs/heads/{branch}"
         self.run_git(repo, ["checkout", "-b", branch])
         path = repo / "agents" / f"agent-{index:03d}.txt"
@@ -1888,13 +1894,13 @@ class ConcurrentPushSmoke:
         )
         refs = self.run_git(
             self.seed,
-            ["ls-remote", self.remote_url, "refs/heads/agents/*"],
+            ["ls-remote", self.remote_url, "refs/heads/agent-*"],
             name="git ls-remote branch fanout refs",
         )
         visible = [
             line
             for line in Path(refs.stdout_log).read_text(encoding="utf-8").splitlines()
-            if "refs/heads/agents/" in line
+            if "refs/heads/agent-" in line
         ]
         self.check(
             "branch-fanout-refs-visible",
@@ -1906,6 +1912,116 @@ class ConcurrentPushSmoke:
             "branch-fanout",
             attempted_pushes=len(results),
             successful_pushes=len(results),
+        )
+
+    def run_branch_updates(self) -> None:
+        request_before = self.request_proxy.snapshot() if self.request_proxy else None
+        updates: list[dict[str, Any]] = []
+        for round_index in range(1, self.args.branch_update_rounds + 1):
+            jobs = []
+            for index in range(self.args.agents):
+                repo = self.branch_agents / f"branch-agent-{index:03d}"
+                branch = f"refs/heads/agent-{index:03d}"
+                path = repo / "agents" / f"agent-{index:03d}.txt"
+                with path.open("a", encoding="utf-8") as payload:
+                    payload.write(f"update round {round_index}\n")
+                self.run_git(repo, ["add", str(path.relative_to(repo))])
+                self.run_git(
+                    repo,
+                    ["commit", "-m", f"agent {index:03d} update {round_index}"],
+                )
+                jobs.append(
+                    (
+                        f"branch-agent-{index:03d}-update-{round_index}",
+                        branch,
+                        repo,
+                        f"HEAD:{branch}",
+                    )
+                )
+            results = self.push_concurrently(jobs)
+            updates.extend(
+                {"round": round_index, **asdict(result)} for result in results
+            )
+            statuses = {result.status for result in results}
+            self.check(
+                f"branch-update-round-{round_index}-all-pushed",
+                statuses == {"ok"},
+                {"statuses": sorted(statuses), "count": len(results)},
+            )
+
+        self.request_snapshot(
+            "branch-updates",
+            request_before,
+            attempted_pushes=len(updates),
+            successful_pushes=sum(update["status"] == "ok" for update in updates),
+        )
+        with self.report_lock:
+            self.report.branch_updates = updates
+            self.write_report()
+        self.verify_branch_update_reads()
+        self.store_snapshot(
+            "branch-updates",
+            attempted_pushes=len(updates),
+            successful_pushes=len(updates),
+        )
+
+    def pull_branch_update(self, index: int) -> dict[str, Any]:
+        branch = f"agent-{index:03d}"
+        target = self.branch_readers / f"reader-{index:03d}"
+        pulled = self.run_git(
+            target,
+            ["pull", "--ff-only"],
+            name=f"protocol v2 pull {branch}",
+            extra_env={"GIT_TRACE_PACKET": "1"},
+        )
+        trace = Path(pulled.stderr_log).read_text(encoding="utf-8", errors="replace")
+        self.run_git(target, ["fsck", "--strict"], name=f"post-update fsck {branch}")
+        path = target / "agents" / f"agent-{index:03d}.txt"
+        expected = (
+            f"branch fanout agent {index}\nrun_id {self.run_id}\n"
+            + "".join(
+                f"update round {round_index}\n"
+                for round_index in range(1, self.args.branch_update_rounds + 1)
+            )
+        )
+        actual = path.read_text(encoding="utf-8") if path.is_file() else None
+        return {
+            "agent": f"branch-agent-{index:03d}",
+            "branch": branch,
+            "pull_duration_ms": pulled.duration_ms,
+            "protocol_v2": "version 2" in trace and "command=fetch" in trace,
+            "content_visible": actual == expected,
+            "pull_stdout_log": pulled.stdout_log,
+            "pull_stderr_log": pulled.stderr_log,
+        }
+
+    def verify_branch_update_reads(self) -> None:
+        max_workers = max(1, min(self.args.agents, self.args.max_parallel_readers))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [
+                pool.submit(self.pull_branch_update, index)
+                for index in range(self.args.agents)
+            ]
+            results = [
+                future.result() for future in concurrent.futures.as_completed(futures)
+            ]
+        results.sort(key=lambda result: str(result["branch"]))
+        with self.report_lock:
+            self.report.branch_update_reads = results
+            self.write_report()
+        failed = [
+            result
+            for result in results
+            if not result["protocol_v2"] or not result["content_visible"]
+        ]
+        self.check(
+            "branch-updates-protocol-v2-pulled",
+            not failed and len(results) == self.args.agents,
+            {
+                "readers": len(results),
+                "expected": self.args.agents,
+                "failed": failed,
+            },
         )
 
     def run_same_branch_contention(self) -> None:
@@ -2056,6 +2172,8 @@ class ConcurrentPushSmoke:
                 self.run_marker_response_loss()
             if not self.args.skip_branch_fanout:
                 self.run_branch_fanout()
+                if self.args.branch_update_rounds:
+                    self.run_branch_updates()
             if not self.args.skip_same_branch:
                 self.run_same_branch_contention()
             self.run_fsck()
@@ -2100,8 +2218,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--crab-bin", default=shutil.which("crab") or "crab")
     parser.add_argument("--git-bin", default=shutil.which("git") or "git")
     parser.add_argument("--agents", type=int, default=8)
+    parser.add_argument("--branch-update-rounds", type=int, default=0)
     parser.add_argument("--same-branch-agents", type=int, default=8)
     parser.add_argument("--max-parallel-pushes", type=int, default=32)
+    parser.add_argument("--max-parallel-readers", type=int, default=2)
     parser.add_argument("--upload-concurrency", type=int, default=4)
     parser.add_argument("--lock-wait-secs", type=int, default=30)
     parser.add_argument("--omit-lock-wait-secs", action="store_true")
@@ -2121,6 +2241,12 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if (args.crash_boundary or args.marker_faults) and args.no_request_capture:
         parser.error("--crash-boundary and --marker-faults require request capture")
+    if args.branch_update_rounds < 0:
+        parser.error("--branch-update-rounds cannot be negative")
+    if args.max_parallel_readers <= 0:
+        parser.error("--max-parallel-readers must be greater than zero")
+    if args.branch_update_rounds and args.skip_branch_fanout:
+        parser.error("--branch-update-rounds requires branch fanout")
     if args.crash_lock_ttl_secs <= 20:
         parser.error("--crash-lock-ttl-secs must be greater than 20")
     if (
