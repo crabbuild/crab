@@ -212,7 +212,9 @@ issue/comment route group now uses typed Cell commands and queries. Upgrade
 migrations, native task/actor and dirty-job admission and the remaining
 collaboration-domain route cuts remain; effective-memory and free-volume startup
 floors, a resource-derived node mailbox and page-cache/file-descriptor-derived
-active-Cell admission are implemented. KV, SQL, Queue and
+active-Cell admission are implemented. A single 110-second absolute shutdown
+deadline now covers listener drain, background supervisors, accepted transfers,
+maintenance, Cell publication/close and SQL-worker join. KV, SQL, Queue and
 Workflow primitive handles are complete for local routing.
 The object-store node directory now strict-creates and conditionally refreshes
 canonical, short-lived advertisements. Each record binds one nonzero boot

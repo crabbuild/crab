@@ -126,6 +126,8 @@ pub enum Error {
     Metrics(#[from] metrics_exporter_prometheus::BuildError),
     #[error("repository maintenance task failed")]
     Worker(#[from] tokio::task::JoinError),
+    #[error("server shutdown exceeded its 110-second deadline")]
+    ShutdownTimeout,
     #[error("repository settings could not be loaded")]
     Settings {
         #[source]

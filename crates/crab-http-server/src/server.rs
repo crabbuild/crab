@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock as SyncRwLock};
@@ -49,6 +50,7 @@ const GIB: u64 = 1024 * MIB;
 const MIN_CELL_MEMORY_BYTES: u64 = 2 * GIB;
 const MIN_USABLE_CELL_DISK_BYTES: u64 = 20 * GIB;
 const FILE_DESCRIPTOR_RESERVE_MINIMUM: usize = 128;
+const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(110);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CellRuntimeBudget {
@@ -117,6 +119,15 @@ fn start_cell_runtime(session: SessionId, budget: CellRuntimeBudget) -> Result<C
         budget.node_mailbox_bytes,
         session,
     )?)
+}
+
+async fn before_shutdown_deadline<T>(
+    deadline: Instant,
+    future: impl Future<Output = T>,
+) -> Result<T> {
+    tokio::time::timeout_at(deadline.into(), future)
+        .await
+        .map_err(|_| crate::Error::ShutdownTimeout)
 }
 
 #[cfg(test)]
@@ -611,43 +622,61 @@ pub async fn serve(config: Config) -> Result<()> {
     let scheduler = tokio::spawn(async move { cell_scheduler.run(scheduler_cancellation).await });
     let public_shutdown = cancellation.clone();
     let management_shutdown = cancellation.clone();
-    let result = tokio::try_join!(
-        axum::serve(listener, app).with_graceful_shutdown(public_shutdown.cancelled_owned()),
-        axum::serve(
-            peer_tls.listener(management_listener),
-            management.into_make_service_with_connect_info::<crate::peer_tls::PeerTlsIdentity>(),
+    let listeners = async {
+        tokio::try_join!(
+            axum::serve(listener, app).with_graceful_shutdown(public_shutdown.cancelled_owned()),
+            axum::serve(
+                peer_tls.listener(management_listener),
+                management
+                    .into_make_service_with_connect_info::<crate::peer_tls::PeerTlsIdentity>(),
+            )
+            .with_graceful_shutdown(management_shutdown.cancelled_owned()),
         )
-        .with_graceful_shutdown(management_shutdown.cancelled_owned()),
-    );
-    cancellation.cancel();
+    };
+    tokio::pin!(listeners);
+    let (listener_result, shutdown_deadline) = tokio::select! {
+        result = &mut listeners => {
+            cancellation.cancel();
+            (Ok(result), Instant::now() + SHUTDOWN_DEADLINE)
+        }
+        () = cancellation.cancelled() => {
+            signal.abort();
+            let deadline = Instant::now() + SHUTDOWN_DEADLINE;
+            (before_shutdown_deadline(deadline, &mut listeners).await, deadline)
+        }
+    };
     signal.abort();
-    if let Err(error) = refresh.await {
-        tracing::warn!(error = %error, "repository catalog refresh task failed");
-    }
-    let heartbeat = match heartbeat.await {
-        Ok(result) => result,
-        Err(error) => Err(error.into()),
-    };
-    let scheduler = match scheduler.await {
-        Ok(result) => result,
-        Err(error) => Err(error.into()),
-    };
-    // Axum has drained its connections, so no handler can register a new
-    // receive after the tracker becomes empty. Close readers only after that drain.
-    server.cancellation.cancel();
-    server.receives.close();
-    server.receives.wait().await;
-    server.transfer_admission.close();
-    server.transfer_admission.wait().await;
-    let maintenance = server.finish_maintenance().await;
-    let runtimes = server.shutdown_runtimes().await;
-    result
-        .map(|_| ())
-        .map_err(crate::Error::from)
-        .and(heartbeat)
-        .and(scheduler)
-        .and(maintenance)
-        .and(runtimes)
+    let result = listener_result?;
+    before_shutdown_deadline(shutdown_deadline, async move {
+        if let Err(error) = refresh.await {
+            tracing::warn!(error = %error, "repository catalog refresh task failed");
+        }
+        let heartbeat = match heartbeat.await {
+            Ok(result) => result,
+            Err(error) => Err(error.into()),
+        };
+        let scheduler = match scheduler.await {
+            Ok(result) => result,
+            Err(error) => Err(error.into()),
+        };
+        // Axum has drained its connections, so no handler can register a new
+        // receive after the tracker becomes empty. Close readers only after that drain.
+        server.cancellation.cancel();
+        server.receives.close();
+        server.receives.wait().await;
+        server.transfer_admission.close();
+        server.transfer_admission.wait().await;
+        let maintenance = server.finish_maintenance().await;
+        let runtimes = server.shutdown_runtimes().await;
+        result
+            .map(|_| ())
+            .map_err(crate::Error::from)
+            .and(heartbeat)
+            .and(scheduler)
+            .and(maintenance)
+            .and(runtimes)
+    })
+    .await?
 }
 
 /// Validate the durable catalog and the storage coordination write path.
@@ -1213,6 +1242,14 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
+    struct DropSignal(Arc<AtomicBool>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
     fn local_resources(
         memory_bytes: u64,
         free_disk_bytes: u64,
@@ -1280,6 +1317,21 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_deadline_drops_an_unfinished_phase() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let signal = DropSignal(dropped.clone());
+        let result =
+            before_shutdown_deadline(Instant::now() + Duration::from_millis(10), async move {
+                let _signal = signal;
+                std::future::pending::<()>().await;
+            })
+            .await;
+
+        assert!(matches!(result, Err(crate::Error::ShutdownTimeout)));
+        assert!(dropped.load(Ordering::Acquire));
     }
 
     #[tokio::test]

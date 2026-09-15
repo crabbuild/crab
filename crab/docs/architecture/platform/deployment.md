@@ -411,12 +411,17 @@ once the runtime enters terminal drain, and calls its shutdown after public HTTP
 Git receives, transfer permits and repository maintenance settle. Shutdown closes
 every active SQLite Cell, conditionally releases its exact control ownership,
 closes the fixed pool and joins all SQL worker threads before process return.
+Cancellation starts one absolute 110-second deadline over both Axum listeners
+and every subsequent background, transfer, maintenance, Cell and worker drain.
+Expiry drops the unfinished shutdown future and returns `ShutdownTimeout`, so
+the process does not recycle permits or detach a stuck native callback before
+the orchestrator's 120-second termination boundary.
 The initial wiring uses CPU-derived 1..16 workers and a 10,000 active-Cell
 ceiling. It derives the node mailbox byte semaphore as five percent of the Cell
 memory budget, derives active-Cell admission from the page-cache and descriptor
 budgets, and enforces the effective-memory and free-volume startup floors above.
-Native task/actor and dirty-job reservations, full use of the configured Cell directory, activity
-cancellation and the 110-second escalation remain delivery work. Node identity,
+Native task/actor and dirty-job reservations, full use of the configured Cell
+directory and activity cancellation remain delivery work. Node identity,
 mandatory management mTLS, initial advertisement, refresh supervision and an
 mTLS-aware binary healthcheck are implemented; production Kubernetes and ECS
 manifests still need per-node direct endpoints and per-node certificate delivery.
