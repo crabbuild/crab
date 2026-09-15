@@ -1,9 +1,11 @@
 use crab_cell_runtime::{
-    CellId, Digest, EffectIntent, EffectLeaseOutcome, EffectTokenSource, HandlerOutcome,
-    InboxApplyOutcome, InboxDelivery, IncarnationId, effect_ack_delivered, effect_claim,
+    ApplicationId, CellId, CellTarget, Digest, EffectBatch, EffectCommandIntent, EffectIntent,
+    EffectLeaseOutcome, EffectTokenSource, HandlerOutcome, InboxApplyOutcome, InboxDelivery,
+    IncarnationId, NamespaceId, TenantId, effect_ack_delivered, effect_claim,
     effect_cleanup_terminal, effect_insert, effect_validate_claim, inbox_apply,
-    inbox_cleanup_expired, install_runtime_schema,
+    inbox_cleanup_expired, install_runtime_schema, peer_wire,
 };
+use prost::Message;
 
 struct Tokens(u8);
 
@@ -40,6 +42,50 @@ fn intent(destination: CellId, operation: &[u8], expires_at_ms: i64) -> EffectIn
         operation: operation.to_vec(),
         expires_at_ms,
     }
+}
+
+#[test]
+fn command_effect_is_canonical_and_does_not_pin_destination_incarnation() {
+    let mut source = connection(1, 2);
+    let target = CellTarget::new(
+        TenantId::from_bytes([3; 16]),
+        ApplicationId::from_bytes([4; 16]),
+        NamespaceId::from_bytes([5; 16]),
+        b"target-partition",
+    )
+    .unwrap();
+    let transaction = source.transaction().unwrap();
+    let mut batch = EffectBatch::new(&transaction, 1, 10).unwrap();
+    let effect_id = batch
+        .insert_command(
+            &transaction,
+            &EffectCommandIntent {
+                target: target.clone(),
+                command_id: 7,
+                codec_version: 1,
+                input: b"typed-input".to_vec(),
+                expires_at_ms: 10_000,
+            },
+        )
+        .unwrap();
+    let (destination, operation): (Vec<u8>, Vec<u8>) = transaction
+        .query_row(
+            "SELECT destination, operation FROM sys_effects WHERE effect_id = ?1",
+            [effect_id.as_slice()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let request = peer_wire::EffectRequest::decode(operation.as_slice()).unwrap();
+    assert_eq!(destination.as_slice(), target.cell_id().as_bytes());
+    assert!(request.destination_incarnation.is_empty());
+    assert_eq!(request.encode_to_vec(), operation);
+    let identity = request.identity.unwrap();
+    assert_eq!(identity.effect_id, effect_id);
+    assert_eq!(identity.source_cell, [1; 32]);
+    assert_eq!(identity.source_incarnation, [2; 16]);
+    assert_eq!(identity.source_sequence, 1);
+    assert_eq!(identity.ordinal, 0);
+    transaction.commit().unwrap();
 }
 
 #[test]

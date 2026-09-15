@@ -596,7 +596,7 @@ async fn authenticated_effect_delivery_publishes_once_and_resolves_from_inbox() 
             namespace_id: fixture.target.namespace().as_bytes().to_vec(),
             partition: fixture.target.partition().to_vec(),
         }),
-        destination_incarnation: fixture.handle.incarnation().as_bytes().to_vec(),
+        destination_incarnation: Vec::new(),
         identity: Some(identity.clone()),
         operation: Some(wire::effect_request::Operation::CellCommand(
             wire::CellCommand {
@@ -661,7 +661,7 @@ async fn typed_effect_source_publishes_claim_validation_ack_and_lost_lease() {
             namespace_id: fixture.target.namespace().as_bytes().to_vec(),
             partition: fixture.target.partition().to_vec(),
         }),
-        destination_incarnation: source_incarnation.as_bytes().to_vec(),
+        destination_incarnation: Vec::new(),
         identity: Some(wire::EffectIdentity {
             effect_id: effect_id.to_vec(),
             source_cell: source_cell.as_bytes().to_vec(),
@@ -770,7 +770,7 @@ async fn effect_supervisor_delivers_to_inbox_and_acknowledges_source() {
             namespace_id: fixture.target.namespace().as_bytes().to_vec(),
             partition: fixture.target.partition().to_vec(),
         }),
-        destination_incarnation: source_incarnation.as_bytes().to_vec(),
+        destination_incarnation: Vec::new(),
         identity: Some(wire::EffectIdentity {
             effect_id: effect_id.to_vec(),
             source_cell: source_cell.as_bytes().to_vec(),

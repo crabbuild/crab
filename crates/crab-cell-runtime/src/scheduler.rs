@@ -3,15 +3,18 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crab_ltx::rusqlite::Transaction;
 
 use crate::{
-    CatalogProof, CatalogShardScan, CellAuthority, CellCatalog, EffectBatch, Error,
-    NodeAdvertisement, Result, SessionId, VersionedControl, WorkflowDefinition,
+    CatalogProof, CatalogShardScan, CellAuthority, CellCatalog, CellTarget, EffectBatch, Error,
+    NodeAdvertisement, QueueDeadLetterTarget, Result, SessionId, VersionedControl,
+    WorkflowDefinition,
     effects::{
         effect_cleanup_terminal_bounded, effect_expire_ready_bounded,
         effect_reclaim_expired_bounded, inbox_cleanup_expired_bounded,
     },
     kv::kv_cleanup_expired_bounded,
     queue::{
-        queue_cleanup_expired_bounded, queue_expire_ready_bounded, queue_reclaim_expired_bounded,
+        QueueDeadLetterWriter, queue_cleanup_expired_bounded, queue_expire_ready_bounded,
+        queue_expire_ready_bounded_with_dead_letter, queue_reclaim_expired_bounded,
+        queue_reclaim_expired_bounded_with_dead_letter,
     },
     workflow::{
         workflow_cleanup_terminal_bounded, workflow_fail_one_expired_activity,
@@ -205,6 +208,7 @@ pub fn scheduler_tick(
         command_sequence,
         logical_time_ms,
         workflow_definitions,
+        None,
     )
 }
 
@@ -213,6 +217,7 @@ pub(crate) fn scheduler_tick_at(
     command_sequence: u64,
     logical_time_ms: i64,
     workflow_definitions: &[&'static dyn WorkflowDefinition],
+    queue_dead_letter: Option<(CellTarget, QueueDeadLetterTarget)>,
 ) -> Result<SchedulerTickOutcome> {
     if logical_time_ms < 0 {
         return Err(Error::Command("negative scheduler logical time"));
@@ -251,12 +256,32 @@ pub(crate) fn scheduler_tick_at(
         consume_with(&mut remaining, |limit| {
             queue_cleanup_expired_bounded(transaction, logical_time_ms, limit)
         })?;
-        consume_with(&mut remaining, |limit| {
-            queue_expire_ready_bounded(transaction, logical_time_ms, limit)
-        })?;
-        consume_with(&mut remaining, |limit| {
-            queue_reclaim_expired_bounded(transaction, logical_time_ms, limit)
-        })?;
+        if let Some((source, target)) = queue_dead_letter {
+            let mut dead_letter = QueueDeadLetterWriter::new(source, target, &mut effects);
+            consume_with(&mut remaining, |limit| {
+                queue_expire_ready_bounded_with_dead_letter(
+                    transaction,
+                    logical_time_ms,
+                    limit,
+                    Some(&mut dead_letter),
+                )
+            })?;
+            consume_with(&mut remaining, |limit| {
+                queue_reclaim_expired_bounded_with_dead_letter(
+                    transaction,
+                    logical_time_ms,
+                    limit,
+                    Some(&mut dead_letter),
+                )
+            })?;
+        } else {
+            consume_with(&mut remaining, |limit| {
+                queue_expire_ready_bounded(transaction, logical_time_ms, limit)
+            })?;
+            consume_with(&mut remaining, |limit| {
+                queue_reclaim_expired_bounded(transaction, logical_time_ms, limit)
+            })?;
+        }
     }
     if tables.contains("workflow_activities") {
         consume_with(&mut remaining, |limit| {

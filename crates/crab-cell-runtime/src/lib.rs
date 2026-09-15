@@ -45,13 +45,13 @@ pub use control::{Control, ControlState, Owner, RootRef, Transition};
 pub use crab_ltx::{CellReplica, Limits as ReplicaLimits};
 pub use effects::{
     EffectAckRequest, EffectBatch, EffectClaim, EffectClaimCommand, EffectClaimRequest,
-    EffectIntent, EffectLease, EffectLeaseCommand, EffectLeaseOutcome, EffectLeaseRequest,
-    EffectModule, EffectRunOutcome, EffectSource, EffectState, EffectSupervisor,
-    EffectSupervisorError, EffectTokenSource, EffectValidateClaimQuery, EffectValidateRequest,
-    InboxApplyOutcome, InboxDelivery, SystemEffectTokens, effect_ack_delivered, effect_claim,
-    effect_cleanup_terminal, effect_extend, effect_id, effect_insert, effect_operation_digest,
-    effect_retry, effect_validate_claim, inbox_apply, inbox_cleanup_expired, inbox_resolve,
-    register_effect_delivery,
+    EffectCommandIntent, EffectIntent, EffectLease, EffectLeaseCommand, EffectLeaseOutcome,
+    EffectLeaseRequest, EffectModule, EffectRunOutcome, EffectSource, EffectState,
+    EffectSupervisor, EffectSupervisorError, EffectTokenSource, EffectValidateClaimQuery,
+    EffectValidateRequest, InboxApplyOutcome, InboxDelivery, SystemEffectTokens,
+    effect_ack_delivered, effect_claim, effect_cleanup_terminal, effect_extend, effect_id,
+    effect_insert, effect_operation_digest, effect_retry, effect_validate_claim, inbox_apply,
+    inbox_cleanup_expired, inbox_resolve, register_effect_delivery,
 };
 pub use error::{Error, Result};
 pub use executor::{
@@ -79,11 +79,12 @@ pub use peer::{
 };
 pub use publication::CellPublisher;
 pub use queue::{
-    QueueClaimCommand, QueueClaimRequest, QueueLeaseAction, QueueLeaseCommand, QueueLeaseOutcome,
-    QueueLeaseRequest, QueueMessage, QueueModule, QueueNamespace, QueueSendCommand,
-    QueueSendOutcome, QueueSendRequest, QueueState, QueueTokenSource, QueueValidateClaimQuery,
-    QueueValidateRequest, SystemQueueTokens, install_queue_schema, queue_apply_lease, queue_claim,
-    queue_cleanup_expired, queue_send, queue_validate_claim, register_queue,
+    QueueClaimCommand, QueueClaimRequest, QueueDeadLetterTarget, QueueLeaseAction,
+    QueueLeaseCommand, QueueLeaseOutcome, QueueLeaseRequest, QueueMessage, QueueModule,
+    QueueNamespace, QueueSendCommand, QueueSendOutcome, QueueSendRequest, QueueState,
+    QueueTokenSource, QueueValidateClaimQuery, QueueValidateRequest, SystemQueueTokens,
+    install_queue_schema, queue_apply_lease, queue_claim, queue_cleanup_expired, queue_send,
+    queue_validate_claim, register_queue,
 };
 pub use registry::{
     BuildDescriptor, CellModule, Command, CommandContext, CommandInvocation, CommandResult,

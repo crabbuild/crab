@@ -55,7 +55,7 @@ owner and epoch. Local tentative state remains quarantined; a changed owner is
 left untouched. The next idle acquisition reopens the exact authoritative root,
 so it cannot publish a late tentative commit. Streaming initial directory construction
 and directory-backed capture checksums, shared directory caching, prepared compaction/bundles,
-Queue dead-letter effect adapters, catalog-driven Workflow activity scheduling,
+catalog-driven Workflow activity scheduling,
 remaining HTTP domain cutovers and capacity qualification remain incomplete. The scoped
 KV primitive now installs
 the normative schema and implements atomic checks/mutations, incarnation/sequence
@@ -66,8 +66,10 @@ from scope, binds stable registered codecs, publishes atomic mutations through
 receipted point/list reads using owner-sampled logical time. Queue now implements
 producer dedup, bounded claims,
 unpredictable lease tokens, published-token validation, ack/retry/extend, expired
-lease reclamation, attempt limits and terminal cleanup. Dead-letter delivery
-still needs to insert into the implemented effect subsystem. Its typed `QueueNamespace`
+lease reclamation, attempt limits and terminal cleanup. A configured dead-letter
+transition atomically inserts a stable typed Queue-send effect, links it from
+the dead row and retains the payload while that effect is pending. Claim-time
+reclamation and the registered Tick use the same adapter. Its typed `QueueNamespace`
 derives send shards from producer IDs, requires consumers to select one fixed
 shard, publishes claims before returning payloads, revalidates exact leases at a
 minimum receipt and exposes token-bound ack/retry/extend commands. Shard counts
@@ -114,8 +116,12 @@ captures LTX and waits for the exact control root before success. A cancelled
 caller does not cancel accepted work; stable retries return the stored outcome,
 and private Resolve reads the inbox after exact-root restoration. The strict
 signed peer protocol now carries generic compiled Cell-command effects and
-effect Resolve, verifies the source-derived identity, destination incarnation
-and operation digest, and exposes a typed source-side `EffectPeerClient`.
+effect Resolve, verifies the source-derived identity, freshly described
+destination incarnation and stable operation digest, and exposes a typed
+source-side `EffectPeerClient`. Durable typed requests store an empty destination
+incarnation; delivery and Resolve describe the current owner generation and fill
+that field only in the transient signed request. Destination inbox hashing clears
+it again, so takeover does not change effect identity.
 `EffectModule` now binds source claim/lease/validation operations into the
 compiled registry, and `EffectSource` publishes every claim, acknowledgement
 and retry through `CellClient`. `EffectSupervisor` claims one published
@@ -126,7 +132,7 @@ bounded effect actions through one command-scoped `EffectBatch`; terminal
 decisions may emit effects while still rejecting new local work. The batch uses
 the Cell commit sequence and assigns ordinals across every transition in one
 scheduler Tick, so different runs cannot collide in `sys_effects`. Queue
-dead-letter effect insertion and generic non-repository effect polling still remain.
+dead-letter insertion is implemented; generic non-repository effect polling still remains.
 Bootstrap and every committed command now derive the earliest durable work or
 retention deadline from SQLite inside the same transaction. The runtime binds
 that summary to the pending LTX cut and publishes it in control; application
@@ -158,7 +164,8 @@ current session and the admission is neither fenced nor draining; it never
 exposes the internal Cell map or SQLite handle.
 The startup-only compiled registry now validates module names, exact migration
 bytes/digests and contiguous schema ranges, command/query codec ranges and byte
-limits, namespace topology/effect targets/DLQ cycles, workflow/activity
+limits, namespace topology/effect targets/DLQ cycles, exact Queue bindings and
+DLQ module/namespace/shard/send-codec equality, workflow/activity
 inventories, and exact descriptor-to-command/query/definition/activity binding
 equality. It produces
 order-independent canonical release bytes, module code digests and one release

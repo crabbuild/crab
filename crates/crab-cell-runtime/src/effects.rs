@@ -1,8 +1,10 @@
+use prost::Message;
 use rand::RngCore;
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use crate::{
-    CellId, Digest, Error, HandlerOutcome, IncarnationId, Resolution, Result, StoredOutcome,
+    CellId, CellTarget, Digest, Error, HandlerOutcome, IncarnationId, Resolution, Result,
+    StoredOutcome, peer_wire as wire,
 };
 
 mod api;
@@ -71,6 +73,16 @@ pub struct EffectIntent {
     pub expires_at_ms: i64,
 }
 
+/// One stable typed command whose destination incarnation is resolved at delivery time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EffectCommandIntent {
+    pub target: CellTarget,
+    pub command_id: u32,
+    pub codec_version: u32,
+    pub input: Vec<u8>,
+    pub expires_at_ms: i64,
+}
+
 /// Command-scoped allocator for durable effect identities.
 ///
 /// One batch must be shared by every primitive transition performed by the
@@ -128,11 +140,7 @@ impl EffectBatch {
         transaction: &Transaction<'_>,
         intent: &EffectIntent,
     ) -> Result<[u8; 32]> {
-        let ordinal = self.next_ordinal;
-        self.next_ordinal = self
-            .next_ordinal
-            .checked_add(1)
-            .ok_or(Error::Command("effect ordinal overflow"))?;
+        let ordinal = self.take_ordinal()?;
         effect_insert(
             transaction,
             self.cell,
@@ -142,6 +150,72 @@ impl EffectBatch {
             self.now_ms,
             intent,
         )
+    }
+
+    /// Inserts one canonical Cell command without pinning a destination owner incarnation.
+    pub fn insert_command(
+        &mut self,
+        transaction: &Transaction<'_>,
+        intent: &EffectCommandIntent,
+    ) -> Result<[u8; 32]> {
+        if intent.command_id == 0 || intent.codec_version == 0 {
+            return Err(Error::Command("invalid effect Cell command identifier"));
+        }
+        let ordinal = self.take_ordinal()?;
+        let id = effect_id(self.cell, self.incarnation, self.sequence, ordinal);
+        let operation = wire::EffectRequest {
+            target: Some(wire::Target {
+                tenant_id: intent.target.tenant().as_bytes().to_vec(),
+                application_id: intent.target.application().as_bytes().to_vec(),
+                namespace_id: intent.target.namespace().as_bytes().to_vec(),
+                partition: intent.target.partition().to_vec(),
+            }),
+            // The durable operation is owner-independent. The delivery client
+            // fills this field from a fresh Describe immediately before send.
+            destination_incarnation: Vec::new(),
+            identity: Some(wire::EffectIdentity {
+                effect_id: id.to_vec(),
+                source_cell: self.cell.as_bytes().to_vec(),
+                source_incarnation: self.incarnation.as_bytes().to_vec(),
+                source_sequence: self.sequence,
+                ordinal,
+                expires_at_ms: intent.expires_at_ms,
+            }),
+            operation: Some(wire::effect_request::Operation::CellCommand(
+                wire::CellCommand {
+                    command_id: intent.command_id,
+                    codec_version: intent.codec_version,
+                    input: intent.input.clone(),
+                },
+            )),
+        }
+        .encode_to_vec();
+        effect_insert(
+            transaction,
+            self.cell,
+            self.incarnation,
+            self.sequence,
+            ordinal,
+            self.now_ms,
+            &EffectIntent {
+                destination: intent.target.cell_id(),
+                operation,
+                expires_at_ms: intent.expires_at_ms,
+            },
+        )
+    }
+
+    pub(crate) const fn source_incarnation(&self) -> IncarnationId {
+        self.incarnation
+    }
+
+    fn take_ordinal(&mut self) -> Result<u32> {
+        let ordinal = self.next_ordinal;
+        self.next_ordinal = self
+            .next_ordinal
+            .checked_add(1)
+            .ok_or(Error::Command("effect ordinal overflow"))?;
+        Ok(ordinal)
     }
 }
 

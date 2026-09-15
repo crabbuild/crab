@@ -105,8 +105,12 @@ authorization/protocol failures without releasing the live lease; normal lease
 reclamation remains the recovery path. Workflow decisions now insert effect
 actions atomically through a command-scoped `EffectBatch`. The batch binds the
 persisted Cell/incarnation and Cell commit sequence and shares its ordinal across
-all transitions performed by one Tick. Queue dead-letter effect insertion and
-generic non-repository node polling remain; the repository module is now polled
+all transitions performed by one Tick. `EffectBatch::insert_command` now stores
+one canonical typed target and command without a destination incarnation. Each
+delivery attempt performs a fresh Describe, fills the currently published
+incarnation only in the transient peer request, and computes the inbox digest
+from the owner-independent form. Queue dead-letter transitions now use that path.
+Generic non-repository node polling remains; the repository module is now polled
 by the server scheduler. Ack/retry codecs carry only effect ID,
 attempt, token and expiry rather than repeating operation bytes. Ack results are
 capped at 1,048,503 bytes so that identity plus result remains within the same
@@ -123,20 +127,22 @@ Effect state: 0=ready, 1=leased, 2=delivered, 3=failed. Generate
 Destination and operation bytes are immutable once inserted. Enforce at most
 128 effects and 1 MiB aggregate effect bytes per command.
 
-Persist the exact encoded EffectRequest from peer.proto, including resolved
-destination incarnation, in sys_effects.operation. Resolve destination metadata
-from compiled namespace capabilities before the source transaction; a stale incarnation causes
-delivery conflict, never silent redirection into restored data. Delivery validates
-effect_id against source Cell/incarnation/sequence/ordinal. Its digest uses the
-canonical typed codec with domain `crab.effect-op.v1\0`; include destination
-Cell/incarnation, EffectIdentity and selected operation. Transport headers are
-excluded, and the digest never changes between delivery attempts.
+Persist the exact owner-independent encoded EffectRequest from peer.proto in
+`sys_effects.operation`: full `CellTarget`, source-derived `EffectIdentity`,
+typed command ID/codec/input, and an empty `destination_incarnation`. The source
+transaction therefore does not perform network I/O or pin an owner generation.
+Before every delivery or Resolve, perform Describe outside SQLite, validate the
+described Cell against the stored target, and copy its current incarnation into
+the transient signed request. The receiving owner fences that incarnation again
+immediately before actor admission.
 
-If a command requests a destination missing from its resolved capability cache, return
-UnresolvedTarget before inserting an effect. Roll back the whole transaction,
-resolve the target outside the SQL worker, reconstruct the typed command context, then
-retry at most twice. This is allowed only after proven rollback; a commit or
-capture ambiguity uses reconciliation instead of SQL replay.
+Delivery validates effect_id against source Cell/incarnation/sequence/ordinal.
+Its digest uses the canonical typed codec with domain `crab.effect-op.v1\0` and
+the durable empty-incarnation request. Transport headers and the transient
+destination incarnation are excluded, so a legitimate destination takeover does
+not change identity or inbox deduplication. A target/code/schema mismatch fails
+closed through Describe/registry validation rather than redirecting arbitrary
+bytes.
 
 The source dispatcher uses the same claim/lease procedure as Queue, with a
 30 s lease and 7-day maximum delivery horizon. It sends a private authenticated
@@ -230,18 +236,26 @@ messages/512 KiB and obtains 16-byte tokens through an injectable source whose
 production implementation uses the process cryptographic RNG. The runtime caller
 publishes the encoded claim before `queue_validate_claim` permits emission.
 `queue_apply_lease` implements conditional ack/retry/extend and attempt/expiry
-death; cleanup removes at most 128 dedup and 128 terminal rows. Integration
+death; cleanup removes at most 128 total terminal-message and orphaned-dedup rows.
+It deletes an expired dedup identity only after its deterministic message row is
+gone, so a payload retained behind a pending DLQ effect cannot turn a retry into
+a primary-key conflict. Integration
 coverage sends and claims through typed `QueueNamespace`, validates only after
 publication, then restores another owner, validates the same lease and
 acknowledges it through the typed API. `QueueModule` supplies stable send/claim/
-lease/query IDs and its fixed namespace; `register_queue` binds bounded codecs.
+lease/query IDs and its fixed namespace; its `MaintenanceModule` supertrait
+supplies the Tick ID and optional dead-letter target. `register_queue` binds the
+bounded Queue codecs and the Tick command together.
 The capability derives producer shards, requires an explicit consumer shard and
 loads the immutable shard count from the compiled registry. Producer conflicts
-and lost leases are durable typed rejections. DLQ effect insertion and scheduler
-polling remain to implement.
+and lost leases are durable typed rejections. Registry freeze requires every
+Queue descriptor to have one compiled Queue binding and verifies a DLQ target's
+module, namespace, shard count, send command ID and codec version.
 
 Queue state: 0=ready, 1=leased, 2=acked, 3=dead. Send hashes producer_id to the
-shard, validates payload <=256 KiB and available_at within now..now+7 days.
+shard, validates payload <=256 KiB and a nonnegative `available_at` no more than
+seven days ahead. A timestamp at or before owner logical time is normalized to
+immediate delivery; this keeps a delayed durable dead-letter effect valid.
 Message ID is first 16 bytes of BLAKE3(`crab.queue-message.v1\0` || namespace ||
 producer_id), with a stored payload digest to detect identity conflict. Existing queue_dedup returns the
 same message identity if payload and scheduling attributes match. Its digest
@@ -305,10 +319,17 @@ If a namespace declares a dead-letter target, transition to dead and insert a
 sys_effects row atomically using the normal source sequence/ordinal effect ID.
 Only the first transition to dead creates this intention; repeated maintenance
 cannot create a second one. Its destination QueueSend producer ID includes the
-source Cell/incarnation/message ID, scoped by the target namespace. Retain dead payload until delivery completes
-or an operator resolves the failed effect. GC cannot delete it at message expiry
-while that effect remains pending. Without DLQ, retain dead rows until expiry
-for inspection. Namespace graph validation rejects DLQ cycles.
+source Cell/incarnation/message ID, scoped by the target namespace. The effect
+contains the ordinary typed Queue send command, resolves the target incarnation
+at delivery, and keeps the original payload. `dead_letter_effect_id` links the
+source row to that intention. Retain the dead payload while the linked effect is
+ready, leased or failed; allow cleanup after delivery or explicit effect removal.
+After a failed effect reaches its delivery horizon, bounded effect cleanup removes
+the intention and a later Queue cleanup may remove the payload. Without DLQ,
+retain dead rows until expiry for inspection. Namespace graph
+validation rejects DLQ cycles. The same adapter is called by retry, claim-time
+lease reclamation and the registered maintenance Tick, so no death path silently
+skips the DLQ.
 
 ## Workflow transitions and activities
 

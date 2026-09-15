@@ -9,8 +9,10 @@ CREATE TABLE queue_messages (
     token BLOB,
     lease_until_ms INTEGER,
     result_code INTEGER,
+    dead_letter_effect_id BLOB CHECK (dead_letter_effect_id IS NULL OR length(dead_letter_effect_id) = 32),
     CHECK ((state = 1 AND token IS NOT NULL AND length(token) = 16 AND lease_until_ms IS NOT NULL)
-        OR (state != 1 AND token IS NULL AND lease_until_ms IS NULL))
+        OR (state != 1 AND token IS NULL AND lease_until_ms IS NULL)),
+    CHECK (dead_letter_effect_id IS NULL OR state = 3)
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX queue_ready ON queue_messages(state, due_at_ms, message_id);
 CREATE INDEX queue_leases ON queue_messages(state, lease_until_ms, message_id);

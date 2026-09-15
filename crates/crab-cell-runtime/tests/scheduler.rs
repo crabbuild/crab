@@ -110,7 +110,7 @@ fn tick_terminalizes_expired_ready_work_and_runs_workflow_failure_transition() {
         .unwrap();
     transaction
         .execute(
-            "INSERT INTO queue_messages VALUES (zeroblob(16), X'02', 0, 0, 1, 5, NULL, NULL, NULL)",
+            "INSERT INTO queue_messages VALUES (zeroblob(16), X'02', 0, 0, 1, 5, NULL, NULL, NULL, NULL)",
             [],
         )
         .unwrap();
@@ -308,7 +308,7 @@ fn summary_covers_all_installed_primitive_deadline_classes() {
         .unwrap();
     transaction
         .execute(
-            "INSERT INTO queue_messages VALUES (zeroblob(16), X'04', 1, 1, 50, 100, zeroblob(16), 80, NULL)",
+            "INSERT INTO queue_messages VALUES (zeroblob(16), X'04', 1, 1, 50, 100, zeroblob(16), 80, NULL, NULL)",
             [],
         )
         .unwrap();

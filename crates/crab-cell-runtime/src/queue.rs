@@ -1,18 +1,22 @@
 use rand::RngCore;
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
-use crate::{Error, NamespaceId, Result};
+use crate::{
+    BoundedEncoder, CellId, CellTarget, EffectBatch, EffectCommandIntent, Error, IncarnationId,
+    NamespaceId, Result, WireValue, partition_for_shard, shard_for_scope,
+};
 
 mod api;
 
 pub use api::{
-    QueueClaimCommand, QueueClaimRequest, QueueLeaseCommand, QueueLeaseRequest, QueueModule,
-    QueueNamespace, QueueSendCommand, QueueValidateClaimQuery, QueueValidateRequest,
-    register_queue,
+    QueueClaimCommand, QueueClaimRequest, QueueDeadLetterTarget, QueueLeaseCommand,
+    QueueLeaseRequest, QueueModule, QueueNamespace, QueueSendCommand, QueueValidateClaimQuery,
+    QueueValidateRequest, register_queue,
 };
 
 const QUEUE_SCHEMA: &str = include_str!("migrations/queue.sql");
 const MAX_PAYLOAD_BYTES: usize = 256 * 1024;
+pub(crate) const QUEUE_SEND_MAX_INPUT_BYTES: u32 = MAX_PAYLOAD_BYTES as u32 + 32;
 const MAX_CLAIM_BYTES: usize = 512 * 1024;
 const MAX_CLAIM_ITEMS: usize = 32;
 const MAX_ATTEMPTS: u32 = 20;
@@ -23,6 +27,69 @@ const MAX_RETRY_DELAY_MS: u32 = 3_600_000;
 const MAX_AVAILABLE_DELAY_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 const RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
 const DELIVERY_MARGIN_MS: i64 = 1_000;
+const DEAD_LETTER_EFFECT_LIFETIME_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+
+pub(crate) struct QueueDeadLetterWriter<'a> {
+    source: CellTarget,
+    target: QueueDeadLetterTarget,
+    effects: &'a mut EffectBatch,
+}
+
+impl<'a> QueueDeadLetterWriter<'a> {
+    pub(crate) const fn new(
+        source: CellTarget,
+        target: QueueDeadLetterTarget,
+        effects: &'a mut EffectBatch,
+    ) -> Self {
+        Self {
+            source,
+            target,
+            effects,
+        }
+    }
+
+    fn insert(
+        &mut self,
+        transaction: &Transaction<'_>,
+        message_id: [u8; 16],
+        payload: &[u8],
+        now_ms: i64,
+    ) -> Result<[u8; 32]> {
+        let producer_id = dead_letter_producer_id(
+            self.target.namespace(),
+            self.source.cell_id(),
+            self.effects.source_incarnation(),
+            message_id,
+        );
+        let shard = shard_for_scope(self.target.namespace(), &producer_id, self.target.shards())?;
+        let target = CellTarget::new(
+            self.source.tenant(),
+            self.source.application(),
+            self.target.namespace(),
+            &partition_for_shard(shard),
+        )?;
+        let request = QueueSendRequest {
+            producer_id,
+            payload: payload.to_vec(),
+            available_at_ms: now_ms,
+        };
+        let mut encoder = BoundedEncoder::new(QUEUE_SEND_MAX_INPUT_BYTES)?;
+        request.encode(&mut encoder)?;
+        let expires_at_ms = now_ms
+            .checked_add(DEAD_LETTER_EFFECT_LIFETIME_MS)
+            .ok_or(Error::Command("queue dead-letter effect expiry overflow"))?;
+        self.effects.insert_command(
+            transaction,
+            &EffectCommandIntent {
+                target,
+                command_id: self.target.send_command_id(),
+                codec_version: self.target.codec_version(),
+                input: encoder.finish(),
+                expires_at_ms,
+            },
+        )
+    }
+}
 
 /// Source of unpredictable queue lease tokens.
 pub trait QueueTokenSource {
@@ -133,11 +200,12 @@ pub fn queue_send(
     let latest = now_ms
         .checked_add(MAX_AVAILABLE_DELAY_MS)
         .ok_or(Error::Command("queue available time overflow"))?;
-    if request.available_at_ms < now_ms || request.available_at_ms > latest {
+    if request.available_at_ms < 0 || request.available_at_ms > latest {
         return Err(Error::Command(
             "queue available time outside seven-day window",
         ));
     }
+    let due_at_ms = request.available_at_ms.max(now_ms);
     let digest = send_digest(&request.payload, request.available_at_ms);
     let existing = transaction
         .query_row(
@@ -165,7 +233,7 @@ pub fn queue_send(
         (
             message_id.as_slice(),
             request.payload.as_slice(),
-            request.available_at_ms,
+            due_at_ms,
             expires_at_ms,
         ),
     )?;
@@ -189,6 +257,17 @@ pub fn queue_claim(
     lease_ms: u32,
     tokens: &mut impl QueueTokenSource,
 ) -> Result<Vec<QueueMessage>> {
+    queue_claim_with_dead_letter(transaction, now_ms, limit, lease_ms, tokens, None)
+}
+
+pub(crate) fn queue_claim_with_dead_letter(
+    transaction: &Transaction<'_>,
+    now_ms: i64,
+    limit: usize,
+    lease_ms: u32,
+    tokens: &mut impl QueueTokenSource,
+    dead_letter: Option<&mut QueueDeadLetterWriter<'_>>,
+) -> Result<Vec<QueueMessage>> {
     validate_now(now_ms)?;
     if !(1..=MAX_CLAIM_ITEMS).contains(&limit) {
         return Err(Error::Command("queue claim limit must be in 1..=32"));
@@ -196,7 +275,12 @@ pub fn queue_claim(
     if !(MIN_LEASE_MS..=MAX_LEASE_MS).contains(&lease_ms) {
         return Err(Error::Command("queue lease must be in 5..=300 seconds"));
     }
-    queue_reclaim_expired_bounded(transaction, now_ms, MAX_RECLAIM_ITEMS)?;
+    queue_reclaim_expired_bounded_with_dead_letter(
+        transaction,
+        now_ms,
+        MAX_RECLAIM_ITEMS,
+        dead_letter,
+    )?;
 
     let mut statement = transaction.prepare(
         "SELECT message_id, payload, attempt, expires_at_ms FROM queue_messages INDEXED BY queue_ready WHERE state = 0 AND due_at_ms <= ?1 AND expires_at_ms > ?1 AND attempt < ?2 ORDER BY due_at_ms, message_id LIMIT ?3",
@@ -317,10 +401,21 @@ pub fn queue_apply_lease(
     token: [u8; 16],
     action: QueueLeaseAction,
 ) -> Result<QueueLeaseOutcome> {
+    queue_apply_lease_with_dead_letter(transaction, now_ms, message_id, token, action, None)
+}
+
+pub(crate) fn queue_apply_lease_with_dead_letter(
+    transaction: &Transaction<'_>,
+    now_ms: i64,
+    message_id: [u8; 16],
+    token: [u8; 16],
+    action: QueueLeaseAction,
+    dead_letter: Option<&mut QueueDeadLetterWriter<'_>>,
+) -> Result<QueueLeaseOutcome> {
     validate_now(now_ms)?;
     let current = transaction
         .query_row(
-            "SELECT state, attempt, token, lease_until_ms, expires_at_ms FROM queue_messages WHERE message_id = ?1",
+            "SELECT state, attempt, token, lease_until_ms, expires_at_ms, payload FROM queue_messages WHERE message_id = ?1",
             [message_id.as_slice()],
             |row| {
                 Ok((
@@ -329,11 +424,13 @@ pub fn queue_apply_lease(
                     row.get::<_, Option<Vec<u8>>>(2)?,
                     row.get::<_, Option<i64>>(3)?,
                     row.get::<_, i64>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
                 ))
             },
         )
         .optional()?;
-    let Some((state, attempt, stored_token, lease_until_ms, expires_at_ms)) = current else {
+    let Some((state, attempt, stored_token, lease_until_ms, expires_at_ms, payload)) = current
+    else {
         return Ok(QueueLeaseOutcome::LeaseLost);
     };
     let live = QueueState::decode(state)? == QueueState::Leased
@@ -369,6 +466,13 @@ pub fn queue_apply_lease(
             (QueueState::Leased, Some(deadline), None)
         }
     };
+    let dead_letter_effect_id = if next_state == QueueState::Dead {
+        dead_letter
+            .map(|writer| writer.insert(transaction, message_id, &payload, now_ms))
+            .transpose()?
+    } else {
+        None
+    };
     let changed = match next_state {
         QueueState::Leased => transaction.execute(
             "UPDATE queue_messages SET lease_until_ms = ?1 WHERE message_id = ?2 AND state = 1 AND token = ?3 AND lease_until_ms > ?4",
@@ -379,12 +483,13 @@ pub fn queue_apply_lease(
             (due_at_ms, message_id.as_slice(), token.as_slice(), now_ms),
         )?,
         QueueState::Acked | QueueState::Dead => transaction.execute(
-            "UPDATE queue_messages SET state = ?1, token = NULL, lease_until_ms = NULL WHERE message_id = ?2 AND state = 1 AND token = ?3 AND lease_until_ms > ?4",
+            "UPDATE queue_messages SET state = ?1, token = NULL, lease_until_ms = NULL, dead_letter_effect_id = ?5 WHERE message_id = ?2 AND state = 1 AND token = ?3 AND lease_until_ms > ?4",
             (
                 next_state.encode(),
                 message_id.as_slice(),
                 token.as_slice(),
                 now_ms,
+                dead_letter_effect_id.as_ref().map(<[u8; 32]>::as_slice),
             ),
         )?,
     };
@@ -412,20 +517,20 @@ pub(crate) fn queue_cleanup_expired_bounded(
     if limit == 0 {
         return Ok(0);
     }
-    let dedup = transaction.execute(
-        "DELETE FROM queue_dedup WHERE producer_id IN (SELECT producer_id FROM queue_dedup INDEXED BY queue_dedup_expiry WHERE retain_until_ms <= ?1 ORDER BY retain_until_ms, producer_id LIMIT ?2)",
+    let messages = transaction.execute(
+        "DELETE FROM queue_messages WHERE message_id IN (SELECT message_id FROM queue_messages INDEXED BY queue_retention WHERE expires_at_ms <= ?1 AND (state = 2 OR (state = 3 AND (dead_letter_effect_id IS NULL OR NOT EXISTS (SELECT 1 FROM sys_effects WHERE effect_id = queue_messages.dead_letter_effect_id AND state IN (0, 1, 3))))) ORDER BY expires_at_ms, message_id LIMIT ?2)",
         (now_ms, limit as i64),
     )?;
-    let remaining = limit.saturating_sub(dedup);
+    let remaining = limit.saturating_sub(messages);
     if remaining == 0 {
-        return Ok(dedup);
+        return Ok(messages);
     }
-    let messages = transaction.execute(
-        "DELETE FROM queue_messages WHERE message_id IN (SELECT message_id FROM queue_messages INDEXED BY queue_retention WHERE state IN (2, 3) AND expires_at_ms <= ?1 ORDER BY expires_at_ms, message_id LIMIT ?2)",
+    let dedup = transaction.execute(
+        "DELETE FROM queue_dedup WHERE producer_id IN (SELECT producer_id FROM queue_dedup INDEXED BY queue_dedup_expiry WHERE retain_until_ms <= ?1 AND NOT EXISTS (SELECT 1 FROM queue_messages WHERE message_id = queue_dedup.message_id) ORDER BY retain_until_ms, producer_id LIMIT ?2)",
         (now_ms, remaining as i64),
     )?;
-    dedup
-        .checked_add(messages)
+    messages
+        .checked_add(dedup)
         .ok_or(Error::Command("queue cleanup count overflow"))
 }
 
@@ -434,19 +539,29 @@ pub(crate) fn queue_reclaim_expired_bounded(
     now_ms: i64,
     limit: usize,
 ) -> Result<usize> {
+    queue_reclaim_expired_bounded_with_dead_letter(transaction, now_ms, limit, None)
+}
+
+pub(crate) fn queue_reclaim_expired_bounded_with_dead_letter(
+    transaction: &Transaction<'_>,
+    now_ms: i64,
+    limit: usize,
+    mut dead_letter: Option<&mut QueueDeadLetterWriter<'_>>,
+) -> Result<usize> {
     validate_now(now_ms)?;
     validate_maintenance_limit(limit)?;
     if limit == 0 {
         return Ok(0);
     }
     let mut statement = transaction.prepare(
-        "SELECT message_id, attempt, expires_at_ms FROM queue_messages INDEXED BY queue_leases WHERE state = 1 AND lease_until_ms <= ?1 ORDER BY lease_until_ms, message_id LIMIT ?2",
+        "SELECT message_id, attempt, expires_at_ms, payload FROM queue_messages INDEXED BY queue_leases WHERE state = 1 AND lease_until_ms <= ?1 ORDER BY lease_until_ms, message_id LIMIT ?2",
     )?;
     let rows = statement.query_map((now_ms, limit as i64), |row| {
         Ok((
             row.get::<_, Vec<u8>>(0)?,
             row.get::<_, i64>(1)?,
             row.get::<_, i64>(2)?,
+            row.get::<_, Vec<u8>>(3)?,
         ))
     })?;
     let mut expired = Vec::new();
@@ -455,15 +570,31 @@ pub(crate) fn queue_reclaim_expired_bounded(
     }
     drop(statement);
     let count = expired.len();
-    for (message_id, attempt, expires_at_ms) in expired {
+    for (message_id, attempt, expires_at_ms, payload) in expired {
+        let message_id: [u8; 16] = message_id
+            .try_into()
+            .map_err(|_| Error::Command("invalid stored queue message ID"))?;
         let next_state = if attempt >= i64::from(MAX_ATTEMPTS) || expires_at_ms <= now_ms {
             QueueState::Dead
         } else {
             QueueState::Ready
         };
+        let dead_letter_effect_id = if next_state == QueueState::Dead {
+            dead_letter
+                .as_deref_mut()
+                .map(|writer| writer.insert(transaction, message_id, &payload, now_ms))
+                .transpose()?
+        } else {
+            None
+        };
         let changed = transaction.execute(
-            "UPDATE queue_messages SET state = ?1, due_at_ms = CASE WHEN ?1 = 0 THEN ?2 ELSE due_at_ms END, token = NULL, lease_until_ms = NULL WHERE message_id = ?3 AND state = 1 AND lease_until_ms <= ?2",
-            (next_state.encode(), now_ms, message_id.as_slice()),
+            "UPDATE queue_messages SET state = ?1, due_at_ms = CASE WHEN ?1 = 0 THEN ?2 ELSE due_at_ms END, token = NULL, lease_until_ms = NULL, dead_letter_effect_id = ?4 WHERE message_id = ?3 AND state = 1 AND lease_until_ms <= ?2",
+            (
+                next_state.encode(),
+                now_ms,
+                message_id.as_slice(),
+                dead_letter_effect_id.as_ref().map(<[u8; 32]>::as_slice),
+            ),
         )?;
         if changed != 1 {
             return Err(Error::Command("queue reclaim lost selected lease"));
@@ -477,15 +608,51 @@ pub(crate) fn queue_expire_ready_bounded(
     now_ms: i64,
     limit: usize,
 ) -> Result<usize> {
+    queue_expire_ready_bounded_with_dead_letter(transaction, now_ms, limit, None)
+}
+
+pub(crate) fn queue_expire_ready_bounded_with_dead_letter(
+    transaction: &Transaction<'_>,
+    now_ms: i64,
+    limit: usize,
+    mut dead_letter: Option<&mut QueueDeadLetterWriter<'_>>,
+) -> Result<usize> {
     validate_now(now_ms)?;
     validate_maintenance_limit(limit)?;
     if limit == 0 {
         return Ok(0);
     }
-    Ok(transaction.execute(
-        "UPDATE queue_messages SET state = 3 WHERE message_id IN (SELECT message_id FROM queue_messages INDEXED BY queue_ready WHERE state = 0 AND (expires_at_ms <= ?1 OR attempt >= ?2) ORDER BY due_at_ms, message_id LIMIT ?3)",
-        (now_ms, i64::from(MAX_ATTEMPTS), limit as i64),
-    )?)
+    let mut statement = transaction.prepare(
+        "SELECT message_id, payload FROM queue_messages INDEXED BY queue_ready WHERE state = 0 AND (expires_at_ms <= ?1 OR attempt >= ?2) ORDER BY due_at_ms, message_id LIMIT ?3",
+    )?;
+    let rows = statement.query_map((now_ms, i64::from(MAX_ATTEMPTS), limit as i64), |row| {
+        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+    })?;
+    let expired = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(statement);
+    for (message_id, payload) in &expired {
+        let message_id: [u8; 16] = message_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::Command("invalid stored queue message ID"))?;
+        let dead_letter_effect_id = dead_letter
+            .as_deref_mut()
+            .map(|writer| writer.insert(transaction, message_id, payload, now_ms))
+            .transpose()?;
+        let changed = transaction.execute(
+            "UPDATE queue_messages SET state = 3, dead_letter_effect_id = ?1 WHERE message_id = ?2 AND state = 0 AND (expires_at_ms <= ?3 OR attempt >= ?4)",
+            (
+                dead_letter_effect_id.as_ref().map(<[u8; 32]>::as_slice),
+                message_id.as_slice(),
+                now_ms,
+                i64::from(MAX_ATTEMPTS),
+            ),
+        )?;
+        if changed != 1 {
+            return Err(Error::Command("queue expiry lost selected ready row"));
+        }
+    }
+    Ok(expired.len())
 }
 
 fn validate_maintenance_limit(limit: usize) -> Result<()> {
@@ -500,6 +667,23 @@ fn message_id(namespace: NamespaceId, producer_id: [u8; 16]) -> [u8; 16] {
     hasher.update(b"crab.queue-message.v1\0");
     hasher.update(namespace.as_bytes());
     hasher.update(&producer_id);
+    let mut id = [0; 16];
+    id.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+    id
+}
+
+fn dead_letter_producer_id(
+    target: NamespaceId,
+    source: CellId,
+    incarnation: IncarnationId,
+    message_id: [u8; 16],
+) -> [u8; 16] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"crab.queue-dead-letter.v1\0");
+    hasher.update(target.as_bytes());
+    hasher.update(source.as_bytes());
+    hasher.update(incarnation.as_bytes());
+    hasher.update(&message_id);
     let mut id = [0; 16];
     id.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
     id
@@ -522,22 +706,4 @@ fn validate_now(now_ms: i64) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn embedded_queue_migration_matches_normative_contract() {
-        assert_eq!(
-            QUEUE_SCHEMA,
-            include_str!("../../../crab/docs/architecture/platform/contracts/queue.sql")
-        );
-    }
-
-    #[test]
-    fn message_identity_binds_namespace_and_producer() {
-        assert_ne!(
-            message_id(NamespaceId::from_bytes([1; 16]), [2; 16]),
-            message_id(NamespaceId::from_bytes([3; 16]), [2; 16])
-        );
-    }
-}
+mod tests;

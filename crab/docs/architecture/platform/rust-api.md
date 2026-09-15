@@ -343,7 +343,8 @@ lifetimes; it cannot retry old bytes against silently changed semantics.
 ## Transaction-scoped application API
 
 `CommandContext` has private transaction and identity fields. It exposes
-`sql(&SqlBatch)`, `now_ms()`, `sequence()`, `cell_id()` and one
+`sql(&SqlBatch)`, `now_ms()`, `sequence()`, `cell_id()`, the validated
+`target()` and one
 command-scoped `effect_batch()`. `QueryContext` exposes `sql(&SqlBatch)`,
 `now_ms()`, `commit_sequence()` and `cell_id()`. Results are materialized and
 cannot retain a SQLite statement or row. Neither context exposes a raw
@@ -427,13 +428,64 @@ exact-root restore. A compile-time `SqlModule` supplies batch/query IDs and
 `register_sql` binds bounded typed `SqlBatch`/`SqlResultSet` codecs. `SqlCell`
 requires an explicit SQL-role target, publishes write batches and enforces
 read-only minimum-receipt queries. Its integration test proves LTX publication,
-query mutation rejection and exact-root restore. `QueueModule` supplies a fixed
-namespace plus send/claim/lease/query IDs; `register_queue` binds canonical
-bounded codecs. `QueueNamespace` derives producer shards, loads the immutable
+query mutation rejection and exact-root restore. `QueueModule` extends
+`MaintenanceModule` and supplies a fixed namespace plus send/claim/lease/query
+IDs; the supertrait supplies the Tick ID and optional typed dead-letter target.
+`register_queue` binds canonical bounded codecs and Tick as one startup unit.
+Registry freeze verifies the source descriptor and the target Queue's module,
+namespace, shard count, send command ID and codec version. `QueueNamespace`
+derives producer shards, loads the immutable
 shard count from the registry, publishes claims before returning payloads,
 revalidates exact tokens at a minimum receipt and exposes token-bound ack/retry/
-extend commands. Its integration test proves durable producer conflict,
-publication, validation, exact-root restore and acknowledgement.
+extend commands. Every dead transition emits at most one owner-independent
+typed Queue-send effect in the same SQLite transaction and links the source row
+for retention. Unit coverage proves atomic linkage, rollback, singleton Tick
+emission and pending-effect payload retention; integration coverage proves
+durable producer conflict, publication, validation, exact-root restore and
+acknowledgement.
+
+The compiled Queue contract is intentionally one Rust type and one registration
+call. The Tick ID is mandatory because expiry and lease death must run even when
+no consumer calls `claim`:
+
+```rust,ignore
+impl MaintenanceModule for BuildQueue {
+    const MODULE: &'static str = "build-queue";
+    const TICK_COMMAND_ID: u32 = 4;
+    const QUEUE_DEAD_LETTER: Option<QueueDeadLetterTarget> = Some(
+        QueueDeadLetterTarget::new(
+            "build-dead-letter",
+            BUILD_DEAD_LETTER_NAMESPACE,
+            16,
+            1,
+            1,
+        ),
+    );
+}
+
+impl QueueModule for BuildQueue {
+    const NAMESPACE: NamespaceId = BUILD_QUEUE_NAMESPACE;
+    const SEND_COMMAND_ID: u32 = 1;
+    const CLAIM_COMMAND_ID: u32 = 2;
+    const LEASE_COMMAND_ID: u32 = 3;
+    const VALIDATE_QUERY_ID: u32 = 1;
+}
+
+impl CellModule for BuildQueue {
+    const NAME: &'static str = "build-queue";
+
+    fn register(self, registry: &mut RegistryBuilder) -> Result<()> {
+        register_queue::<Self>(registry)
+    }
+}
+```
+
+The `build-dead-letter` module separately implements the same Queue traits for
+`BUILD_DEAD_LETTER_NAMESPACE`. Its namespace descriptor must declare 16 shards
+and send command `(1, 1)`. The source descriptor must include that namespace in
+`effect_targets` and `dead_letter`. Any drift aborts `RegistryBuilder::finish`
+before the server opens listeners.
+
 `WorkflowModule` binds one namespace, one current definition for new runs, a
 static retained-definition inventory, and fixed start/signal/cancel/state IDs;
 `register_workflow` installs their typed codecs and every exact definition-digest
@@ -548,9 +600,11 @@ The registry binds a definition digest to the exact transition implementation
 and its state/event codecs. Activity is registered generically; private
 type-erasure is an implementation detail, not a dynamic-library ABI. Validate
 `WorkflowDecision` bounds before any writes and apply all actions in the same
-transaction. `WorkflowAction::Effect` uses the pre-resolved destination
-procedure in primitives.md; action IDs come from `WorkflowContext`, never
-random callback-local state.
+transaction. Action IDs come from `WorkflowContext`, never random callback-local
+state. The current legacy `WorkflowAction::Effect { destination, operation }`
+still stores caller-preencoded bytes; it must move to `EffectCommandIntent`
+before workflow-emitted effects can claim the same takeover-safe typed-delivery
+contract as Queue dead letters.
 
 Use a node-wide Tokio supervisor with at most min(32, 2 * vCPU) running activities
 and byte reservations for input/output. It cycles eligible shards, backs off
@@ -646,9 +700,12 @@ unknown-outcome behavior identical across ingress nodes.
 Generic compiled Cell-command effects now use the same strict boundary.
 `EffectPeerClient::deliver` accepts only an `EffectClaim` whose caller has
 validated the published lease, decodes its canonical stored `EffectRequest`,
-rechecks source Cell/incarnation/sequence, target Cell, expiry and digest, then
-signs and routes it. `PeerDispatcher` rechecks the derived effect ID and target
-incarnation before calling `CellHandle::deliver_effect`. Ambiguous transport or
+rechecks source Cell/incarnation/sequence, target Cell, expiry and digest,
+performs a fresh Describe, then copies the described incarnation into the
+transient signed request. The durable request and inbox digest keep that field
+empty, so destination takeover does not change effect identity. `PeerDispatcher`
+rechecks the derived effect ID and current target incarnation before calling
+`CellHandle::deliver_effect`. Ambiguous transport or
 publication returns `EffectOutcomeUnknown`; `EffectPeerClient::resolve` queries
 the destination inbox with the same identity and digest. The source-side Rust
 API is:
@@ -676,6 +733,11 @@ impl EffectBatch {
         &mut self,
         transaction: &Transaction<'_>,
         intent: &EffectIntent,
+    ) -> Result<[u8; 32]>;
+    pub fn insert_command(
+        &mut self,
+        transaction: &Transaction<'_>,
+        intent: &EffectCommandIntent,
     ) -> Result<[u8; 32]>;
 }
 
@@ -714,6 +776,12 @@ impl<M: EffectModule> EffectSupervisor<M> {
         -> Result<EffectRunOutcome, EffectSupervisorError>;
 }
 ```
+
+`EffectCommandIntent` carries a validated `CellTarget`, fixed command ID/codec,
+bounded encoded input and expiry. Its stored `EffectRequest` deliberately has no
+destination incarnation. Queue DLQ uses this API. The lower-level `EffectIntent`
+exists for current workflow compatibility but is not a takeover-safe typed
+application surface and remains a migration item.
 
 `WorkflowAction::Effect` is applied through the same `EffectBatch` as other
 transitions in the command. Ordinary workflow commands reconstruct the next

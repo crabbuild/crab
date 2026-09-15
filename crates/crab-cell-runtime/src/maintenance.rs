@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use crate::{
     BoundedDecoder, BoundedEncoder, CodecError, Command, CommandContext, CommandResult, Error,
-    RegistryBuilder, SchedulerTickOutcome, WireValue, WorkflowDefinition,
+    QueueDeadLetterTarget, RegistryBuilder, SchedulerTickOutcome, WireValue, WorkflowDefinition,
     scheduler::scheduler_tick_at,
 };
 
@@ -12,12 +12,14 @@ pub trait MaintenanceModule: Send + Sync + 'static {
     const CODEC_VERSION: u32 = 1;
     const TICK_COMMAND_ID: u32;
     const WORKFLOW_DEFINITIONS: &'static [&'static dyn WorkflowDefinition] = &[];
+    const QUEUE_DEAD_LETTER: Option<QueueDeadLetterTarget> = None;
 }
 
 /// Registers one module's internal scheduler Tick command.
 pub fn register_maintenance<M: MaintenanceModule>(
     registry: &mut RegistryBuilder,
 ) -> crate::Result<()> {
+    registry.bind_maintenance_module(M::MODULE, M::QUEUE_DEAD_LETTER)?;
     registry.bind_command::<MaintenanceTickCommand<M>>()
 }
 
@@ -60,6 +62,7 @@ impl<M: MaintenanceModule> Command for MaintenanceTickCommand<M> {
             context.sequence(),
             context.now_ms(),
             M::WORKFLOW_DEFINITIONS,
+            M::QUEUE_DEAD_LETTER.map(|target| (context.target().clone(), target)),
         )?;
         Ok(CommandResult::Success(MaintenanceTickOutcome::Applied {
             processed,

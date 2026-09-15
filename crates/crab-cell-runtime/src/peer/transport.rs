@@ -58,7 +58,12 @@ impl EffectPeerClient {
                 "effect lease has insufficient delivery margin",
             ));
         }
-        let (request, target, expected) = checked_effect_request(claim, now_ms)?;
+        let (mut request, target) = checked_effect_request(claim, now_ms)?;
+        let expected = self.transport.describe(target.clone()).await?;
+        if expected.cell != target.cell_id() {
+            return Err(Error::Fenced);
+        }
+        request.destination_incarnation = expected.incarnation.as_bytes().to_vec();
         let expires_at_ms = now_ms.saturating_add(60_000).min(claim.expires_at_ms);
         let reply = match self
             .transport
@@ -92,7 +97,12 @@ impl EffectPeerClient {
 
     /// Resolves one ambiguous delivery against the destination inbox.
     pub async fn resolve(&self, claim: &EffectClaim, now_ms: i64) -> Result<Resolution> {
-        let (request, target, expected) = checked_effect_request(claim, now_ms)?;
+        let (mut request, target) = checked_effect_request(claim, now_ms)?;
+        let expected = self.transport.describe(target.clone()).await?;
+        if expected.cell != target.cell_id() {
+            return Err(Error::Fenced);
+        }
+        request.destination_incarnation = expected.incarnation.as_bytes().to_vec();
         let expires_at_ms = now_ms.saturating_add(60_000).min(claim.expires_at_ms);
         let reply = self
             .transport
@@ -340,7 +350,7 @@ impl Clone for PeerClientTransport {
 fn checked_effect_request(
     claim: &EffectClaim,
     now_ms: i64,
-) -> Result<(wire::EffectRequest, CellTarget, CellDescription)> {
+) -> Result<(wire::EffectRequest, CellTarget)> {
     if claim.attempt == 0
         || claim.token.iter().all(|byte| *byte == 0)
         || claim.operation.is_empty()
@@ -349,10 +359,17 @@ fn checked_effect_request(
         return Err(Error::Command("invalid effect claim for delivery"));
     }
     let request = wire::EffectRequest::decode(claim.operation.as_slice())?;
-    PeerOperation::DeliverEffect(request.clone()).validate(now_ms)?;
     if request.encode_to_vec() != claim.operation {
         return Err(Error::Peer("stored effect request is not canonical"));
     }
+    if !request.destination_incarnation.is_empty() {
+        return Err(Error::Peer(
+            "stored effect request pins a destination incarnation",
+        ));
+    }
+    let mut validated = request.clone();
+    validated.destination_incarnation = vec![1; 16];
+    PeerOperation::DeliverEffect(validated).validate(now_ms)?;
     let target = runtime_target(
         request
             .target
@@ -375,17 +392,7 @@ fn checked_effect_request(
     {
         return Err(Error::Command("effect claim source identity changed"));
     }
-    let incarnation = IncarnationId::try_from(request.destination_incarnation.as_slice())?;
-    Ok((
-        request,
-        target.clone(),
-        CellDescription {
-            cell: target.cell_id(),
-            incarnation,
-            code: Digest::from_bytes([0; 32]),
-            schema: 1,
-        },
-    ))
+    Ok((request, target))
 }
 
 fn runtime_target(value: &wire::Target) -> Result<CellTarget> {

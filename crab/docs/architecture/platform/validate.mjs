@@ -42,9 +42,11 @@ rejects('', `INSERT INTO sys_meta VALUES(1, zeroblob(31), zeroblob(16), 0, 0, 1)
 rejects(kv, `INSERT INTO kv_entries VALUES(X'', X'01', zeroblob(27), X'', NULL);`, /CHECK constraint/);
 rejects(kv, `INSERT INTO kv_entries VALUES(X'', X'01', zeroblob(28), zeroblob(65537), NULL);`, /CHECK constraint/);
 
-const leased = `INSERT INTO queue_messages VALUES(zeroblob(16), X'01', 1, 1, 0, 1000, zeroblob(16), 100, NULL);`;
-rejects(queue, `INSERT INTO queue_messages VALUES(zeroblob(16), X'01', 1, 1, 0, 1000, NULL, 100, NULL);`, /CHECK constraint/);
+const leased = `INSERT INTO queue_messages VALUES(zeroblob(16), X'01', 1, 1, 0, 1000, zeroblob(16), 100, NULL, NULL);`;
+rejects(queue, `INSERT INTO queue_messages VALUES(zeroblob(16), X'01', 1, 1, 0, 1000, NULL, 100, NULL, NULL);`, /CHECK constraint/);
 rejects(queue, leased + `UPDATE queue_messages SET state=2;`, /CHECK constraint/);
+rejects(queue, `INSERT INTO queue_messages VALUES(zeroblob(16), X'01', 2, 1, 0, 1000, NULL, NULL, NULL, zeroblob(32));`, /CHECK constraint/);
+rejects(queue, `INSERT INTO queue_messages VALUES(zeroblob(16), X'01', 3, 1, 0, 1000, NULL, NULL, NULL, zeroblob(31));`, /CHECK constraint/);
 sqlite(queue, leased + `
 UPDATE queue_messages SET state=2, token=NULL, lease_until_ms=NULL
 WHERE message_id=zeroblob(16) AND state=1 AND token=X'01' AND lease_until_ms>50;

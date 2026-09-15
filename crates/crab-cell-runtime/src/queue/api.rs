@@ -2,15 +2,16 @@ use std::marker::PhantomData;
 
 use crate::{
     ApplicationId, BoundedDecoder, BoundedEncoder, CatalogRole, CellClient, CellTarget, CodecError,
-    Command, CommandContext, CommandResult, Committed, InvocationError, NamespaceId, Observed,
-    Query, QueryContext, Receipt, RegistryBuilder, TenantId, WireValue, partition_for_shard,
-    shard_for_scope,
+    Command, CommandContext, CommandResult, Committed, InvocationError, MaintenanceModule,
+    NamespaceId, Observed, Query, QueryContext, Receipt, RegistryBuilder, TenantId, WireValue,
+    partition_for_shard, register_maintenance, shard_for_scope,
 };
 
 use super::{
-    MAX_ATTEMPTS, MAX_CLAIM_ITEMS, MAX_PAYLOAD_BYTES, QueueLeaseAction, QueueLeaseOutcome,
-    QueueMessage, QueueSendOutcome, QueueSendRequest, QueueState, SystemQueueTokens,
-    queue_apply_lease, queue_claim, queue_send, queue_validate_claim,
+    MAX_ATTEMPTS, MAX_CLAIM_ITEMS, MAX_PAYLOAD_BYTES, QueueDeadLetterWriter, QueueLeaseAction,
+    QueueLeaseOutcome, QueueMessage, QueueSendOutcome, QueueSendRequest, QueueState,
+    SystemQueueTokens, queue_apply_lease, queue_apply_lease_with_dead_letter, queue_claim,
+    queue_claim_with_dead_letter, queue_send, queue_validate_claim,
 };
 
 const SENT_TAG: u8 = 0;
@@ -21,11 +22,58 @@ const EXTEND_TAG: u8 = 2;
 const APPLIED_TAG: u8 = 0;
 const LEASE_LOST_TAG: u8 = 1;
 
+/// Compile-time routing contract for one Queue namespace's dead-letter target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueueDeadLetterTarget {
+    module: &'static str,
+    namespace: NamespaceId,
+    shards: u32,
+    send_command_id: u32,
+    codec_version: u32,
+}
+
+impl QueueDeadLetterTarget {
+    #[must_use]
+    pub const fn new(
+        module: &'static str,
+        namespace: NamespaceId,
+        shards: u32,
+        send_command_id: u32,
+        codec_version: u32,
+    ) -> Self {
+        Self {
+            module,
+            namespace,
+            shards,
+            send_command_id,
+            codec_version,
+        }
+    }
+
+    pub(crate) const fn module(self) -> &'static str {
+        self.module
+    }
+
+    pub(crate) const fn namespace(self) -> NamespaceId {
+        self.namespace
+    }
+
+    pub(crate) const fn shards(self) -> u32 {
+        self.shards
+    }
+
+    pub(crate) const fn send_command_id(self) -> u32 {
+        self.send_command_id
+    }
+
+    pub(crate) const fn codec_version(self) -> u32 {
+        self.codec_version
+    }
+}
+
 /// Compile-time namespace and operation identifiers for one native Queue module.
-pub trait QueueModule: Send + Sync + 'static {
-    const MODULE: &'static str;
+pub trait QueueModule: MaintenanceModule {
     const NAMESPACE: NamespaceId;
-    const CODEC_VERSION: u32 = 1;
     const SEND_COMMAND_ID: u32;
     const CLAIM_COMMAND_ID: u32;
     const LEASE_COMMAND_ID: u32;
@@ -34,10 +82,18 @@ pub trait QueueModule: Send + Sync + 'static {
 
 /// Registers all typed Queue bindings contributed by one compiled module.
 pub fn register_queue<M: QueueModule>(registry: &mut RegistryBuilder) -> crate::Result<()> {
+    registry.bind_queue_module(
+        M::MODULE,
+        M::NAMESPACE,
+        M::SEND_COMMAND_ID,
+        M::CODEC_VERSION,
+        M::QUEUE_DEAD_LETTER,
+    )?;
     registry.bind_command::<QueueSendCommand<M>>()?;
     registry.bind_command::<QueueClaimCommand<M>>()?;
     registry.bind_command::<QueueLeaseCommand<M>>()?;
-    registry.bind_query::<QueueValidateClaimQuery<M>>()
+    registry.bind_query::<QueueValidateClaimQuery<M>>()?;
+    register_maintenance::<M>(registry)
 }
 
 /// Typed Queue send bound to immutable module operation IDs.
@@ -91,13 +147,28 @@ impl<M: QueueModule> Command for QueueClaimCommand<M> {
         let limit = usize::try_from(input.limit)
             .map_err(|_| crate::Error::Command("queue claim limit overflow"))?;
         let mut tokens = SystemQueueTokens;
-        Ok(CommandResult::Success(queue_claim(
-            context.primitive_transaction(),
-            context.now_ms(),
-            limit,
-            input.lease_ms,
-            &mut tokens,
-        )?))
+        let claimed = if let Some(target) = M::QUEUE_DEAD_LETTER {
+            let mut effects = context.effect_batch()?;
+            let mut writer =
+                QueueDeadLetterWriter::new(context.target().clone(), target, &mut effects);
+            queue_claim_with_dead_letter(
+                context.primitive_transaction(),
+                context.now_ms(),
+                limit,
+                input.lease_ms,
+                &mut tokens,
+                Some(&mut writer),
+            )?
+        } else {
+            queue_claim(
+                context.primitive_transaction(),
+                context.now_ms(),
+                limit,
+                input.lease_ms,
+                &mut tokens,
+            )?
+        };
+        Ok(CommandResult::Success(claimed))
     }
 }
 
@@ -123,13 +194,27 @@ impl<M: QueueModule> Command for QueueLeaseCommand<M> {
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
     ) -> crate::Result<CommandResult<Self::Output>> {
-        let outcome = queue_apply_lease(
-            context.primitive_transaction(),
-            context.now_ms(),
-            input.message_id,
-            input.token,
-            input.action,
-        )?;
+        let outcome = if let Some(target) = M::QUEUE_DEAD_LETTER {
+            let mut effects = context.effect_batch()?;
+            let mut writer =
+                QueueDeadLetterWriter::new(context.target().clone(), target, &mut effects);
+            queue_apply_lease_with_dead_letter(
+                context.primitive_transaction(),
+                context.now_ms(),
+                input.message_id,
+                input.token,
+                input.action,
+                Some(&mut writer),
+            )?
+        } else {
+            queue_apply_lease(
+                context.primitive_transaction(),
+                context.now_ms(),
+                input.message_id,
+                input.token,
+                input.action,
+            )?
+        };
         Ok(match outcome {
             QueueLeaseOutcome::Applied { .. } => CommandResult::Success(outcome),
             QueueLeaseOutcome::LeaseLost => CommandResult::Rejected(outcome),

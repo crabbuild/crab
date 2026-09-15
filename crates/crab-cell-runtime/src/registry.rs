@@ -12,8 +12,8 @@ use descriptor::encode_release;
 
 use crate::{
     ActivityContext, ActivityExecution, ActivityHandler, ActivitySupport, CatalogRole, CellId,
-    Digest, Error, HandlerOutcome, NamespaceId, Result, SqlBatch, SqlResultSet, WireValue,
-    WorkflowDefinition,
+    CellTarget, Digest, Error, HandlerOutcome, NamespaceId, Result, SqlBatch, SqlResultSet,
+    WireValue, WorkflowDefinition,
     codec::{decode_wire, encode_wire},
     sql_batch, sql_query_batch,
 };
@@ -81,7 +81,7 @@ pub struct ModuleDescriptor {
 /// Synchronous application command context with no raw transaction accessor.
 pub struct CommandContext<'borrow, 'connection> {
     transaction: &'borrow Transaction<'connection>,
-    cell: CellId,
+    target: CellTarget,
     sequence: u64,
     now_ms: i64,
     input_limit: u32,
@@ -90,8 +90,14 @@ pub struct CommandContext<'borrow, 'connection> {
 
 impl CommandContext<'_, '_> {
     #[must_use]
-    pub const fn cell_id(&self) -> CellId {
-        self.cell
+    pub fn cell_id(&self) -> CellId {
+        self.target.cell_id()
+    }
+
+    /// Returns the runtime-validated target for deterministic cross-Cell routing.
+    #[must_use]
+    pub const fn target(&self) -> &CellTarget {
+        &self.target
     }
 
     #[must_use]
@@ -201,7 +207,7 @@ pub struct CommandInvocation<'a> {
     pub operation_id: u32,
     pub codec_version: u32,
     pub schema: u32,
-    pub cell: CellId,
+    pub target: CellTarget,
     pub sequence: u64,
     pub now_ms: i64,
     pub input: &'a [u8],
@@ -236,6 +242,8 @@ pub struct RegistryBuilder {
     workflow_definitions: HashSet<(String, [u8; 32])>,
     activities: BTreeMap<ActivityKey, ActivityFunction>,
     activity_claims: BTreeSet<ActivityKey>,
+    queue_bindings: Vec<QueueBinding>,
+    maintenance_bindings: BTreeMap<&'static str, Option<crate::QueueDeadLetterTarget>>,
 }
 
 impl RegistryBuilder {
@@ -249,6 +257,8 @@ impl RegistryBuilder {
             workflow_definitions: HashSet::new(),
             activities: BTreeMap::new(),
             activity_claims: BTreeSet::new(),
+            queue_bindings: Vec::new(),
+            maintenance_bindings: BTreeMap::new(),
         }
     }
 
@@ -279,6 +289,46 @@ impl RegistryBuilder {
         let key = BindingKey::new(Q::MODULE, Q::ID, Q::CODEC_VERSION)?;
         if self.queries.insert(key, typed_query::<Q>).is_some() {
             return Err(Error::Registry("duplicate query binding"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn bind_queue_module(
+        &mut self,
+        module: &'static str,
+        namespace: NamespaceId,
+        send_command_id: u32,
+        codec_version: u32,
+        dead_letter: Option<crate::QueueDeadLetterTarget>,
+    ) -> Result<()> {
+        if self
+            .queue_bindings
+            .iter()
+            .any(|binding| binding.namespace == namespace)
+        {
+            return Err(Error::Registry("duplicate Queue module binding"));
+        }
+        self.queue_bindings.push(QueueBinding {
+            module,
+            namespace,
+            send_command_id,
+            codec_version,
+            dead_letter,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn bind_maintenance_module(
+        &mut self,
+        module: &'static str,
+        queue_dead_letter: Option<crate::QueueDeadLetterTarget>,
+    ) -> Result<()> {
+        if self
+            .maintenance_bindings
+            .insert(module, queue_dead_letter)
+            .is_some()
+        {
+            return Err(Error::Registry("duplicate maintenance module binding"));
         }
         Ok(())
     }
@@ -396,6 +446,8 @@ impl RegistryBuilder {
             return Err(Error::Registry("descriptor and activity bindings differ"));
         }
         validate_namespaces(&namespace_owners)?;
+        validate_queue_bindings(&self.queue_bindings, &namespace_owners, &self.modules)?;
+        validate_maintenance_bindings(&self.maintenance_bindings, &self.queue_bindings)?;
 
         let command_descriptors = operation_descriptors(&self.modules, |module| module.commands);
         let query_descriptors = operation_descriptors(&self.modules, |module| module.queries);
@@ -428,6 +480,15 @@ impl RegistryBuilder {
             activities: self.activities,
         })
     }
+}
+
+#[derive(Clone, Copy)]
+struct QueueBinding {
+    module: &'static str,
+    namespace: NamespaceId,
+    send_command_id: u32,
+    codec_version: u32,
+    dead_letter: Option<crate::QueueDeadLetterTarget>,
 }
 
 /// Immutable compiled registry shared by runtime and release inspection.
@@ -649,7 +710,7 @@ impl Registry {
             .ok_or(Error::Registry("command binding is unavailable"))?;
         let mut context = CommandContext {
             transaction,
-            cell: invocation.cell,
+            target: invocation.target,
             sequence: invocation.sequence,
             now_ms: invocation.now_ms,
             input_limit: operation.input_limit,
@@ -927,6 +988,91 @@ fn validate_namespaces(
                 return Err(Error::Registry("dead-letter cycle"));
             }
             current = namespaces.get(&id).and_then(|(_, value)| value.dead_letter);
+        }
+    }
+    Ok(())
+}
+
+fn validate_queue_bindings(
+    bindings: &[QueueBinding],
+    namespaces: &HashMap<NamespaceId, (&'static str, NamespaceDescriptor)>,
+    modules: &[&ModuleDescriptor],
+) -> Result<()> {
+    let queues = namespaces
+        .iter()
+        .filter(|(_, (_, namespace))| namespace.role == CatalogRole::Queue)
+        .count();
+    if bindings.len() != queues {
+        return Err(Error::Registry(
+            "Queue descriptors and compiled bindings differ",
+        ));
+    }
+
+    for binding in bindings {
+        let Some((owner, namespace)) = namespaces.get(&binding.namespace) else {
+            return Err(Error::Registry("Queue binding namespace is unavailable"));
+        };
+        if namespace.role != CatalogRole::Queue || *owner != binding.module {
+            return Err(Error::Registry("Queue binding does not own its namespace"));
+        }
+        let module = modules
+            .iter()
+            .find(|module| module.name == binding.module)
+            .ok_or(Error::Registry("Queue binding module is unavailable"))?;
+        if !module.commands.iter().any(|command| {
+            command.id == binding.send_command_id
+                && command.codec_version == binding.codec_version
+                && command.input_limit >= crate::queue::QUEUE_SEND_MAX_INPUT_BYTES
+        }) {
+            return Err(Error::Registry(
+                "Queue send binding is absent from its descriptor",
+            ));
+        }
+        if namespace.dead_letter != binding.dead_letter.map(|target| target.namespace()) {
+            return Err(Error::Registry(
+                "Queue dead-letter descriptor and binding differ",
+            ));
+        }
+
+        let Some(dead_letter) = binding.dead_letter else {
+            continue;
+        };
+        let target = bindings
+            .iter()
+            .find(|candidate| candidate.namespace == dead_letter.namespace())
+            .ok_or(Error::Registry(
+                "Queue dead-letter target has no compiled binding",
+            ))?;
+        if target.module != dead_letter.module()
+            || target.send_command_id != dead_letter.send_command_id()
+            || target.codec_version != dead_letter.codec_version()
+            || namespaces
+                .get(&target.namespace)
+                .map(|(_, descriptor)| descriptor.shards)
+                != Some(dead_letter.shards())
+        {
+            return Err(Error::Registry(
+                "Queue dead-letter target and compiled binding differ",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_maintenance_bindings(
+    maintenance: &BTreeMap<&'static str, Option<crate::QueueDeadLetterTarget>>,
+    queues: &[QueueBinding],
+) -> Result<()> {
+    for (module, configured) in maintenance {
+        let queue = queues.iter().find(|queue| queue.module == *module);
+        match (queue, configured) {
+            (Some(queue), configured) if queue.dead_letter == *configured => {}
+            (None, None) => {}
+            _ => {
+                return Err(Error::Registry(
+                    "maintenance and Queue dead-letter bindings differ",
+                ));
+            }
         }
     }
     Ok(())

@@ -1,11 +1,11 @@
 use std::sync::OnceLock;
 
 use crab_cell_runtime::{
-    BoundedDecoder, BoundedEncoder, BuildDescriptor, CatalogRole, CellId, CellModule, Command,
-    CommandContext, CommandInvocation, CommandResult, Digest, Error, HandlerOutcome,
-    MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor, NamespaceId, OperationDescriptor,
-    Query, QueryContext, QueryInvocation, Registry, RegistryBuilder, SqlBatch, SqlStatement,
-    SqlValue, WireValue,
+    ApplicationId, BoundedDecoder, BoundedEncoder, BuildDescriptor, CatalogRole, CellId,
+    CellModule, CellTarget, Command, CommandContext, CommandInvocation, CommandResult, Digest,
+    Error, HandlerOutcome, MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor, NamespaceId,
+    OperationDescriptor, Query, QueryContext, QueryInvocation, Registry, RegistryBuilder, SqlBatch,
+    SqlStatement, SqlValue, TenantId, WireValue,
 };
 
 const MIGRATION: &str = "CREATE TABLE items(value BLOB NOT NULL)";
@@ -291,6 +291,13 @@ fn compiled_registry_is_canonical_and_executes_only_declared_bindings() {
     connection.execute_batch(MIGRATION).unwrap();
     let transaction = connection.transaction().unwrap();
     let input = wire(&b"value".to_vec(), 16);
+    let target = CellTarget::new(
+        TenantId::from_bytes([1; 16]),
+        ApplicationId::from_bytes([2; 16]),
+        NamespaceId::from_bytes([1; 16]),
+        b"registry-test",
+    )
+    .unwrap();
     let outcome = registry
         .execute_command(
             &transaction,
@@ -299,7 +306,7 @@ fn compiled_registry_is_canonical_and_executes_only_declared_bindings() {
                 operation_id: 1,
                 codec_version: 1,
                 schema: 1,
-                cell: CellId::from_bytes([3; 32]),
+                target,
                 sequence: 1,
                 now_ms: 10,
                 input: &input,

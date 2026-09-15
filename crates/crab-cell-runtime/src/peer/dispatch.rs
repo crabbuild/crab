@@ -309,18 +309,20 @@ impl PeerDispatcher {
             return Err(Error::Command("encoded effect input exceeds limit"));
         }
         let effect_id = exact_effect_id(identity)?;
+        let mut canonical_operation = request.clone();
+        canonical_operation.destination_incarnation.clear();
+        let encoded_operation = canonical_operation.encode_to_vec();
         let encoded_request = request.encode_to_vec();
         let delivery = InboxDelivery {
             effect_id,
             operation_digest: crate::effect_operation_digest(
                 target.cell_id(),
                 effect_id,
-                &encoded_request,
+                &encoded_operation,
             ),
             expires_at_ms: identity.expires_at_ms,
         };
         let registry = Arc::clone(&self.registry);
-        let cell = transport.handle.cell_id();
         let schema = transport.handle.schema();
         let input = command.input.clone();
         let operation_id = command.command_id;
@@ -340,7 +342,7 @@ impl PeerDispatcher {
                             operation_id,
                             codec_version,
                             schema,
-                            cell,
+                            target: target.clone(),
                             sequence: next_sequence(transaction)?,
                             now_ms,
                             input: &input,

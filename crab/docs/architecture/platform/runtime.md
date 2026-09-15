@@ -160,7 +160,10 @@ drop the accepted command or release its resource reservations.
 Application/internal outcomes use sys_requests; private Effect outcomes use sys_inbox.
 The actor's lookup/store-outcome helpers dispatch on CommandIdentity, so a
 7-day effect is not accidentally subjected to the application 24-hour request limit.
-Effect lookup includes its 32-byte ID and destination incarnation. Internal
+Effect lookup includes its 32-byte ID and owner-independent operation digest.
+The destination incarnation is freshly described for each attempt, appears only
+in the transient signed request and is fenced before destination admission; it
+is not part of durable inbox identity. Internal
 requests have a 60-second admission validity and are never accepted from the
 public listener. The same pending-publication state machine supervises all three.
 
