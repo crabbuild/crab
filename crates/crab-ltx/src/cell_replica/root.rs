@@ -45,12 +45,60 @@ impl SegmentDescriptor {
         }
     }
 
+    pub(super) fn bundled(
+        info: SegmentInfo,
+        index_digest: [u8; 32],
+        index_length: u64,
+        object_digest: [u8; 32],
+        offset: u64,
+    ) -> Self {
+        let length = info.size_bytes;
+        Self {
+            info,
+            index_digest,
+            index_length,
+            object_digest,
+            offset,
+            length,
+            level: 0,
+        }
+    }
+
+    pub(super) fn with_level(mut self, level: u8) -> Self {
+        self.level = level;
+        self
+    }
+
+    pub(super) const fn level(&self) -> u8 {
+        self.level
+    }
+
+    pub(super) const fn object_digest(&self) -> [u8; 32] {
+        self.object_digest
+    }
+
+    pub(super) const fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    pub(super) const fn length(&self) -> u64 {
+        self.length
+    }
+
+    pub(super) fn object_kind(&self) -> crab_storage::CellObjectKind {
+        if self.object_digest == self.info.blake3 {
+            crab_storage::CellObjectKind::Ltx
+        } else {
+            crab_storage::CellObjectKind::Bundle
+        }
+    }
+
     pub(super) fn object_extent(&self) -> ([u8; 32], u64, u64, crab_storage::CellObjectKind) {
         (
             self.object_digest,
             self.offset,
             self.length,
-            crab_storage::CellObjectKind::Ltx,
+            self.object_kind(),
         )
     }
 
@@ -67,9 +115,22 @@ impl SegmentDescriptor {
             || self.index_length > u64::from(info.database_pages) * 60
             || self.length != info.size_bytes
             || self.offset.checked_add(self.length).is_none()
+            || (self.object_kind() == crab_storage::CellObjectKind::Ltx && self.offset != 0)
+            || self
+                .offset
+                .checked_add(self.length)
+                .is_none_or(|end| end > limits.max_plan_bytes)
             || u64::from(info.database_pages) * u64::from(info.page_size)
                 > limits.max_database_bytes
         {
+            return Err(CrabError::LTXCorrupted);
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_published(&self, limits: Limits) -> Result<()> {
+        self.validate(limits)?;
+        if self.index_digest == [0; 32] || self.index_length == 0 || self.object_digest == [0; 32] {
             return Err(CrabError::LTXCorrupted);
         }
         Ok(())
@@ -347,5 +408,26 @@ mod tests {
             "one maximum descriptor occupies {} bytes",
             one.len()
         );
+    }
+
+    #[test]
+    fn bundled_descriptor_roundtrips_its_exact_extent() {
+        let info = SegmentInfo {
+            min_txid: 1,
+            max_txid: 2,
+            page_size: 4096,
+            database_pages: 9,
+            pre_checksum: 0,
+            post_checksum: crate::CHECKSUM_FLAG | 7,
+            size_bytes: 1024,
+            blake3: [1; 32],
+        };
+        let descriptor = SegmentDescriptor::bundled(info, [2; 32], 60, [3; 32], 4096);
+        let decoded = decode_segment_page(&encode_segment_page(&[descriptor]).unwrap()).unwrap();
+        let decoded = decoded.first().unwrap();
+        assert_eq!(decoded.object_kind(), crab_storage::CellObjectKind::Bundle);
+        assert_eq!(decoded.object_digest(), [3; 32]);
+        assert_eq!(decoded.offset(), 4096);
+        assert_eq!(decoded.length(), 1024);
     }
 }

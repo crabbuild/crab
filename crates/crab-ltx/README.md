@@ -5,12 +5,13 @@ replication and paged SQL reads. Crab-owned integration of Celld's mechanics;
 no Celld Git dependency or Litestream daemon. Default features remain empty.
 Enable `replica` for the existing `crab-storage` transport and Tokio integration.
 
-Status: local and standalone remote replication are implemented. Native LTX cuts
-can also be prepared as immutable Cell/incarnation-scoped roots and bound to a
-checked `crab-cell-runtime` control successor. **This is not wired into
-`crab-http-server` yet.** Prepared bundle/compaction roots, directory-backed
-capture checksums, shared directory caching, streaming initial construction and
-the hard cutover still remain. See the
+Status: local and standalone remote replication are implemented. Native and
+shared-bundle LTX cuts can be prepared as immutable Cell/incarnation-scoped roots,
+and exact range/full compaction can produce a representation-only prepared root.
+These roots are bound to checked `crab-cell-runtime` control successors and the
+runtime is composed by `crab-http-server`. Directory-backed capture checksums,
+shared directory caching, streaming initial construction, external-merge
+compaction and the complete product hard cutover still remain. See the
 [next architecture](../crab-http-server/next-architecture/README.md).
 
 ## Contract
@@ -124,6 +125,8 @@ The next Cell runtime uses `CellReplica`, not the standalone epoch head:
 | `CellReplica::new(layout, cell, incarnation, limits)` | Binds every immutable path to one typed Cell incarnation and rejects staged stores |
 | `CellReplica::open_new(path)` | Exclusively creates a fresh local database with the replica's filesystem, SQLite VFS and limits for worker-owned bootstrap |
 | `prepare(base, cuts, sequence, schema).await` | Admits the complete chain, verifies native LTX/index bytes, writes content-addressed directory/descriptor/root objects and returns an unforgeable `PreparedRoot`; writes no mutable key |
+| `prepare_bundle(base, bundle, sequence, schema).await` | Selects canonical rows for this Cell/incarnation from a shared bundle, verifies their chain, retains the bundle and indexes, and prepares the advancing immutable root without a mutable write |
+| `prepare_compaction(base, range, level).await` | Verifies the exact selected bodies and indexes, replaces that range while preserving logical position/sequence/schema, and returns a representation-only prepared root for the normal authority CAS |
 | `open_root(root).await` | Reopens the exact digest, validates canonical metadata, scope, chain and the authenticated radix root without downloading LTX bodies or every directory leaf |
 | `VerifiedRoot::paged().read_page(page).await` | Walks only the selected hash-pinned radix path, range-reads its LTX frame and verifies frame BLAKE3, decoded page number and page checksum |
 | `VerifiedRoot::paged().prepare_writable().await` | Loads authenticated directory checksums without LTX bodies and returns an exact-root writable activation value |
@@ -147,9 +150,10 @@ database page before opening SQLite. Incremental preparation copy-on-writes only
 changed leaves and ancestors, prunes truncated subtrees by their authenticated
 ranges and reuses every untouched digest; it does not fetch historical indexes or
 materialize all live locators. Initial root construction still materializes its
-full locator set, and no shared directory-node cache exists yet, so this is not
-yet the complete streaming 5 GB write path required by the platform capacity
-gate. Cell-root bundle, compaction and full sequential restore APIs also remain.
+full locator set, no shared directory-node cache exists, and Cell compaction
+currently holds all selected bodies in memory. This is therefore not yet the
+complete streaming 5 GB write path required by the platform capacity gate. A
+full sequential Cell-root restore API also remains.
 
 The older `Replica` API below remains for standalone repository replication and
 its existing callers. Its mutable epoch head is not Cell ownership authority.

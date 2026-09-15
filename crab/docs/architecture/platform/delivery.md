@@ -9,7 +9,7 @@ does not establish a working runtime.
 | Source | Current behavior | Required change |
 | --- | --- | --- |
 | [managed.rs](../../../../crates/crab-ltx/src/managed.rs) | Typed mutation callbacks, capture ownership and a temporary SQLite `query_only` read boundary | Keep raw connection access inside the runtime; typed application SQL authorization is implemented above this layer |
-| [cell_replica.rs](../../../../crates/crab-ltx/src/cell_replica.rs) | Native cuts prepare immutable Cell roots; cold reads and sparse writable activation use exact digest-pinned radix paths; incremental publication copy-on-writes only changed directory paths and safely prunes truncation | Add prepared compaction/bundles, shared node cache, streaming initial construction and directory-backed capture checksums |
+| [cell_replica.rs](../../../../crates/crab-ltx/src/cell_replica.rs) | Native and canonical Cell-selected bundle cuts prepare immutable roots; exact range/full compaction produces representation-only prepared roots; cold reads and sparse writable activation use exact digest-pinned radix paths; incremental publication copy-on-writes only changed directory paths and safely prunes truncation | Add shared node cache, streaming initial construction, external-merge compaction and directory-backed capture checksums |
 | [replica.rs](../../../../crates/crab-ltx/src/replica.rs) | Standalone immutable manifest plus per-epoch mutable head | Keep existing callers working; Cell runtime uses only `CellReplica` and never treats this head as authority |
 | [append.rs](../../../../crates/crab-ltx/src/replica/append.rs) | Shared native/bundle append verification | Reuse verification under the prepared-root API |
 | [paged.rs](../../../../crates/crab-ltx/src/paged.rs) | Authenticated but resident page map; sparse writable SQL | Bounded directory nodes/cache and capture checksum tracker |
@@ -44,8 +44,13 @@ radix directory format. `Control::publish_prepared` binds that checked proposal
 to exactly one Cell/incarnation/predecessor before the authority CAS. Incremental
 native publication now authenticates and copy-on-writes only changed leaves and
 ancestors, reuses untouched subtree digests and prunes truncation without loading
-discarded leaves. Complete this package by sharing preparation with bundles and
-compaction, streaming initial directory construction, replacing the dense
+discarded leaves. Canonical Cell/incarnation rows can now be selected from a
+multi-Cell bundle, independently verified and retained under one immutable bundle
+digest. Exact range/full compaction verifies only selected LTX bodies plus their
+indexes, preserves TXID/checksum/commit sequence/schema and returns a normal
+representation-only `PreparedRoot`; suffix indexes rebuild changed directory
+locators without downloading unselected bodies. Complete this package with
+streaming initial directory construction, external-merge compaction, replacing the dense
 capture/activation checksum array and adding the shared node cache. Exact
 Cell roots now load authenticated directory checksums without LTX bodies and
 open a sparse writable continuation through the existing VFS.
@@ -55,8 +60,8 @@ code must not call its mutable epoch head.
 Current local coverage is in `crates/crab-ltx/tests/cell_roots.rs` and
 `crates/crab-cell-runtime/tests/publication.rs`. Add the remaining cases:
 
-- `prepare_does_not_write_mutable_keys`: instrument transport; assert no head/
-  control update during native, bundled and compaction preparation.
+- `prepare_does_not_write_mutable_keys`: covered for native, bundled and
+  compaction preparation by asserting every emitted key is below `objects/`.
 - `prepared_root_restores_after_source_loss`: real RustFS upload, delete local
   source, reopen exact root and compare SQL and database checksums.
 - `root_rejects_other_cell_or_incarnation`: reuse a valid digest in another scope.

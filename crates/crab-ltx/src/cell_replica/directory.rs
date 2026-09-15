@@ -236,11 +236,10 @@ pub(super) struct Verification<'a> {
     pub host: &'a Host,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct ObjectExtent {
     pub kind: CellObjectKind,
-    pub offset: u64,
-    pub length: u64,
+    pub ranges: Vec<std::ops::Range<u64>>,
 }
 
 pub(super) async fn verify_root(
@@ -486,10 +485,6 @@ fn verify_leaf(
         let frame_hash = array(&bytes[start + 48..start + 80])?;
         let page_checksum = read_u64(bytes, start + 80)?;
         let extent = extents.get(&object).ok_or(CrabError::LTXCorrupted)?;
-        let object_end = extent
-            .offset
-            .checked_add(extent.length)
-            .ok_or(CrabError::LTXCorrupted)?;
         let frame_end = offset
             .checked_add(u64::from(length))
             .ok_or(CrabError::LTXCorrupted)?;
@@ -499,8 +494,10 @@ fn verify_leaf(
             || page <= previous
             || page_checksum & crate::CHECKSUM_FLAG == 0
             || length == 0
-            || offset < extent.offset
-            || frame_end > object_end
+            || !extent
+                .ranges
+                .iter()
+                .any(|range| range.start <= offset && frame_end <= range.end)
         {
             return Err(CrabError::LTXCorrupted);
         }

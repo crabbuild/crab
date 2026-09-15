@@ -177,6 +177,19 @@ async fn prepared_root_becomes_one_valid_control_successor() {
             if result == b"one"
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let compacted = replica
+        .prepare_compaction(&prepared.root(), 0..1, 9)
+        .await
+        .unwrap();
+    let compacted_control = published.publish_prepared(&compacted, Some(42)).unwrap();
+    assert_eq!(compacted.root().position, prepared.root().position);
+    assert_eq!(
+        compacted.root().commit_sequence,
+        prepared.root().commit_sequence
+    );
+    assert_ne!(compacted.root().digest, prepared.root().digest);
+    assert_eq!(compacted_control.ltx_root(), Some(compacted.root()));
     executor.close().unwrap();
 }
 

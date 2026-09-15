@@ -331,18 +331,15 @@ impl CellReplica {
         commit_sequence: u64,
         schema: u32,
     ) -> Result<PreparedRoot> {
-        if schema == 0 || commit_sequence > i64::MAX as u64 || cuts.segments.is_empty() {
-            return Err(CrabError::InvalidState("invalid Cell root metadata"));
+        self.validate_metadata(commit_sequence, schema)?;
+        if cuts.segments.is_empty() {
+            return Err(CrabError::InvalidState("empty Cell append"));
         }
         let base_graph = match base {
             Some(root) => Some(self.load_graph(root).await?),
             None => None,
         };
-        if let Some(graph) = &base_graph
-            && commit_sequence <= graph.document.commit_sequence
-        {
-            return Err(CrabError::InvalidState("commit sequence did not advance"));
-        }
+        self.validate_append_sequence(&base_graph, commit_sequence)?;
 
         // Admit the complete prospective chain from trusted capture metadata
         // before reading local bodies or starting immutable uploads.
@@ -350,7 +347,6 @@ impl CellReplica {
             .as_ref()
             .map(|graph| graph.descriptors.clone())
             .unwrap_or_default();
-        let base_len = descriptors.len();
         descriptors.extend(
             cuts.segments
                 .iter()
@@ -360,44 +356,296 @@ impl CellReplica {
 
         let local = cuts.segments.clone();
         let host = self.host.clone();
-        let limits = self.limits;
-        let prepared = self
+        let inputs = self
             .host
             .run(move || {
                 local
                     .into_iter()
                     .map(|segment| {
                         let bytes = host.read(segment.path(), segment.info().size_bytes)?;
-                        crate::recovery::verify_segment(&bytes, segment.info(), limits)?;
-                        let index = crate::paged::encode_index(&bytes)?;
-                        Ok((bytes, segment.info().clone(), index))
+                        Ok(AppendInput {
+                            bytes,
+                            info: segment.info().clone(),
+                            location: BodyLocation::Native,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .await??;
+        self.prepare_append(
+            base,
+            base_graph,
+            inputs,
+            cuts.position,
+            commit_sequence,
+            schema,
+            None,
+        )
+        .await
+    }
+
+    /// Verifies selected Cell rows from a shared bundle and prepares one root append.
+    ///
+    /// Bundle row identity is routing metadata, not authorization. Only rows using
+    /// the canonical Cell/incarnation identity are selected, and their complete LTX
+    /// chain is independently verified before the immutable bundle is retained.
+    pub async fn prepare_bundle(
+        &self,
+        base: Option<&RootRef>,
+        bundle: &crate::bundle::Bundle,
+        commit_sequence: u64,
+        schema: u32,
+    ) -> Result<PreparedRoot> {
+        self.validate_metadata(commit_sequence, schema)?;
+        if bundle.bytes().len() as u64 > self.limits.max_plan_bytes {
+            return Err(CrabError::Limit("Cell bundle bytes"));
+        }
+        let base_graph = match base {
+            Some(root) => Some(self.load_graph(root).await?),
+            None => None,
+        };
+        self.validate_append_sequence(&base_graph, commit_sequence)?;
+
+        let (repository, epoch) = crate::bundle::cell_identity(&self.cell, &self.incarnation);
+        let bundle_digest = *blake3::hash(bundle.bytes()).as_bytes();
+        let mut inputs = Vec::new();
+        let mut prospective = base_graph
+            .as_ref()
+            .map(|graph| graph.descriptors.clone())
+            .unwrap_or_default();
+        for (index, row) in bundle.rows().iter().enumerate() {
+            if row.repository != repository || row.epoch != epoch {
+                continue;
+            }
+            prospective.push(SegmentDescriptor::bundled(
+                row.info.clone(),
+                [0; 32],
+                0,
+                bundle_digest,
+                row.offset,
+            ));
+            inputs.push(AppendInput {
+                bytes: bundle.segment(index)?.to_vec(),
+                info: row.info.clone(),
+                location: BodyLocation::Bundle {
+                    digest: bundle_digest,
+                    offset: row.offset,
+                },
+            });
+        }
+        let target = inputs
+            .last()
+            .map(|input| input.info.position())
+            .ok_or(CrabError::TxNotAvailable)?;
+        self.validate_chain(&prospective, target)?;
+        self.prepare_append(
+            base,
+            base_graph,
+            inputs,
+            target,
+            commit_sequence,
+            schema,
+            Some(bundle.bytes().to_vec()),
+        )
+        .await
+    }
+
+    /// Prepares an exact representation-only compaction of a pinned root.
+    ///
+    /// The output retains the base TXID, checksum, commit sequence and schema.
+    /// Only the authority owner may later publish the proposal as a normal root CAS.
+    pub async fn prepare_compaction(
+        &self,
+        base: &RootRef,
+        range: std::ops::Range<usize>,
+        level: u8,
+    ) -> Result<PreparedRoot> {
+        let graph = self.load_graph(base).await?;
+        let schema = graph.document.schema;
+        let selected = graph
+            .descriptors
+            .get(range.clone())
+            .filter(|segments| !segments.is_empty())
+            .ok_or(CrabError::TxNotAvailable)?;
+        if !(1..=9).contains(&level)
+            || (level == 9 && (range.start != 0 || range.end != graph.descriptors.len()))
+            || (level < 9 && selected.iter().any(|segment| segment.level() >= level))
+        {
+            return Err(CrabError::InvalidState("invalid compaction level or range"));
+        }
+
+        let mut bodies = Vec::with_capacity(selected.len());
+        for descriptor in selected {
+            bodies.push(self.read_segment(descriptor).await?);
+        }
+        let infos = selected
+            .iter()
+            .map(|descriptor| descriptor.info.clone())
+            .collect::<Vec<_>>();
+        let expected_indexes = selected
+            .iter()
+            .map(|descriptor| (descriptor.index_digest, descriptor.index_length))
+            .collect::<Vec<_>>();
+        let limits = self.limits;
+        let (bytes, info, index) = self
+            .host
+            .run(move || {
+                for ((bytes, info), (digest, length)) in
+                    bodies.iter().zip(&infos).zip(expected_indexes)
+                {
+                    crate::recovery::verify_segment(bytes, info, limits)?;
+                    let index = crate::paged::encode_index(bytes)?;
+                    if *blake3::hash(&index).as_bytes() != digest || index.len() as u64 != length {
+                        return Err(CrabError::ChecksumMismatch);
+                    }
+                }
+                let (bytes, info) = crate::recovery::compact_inputs(&bodies, &infos, limits)?;
+                let index = crate::paged::encode_index(&bytes)?;
+                Ok::<_, CrabError>((bytes, info, index))
+            })
+            .await??;
+        let descriptor =
+            SegmentDescriptor::native(info, *blake3::hash(&index).as_bytes(), index.len() as u64)
+                .with_level(level);
+        self.put_object(&descriptor.info.blake3, CellObjectKind::Ltx, bytes)
+            .await?;
+        self.put_object(
+            &descriptor.index_digest,
+            CellObjectKind::Index,
+            index.clone(),
+        )
+        .await?;
+
+        let suffix = graph.descriptors[range.end..].to_vec();
+        let mut directory_inputs = vec![DirectoryInput {
+            descriptor: descriptor.clone(),
+            index,
+        }];
+        for descriptor in &suffix {
+            directory_inputs.push(DirectoryInput {
+                descriptor: descriptor.clone(),
+                index: self.read_index(descriptor).await?,
+            });
+        }
+        let mut descriptors = graph.descriptors.clone();
+        descriptors.splice(range, [descriptor]);
+        self.validate_chain(&descriptors, base.position)?;
+        self.finish_preparation(
+            Some(base),
+            Some(graph),
+            descriptors,
+            &directory_inputs,
+            base.position,
+            base.commit_sequence,
+            schema,
+        )
+        .await
+    }
+
+    async fn prepare_append(
+        &self,
+        base: Option<&RootRef>,
+        base_graph: Option<LoadedGraph>,
+        inputs: Vec<AppendInput>,
+        target: Position,
+        commit_sequence: u64,
+        schema: u32,
+        bundle: Option<Vec<u8>>,
+    ) -> Result<PreparedRoot> {
+        let limits = self.limits;
+        let prepared = self
+            .host
+            .run(move || {
+                inputs
+                    .into_iter()
+                    .map(|input| {
+                        crate::recovery::verify_segment(&input.bytes, &input.info, limits)?;
+                        let index = crate::paged::encode_index(&input.bytes)?;
+                        let digest = *blake3::hash(&index).as_bytes();
+                        let descriptor = match input.location {
+                            BodyLocation::Native => {
+                                SegmentDescriptor::native(input.info, digest, index.len() as u64)
+                            }
+                            BodyLocation::Bundle { digest, offset } => SegmentDescriptor::bundled(
+                                input.info,
+                                *blake3::hash(&index).as_bytes(),
+                                index.len() as u64,
+                                digest,
+                                offset,
+                            ),
+                        };
+                        Ok(PreparedSegment {
+                            bytes: input.bytes,
+                            descriptor,
+                            index,
+                        })
                     })
                     .collect::<Result<Vec<_>>>()
             })
             .await??;
 
-        descriptors.truncate(base_len);
-        descriptors.extend(prepared.iter().map(|(_, info, index)| {
-            SegmentDescriptor::native(
-                info.clone(),
-                *blake3::hash(index).as_bytes(),
-                index.len() as u64,
-            )
-        }));
-        self.validate_chain(&descriptors, cuts.position)?;
-        for (bytes, info, index) in &prepared {
-            let index_digest = *blake3::hash(index).as_bytes();
-            self.put_object(&info.blake3, CellObjectKind::Ltx, bytes.clone())
-                .await?;
-            self.put_object(&index_digest, CellObjectKind::Index, index.clone())
+        let mut descriptors = base_graph
+            .as_ref()
+            .map(|graph| graph.descriptors.clone())
+            .unwrap_or_default();
+        descriptors.extend(prepared.iter().map(|segment| segment.descriptor.clone()));
+        self.validate_chain(&descriptors, target)?;
+        if let Some(bytes) = bundle {
+            let digest = *blake3::hash(&bytes).as_bytes();
+            self.put_object(&digest, CellObjectKind::Bundle, bytes)
                 .await?;
         }
+        let mut directory_inputs = Vec::with_capacity(prepared.len());
+        for segment in prepared {
+            if segment.descriptor.object_kind() == CellObjectKind::Ltx {
+                self.put_object(
+                    &segment.descriptor.info.blake3,
+                    CellObjectKind::Ltx,
+                    segment.bytes,
+                )
+                .await?;
+            }
+            self.put_object(
+                &segment.descriptor.index_digest,
+                CellObjectKind::Index,
+                segment.index.clone(),
+            )
+            .await?;
+            directory_inputs.push(DirectoryInput {
+                descriptor: segment.descriptor,
+                index: segment.index,
+            });
+        }
+        self.finish_preparation(
+            base,
+            base_graph,
+            descriptors,
+            &directory_inputs,
+            target,
+            commit_sequence,
+            schema,
+        )
+        .await
+    }
 
+    async fn finish_preparation(
+        &self,
+        base: Option<&RootRef>,
+        base_graph: Option<LoadedGraph>,
+        descriptors: Vec<SegmentDescriptor>,
+        directory_inputs: &[DirectoryInput],
+        target: Position,
+        commit_sequence: u64,
+        schema: u32,
+    ) -> Result<PreparedRoot> {
+        for descriptor in &descriptors {
+            descriptor.validate_published(self.limits)?;
+        }
         let base_pages = base_graph
             .as_ref()
             .map_or(0, |graph| graph.document.database_pages);
         let (changes, retain_through, page_size, database_pages) =
-            directory_changes(&prepared, base_pages)?;
+            directory_changes(directory_inputs, base_pages)?;
         let extents = object_extents(&descriptors)?;
         let directory = if let Some(graph) = &base_graph {
             let base_extents = object_extents(&graph.descriptors)?;
@@ -425,12 +673,12 @@ impl CellReplica {
                     extents: &extents,
                     host: &self.host,
                 },
-                cuts.position.checksum,
+                target.checksum,
             )
             .await?
         } else {
             let directory = DirectoryTree::build(changes, page_size, database_pages)?;
-            if directory.checksum() != cuts.position.checksum {
+            if directory.checksum() != target.checksum {
                 return Err(CrabError::ChecksumMismatch);
             }
             directory
@@ -453,7 +701,7 @@ impl CellReplica {
         }
         let document = RootDocument {
             cell: self.cell,
-            checksum: cuts.position.checksum,
+            checksum: target.checksum,
             commit_sequence,
             database_pages,
             directory_digest: directory.root_digest(),
@@ -462,7 +710,7 @@ impl CellReplica {
             page_size,
             schema,
             segment_pages,
-            txid: cuts.position.txid,
+            txid: target.txid,
         };
         let bytes = encode_root(&document)?;
         let digest = *blake3::hash(&bytes).as_bytes();
@@ -472,13 +720,75 @@ impl CellReplica {
             cell: self.cell,
             incarnation: self.incarnation,
             digest,
-            position: cuts.position,
+            position: target,
             commit_sequence,
         };
         Ok(PreparedRoot {
             predecessor: base.copied(),
             verified: VerifiedRoot::from_graph(self.clone(), root, &document, descriptors)?,
         })
+    }
+
+    fn validate_metadata(&self, commit_sequence: u64, schema: u32) -> Result<()> {
+        if schema == 0 || commit_sequence > i64::MAX as u64 {
+            return Err(CrabError::InvalidState("invalid Cell root metadata"));
+        }
+        Ok(())
+    }
+
+    fn validate_append_sequence(
+        &self,
+        base: &Option<LoadedGraph>,
+        commit_sequence: u64,
+    ) -> Result<()> {
+        if base
+            .as_ref()
+            .is_some_and(|graph| commit_sequence <= graph.document.commit_sequence)
+        {
+            return Err(CrabError::InvalidState("commit sequence did not advance"));
+        }
+        Ok(())
+    }
+
+    async fn read_segment(&self, descriptor: &SegmentDescriptor) -> Result<Vec<u8>> {
+        descriptor.validate(self.limits)?;
+        let end = descriptor
+            .offset()
+            .checked_add(descriptor.length())
+            .ok_or(CrabError::LTXCorrupted)?;
+        let path = self.layout.incarnation_object_path(
+            &self.cell,
+            &self.incarnation,
+            &descriptor.object_digest(),
+            descriptor.object_kind(),
+        );
+        let _permit = self.host.io_permit().await?;
+        let bytes = self
+            .layout
+            .store()
+            .range_get(&path, descriptor.offset()..end)
+            .await?;
+        if bytes.len() as u64 != descriptor.length() {
+            return Err(CrabError::ChecksumMismatch);
+        }
+        Ok(bytes.to_vec())
+    }
+
+    async fn read_index(&self, descriptor: &SegmentDescriptor) -> Result<Vec<u8>> {
+        let bytes = self
+            .read_object(
+                &descriptor.index_digest,
+                CellObjectKind::Index,
+                descriptor.index_length,
+            )
+            .await?;
+        if bytes.len() as u64 != descriptor.index_length
+            || *blake3::hash(&bytes).as_bytes() != descriptor.index_digest
+        {
+            return Err(CrabError::ChecksumMismatch);
+        }
+        crate::paged::decode_index(&bytes)?;
+        Ok(bytes)
     }
 
     /// Reopens and verifies an exact immutable root and its metadata graph.
@@ -522,6 +832,9 @@ impl CellReplica {
             descriptors.extend(page);
         }
         self.validate_chain(&descriptors, root.position)?;
+        for descriptor in &descriptors {
+            descriptor.validate_published(self.limits)?;
+        }
         let endpoint = descriptors.last().ok_or(CrabError::LTXCorrupted)?;
         if document.page_size != endpoint.info.page_size
             || document.database_pages != endpoint.info.database_pages
@@ -636,6 +949,29 @@ struct LoadedGraph {
     descriptors: Vec<SegmentDescriptor>,
 }
 
+struct AppendInput {
+    bytes: Vec<u8>,
+    info: crate::SegmentInfo,
+    location: BodyLocation,
+}
+
+#[derive(Clone, Copy)]
+enum BodyLocation {
+    Native,
+    Bundle { digest: [u8; 32], offset: u64 },
+}
+
+struct PreparedSegment {
+    bytes: Vec<u8>,
+    descriptor: SegmentDescriptor,
+    index: Vec<u8>,
+}
+
+struct DirectoryInput {
+    descriptor: SegmentDescriptor,
+    index: Vec<u8>,
+}
+
 impl VerifiedRoot {
     fn from_graph(
         replica: CellReplica,
@@ -668,13 +1004,35 @@ fn object_extents(descriptors: &[SegmentDescriptor]) -> Result<BTreeMap<[u8; 32]
     let mut extents = BTreeMap::new();
     for descriptor in descriptors {
         let (digest, offset, length, kind) = descriptor.object_extent();
-        let extent = ObjectExtent {
-            kind,
-            offset,
-            length,
-        };
-        if let Some(previous) = extents.insert(digest, extent)
-            && (previous.kind != kind || previous.offset != offset || previous.length != length)
+        let end = offset.checked_add(length).ok_or(CrabError::LTXCorrupted)?;
+        match extents.entry(digest) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(ObjectExtent {
+                    kind,
+                    ranges: std::iter::once(offset..end).collect(),
+                });
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let extent = entry.get_mut();
+                if extent.kind != kind {
+                    return Err(CrabError::LTXCorrupted);
+                }
+                if !extent
+                    .ranges
+                    .iter()
+                    .any(|range| range.start == offset && range.end == end)
+                {
+                    extent.ranges.push(offset..end);
+                }
+            }
+        }
+    }
+    for extent in extents.values_mut() {
+        extent.ranges.sort_by_key(|range| range.start);
+        if extent
+            .ranges
+            .windows(2)
+            .any(|ranges| ranges[0].end > ranges[1].start)
         {
             return Err(CrabError::LTXCorrupted);
         }
@@ -683,14 +1041,16 @@ fn object_extents(descriptors: &[SegmentDescriptor]) -> Result<BTreeMap<[u8; 32]
 }
 
 fn directory_changes(
-    prepared: &[(Vec<u8>, crate::SegmentInfo, Vec<u8>)],
+    prepared: &[DirectoryInput],
     base_pages: u32,
 ) -> Result<(BTreeMap<u32, DirectoryEntry>, u32, u32, u32)> {
     let mut changes = BTreeMap::new();
     let mut retain_through = base_pages;
     let mut page_size = 0;
     let mut database_pages = base_pages;
-    for (_, info, index) in prepared {
+    for prepared in prepared {
+        let info = &prepared.descriptor.info;
+        let index = &prepared.index;
         page_size = info.page_size;
         database_pages = info.database_pages;
         // Once a cut truncates a page, later growth must provide a new frame;
@@ -702,8 +1062,12 @@ fn directory_changes(
                 entry.page,
                 DirectoryEntry {
                     page: entry.page,
-                    object: info.blake3,
-                    offset: entry.offset,
+                    object: prepared.descriptor.object_digest(),
+                    offset: prepared
+                        .descriptor
+                        .offset()
+                        .checked_add(entry.offset)
+                        .ok_or(CrabError::LTXCorrupted)?,
                     length: u32::try_from(entry.size).map_err(|_| CrabError::LTXCorrupted)?,
                     frame_hash: entry.hash,
                     checksum: entry.checksum,

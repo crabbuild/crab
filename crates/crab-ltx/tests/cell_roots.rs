@@ -5,7 +5,11 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-use crab_ltx::{CellReplica, Limits, ManagedDb, RootRef, VerifiedLocalPlan, restore_exact};
+use crab_ltx::{
+    CellReplica, Limits, ManagedDb, RootRef, VerifiedLocalPlan,
+    bundle::{Bundle, BundleEntry},
+    restore_exact,
+};
 use crab_storage::{CellStorageLayout, Store};
 use object_store::{memory::InMemory, path::Path};
 
@@ -382,4 +386,128 @@ async fn truncate_regrow_cannot_reuse_old_locator() {
     assert_eq!(length, 4_000_000);
     assert!(!is_zero);
     replacement.close().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn prepare_does_not_write_mutable_keys() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let path = directory.path().join("cell.sqlite");
+    let mut writer = ManagedDb::open(&path, Limits::default()).unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE messages(id INTEGER PRIMARY KEY, body TEXT NOT NULL);\
+                 INSERT INTO messages(body) VALUES ('first')",
+            )
+        })
+        .unwrap();
+    let first = writer.capture().unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute("INSERT INTO messages(body) VALUES ('second')", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let second = writer.capture().unwrap();
+
+    let cell = [71; 32];
+    let incarnation = [72; 16];
+    let first_segment = first.segments.first().unwrap();
+    let second_segment = second.segments.first().unwrap();
+    let bundle = Bundle::encode(
+        vec![
+            BundleEntry::for_cell(
+                cell,
+                incarnation,
+                first_segment.info().clone(),
+                std::fs::read(first_segment.path()).unwrap(),
+            ),
+            BundleEntry::for_cell(
+                [73; 32],
+                incarnation,
+                first_segment.info().clone(),
+                std::fs::read(first_segment.path()).unwrap(),
+            ),
+            BundleEntry::for_cell(
+                cell,
+                incarnation,
+                second_segment.info().clone(),
+                std::fs::read(second_segment.path()).unwrap(),
+            ),
+        ],
+        Limits::default(),
+    )
+    .unwrap();
+    let store = Store::new(Arc::new(InMemory::new()));
+    let replica = replica(store.clone(), cell, incarnation);
+    let bundled = replica.prepare_bundle(None, &bundle, 2, 5).await.unwrap();
+    assert_eq!(bundled.verified().segment_count(), 2);
+    assert_eq!(bundled.root().position, second.position);
+
+    writer
+        .transaction(|transaction| {
+            transaction.execute("INSERT INTO messages(body) VALUES ('third')", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let third = writer.capture().unwrap();
+    let appended = replica
+        .prepare(Some(&bundled.root()), &third, 3, 5)
+        .await
+        .unwrap();
+    writer.close().unwrap();
+    directory.close().unwrap();
+
+    let compacted = replica
+        .prepare_compaction(&appended.root(), 0..2, 1)
+        .await
+        .unwrap();
+    assert_eq!(compacted.predecessor(), Some(appended.root()));
+    assert_eq!(compacted.root().position, appended.root().position);
+    assert_eq!(compacted.root().commit_sequence, 3);
+    assert_eq!(compacted.verified().segment_count(), 2);
+    assert_ne!(compacted.root().digest, appended.root().digest);
+
+    let snapshot = replica
+        .prepare_compaction(&compacted.root(), 0..2, 9)
+        .await
+        .unwrap();
+    assert_eq!(snapshot.verified().segment_count(), 1);
+    assert_eq!(snapshot.root().position, appended.root().position);
+    let written = store
+        .list_prefix(&Path::from("runtime/cells/v1"))
+        .await
+        .unwrap();
+    assert!(
+        !written.is_empty()
+            && written
+                .iter()
+                .all(|object| object.location.as_ref().contains("/objects/")),
+        "root preparation must write only immutable dependency objects"
+    );
+    let destination = tempfile::TempDir::new().unwrap();
+    let writable = replica
+        .open_root(&snapshot.root())
+        .await
+        .unwrap()
+        .paged()
+        .prepare_writable()
+        .await
+        .unwrap();
+    let path = destination.path().join("restored.sqlite");
+    let mut restored = tokio::task::spawn_blocking(move || writable.open_writable(&path))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        restored
+            .transaction(|transaction| {
+                transaction.query_row("SELECT count(*) FROM messages", [], |row| {
+                    row.get::<_, u32>(0)
+                })
+            })
+            .unwrap(),
+        3
+    );
+    restored.close().unwrap();
 }

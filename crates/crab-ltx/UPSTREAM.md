@@ -117,10 +117,12 @@ Paths in the first column are relative to upstream `crates/ltx/`.
     the optional remote feature is enabled. No local listing-based authority.
 
 Still omitted: duplicate provider/URL construction, epoch election, listing-based
-discovery, complete virtual-filesystem simulation, B-tree prediction heuristics,
-node-wide shared-bundle aggregation and the Cell actor/HTTP integration. Native
-Cell cuts now have a Crab-specific immutable root and authenticated radix-directory
-format; prepared bundle/compaction roots and lazy Cell VFS activation remain.
+discovery, complete virtual-filesystem simulation and B-tree prediction heuristics.
+Native and canonical rows from shared multi-Cell bundles now use Crab's immutable
+Cell root and authenticated radix-directory format. Exact range/full compaction
+produces representation-only prepared roots, and the Cell VFS activates lazily
+through the runtime/server integration. Node-wide bundle scheduling, bounded
+external-merge Cell compaction and remaining product-domain cutovers remain.
 Retention planning, leases, permission checks and durable HTTP responses remain
 server policy.
 The new remote modules are focused Crab adaptations of the referenced designs,

@@ -184,24 +184,39 @@ pub struct PreparedRoot {
     predecessor: Option<RootRef>,
     root: RootRef,
 }
-impl Replica {
+impl CellReplica {
     pub async fn prepare(
         &self, base: Option<&RootRef>, cuts: &CaptureBatch,
         sequence: u64, schema: u32,
     ) -> Result<PreparedRoot>;
     pub async fn open_root(&self, root: &RootRef) -> Result<VerifiedRoot>;
+    pub async fn prepare_bundle(
+        &self, base: Option<&RootRef>, bundle: &crab_ltx::bundle::Bundle,
+        sequence: u64, schema: u32,
+    ) -> Result<PreparedRoot>;
     pub async fn prepare_compaction(
         &self, base: &RootRef, range: std::ops::Range<usize>, level: u8,
     ) -> Result<PreparedRoot>;
 }
 ```
 
-Reuse verification in replica/append.rs and the native/bundle frame resolver.
-`prepare` uploads immutable dependencies only: no per-epoch head write. It
+Native and bundled append preparation share the same segment/index verification
+and immutable-root builder. `prepare` uploads immutable dependencies only: no
+per-epoch head write. It
 accepts a verified historical root without a mutation token; authority remains
 the runtime's responsibility. New incarnation uses `base=None` and a complete
 snapshot. Existing incarnation continues exact TXID/checksum without epoch
 renumbering. Ownership epoch is not the physical LTX namespace in this format.
+
+`BundleEntry::for_cell` writes the canonical Cell/incarnation routing identity;
+`prepare_bundle` filters those rows from a shared multi-Cell envelope, verifies
+their exact chain, stores the complete bundle by digest and records absolute
+frame offsets with no native-object fallback. `prepare_compaction` verifies the
+selected bodies and their pinned indexes, compacts the exact range, replays only
+suffix indexes needed to replace final directory locators and preserves the
+base TXID, checksum, commit sequence and schema. The current compactor retains
+selected inputs in memory; the bounded external merge below remains required
+for the 5,000 MB qualification gate.
 
 `PreparedRoot` fields are private; constructors must verify scope, complete
 dependency upload, cut continuity and root metadata. The runtime cannot build

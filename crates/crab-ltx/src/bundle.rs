@@ -13,6 +13,24 @@ pub struct BundleEntry {
     pub bytes: Vec<u8>,
 }
 
+impl BundleEntry {
+    /// Creates an entry using the canonical identity selected by `CellReplica`.
+    #[must_use]
+    pub fn for_cell(
+        cell: [u8; 32],
+        incarnation: [u8; 16],
+        info: SegmentInfo,
+        bytes: Vec<u8>,
+    ) -> Self {
+        Self {
+            repository: encode_identity(&cell),
+            epoch: encode_identity(&incarnation),
+            info,
+            bytes,
+        }
+    }
+}
+
 /// A verified segment's byte extent in a bundle; identity is not authorization.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -137,4 +155,18 @@ impl Bundle {
         let row = self.rows.get(index).ok_or(CrabError::TxNotAvailable)?;
         Ok(&self.bytes[row.offset as usize..(row.offset + row.info.size_bytes) as usize])
     }
+}
+
+pub(crate) fn cell_identity(cell: &[u8; 32], incarnation: &[u8; 16]) -> (String, String) {
+    (encode_identity(cell), encode_identity(incarnation))
+}
+
+fn encode_identity(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(TABLE[(byte >> 4) as usize] as char);
+        encoded.push(TABLE[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
