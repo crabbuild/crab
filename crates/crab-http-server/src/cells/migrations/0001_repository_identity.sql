@@ -15,9 +15,7 @@ INSERT INTO repository_sequences(kind, last) VALUES ('issue', 0), ('label', 0);
 CREATE TABLE repository_label_submissions (
     request_id BLOB PRIMARY KEY CHECK (length(request_id) = 16),
     payload_digest BLOB NOT NULL CHECK (length(payload_digest) = 32),
-    label_number INTEGER NOT NULL UNIQUE CHECK (label_number BETWEEN 1 AND 500),
-    author_name TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0)
+    label_number INTEGER NOT NULL UNIQUE CHECK (label_number BETWEEN 1 AND 500)
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE repository_labels (
@@ -36,14 +34,11 @@ CREATE UNIQUE INDEX repository_active_label_names
 ON repository_labels(name_key)
 WHERE deleted_version IS NULL;
 
--- This row may precede its visible issue during offline import and retry repair.
 CREATE TABLE repository_issue_submissions (
     request_id BLOB PRIMARY KEY CHECK (length(request_id) = 16),
     payload_digest BLOB NOT NULL CHECK (length(payload_digest) = 32),
     issue_number INTEGER NOT NULL UNIQUE
-        CHECK (issue_number BETWEEN 1 AND 9007199254740991),
-    author_name TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0)
+        CHECK (issue_number BETWEEN 1 AND 9007199254740991)
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE repository_issues (
@@ -73,8 +68,6 @@ CREATE TABLE repository_comment_submissions (
     payload_digest BLOB NOT NULL CHECK (length(payload_digest) = 32),
     comment_number INTEGER NOT NULL
         CHECK (comment_number BETWEEN 1 AND 9007199254740991),
-    author_name TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     PRIMARY KEY (issue_number, request_id),
     UNIQUE (issue_number, comment_number),
     FOREIGN KEY (issue_number) REFERENCES repository_issues(number) ON DELETE CASCADE
@@ -99,7 +92,6 @@ CREATE TABLE repository_status_sequences (
     last INTEGER NOT NULL CHECK (last BETWEEN 1 AND 1000)
 ) STRICT, WITHOUT ROWID;
 
--- Invisible rows preserve legacy reservations whose summary publication did not finish.
 CREATE TABLE repository_commit_statuses (
     oid TEXT NOT NULL CHECK (length(oid) = 40),
     request_id BLOB NOT NULL CHECK (length(request_id) = 16),
@@ -114,11 +106,9 @@ CREATE TABLE repository_commit_statuses (
     description TEXT,
     target_url TEXT,
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-    visible INTEGER NOT NULL DEFAULT 1 CHECK (visible IN (0, 1)),
     PRIMARY KEY (oid, request_id),
     UNIQUE (oid, number)
 ) STRICT, WITHOUT ROWID;
 
-CREATE INDEX repository_visible_commit_statuses
-ON repository_commit_statuses(oid, context_key, number DESC)
-WHERE visible = 1;
+CREATE INDEX repository_commit_status_contexts
+ON repository_commit_statuses(oid, context_key, number DESC);

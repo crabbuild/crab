@@ -110,8 +110,8 @@ docker compose --file crates/crab-http-server/deploy/compose.yaml run --rm \
 
 Create returns only after the initial repository SQLite/LTX root has been
 published, restored, identity-checked and marked `cell_ready`. Adopted
-repositories remain `import_required` and cannot be served until the exact
-maintenance importer completes.
+repositories follow the same empty-Cell initialization and readiness transition;
+old collaboration application data is not imported.
 
 Inspect or stop the stack without deleting repositories:
 
@@ -223,8 +223,8 @@ unauthenticated loopback deployments may omit membership.
 `empty_cell_pending`, provisions and verifies the initial SQLite/LTX root, then
 CASes `cell_ready`. Exact retries retain the catalog UUID and restore the
 published root before completing. `adopt` requires canonical Git objects,
-publishes `import_required`, and remains unroutable until the verified importer
-finishes. `set-members` uses one conditional catalog update and reports a
+publishes `empty_cell_pending`, initializes a new empty application Cell and
+then publishes `cell_ready`. `set-members` uses one conditional catalog update and reports a
 conflict instead of replaying a stale decision over a concurrent change. Every
 running replica checks the catalog every five seconds and swaps routing only
 after all records pass Cell readiness validation; in-flight requests retain the

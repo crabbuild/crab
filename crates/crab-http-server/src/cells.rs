@@ -24,15 +24,14 @@ use uuid::Uuid;
 
 use crate::{Config, Error, Result, storage_root::StorageRoot};
 
-mod importer;
 mod initializer;
 pub(crate) mod repository;
 mod router;
 mod scheduler;
 
-pub(crate) use importer::import_repository;
 #[cfg(test)]
 pub(crate) use initializer::initialize_repository_at;
+#[cfg(test)]
 pub(super) use initializer::provision_repository;
 pub(crate) use initializer::{initialize_repository, verify_repository_cells};
 pub(crate) use router::{RepositoryCell, RepositoryCellPeer, RepositoryCellRouter};
@@ -1414,7 +1413,7 @@ mod tests {
         assert_eq!(descriptor["modules"][0]["name"], "repository");
         assert_eq!(
             descriptor["modules"][0]["code"],
-            "23e5e5ab7a8e8876d74c7fbaa3c643a16fc116d879e7c80bb9937e0338b7141d"
+            "107973fd0ba63cd83e24180deaa6c51bd4c116cc8eae49a96524ca0b43167045"
         );
         assert_eq!(descriptor["modules"][0]["schema_min"], 1);
         assert_eq!(descriptor["modules"][0]["schema_max"], 1);
@@ -3054,178 +3053,6 @@ mod tests {
         second_handle.drain().await.unwrap();
         second_runtime.shutdown().await.unwrap();
     }
-
-    #[tokio::test]
-    async fn repository_submission_reservations_repair_incomplete_visibility() {
-        let registry = Arc::new(compiled_registry().unwrap());
-        let tenant = TenantId::from_bytes([21; 16]);
-        let application = ApplicationId::from_bytes([22; 16]);
-        let repository_id = [23; 16];
-        let target =
-            CellTarget::new(tenant, application, REPOSITORY_NAMESPACE, &repository_id).unwrap();
-        let cell = target.cell_id();
-        let incarnation = IncarnationId::from_bytes([24; 16]);
-        let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
-            Path::from("repository-reservations"),
-            *application.as_bytes(),
-        );
-        let replica = CellReplica::new(
-            layout.clone(),
-            *cell.as_bytes(),
-            *incarnation.as_bytes(),
-            ReplicaLimits::default(),
-        )
-        .unwrap();
-        let catalog = CellCatalog::new(layout.clone(), tenant);
-        let proof = catalog
-            .provision(
-                CatalogEntry::new(
-                    &target,
-                    CatalogRole::Repository,
-                    registry.module_code(RepositoryModule::NAME).unwrap(),
-                    1,
-                )
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-        let authority = CellAuthority::new(layout);
-        let session = SessionId::from_bytes([25; 16]);
-        let recovering = authority
-            .create_initial(
-                &proof,
-                incarnation,
-                Owner {
-                    session,
-                    endpoint: "https://reservations.internal:8081".into(),
-                },
-            )
-            .await
-            .unwrap();
-        let issue_input = CreateIssueInput {
-            submission_id: [26; 16],
-            author: RepositoryAuthor {
-                issuer: "https://crab.build".into(),
-                subject: "user-1".into(),
-                name: "Current Display Name".into(),
-            },
-            title: "Reserved issue".into(),
-            body: "repair this incomplete reservation".into(),
-        };
-        let comment_input = CreateCommentInput {
-            submission_id: [27; 16],
-            issue: 1,
-            author: issue_input.author.clone(),
-            body: "repair this incomplete comment".into(),
-        };
-        let label_input = CreateLabelInput {
-            submission_id: [30; 16],
-            author: issue_input.author.clone(),
-            name: "reserved".into(),
-            color: "123abc".into(),
-            description: Some("repair this incomplete label".into()),
-        };
-        let issue_digest = repository::issue_submission_digest(&issue_input);
-        let comment_digest = repository::comment_submission_digest(&comment_input);
-        let label_digest = repository::label_submission_digest(&label_input);
-        let issue_submission_id = issue_input.submission_id;
-        let comment_submission_id = comment_input.submission_id;
-        let label_submission_id = label_input.submission_id;
-        let local = tempfile::TempDir::new().unwrap();
-        let runtime = CellRuntime::new(
-            SqlWorkerPool::new(1, 10).unwrap(),
-            16 * 1024 * 1024,
-            session,
-        )
-        .unwrap();
-        let handle = runtime
-            .bootstrap(
-                proof,
-                replica,
-                authority,
-                recovering,
-                local.path().join("repository.sqlite"),
-                move |transaction| {
-                    transaction.execute_batch(REPOSITORY_MIGRATION)?;
-                    transaction.execute(
-                        "INSERT INTO repository_identity(singleton, repository_uuid) VALUES (1, ?1)",
-                        [repository_id.as_slice()],
-                    )?;
-                    transaction.execute(
-                        "UPDATE repository_sequences SET last = 8 WHERE kind = 'issue'",
-                        [],
-                    )?;
-                    transaction.execute(
-                        "INSERT INTO repository_issues(number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms) VALUES (1, 'https://crab.build', 'user-1', 'Parent', 'Parent issue', '', 0, X'00000000', X'00000000', 1, 1000, 1000)",
-                        [],
-                    )?;
-                    transaction.execute(
-                        "INSERT INTO repository_issue_submissions(request_id, payload_digest, issue_number, author_name, created_at_ms) VALUES (?1, ?2, 8, 'Original Issue Name', 2000)",
-                        (issue_submission_id.as_slice(), issue_digest.as_bytes().as_slice()),
-                    )?;
-                    transaction.execute(
-                        "INSERT INTO repository_comment_sequences(issue_number, last) VALUES (1, 4)",
-                        [],
-                    )?;
-                    transaction.execute(
-                        "INSERT INTO repository_comment_submissions(issue_number, request_id, payload_digest, comment_number, author_name, created_at_ms) VALUES (1, ?1, ?2, 4, 'Original Comment Name', 3000)",
-                        (
-                            comment_submission_id.as_slice(),
-                            comment_digest.as_bytes().as_slice(),
-                        ),
-                    )?;
-                    transaction.execute(
-                        "UPDATE repository_sequences SET last = 5 WHERE kind = 'label'",
-                        [],
-                    )?;
-                    transaction.execute(
-                        "INSERT INTO repository_label_submissions(request_id, payload_digest, label_number, author_name, created_at_ms) VALUES (?1, ?2, 5, 'Original Label Name', 4000)",
-                        (
-                            label_submission_id.as_slice(),
-                            label_digest.as_bytes().as_slice(),
-                        ),
-                    )?;
-                    Ok(())
-                },
-            )
-            .await
-            .unwrap();
-        let client = CellClient::local(registry, handle.clone());
-        let repaired_issue = client
-            .command::<CreateIssue>(&target, mutation(28), issue_input)
-            .await
-            .unwrap();
-        let CreateIssueOutcome::Created(repaired_issue) = repaired_issue.output else {
-            panic!("reserved issue did not become visible");
-        };
-        assert_eq!(repaired_issue.number, 8);
-        assert_eq!(repaired_issue.author.name, "Original Issue Name");
-        assert_eq!(repaired_issue.created_at_ms, 2000);
-
-        let repaired_comment = client
-            .command::<CreateComment>(&target, mutation(29), comment_input)
-            .await
-            .unwrap();
-        let CreateCommentOutcome::Created(repaired_comment) = repaired_comment.output else {
-            panic!("reserved comment did not become visible");
-        };
-        assert_eq!(repaired_comment.number, 4);
-        assert_eq!(repaired_comment.author.name, "Original Comment Name");
-        assert_eq!(repaired_comment.created_at_ms, 3000);
-        let repaired_label = client
-            .command::<CreateLabel>(&target, mutation(31), label_input)
-            .await
-            .unwrap();
-        let CreateLabelOutcome::Created(repaired_label) = repaired_label.output else {
-            panic!("reserved label did not become visible");
-        };
-        assert_eq!(repaired_label.number, 5);
-        assert_eq!(repaired_label.created_at_ms, 4000);
-        handle.drain().await.unwrap();
-        runtime.shutdown().await.unwrap();
-    }
-
     fn mutation(byte: u8) -> MutationIdentity {
         let now_ms = i64::try_from(
             std::time::SystemTime::now()

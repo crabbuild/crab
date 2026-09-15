@@ -16,7 +16,7 @@
 | Capture correctness | WAL reset, checkpoint race, partial transaction and page-size cases |
 | Proxy authorization | Spoofed envelope, revoked credential, wrong repository and scope escalation rejected |
 | Git coexistence | Native push, browser edits, PR merges and remote helper share correct publication rules |
-| Migration correctness | Old fleet stopped, complete semantic inventory imported, all repositories restored and verified before reopening; incomplete requests and tombstones preserved |
+| Hard-cut correctness | Old fleet fenced, retired-key deletion allowlist proven, every retained Git repository initialized as an empty Cell and restored before reopening |
 | Rollout correctness | Drain, Pod kill, disk loss, incompatible reader, owner rebalance |
 | UI completeness | User action causes real storage change visible after reload and cold restart |
 
@@ -97,8 +97,8 @@ gate the later rebalancer, not the initial on-demand release.
 ### Real repositories and UI acceptance
 
 Use 5–10 real repositories from the mounted qualification checkout collection.
-Treat them as read-only source inputs. Import into dedicated Crab test prefixes;
-perform branch/content/PR mutations only in those imported test copies. A
+Treat them as read-only source inputs. Copy them into dedicated Crab test prefixes;
+perform branch/content/PR mutations only in those disposable Crab copies. A
 suggested ten-slot coverage matrix is:
 
 | Slot | Input characteristic | UI/storage purpose |
@@ -183,15 +183,15 @@ Do not introduce placeholder backends or partially wired production routes.
 | 4. Multi-node ownership | Session identity, leases, peer TLS, route policy, cold capacity admission, strong owner reads | Wrong-node routing, competing acquisition, overload, stale owner and lost-response tests |
 | 5. Domain parity | PR/reviews, assignees, checks and release metadata/assets; commit-status SQL/API is implemented | Existing domain/API suites plus real UI workflows |
 | 6. Cross-domain recovery | Durable outbox, canonical Git evidence and pending-work rules | Merge/tag crash and ABA/later-push qualification |
-| 7. Hard cutover | Stop old fleet, offline full inventory import, verify every repository, start SQL/LTX-only fleet | Real copied dataset comparison, interrupted import/resume and full-fleet acceptance before reopening |
+| 7. Hard cutover | Stop old fleet, manually delete retired application data/catalog, adopt every Git repository into a new empty Cell, start SQL/LTX-only fleet | Deletion allowlist proof, empty-state verification, interrupted initialization retry and full-fleet acceptance before reopening |
 | 8. Operational completeness | Kubernetes lifecycle, idle handoff, backups, schema/format rollout, resource limits | Three-Pod rolling update, scale-out/in, disk loss and backup restore |
 | 9. Measured optimization | Bounded proactive rebalance, batching, compaction and then safe collection as justified | Convergence/pressure tests and before/after benchmarks with unchanged fault invariants |
 
 Stages use isolated test instances until the new architecture is complete enough
 for the hard cutover. The new runtime contains one SQLite/LTX application path
 from the outset. Do not implement a legacy-serving adapter, backend toggle or
-migration-aware intermediate release. The offline importer preserves the source
-data contract without making the old store reachable from request handlers.
+migration-aware intermediate release. There is no offline importer; the cutover
+contract intentionally resets application state.
 
 Celld source reuse is approved. The first two phases must complete dependency
 alignment, attribution, capture/checksum qualification and control serialization.
@@ -214,9 +214,9 @@ Expected changes by owner:
 Replace and delete retired domain JSON runtime paths as their SQL equivalents
 land in the new architecture; remove tests that assert only removed internals.
 The hard-cutover release contains no retired collaboration backend. Retain
-offline import fixtures that protect real stored-data contracts. Review net code
-growth by responsibility rather than accepting an adapter stack around the old
-store.
+only native Cell restore and empty-initialization fixtures; there is no stored
+JSON import contract. Review net code growth by responsibility rather than
+accepting an adapter stack around the old store.
 
 ## Worked examples
 

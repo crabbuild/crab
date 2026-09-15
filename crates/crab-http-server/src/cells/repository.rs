@@ -296,7 +296,7 @@ impl Command for CreateIssue {
         let payload_digest = issue_submission_digest(&input);
         let reservation = context.sql(&SqlBatch {
             statements: vec![statement(
-                "SELECT payload_digest, issue_number, author_name, created_at_ms FROM repository_issue_submissions WHERE request_id = ?",
+                "SELECT payload_digest, issue_number FROM repository_issue_submissions WHERE request_id = ?",
                 vec![SqlValue::Blob(input.submission_id.to_vec())],
             )],
         })?;
@@ -311,32 +311,14 @@ impl Command for CreateIssue {
                     vec![integer(number)?],
                 )],
             })?;
-            if let Some(issue) = current[0].rows.first() {
-                return Ok(CommandResult::Success(CreateIssueOutcome::Created(
-                    Box::new(issue_from_row(issue)?),
-                )));
-            }
-            let created_at_ms = result_u64_from_row(row, 3)?;
-            let record = IssueRecord {
-                number,
-                author: RepositoryAuthor {
-                    issuer: input.author.issuer,
-                    subject: input.author.subject,
-                    name: result_text(row, 2)?,
-                },
-                title: input.title,
-                body: input.body,
-                state: 0,
-                label_ids: vec![],
-                assignee_subjects: vec![],
-                version: 1,
-                created_at_ms,
-                updated_at_ms: created_at_ms,
-            };
-            insert_issue(context, &record)?;
-            advance_revision(context)?;
+            let issue = current[0]
+                .rows
+                .first()
+                .ok_or(crab_cell_runtime::Error::Command(
+                    "repository issue submission has no issue row",
+                ))?;
             return Ok(CommandResult::Success(CreateIssueOutcome::Created(
-                Box::new(record),
+                Box::new(issue_from_row(issue)?),
             )));
         }
         let now = timestamp(context.now_ms())?;
@@ -372,13 +354,11 @@ impl Command for CreateIssue {
         };
         context.sql(&SqlBatch {
             statements: vec![statement(
-                "INSERT INTO repository_issue_submissions(request_id, payload_digest, issue_number, author_name, created_at_ms) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO repository_issue_submissions(request_id, payload_digest, issue_number) VALUES (?, ?, ?)",
                 vec![
                     SqlValue::Blob(input.submission_id.to_vec()),
                     SqlValue::Blob(payload_digest.as_bytes().to_vec()),
                     integer(record.number)?,
-                    SqlValue::Text(record.author.name.clone()),
-                    integer(record.created_at_ms)?,
                 ],
             )],
         })?;
@@ -418,7 +398,7 @@ impl Command for CreateComment {
         let payload_digest = comment_submission_digest(&input);
         let reservation = context.sql(&SqlBatch {
             statements: vec![statement(
-                "SELECT payload_digest, comment_number, author_name, created_at_ms FROM repository_comment_submissions WHERE issue_number = ? AND request_id = ?",
+                "SELECT payload_digest, comment_number FROM repository_comment_submissions WHERE issue_number = ? AND request_id = ?",
                 vec![integer(input.issue)?, SqlValue::Blob(input.submission_id.to_vec())],
             )],
         })?;
@@ -435,29 +415,14 @@ impl Command for CreateComment {
                     vec![integer(input.issue)?, integer(number)?],
                 )],
             })?;
-            if let Some(comment) = current[0].rows.first() {
-                return Ok(CommandResult::Success(CreateCommentOutcome::Created(
-                    comment_from_row(comment)?,
-                )));
-            }
-            let created_at_ms = result_u64_from_row(row, 3)?;
-            let record = CommentRecord {
-                issue: input.issue,
-                number,
-                author: RepositoryAuthor {
-                    issuer: input.author.issuer,
-                    subject: input.author.subject,
-                    name: result_text(row, 2)?,
-                },
-                body: input.body,
-                version: 1,
-                created_at_ms,
-                updated_at_ms: created_at_ms,
-            };
-            insert_comment(context, &record)?;
-            advance_revision(context)?;
+            let comment = current[0]
+                .rows
+                .first()
+                .ok_or(crab_cell_runtime::Error::Command(
+                    "repository comment submission has no comment row",
+                ))?;
             return Ok(CommandResult::Success(CreateCommentOutcome::Created(
-                record,
+                comment_from_row(comment)?,
             )));
         }
         let now = timestamp(context.now_ms())?;
@@ -490,14 +455,12 @@ impl Command for CreateComment {
         };
         context.sql(&SqlBatch {
             statements: vec![statement(
-                "INSERT INTO repository_comment_submissions(issue_number, request_id, payload_digest, comment_number, author_name, created_at_ms) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO repository_comment_submissions(issue_number, request_id, payload_digest, comment_number) VALUES (?, ?, ?, ?)",
                 vec![
                     integer(record.issue)?,
                     SqlValue::Blob(input.submission_id.to_vec()),
                     SqlValue::Blob(payload_digest.as_bytes().to_vec()),
                     integer(record.number)?,
-                    SqlValue::Text(record.author.name.clone()),
-                    integer(record.created_at_ms)?,
                 ],
             )],
         })?;

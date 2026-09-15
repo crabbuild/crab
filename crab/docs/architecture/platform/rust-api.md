@@ -190,8 +190,8 @@ fleet.
 This procedure deliberately couples application and runtime compatibility to
 the server release. A Cargo feature, repository setting or environment variable
 must not select between old and new persistence implementations. During the hard
-cutover, old application storage exists only as importer input; all serving uses
-the registered Cell path.
+cutover, old application storage is manually deleted; all serving uses the
+registered Cell path and no importer exists.
 
 ## Typed commands, not remotely shipped closures
 
@@ -1038,23 +1038,21 @@ directory. Its repository route algorithm is fixed:
 5. Return only a typed `CellClient`; HTTP handlers never receive a SQLite
    connection, replica, control token or peer endpoint.
 
-`repository create` is the only online empty-bootstrap authority. It writes an
-`empty_cell_pending` catalog state, provisions through the ready compiled
-release, publishes the migration and repository UUID as the initial LTX root,
-drains the temporary owner, then CASes the application state to `cell_ready`.
-Retries resume the same catalog UUID. `repository adopt` and legacy records start
-as `import_required`; only verified import completion may mark them ready. A
+`repository create` and `repository adopt` are the administrative
+empty-bootstrap authorities. They write an `empty_cell_pending` catalog state,
+provision through the ready compiled release, publish the migration and
+repository UUID as the initial LTX root, drain the temporary owner, then CAS the
+application state to `cell_ready`. Retries resume the same catalog UUID. Legacy
+catalog records are rejected. A
 ready record with a missing control/root fails verification rather than
 bootstrapping again. `serve` verifies this state and root for every repository
 before binding either listener.
 
 The router and authenticated issue/comment/label/status HTTP routes are integration-qualified
 for explicit bootstrap, local reuse, clean idle release, source-independent
-exact-root restoration and stable submission replay. The maintenance CLI imports
-the legacy issue/comment and Label object trees with bounded two-pass source
-verification, immutable evidence, LTX publication and exact crash-resume checks.
-It preserves active Labels, deletion tombstones and incomplete reservations.
-Remaining collaboration-domain import and route cuts remain. A live remote owner is
+exact-root restoration and stable submission replay. Old collaboration objects
+are not read by serving or maintenance code.
+Remaining collaboration-domain route cuts remain. A live remote owner is
 forwarded to rather than stolen; absent/expired active owners use the bounded
 ownership procedure above. Tests cover live mTLS forwarding, idle restoration,
 the full 15-second no-progress observation and exact-root takeover.

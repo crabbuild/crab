@@ -8,7 +8,6 @@ use uuid::Uuid;
 
 use crate::{BranchProtection, RepositoryConfig, RepositoryMember, storage_root::StorageRoot};
 
-const LEGACY_SCHEMA_VERSION: u32 = 1;
 const SCHEMA_VERSION: u32 = 2;
 const MAX_CATALOG_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_REPOSITORIES: usize = 10_000;
@@ -41,7 +40,6 @@ pub struct CatalogRecord {
     pub name: String,
     pub prefix: String,
     pub placement_generation: u64,
-    #[serde(default)]
     pub application: RepositoryApplicationState,
     #[serde(default)]
     pub description: String,
@@ -51,11 +49,9 @@ pub struct CatalogRecord {
     pub protected_branches: Vec<BranchProtection>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RepositoryApplicationState {
-    #[default]
-    ImportRequired,
     EmptyCellPending,
     CellReady,
 }
@@ -66,6 +62,11 @@ pub struct CatalogDocument {
     pub schema_version: u32,
     pub version: u64,
     pub repositories: Vec<CatalogRecord>,
+}
+
+#[derive(Deserialize)]
+struct CatalogSchema {
+    schema_version: u32,
 }
 
 impl Default for CatalogDocument {
@@ -80,21 +81,9 @@ impl Default for CatalogDocument {
 
 impl CatalogDocument {
     fn validate(&self, root: &StorageRoot) -> Result<(), CatalogError> {
-        if !matches!(self.schema_version, LEGACY_SCHEMA_VERSION | SCHEMA_VERSION)
-            || self.repositories.len() > MAX_REPOSITORIES
-        {
+        if self.schema_version != SCHEMA_VERSION || self.repositories.len() > MAX_REPOSITORIES {
             return Err(CatalogError::Invalid(
                 "unsupported schema or repository count",
-            ));
-        }
-        if self.schema_version == LEGACY_SCHEMA_VERSION
-            && self
-                .repositories
-                .iter()
-                .any(|record| record.application != RepositoryApplicationState::ImportRequired)
-        {
-            return Err(CatalogError::Invalid(
-                "legacy catalog cannot declare repository application readiness",
             ));
         }
         let mut ids = HashSet::new();
@@ -186,6 +175,10 @@ impl CatalogStore {
             Err(StorageError::NotFound { .. }) => return Ok((CatalogDocument::default(), None)),
             Err(error) => return Err(error.into()),
         };
+        let schema: CatalogSchema = serde_json::from_slice(&body)?;
+        if schema.schema_version != SCHEMA_VERSION {
+            return Err(CatalogError::Invalid("unsupported catalog schema"));
+        }
         let document: CatalogDocument = serde_json::from_slice(&body)?;
         document.validate(&self.root)?;
         Ok((document, Some(etag)))
@@ -240,7 +233,7 @@ impl CatalogStore {
             name,
             prefix,
             placement_generation: 1,
-            application: RepositoryApplicationState::ImportRequired,
+            application: RepositoryApplicationState::EmptyCellPending,
             description,
             members,
             protected_branches: Vec::new(),
@@ -436,20 +429,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn adopted_repository_requires_import_and_ready_transition_is_idempotent() {
+    async fn adopted_repository_requires_empty_cell_and_ready_transition_is_idempotent() {
         let catalog = catalog();
-        let runtime = CatalogRecord {
-            id: Uuid::from_bytes([7; 16]),
-            owner: "team".into(),
-            name: "project".into(),
-            prefix: "team/project".into(),
-            placement_generation: 1,
-            application: RepositoryApplicationState::ImportRequired,
-            description: String::new(),
-            members: vec![],
-            protected_branches: vec![],
-        };
-        catalog.insert(runtime.clone()).await.unwrap();
+        let layout = StoreLayout::new(
+            catalog.root.store.clone(),
+            catalog.root.repository_prefix("team/project").unwrap(),
+        );
+        crab_write::initialize::initialize_repository(
+            &catalog.root.store,
+            &layout,
+            "refs/heads/main",
+        )
+        .await
+        .unwrap();
+        let runtime = catalog
+            .adopt_repository(
+                "team".into(),
+                "project".into(),
+                "team/project".into(),
+                String::new(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime.application,
+            RepositoryApplicationState::EmptyCellPending
+        );
 
         let ready = catalog.mark_cell_ready(runtime.id).await.unwrap();
         let repeated = catalog.mark_cell_ready(runtime.id).await.unwrap();
@@ -461,7 +467,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_catalog_defaults_to_import_required_and_mutations_upgrade_v2() {
+    async fn legacy_catalog_is_rejected_at_the_hard_cut() {
         let catalog = catalog();
         let body = serde_json::to_vec(&serde_json::json!({
             "schema_version": 1,
@@ -482,35 +488,10 @@ mod tests {
             .await
             .unwrap();
 
-        let (legacy, _) = catalog.load().await.unwrap();
-        assert_eq!(legacy.schema_version, LEGACY_SCHEMA_VERSION);
-        assert_eq!(
-            legacy.repositories[0].application,
-            RepositoryApplicationState::ImportRequired
-        );
-        let mut forged_legacy = legacy.clone();
-        forged_legacy.repositories[0].application = RepositoryApplicationState::CellReady;
         assert!(matches!(
-            forged_legacy.validate(&catalog.root),
-            Err(CatalogError::Invalid(
-                "legacy catalog cannot declare repository application readiness"
-            ))
+            catalog.load().await,
+            Err(CatalogError::Invalid("unsupported catalog schema"))
         ));
-        catalog
-            .set_members(
-                "team",
-                "project",
-                vec![RepositoryMember {
-                    subject: "user-1".into(),
-                    name: "Crab User".into(),
-                    access: crate::RepositoryAccess::Admin,
-                }],
-            )
-            .await
-            .unwrap();
-        let (upgraded, _) = catalog.load().await.unwrap();
-        assert_eq!(upgraded.schema_version, SCHEMA_VERSION);
-        assert_eq!(upgraded.version, 5);
     }
 
     #[tokio::test]

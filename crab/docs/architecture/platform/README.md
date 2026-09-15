@@ -251,9 +251,9 @@ published active owner only when its canonical node session is absent or expired
 and the exact control then remains unchanged for 15 seconds. Malformed or foreign
 node records fail closed. Explicit
 `repository create` now provisions and publishes an empty Cell before marking
-the catalog application ready; imported repositories receive the same marker
-only after verified publication. Serving fails before listener bind when any
-cataloged repository is pending import/initialization or lacks a published root,
+the catalog application ready; `repository adopt` performs the same empty-Cell
+publication for an existing canonical Git repository. Serving fails before
+listener bind when any cataloged repository is pending initialization or lacks a published root,
 and request routing never authorizes an empty bootstrap. The complete public
 issue/comment/label/status route group now uses typed Cell commands and queries. The runtime
 now declares bounded predecessor-code compatibility in the compiled Rust
@@ -266,9 +266,8 @@ routes each transition through local or authenticated peer ownership, caps work
 at 16 concurrent Cells per node, and conditionally stores monotonic terminal
 progress for the activating release. Native task/actor and dirty-job admission
 remain. Label create/edit/delete/list, issue-label validation and commit-status
-create/list plus Pull merge requirements now use the same Cell; the offline
-importer preserves legacy Label and status state, while the remaining
-collaboration-domain imports and route cuts remain;
+create/list plus Pull merge requirements now use the same Cell; the hard cut has
+no legacy importer, while the remaining collaboration-domain route cuts remain;
 effective-memory and free-volume startup
 floors, a resource-derived node mailbox and page-cache/file-descriptor-derived
 active-Cell admission are implemented. A single 110-second absolute shutdown
@@ -308,9 +307,8 @@ operation in `maintenance`. After the runtime drains, the command requires the
 node directory to contain only its executor lease, checks the current Cell
 inventory, and only then CASes the same operation to `ready`. The executor
 withdraws its exact ETag after publication. Arbitrary transforms whose source
-code is absent from the candidate, namespace removal, and the remaining
-collaboration-domain imports still require explicit maintenance
-implementations. The peer
+code is absent from the candidate and namespace removal still require explicit
+maintenance implementations. The peer
 pre-decoder can extract the structurally valid but explicitly untrusted session
 claim for that lookup. The server now loads only CA-trusted Ed25519 PKCS#8
 identities, proves the leaf certificate covers its advertised host and both TLS
@@ -352,11 +350,9 @@ operations for labels. Stable codecs include issue label and assignee selections
 SQLite owns repository identity, sequences, issues, comments, active labels,
 label tombstones, immutable commit-status events and permanent create
 submission ledgers. The ledgers preserve browser idempotency beyond bounded
-runtime request retention and can complete imported reservations whose allocated
-object was not yet visible. Integration tests execute all discussion operations
+runtime request retention. Integration tests execute all discussion operations
 through `CellClient` and the Label HTTP contract through the same router, prove
-exact runtime replay, later same-submission replay,
-payload conflict rejection, incomplete-reservation repair and durable
+exact runtime replay, later same-submission replay, payload conflict rejection and durable
 missing-resource/author rejection, then delete the first owner's complete local
 database and read the published detail and list results after exact-root
 restoration by a new owner.
@@ -430,18 +426,11 @@ check `queue_messages` and `queue_dedup`, and Workflow Cells check
 not infer payload compatibility: operators must let retention cleanup complete,
 drain the primitive, or provide a purpose-built transform before removing the
 old binding.
-The maintenance CLI now implements a resumable repository import:
-`cells import-repository --owner OWNER --name NAME --operation UUID`.
-It stages bounded, version-pinned `app/v1/issues`, `app/v1/labels` and
-`app/v1/statuses` inventories in SQLite, verifies all sources with a second complete listing,
-and imports visible records, counters, deletion tombstones and incomplete
-reservations in one transaction. It then publishes an initial LTX root and
-records content-addressed source and completion evidence. Exact retries adopt a
-completed import; interruption after root publication restores and verifies
-that root before writing completion evidence.
-The command refuses a live signed Cell
-fleet, but operators must still independently prove that every legacy writer has
-stopped because the legacy deployment did not publish those node records.
+The hard cut contains no application-data importer. Catalog schema v1 is
+rejected; operators stop every old writer, manually delete retired `app/v1`
+application keys and the old catalog, then run `repository adopt` for each
+retained Git repository. Create and adopt both publish and verify a new empty
+Cell before marking it ready.
 Single-Cell migration now covers current or explicitly retained predecessor code,
 adjacent schema SQL, and same-schema code-only rollover. The code-only path is
 proven through an authoritative LTX/control publication, while the schema path is
@@ -453,10 +442,10 @@ same local/remote/idle/takeover router. Its signed peer request carries only the
 exact source and successor versions; the owner derives trusted SQL from its own
 frozen registry. Per-operation terminal progress uses conditional writes and
 cannot regress from completed to failed. Remaining collaboration-domain
-import/adapters, real multi-Pod fault proof and capacity qualification remain.
+adapters, real multi-Pod fault proof and capacity qualification remain.
 Issue/comment/status HTTP reads and mutations now enter
 through the authenticated repository router and typed Cell API; legacy issue
-objects are maintenance-import input only and are ignored by serving code.
+objects are ignored by serving code and manually deleted during cutover.
 
 ## Deliverable and contract precedence
 

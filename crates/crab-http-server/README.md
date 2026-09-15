@@ -85,7 +85,9 @@ rejects startup before binding either listener unless the compiled descriptor is
 the selected ready release or the selected compatible rollout candidate.
 `repository create` also publishes the repository's initial SQLite/LTX Cell and
 does not return until its catalog state is ready. `repository adopt` records an
-import-required repository; run the verified Cell importer before serving it.
+existing canonical Git repository, publishes a new empty application Cell and
+does not return until that Cell is ready. It does not preserve old collaboration
+application data.
 The server refuses startup for pending, missing or rootless repository Cells.
 `storage-probe` fails unless the workload can read and list the configured
 root, perform conditional coordination writes, create and delete an object,

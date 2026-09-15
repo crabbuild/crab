@@ -22,11 +22,6 @@ pub(crate) async fn initialize_repository(config: &Config, repository: Uuid) -> 
         .iter()
         .find(|record| record.id == repository)
         .ok_or(crate::catalog::CatalogError::NotFound)?;
-    if record.application == RepositoryApplicationState::ImportRequired {
-        return Err(Error::Config(
-            "adopted repository requires verified Cell import",
-        ));
-    }
     let startup = super::verify_startup_release(config).await?;
     require_ready_release(&startup.layout, startup.identity, &startup.registry).await?;
     if record.application == RepositoryApplicationState::CellReady {
@@ -233,7 +228,7 @@ pub(crate) async fn verify_repository_cells(
     for (repository, state) in repositories {
         if state != RepositoryApplicationState::CellReady {
             return Err(Error::Config(
-                "cataloged repository application has not completed Cell initialization or import",
+                "cataloged repository application has not completed Cell initialization",
             ));
         }
         let target = CellTarget::new(
@@ -246,7 +241,7 @@ pub(crate) async fn verify_repository_cells(
             .lookup(target.cell_id())
             .await?
             .ok_or(Error::Config(
-                "cataloged repository has not been initialized or imported into a Cell",
+                "cataloged repository has not been initialized into a Cell",
             ))?;
         let control = authority
             .load(target.cell_id())

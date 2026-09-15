@@ -395,7 +395,7 @@ impl Command for CreateLabel {
         let payload_digest = label_submission_digest(&input);
         let reservation = context.sql(&SqlBatch {
             statements: vec![statement(
-                "SELECT payload_digest, label_number, author_name, created_at_ms FROM repository_label_submissions WHERE request_id = ?",
+                "SELECT payload_digest, label_number FROM repository_label_submissions WHERE request_id = ?",
                 vec![SqlValue::Blob(input.submission_id.to_vec())],
             )],
         })?;
@@ -410,54 +410,18 @@ impl Command for CreateLabel {
                     vec![integer(number)?],
                 )],
             })?;
-            if let Some(label) = current[0].rows.first() {
-                if !matches!(label.get(7), Some(SqlValue::Null)) {
-                    return Ok(CommandResult::Rejected(CreateLabelOutcome::NotFound));
-                }
-                return Ok(CommandResult::Success(CreateLabelOutcome::Created(
-                    label_from_row(label)?,
-                )));
+            let label = current[0]
+                .rows
+                .first()
+                .ok_or(crab_cell_runtime::Error::Command(
+                    "repository label submission has no label row",
+                ))?;
+            if !matches!(label.get(7), Some(SqlValue::Null)) {
+                return Ok(CommandResult::Rejected(CreateLabelOutcome::NotFound));
             }
-            let name_key = input.name.to_lowercase();
-            let conflict = context.sql(&SqlBatch {
-                statements: vec![statement(
-                    "SELECT 1 FROM repository_labels WHERE name_key = ? AND deleted_version IS NULL",
-                    vec![SqlValue::Text(name_key.clone())],
-                )],
-            })?;
-            if !conflict[0].rows.is_empty() {
-                return Ok(CommandResult::Rejected(CreateLabelOutcome::NameConflict));
-            }
-            let created_at_ms = result_u64_from_row(row, 3)?;
-            let label = LabelRecord {
-                number,
-                name: input.name,
-                color: input.color,
-                description: input.description,
-                version: 1,
-                created_at_ms,
-                updated_at_ms: created_at_ms,
-            };
-            context.sql(&SqlBatch {
-                statements: vec![statement(
-                    "INSERT INTO repository_labels(number, name_key, name, color, description, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    vec![
-                        integer(label.number)?,
-                        SqlValue::Text(name_key),
-                        SqlValue::Text(label.name.clone()),
-                        SqlValue::Text(label.color.clone()),
-                        label
-                            .description
-                            .clone()
-                            .map_or(SqlValue::Null, SqlValue::Text),
-                        integer(label.version)?,
-                        integer(label.created_at_ms)?,
-                        integer(label.updated_at_ms)?,
-                    ],
-                )],
-            })?;
-            advance_revision(context)?;
-            return Ok(CommandResult::Success(CreateLabelOutcome::Created(label)));
+            return Ok(CommandResult::Success(CreateLabelOutcome::Created(
+                label_from_row(label)?,
+            )));
         }
 
         let name_key = input.name.to_lowercase();
@@ -498,13 +462,11 @@ impl Command for CreateLabel {
         context.sql(&SqlBatch {
             statements: vec![
                 statement(
-                    "INSERT INTO repository_label_submissions(request_id, payload_digest, label_number, author_name, created_at_ms) VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO repository_label_submissions(request_id, payload_digest, label_number) VALUES (?, ?, ?)",
                     vec![
                         SqlValue::Blob(input.submission_id.to_vec()),
                         SqlValue::Blob(payload_digest.as_bytes().to_vec()),
                         integer(label.number)?,
-                        SqlValue::Text(input.author.name),
-                        integer(now)?,
                     ],
                 ),
                 statement(
@@ -723,7 +685,7 @@ impl Command for CreateCommitStatus {
         let payload_digest = status_submission_digest(&input);
         let existing = context.sql(&SqlBatch {
             statements: vec![statement(
-                "SELECT payload_digest, number, request_id, author_issuer, author_subject, author_name, oid, context, state, description, target_url, created_at_ms, visible FROM repository_commit_statuses WHERE oid = ? AND request_id = ?",
+                "SELECT payload_digest, number, request_id, author_issuer, author_subject, author_name, oid, context, state, description, target_url, created_at_ms FROM repository_commit_statuses WHERE oid = ? AND request_id = ?",
                 vec![
                     SqlValue::Text(input.oid.clone()),
                     SqlValue::Blob(input.submission_id.to_vec()),
@@ -737,28 +699,6 @@ impl Command for CreateCommitStatus {
                 ));
             }
             let status = status_from_row(&row[1..12])?;
-            if result_u64_from_row(row, 12)? == 0 {
-                if !status_context_available(context, &status.oid, &status.context)? {
-                    return Ok(CommandResult::Rejected(
-                        CreateCommitStatusOutcome::ContextLimit,
-                    ));
-                }
-                let published = context.sql(&SqlBatch {
-                    statements: vec![statement(
-                        "UPDATE repository_commit_statuses SET visible = 1 WHERE oid = ? AND request_id = ? AND visible = 0",
-                        vec![
-                            SqlValue::Text(status.oid.clone()),
-                            SqlValue::Blob(status.submission_id.to_vec()),
-                        ],
-                    )],
-                })?;
-                if published[0].rows_affected != 1 {
-                    return Err(crab_cell_runtime::Error::Command(
-                        "repository commit status repair lost its reservation",
-                    ));
-                }
-                advance_revision(context)?;
-            }
             return Ok(CommandResult::Success(CreateCommitStatusOutcome::Created(
                 Box::new(status),
             )));
@@ -800,7 +740,7 @@ impl Command for CreateCommitStatus {
         let context_key = status.context.to_lowercase();
         context.sql(&SqlBatch {
             statements: vec![statement(
-                "INSERT INTO repository_commit_statuses(oid, request_id, payload_digest, number, author_issuer, author_subject, author_name, context_key, context, state, description, target_url, created_at_ms, visible) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+                "INSERT INTO repository_commit_statuses(oid, request_id, payload_digest, number, author_issuer, author_subject, author_name, context_key, context, state, description, target_url, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 vec![
                     SqlValue::Text(status.oid.clone()),
                     SqlValue::Blob(status.submission_id.to_vec()),
@@ -847,7 +787,7 @@ impl Query for ListCommitStatuses {
         validate_status_fields(&oid, "status", 0, None, None)?;
         let result = context.sql(&SqlBatch {
             statements: vec![statement(
-                "SELECT number, request_id, author_issuer, author_subject, author_name, oid, context, state, description, target_url, created_at_ms, context_key FROM repository_commit_statuses WHERE oid = ? AND visible = 1 ORDER BY context_key, number DESC",
+                "SELECT number, request_id, author_issuer, author_subject, author_name, oid, context, state, description, target_url, created_at_ms, context_key FROM repository_commit_statuses WHERE oid = ? ORDER BY context_key, number DESC",
                 vec![SqlValue::Text(oid)],
             )],
         })?;
@@ -915,14 +855,14 @@ fn status_context_available(
     let result = context.sql(&SqlBatch {
         statements: vec![
             statement(
-                "SELECT 1 FROM repository_commit_statuses WHERE oid = ? AND context_key = ? AND visible = 1 LIMIT 1",
+                "SELECT 1 FROM repository_commit_statuses WHERE oid = ? AND context_key = ? LIMIT 1",
                 vec![
                     SqlValue::Text(oid.to_owned()),
                     SqlValue::Text(context_key),
                 ],
             ),
             statement(
-                "SELECT COUNT(DISTINCT context_key) FROM repository_commit_statuses WHERE oid = ? AND visible = 1",
+                "SELECT COUNT(DISTINCT context_key) FROM repository_commit_statuses WHERE oid = ?",
                 vec![SqlValue::Text(oid.to_owned())],
             ),
         ],

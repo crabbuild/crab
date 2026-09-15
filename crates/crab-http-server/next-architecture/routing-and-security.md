@@ -106,8 +106,8 @@ Cold acquisition is a sender-side runtime operation, not a peer-protocol mode.
 [capacity admission path](ownership-and-load-balancing.md#placement-and-balancing):
 it serializes the local cold path by Cell ID, reloads proof and control, wins the
 idle owner CAS, restores the exact root, and exposes only a typed local client.
-Rootless Cells are accepted only by the explicit new-repository initializer or
-offline importer, never by a product request. The issue/comment/label/status handlers now
+Rootless Cells are accepted only by the explicit repository initializer, never
+by a product request. The issue/comment/label/status handlers now
 invoke this router after public authorization. A missing proof, control or root
 returns unavailable and never authorizes execution without acquisition and
 restore.

@@ -332,10 +332,10 @@ membership contains at least one administrator; this prevents creating a
 repository that nobody can manage or open. Create publishes and verifies the
 initial SQLite/LTX root before marking the record `cell_ready`. Every healthy
 replica discovers that ready record on its next five-second catalog poll. A
-pending or import-required record fails the refresh readiness gate and is never
-routed. Use `repository adopt` instead when the target prefix already contains a
-canonical Crab repository, then run the verified maintenance importer before
-starting or reopening the fleet.
+pending record fails the refresh readiness gate and is never routed. Use
+`repository adopt` when the target prefix already contains a canonical Crab Git
+repository; it creates a new empty application Cell and does not import old
+collaboration data.
 
 Use the same private-file pattern to replace membership later:
 

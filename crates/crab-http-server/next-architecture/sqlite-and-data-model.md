@@ -13,8 +13,8 @@ identity, issue/comment/label/status schema, typed operations, publication barri
 HTTP adapter are implemented. Pulls, releases, checks, outbox/workflow
 tables and their route cuts remain proposed.
 Restore and takeover follow [recovery rules](recovery-and-retention.md);
-the [offline importer](hard-cutover.md) must preserve domain identities and retry
-semantics when constructing these tables.
+the [hard cut](hard-cutover.md) creates these tables empty and deletes old
+application documents instead of importing them.
 
 ## SQLite runtime and WAL capture
 
@@ -233,9 +233,8 @@ including one after runtime retention expires, resolves through the repository
 submission row and returns the current visible record. Reusing a submission UUID
 with a different issuer, subject or content is a durable request conflict.
 Display name is intentionally excluded from the domain digest to preserve the
-existing identity rule, but the original display name and timestamp are retained
-so an imported incomplete reservation can become visible without rewriting its
-historical presentation fields.
+existing identity rule. The original display name and timestamp remain in the
+atomically created visible row returned by every later replay.
 
 ### Remaining domain tables
 
@@ -265,9 +264,9 @@ Within `BEGIN IMMEDIATE`:
 2. Open the application savepoint and validate actor/title/body inside the
    compiled handler. Compute the domain-separated submission digest.
 3. Look up the stable submission UUID. A different domain digest returns a
-   durable product request conflict. A matching visible issue returns its current
-   row. A matching imported reservation without a visible issue inserts the
-   reserved number using its original display name and creation timestamp.
+   durable product request conflict. A matching submission returns its current
+   issue row; a submission without that row is database corruption because both
+   records commit in one application savepoint.
 4. For a new submission, increment `repository_sequences.last` for kind `issue`
    with a checked upper bound, then insert the permanent submission row and issue
    version 1 in the same application savepoint.
@@ -283,7 +282,7 @@ version, issued/expiry times and exact bounded input bytes. The permanent
 submission digest separately covers stable author identity and domain content,
 not the runtime timestamps or display name. Handler-generated timestamps are
 not regenerated for exact runtime replay; permanent retry reads the current
-visible record, while incomplete imported reservations reuse their stored time.
+visible record and its stored time.
 
 ### Versioned edits and durable retries
 
@@ -316,5 +315,4 @@ return an old serialized permission flag or user display value as current truth.
 Do not silently expire old creation request IDs and permit them to allocate
 again. Keep compact durable deduplication records for the supported lifetime.
 If response payload retention is later bounded, retain identity, content hash,
-resource result and a documented replay policy. Imported reservations may need
-their original validation fields to preserve exact conflict behavior.
+resource result and a documented replay policy.

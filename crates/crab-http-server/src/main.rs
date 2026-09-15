@@ -44,15 +44,6 @@ enum CellsCommand {
         #[command(subcommand)]
         command: CellReleaseCommand,
     },
-    /// Run a bounded, resumable offline repository migration.
-    ImportRepository {
-        #[arg(long)]
-        owner: String,
-        #[arg(long)]
-        name: String,
-        #[arg(long)]
-        operation: uuid::Uuid,
-    },
 }
 
 #[derive(Subcommand)]
@@ -290,11 +281,6 @@ async fn cells(
         CellsCommand::Release {
             command: CellReleaseCommand::Migrations { after, limit },
         } => crab_http_server::cell_release_migrations(config, after.as_deref(), limit).await?,
-        CellsCommand::ImportRepository {
-            owner,
-            name,
-            operation,
-        } => crab_http_server::import_repository(config, &owner, &name, operation).await?,
     };
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(&bytes)?;
@@ -374,7 +360,14 @@ async fn repository(
                     members,
                 )
                 .await?;
-            println!("{}", serde_json::to_string_pretty(&record)?);
+            crab_http_server::initialize_repository_cell(config, record.id).await?;
+            let (document, _) = catalog.load().await?;
+            let ready = document
+                .repositories
+                .into_iter()
+                .find(|candidate| candidate.id == record.id)
+                .ok_or(crab_http_server::catalog::CatalogError::NotFound)?;
+            println!("{}", serde_json::to_string_pretty(&ready)?);
         }
         RepositoryCommand::SetMembers(arguments) => {
             let members = validate_members(
@@ -602,49 +595,6 @@ mod tests {
     }
 
     #[test]
-    fn repository_import_requires_explicit_repository_and_operation() {
-        let operation = "00000000-0000-0000-0000-000000000001";
-        let arguments = Arguments::try_parse_from([
-            "crab-http-server",
-            "--config",
-            "server.toml",
-            "cells",
-            "import-repository",
-            "--owner",
-            "team",
-            "--name",
-            "repo",
-            "--operation",
-            operation,
-        ])
-        .unwrap();
-        assert!(matches!(
-            arguments.command,
-            Some(Command::Cells {
-                command: CellsCommand::ImportRepository {
-                    owner,
-                    name,
-                    operation: parsed,
-                }
-            }) if owner == "team" && name == "repo" && parsed.hyphenated().to_string() == operation
-        ));
-        assert!(
-            Arguments::try_parse_from([
-                "crab-http-server",
-                "--config",
-                "server.toml",
-                "cells",
-                "import-repository",
-                "--owner",
-                "team",
-                "--name",
-                "repo",
-            ])
-            .is_err()
-        );
-    }
-
-    #[test]
     fn members_file_accepts_stdin_and_preserves_admin_identity() {
         let arguments = Arguments::try_parse_from([
             "crab-http-server",
@@ -680,6 +630,26 @@ mod tests {
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].subject, "alice-sub");
         assert_eq!(members[0].access, RepositoryAccess::Admin);
+    }
+
+    #[test]
+    fn hard_cut_rejects_the_removed_repository_import_command() {
+        assert!(
+            Arguments::try_parse_from([
+                "crab-http-server",
+                "--config",
+                "server.toml",
+                "cells",
+                "import-repository",
+                "--owner",
+                "team",
+                "--name",
+                "project",
+                "--operation",
+                "00000000-0000-0000-0000-000000000001",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

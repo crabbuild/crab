@@ -186,8 +186,8 @@ Create initializes the canonical Git repository, publishes an
 `empty_cell_pending` catalog record, publishes the repository application's
 initial SQLite/LTX root, then marks the record `cell_ready`. Exact retries resume
 the same catalog UUID. Adopt validates an existing layout and manifest, records
-`import_required`, and never converts arbitrary object prefixes; run the
-verified Cell importer before serving that repository.
+`empty_cell_pending`, publishes a new empty application Cell and never converts
+arbitrary object prefixes. Old collaboration application data is not imported.
 
 ```sh
 SERVER="$HOME/Workspace/crabbuild-target/crab-http-server-dev/release/crab-http-server"
@@ -326,10 +326,9 @@ docker run --rm --name crab-http-server \
 ```
 
 Run `repository create` or `repository adopt` as a one-shot container with the
-same mounts. Creation initializes the Cell
-before returning. Adoption remains unavailable to serving until its legacy data
-has been imported and verified. A running server rejects changed catalog
-versions containing pending/import-required or rootless repositories and marks
+same mounts. Creation and adoption initialize a new empty Cell before returning;
+adoption intentionally does not preserve old collaboration data. A running
+server rejects changed catalog versions containing pending or rootless repositories and marks
 readiness unhealthy; it swaps in ready changes without a restart.
 
 The binary's `healthcheck` command calls `/readyz` on the management listener.
@@ -1139,12 +1138,12 @@ Serving data currently uses these roots:
 
 | Root | Content |
 | --- | --- |
-| Repository Cell/LTX namespace | Issues, issue comments, labels, label deletion tombstones, counters, and permanent product submission ledgers |
-| `app/v1/issues` | Legacy issue import input only; serving ignores these objects after cutover |
+| Repository Cell/LTX namespace | Issues, issue comments, labels, label deletion tombstones, commit statuses, counters, and permanent product submission ledgers |
+| `app/v1/issues` | Retired issue documents; serving ignores them and operators delete them at hard cutover |
 | `app/v1/pulls` | Pulls, comments, reviews, merge state, counters, and reservations |
-| `app/v1/labels` | Legacy Label import input only; serving ignores these objects after cutover, and offline import preserves its sequence, active rows, tombstones and incomplete reservations |
+| `app/v1/labels` | Retired Label documents; serving ignores them and operators delete them at hard cutover |
 | `app/v1/releases` | Releases, tags, assets, reservations, and tombstones |
-| `app/v1/statuses` | Commit statuses and immutable requests |
+| `app/v1/statuses` | Retired status documents; serving ignores them and operators delete them at hard cutover |
 | `app/v1/check-runs` | Check catalogs, versioned output, and requests |
 | `app/v1/settings` | Branch protection and repository lifecycle records |
 

@@ -126,10 +126,9 @@ rules.
 Every mutation reads the document with its provider CAS token, validates the
 whole next document, sorts it deterministically, increments `version`, and uses
 conditional create or update. A state conflict restarts the bounded loop. Names
-are unique ignoring case; prefixes and IDs are exactly unique. Version 1
-documents remain readable only as legacy input: absent application state
-defaults to `import_required`. Every mutation writes version 2. An old binary
-rejects the new version, which is intentional for the forward-only hard cut.
+are unique ignoring case; prefixes and IDs are exactly unique. Version 2 is
+mandatory and accepts only `empty_cell_pending` or `cell_ready`; version 1 is
+rejected at the forward-only hard cut instead of being upgraded or imported.
 
 ### Create and adopt without scanning
 
@@ -155,9 +154,10 @@ this is safe and recoverable with `repository adopt`. Once the pending record is
 published, exact retries retain its UUID, restore and verify the authoritative
 SQLite root, and complete the ready-state CAS. The server rejects pending records
 at startup and catalog refresh, so a partial initialization is never routable.
-Adopt performs the two canonical Git metadata reads and inserts an
-`import_required` record; its verified maintenance import must finish before it
-can become `cell_ready`.
+Adopt performs the two canonical Git metadata reads, inserts an
+`empty_cell_pending` record and initializes a new empty application Cell through
+the same publication and verification path as create. Old application JSON is
+not read or preserved.
 
 For an authenticated deployment, the administration CLI requires an initial
 administrator before either operation reaches storage. Membership can stream

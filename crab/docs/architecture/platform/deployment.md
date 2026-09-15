@@ -272,7 +272,6 @@ crab-http-server --config CONFIG cells release activate --expected-revision N --
 crab-http-server --config CONFIG cells release activate --expected-revision N --strategy maintenance
 crab-http-server --config CONFIG cells release status
 crab-http-server --config CONFIG cells release migrations [--after CELL_ID] [--limit N]
-crab-http-server --config CONFIG cells import-repository --owner OWNER --name NAME --operation UUID
 ```
 
 `cells release inspect --json` is now implemented and read-only; it prints the
@@ -365,30 +364,11 @@ Cell publication, SQLite handles and worker threads settle. A heartbeat failure
 also cancels the server and retains its last record until shutdown or ETag-fenced
 stale collection; heartbeat expiry alone is not drain evidence.
 
-`cells import-repository` is the first maintenance importer slice. It
-requires the exact ready release, resolves the catalog repository UUID, rejects
-any live signed Cell node, captures at most 2,000,000 issue/comment/Label/status objects
-and 8 GiB of source, and requires three times the source bytes plus 256 MiB of
-local free space. A bounded channel feeds a temporary SQLite staging database
-while the reader hashes every object. A second complete LIST must reproduce
-every path, size, ETag/version and semantic kind before import begins. One
-bootstrap transaction installs the repository schema and copies issue/comment/
-Label/status sequences, visible records/latest status contexts, Label tombstones and incomplete submission
-reservations. The command then
-publishes the initial LTX root, restores and compares the semantic summary, and
-strict-creates completion evidence bound to the operation, repository, Cell,
-source inventory and published root. A retry resumes rootless ownership after
-an observed stale interval, or restores an already published root before
-finishing evidence. The exact completed operation then moves the catalog from
-`import_required` to `cell_ready`. A different operation cannot overwrite a
-ready repository. This slice intentionally excludes pull requests, checks,
-releases, milestones and their pending cross-domain work; those sources remain outside the
-captured inventory and must receive their own explicit importer before cutover.
-
-An empty signed node directory is only a mutual-exclusion check for the new Cell
-fleet. It cannot prove that a legacy server has stopped because legacy servers
-never registered there. Operators must still satisfy the external process,
-scheduler and storage-write revocation proof required by the hard-cut procedure.
+There is no application-data import command. During the hard cut, operators stop
+and fence every legacy writer, manually delete retired `app/v1` collaboration
+keys and the old HTTP catalog, then run `repository adopt` for every retained Git
+repository. Adoption initializes and verifies a new empty Cell before returning
+`cell_ready`.
 
 `ReleaseStore::provision` implements the release-aware catalog boundary. It first
 requires the exact compiled descriptor bytes selected by `ready.current` or
@@ -600,33 +580,30 @@ Git/network operations may already have happened before backup.
 
 ## Repository application cutover
 
-Stop old collaboration writes and background writers. Inventory repository UUIDs;
-import application JSON into repository SQL; validate counts, IDs, permissions,
-relationships and retained submission identities. Publish initial roots and
-switch the fleet to the native consumer in one maintenance cutover. No dual
-writes, legacy read fallback or second collaboration persistence path remains.
+Stop and fence old collaboration writers. Back up the bucket if required, then
+manually delete retired application JSON and the old catalog while preserving
+Git/LFS content. Adopt each canonical Git repository into a new empty Cell,
+publish and restore its initial root, and switch the fleet in one maintenance
+cutover. No dual writes, import, legacy read fallback or second collaboration
+persistence path remains.
 
-The catalog is the durable admission state machine. Newly created repositories
-start `empty_cell_pending`; adopted or legacy records start `import_required`;
-only a verified initializer or exact importer operation may write `cell_ready`.
+The catalog is the durable admission state machine. Newly created and adopted
+repositories start `empty_cell_pending`; only the verified initializer may write `cell_ready`.
 Startup validates every record before binding, and each five-second catalog
 refresh validates the changed document before replacing the in-memory index. A
 pending record therefore makes readiness unhealthy but never becomes routable.
 Once its final CAS publishes `cell_ready`, the next refresh can materialize it.
-New writes use catalog schema version 2. Version 1 remains a one-way read input:
-the absent application field decodes as `import_required`, and the next
-administrative mutation upgrades the document to version 2. Version 1 cannot
-declare readiness. Old binaries reject version 2, enforcing the forward-only
-fleet cut instead of silently serving a new state machine.
+Catalog schema version 2 is mandatory. Version 1 is rejected rather than read or
+upgraded. Old binaries reject version 2, enforcing the forward-only fleet cut.
 
 Validate browser create/edit/list/search and error flows, plus Git/SQL outbox
 reconciliation, before reopening admission. Existing public product routes and
 React UI stay in place; only explicitly designed outcome/receipt additions change
 their contract. Existing Git/Xet/LFS objects and publication are outside this
-application-data migration. Issue and comment production routes no longer call
-their former JSON path; that namespace is maintenance import input only. Other
-collaboration domains continue to use `app_storage` until their own hard-cut
-importer and native route adapter are delivered.
+application-data reset. Issue and comment production routes no longer call their
+former JSON path; operators delete that namespace during cutover. Other
+collaboration domains continue to use `app_storage` only until their native route
+adapter is delivered, then their old keys are deleted as part of the same cut.
 
 ## Operational metrics
 

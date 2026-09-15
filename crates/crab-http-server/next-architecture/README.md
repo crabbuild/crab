@@ -13,9 +13,8 @@ activation and publishes a verified descriptor as current. Private routing now
 includes mandatory mTLS ingress, live enrollment, authoritative outbound owner
 lookup and one bounded stale-owner retry. Explicit release activation now also
 requires one live exact fleet/image/release/module-compatible candidate. The
-maintenance importer now covers the legacy issue/comment, Label and commit-status trees,
-including counters, visible edits/latest contexts, Label tombstones and incomplete reservations,
-with two-pass source verification, immutable evidence and crash-resumable LTX publication. The
+forward-only hard cut rejects legacy catalogs and has no application-data
+importer: create and adopt both publish a new empty repository Cell. The
 repository router now distinguishes a live signed remote owner from an absent or
 expired session and uses the runtime's unchanged-control observation before
 takeover. The server now also runs a bounded catalog-driven Cell scheduler:
@@ -35,10 +34,9 @@ authenticated peer migrations concurrently, and persists monotonic terminal
 progress under the release operation. The final gate refuses `ready` while any
 retained predecessor remains, and `cells release migrations` exposes a bounded
 cursor view of pending and failed Cells.
-Remaining collaboration-domain import, configured multi-node quorum and the
-remaining product-domain route cuts are not yet integrated. New repository
-creation explicitly publishes an empty Cell and marks
-the catalog ready; adoption remains blocked until verified import. Startup
+Configured multi-node quorum and the remaining product-domain route cuts are not
+yet integrated. New repository creation and adoption explicitly publish an empty
+Cell and mark the catalog ready. Startup
 rejects every missing or rootless repository Cell. The issue/comment/label/status HTTP group
 now uses the release-aware router, which reuses local handles, selects
 authenticated remote owners and restores idle Cells without request-time empty
@@ -76,8 +74,9 @@ servers route collaboration requests to the repository's current owner, while
 the existing Git data plane continues to use its shared publication contracts.
 
 Accepted deployment decision: hard cutover from the current architecture. A
-maintenance window stops the old fleet, imports and verifies existing application
-data, and starts the new fleet. The new runtime supports only SQLite/LTX
+maintenance window stops the old fleet, manually deletes existing application
+data and the old catalog, initializes empty Cells for retained Git repositories,
+and starts the new fleet. The new runtime supports only SQLite/LTX
 application storage; no old/new mixed fleet or legacy backend is required.
 
 The existing [system and write design](../DESIGN.md) describes current behavior.
@@ -107,7 +106,7 @@ and deployment boundaries.
 | [Git and application workflows](git-workflows.md) | Durable outbox, merge/tag publication, uncertain outcomes, and release assets. |
 | [Recovery, compaction, and backups](recovery-and-retention.md) | Exact restore, failure matrix, takeover races, retention, and backup roots. |
 | [Deployment, lifecycle, and operations](deployment-and-operations.md) | Kubernetes topology, drain, resource budgets, capacity, metrics, and runbooks. |
-| [Hard cutover and future upgrades](hard-cutover.md) | Offline import, verification, fleet transition, failure recovery, and format upgrades. |
+| [Hard cutover and future upgrades](hard-cutover.md) | Offline application-data reset, empty Cell initialization, verification, fleet transition, failure recovery, and format upgrades. |
 | [Validation, delivery, and worked examples](validation-and-delivery.md) | Protocol tests, real repositories/UI acceptance, delivery gates, examples, and sources. |
 
 Start with [architecture and data ownership](overview.md#architecture-and-data-ownership).

@@ -83,17 +83,6 @@ pub(crate) async fn read<T: DeserializeOwned>(
     }
 }
 
-pub(crate) fn decode<T: DeserializeOwned>(
-    bytes: &[u8],
-) -> std::result::Result<T, serde_json::Error> {
-    let document: Document<T> = serde_json::from_slice(bytes)?;
-    Ok(document.data)
-}
-
-pub(crate) fn decode_sequence(bytes: &[u8]) -> std::result::Result<u64, serde_json::Error> {
-    Ok(decode::<Sequence>(bytes)?.last)
-}
-
 fn encode<T: Serialize>(data: &T) -> Result<Vec<u8>> {
     let bytes = serde_json::to_vec(&Document {
         schema_version: Schema::default(),

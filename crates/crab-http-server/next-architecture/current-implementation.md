@@ -10,13 +10,13 @@ Paths in this table are relative to `crates/crab-http-server/` unless stated.
 
 | Current surface | Entry and owner | Existing behavior | Next design impact |
 | --- | --- | --- | --- |
-| Process CLI | [main.rs](../src/main.rs) | Serve, healthcheck, storage-probe, repository create/adopt/set-members/list, release lifecycle and resumable repository issue/comment/Label/status import | Add importers for the remaining application domains and fleet-wide cutover evidence |
+| Process CLI | [main.rs](../src/main.rs) | Serve, healthcheck, storage-probe, repository create/adopt/set-members/list and Cell release lifecycle; there is no application-data import command | Keep the hard cut forward-only and qualify the empty-state reset procedure |
 | Server lifecycle | [server.rs](../src/server.rs), [cells.rs](../src/cells.rs), [cells/initializer.rs](../src/cells/initializer.rs), [cells/router.rs](../src/cells/router.rs), [cells/scheduler.rs](../src/cells/scheduler.rs), [peer.rs](../src/peer.rs), [peer_tls.rs](../src/peer_tls.rs) | Two listeners, catalog refresh, Git runtime, one compiled-registry-validated Cell runtime/session, mandatory management mTLS, live signed enrollment, local dispatch and owner-selecting outbound peer transport. Startup and every changed catalog version require `cell_ready`, a catalog proof, control and a published root; request routing never bootstraps a Cell. A missing/expired remote session starts the unchanged-control takeover protocol; malformed/foreign records fail closed. A one-second Cell scheduler scans rendezvous-assigned catalog shards, caps each cycle at 128 due Cells, invokes type-erased compiled Tick/activity/effect runners for registered namespaces, uses CPU-derived activity admission capped at 16 and one job per Cell, keeps long activities out of the scanner future, routes work locally or through the authenticated peer path and drains scheduler-only local activations back to Idle. Exact registered operation IDs/codecs select fleet-only peer grants. Readiness waits for the first complete cycle. Completed-cycle progress is signed into heartbeat refreshes; 15 seconds without progress withdraws local readiness and excludes that session from rendezvous assignment until recovery. Scheduler cancellation aborts and joins tracked activities, triggering cooperative cancellation before runtime drain. Cell drain withdraws readiness; scheduler cancellation/join participates in shutdown. Effective-memory and free-volume startup floors protect the Cell budget; the node mailbox receives five percent of that budget; three 64 KiB SQLite caches and eight persistent descriptors per Cell derive the active limit. One absolute 110-second deadline covers listener, background, transfer, maintenance, Cell and worker drain | Add native task/actor and dirty-job admission, durable scheduler retry/fairness and multi-node activity failure qualification |
-| Repository identity | [catalog.rs](../src/catalog.rs), [cells/initializer.rs](../src/cells/initializer.rs), `materialize_catalog` in [server.rs](../src/server.rs) | Catalog and runtime repository retain one stable UUID independent of owner/name. Catalog v2 records application state; v1 loads only as `import_required` and the next mutation upgrades it. Create moves `empty_cell_pending → cell_ready` only after restoring and verifying the exact SQLite identity; adopt starts `import_required` | Use the same state gate for every remaining domain importer and fleet cutover report |
+| Repository identity | [catalog.rs](../src/catalog.rs), [cells/initializer.rs](../src/cells/initializer.rs), `materialize_catalog` in [server.rs](../src/server.rs) | Catalog and runtime repository retain one stable UUID independent of owner/name. Catalog v2 is mandatory and records application state; v1 is rejected. Create and adopt both move `empty_cell_pending → cell_ready` only after publishing, restoring and verifying a new empty SQLite Cell | Preserve the same readiness gate for every repository and fleet cutover report |
 | Application boundary | [app.rs](../src/app.rs) | Repository/principal checks, eight production application slots, 30-second handler deadline | Preserve external contracts; move accepted durable work into tracked cells |
-| Collaboration persistence | [app_storage.rs](../src/app_storage.rs), [cells/repository.rs](../src/cells/repository.rs) | Issues, comments, Labels and commit statuses use transactional repository SQLite plus LTX; the offline importer preserves legacy counters, visible edits/latest contexts, Label tombstones and incomplete reservations; pulls consume the Cell label and status catalogs but their own records, releases, checks and settings still use bounded JSON/CAS | Move each remaining domain through an explicit importer and typed module API |
-| Issues, comments and Labels | [issues.rs](../src/issues.rs), [labels.rs](../src/labels.rs), [cells/repository.rs](../src/cells/repository.rs), [cells/router.rs](../src/cells/router.rs), [server_peer_e2e_tests.rs](../src/server_peer_e2e_tests.rs) | Public create/read/list/update routes use typed commands and queries; Label deletion retains a versioned tombstone; immutable submission identity, number allocation and visibility commit in one SQLite transaction; issue Label existence is rechecked inside its update transaction; source-loss tests restore the published LTX root and prove legacy objects are not a serving path; the offline importer restores active and deleted Labels plus incomplete reservations from LTX; a two-node test proves Issue/Label create and assignment from public HTTP through mTLS to the remote owner and published LTX; router tests prove idle restoration and stale-active-owner takeover | Qualify sustained capacity and process-loss failover |
-| Commit statuses | [statuses.rs](../src/statuses.rs), [pulls.rs](../src/pulls.rs), [pulls/merge.rs](../src/pulls/merge.rs), [cells/repository.rs](../src/cells/repository.rs) | New submissions verify exact reachable commits, then append through typed Cell commands; permanent UUID/digest rows preserve replay, latest selection is deterministic per case-insensitive context, and Pull views/merge admission query the same Cell state. Import preserves visible summaries and unpublished reservations | Add check-run SQL so required checks share one atomic authority |
+| Collaboration persistence | [app_storage.rs](../src/app_storage.rs), [cells/repository.rs](../src/cells/repository.rs) | Issues, comments, Labels and commit statuses use transactional repository SQLite plus LTX; pulls consume the Cell label and status catalogs but their own records, releases, checks and settings still use bounded JSON/CAS. No legacy application importer exists | Move each remaining serving domain directly to typed module APIs; old bucket data is manually deleted at cutover |
+| Issues, comments and Labels | [issues.rs](../src/issues.rs), [labels.rs](../src/labels.rs), [cells/repository.rs](../src/cells/repository.rs), [cells/router.rs](../src/cells/router.rs), [server_peer_e2e_tests.rs](../src/server_peer_e2e_tests.rs) | Public create/read/list/update routes use typed commands and queries; Label deletion retains a versioned tombstone; immutable submission identity, number allocation and visibility commit in one SQLite transaction; issue Label existence is rechecked inside its update transaction; source-loss tests restore the published LTX root and prove legacy objects are not a serving path; a two-node test proves Issue/Label create and assignment from public HTTP through mTLS to the remote owner and published LTX; router tests prove idle restoration and stale-active-owner takeover | Qualify sustained capacity and process-loss failover |
+| Commit statuses | [statuses.rs](../src/statuses.rs), [pulls.rs](../src/pulls.rs), [pulls/merge.rs](../src/pulls/merge.rs), [cells/repository.rs](../src/cells/repository.rs) | New submissions verify exact reachable commits, then append through typed Cell commands; permanent UUID/digest rows preserve replay, latest selection is deterministic per case-insensitive context, and Pull views/merge admission query the same Cell state | Add check-run SQL so required checks share one atomic authority |
 | PR workflow | [pulls/storage.rs](../src/pulls/storage.rs), [pulls/merge.rs](../src/pulls/merge.rs) | Durable pending merge and reconciliation against Git refs | Express as SQL outbox plus canonical Git publication |
 | Git receive | [receive.rs](../src/receive.rs), [receive/publish.rs](../src/receive/publish.rs) | Bounded native receive, validation, ref and GC coordination | Preserve shared publication authority and worker drain |
 | Repository policy | [repository_settings.rs](../src/repository_settings.rs) | Branch protection and archive state read by browsing and publication | Keep direct object-store CAS in the initial design |
@@ -27,8 +27,9 @@ Paths in this table are relative to `crates/crab-http-server/` unless stated.
 
 Current persistence is described in
 [pagination and storage](../REFERENCE.md#understand-pagination-and-storage).
-The `app/v1` namespace includes visible objects, sequences, claims, reservations,
-and tombstones. The migration cannot infer the complete state from UI list APIs.
+The remaining `app/v1` namespace includes visible objects, sequences, claims,
+reservations and tombstones for domains not yet cut to Cells. Those keys are
+retired and manually deleted at the fleet hard cut; they are not importer input.
 
 ### Replication crate now available
 
@@ -105,8 +106,7 @@ offline peer transport fails closed and lease loss prevents publication.
 Breaking-release maintenance now inspects retained runtime requests, inbox
 deliveries, effects, Queue rows/dedup records and Workflow runs after migrating
 each Cell, and refuses Ready while any persisted row still requires removed or
-narrowed executable contracts. Removed-namespace transforms and remaining
-collaboration-domain imports are not implemented. The
+narrowed executable contracts. Removed-namespace transforms are not implemented. The
 private management route can dispatch or forward registered calls between
 compatible nodes. The repository module additionally registers private Tick and
 effect claim/lease/validation operations. Its server-owned due scanner reads the
@@ -129,14 +129,11 @@ pulls, releases, checks and other collaboration domains still use application JS
 Git publication behavior remains unchanged. See
 [remaining gates](validation-and-delivery.md#verification-scope-for-the-current-implementation).
 
-The maintenance command `cells import-repository` now captures the exact legacy
-issue/comment, Label and commit-status object trees into one bounded SQLite staging database,
-verifies a second stable listing, installs the repository schema and publishes a
-verified initial LTX root. It preserves active Label edits, deletion tombstones
-and incomplete issue/comment/Label/status reservations. Immutable source/completion
-evidence and rootless or post-publication recovery make exact operation retries
-resumable. This is not yet the full-fleet cutover importer: pull requests,
-checks, releases, milestones and pending cross-domain work still require import support.
+The hard cut deliberately has no repository application importer. Catalog schema
+v1 is rejected, both create and adopt initialize a fresh empty Cell, and old
+`app/v1` state is removed manually while the fleet is offline. Exact retries are
+supported for native catalog/Cell initialization and later native mutations, not
+for recovering deleted collaboration documents.
 
 ### Existing tests to preserve or evolve
 

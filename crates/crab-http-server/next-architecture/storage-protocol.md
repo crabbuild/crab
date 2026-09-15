@@ -25,7 +25,7 @@ The following paths are relative to the existing configured storage root:
       snapshots/<txid>-<digest>.ltx              full database LTX snapshot
     manifests/<digest>.json                    immutable recovery manifests
   backups/<backup-id>.json                      retained recovery roots
-  migration/<migration-id>/...                  inventory and import evidence
+  migration/<migration-id>/...                  native schema/code migration evidence
 
 <existing-repository-prefix>/...                existing Git and app/v1 data
 ```
@@ -80,7 +80,7 @@ qualification, not official LTX version names.
 
 `state` describes activation (`recovering`, `serving`, `draining`, `idle`,
 `tombstoned`). There is no storage-backend mode: every cell uses SQLite/LTX.
-Offline import progress belongs in migration evidence, outside runtime routing.
+Native release-migration progress belongs in migration evidence, outside runtime routing.
 
 `revision` increases on every CAS, including renewal, to avoid repeating identical
 control bytes. A pure heartbeat preserves the head. A publication preserves
