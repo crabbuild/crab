@@ -8,20 +8,28 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use futures_util::{StreamExt, TryStreamExt};
+use crab_cell_runtime::{Committed, InvocationError, MutationIdentity, Observed, RequestId};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::{
     app::{Error, Result, actor, body, number, repository, submission, title},
-    app_storage,
     assignees::{self, Assignee},
     auth::{Identity, Principal},
+    cells::{
+        RepositoryCell, RepositoryCellRouter,
+        repository::{
+            CommentKey, CommentPage, CommentRecord, CreateComment, CreateCommentInput,
+            CreateCommentOutcome, CreateIssue, CreateIssueInput, CreateIssueOutcome, GetComment,
+            GetIssue, IssueRecord, IssueSummary, ListComments, ListCommentsInput, ListIssues,
+            ListIssuesInput, RepositoryAuthor, UpdateComment, UpdateCommentInput,
+            UpdateCommentOutcome, UpdateIssue, UpdateIssueInput, UpdateIssueOutcome,
+        },
+    },
     labels::{self, Label},
-    server::Server,
+    server::{Repository, Server},
 };
-pub(crate) mod storage;
-use storage::{Comment, Issue, IssueState};
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
@@ -41,24 +49,102 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .layer(axum::extract::DefaultBodyLimit::max(80 * 1024))
         .route_layer(middleware::from_fn_with_state(server, crate::app::admit))
 }
+
 fn issue_view(
-    issue: &Issue,
+    issue: &IssueRecord,
     author: &Identity,
     labels: &[Label],
     assignees: &[Assignee],
     can_manage_metadata: bool,
     full: bool,
 ) -> Value {
-    json!({"number":issue.number,"title":issue.title,"body":full.then_some(&issue.body),"state":issue.state,
-        "author":issue.author.name,"version":issue.version,"created_at":issue.created_at,"updated_at":issue.updated_at,
-        "labels":labels::selection_view(&issue.label_ids, labels),
-        "assignees":assignees::selection_view(&issue.assignee_subjects, assignees),
-        "can_edit":storage::same_author(&issue.author, author),
-        "can_label":can_manage_metadata,"can_assign":can_manage_metadata})
+    json!({
+        "number": issue.number,
+        "title": issue.title,
+        "body": full.then_some(&issue.body),
+        "state": state_name(issue.state),
+        "author": issue.author.name,
+        "version": issue.version,
+        "created_at": issue.created_at_ms,
+        "updated_at": issue.updated_at_ms,
+        "labels": labels::selection_view(&issue.label_ids, labels),
+        "assignees": assignees::selection_view(&issue.assignee_subjects, assignees),
+        "can_edit": same_author(&issue.author, author),
+        "can_label": can_manage_metadata,
+        "can_assign": can_manage_metadata,
+    })
 }
-fn comment_view(comment: &Comment, author: &Identity) -> Value {
-    json!({"number":comment.number,"body":comment.body,"author":comment.author.name,"version":comment.version,
-        "created_at":comment.created_at,"updated_at":comment.updated_at,"can_edit":storage::same_author(&comment.author, author)})
+
+fn issue_summary_view(
+    issue: &IssueSummary,
+    author: &Identity,
+    labels: &[Label],
+    assignees: &[Assignee],
+    can_manage_metadata: bool,
+) -> Value {
+    json!({
+        "number": issue.number,
+        "title": issue.title,
+        "body": Value::Null,
+        "state": state_name(issue.state),
+        "author": issue.author.name,
+        "version": issue.version,
+        "created_at": issue.created_at_ms,
+        "updated_at": issue.updated_at_ms,
+        "labels": labels::selection_view(&issue.label_ids, labels),
+        "assignees": assignees::selection_view(&issue.assignee_subjects, assignees),
+        "can_edit": same_author(&issue.author, author),
+        "can_label": can_manage_metadata,
+        "can_assign": can_manage_metadata,
+    })
+}
+
+fn comment_view(comment: &CommentRecord, author: &Identity) -> Value {
+    json!({
+        "number": comment.number,
+        "body": comment.body,
+        "author": comment.author.name,
+        "version": comment.version,
+        "created_at": comment.created_at_ms,
+        "updated_at": comment.updated_at_ms,
+        "can_edit": same_author(&comment.author, author),
+    })
+}
+
+fn state_name(state: u8) -> &'static str {
+    match state {
+        0 => "open",
+        1 => "closed",
+        _ => "invalid",
+    }
+}
+
+fn same_author(left: &RepositoryAuthor, right: &Identity) -> bool {
+    left.issuer == right.issuer && left.subject == right.subject
+}
+
+fn repository_author(identity: &Identity) -> RepositoryAuthor {
+    RepositoryAuthor {
+        issuer: identity.issuer.clone(),
+        subject: identity.subject.clone(),
+        name: identity.name.clone(),
+    }
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum IssueState {
+    Open,
+    Closed,
+}
+
+impl IssueState {
+    const fn code(self) -> u8 {
+        match self {
+            Self::Open => 0,
+            Self::Closed => 1,
+        }
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -69,27 +155,33 @@ struct ListParameters {
     state: Option<String>,
     q: Option<String>,
 }
+
 impl ListParameters {
-    fn limit(&self) -> Result<usize> {
+    fn limit(&self) -> Result<u8> {
         let limit = self.limit.unwrap_or(30);
-        if !(1..=50).contains(&limit) {
-            return Err(Error::Invalid("Page size must be 1–50"));
+        u8::try_from(limit)
+            .ok()
+            .filter(|limit| (1..=50).contains(limit))
+            .ok_or(Error::Invalid("Page size must be 1–50"))
+    }
+
+    fn state(&self) -> Result<u8> {
+        match self.state.as_deref().unwrap_or("open") {
+            "open" => Ok(0),
+            "closed" => Ok(1),
+            "all" => Ok(2),
+            _ => Err(Error::Invalid("Issue state must be open, closed or all")),
         }
+    }
+
+    fn before(&self) -> Result<Option<u64>> {
         if self
             .before
-            .is_some_and(|value| value == 0 || value > storage::MAX_NUMBER)
+            .is_some_and(|value| value == 0 || value > crate::app_storage::MAX_NUMBER)
         {
             return Err(Error::Invalid("Invalid page cursor"));
         }
-        Ok(limit)
-    }
-    fn state(&self) -> Result<Option<IssueState>> {
-        match self.state.as_deref().unwrap_or("open") {
-            "open" => Ok(Some(IssueState::Open)),
-            "closed" => Ok(Some(IssueState::Closed)),
-            "all" => Ok(None),
-            _ => Err(Error::Invalid("Issue state must be open, closed or all")),
-        }
+        Ok(self.before)
     }
 }
 
@@ -100,55 +192,32 @@ async fn list(
     Query(params): Query<ListParameters>,
 ) -> Result<Json<Value>> {
     let repo = repository(&server, &principal, &key)?;
-    let repo = repo.as_ref();
     let author = actor(&principal)?;
-    let labels = labels::catalog(repo).await?;
-    let assignees = assignees::available(repo, &author);
+    let labels = labels::catalog(&repo).await?;
+    let assignees = assignees::available(&repo, &author);
     let can_manage_metadata = principal.can_write(&repo.config);
-    let limit = params.limit()?;
-    let state = params.state()?;
-    let query = crate::app::search_query(params.q.as_deref())?;
-    let last = app_storage::last_number(repo, storage::ROOT).await?;
-    let mut next = last.min(params.before.map_or(last, |before| before - 1));
-    let mut items = Vec::new();
-    let mut scanned = 0;
-    // Point reads make ordering independent of provider LIST ordering and bound sparse scans.
-    while next > 0 && items.len() < limit && scanned < 200 {
-        let bottom = next.saturating_sub(8);
-        let batch =
-            futures_util::stream::iter(((bottom + 1)..=next).rev().map(|id| async move {
-                storage::read::<Issue>(repo, &storage::issue_path(id)).await
-            }))
-            .buffered(8)
-            .try_collect::<Vec<_>>()
-            .await?;
-        for entry in batch {
-            next -= 1;
-            scanned += 1;
-            if let Some((issue, _)) = entry
-                && state.is_none_or(|state| state == issue.state)
-                && crate::app::matches_query(
-                    query.as_deref(),
-                    &[&issue.title, &issue.body, &issue.author.name],
-                )
-            {
-                items.push(issue_view(
-                    &issue,
-                    &author,
-                    &labels,
-                    &assignees,
-                    can_manage_metadata,
-                    false,
-                ));
-            }
-            if items.len() == limit || scanned == 200 {
-                break;
-            }
-        }
-    }
-    Ok(Json(
-        json!({"items":items,"next":(next > 0).then_some(next + 1)}),
-    ))
+    let routed = route(&server, &repo, &author, "repository.read").await?;
+    let page = query_output(
+        routed
+            .client
+            .query::<ListIssues>(
+                &routed.target,
+                None,
+                ListIssuesInput {
+                    before: params.before()?,
+                    limit: params.limit()?,
+                    state: params.state()?,
+                    query: crate::app::search_query(params.q.as_deref())?,
+                },
+            )
+            .await,
+    )?;
+    let items = page
+        .items
+        .iter()
+        .map(|issue| issue_summary_view(issue, &author, &labels, &assignees, can_manage_metadata))
+        .collect::<Vec<_>>();
+    Ok(Json(json!({"items":items,"next":page.next})))
 }
 
 #[derive(Deserialize)]
@@ -158,6 +227,7 @@ struct NewIssue {
     title: String,
     body: String,
 }
+
 async fn create(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
@@ -165,15 +235,32 @@ async fn create(
     input: std::result::Result<Json<NewIssue>, JsonRejection>,
 ) -> Result<impl IntoResponse> {
     let repo = repository(&server, &principal, &key)?;
-    let repo = repo.as_ref();
     let Json(input) = input?;
     let author = actor(&principal)?;
-    let request_id = submission(&input.request_id)?;
     let title = title(&input.title)?;
     body(&input.body, false)?;
-    let issue = storage::create_issue(repo, author.clone(), request_id, title, input.body).await?;
-    let labels = labels::catalog(repo).await?;
-    let assignees = assignees::available(repo, &author);
+    let routed = route(&server, &repo, &author, "repository.issue.create").await?;
+    let output = command_output(
+        routed
+            .client
+            .command::<CreateIssue>(
+                &routed.target,
+                mutation_identity()?,
+                CreateIssueInput {
+                    submission_id: submission_id(&input.request_id)?,
+                    author: repository_author(&author),
+                    title,
+                    body: input.body,
+                },
+            )
+            .await,
+    )?;
+    let issue = match output {
+        CreateIssueOutcome::Created(issue) => issue,
+        CreateIssueOutcome::RequestConflict => return Err(Error::RequestConflict),
+    };
+    let labels = labels::catalog(&repo).await?;
+    let assignees = assignees::available(&repo, &author);
     Ok((
         StatusCode::CREATED,
         Json(issue_view(
@@ -186,19 +273,24 @@ async fn create(
         )),
     ))
 }
+
 async fn detail(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path((owner, name, id)): Path<(String, String, u64)>,
 ) -> Result<Json<Value>> {
     let repo = repository(&server, &principal, &(owner, name))?;
-    let repo = repo.as_ref();
-    let (issue, _) = storage::read::<Issue>(repo, &storage::issue_path(number(id)?))
-        .await?
-        .ok_or(Error::NotFound)?;
-    let labels = labels::catalog(repo).await?;
     let author = actor(&principal)?;
-    let assignees = assignees::available(repo, &author);
+    let routed = route(&server, &repo, &author, "repository.read").await?;
+    let issue = query_output(
+        routed
+            .client
+            .query::<GetIssue>(&routed.target, None, number(id)?)
+            .await,
+    )?
+    .ok_or(Error::NotFound)?;
+    let labels = labels::catalog(&repo).await?;
+    let assignees = assignees::available(&repo, &author);
     Ok(Json(issue_view(
         &issue,
         &author,
@@ -219,6 +311,7 @@ struct IssueEdit {
     label_ids: Option<Vec<u64>>,
     assignees: Option<Vec<String>>,
 }
+
 async fn edit(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
@@ -226,28 +319,8 @@ async fn edit(
     input: std::result::Result<Json<IssueEdit>, JsonRejection>,
 ) -> Result<Json<Value>> {
     let repo = repository(&server, &principal, &(owner, name))?;
-    let repo = repo.as_ref();
     let Json(input) = input?;
     let author = actor(&principal)?;
-    let path = storage::issue_path(number(id)?);
-    let (mut issue, etag) = storage::read::<Issue>(repo, &path)
-        .await?
-        .ok_or(Error::NotFound)?;
-    let label_change = input.label_ids.is_some();
-    let assignee_change = input.assignees.is_some();
-    let author_change = input.title.is_some() || input.body.is_some() || input.state.is_some();
-    if author_change && !storage::same_author(&issue.author, &author) {
-        return Err(Error::Forbidden);
-    }
-    if label_change && !principal.can_write(&repo.config) {
-        return Err(Error::LabelPermission);
-    }
-    if assignee_change && !principal.can_write(&repo.config) {
-        return Err(Error::AssigneePermission);
-    }
-    if input.version != issue.version {
-        return Err(Error::Conflict);
-    }
     if input.title.is_none()
         && input.body.is_none()
         && input.state.is_none()
@@ -256,43 +329,62 @@ async fn edit(
     {
         return Err(Error::Invalid("No issue changes supplied"));
     }
-    let labels = labels::catalog(repo).await?;
-    let assignees = assignees::available(repo, &author);
-    if let Some(value) = input.title {
-        issue.title = title(&value)?;
-    }
-    if let Some(value) = input.body {
-        body(&value, false)?;
-        issue.body = value;
-    }
-    if let Some(value) = input.state {
-        issue.state = value;
-    }
-    if let Some(value) = input.label_ids {
-        issue.label_ids = labels::validate_selection(value, &labels)?;
-    }
-    if let Some(value) = input.assignees {
-        issue.assignee_subjects = assignees::validate_selection(value, &assignees)?;
-    }
-    issue.version = issue
-        .version
-        .checked_add(1)
-        .filter(|value| *value < storage::MAX_NUMBER)
-        .ok_or(Error::Conflict)?;
-    issue.updated_at = storage::now()?;
-    if label_change && !principal.can_write(&repo.config) {
+    let can_manage_metadata = principal.can_write(&repo.config);
+    if input.label_ids.is_some() && !can_manage_metadata {
         return Err(Error::LabelPermission);
     }
-    if assignee_change && !principal.can_write(&repo.config) {
+    if input.assignees.is_some() && !can_manage_metadata {
         return Err(Error::AssigneePermission);
     }
-    storage::update(repo, &path, &issue, etag).await?;
+    let labels = labels::catalog(&repo).await?;
+    let assignees = assignees::available(&repo, &author);
+    let title = input.title.as_deref().map(title).transpose()?;
+    if let Some(value) = input.body.as_deref() {
+        body(value, false)?;
+    }
+    let label_ids = input
+        .label_ids
+        .map(|value| labels::validate_selection(value, &labels))
+        .transpose()?;
+    let assignee_subjects = input
+        .assignees
+        .map(|value| assignees::validate_selection(value, &assignees))
+        .transpose()?;
+    let routed = route(&server, &repo, &author, "repository.issue.update").await?;
+    let output = command_output(
+        routed
+            .client
+            .command::<UpdateIssue>(
+                &routed.target,
+                mutation_identity()?,
+                UpdateIssueInput {
+                    number: number(id)?,
+                    actor: repository_author(&author),
+                    can_manage_metadata,
+                    version: input.version,
+                    title,
+                    body: input.body,
+                    state: input.state.map(IssueState::code),
+                    label_ids,
+                    assignee_subjects,
+                },
+            )
+            .await,
+    )?;
+    let issue = match output {
+        UpdateIssueOutcome::Updated(issue) => issue,
+        UpdateIssueOutcome::NotFound => return Err(Error::NotFound),
+        UpdateIssueOutcome::Forbidden => return Err(Error::Forbidden),
+        UpdateIssueOutcome::LabelForbidden => return Err(Error::LabelPermission),
+        UpdateIssueOutcome::AssigneeForbidden => return Err(Error::AssigneePermission),
+        UpdateIssueOutcome::Conflict => return Err(Error::Conflict),
+    };
     Ok(Json(issue_view(
         &issue,
         &author,
         &labels,
         &assignees,
-        principal.can_write(&repo.config),
+        can_manage_metadata,
         true,
     )))
 }
@@ -304,46 +396,35 @@ async fn comments(
     Query(params): Query<ListParameters>,
 ) -> Result<Json<Value>> {
     let repo = repository(&server, &principal, &(owner, name))?;
-    let repo = repo.as_ref();
-    let id = number(id)?;
-    if storage::read::<Issue>(repo, &storage::issue_path(id))
-        .await?
-        .is_none()
-    {
-        return Err(Error::NotFound);
-    }
     let author = actor(&principal)?;
-    let limit = params.limit()?;
     if params.state.is_some() || params.q.is_some() {
         return Err(Error::Invalid("Comments do not support list filters"));
     }
-    let last = app_storage::last_number(repo, &storage::comments_root(id)).await?;
-    let mut next = last.min(params.before.map_or(last, |before| before - 1));
-    let mut items = Vec::new();
-    let mut scanned = 0;
-    while next > 0 && items.len() < limit && scanned < 200 {
-        let bottom = next.saturating_sub(8);
-        let batch =
-            futures_util::stream::iter(((bottom + 1)..=next).rev().map(|number| async move {
-                storage::read::<Comment>(repo, &storage::comment_path(id, number)).await
-            }))
-            .buffered(8)
-            .try_collect::<Vec<_>>()
-            .await?;
-        for entry in batch {
-            next -= 1;
-            scanned += 1;
-            if let Some((comment, _)) = entry {
-                items.push(comment_view(&comment, &author));
-            }
-            if items.len() == limit || scanned == 200 {
-                break;
-            }
-        }
-    }
-    Ok(Json(
-        json!({"items":items,"next":(next > 0).then_some(next + 1)}),
-    ))
+    let routed = route(&server, &repo, &author, "repository.read").await?;
+    let page = query_output(
+        routed
+            .client
+            .query::<ListComments>(
+                &routed.target,
+                None,
+                ListCommentsInput {
+                    issue: number(id)?,
+                    before: params.before()?,
+                    limit: params.limit()?,
+                },
+            )
+            .await,
+    )?;
+    let CommentPage::Found { items, next } = page else {
+        return Err(Error::NotFound);
+    };
+    Ok(Json(json!({
+        "items": items
+            .iter()
+            .map(|comment| comment_view(comment, &author))
+            .collect::<Vec<_>>(),
+        "next": next,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -352,6 +433,7 @@ struct NewComment {
     request_id: String,
     body: String,
 }
+
 async fn comment(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
@@ -359,25 +441,30 @@ async fn comment(
     input: std::result::Result<Json<NewComment>, JsonRejection>,
 ) -> Result<impl IntoResponse> {
     let repo = repository(&server, &principal, &(owner, name))?;
-    let repo = repo.as_ref();
-    let id = number(id)?;
-    if storage::read::<Issue>(repo, &storage::issue_path(id))
-        .await?
-        .is_none()
-    {
-        return Err(Error::NotFound);
-    }
     let Json(input) = input?;
     let author = actor(&principal)?;
     body(&input.body, true)?;
-    let comment = storage::create_comment(
-        repo,
-        id,
-        author.clone(),
-        submission(&input.request_id)?,
-        input.body,
-    )
-    .await?;
+    let routed = route(&server, &repo, &author, "repository.comment.create").await?;
+    let output = command_output(
+        routed
+            .client
+            .command::<CreateComment>(
+                &routed.target,
+                mutation_identity()?,
+                CreateCommentInput {
+                    submission_id: submission_id(&input.request_id)?,
+                    issue: number(id)?,
+                    author: repository_author(&author),
+                    body: input.body,
+                },
+            )
+            .await,
+    )?;
+    let comment = match output {
+        CreateCommentOutcome::Created(comment) => comment,
+        CreateCommentOutcome::IssueNotFound => return Err(Error::NotFound),
+        CreateCommentOutcome::RequestConflict => return Err(Error::RequestConflict),
+    };
     Ok((StatusCode::CREATED, Json(comment_view(&comment, &author))))
 }
 
@@ -387,19 +474,32 @@ async fn comment_detail(
     Path((owner, name, id, comment)): Path<(String, String, u64, u64)>,
 ) -> Result<Json<Value>> {
     let repo = repository(&server, &principal, &(owner, name))?;
-    let repo = repo.as_ref();
-    let path = storage::comment_path(number(id)?, number(comment)?);
-    let (comment, _) = storage::read::<Comment>(repo, &path)
-        .await?
-        .ok_or(Error::NotFound)?;
-    Ok(Json(comment_view(&comment, &actor(&principal)?)))
+    let author = actor(&principal)?;
+    let routed = route(&server, &repo, &author, "repository.read").await?;
+    let comment = query_output(
+        routed
+            .client
+            .query::<GetComment>(
+                &routed.target,
+                None,
+                CommentKey {
+                    issue: number(id)?,
+                    number: number(comment)?,
+                },
+            )
+            .await,
+    )?
+    .ok_or(Error::NotFound)?;
+    Ok(Json(comment_view(&comment, &author)))
 }
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CommentEdit {
     version: u64,
     body: String,
 }
+
 async fn edit_comment(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
@@ -407,27 +507,94 @@ async fn edit_comment(
     input: std::result::Result<Json<CommentEdit>, JsonRejection>,
 ) -> Result<Json<Value>> {
     let repo = repository(&server, &principal, &(owner, name))?;
-    let repo = repo.as_ref();
     let Json(input) = input?;
     let author = actor(&principal)?;
-    let path = storage::comment_path(number(id)?, number(comment)?);
-    let (mut comment, etag) = storage::read::<Comment>(repo, &path)
-        .await?
-        .ok_or(Error::NotFound)?;
-    if !storage::same_author(&comment.author, &author) {
-        return Err(Error::Forbidden);
-    }
-    if input.version != comment.version {
-        return Err(Error::Conflict);
-    }
     body(&input.body, true)?;
-    comment.body = input.body;
-    comment.version = comment
-        .version
-        .checked_add(1)
-        .filter(|value| *value < storage::MAX_NUMBER)
-        .ok_or(Error::Conflict)?;
-    comment.updated_at = storage::now()?;
-    storage::update(repo, &path, &comment, etag).await?;
+    let routed = route(&server, &repo, &author, "repository.comment.update").await?;
+    let output = command_output(
+        routed
+            .client
+            .command::<UpdateComment>(
+                &routed.target,
+                mutation_identity()?,
+                UpdateCommentInput {
+                    key: CommentKey {
+                        issue: number(id)?,
+                        number: number(comment)?,
+                    },
+                    actor: repository_author(&author),
+                    version: input.version,
+                    body: input.body,
+                },
+            )
+            .await,
+    )?;
+    let comment = match output {
+        UpdateCommentOutcome::Updated(comment) => comment,
+        UpdateCommentOutcome::NotFound => return Err(Error::NotFound),
+        UpdateCommentOutcome::Forbidden => return Err(Error::Forbidden),
+        UpdateCommentOutcome::Conflict => return Err(Error::Conflict),
+    };
     Ok(Json(comment_view(&comment, &author)))
+}
+
+async fn route(
+    server: &Server,
+    repository: &Repository,
+    principal: &Identity,
+    action: &'static str,
+) -> Result<RepositoryCell> {
+    let router: &RepositoryCellRouter = server
+        .repository_cells
+        .as_ref()
+        .ok_or(Error::CellUnavailable)?;
+    router
+        .route(repository.id, principal, action)
+        .await
+        .map_err(|error| match error {
+            crate::Error::Cell(source) => Error::Cell(source),
+            source => Error::Repository(source),
+        })
+}
+
+fn mutation_identity() -> Result<MutationIdentity> {
+    let now_ms = crate::cells::unix_now_ms().map_err(Error::Repository)?;
+    let expires_at_ms = now_ms
+        .checked_add(60_000)
+        .ok_or(Error::CellContract("Cell request expiry overflowed"))?;
+    Ok(MutationIdentity {
+        request_id: RequestId::from_bytes(Uuid::now_v7().into_bytes()),
+        issued_at_ms: now_ms,
+        expires_at_ms,
+    })
+}
+
+fn submission_id(value: &str) -> Result<[u8; 16]> {
+    Uuid::parse_str(&submission(value)?)
+        .map(Uuid::into_bytes)
+        .map_err(|_| Error::Invalid("Submission ID must be a UUID"))
+}
+
+fn command_output<T>(result: std::result::Result<Committed<T>, InvocationError<T>>) -> Result<T> {
+    match result {
+        Ok(committed) => Ok(committed.output),
+        Err(InvocationError::Rejected(committed)) => Ok(committed.output),
+        Err(InvocationError::Pending(_)) => Err(Error::CellPending),
+        Err(InvocationError::InvalidPublishedResult { source, .. }) => Err(Error::Cell(*source)),
+        Err(InvocationError::NotStarted(source)) => Err(Error::Cell(source)),
+    }
+}
+
+fn query_output<T>(result: std::result::Result<Observed<T>, InvocationError<T>>) -> Result<T> {
+    match result {
+        Ok(observed) => Ok(observed.output),
+        Err(InvocationError::Rejected(_)) => Err(Error::CellContract(
+            "Cell query returned a durable rejection",
+        )),
+        Err(InvocationError::Pending(_)) => Err(Error::CellContract(
+            "Cell query returned pending mutation evidence",
+        )),
+        Err(InvocationError::InvalidPublishedResult { source, .. }) => Err(Error::Cell(*source)),
+        Err(InvocationError::NotStarted(source)) => Err(Error::Cell(source)),
+    }
 }

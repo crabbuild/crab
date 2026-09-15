@@ -151,12 +151,17 @@ round trip now reloads authoritative ownership, requires the owner endpoint to
 match a live signed node advertisement, pins CA/hostname/leaf/SPKI through mTLS,
 reuses a bounded client pool and retries only definitely-not-started failures
 once within the original deadline. The server-owned repository router now
-provisions through the selected release, serializes activation, bootstraps a new
-Cell, reuses an exact local handle, selects the authenticated remote peer, and
-acquires an idle Cell by restoring its exact root. Upgrade migrations,
-active-owner takeover, complete resource-derived budgets and the coherent
-repository HTTP route cut remain; KV, SQL, Queue and Workflow primitive handles
-are complete for local routing.
+serializes activation, reuses an exact local handle, selects the authenticated
+remote peer, and acquires an idle Cell by restoring its exact root. Explicit
+`repository create` now provisions and publishes an empty Cell before marking
+the catalog application ready; imported repositories receive the same marker
+only after verified publication. Serving fails before listener bind when any
+cataloged repository is pending import/initialization or lacks a published root,
+and request routing never authorizes an empty bootstrap. The complete public
+issue/comment route group now uses typed Cell commands and queries. Upgrade
+migrations, active-owner takeover, complete resource-derived budgets and the
+remaining collaboration-domain route cuts remain; KV, SQL, Queue and Workflow
+primitive handles are complete for local routing.
 The object-store node directory now strict-creates and conditionally refreshes
 canonical, short-lived advertisements. Each record binds one nonzero boot
 session, HTTPS endpoint, fleet and certificate digests, compiled release,
@@ -191,9 +196,10 @@ body, authenticates the live node session before dispatch, and returns a strict
 Protobuf reply. A stale receiving node can reauthorize and forward those same
 signed operation bytes once more, with a reduced deadline and maximum hop count
 of two. The outbound client never follows redirects or trusts a control-record
-endpoint without the matching live advertisement. Product routes do not yet
-construct this peer capability, acquire an idle Cell or expose it to the browser.
-The server now compiles and binds the complete internal issue/comment operation
+endpoint without the matching live advertisement. The issue/comment product
+routes construct this capability, acquire idle Cells through exact-root restore
+and preserve the public browser JSON contract. Other product domains do not yet
+use it. The server now compiles and binds the complete internal issue/comment operation
 set: create and update commands plus get and bounded list queries for both
 resources. Stable codecs include issue label and assignee selections; SQLite
 owns repository identity, sequences, issues, comments and permanent create
@@ -242,10 +248,10 @@ root before writing completion evidence. The command refuses a live signed Cell
 fleet, but operators must still independently prove that every legacy writer has
 stopped because the legacy deployment did not publish those node records.
 Configured multi-replica quorum, old-code/schema migration,
-active-owner takeover, product route adapters, remaining collaboration-domain
-import and capacity
-qualification remain. Existing HTTP issue/comment routes still use the old
-object documents; the native module is not yet a user-visible storage path.
+active-owner takeover, remaining collaboration-domain import/adapters and
+capacity qualification remain. Issue/comment HTTP reads and mutations now enter
+through the authenticated repository router and typed Cell API; legacy issue
+objects are maintenance-import input only and are ignored by serving code.
 
 ## Deliverable and contract precedence
 

@@ -108,6 +108,11 @@ docker compose --file crates/crab-http-server/deploy/compose.yaml run --rm \
   repository-init --config /etc/crab/server.toml repository list
 ```
 
+Create returns only after the initial repository SQLite/LTX root has been
+published, restored, identity-checked and marked `cell_ready`. Adopted
+repositories remain `import_required` and cannot be served until the exact
+maintenance importer completes.
+
 Inspect or stop the stack without deleting repositories:
 
 ```sh
@@ -214,13 +219,16 @@ input, which is useful with `kubectl exec --stdin`. Authenticated deployments
 require at least one `admin` member when creating or adopting a repository;
 unauthenticated loopback deployments may omit membership.
 
-`create` initializes canonical Crab layout and manifest objects before its CAS
-catalog publish. `adopt` requires those objects to exist already. `set-members`
-uses one conditional catalog update and reports a conflict instead of replaying
-a stale decision over a concurrent change. Every running replica checks the
-catalog every five seconds and swaps routing after the new document
-materializes successfully; in-flight requests retain the previous repository
-handle.
+`create` initializes canonical Crab layout and manifest objects, CAS-publishes
+`empty_cell_pending`, provisions and verifies the initial SQLite/LTX root, then
+CASes `cell_ready`. Exact retries retain the catalog UUID and restore the
+published root before completing. `adopt` requires canonical Git objects,
+publishes `import_required`, and remains unroutable until the verified importer
+finishes. `set-members` uses one conditional catalog update and reports a
+conflict instead of replaying a stale decision over a concurrent change. Every
+running replica checks the catalog every five seconds and swaps routing only
+after all records pass Cell readiness validation; in-flight requests retain the
+previous repository handle.
 
 ## Why Lambda is excluded
 

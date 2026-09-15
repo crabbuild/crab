@@ -13,11 +13,16 @@ use uuid::Uuid;
 use crate::{Config, Error, Result, storage_root::StorageRoot};
 
 mod importer;
-mod repository;
+mod initializer;
+pub(crate) mod repository;
 mod router;
 
 pub(crate) use importer::import_repository_issues;
-pub(crate) use router::RepositoryCellRouter;
+#[cfg(test)]
+pub(crate) use initializer::initialize_repository_at;
+pub(super) use initializer::provision_repository;
+pub(crate) use initializer::{initialize_repository, verify_repository_cells};
+pub(crate) use router::{RepositoryCell, RepositoryCellRouter};
 
 const REPOSITORY_MIGRATION: &str = include_str!("cells/migrations/0001_repository_identity.sql");
 pub(crate) const REPOSITORY_NAMESPACE: NamespaceId = NamespaceId::from_bytes(*b"crab-repository1");
@@ -129,7 +134,7 @@ pub(crate) async fn bootstrap_release(config: &Config, image: &str) -> Result<Ve
     bootstrap_release_at(&layout, identity, &registry, image).await
 }
 
-async fn bootstrap_release_at(
+pub(crate) async fn bootstrap_release_at(
     layout: &CellStorageLayout,
     identity: ApplicationIdentity,
     registry: &Registry,
@@ -380,7 +385,7 @@ async fn verify_eligible_nodes(
     Ok(())
 }
 
-fn unix_now_ms() -> Result<i64> {
+pub(crate) fn unix_now_ms() -> Result<i64> {
     let elapsed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| Error::Config("system clock precedes the Unix epoch"))?;

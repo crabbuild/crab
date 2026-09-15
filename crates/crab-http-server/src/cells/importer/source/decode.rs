@@ -1,11 +1,11 @@
 use bytes::Bytes;
 use uuid::Uuid;
 
+use super::super::legacy::{Comment, Issue, IssueState};
 use crate::cells::repository::{
     CommentRecord, CreateCommentInput, CreateIssueInput, IssueRecord, RepositoryAuthor,
     comment_submission_digest, issue_submission_digest,
 };
-use crate::issues::storage::{Comment, Issue, IssueState};
 
 use super::{validate_comment_v1, validate_issue_v1};
 

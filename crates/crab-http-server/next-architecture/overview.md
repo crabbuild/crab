@@ -1,6 +1,6 @@
 # Architecture, scope, and guarantees
 
-[Design index](README.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Target contract; implemented subset tracked in current implementation.
 
 The system boundaries below lead to the detailed
 [storage protocol](storage-protocol.md),

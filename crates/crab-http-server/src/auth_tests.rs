@@ -16,6 +16,21 @@ use url::Url;
 const KEY_ONE: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIBERERERERERERERERERERERERERERERERERERERERER\n-----END PRIVATE KEY-----";
 const KEY_TWO: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEICIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIi\n-----END PRIVATE KEY-----";
 
+struct UnavailablePeer;
+
+impl crab_cell_runtime::PeerRoundTrip for UnavailablePeer {
+    fn send(
+        &self,
+        _target: crab_cell_runtime::CellTarget,
+        _request: Vec<u8>,
+        _remaining_ms: u32,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>,
+    > {
+        Box::pin(async { Err(crab_cell_runtime::Error::CellNotActive) })
+    }
+}
+
 struct Provider {
     issuer: String,
     rotated: AtomicBool,
@@ -157,6 +172,7 @@ struct Harness {
     provider: Arc<Provider>,
     server: Arc<Server>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    cell_dir: tempfile::TempDir,
 }
 
 impl Harness {
@@ -225,11 +241,65 @@ impl Harness {
         )
         .await
         .unwrap();
+        let cell_identity = crab_cell_runtime::ApplicationIdentity::new(
+            crab_cell_runtime::TenantId::from_bytes([2; 16]),
+            crab_cell_runtime::ApplicationId::from_bytes([3; 16]),
+        );
+        let cell_layout = crab_storage::CellStorageLayout::new(
+            admission_store.clone(),
+            object_store::path::Path::from("test-cells"),
+            *cell_identity.application().as_bytes(),
+        );
+        let registry = Arc::new(crate::cells::compiled_registry().unwrap());
+        crate::cells::bootstrap_release_at(
+            &cell_layout,
+            cell_identity,
+            &registry,
+            &format!("sha256:{}", "a".repeat(64)),
+        )
+        .await
+        .unwrap();
+        let cell_dir = tempfile::TempDir::new().unwrap();
+        crate::cells::initialize_repository_at(
+            &cell_layout,
+            cell_identity,
+            &registry,
+            cell_dir.path(),
+            "https://initializer.test:8081".into(),
+            repository.id,
+        )
+        .await
+        .unwrap();
+        let cell_session = crab_cell_runtime::SessionId::from_bytes([4; 16]);
+        let cell_runtime = crab_cell_runtime::CellRuntime::new(
+            crab_cell_runtime::SqlWorkerPool::new(1, 16).unwrap(),
+            16 * 1024 * 1024,
+            cell_session,
+        )
+        .unwrap();
+        let repository_cells = crate::cells::RepositoryCellRouter::new(
+            cell_identity,
+            cell_layout,
+            Arc::clone(&registry),
+            cell_runtime.clone(),
+            Arc::new(crab_cell_runtime::PeerSigner::new(
+                cell_session,
+                registry.release_digest(),
+                ed25519_dalek::SigningKey::from_bytes(&[5; 32]),
+            )),
+            Arc::new(UnavailablePeer),
+            crab_cell_runtime::Owner {
+                session: cell_session,
+                endpoint: "https://server.test:8081".into(),
+            },
+            cell_dir.path().to_path_buf(),
+        )
+        .unwrap();
         let server = Arc::new(Server {
             repositories: BTreeMap::from([(("team".into(), "private".into()), repository)]).into(),
             runtime: Arc::new(RemoteGitRuntime::default()),
-            cell_runtime: start_test_cell_runtime(),
-            repository_cells: None,
+            cell_runtime,
+            repository_cells: Some(repository_cells),
             peer_receiver: None,
             options: RepositoryOptions::default(),
             cursor_key: [7; 32],
@@ -262,6 +332,7 @@ impl Harness {
             provider,
             server,
             tasks: vec![task, provider_task],
+            cell_dir,
         }
     }
 

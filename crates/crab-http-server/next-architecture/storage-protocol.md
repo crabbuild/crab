@@ -1,6 +1,6 @@
 # Object storage and commit publication
 
-[Design index](README.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Target contract; implemented subset tracked in current implementation.
 
 This document owns the durable control and publication contract.
 [Ownership](ownership-and-load-balancing.md) defines who may propose a transition;

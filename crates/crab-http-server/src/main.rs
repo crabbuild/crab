@@ -299,7 +299,14 @@ async fn repository(
                     members,
                 )
                 .await?;
-            println!("{}", serde_json::to_string_pretty(&record)?);
+            crab_http_server::initialize_repository_cell(config, record.id).await?;
+            let (document, _) = catalog.load().await?;
+            let ready = document
+                .repositories
+                .into_iter()
+                .find(|candidate| candidate.id == record.id)
+                .ok_or(crab_http_server::catalog::CatalogError::NotFound)?;
+            println!("{}", serde_json::to_string_pretty(&ready)?);
         }
         RepositoryCommand::Adopt(arguments) => {
             let identity = arguments.identity;

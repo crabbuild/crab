@@ -14,10 +14,13 @@ maintenance importer now covers the legacy issue/comment tree, including
 counters, visible edits and incomplete reservations, with two-pass source
 verification, immutable evidence and crash-resumable LTX publication. Remaining
 collaboration-domain import, old-version migration/configured multi-node quorum,
-active-owner takeover, public repository adapters and product-route hard cut are
-not yet integrated. The server now owns a
-release-aware repository router that provisions, bootstraps, reuses local
-handles, selects authenticated remote owners and restores idle Cells.
+active-owner takeover and the remaining product-domain route cuts are not yet
+integrated. New repository creation explicitly publishes an empty Cell and marks
+the catalog ready; adoption remains blocked until verified import. Startup
+rejects every missing or rootless repository Cell. The issue/comment HTTP group
+now uses the release-aware router, which reuses local handles, selects
+authenticated remote owners and restores idle Cells without request-time empty
+bootstrap.
 Prepared 2026-09-13
 against Crab commit
 `f67181e0dcdc69a766b14a8b441e9119d3684f33`; deployment and integration notes were

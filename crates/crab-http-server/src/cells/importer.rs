@@ -1,4 +1,5 @@
 mod evidence;
+mod legacy;
 mod source;
 
 #[cfg(test)]
@@ -9,9 +10,9 @@ use std::sync::Arc;
 
 use blake3::Hasher;
 use crab_cell_runtime::{
-    CatalogEntry, CatalogRole, CellAuthority, CellCatalog, CellHandle, CellModule, CellReplica,
-    CellRuntime, CellTarget, ControlState, IncarnationId, NodeDirectory, Owner, Registry,
-    ReleaseState, ReleaseStore, ReplicaLimits, SessionId, SqlWorkerPool,
+    CellAuthority, CellHandle, CellReplica, CellRuntime, CellTarget, ControlState, IncarnationId,
+    NodeDirectory, Owner, Registry, ReleaseState, ReleaseStore, ReplicaLimits, SessionId,
+    SqlWorkerPool,
 };
 use crab_storage::{CellStorageLayout, StoreLayout};
 use rusqlite::{Connection, OptionalExtension as _, Row, types::ValueRef};
@@ -19,9 +20,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{
-    MAX_LIVE_NODES, REPOSITORY_MIGRATION, REPOSITORY_NAMESPACE, RepositoryModule, unix_now_ms,
+    MAX_LIVE_NODES, REPOSITORY_MIGRATION, REPOSITORY_NAMESPACE, provision_repository, unix_now_ms,
 };
-use crate::catalog::{CatalogRecord, CatalogStore};
+use crate::catalog::{CatalogRecord, CatalogStore, RepositoryApplicationState};
 use crate::{Config, Error, Result};
 
 const IMPORT_MAILBOX_BYTES: usize = 16 * 1024 * 1024;
@@ -65,6 +66,7 @@ pub(crate) async fn import_repository_issues(
     let catalog = CatalogStore::from_config(config)?;
     let (document, _) = catalog.load().await?;
     let record = find_repository(&document.repositories, owner, name)?;
+    let repository_id = record.id;
     let repository = record.runtime_config(catalog.root(), "main")?;
     let repository_layout = StoreLayout::new(catalog.root().store.clone(), repository.prefix);
     let target = CellTarget::new(
@@ -75,6 +77,20 @@ pub(crate) async fn import_repository_issues(
     )?;
     let complete =
         evidence::load_complete(&startup.layout, target.cell_id(), operation, record.id).await?;
+    match (record.application, complete.is_some()) {
+        (RepositoryApplicationState::EmptyCellPending, _) => {
+            return Err(Error::Config(
+                "new repository requires empty Cell initialization, not legacy import",
+            ));
+        }
+        (RepositoryApplicationState::CellReady, false) => {
+            return Err(Error::Config(
+                "ready repository cannot start a different legacy import operation",
+            ));
+        }
+        (RepositoryApplicationState::ImportRequired, _)
+        | (RepositoryApplicationState::CellReady, true) => {}
+    }
 
     std::fs::create_dir_all(&config.cells.data_dir)?;
     let directory = tempfile::Builder::new()
@@ -140,11 +156,13 @@ pub(crate) async fn import_repository_issues(
         }
     };
     let shutdown = runtime.shutdown().await.map_err(Error::from);
-    match (result, shutdown) {
+    let value = match (result, shutdown) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
-    }
+    }?;
+    catalog.mark_cell_ready(repository_id).await?;
+    Ok(value)
 }
 
 enum ImportWork {
@@ -202,7 +220,7 @@ async fn import_staged(
     endpoint: String,
     local_dir: &Path,
 ) -> Result<Vec<u8>> {
-    let (proof, authority) = provision(layout, identity, &registry, target).await?;
+    let (proof, authority) = provision_repository(layout, identity, &registry, target).await?;
     let owner = Owner { session, endpoint };
     let observed = match authority.load(target.cell_id()).await? {
         Some(observed) => observed,
@@ -318,7 +336,7 @@ async fn resume_complete(
     endpoint: String,
     local_dir: &Path,
 ) -> Result<Vec<u8>> {
-    let (proof, authority) = provision(layout, identity, &registry, target).await?;
+    let (proof, authority) = provision_repository(layout, identity, &registry, target).await?;
     let observed = authority
         .load(target.cell_id())
         .await?
@@ -371,29 +389,6 @@ async fn resume_complete(
     }
     handle.drain().await?;
     complete.encode()
-}
-
-async fn provision(
-    layout: &CellStorageLayout,
-    identity: crab_cell_runtime::ApplicationIdentity,
-    registry: &Registry,
-    target: &CellTarget,
-) -> Result<(crab_cell_runtime::CatalogProof, CellAuthority)> {
-    let catalog = CellCatalog::new(layout.clone(), identity.tenant());
-    let code =
-        registry
-            .module_code(RepositoryModule::NAME)
-            .ok_or(crab_cell_runtime::Error::Registry(
-                "repository module is not registered",
-            ))?;
-    let proof = ReleaseStore::new(layout.clone(), identity)?
-        .provision(
-            &catalog,
-            registry,
-            CatalogEntry::new(target, CatalogRole::Repository, code, 1)?,
-        )
-        .await?;
-    Ok((proof, CellAuthority::new(layout.clone())))
 }
 
 async fn verify_and_complete(

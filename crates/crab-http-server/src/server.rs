@@ -324,10 +324,6 @@ pub(crate) struct Server {
     pub repositories: RepositorySet,
     pub runtime: Arc<RemoteGitRuntime>,
     pub cell_runtime: CellRuntime,
-    #[expect(
-        dead_code,
-        reason = "startup owns routing state before the coherent repository route-group cutover"
-    )]
     pub(crate) repository_cells: Option<crate::cells::RepositoryCellRouter>,
     pub(crate) peer_receiver: Option<crate::peer::PeerReceiver>,
     pub options: RepositoryOptions,
@@ -404,6 +400,11 @@ pub async fn serve(config: Config) -> Result<()> {
         None => None,
     };
     let catalog_version = document.version;
+    let repository_cells = document
+        .repositories
+        .iter()
+        .map(|record| (record.id, record.application))
+        .collect::<Vec<_>>();
     let repositories = materialize_catalog(&catalog, document).await?;
     let runtime = Arc::new(RemoteGitRuntime::default());
     let cancellation = CancellationToken::new();
@@ -425,6 +426,8 @@ pub async fn serve(config: Config) -> Result<()> {
     let transfer_admission = transfer_admission(&catalog);
     probe_storage_contract(&catalog, &transfer_admission).await?;
     let startup = crate::cells::verify_startup_release(&config).await?;
+    crate::cells::verify_repository_cells(&startup.layout, startup.identity, repository_cells)
+        .await?;
     let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
     let session = SessionId::from_bytes(Uuid::now_v7().into_bytes());
     let registry = Arc::new(startup.registry);
@@ -671,6 +674,23 @@ async fn refresh_catalog(server: Arc<Server>, mut version: u64) {
         }
         if document.version == version {
             server.catalog_healthy.store(true, Ordering::Release);
+            continue;
+        }
+        let repository_cells = document
+            .repositories
+            .iter()
+            .map(|record| (record.id, record.application))
+            .collect::<Vec<_>>();
+        let verified = match server.repository_cells.as_ref() {
+            Some(router) => router.verify_repositories(repository_cells).await,
+            None => Err(crate::Error::Config(
+                "repository catalog refresh requires Cell routing",
+            )),
+        };
+        if let Err(error) = verified {
+            server.catalog_healthy.store(false, Ordering::Release);
+            server.metrics.record_catalog_refresh_failure();
+            tracing::warn!(error = ?error, "repository catalog Cell readiness failed");
             continue;
         }
         let next_version = document.version;

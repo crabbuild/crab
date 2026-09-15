@@ -276,17 +276,26 @@ async fn membership_author_ownership_and_csrf_protect_all_mutations() {
 }
 
 #[tokio::test]
-async fn retry_repairs_interruption_after_reservation_without_allocating_another_issue() {
+async fn source_loss_restores_the_published_issue_before_submission_replay() {
     let h = Harness::new(false).await;
     let cookie = h.login().await;
     let issue = write(&h, &cookie, "POST", ROOT, input(1)).await.1;
     let repo = h.server.repositories.values().into_iter().next().unwrap();
-    // Recreate the durable state left between reserving a number and publishing its issue.
-    let path = repo.layout.repo_path(&format!(
-        "app/v1/issues/{:016}/issue.json",
-        issue["number"].as_u64().unwrap()
-    ));
-    repo.store.delete(&path).await.unwrap();
+    h.server
+        .repository_cells
+        .as_ref()
+        .unwrap()
+        .drain_local(repo.id)
+        .await
+        .unwrap();
+    for entry in std::fs::read_dir(h.cell_dir.path()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            std::fs::remove_dir_all(path).unwrap();
+        } else {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
     assert_eq!(write(&h, &cookie, "POST", ROOT, input(1)).await.1, issue);
     assert_eq!(
         h.json(ROOT, &cookie).await["items"]
@@ -299,7 +308,7 @@ async fn retry_repairs_interruption_after_reservation_without_allocating_another
 }
 
 #[tokio::test]
-async fn unknown_storage_schema_and_invalid_inputs_fail_without_creating_content() {
+async fn invalid_inputs_fail_and_legacy_issue_objects_are_not_a_serving_path() {
     let h = Harness::new(false).await;
     let cookie = h.login().await;
     for value in [
@@ -337,9 +346,9 @@ async fn unknown_storage_schema_and_invalid_inputs_fail_without_creating_content
         )
         .await
         .unwrap();
-    assert_eq!(
-        write(&h, &cookie, "POST", ROOT, input(1)).await.0,
-        StatusCode::BAD_GATEWAY
-    );
+    let (status, issue) = write(&h, &cookie, "POST", ROOT, input(1)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(issue["number"], 1);
+    assert_eq!(h.json(ROOT, &cookie).await["items"][0]["number"], 1);
     h.close().await;
 }

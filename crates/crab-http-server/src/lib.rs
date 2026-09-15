@@ -69,6 +69,12 @@ pub async fn activate_cell_release(config: &Config, expected_revision: u64) -> R
     cells::activate_release(config, expected_revision).await
 }
 
+/// Initializes the empty application Cell for one newly cataloged repository.
+pub async fn initialize_repository_cell(config: &Config, repository: uuid::Uuid) -> Result<()> {
+    config.validate()?;
+    cells::initialize_repository(config, repository).await
+}
+
 /// Imports one repository's legacy issue and comment documents into its Cell.
 pub async fn import_repository_issues(
     config: &Config,

@@ -10,12 +10,12 @@ Paths in this table are relative to `crates/crab-http-server/` unless stated.
 
 | Current surface | Entry and owner | Existing behavior | Next design impact |
 | --- | --- | --- | --- |
-| Process CLI | [main.rs](../src/main.rs) | Serve, healthcheck, storage-probe, repository create/adopt/set-members/list | Extend existing storage diagnosis and add scoped migration commands |
-| Server lifecycle | [server.rs](../src/server.rs), [cells.rs](../src/cells.rs), [cells/router.rs](../src/cells/router.rs), [peer.rs](../src/peer.rs), [peer_tls.rs](../src/peer_tls.rs) | Two listeners, catalog refresh, Git runtime, one compiled-registry-validated Cell runtime/session, mandatory management mTLS, live signed enrollment, local dispatch, owner-selecting outbound peer transport and a release-aware repository router with serialized bootstrap/local/remote/idle selection; terminal Cell drain participates in readiness and shutdown | Add full resource-derived admission, active-owner takeover, product adapters and timed shutdown escalation |
-| Repository identity | [catalog.rs](../src/catalog.rs), `materialize_catalog` in [server.rs](../src/server.rs) | Catalog and runtime repository retain one stable UUID independent of owner/name | Use the UUID as the repository Cell partition and import key |
+| Process CLI | [main.rs](../src/main.rs) | Serve, healthcheck, storage-probe, repository create/adopt/set-members/list, release lifecycle and resumable issue import | Add importers for the remaining application domains and fleet-wide cutover evidence |
+| Server lifecycle | [server.rs](../src/server.rs), [cells.rs](../src/cells.rs), [cells/initializer.rs](../src/cells/initializer.rs), [cells/router.rs](../src/cells/router.rs), [peer.rs](../src/peer.rs), [peer_tls.rs](../src/peer_tls.rs) | Two listeners, catalog refresh, Git runtime, one compiled-registry-validated Cell runtime/session, mandatory management mTLS, live signed enrollment, local dispatch and owner-selecting outbound peer transport. Startup and every changed catalog version require `cell_ready`, a catalog proof, control and a published root; request routing never bootstraps a Cell. Terminal Cell drain participates in readiness and shutdown | Add full resource-derived admission, qualified active-owner takeover and timed shutdown escalation |
+| Repository identity | [catalog.rs](../src/catalog.rs), [cells/initializer.rs](../src/cells/initializer.rs), `materialize_catalog` in [server.rs](../src/server.rs) | Catalog and runtime repository retain one stable UUID independent of owner/name. Catalog v2 records application state; v1 loads only as `import_required` and the next mutation upgrades it. Create moves `empty_cell_pending → cell_ready` only after restoring and verifying the exact SQLite identity; adopt starts `import_required` | Use the same state gate for every remaining domain importer and fleet cutover report |
 | Application boundary | [app.rs](../src/app.rs) | Repository/principal checks, eight production application slots, 30-second handler deadline | Preserve external contracts; move accepted durable work into tracked cells |
-| Collaboration persistence | [app_storage.rs](../src/app_storage.rs) | Bounded JSON, strict create, ETag update, CAS number allocation | Replace domain document storage with SQL repositories |
-| Issue creation | [issues/storage.rs](../src/issues/storage.rs) | Immutable request reservation, allocated number, visible issue | Import both reservations and visible records; keep retry semantics |
+| Collaboration persistence | [app_storage.rs](../src/app_storage.rs), [cells/repository.rs](../src/cells/repository.rs) | Issues and comments use transactional repository SQLite plus LTX; pulls, releases, labels, checks and settings still use bounded JSON/CAS | Move each remaining domain through an explicit importer and typed module API |
+| Issues and comments | [issues.rs](../src/issues.rs), [cells/repository.rs](../src/cells/repository.rs), [cells/router.rs](../src/cells/router.rs) | Public create/read/list/update routes use typed commands and queries; immutable submission identity, number allocation and visibility commit in one SQLite transaction; source-loss tests restore the published LTX root; legacy issue JSON is importer-only | Qualify authenticated remote-owner dispatch and sustained capacity; remove remaining presentation dependencies on JSON catalogs when their domains cut over |
 | PR workflow | [pulls/storage.rs](../src/pulls/storage.rs), [pulls/merge.rs](../src/pulls/merge.rs) | Durable pending merge and reconciliation against Git refs | Express as SQL outbox plus canonical Git publication |
 | Git receive | [receive.rs](../src/receive.rs), [receive/publish.rs](../src/receive/publish.rs) | Bounded native receive, validation, ref and GC coordination | Preserve shared publication authority and worker drain |
 | Repository policy | [repository_settings.rs](../src/repository_settings.rs) | Branch protection and archive state read by browsing and publication | Keep direct object-store CAS in the initial design |
@@ -52,17 +52,19 @@ identity, issue/comment sequences and rows; an integration test proves replay,
 durable rejection, LTX publication, full first-owner local deletion and exact-root
 readback on a second owner. `serve` now owns the same runtime lifecycle: it starts
 one process session with fixed SQL workers, includes terminal Cell drain in
-readiness, and drains/releases/joins it after accepted HTTP and Git work. This is
-still below the product route. Release administration can now CAS one prepared
+readiness, and drains/releases/joins it after accepted HTTP and Git work. The
+public issue/comment routes now use that runtime and no longer read or write the
+legacy issue tree. Release administration can now CAS one prepared
 descriptor through activating to ready after checking all catalog shards and live
 control code/schema pairs against the exact binary registry; retries retain the
 same operation, and a real RustFS run reached canonical `current=desired` state.
 Explicit activation now also requires one live signed node with the exact fleet,
 image, release and module inventory. Configured multi-replica quorum and
-old-version migration are not implemented. No product HTTP route
-currently calls that repository module. The private management route can dispatch
-or forward registered calls between compatible nodes, but application JSON
-persistence, Git publication and browser behavior above remain unchanged. See
+old-version migration are not implemented. The complete issue/comment HTTP route
+group now calls the typed repository module and publishes through LTX. The
+private management route can dispatch or forward registered calls between
+compatible nodes; remaining collaboration domains still use application JSON.
+Git publication behavior remains unchanged. See
 [remaining gates](validation-and-delivery.md#verification-scope-for-the-current-implementation).
 
 The maintenance command `cells import-repository-issues` now captures the exact
@@ -76,7 +78,8 @@ labels, milestones and pending cross-domain work still require import support.
 ### Existing tests to preserve or evolve
 
 - [Issue authorization tests](../src/auth_tests/issues.rs) cover author checks,
-  CSRF, durable replay, sparse pagination, and interrupted reservations.
+  CSRF, durable replay, sparse pagination, ignored legacy objects, and exact-root
+  restore after local SQLite loss.
 - [PR tests](../src/pulls_tests.rs) exercise live branch relationships and canonical
   merge publication.
 - [Receive fault tests](../src/receive_fault_tests.rs) exercise uncertain write

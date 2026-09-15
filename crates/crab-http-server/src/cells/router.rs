@@ -1,35 +1,26 @@
 use std::{path::PathBuf, sync::Arc};
 
 use crab_cell_runtime::{
-    ApplicationIdentity, CatalogEntry, CatalogProof, CatalogRole, CellAuthority, CellCatalog,
-    CellClient, CellModule, CellReplica, CellRuntime, CellTarget, ControlState, IncarnationId,
-    Owner, PeerPrincipal, PeerRoundTrip, PeerSigner, Registry, ReleaseStore, ReplicaLimits,
-    VersionedControl,
+    ApplicationIdentity, CatalogProof, CellAuthority, CellCatalog, CellClient, CellReplica,
+    CellRuntime, CellTarget, ControlState, Owner, PeerPrincipal, PeerRoundTrip, PeerSigner,
+    Registry, ReplicaLimits, VersionedControl,
 };
 use crab_storage::CellStorageLayout;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use super::{REPOSITORY_MIGRATION, REPOSITORY_NAMESPACE, RepositoryModule};
+use super::REPOSITORY_NAMESPACE;
 use crate::auth::Identity;
 
 const ACTIVATION_SHARDS: usize = 4096;
 
 #[derive(Clone)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the server owns this router before the coherent repository route-group cutover"
-    )
-)]
 pub(crate) struct RepositoryCellRouter {
     identity: ApplicationIdentity,
     layout: CellStorageLayout,
     registry: Arc<Registry>,
     catalog: CellCatalog,
     authority: CellAuthority,
-    releases: ReleaseStore,
     runtime: CellRuntime,
     signer: Arc<PeerSigner>,
     round_trip: Arc<dyn PeerRoundTrip>,
@@ -38,25 +29,11 @@ pub(crate) struct RepositoryCellRouter {
     activation: Arc<[Mutex<()>]>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the typed route result is exercised before the coherent repository route-group cutover"
-    )
-)]
 pub(crate) struct RepositoryCell {
     pub(crate) target: CellTarget,
     pub(crate) client: CellClient,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "activation is qualified before the coherent repository route-group cutover"
-    )
-)]
 impl RepositoryCellRouter {
     pub(crate) fn new(
         identity: ApplicationIdentity,
@@ -73,14 +50,12 @@ impl RepositoryCellRouter {
                 "repository Cell routing requires an absolute session directory and endpoint",
             ));
         }
-        let releases = ReleaseStore::new(layout.clone(), identity)?;
         Ok(Self {
             identity,
             catalog: CellCatalog::new(layout.clone(), identity.tenant()),
             authority: CellAuthority::new(layout.clone()),
             layout,
             registry,
-            releases,
             runtime,
             signer,
             round_trip,
@@ -116,43 +91,28 @@ impl RepositoryCellRouter {
             return Ok(routed);
         }
 
-        let proof = match self.catalog.lookup(target.cell_id()).await? {
-            Some(proof) => proof,
-            None => {
-                let code = self.registry.module_code(RepositoryModule::NAME).ok_or(
-                    crab_cell_runtime::Error::Registry("repository module is not registered"),
-                )?;
-                self.releases
-                    .provision(
-                        &self.catalog,
-                        &self.registry,
-                        CatalogEntry::new(&target, CatalogRole::Repository, code, 1)?,
-                    )
-                    .await?
-            }
-        };
-        let observed = match self.authority.load(target.cell_id()).await? {
-            Some(observed) => observed,
-            None => match self
-                .authority
-                .create_initial(
-                    &proof,
-                    IncarnationId::from_bytes(Uuid::now_v7().into_bytes()),
-                    self.owner.clone(),
-                )
-                .await
-            {
-                Ok(observed) => observed,
-                Err(crab_cell_runtime::Error::CellAlreadyActive) => self
-                    .authority
-                    .load(target.cell_id())
-                    .await?
-                    .ok_or(crab_cell_runtime::Error::CellNotActive)?,
-                Err(error) => return Err(error.into()),
-            },
-        };
-        self.activate_or_route(target, proof, observed, repository, principal, action)
+        let proof = self
+            .catalog
+            .lookup(target.cell_id())
+            .await?
+            .ok_or(crab_cell_runtime::Error::CellNotActive)?;
+        let observed = self
+            .authority
+            .load(target.cell_id())
+            .await?
+            .ok_or(crab_cell_runtime::Error::CellNotActive)?;
+        if observed.value().root.is_none() {
+            return Err(crab_cell_runtime::Error::CellNotActive.into());
+        }
+        self.activate_or_route(target, proof, observed, principal, action)
             .await
+    }
+
+    pub(crate) async fn verify_repositories(
+        &self,
+        repositories: impl IntoIterator<Item = (Uuid, crate::catalog::RepositoryApplicationState)>,
+    ) -> crate::Result<()> {
+        super::verify_repository_cells(&self.layout, self.identity, repositories).await
     }
 
     async fn route_existing(
@@ -167,6 +127,9 @@ impl RepositoryCellRouter {
         let Some(control) = self.authority.load(target.cell_id()).await? else {
             return Ok(None);
         };
+        if control.value().root.is_none() {
+            return Err(crab_cell_runtime::Error::CellNotActive.into());
+        }
         if control.value().state == ControlState::Tombstoned {
             return Err(crab_cell_runtime::Error::CellNotActive.into());
         }
@@ -194,7 +157,6 @@ impl RepositoryCellRouter {
         target: CellTarget,
         proof: CatalogProof,
         observed: VersionedControl,
-        repository: Uuid,
         principal: &Identity,
         action: &'static str,
     ) -> crate::Result<RepositoryCell> {
@@ -224,26 +186,6 @@ impl RepositoryCellRouter {
         .map_err(crab_cell_runtime::Error::from)?;
         let destination = self.activation_path(&target).await?;
         let handle = match observed.value().state {
-            ControlState::Recovering if observed.value().root.is_none() => {
-                let repository = *repository.as_bytes();
-                self.runtime
-                    .bootstrap(
-                        proof,
-                        replica,
-                        self.authority.clone(),
-                        observed,
-                        destination,
-                        move |transaction| {
-                            transaction.execute_batch(REPOSITORY_MIGRATION)?;
-                            transaction.execute(
-                                "INSERT INTO repository_identity(singleton, repository_uuid) VALUES (1, ?1)",
-                                [repository.as_slice()],
-                            )?;
-                            Ok(())
-                        },
-                    )
-                    .await?
-            }
             ControlState::Idle => {
                 self.runtime
                     .acquire_idle_restored(
@@ -305,6 +247,32 @@ impl RepositoryCellRouter {
         tokio::fs::create_dir_all(&directory).await?;
         Ok(directory.join(format!("{}.sqlite", Uuid::now_v7())))
     }
+
+    #[cfg(test)]
+    pub(crate) async fn drain_local(&self, repository: Uuid) -> crate::Result<()> {
+        let target = CellTarget::new(
+            self.identity.tenant(),
+            self.identity.application(),
+            REPOSITORY_NAMESPACE,
+            repository.as_bytes(),
+        )?;
+        let proof = self
+            .catalog
+            .lookup(target.cell_id())
+            .await?
+            .ok_or(crab_cell_runtime::Error::CellNotActive)?;
+        let control = self
+            .authority
+            .load(target.cell_id())
+            .await?
+            .ok_or(crab_cell_runtime::Error::CellNotActive)?;
+        let handle = self
+            .runtime
+            .local_handle(proof, &control)
+            .await?
+            .ok_or(crab_cell_runtime::Error::CellNotActive)?;
+        handle.drain().await.map_err(Into::into)
+    }
 }
 
 fn activation_shard(target: &CellTarget) -> usize {
@@ -345,7 +313,8 @@ mod tests {
     use std::{future::Future, pin::Pin, time::UNIX_EPOCH};
 
     use crab_cell_runtime::{
-        ApplicationId, MutationIdentity, RequestId, SessionId, SqlWorkerPool, TenantId,
+        ApplicationId, IncarnationId, MutationIdentity, RequestId, SessionId, SqlWorkerPool,
+        TenantId,
     };
     use crab_storage::Store;
     use ed25519_dalek::SigningKey;
@@ -353,7 +322,7 @@ mod tests {
 
     use super::*;
     use crate::cells::{
-        bootstrap_release_at,
+        REPOSITORY_MIGRATION, bootstrap_release_at,
         repository::{CreateIssue, CreateIssueInput, GetIssue, RepositoryAuthor},
     };
 
@@ -372,7 +341,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn route_provisions_reuses_and_restores_repository_cell() {
+    async fn route_reuses_and_restores_explicit_repository_cell() {
         let identity = ApplicationIdentity::new(
             TenantId::from_bytes([1; 16]),
             ApplicationId::from_bytes([2; 16]),
@@ -405,6 +374,50 @@ mod tests {
         )
         .unwrap();
         let first_dir = tempfile::TempDir::new().unwrap();
+        let target = CellTarget::new(
+            identity.tenant(),
+            identity.application(),
+            REPOSITORY_NAMESPACE,
+            repository.as_bytes(),
+        )
+        .unwrap();
+        let (proof, authority) =
+            crate::cells::provision_repository(&layout, identity, &registry, &target)
+                .await
+                .unwrap();
+        let observed = authority
+            .create_initial(
+                &proof,
+                IncarnationId::from_bytes([9; 16]),
+                owner(first_session),
+            )
+            .await
+            .unwrap();
+        let repository_bytes = repository.into_bytes();
+        first_runtime
+            .bootstrap(
+                proof,
+                CellReplica::new(
+                    layout.clone(),
+                    *target.cell_id().as_bytes(),
+                    *observed.value().incarnation.as_bytes(),
+                    ReplicaLimits::default(),
+                )
+                .unwrap(),
+                authority,
+                observed,
+                first_dir.path().join("bootstrap.sqlite"),
+                move |transaction| {
+                    transaction.execute_batch(REPOSITORY_MIGRATION)?;
+                    transaction.execute(
+                        "INSERT INTO repository_identity(singleton, repository_uuid) VALUES (1, ?1)",
+                        [repository_bytes.as_slice()],
+                    )?;
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
         let first = router(
             identity,
             layout.clone(),
@@ -491,6 +504,59 @@ mod tests {
         second_runtime.shutdown().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn route_refuses_to_initialize_an_uncataloged_repository_cell() {
+        let identity = ApplicationIdentity::new(
+            TenantId::from_bytes([11; 16]),
+            ApplicationId::from_bytes([12; 16]),
+        );
+        let layout = CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("repository-router-missing"),
+            *identity.application().as_bytes(),
+        );
+        let registry = Arc::new(crate::cells::compiled_registry().unwrap());
+        bootstrap_release_at(
+            &layout,
+            identity,
+            &registry,
+            &format!("sha256:{}", "b".repeat(64)),
+        )
+        .await
+        .unwrap();
+        let session = SessionId::from_bytes([13; 16]);
+        let runtime = CellRuntime::new(
+            SqlWorkerPool::new(1, 10).unwrap(),
+            16 * 1024 * 1024,
+            session,
+        )
+        .unwrap();
+        let directory = tempfile::TempDir::new().unwrap();
+        let router = router(
+            identity,
+            layout,
+            registry,
+            runtime.clone(),
+            session,
+            directory.path().to_path_buf(),
+        );
+        let principal = Identity {
+            issuer: "https://crab.build".into(),
+            subject: "user-1".into(),
+            name: "Crab User".into(),
+        };
+
+        let result = router
+            .route(Uuid::from_bytes([14; 16]), &principal, "repository.read")
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(crate::Error::Cell(crab_cell_runtime::Error::CellNotActive))
+        ));
+        runtime.shutdown().await.unwrap();
+    }
+
     fn router(
         identity: ApplicationIdentity,
         layout: CellStorageLayout,
@@ -510,13 +576,17 @@ mod tests {
                 SigningKey::from_bytes(&[7; 32]),
             )),
             Arc::new(UnavailablePeer),
-            Owner {
-                session,
-                endpoint: format!("https://{}.internal:8081", encode_hex(session.as_bytes())),
-            },
+            owner(session),
             session_dir,
         )
         .unwrap()
+    }
+
+    fn owner(session: SessionId) -> Owner {
+        Owner {
+            session,
+            endpoint: format!("https://{}.internal:8081", encode_hex(session.as_bytes())),
+        }
     }
 
     fn mutation(byte: u8) -> MutationIdentity {

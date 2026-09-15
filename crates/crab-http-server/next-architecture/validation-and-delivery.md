@@ -1,6 +1,6 @@
 # Validation, delivery, and worked examples
 
-[Design index](README.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Target contract; implemented subset tracked in current implementation.
 
 ## Validation and real-repository qualification
 

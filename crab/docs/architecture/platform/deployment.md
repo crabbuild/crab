@@ -268,7 +268,9 @@ publishes the initial LTX root, restores and compares the semantic summary, and
 strict-creates completion evidence bound to the operation, repository, Cell,
 source inventory and published root. A retry resumes rootless ownership after
 an observed stale interval, or restores an already published root before
-finishing evidence. This slice intentionally excludes pull requests, releases,
+finishing evidence. The exact completed operation then moves the catalog from
+`import_required` to `cell_ready`. A different operation cannot overwrite a
+ready repository. This slice intentionally excludes pull requests, releases,
 labels, milestones and their pending cross-domain work.
 
 An empty signed node directory is only a mutual-exclusion check for the new Cell
@@ -285,8 +287,12 @@ publication and accepts only the identical record or the same operation's exact
 the already-visible catalog entry remains activation input and cannot be hidden.
 This closes the interval between the activator's final shard revision check and
 ready CAS without pretending the two objects share a transaction. Revision
-rechecks alone are insufficient. No production Cell-creation route invokes this
-boundary yet; route cutover must use it before `CellAuthority::create_initial`.
+rechecks alone are insufficient. No production request route invokes this
+boundary implicitly. `repository create` invokes it explicitly, initializes the
+repository schema and UUID in one bootstrap transaction, publishes the initial
+root, restores and verifies that identity, drains the temporary owner, and only
+then marks the catalog `cell_ready`. Public request routing refuses missing,
+rootless or non-ready Cells and cannot create control state.
 
 release.json <=8 KiB: version=1, application, revision as u64 decimal string,
 current/desired descriptor digest or null, desired_image, operation ID hex16,
@@ -421,12 +427,27 @@ relationships and retained submission identities. Publish initial roots and
 switch the fleet to the native consumer in one maintenance cutover. No dual
 writes, legacy read fallback or second collaboration persistence path remains.
 
+The catalog is the durable admission state machine. Newly created repositories
+start `empty_cell_pending`; adopted or legacy records start `import_required`;
+only a verified initializer or exact importer operation may write `cell_ready`.
+Startup validates every record before binding, and each five-second catalog
+refresh validates the changed document before replacing the in-memory index. A
+pending record therefore makes readiness unhealthy but never becomes routable.
+Once its final CAS publishes `cell_ready`, the next refresh can materialize it.
+New writes use catalog schema version 2. Version 1 remains a one-way read input:
+the absent application field decodes as `import_required`, and the next
+administrative mutation upgrades the document to version 2. Version 1 cannot
+declare readiness. Old binaries reject version 2, enforcing the forward-only
+fleet cut instead of silently serving a new state machine.
+
 Validate browser create/edit/list/search and error flows, plus Git/SQL outbox
 reconciliation, before reopening admission. Existing public product routes and
 React UI stay in place; only explicitly designed outcome/receipt additions change
 their contract. Existing Git/Xet/LFS objects and publication are outside this
-application-data migration. Production binaries no longer call app_storage's
-JSON path; any importer is maintenance-only.
+application-data migration. Issue and comment production routes no longer call
+their former JSON path; that namespace is maintenance import input only. Other
+collaboration domains continue to use `app_storage` until their own hard-cut
+importer and native route adapter are delivered.
 
 ## Operational metrics
 

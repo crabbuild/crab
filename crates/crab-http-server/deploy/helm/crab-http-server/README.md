@@ -326,10 +326,13 @@ kubectl --namespace crab exec --stdin deployment/crab-http-server -- \
 
 Authenticated repository creation and adoption fail unless the supplied
 membership contains at least one administrator; this prevents creating a
-repository that nobody can manage or open. Every healthy replica discovers the
-new record on its next five-second catalog poll and routes it after
-materialization succeeds. Use `repository adopt` instead when the target prefix
-already contains a canonical Crab repository.
+repository that nobody can manage or open. Create publishes and verifies the
+initial SQLite/LTX root before marking the record `cell_ready`. Every healthy
+replica discovers that ready record on its next five-second catalog poll. A
+pending or import-required record fails the refresh readiness gate and is never
+routed. Use `repository adopt` instead when the target prefix already contains a
+canonical Crab repository, then run the verified maintenance importer before
+starting or reopening the fleet.
 
 Use the same private-file pattern to replace membership later:
 

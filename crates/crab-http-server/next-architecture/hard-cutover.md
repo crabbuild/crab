@@ -91,8 +91,13 @@ bootstrap transaction; publishes/restores the initial LTX root; and writes
 operation-bound completion evidence. It refuses a live signed new Cell fleet.
 That check does not observe legacy processes, so step 1's independent proof that
 old processes and schedulers are stopped and lack write authority remains
-mandatory. Other collaboration domains and the fleet-wide completion checklist
-are not implemented.
+mandatory. On exact completion it moves the repository catalog from
+`import_required` to `cell_ready`; a different operation is rejected after that
+transition. Public issue/comment routes are now native typed Cell consumers and
+ignore legacy issue objects. Startup and catalog refresh reject any repository
+that is not ready or lacks a published root, while request routing has no
+bootstrap path. Other collaboration domains and the fleet-wide completion
+checklist are not implemented.
 
 An uncertain head publication requires rereading authority and matching import
 evidence before retry. Do not start either server version as an automatic

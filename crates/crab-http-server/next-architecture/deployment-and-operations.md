@@ -1,6 +1,6 @@
 # Deployment, lifecycle, and operations
 
-[Design index](README.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Target contract; implemented subset tracked in current implementation.
 
 The fleet runs identical `crab-http-server` processes with embedded replication.
 No separate Celld servers, scheduler service, or SQLite database servers are
@@ -87,33 +87,36 @@ Capacity planning includes losing the largest relevant failure domain, not just
 one nominal replica. Three Pods do not by themselves prove that the remaining
 Pods have sufficient SQLite, restore, Git-transfer or storage-request capacity.
 
-### Listener and configuration proposal
+### Listener and configuration
 
 | Listener | Scope | Handler responsibility |
 | --- | --- | --- |
 | 8788 public | Public Service through configured edge | External auth/origin checks, UI/API/Git |
-| 8789 management | Kubelet and selected monitoring sources | Health/readiness and authenticated diagnostics where added |
-| 8790 peer | Authorized fleet identities only | Cell dispatch and authenticated internal control |
+| 8789 management and peer, current | Authorized fleet identities and credentialed probes | Health/readiness, metrics and Cell dispatch on mandatory mTLS |
+| 8790 peer, target split | Authorized fleet identities only | Cell dispatch and authenticated internal control |
 
-Proposed new configuration, not accepted by the current binary:
+The current binary accepts this exact shape. `peer_advertise` must be a root
+HTTPS URL on `management_listen`; all filesystem paths must be absolute. The
+certificate must be CA-trusted, valid for client and server authentication,
+match the Ed25519 private key and cover the advertised host.
 
 ```toml
-[cells]
-directory = "/var/lib/crab/tmp/cells"
+management_listen = "0.0.0.0:8789"
 
-[peer]
-listen = "0.0.0.0:8790"
-advertise_url = "https://10.42.3.17:8790"
-certificate_file = "/run/secrets/crab-peer/tls.crt"
-private_key_file = "/run/secrets/crab-peer/tls.key"
-trust_bundle_file = "/run/secrets/crab-peer/ca.crt"
+[cells]
+data_dir = "/var/lib/crab/cells"
+peer_advertise = "https://10.42.3.17:8789"
+peer_certificate = "/run/secrets/crab-peer/tls.crt"
+peer_private_key = "/run/secrets/crab-peer/tls.key"
+peer_ca = "/run/secrets/crab-peer/ca.crt"
 ```
 
-Prefer deriving the cell directory from existing scratch policy. Peer binding,
-advertised address and trust material are necessary distributed-process inputs;
-per-repository cloud credentials and a second storage-root configuration are not.
-Keep algorithm tuning as documented internal constants until operational
-evidence warrants public configuration.
+The target may split peer traffic onto 8790 after the Helm, probe and certificate
+contracts are changed together. That is an operational isolation change, not a
+second Cell protocol. Advertised address and trust material are necessary
+distributed-process inputs; per-repository cloud credentials and a second
+storage-root configuration are not. Keep algorithm tuning as documented internal
+constants until operational evidence warrants public configuration.
 
 Pod IP advertisement and TLS verification must agree. For IP endpoints, issue
 appropriate IP SAN certificates or use a reviewed verifier that authenticates a

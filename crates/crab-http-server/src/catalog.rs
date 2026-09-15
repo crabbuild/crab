@@ -8,7 +8,8 @@ use uuid::Uuid;
 
 use crate::{BranchProtection, RepositoryConfig, RepositoryMember, storage_root::StorageRoot};
 
-const SCHEMA_VERSION: u32 = 1;
+const LEGACY_SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const MAX_CATALOG_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_REPOSITORIES: usize = 10_000;
 const MAX_CAS_ATTEMPTS: usize = 8;
@@ -41,11 +42,22 @@ pub struct CatalogRecord {
     pub prefix: String,
     pub placement_generation: u64,
     #[serde(default)]
+    pub application: RepositoryApplicationState,
+    #[serde(default)]
     pub description: String,
     #[serde(default)]
     pub members: Vec<RepositoryMember>,
     #[serde(default)]
     pub protected_branches: Vec<BranchProtection>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryApplicationState {
+    #[default]
+    ImportRequired,
+    EmptyCellPending,
+    CellReady,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -68,9 +80,21 @@ impl Default for CatalogDocument {
 
 impl CatalogDocument {
     fn validate(&self, root: &StorageRoot) -> Result<(), CatalogError> {
-        if self.schema_version != SCHEMA_VERSION || self.repositories.len() > MAX_REPOSITORIES {
+        if !matches!(self.schema_version, LEGACY_SCHEMA_VERSION | SCHEMA_VERSION)
+            || self.repositories.len() > MAX_REPOSITORIES
+        {
             return Err(CatalogError::Invalid(
                 "unsupported schema or repository count",
+            ));
+        }
+        if self.schema_version == LEGACY_SCHEMA_VERSION
+            && self
+                .repositories
+                .iter()
+                .any(|record| record.application != RepositoryApplicationState::ImportRequired)
+        {
+            return Err(CatalogError::Invalid(
+                "legacy catalog cannot declare repository application readiness",
             ));
         }
         let mut ids = HashSet::new();
@@ -182,6 +206,7 @@ impl CatalogStore {
             name,
             prefix,
             placement_generation: 1,
+            application: RepositoryApplicationState::EmptyCellPending,
             description,
             members,
             protected_branches: Vec::new(),
@@ -215,6 +240,7 @@ impl CatalogStore {
             name,
             prefix,
             placement_generation: 1,
+            application: RepositoryApplicationState::ImportRequired,
             description,
             members,
             protected_branches: Vec::new(),
@@ -259,12 +285,42 @@ impl CatalogStore {
             .version
             .checked_add(1)
             .ok_or(CatalogError::Invalid("catalog version overflowed"))?;
+        document.schema_version = SCHEMA_VERSION;
         document.validate(&self.root)?;
         if self.write_document(&document, etag).await? {
             Ok(updated)
         } else {
             Err(CatalogError::Conflict)
         }
+    }
+
+    pub(crate) async fn mark_cell_ready(
+        &self,
+        repository: Uuid,
+    ) -> Result<CatalogRecord, CatalogError> {
+        for _ in 0..MAX_CAS_ATTEMPTS {
+            let (mut document, etag) = self.load().await?;
+            let record = document
+                .repositories
+                .iter_mut()
+                .find(|record| record.id == repository)
+                .ok_or(CatalogError::NotFound)?;
+            if record.application == RepositoryApplicationState::CellReady {
+                return Ok(record.clone());
+            }
+            record.application = RepositoryApplicationState::CellReady;
+            let updated = record.clone();
+            document.version = document
+                .version
+                .checked_add(1)
+                .ok_or(CatalogError::Invalid("catalog version overflowed"))?;
+            document.schema_version = SCHEMA_VERSION;
+            document.validate(&self.root)?;
+            if self.write_document(&document, etag).await? {
+                return Ok(updated);
+            }
+        }
+        Err(CatalogError::Conflict)
     }
 
     async fn insert(&self, record: CatalogRecord) -> Result<CatalogRecord, CatalogError> {
@@ -291,6 +347,7 @@ impl CatalogStore {
                 .version
                 .checked_add(1)
                 .ok_or(CatalogError::Invalid("catalog version overflowed"))?;
+            document.schema_version = SCHEMA_VERSION;
             document.repositories.push(record.clone());
             document.normalize();
             document.validate(&self.root)?;
@@ -357,6 +414,10 @@ mod tests {
         let (document, _) = catalog.load().await.unwrap();
         assert_eq!(document.repositories, [record]);
         assert_eq!(document.version, 1);
+        assert_eq!(
+            document.repositories[0].application,
+            RepositoryApplicationState::EmptyCellPending
+        );
     }
 
     #[tokio::test]
@@ -372,6 +433,84 @@ mod tests {
             )
             .await;
         assert!(matches!(result, Err(CatalogError::Metadata(_))));
+    }
+
+    #[tokio::test]
+    async fn adopted_repository_requires_import_and_ready_transition_is_idempotent() {
+        let catalog = catalog();
+        let runtime = CatalogRecord {
+            id: Uuid::from_bytes([7; 16]),
+            owner: "team".into(),
+            name: "project".into(),
+            prefix: "team/project".into(),
+            placement_generation: 1,
+            application: RepositoryApplicationState::ImportRequired,
+            description: String::new(),
+            members: vec![],
+            protected_branches: vec![],
+        };
+        catalog.insert(runtime.clone()).await.unwrap();
+
+        let ready = catalog.mark_cell_ready(runtime.id).await.unwrap();
+        let repeated = catalog.mark_cell_ready(runtime.id).await.unwrap();
+        let (document, _) = catalog.load().await.unwrap();
+
+        assert_eq!(ready.application, RepositoryApplicationState::CellReady);
+        assert_eq!(repeated, ready);
+        assert_eq!(document.version, 2);
+    }
+
+    #[tokio::test]
+    async fn legacy_catalog_defaults_to_import_required_and_mutations_upgrade_v2() {
+        let catalog = catalog();
+        let body = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "version": 4,
+            "repositories": [{
+                "id": "00000000-0000-0000-0000-000000000007",
+                "owner": "team",
+                "name": "project",
+                "prefix": "team/project",
+                "placement_generation": 1
+            }]
+        }))
+        .unwrap();
+        catalog
+            .root
+            .store
+            .put_overwrite(&catalog.path, Bytes::from(body))
+            .await
+            .unwrap();
+
+        let (legacy, _) = catalog.load().await.unwrap();
+        assert_eq!(legacy.schema_version, LEGACY_SCHEMA_VERSION);
+        assert_eq!(
+            legacy.repositories[0].application,
+            RepositoryApplicationState::ImportRequired
+        );
+        let mut forged_legacy = legacy.clone();
+        forged_legacy.repositories[0].application = RepositoryApplicationState::CellReady;
+        assert!(matches!(
+            forged_legacy.validate(&catalog.root),
+            Err(CatalogError::Invalid(
+                "legacy catalog cannot declare repository application readiness"
+            ))
+        ));
+        catalog
+            .set_members(
+                "team",
+                "project",
+                vec![RepositoryMember {
+                    subject: "user-1".into(),
+                    name: "Crab User".into(),
+                    access: crate::RepositoryAccess::Admin,
+                }],
+            )
+            .await
+            .unwrap();
+        let (upgraded, _) = catalog.load().await.unwrap();
+        assert_eq!(upgraded.schema_version, SCHEMA_VERSION);
+        assert_eq!(upgraded.version, 5);
     }
 
     #[tokio::test]
