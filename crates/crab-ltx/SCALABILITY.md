@@ -72,7 +72,7 @@ Full restore continues to verify every body and intermediate database checksum.
 | Paged fault driver | One shared default worker; 32 concurrent faults and 256 queued requests | SQL worker count; custom independently configured executor hosts |
 | Decoded read-ahead cache | 8 MiB payload per shared driver | SQLite caches, active fetch buffers, metadata and cache bookkeeping |
 | Fault latency | 30-second deadline including queued wait | Arbitrary blocking custom transports/executors that do not yield |
-| Database/input admission | Existing per-database `Limits` | Node RAM, local SSD quota, open file descriptors |
+| Database/input admission | Per-database `Limits`; three retained 64 KiB SQLite page caches; embedding server derives active count from its page-cache pool and available file descriptors | Native task/actor overhead, dirty bytes and local SSD quota |
 
 `Host::{with_io_slots,with_job_slots,with_recovery_slots}` accept shared
 `Arc<tokio::sync::Semaphore>` values. Configure a host once and clone it across
@@ -93,20 +93,22 @@ admit 5 GB databases. Raising it requires a separately sized recovery budget.
    authenticated block-addressable radix directory, and incremental publication
    reads/copy-on-writes only changed paths while preserving truncation/regrowth
    coverage. Initial construction still materializes all locators, writable
-   activation loads an eight-byte checksum per database page, the standalone
-   `Replica` page map remains resident, and there is no bounded shared node cache
-   with an explicit local persistence/rebuild contract. Finish those paths before
+   activation loads an eight-byte checksum per database page, and the standalone
+   `Replica` page map remains resident. The shared verified directory-node cache
+   is bounded but has no local persistence/rebuild contract. Finish those paths before
    claiming the 5 GB/10K target; do not add an implicit fallback reader.
 2. **Streaming large-database operations.** Capture checksum arrays still
    clone/scan per cut. Snapshot, restore and compaction can hold database-sized
    decoded buffers. Replace these with bounded scratch-backed processing and
    incremental checksum state; qualify 5 GB incompressible data and low-disk
    failures. Keep cryptographic body/index binding and exact output verification.
-3. **Resident lifecycle and SQL scheduling.** The server needs bounded activation
-   queues, a shared SQL executor, per-database serialization, FD/cache budgets,
-   and explicit active/warm/cold transitions. Managed sessions own three SQLite
-   connections each. Fresh exact-root restore is supported; reusable crash-safe
-   local warm reopening is not. Every acknowledged root must survive eviction.
+3. **Resident lifecycle and SQL scheduling.** The server has bounded activation
+   queues, a shared SQL executor, per-database serialization and FD/page-cache-
+   derived active admission. Managed sessions own three 64 KiB-cache SQLite
+   connections each. Native task/actor overhead and dirty-byte reservations plus
+   explicit warm transitions remain. Fresh exact-root restore is supported;
+   reusable crash-safe local warm reopening is not. Every acknowledged root must
+   survive eviction.
 4. **Durable publication and retention.** Implement the HTTP owner/head CAS and
    response gate, reconcile ambiguous publication, pin backups/recovery roots,
    and reclaim only unreferenced objects outside retention grace. Library epoch

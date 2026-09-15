@@ -5,6 +5,14 @@ use rusqlite::{Connection, Transaction};
 use crate::{CaptureBatch, CrabError, Limits, LocalSegment, Position, Result, SegmentInfo};
 use crate::{db::Db, host::LtxHost, ltx, types::Txid};
 
+/// Number of SQLite connections retained by one open managed database.
+pub const MANAGED_SQLITE_CONNECTIONS: u64 = 3;
+
+/// Page-cache byte target budgeted for each retained SQLite connection.
+pub const MANAGED_CONNECTION_PAGE_CACHE_BYTES: u64 = 64 * 1024;
+
+const MANAGED_CONNECTION_PAGE_CACHE_KIB: i64 = 64;
+
 /// One exclusive local capture session with a serialized SQLite writer.
 ///
 /// The caller owns the database and its directory: no external writers, direct
@@ -494,10 +502,12 @@ impl ManagedDb {
 }
 
 pub(crate) fn open_connection(path: &Path, vfs: Option<&str>) -> rusqlite::Result<Connection> {
-    match vfs {
+    let connection = match vfs {
         Some(vfs) => Connection::open_with_flags_and_vfs(path, rusqlite::OpenFlags::default(), vfs),
         None => Connection::open(path),
-    }
+    }?;
+    connection.pragma_update(None, "cache_size", -MANAGED_CONNECTION_PAGE_CACHE_KIB)?;
+    Ok(connection)
 }
 
 pub(crate) fn read_main(connection: &Connection, offset: u64, size: usize) -> Result<Vec<u8>> {
@@ -536,6 +546,16 @@ mod tests {
     #[derive(Debug, thiserror::Error)]
     #[error("inventory rejected the command")]
     struct Rejected;
+
+    #[test]
+    fn managed_connections_set_the_budgeted_page_cache() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let connection = open_connection(&temp.path().join("cache.sqlite"), None).unwrap();
+        let cache_kib: i64 = connection
+            .query_row("PRAGMA cache_size", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(cache_kib, -MANAGED_CONNECTION_PAGE_CACHE_KIB);
+    }
 
     #[test]
     fn typed_operation_error_rolls_back_and_keeps_writer_usable() {

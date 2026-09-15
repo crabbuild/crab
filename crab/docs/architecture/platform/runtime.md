@@ -298,7 +298,10 @@ With `panic=abort`, process restart follows the normal source-loss recovery path
 Neither policy turns a panic into a business rejection.
 
 The implemented `SqlWorkerPool` supplies the SQL ownership half of this contract. Construction
-accepts one through sixteen workers and one through 10,000 active Cells. Each OS
+accepts one through sixteen workers and one through 10,000 active Cells. Server
+composition derives the active limit from its 35% page-cache pool, three 64 KiB
+caches per managed database and the process's currently available file
+descriptors, then retains 10,000 only as an absolute safety ceiling. Each OS
 thread owns a `HashMap<CellId, CellExecutor>` and consumes a Tokio MPSC channel
 with capacity 256 through `blocking_recv`; no Tokio runtime is created on the
 worker. The first eight Cell-ID bytes select the worker, so activation and every

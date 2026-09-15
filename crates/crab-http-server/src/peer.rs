@@ -75,6 +75,7 @@ pub(crate) struct NodePublisher {
 pub(crate) struct LocalResources {
     pub(crate) memory_bytes: u64,
     pub(crate) free_disk_bytes: u64,
+    pub(crate) available_file_descriptors: usize,
 }
 
 impl NodePublisher {
@@ -511,11 +512,24 @@ fn node_capacity(data_dir: &Path) -> crate::Result<NodeCapacity> {
 fn local_resources(data_dir: &Path) -> crate::Result<LocalResources> {
     let mut system = sysinfo::System::new();
     system.refresh_memory();
+    let pid = sysinfo::get_current_pid()
+        .map_err(|_| crate::Error::Config("cannot determine the server process ID"))?;
+    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), false);
+    let open_files = system
+        .process(pid)
+        .and_then(sysinfo::Process::open_files)
+        .ok_or(crate::Error::Config(
+            "cannot determine the server's open file count",
+        ))?;
+    let file_limit = sysinfo::System::open_files_limit().ok_or(crate::Error::Config(
+        "cannot determine the server's open file limit",
+    ))?;
     // Startup budgets use the stable process limit. Reusing advertised free
     // memory would make transient boot load permanently shrink Cell admission.
     Ok(LocalResources {
         memory_bytes: effective_memory_limit(system.total_memory()),
         free_disk_bytes: fs4::available_space(data_dir)?,
+        available_file_descriptors: file_limit.saturating_sub(open_files),
     })
 }
 
@@ -678,6 +692,17 @@ mod tests {
     use super::*;
 
     const NOW_MS: i64 = 1_000_000;
+
+    #[test]
+    fn local_resources_include_process_file_capacity() {
+        let directory = TempDir::new().unwrap();
+        let resources = local_resources(directory.path()).unwrap();
+        assert!(
+            resources.memory_bytes > 0
+                && resources.free_disk_bytes > 0
+                && resources.available_file_descriptors > 0
+        );
+    }
 
     fn repository() -> RepositoryConfig {
         RepositoryConfig {

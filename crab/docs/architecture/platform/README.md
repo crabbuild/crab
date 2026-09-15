@@ -209,9 +209,10 @@ only after verified publication. Serving fails before listener bind when any
 cataloged repository is pending import/initialization or lacks a published root,
 and request routing never authorizes an empty bootstrap. The complete public
 issue/comment route group now uses typed Cell commands and queries. Upgrade
-migrations, per-Cell/file-descriptor/dirty-job admission and the remaining
+migrations, native task/actor and dirty-job admission and the remaining
 collaboration-domain route cuts remain; effective-memory and free-volume startup
-floors plus a resource-derived node mailbox are implemented. KV, SQL, Queue and
+floors, a resource-derived node mailbox and page-cache/file-descriptor-derived
+active-Cell admission are implemented. KV, SQL, Queue and
 Workflow primitive handles are complete for local routing.
 The object-store node directory now strict-creates and conditionally refreshes
 canonical, short-lived advertisements. Each record binds one nonzero boot

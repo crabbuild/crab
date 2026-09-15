@@ -168,6 +168,7 @@ docker run --detach --name "$restore_server" \
   --env AWS_EC2_METADATA_DISABLED=true \
   --read-only --cap-drop ALL --security-opt no-new-privileges:true \
   --tmpfs /var/lib/crab/tmp:rw,noexec,nosuid,nodev,size=2g,uid=10001,gid=10001,mode=0700 \
+  --tmpfs /var/lib/crab/cells:rw,noexec,nosuid,nodev,size=32g,uid=10001,gid=10001,mode=0700 \
   --volume "${work_dir}/restore.server.toml:/etc/crab/server.toml:ro" \
   "$server_image" >/dev/null
 docker run --detach --name "$restore_proxy" \

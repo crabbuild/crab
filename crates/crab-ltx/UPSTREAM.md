@@ -115,6 +115,9 @@ Paths in the first column are relative to upstream `crates/ltx/`.
     and local pruning; named process-lifetime SQLite base VFS; independently
     started/joined I/O workers. Exact local resume remains runtime-free unless
     the optional remote feature is enabled. No local listing-based authority.
+14. Every retained managed SQLite connection uses a 64 KiB page-cache target.
+    The three-connection total is exported for the embedding runtime's active-
+    database admission instead of relying on SQLite's multi-megabyte default.
 
 Still omitted: duplicate provider/URL construction, epoch election, listing-based
 discovery, complete virtual-filesystem simulation and B-tree prediction heuristics.

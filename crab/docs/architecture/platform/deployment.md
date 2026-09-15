@@ -89,8 +89,10 @@ separately derives its stable memory budget from the lower of host RAM and the
 cgroup limit, reserves the larger of 512 MiB or one quarter for the process,
 and gives five percent of the remaining Cell budget to the node mailbox. It
 rejects less than 2 GiB effective memory or less than 20 GiB disk after the
-larger of 10 GiB or one fifth of current free space is reserved. Per-Cell page
-cache, open-file and dirty-job reservations remain delivery work.
+larger of 10 GiB or one fifth of current free space is reserved. Active-Cell
+admission also reserves three 64 KiB SQLite caches and eight persistent file
+descriptors per Cell, after retaining ten percent or at least 128 descriptors
+for the process. Native task/actor overhead and dirty-job reservations remain.
 
 ## Resource profiles and capacity targets
 
@@ -131,10 +133,12 @@ Measure baseline growth during combined Git/browser/Cell qualification.
 Include native thread stacks, registry data, connection and SHM overhead in
 measured accounting; reservations are not an RSS guarantee by themselves.
 
-Each open SQLite session reserves a 64 KiB minimum page cache plus its measured
-overhead upper bound. Additional pages come from the shared pool. All three
-ManagedDb connections and SQLite sidecar files enter FD accounting; startup
-validates available RLIMIT_NOFILE and activation reserves descriptors. A profile
+Each of the three SQLite connections retained by an open ManagedDb has a 64 KiB
+page-cache target. Their combined 192 KiB is charged against the 35% pool when
+deriving the active-Cell limit. The same limit reserves eight descriptors for
+the three database/WAL handles, shared-memory sidecar and capture reader. Startup
+subtracts files already open from the process limit and retains ten percent or
+128 descriptors, whichever is larger, for HTTP, Git and transient work. A profile
 with insufficient memory or FDs rejects activation rather than substituting cold
 registrations for the requested open-DB target.
 
@@ -409,10 +413,9 @@ every active SQLite Cell, conditionally releases its exact control ownership,
 closes the fixed pool and joins all SQL worker threads before process return.
 The initial wiring uses CPU-derived 1..16 workers and a 10,000 active-Cell
 ceiling. It derives the node mailbox byte semaphore as five percent of the Cell
-memory budget and enforces the effective-memory and free-volume startup floors
-above. The count ceiling is still only a safety maximum, not completed
-resource-profile admission. Per-Cell page-cache, local file-descriptor and
-dirty-job reservations, full use of the configured Cell directory, activity
+memory budget, derives active-Cell admission from the page-cache and descriptor
+budgets, and enforces the effective-memory and free-volume startup floors above.
+Native task/actor and dirty-job reservations, full use of the configured Cell directory, activity
 cancellation and the 110-second escalation remain delivery work. Node identity,
 mandatory management mTLS, initial advertisement, refresh supervision and an
 mTLS-aware binary healthcheck are implemented; production Kubernetes and ECS

@@ -18,7 +18,7 @@ compaction and the complete product hard cutover still remain. See the
 
 | API | Local result |
 | --- | --- |
-| `ManagedDb::open(path, limits)` | Exclusive fresh capture session; owns control, read-lock and application-writer SQLite connections |
+| `ManagedDb::open(path, limits)` | Exclusive fresh capture session; owns control, read-lock and application-writer SQLite connections, each configured with a 64 KiB page-cache target |
 | `ManagedDb::{resume,resume_with_host}(plan, path, limits, …)` | New local session continuing an exact verified TXID/checksum; available without `replica` |
 | `transaction(closure)` | One locally committed SQL transaction; no remote-durability claim |
 | `capture()` | Ordered `CaptureBatch` containing every newly generated cut and its endpoint, including checkpoint cuts |

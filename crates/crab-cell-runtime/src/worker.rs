@@ -22,6 +22,13 @@ const MAX_ACTIVE_CELLS: usize = 10_000;
 const WORKER_QUEUE: usize = 256;
 const DEFAULT_PAGE_IO_DEADLINE: Duration = Duration::from_secs(30);
 
+/// Minimum SQLite page-cache reservation for one active Cell.
+pub const ACTIVE_CELL_PAGE_CACHE_BYTES: u64 =
+    crab_ltx::MANAGED_SQLITE_CONNECTIONS * crab_ltx::MANAGED_CONNECTION_PAGE_CACHE_BYTES;
+
+/// Persistent database, WAL, SHM and capture descriptors reserved per active Cell.
+pub const ACTIVE_CELL_FILE_DESCRIPTORS: usize = 8;
+
 pub(crate) type Handler = Box<
     dyn for<'connection> FnOnce(
             &crab_ltx::rusqlite::Transaction<'connection>,

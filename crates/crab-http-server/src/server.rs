@@ -14,7 +14,8 @@ use axum::{
 };
 use bytes::Bytes;
 use crab_cell_runtime::{
-    CellRuntime, NodeDirectory, Owner, PeerRoundTrip, PeerSigner, SessionId, SqlWorkerPool,
+    ACTIVE_CELL_FILE_DESCRIPTORS, ACTIVE_CELL_PAGE_CACHE_BYTES, CellRuntime, NodeDirectory, Owner,
+    PeerRoundTrip, PeerSigner, SessionId, SqlWorkerPool,
 };
 use crab_metadata::manifest_store::read_manifest;
 use crab_remote_git::{
@@ -47,10 +48,12 @@ const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
 const MIN_CELL_MEMORY_BYTES: u64 = 2 * GIB;
 const MIN_USABLE_CELL_DISK_BYTES: u64 = 20 * GIB;
+const FILE_DESCRIPTOR_RESERVE_MINIMUM: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CellRuntimeBudget {
     node_mailbox_bytes: usize,
+    max_active_cells: usize,
 }
 
 impl CellRuntimeBudget {
@@ -69,11 +72,29 @@ impl CellRuntimeBudget {
         }
         let process_reserve = (resources.memory_bytes / 4).max(512 * MIB);
         let cell_memory = resources.memory_bytes - process_reserve;
+        let page_cache_memory = cell_memory.saturating_mul(35) / 100;
+        let memory_cells = page_cache_memory / ACTIVE_CELL_PAGE_CACHE_BYTES;
+        let descriptor_reserve =
+            (resources.available_file_descriptors / 10).max(FILE_DESCRIPTOR_RESERVE_MINIMUM);
+        let descriptor_cells = resources
+            .available_file_descriptors
+            .saturating_sub(descriptor_reserve)
+            / ACTIVE_CELL_FILE_DESCRIPTORS;
+        let max_active_cells = usize::try_from(memory_cells)
+            .unwrap_or(usize::MAX)
+            .min(descriptor_cells)
+            .min(MAX_ACTIVE_CELLS);
+        if max_active_cells == 0 {
+            return Err(crate::Error::Config(
+                "Cell runtime has no memory and file-descriptor capacity",
+            ));
+        }
         let mailbox = usize::try_from(cell_memory / 20)
             .unwrap_or(usize::MAX)
             .min(tokio::sync::Semaphore::MAX_PERMITS);
         Ok(Self {
             node_mailbox_bytes: mailbox,
+            max_active_cells,
         })
     }
 }
@@ -92,7 +113,7 @@ fn transfer_admission(catalog: &CatalogStore) -> TransferAdmission {
 fn start_cell_runtime(session: SessionId, budget: CellRuntimeBudget) -> Result<CellRuntime> {
     crate::cells::compiled_registry()?;
     Ok(CellRuntime::new(
-        SqlWorkerPool::for_system(MAX_ACTIVE_CELLS)?,
+        SqlWorkerPool::for_system(budget.max_active_cells)?,
         budget.node_mailbox_bytes,
         session,
     )?)
@@ -1192,26 +1213,70 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    #[test]
-    fn cell_runtime_budget_uses_effective_memory_and_reserved_disk() {
-        let budget = CellRuntimeBudget::from_resources(crate::peer::LocalResources {
-            memory_bytes: 2 * GIB,
-            free_disk_bytes: 30 * GIB,
-        })
-        .unwrap();
-        assert_eq!(budget.node_mailbox_bytes, (3 * GIB / 2 / 20) as usize);
+    fn local_resources(
+        memory_bytes: u64,
+        free_disk_bytes: u64,
+        available_file_descriptors: usize,
+    ) -> crate::peer::LocalResources {
+        crate::peer::LocalResources {
+            memory_bytes,
+            free_disk_bytes,
+            available_file_descriptors,
+        }
+    }
 
-        assert!(
-            CellRuntimeBudget::from_resources(crate::peer::LocalResources {
-                memory_bytes: 2 * GIB - 1,
-                free_disk_bytes: 30 * GIB,
-            })
-            .is_err()
+    #[test]
+    fn cell_runtime_budget_derives_mailbox_and_active_cell_capacity() {
+        let budget =
+            CellRuntimeBudget::from_resources(local_resources(2 * GIB, 30 * GIB, 10_000)).unwrap();
+        assert_eq!(
+            budget,
+            CellRuntimeBudget {
+                node_mailbox_bytes: (3 * GIB / 2 / 20) as usize,
+                max_active_cells: 1_125,
+            }
         );
+    }
+
+    #[test]
+    fn cell_runtime_budget_memory_bounds_active_cells() {
+        let budget =
+            CellRuntimeBudget::from_resources(local_resources(2 * GIB, 30 * GIB, 1_000_000))
+                .unwrap();
+        assert_eq!(budget.max_active_cells, 2_867);
+    }
+
+    #[test]
+    fn cell_runtime_budget_keeps_the_node_safety_ceiling() {
+        let budget =
+            CellRuntimeBudget::from_resources(local_resources(64 * GIB, 1000 * GIB, 1_000_000))
+                .unwrap();
+        assert_eq!(budget.max_active_cells, MAX_ACTIVE_CELLS);
+    }
+
+    #[test]
+    fn cell_runtime_budget_rejects_insufficient_memory() {
+        assert!(
+            CellRuntimeBudget::from_resources(local_resources(2 * GIB - 1, 30 * GIB, 10_000))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cell_runtime_budget_rejects_insufficient_disk() {
+        assert!(
+            CellRuntimeBudget::from_resources(local_resources(2 * GIB, 30 * GIB - 1, 10_000))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cell_runtime_budget_rejects_insufficient_file_descriptors() {
         assert!(
             CellRuntimeBudget::from_resources(crate::peer::LocalResources {
                 memory_bytes: 2 * GIB,
-                free_disk_bytes: 30 * GIB - 1,
+                free_disk_bytes: 30 * GIB,
+                available_file_descriptors: FILE_DESCRIPTOR_RESERVE_MINIMUM,
             })
             .is_err()
         );
