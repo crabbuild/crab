@@ -4,7 +4,7 @@ use crab_cell_runtime::{
     ApplicationId, BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellCatalog,
     CellModule, CellRuntime, CellTarget, Digest, HandlerOutcome, IncarnationId,
     MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor, NamespaceId, Owner, Registry,
-    RegistryBuilder, SessionId, SqlWorkerPool, TenantId,
+    RegistryBuilder, RetainedCodeDescriptor, SessionId, SqlWorkerPool, TenantId,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{CellStorageLayout, Store};
@@ -15,6 +15,7 @@ const NAMESPACE: NamespaceId = NamespaceId::from_bytes([61; 16]);
 const MIGRATION_ONE: &str =
     "CREATE TABLE records(id INTEGER PRIMARY KEY, value BLOB NOT NULL) STRICT";
 const MIGRATION_TWO: &str = "ALTER TABLE records ADD COLUMN label TEXT";
+const PREDECESSOR_CODE: Digest = Digest::from_bytes([60; 32]);
 
 struct MigrationModule;
 
@@ -35,6 +36,11 @@ fn descriptor() -> &'static ModuleDescriptor {
     DESCRIPTOR.get_or_init(|| ModuleDescriptor {
         name: MODULE,
         source_digest: Digest::from_bytes([62; 32]),
+        retained_codes: &[RetainedCodeDescriptor {
+            code: PREDECESSOR_CODE,
+            schema_min: 1,
+            schema_max: 2,
+        }],
         schema_min: 1,
         schema_max: 2,
         migrations: Box::leak(Box::new([
@@ -77,6 +83,10 @@ fn compiled_registry() -> Registry {
 async fn migration_replaces_capability_publishes_schema_and_restores_exact_root() {
     let registry = compiled_registry();
     let code = registry.module_code(MODULE).unwrap();
+    assert!(registry.supports_cell(NAMESPACE, CatalogRole::Sql, PREDECESSOR_CODE, 1));
+    assert!(registry.supports_cell(NAMESPACE, CatalogRole::Sql, PREDECESSOR_CODE, 2));
+    assert!(registry.module_digests().contains(&PREDECESSOR_CODE));
+    assert!(registry.module_digests().contains(&code));
     let target = CellTarget::new(
         TenantId::from_bytes([64; 16]),
         ApplicationId::from_bytes([65; 16]),
@@ -100,7 +110,7 @@ async fn migration_replaces_capability_publishes_schema_and_restores_exact_root(
     .unwrap();
     let catalog = CellCatalog::new(layout.clone(), target.tenant());
     let proof = catalog
-        .provision(CatalogEntry::new(&target, CatalogRole::Sql, code, 1).unwrap())
+        .provision(CatalogEntry::new(&target, CatalogRole::Sql, PREDECESSOR_CODE, 1).unwrap())
         .await
         .unwrap();
     let authority = CellAuthority::new(layout);
@@ -142,7 +152,9 @@ async fn migration_replaces_capability_publishes_schema_and_restores_exact_root(
         .next_migration(NAMESPACE, handle.code(), handle.schema())
         .unwrap()
         .unwrap();
-    let migration_digest = plan.digest();
+    assert_eq!(plan.from_code(), PREDECESSOR_CODE);
+    assert_eq!(plan.to_code(), code);
+    let migration_digest = plan.digest().unwrap();
     let migrated = handle.migrate(plan, 10).await.unwrap();
     assert_eq!(migrated.outcome.code, code);
     assert_eq!(migrated.outcome.schema, 2);
@@ -157,6 +169,14 @@ async fn migration_replaces_capability_publishes_schema_and_restores_exact_root(
             .unwrap()
             .is_none()
     );
+    let code_only = registry
+        .next_migration(NAMESPACE, PREDECESSOR_CODE, 2)
+        .unwrap()
+        .unwrap();
+    assert_eq!(code_only.from_schema(), code_only.to_schema());
+    assert_eq!(code_only.from_code(), PREDECESSOR_CODE);
+    assert_eq!(code_only.to_code(), code);
+    assert!(code_only.sql().is_none());
     let metadata = migrated
         .handle
         .query(64, 128, |connection| {
@@ -250,9 +270,118 @@ async fn migration_replaces_capability_publishes_schema_and_restores_exact_root(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn migration_digest_conflict_blocks_activation() {
+async fn code_only_migration_publishes_new_code_without_schema_ledger_entry() {
     let registry = compiled_registry();
     let code = registry.module_code(MODULE).unwrap();
+    let target = CellTarget::new(
+        TenantId::from_bytes([75; 16]),
+        ApplicationId::from_bytes([76; 16]),
+        NAMESPACE,
+        b"code-only",
+    )
+    .unwrap();
+    let cell = target.cell_id();
+    let incarnation = IncarnationId::from_bytes([77; 16]);
+    let layout = CellStorageLayout::new(
+        Store::new(Arc::new(InMemory::new())),
+        Path::from("code-only-migration-runtime"),
+        [76; 16],
+    );
+    let replica = CellReplica::new(
+        layout.clone(),
+        *cell.as_bytes(),
+        *incarnation.as_bytes(),
+        Limits::default(),
+    )
+    .unwrap();
+    let catalog = CellCatalog::new(layout.clone(), target.tenant());
+    let proof = catalog
+        .provision(CatalogEntry::new(&target, CatalogRole::Sql, PREDECESSOR_CODE, 2).unwrap())
+        .await
+        .unwrap();
+    let authority = CellAuthority::new(layout);
+    let session = SessionId::from_bytes([78; 16]);
+    let control = authority
+        .create_initial(
+            &proof,
+            incarnation,
+            Owner {
+                session,
+                endpoint: "https://code-only.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let files = tempfile::TempDir::new().unwrap();
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 2).unwrap(), 16 * 1024 * 1024, session).unwrap();
+    let handle = runtime
+        .bootstrap(
+            proof,
+            replica,
+            authority.clone(),
+            control,
+            files.path().join("code-only.sqlite"),
+            |transaction| {
+                transaction.execute_batch(MIGRATION_ONE)?;
+                transaction.execute_batch(MIGRATION_TWO)?;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    let old_handle = handle.clone();
+    let plan = registry
+        .next_migration(NAMESPACE, handle.code(), handle.schema())
+        .unwrap()
+        .unwrap();
+    assert_eq!(plan.from_code(), PREDECESSOR_CODE);
+    assert_eq!(plan.to_code(), code);
+    assert_eq!(plan.from_schema(), 2);
+    assert_eq!(plan.to_schema(), 2);
+    assert_eq!(plan.digest(), None);
+    assert_eq!(plan.sql(), None);
+
+    let migrated = handle.migrate(plan, 10).await.unwrap();
+    assert_eq!(migrated.outcome.code, code);
+    assert_eq!(migrated.outcome.schema, 2);
+    assert_eq!(migrated.outcome.commit_sequence, 1);
+    assert!(matches!(
+        old_handle.query(1, 1, |_| Ok(Vec::new())).await,
+        Err(crab_cell_runtime::Error::CellDraining)
+    ));
+    let metadata = migrated
+        .handle
+        .query(64, 64, |connection| {
+            let schema = connection.query_row(
+                "SELECT schema_version FROM sys_meta WHERE singleton = 1",
+                [],
+                |row| row.get::<_, u32>(0),
+            )?;
+            let migrations =
+                connection.query_row("SELECT COUNT(*) FROM sys_migrations", [], |row| {
+                    row.get::<_, u32>(0)
+                })?;
+            let mut result = schema.to_be_bytes().to_vec();
+            result.extend_from_slice(&migrations.to_be_bytes());
+            Ok(result)
+        })
+        .await
+        .unwrap();
+    assert_eq!(&metadata[..4], &2_u32.to_be_bytes());
+    assert_eq!(&metadata[4..], &0_u32.to_be_bytes());
+    let published = authority.load(cell).await.unwrap().unwrap();
+    assert_eq!(published.value().code, code);
+    assert_eq!(published.value().schema, 2);
+    assert_eq!(published.value().root.as_ref().unwrap().commit_sequence, 1);
+
+    migrated.handle.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_digest_conflict_blocks_activation() {
+    let registry = compiled_registry();
     let target = CellTarget::new(
         TenantId::from_bytes([71; 16]),
         ApplicationId::from_bytes([72; 16]),
@@ -276,7 +405,7 @@ async fn migration_digest_conflict_blocks_activation() {
     .unwrap();
     let catalog = CellCatalog::new(layout.clone(), target.tenant());
     let proof = catalog
-        .provision(CatalogEntry::new(&target, CatalogRole::Sql, code, 1).unwrap())
+        .provision(CatalogEntry::new(&target, CatalogRole::Sql, PREDECESSOR_CODE, 1).unwrap())
         .await
         .unwrap();
     let authority = CellAuthority::new(layout);

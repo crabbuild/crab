@@ -33,6 +33,7 @@ impl CellModule for TestSql {
         DESCRIPTOR.get_or_init(|| ModuleDescriptor {
             name: SQL_MODULE,
             source_digest: Digest::from_bytes([8; 32]),
+            retained_codes: &[],
             schema_min: 1,
             schema_max: 1,
             migrations: Box::leak(Box::new([MigrationDescriptor {

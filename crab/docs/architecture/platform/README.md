@@ -250,12 +250,14 @@ only after verified publication. Serving fails before listener bind when any
 cataloged repository is pending import/initialization or lacks a published root,
 and request routing never authorizes an empty bootstrap. The complete public
 issue/comment route group now uses typed Cell commands and queries. The runtime
-now executes one registry-verified `N→N+1` migration on the Cell's fixed SQL
-worker, records its digest, captures its LTX cut, publishes root/schema/code in
-one fenced control transition, and replaces the old capability only after that
-transition is authoritative. Fleet-wide release activation, predecessor-code and
-code-only rollover, native task/actor and dirty-job admission, and the remaining
-collaboration-domain route cuts remain; effective-memory and free-volume startup
+now declares bounded predecessor-code compatibility in the compiled Rust
+registry. It can execute typed local and peer operations for those declared
+code/schema pairs, publish either one verified `N→N+1` SQL migration or one
+same-schema code-only system transaction, and replace the old capability only
+after the new LTX root/schema/code control transition is authoritative.
+Fleet-wide catalog migration orchestration and progress, native task/actor and
+dirty-job admission, and the remaining collaboration-domain route cuts remain;
+effective-memory and free-volume startup
 floors, a resource-derived node mailbox and page-cache/file-descriptor-derived
 active-Cell admission are implemented. A single 110-second absolute shutdown
 deadline now covers listener drain, background supervisors, accepted transfers,
@@ -362,10 +364,11 @@ completed import; interruption after root publication restores and verifies that
 root before writing completion evidence. The command refuses a live signed Cell
 fleet, but operators must still independently prove that every legacy writer has
 stopped because the legacy deployment did not publish those node records.
-The single-Cell, same-code schema migration mechanism is implemented and proven
-through exact-root restoration. Catalog-wide migration progress,
-predecessor-code/code-only rollover, remaining collaboration-domain
-import/adapters and capacity qualification remain.
+Single-Cell migration now covers current or explicitly retained predecessor code,
+adjacent schema SQL, and same-schema code-only rollover. The code-only path is
+proven through an authoritative LTX/control publication, while the schema path is
+also proven through exact-root restoration. Catalog-wide migration progress,
+remaining collaboration-domain import/adapters and capacity qualification remain.
 Issue/comment HTTP reads and mutations now enter
 through the authenticated repository router and typed Cell API; legacy issue
 objects are maintenance-import input only and are ignored by serving code.

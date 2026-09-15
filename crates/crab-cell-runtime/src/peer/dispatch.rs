@@ -127,12 +127,18 @@ impl PeerDispatcher {
             Some(wire::mutation_request::Operation::CellCommand(command)) => command,
             _ => return Err(Error::Peer("typed mutation operation is not implemented")),
         };
-        let (module, descriptor, code) = self.registry.routed_command_contract(
+        let (module, descriptor) = self.registry.routed_command_contract(
             request_target(request.target.as_ref())?.namespace(),
             command.command_id,
             command.codec_version,
         )?;
-        validate_description(expected, code, descriptor.schema_min, descriptor.schema_max)?;
+        validate_description(
+            &self.registry,
+            module,
+            expected,
+            descriptor.schema_min,
+            descriptor.schema_max,
+        )?;
         let operation_digest = encoded_command_operation_digest(
             expected,
             identity,
@@ -205,12 +211,18 @@ impl PeerDispatcher {
         now_ms: i64,
     ) -> Result<EncodedObservation> {
         let target = request_target(request.target.as_ref())?;
-        let (module, descriptor, code) = self.registry.routed_query_contract(
+        let (module, descriptor) = self.registry.routed_query_contract(
             target.namespace(),
             query.query_id,
             query.codec_version,
         )?;
-        validate_description(expected, code, descriptor.schema_min, descriptor.schema_max)?;
+        validate_description(
+            &self.registry,
+            module,
+            expected,
+            descriptor.schema_min,
+            descriptor.schema_max,
+        )?;
         transport
             .query(EncodedQuery {
                 target,
@@ -299,12 +311,18 @@ impl PeerDispatcher {
             Some(wire::effect_request::Operation::CellCommand(command)) => command,
             _ => return Err(Error::Peer("typed effect operation is not implemented")),
         };
-        let (module, descriptor, code) = self.registry.routed_command_contract(
+        let (module, descriptor) = self.registry.routed_command_contract(
             target.namespace(),
             command.command_id,
             command.codec_version,
         )?;
-        validate_description(expected, code, descriptor.schema_min, descriptor.schema_max)?;
+        validate_description(
+            &self.registry,
+            module,
+            expected,
+            descriptor.schema_min,
+            descriptor.schema_max,
+        )?;
         if command.input.len() > descriptor.input_limit as usize {
             return Err(Error::Command("encoded effect input exceeds limit"));
         }
@@ -448,12 +466,15 @@ fn request_target(target: Option<&wire::Target>) -> Result<CellTarget> {
 }
 
 fn validate_description(
+    registry: &Registry,
+    module: &str,
     description: CellDescription,
-    code: Digest,
     schema_min: u32,
     schema_max: u32,
 ) -> Result<()> {
-    if description.code != code || !(schema_min..=schema_max).contains(&description.schema) {
+    if !registry.supports_module_code(module, description.code, description.schema)
+        || !(schema_min..=schema_max).contains(&description.schema)
+    {
         return Err(Error::Fenced);
     }
     Ok(())

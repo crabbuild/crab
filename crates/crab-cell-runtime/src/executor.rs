@@ -107,7 +107,7 @@ pub struct PendingMigration {
     code: Digest,
     from_schema: u32,
     to_schema: u32,
-    digest: Digest,
+    digest: Option<Digest>,
     commit_sequence: u64,
     next_due_ms: Option<i64>,
     cuts: CaptureBatch,
@@ -131,7 +131,7 @@ impl PendingMigration {
     }
 
     #[must_use]
-    pub const fn digest(&self) -> Digest {
+    pub const fn digest(&self) -> Option<Digest> {
         self.digest
     }
 
@@ -665,11 +665,15 @@ impl CellExecutor {
         if self.has_pending() {
             return Err(Error::PendingPublication);
         }
-        if now_ms < 0
-            || plan.from_schema() != self.schema
-            || self.schema.checked_add(1) != Some(plan.to_schema())
-            || plan.digest() != Digest::from_bytes(*blake3::hash(plan.sql().as_bytes()).as_bytes())
-        {
+        let valid_step = match (plan.sql(), plan.digest()) {
+            (Some(sql), Some(digest)) => {
+                self.schema.checked_add(1) == Some(plan.to_schema())
+                    && digest == Digest::from_bytes(*blake3::hash(sql.as_bytes()).as_bytes())
+            }
+            (None, None) => self.schema == plan.to_schema() && plan.from_code() != plan.to_code(),
+            _ => false,
+        };
+        if now_ms < 0 || plan.from_schema() != self.schema || !valid_step {
             return Err(Error::Registry("invalid Cell migration plan"));
         }
         let cell = self.cell;
@@ -680,30 +684,32 @@ impl CellExecutor {
         let transaction = self.db.transaction_with(|transaction| {
             let (commit_sequence, prior_logical_time_ms) =
                 runtime_metadata(transaction, cell, incarnation, from_schema)?;
-            let existing = transaction
-                .query_row(
-                    "SELECT digest, applied_sequence FROM sys_migrations WHERE version = ?1",
-                    [to_schema],
-                    |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
-                )
-                .optional()?;
-            if let Some((existing_digest, _)) = existing {
-                return Err(if existing_digest.as_slice() == digest.as_bytes() {
-                    Error::Control("migration is recorded ahead of runtime schema")
-                } else {
-                    Error::Registry("migration digest conflicts with SQLite history")
-                });
-            }
             let sequence = commit_sequence
                 .checked_add(1)
                 .filter(|value| *value > 0)
                 .ok_or(Error::Command("commit sequence overflow"))?;
             let logical_time_ms = now_ms.max(prior_logical_time_ms);
-            transaction.execute_batch(plan.sql())?;
-            transaction.execute(
-                "INSERT INTO sys_migrations(version, digest, applied_sequence) VALUES (?1, ?2, ?3)",
-                (to_schema, digest.as_bytes().as_slice(), sequence),
-            )?;
+            if let (Some(sql), Some(digest)) = (plan.sql(), digest) {
+                let existing = transaction
+                    .query_row(
+                        "SELECT digest, applied_sequence FROM sys_migrations WHERE version = ?1",
+                        [to_schema],
+                        |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
+                    )
+                    .optional()?;
+                if let Some((existing_digest, _)) = existing {
+                    return Err(if existing_digest.as_slice() == digest.as_bytes() {
+                        Error::Control("migration is recorded ahead of runtime schema")
+                    } else {
+                        Error::Registry("migration digest conflicts with SQLite history")
+                    });
+                }
+                transaction.execute_batch(sql)?;
+                transaction.execute(
+                    "INSERT INTO sys_migrations(version, digest, applied_sequence) VALUES (?1, ?2, ?3)",
+                    (to_schema, digest.as_bytes().as_slice(), sequence),
+                )?;
+            }
             if transaction.execute(
                 "UPDATE sys_meta SET commit_sequence = ?1, logical_time_ms = ?2, schema_version = ?3 WHERE singleton = 1 AND schema_version = ?4",
                 (sequence, logical_time_ms, to_schema, from_schema),
@@ -745,7 +751,7 @@ impl CellExecutor {
             u64::try_from(sequence).map_err(|_| Error::Command("migration sequence overflow"))?;
         self.schema = to_schema;
         self.pending_migration = Some(PendingMigration {
-            code: plan.code(),
+            code: plan.to_code(),
             from_schema,
             to_schema,
             digest,
@@ -999,7 +1005,67 @@ fn stored_outcome(outcome: i64, result: Vec<u8>, sequence: i64) -> Result<Stored
 
 #[cfg(test)]
 mod tests {
+    use std::sync::OnceLock;
+
     use super::*;
+
+    const CODE_ONLY_MODULE: &str = "code-only-test";
+    const CODE_ONLY_NAMESPACE: crate::NamespaceId = crate::NamespaceId::from_bytes([45; 16]);
+    const PREDECESSOR_CODE: Digest = Digest::from_bytes([43; 32]);
+
+    struct CodeOnlyModule;
+
+    impl crate::CellModule for CodeOnlyModule {
+        const NAME: &'static str = CODE_ONLY_MODULE;
+
+        fn descriptor(&self) -> &'static crate::ModuleDescriptor {
+            static DESCRIPTOR: OnceLock<crate::ModuleDescriptor> = OnceLock::new();
+            DESCRIPTOR.get_or_init(|| {
+                let sql = "SELECT 1";
+                crate::ModuleDescriptor {
+                    name: CODE_ONLY_MODULE,
+                    source_digest: Digest::from_bytes([46; 32]),
+                    retained_codes: &[crate::RetainedCodeDescriptor {
+                        code: PREDECESSOR_CODE,
+                        schema_min: 1,
+                        schema_max: 1,
+                    }],
+                    schema_min: 1,
+                    schema_max: 1,
+                    migrations: Box::leak(Box::new([crate::MigrationDescriptor {
+                        version: 1,
+                        sql,
+                        digest: Digest::from_bytes(*blake3::hash(sql.as_bytes()).as_bytes()),
+                    }])),
+                    commands: &[],
+                    queries: &[],
+                    workflow_definitions: &[],
+                    activity_types: &[],
+                    namespaces: &[crate::NamespaceDescriptor {
+                        id: CODE_ONLY_NAMESPACE,
+                        name: CODE_ONLY_MODULE,
+                        role: crate::CatalogRole::Sql,
+                        shards: 1,
+                        effect_targets: &[],
+                        dead_letter: None,
+                    }],
+                }
+            })
+        }
+
+        fn register(self, _registry: &mut crate::RegistryBuilder) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn code_only_registry() -> crate::Registry {
+        let mut registry = crate::RegistryBuilder::new(crate::BuildDescriptor {
+            source_revision: CODE_ONLY_MODULE.into(),
+            cargo_lock_digest: Digest::from_bytes([47; 32]),
+        });
+        registry.register(CodeOnlyModule).unwrap();
+        registry.finish().unwrap()
+    }
 
     #[test]
     fn restored_executor_rejects_root_sequence_ahead_of_sqlite_metadata() {
@@ -1030,5 +1096,32 @@ mod tests {
                 "restored SQLite metadata does not match authoritative root"
             ))
         ));
+    }
+
+    #[test]
+    fn code_only_migration_commits_a_captured_system_cut() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("cell.sqlite");
+        let cell = CellId::from_bytes([41; 32]);
+        let incarnation = IncarnationId::from_bytes([42; 16]);
+        let mut connection = crab_ltx::rusqlite::Connection::open(&path).unwrap();
+        crate::install_runtime_schema(&mut connection, cell, incarnation, 1).unwrap();
+        drop(connection);
+        let db = ManagedDb::open(&path, crab_ltx::Limits::default()).unwrap();
+        let mut executor = CellExecutor::new(db, cell, incarnation, 1);
+        let registry = code_only_registry();
+        let target_code = registry.module_code(CODE_ONLY_MODULE).unwrap();
+        let plan = registry
+            .next_migration(CODE_ONLY_NAMESPACE, PREDECESSOR_CODE, 1)
+            .unwrap()
+            .unwrap();
+        executor.migrate(plan, 10).unwrap();
+        let pending = executor.pending_migration().unwrap();
+        assert_eq!(pending.code(), target_code);
+        assert_eq!(pending.from_schema(), 1);
+        assert_eq!(pending.to_schema(), 1);
+        assert_eq!(pending.digest(), None);
+        assert_eq!(pending.commit_sequence(), 1);
+        assert!(!pending.cuts().segments.is_empty());
     }
 }

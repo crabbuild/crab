@@ -227,12 +227,14 @@ The same bytes may be copied to the object store as metadata. Fields:
 | namespaces | stable id/name/role/shards/module binding; maximum 128 |
 | build | source revision and Cargo.lock digest, informational |
 
-Each module entry contains name, code digest, schema_min/schema_max, migrations
-ordered by version/digest, command/query ID+codec+schema ranges, supported workflow
-definition digests and activity types. A module's code digest hashes its canonical
-descriptor excluding the code field itself, including a build-generated
-source/dependency digest. The release digest is BLAKE3 of the exact canonical
-descriptor (sorted JSON keys, no whitespace).
+Each module entry contains name, current code digest, sorted retained predecessor
+code/schema ranges, schema_min/schema_max, migrations ordered by version/digest,
+command/query ID+codec+schema ranges, supported workflow definition digests and
+activity types. Retained-code inventory changes the release digest but does not
+redefine the current executable code digest. A module's current code digest
+hashes its canonical executable descriptor excluding the code and retained-code
+fields, including a build-generated source/dependency digest. The release digest
+is BLAKE3 of the exact canonical descriptor (sorted JSON keys, no whitespace).
 Image digest is recorded by the operator in release.json, not inside its own image.
 
 Descriptor limit 256 KiB; reject duplicate IDs, invalid roles, undeclared effect
@@ -287,8 +289,9 @@ The required count is explicit and bounded from 1 through 10,000; a single-node
 VM passes 1 and the two-replica Helm deployment passes 2. The same quorum is
 reloaded after the complete catalog compatibility scan and immediately before
 the ready CAS. Repeating the original command adopts the same ready record. It
-currently admits initial or already exact
-compatible inventories; old-code/schema migration remains target behavior.
+currently admits initial, current-code, or explicitly retained compatible
+code/schema inventories. It does not yet migrate those retained Cells to current
+code or persist catalog-wide migration progress.
 Prepare alone never makes the descriptor current. Administrative
 storage credentials provide authority; there is no public deployment API.
 
@@ -395,17 +398,18 @@ A routing rollback cannot undo migrated data. Retain rollback images and release
 descriptors alongside backups. Queue payload changes require compatibility
 or drained/transformed messages; never implicitly coerce bytes.
 
-Implementation status: the runtime-level adjacent-schema path is complete for a
-Cell already using the current compiled module code. The frozen registry selects
-the next verified migration; the old capability becomes terminal; the fixed SQL
-worker commits migration SQL, `sys_migrations` and `sys_meta`; LTX captures the
-cut; and `Transition::Migrate` publishes root/schema/code atomically before a new
-capability is returned. Tests cover digest conflict without authority movement,
-old-capability rejection, a post-migration write, local-source loss and
-exact-root restore. Release activation does not yet walk the catalog, persist
-per-Cell migration progress, retain predecessor module code, or emit a code-only
-root transition. Until those pieces exist, operators cannot treat a prepared
-release as an automatic fleet schema rollout.
+Implementation status: the runtime-level path is complete for current code and
+explicitly retained predecessor code. The frozen registry selects either the next
+verified adjacent-schema migration or a same-schema code-only transition; the old
+capability becomes terminal; the fixed SQL worker commits the SQL ledger or the
+code-only system metadata update; LTX captures the cut; and
+`Transition::Migrate` publishes root/schema/code atomically before returning a
+new capability. Tests cover digest conflict without authority movement,
+old-capability rejection, retained typed-client execution, code-only publication,
+a post-migration write, local-source loss and exact-root restore. Release
+activation does not yet walk the catalog or persist per-Cell migration progress.
+Until that orchestration exists, operators cannot treat a prepared release as an
+automatic fleet schema rollout.
 
 ## Kubernetes and VM process lifecycle
 

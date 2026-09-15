@@ -285,6 +285,7 @@ impl CellModule for TestWorkflow {
         DESCRIPTOR.get_or_init(|| ModuleDescriptor {
             name: WORKFLOW_MODULE,
             source_digest: Digest::from_bytes([4; 32]),
+            retained_codes: &[],
             schema_min: 1,
             schema_max: 1,
             migrations: Box::leak(Box::new([MigrationDescriptor {
@@ -318,6 +319,7 @@ impl CellModule for EffectTargetDrift {
         Box::leak(Box::new(ModuleDescriptor {
             name: WORKFLOW_MODULE,
             source_digest: Digest::from_bytes([4; 32]),
+            retained_codes: &[],
             schema_min: 1,
             schema_max: 1,
             migrations: TestWorkflow.descriptor().migrations,

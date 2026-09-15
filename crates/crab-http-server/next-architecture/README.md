@@ -24,9 +24,10 @@ Cell, so they do not block later scans or race a temporary-activation drain.
 Completed cycles advance signed node progress; a node stalled for 15 seconds
 loses readiness and is excluded so the next rendezvous candidate takes over.
 Durable scheduler retry/fairness and multi-node activity failure qualification
-remain. The shared runtime can now publish one adjacent schema step for a Cell
-already on the current compiled code, but the HTTP release activator does not yet
-orchestrate catalog-wide migration or predecessor-code/code-only rollover.
+remain. The shared runtime now supports declared predecessor code/schema pairs,
+serves them through the same typed local/peer bindings, and can publish adjacent
+schema or same-schema code-only transitions. The HTTP release activator does not
+yet orchestrate those transitions across the catalog or persist per-Cell progress.
 Remaining collaboration-domain import, configured multi-node quorum and the
 remaining product-domain route cuts are not yet integrated. New repository
 creation explicitly publishes an empty Cell and marks

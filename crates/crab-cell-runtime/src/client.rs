@@ -300,11 +300,12 @@ impl CellClient {
             .validate(now_ms)
             .map_err(InvocationError::NotStarted)?;
         let description = self.describe::<C::Output>(target).await?;
-        let (operation, code) = self
+        let operation = self
             .registry
             .command_contract::<C>(target.namespace())
             .map_err(InvocationError::NotStarted)?;
-        validate_description(description, code, operation).map_err(InvocationError::NotStarted)?;
+        validate_description(&self.registry, C::MODULE, description, operation)
+            .map_err(InvocationError::NotStarted)?;
         let input = encode_wire(&input, operation.input_limit)
             .map_err(Error::from)
             .map_err(InvocationError::NotStarted)?;
@@ -366,11 +367,12 @@ impl CellClient {
     ) -> std::result::Result<Observed<Q::Output>, InvocationError<Q::Output>> {
         let now_ms = unix_time_ms().map_err(InvocationError::NotStarted)?;
         let description = self.describe::<Q::Output>(target).await?;
-        let (operation, code) = self
+        let operation = self
             .registry
             .query_contract::<Q>(target.namespace())
             .map_err(InvocationError::NotStarted)?;
-        validate_description(description, code, operation).map_err(InvocationError::NotStarted)?;
+        validate_description(&self.registry, Q::MODULE, description, operation)
+            .map_err(InvocationError::NotStarted)?;
         validate_minimum(description, minimum).map_err(InvocationError::NotStarted)?;
         let input = encode_wire(&input, operation.input_limit)
             .map_err(Error::from)
@@ -638,11 +640,12 @@ fn decode_committed<T: crate::WireValue>(
 }
 
 fn validate_description(
+    registry: &Registry,
+    module: &str,
     description: CellDescription,
-    code: Digest,
     operation: OperationDescriptor,
 ) -> Result<()> {
-    if description.code != code {
+    if !registry.supports_module_code(module, description.code, description.schema) {
         return Err(Error::Command("Cell code does not match operation module"));
     }
     if !(operation.schema_min..=operation.schema_max).contains(&description.schema) {

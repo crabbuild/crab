@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use super::{
     BuildDescriptor, MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor,
-    OperationDescriptor,
+    OperationDescriptor, RetainedCodeDescriptor,
 };
 use crate::{CatalogRole, Digest, Result, identity::encode_hex};
 
@@ -20,7 +20,7 @@ pub(super) fn encode_release(
         let code = Digest::from_bytes(*blake3::hash(&serde_json::to_vec(&base)?).as_bytes());
         codes.insert(module.name.to_owned(), code);
         raw_namespaces.extend(base.namespaces.iter().cloned());
-        raw_modules.push(RawModule::new(base, code));
+        raw_modules.push(RawModule::new(base, code, module.retained_codes));
     }
     raw_namespaces.sort_by(|left, right| left.id.cmp(&right.id));
     let release = RawRelease {
@@ -61,6 +61,7 @@ struct RawModule<'a> {
     migrations: Vec<RawMigration>,
     name: &'a str,
     queries: Vec<RawOperation>,
+    retained_codes: Vec<RawRetainedCode>,
     schema_max: u32,
     schema_min: u32,
     source_digest: String,
@@ -68,7 +69,16 @@ struct RawModule<'a> {
 }
 
 impl<'a> RawModule<'a> {
-    fn new(base: RawModuleBase<'a>, code: Digest) -> Self {
+    fn new(
+        base: RawModuleBase<'a>,
+        code: Digest,
+        retained_codes: &[RetainedCodeDescriptor],
+    ) -> Self {
+        let mut retained_codes = retained_codes
+            .iter()
+            .map(RawRetainedCode::from)
+            .collect::<Vec<_>>();
+        retained_codes.sort();
         Self {
             activities: base.activities,
             code: encode_hex(code.as_bytes()),
@@ -76,10 +86,28 @@ impl<'a> RawModule<'a> {
             migrations: base.migrations,
             name: base.name,
             queries: base.queries,
+            retained_codes,
             schema_max: base.schema_max,
             schema_min: base.schema_min,
             source_digest: base.source_digest,
             workflows: base.workflows,
+        }
+    }
+}
+
+#[derive(Ord, PartialOrd, Eq, PartialEq, Serialize)]
+struct RawRetainedCode {
+    code: String,
+    schema_max: u32,
+    schema_min: u32,
+}
+
+impl From<&RetainedCodeDescriptor> for RawRetainedCode {
+    fn from(retained: &RetainedCodeDescriptor) -> Self {
+        Self {
+            code: encode_hex(retained.code.as_bytes()),
+            schema_max: retained.schema_max,
+            schema_min: retained.schema_min,
         }
     }
 }

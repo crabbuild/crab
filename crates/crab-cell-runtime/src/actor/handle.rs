@@ -259,13 +259,13 @@ impl CellHandle {
 
     /// Drains the old capability and publishes one registry-verified schema step.
     pub async fn migrate(&self, plan: MigrationPlan, now_ms: i64) -> crate::Result<MigratedCell> {
-        if plan.code() != self.code
+        if plan.from_code() != self.code
             || plan.from_schema() != self.schema
-            || plan.sql().len() > MAX_OPERATION_BYTES
+            || plan.operation_bytes() > MAX_OPERATION_BYTES
         {
             return Err(Error::Registry("migration plan does not match Cell handle"));
         }
-        let work = self.reserve_work(plan.sql().len(), 0)?;
+        let work = self.reserve_work(plan.operation_bytes(), 0)?;
         if self
             .admission
             .draining

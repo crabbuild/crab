@@ -16,13 +16,14 @@ use crate::{
     ApplicationId, BuildDescriptor, CatalogRole, CellModule, CellTarget, Command, CommandContext,
     CommandResult, Digest, Error, IncarnationId, MigrationDescriptor, ModuleDescriptor,
     MutationIdentity, NamespaceDescriptor, NamespaceId, OperationDescriptor, PeerPrincipal,
-    PeerRoundTrip, PeerSigner, RegistryBuilder, RequestId, Resolution, SessionId, StoredOutcome,
-    TenantId,
+    PeerRoundTrip, PeerSigner, RegistryBuilder, RequestId, Resolution, RetainedCodeDescriptor,
+    SessionId, StoredOutcome, TenantId,
 };
 
 const MODULE: &str = "pending-test";
 const NAMESPACE: NamespaceId = NamespaceId::from_bytes([3; 16]);
 const MIGRATION: &str = "CREATE TABLE pending_test(value BLOB NOT NULL)";
+const RETAINED_CODE: Digest = Digest::from_bytes([14; 32]);
 
 struct PendingCommand;
 
@@ -139,6 +140,11 @@ impl CellModule for PendingModule {
         DESCRIPTOR.get_or_init(|| ModuleDescriptor {
             name: MODULE,
             source_digest: Digest::from_bytes([4; 32]),
+            retained_codes: &[RetainedCodeDescriptor {
+                code: RETAINED_CODE,
+                schema_min: 1,
+                schema_max: 1,
+            }],
             schema_min: 1,
             schema_max: 1,
             migrations: Box::leak(Box::new([MigrationDescriptor {
@@ -240,7 +246,7 @@ async fn unknown_outcome_keeps_identity_and_digest_for_resolve() {
     let description = CellDescription {
         cell: target.cell_id(),
         incarnation: IncarnationId::from_bytes([6; 16]),
-        code: registry.module_code(MODULE).unwrap(),
+        code: RETAINED_CODE,
         schema: 1,
     };
     let command_digest = Arc::new(Mutex::new(None));

@@ -28,6 +28,7 @@ const MAX_MODULES: usize = 128;
 const MAX_NAMESPACES: usize = 128;
 const MAX_MIGRATION_BYTES: usize = 1024 * 1024;
 const MAX_OPERATION_BYTES: u32 = 1024 * 1024;
+const CODE_ONLY_MIGRATION_BYTES: usize = 2 * 32;
 
 /// Registry construction error returned before server readiness.
 pub type RegistryError = Error;
@@ -47,13 +48,23 @@ pub struct MigrationDescriptor {
     pub digest: Digest,
 }
 
-/// One registry-verified, single-version migration for an active Cell.
+/// One predecessor module code intentionally retained by the current binary.
+#[derive(Clone, Copy, Debug)]
+pub struct RetainedCodeDescriptor {
+    pub code: Digest,
+    pub schema_min: u32,
+    pub schema_max: u32,
+}
+
+/// One registry-verified schema or code migration for an active Cell.
 #[derive(Clone, Copy, Debug)]
 pub struct MigrationPlan {
     module: &'static str,
-    code: Digest,
+    from_code: Digest,
+    to_code: Digest,
     from_schema: u32,
-    migration: MigrationDescriptor,
+    to_schema: u32,
+    migration: Option<MigrationDescriptor>,
 }
 
 impl MigrationPlan {
@@ -63,8 +74,13 @@ impl MigrationPlan {
     }
 
     #[must_use]
-    pub const fn code(&self) -> Digest {
-        self.code
+    pub const fn from_code(&self) -> Digest {
+        self.from_code
+    }
+
+    #[must_use]
+    pub const fn to_code(&self) -> Digest {
+        self.to_code
     }
 
     #[must_use]
@@ -74,17 +90,31 @@ impl MigrationPlan {
 
     #[must_use]
     pub const fn to_schema(&self) -> u32 {
-        self.migration.version
+        self.to_schema
     }
 
     #[must_use]
-    pub const fn digest(&self) -> Digest {
-        self.migration.digest
+    pub const fn digest(&self) -> Option<Digest> {
+        match self.migration {
+            Some(migration) => Some(migration.digest),
+            None => None,
+        }
     }
 
     #[must_use]
-    pub const fn sql(&self) -> &'static str {
-        self.migration.sql
+    pub const fn sql(&self) -> Option<&'static str> {
+        match self.migration {
+            Some(migration) => Some(migration.sql),
+            None => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn operation_bytes(&self) -> usize {
+        match self.migration {
+            Some(migration) => migration.sql.len(),
+            None => CODE_ONLY_MIGRATION_BYTES,
+        }
     }
 }
 
@@ -115,6 +145,7 @@ pub struct NamespaceDescriptor {
 pub struct ModuleDescriptor {
     pub name: &'static str,
     pub source_digest: Digest,
+    pub retained_codes: &'static [RetainedCodeDescriptor],
     pub schema_min: u32,
     pub schema_max: u32,
     pub migrations: &'static [MigrationDescriptor],
@@ -691,6 +722,37 @@ impl RegistryBuilder {
             .collect();
 
         let (release_bytes, module_codes) = encode_release(&self.build, &self.modules)?;
+        let module_retained_codes = self
+            .modules
+            .iter()
+            .map(|module| {
+                let current = module_codes
+                    .get(module.name)
+                    .copied()
+                    .ok_or(Error::Registry("module code is unavailable"))?;
+                if module
+                    .retained_codes
+                    .iter()
+                    .any(|retained| retained.code == current)
+                {
+                    return Err(Error::Registry(
+                        "current module code is retained as predecessor",
+                    ));
+                }
+                Ok((module.name, module.retained_codes))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let mut supported_codes = module_codes.values().copied().collect::<HashSet<_>>();
+        supported_codes.extend(
+            module_retained_codes
+                .values()
+                .flat_map(|retained| retained.iter().map(|descriptor| descriptor.code)),
+        );
+        if supported_codes.len() > MAX_MODULES {
+            return Err(Error::Registry(
+                "current and retained module code inventory exceeds 128",
+            ));
+        }
         if release_bytes.len() > MAX_DESCRIPTOR_BYTES {
             return Err(Error::Registry("release descriptor exceeds 256 KiB"));
         }
@@ -715,6 +777,7 @@ impl RegistryBuilder {
             module_codes,
             module_schemas,
             module_migrations,
+            module_retained_codes,
             commands: self.commands,
             command_descriptors,
             queries: self.queries,
@@ -748,6 +811,7 @@ pub struct Registry {
     module_codes: BTreeMap<String, Digest>,
     module_schemas: BTreeMap<String, (u32, u32)>,
     module_migrations: BTreeMap<&'static str, &'static [MigrationDescriptor]>,
+    module_retained_codes: BTreeMap<&'static str, &'static [RetainedCodeDescriptor]>,
     commands: BTreeMap<BindingKey, CommandHandler>,
     command_descriptors: BTreeMap<BindingKey, OperationDescriptor>,
     queries: BTreeMap<BindingKey, QueryHandler>,
@@ -783,6 +847,11 @@ impl Registry {
     #[must_use]
     pub fn module_digests(&self) -> Vec<Digest> {
         let mut digests = self.module_codes.values().copied().collect::<Vec<_>>();
+        digests.extend(
+            self.module_retained_codes
+                .values()
+                .flat_map(|retained| retained.iter().map(|descriptor| descriptor.code)),
+        );
         digests.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
         digests.dedup();
         digests
@@ -803,9 +872,10 @@ impl Registry {
         let Some((schema_min, schema_max)) = self.module_schemas.get(*module) else {
             return false;
         };
-        descriptor.role == role
-            && self.module_codes.get(*module) == Some(&code)
-            && (*schema_min..=*schema_max).contains(&schema)
+        if descriptor.role != role || !(*schema_min..=*schema_max).contains(&schema) {
+            return false;
+        }
+        self.supports_module_code(module, code, schema)
     }
 
     /// Selects the next compiled migration for one exact Cell code/schema pair.
@@ -829,28 +899,46 @@ impl Registry {
             .get(*module)
             .copied()
             .ok_or(Error::Registry("module schema range is unavailable"))?;
-        if code != current_code || !(schema_min..=schema_max).contains(&schema) {
+        if !(schema_min..=schema_max).contains(&schema)
+            || (code != current_code
+                && !self
+                    .module_retained_codes
+                    .get(module)
+                    .is_some_and(|retained| {
+                        retained.iter().any(|descriptor| {
+                            descriptor.code == code
+                                && (descriptor.schema_min..=descriptor.schema_max).contains(&schema)
+                        })
+                    }))
+        {
             return Err(Error::Registry(
                 "Cell code/schema is not executable by this registry",
             ));
         }
-        let Some(to_schema) = schema.checked_add(1).filter(|next| *next <= schema_max) else {
-            return Ok(None);
+        let (to_schema, migration) = match schema.checked_add(1).filter(|next| *next <= schema_max)
+        {
+            Some(to_schema) => {
+                let migration = self
+                    .module_migrations
+                    .get(module)
+                    .and_then(|migrations| {
+                        migrations
+                            .iter()
+                            .find(|migration| migration.version == to_schema)
+                    })
+                    .copied()
+                    .ok_or(Error::Registry("next migration is unavailable"))?;
+                (to_schema, Some(migration))
+            }
+            None if code != current_code => (schema, None),
+            None => return Ok(None),
         };
-        let migration = self
-            .module_migrations
-            .get(module)
-            .and_then(|migrations| {
-                migrations
-                    .iter()
-                    .find(|migration| migration.version == to_schema)
-            })
-            .copied()
-            .ok_or(Error::Registry("next migration is unavailable"))?;
         Ok(Some(MigrationPlan {
             module,
-            code,
+            from_code: code,
+            to_code: current_code,
             from_schema: schema,
+            to_schema,
             migration,
         }))
     }
@@ -1098,7 +1186,7 @@ impl Registry {
     pub(crate) fn command_contract<C: Command>(
         &self,
         namespace: NamespaceId,
-    ) -> Result<(OperationDescriptor, Digest)> {
+    ) -> Result<OperationDescriptor> {
         self.operation_contract(
             namespace,
             C::MODULE,
@@ -1111,7 +1199,7 @@ impl Registry {
     pub(crate) fn query_contract<Q: Query>(
         &self,
         namespace: NamespaceId,
-    ) -> Result<(OperationDescriptor, Digest)> {
+    ) -> Result<OperationDescriptor> {
         self.operation_contract(
             namespace,
             Q::MODULE,
@@ -1126,7 +1214,7 @@ impl Registry {
         namespace: NamespaceId,
         id: u32,
         codec_version: u32,
-    ) -> Result<(&'static str, OperationDescriptor, Digest)> {
+    ) -> Result<(&'static str, OperationDescriptor)> {
         self.routed_operation_contract(namespace, id, codec_version, &self.command_descriptors)
     }
 
@@ -1135,7 +1223,7 @@ impl Registry {
         namespace: NamespaceId,
         id: u32,
         codec_version: u32,
-    ) -> Result<(&'static str, OperationDescriptor, Digest)> {
+    ) -> Result<(&'static str, OperationDescriptor)> {
         self.routed_operation_contract(namespace, id, codec_version, &self.query_descriptors)
     }
 
@@ -1145,15 +1233,15 @@ impl Registry {
         id: u32,
         codec_version: u32,
         descriptors: &BTreeMap<BindingKey, OperationDescriptor>,
-    ) -> Result<(&'static str, OperationDescriptor, Digest)> {
+    ) -> Result<(&'static str, OperationDescriptor)> {
         let module = self
             .namespace_modules
             .get(&namespace)
             .map(|(module, _)| *module)
             .ok_or(Error::Registry("operation namespace is unavailable"))?;
-        let (operation, code) =
+        let operation =
             self.operation_contract(namespace, module, id, codec_version, descriptors)?;
-        Ok((module, operation, code))
+        Ok((module, operation))
     }
 
     fn operation_contract(
@@ -1163,7 +1251,7 @@ impl Registry {
         id: u32,
         codec_version: u32,
         descriptors: &BTreeMap<BindingKey, OperationDescriptor>,
-    ) -> Result<(OperationDescriptor, Digest)> {
+    ) -> Result<OperationDescriptor> {
         if self
             .namespace_modules
             .get(&namespace)
@@ -1177,12 +1265,27 @@ impl Registry {
             .get(&key)
             .copied()
             .ok_or(Error::Registry("operation descriptor is unavailable"))?;
-        let code = self
-            .module_codes
+        Ok(operation)
+    }
+
+    pub(crate) fn supports_module_code(&self, module: &str, code: Digest, schema: u32) -> bool {
+        if self
+            .module_schemas
             .get(module)
-            .copied()
-            .ok_or(Error::Registry("module code is unavailable"))?;
-        Ok((operation, code))
+            .is_none_or(|(schema_min, schema_max)| !(*schema_min..=*schema_max).contains(&schema))
+        {
+            return false;
+        }
+        self.module_codes.get(module) == Some(&code)
+            || self
+                .module_retained_codes
+                .get(module)
+                .is_some_and(|retained| {
+                    retained.iter().any(|descriptor| {
+                        descriptor.code == code
+                            && (descriptor.schema_min..=descriptor.schema_max).contains(&schema)
+                    })
+                })
     }
 
     /// Executes one already bounded command through its exact compiled binding.
@@ -1458,6 +1561,17 @@ fn validate_module(
         return Err(Error::Registry(
             "migration range does not cover module schema",
         ));
+    }
+    let mut retained_codes = HashSet::new();
+    for retained in module.retained_codes {
+        if retained.code.as_bytes().iter().all(|byte| *byte == 0)
+            || retained.schema_min < module.schema_min
+            || retained.schema_max > module.schema_max
+            || retained.schema_max < retained.schema_min
+            || !retained_codes.insert(retained.code)
+        {
+            return Err(Error::Registry("invalid retained module code inventory"));
+        }
     }
     validate_operations(module, module.commands, commands)?;
     validate_operations(module, module.queries, queries)?;

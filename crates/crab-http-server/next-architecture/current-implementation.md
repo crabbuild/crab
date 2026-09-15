@@ -69,11 +69,12 @@ control code/schema pairs against the exact binary registry; retries retain the
 same operation, and a real RustFS run reached canonical `current=desired` state.
 Explicit activation now also requires the operator-selected 1–10,000 live signed
 node quorum with the exact fleet, image, release and module inventory. The shared
-runtime now selects, commits and atomically publishes one adjacent schema step
-when the Cell already uses the current compiled code; it replaces the old
-capability and restores the migrated root after local loss. The server release
-activator does not yet enumerate and migrate the catalog or support retained
-predecessor code/code-only rollover. The complete issue/comment HTTP route
+runtime now declares retained predecessor code/schema compatibility, uses it for
+typed local and peer dispatch, and atomically publishes adjacent schema or
+same-schema code-only transitions. It replaces the old capability only after
+control publication, and restores the schema-migrated root after local loss. The
+server release activator does not yet enumerate and migrate the catalog or persist
+per-Cell progress. The complete issue/comment HTTP route
 group now calls the typed repository module and publishes through LTX. The
 private management route can dispatch or forward registered calls between
 compatible nodes. The repository module additionally registers private Tick and

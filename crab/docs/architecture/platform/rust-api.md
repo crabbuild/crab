@@ -286,13 +286,16 @@ let MigratedCell { handle, outcome } = handle.migrate(plan, now_ms).await?;
 assert_eq!(handle.schema(), outcome.schema);
 ```
 
-`next_migration` currently accepts only the exact current module code and returns
-one adjacent schema step. `migrate` places that step behind already accepted Cell
-work, executes the static SQL on the assigned worker, records its digest, captures
-LTX and publishes root/schema/code together. It returns the replacement handle
-only after the authority CAS is proven. Catalog iteration, predecessor-code
-retention and code-only rollover belong to release activation and are not yet
-implemented by `crab-http-server`.
+`next_migration` accepts the current module code or one explicitly declared
+`RetainedCodeDescriptor` at a supported schema. It returns the next adjacent SQL
+step targeting current code, or at the maximum schema a same-schema code-only
+step with no SQL/digest. `migrate` places either plan behind already accepted Cell
+work, creates one managed system transaction, captures LTX and publishes
+root/schema/code together. It returns the replacement handle only after the
+authority CAS is proven. The typed client and authenticated peer dispatcher use
+the same registry compatibility declaration for old code/schema operations.
+`crab-http-server` still needs a bounded catalog walker and durable per-Cell
+activation progress to invoke these completed single-Cell transitions fleet-wide.
 
 ```rust,ignore
 pub trait WireValue: Sized + Send + 'static {

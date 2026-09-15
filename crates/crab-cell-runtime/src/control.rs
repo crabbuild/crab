@@ -243,8 +243,8 @@ impl Control {
     ) -> Result<Self> {
         if prepared.predecessor() != self.ltx_root()
             || prepared.verified().schema() != schema
-            || self.schema.checked_add(1) != Some(schema)
             || code.as_bytes().iter().all(|byte| *byte == 0)
+            || !valid_migration_version(self.code, self.schema, code, schema)
         {
             return Err(Error::Control(
                 "prepared migration does not continue control",
@@ -333,8 +333,8 @@ impl Control {
                     || self.epoch != next.epoch
                     || self.owner != next.owner
                     || next.root.is_none()
-                    || self.schema.checked_add(1) != Some(next.schema)
                     || next.code.as_bytes().iter().all(|byte| *byte == 0)
+                    || !valid_migration_version(self.code, self.schema, next.code, next.schema)
                     || !valid_root_successor(self.root.as_ref(), next.root.as_ref())
                 {
                     return Err(Error::Control("invalid migration transition"));
@@ -428,6 +428,16 @@ fn valid_root_successor(previous: Option<&RootRef>, next: Option<&RootRef>) -> b
     }
     next.txid != previous.txid
         || (next.checksum == previous.checksum && next.commit_sequence == previous.commit_sequence)
+}
+
+fn valid_migration_version(
+    current_code: Digest,
+    current_schema: u32,
+    next_code: Digest,
+    next_schema: u32,
+) -> bool {
+    current_schema.checked_add(1) == Some(next_schema)
+        || (current_schema == next_schema && current_code != next_code)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -632,6 +642,17 @@ mod tests {
                 .validate_transition(&unlabelled_migration, Transition::Publish)
                 .is_err()
         );
+        serving
+            .validate_transition(&unlabelled_migration, Transition::Migrate)
+            .unwrap();
+        let mut code_only = serving.clone();
+        code_only.code = Digest::from_bytes([8; 32]);
+        code_only.root = Some(root(2));
+        code_only.revision += 1;
+        code_only.progress += 1;
+        serving
+            .validate_transition(&code_only, Transition::Migrate)
+            .unwrap();
 
         let renewed = serving.renew().unwrap();
         assert!(serving.is_same_or_pure_renewal_of(&serving));

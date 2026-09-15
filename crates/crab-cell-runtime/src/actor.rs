@@ -1067,7 +1067,8 @@ fn handle_message(
                 send_migration_reply(&mut migration, Err(error));
                 return;
             }
-            if active.code != migration.plan.code() || active.schema != migration.plan.from_schema()
+            if active.code != migration.plan.from_code()
+                || active.schema != migration.plan.from_schema()
             {
                 send_migration_reply(
                     &mut migration,

@@ -34,6 +34,7 @@ impl CellModule for TestKv {
         DESCRIPTOR.get_or_init(|| ModuleDescriptor {
             name: KV_MODULE,
             source_digest: Digest::from_bytes([4; 32]),
+            retained_codes: &[],
             schema_min: 1,
             schema_max: 1,
             migrations: Box::leak(Box::new([MigrationDescriptor {

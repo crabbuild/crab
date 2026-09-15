@@ -67,21 +67,23 @@ and Resolve returns `UNKNOWN`, regardless of whether the inner VFS timer or the
 outer actor watchdog observes the instant first. The 30-second default remains
 only for standalone `crab-ltx` sparse calls without a caller scope.
 
-`Registry::next_migration` now selects exactly one compiled, digest-verified
-`N→N+1` migration for a Cell whose code and schema are executable by the current
-registry. `CellHandle::migrate` reserves the migration SQL bytes, atomically
-closes the old capability's admission, and queues the migration behind work that
-the actor already accepted. The assigned SQL worker executes the trusted SQL,
-inserts `sys_migrations(version, digest, applied_sequence)`, and advances
-`sys_meta` schema/sequence/time in one managed transaction. The executor then
-retains the captured cut as `PendingMigration`; no new capability is returned
-until immutable preparation and the `Migrate` control CAS publish the exact root,
-schema and code together. Success installs a fresh admission token and leaves all
-old `CellHandle` clones permanently closed. Any transaction, capture, deadline or
-publication failure fences the local executor and leaves authority at the last
-published root. This implementation intentionally covers only adjacent schemas
-within one compiled module code. The release activator still needs catalog-wide
-progress, retained predecessor-code support and a code-only publication step.
+`Registry::next_migration` now selects exactly one transition for a Cell whose
+code/schema pair is either current or explicitly retained by the compiled Rust
+module. Below `schema_max`, it returns the next digest-verified `N→N+1` SQL
+migration and targets the current module code. At `schema_max`, a retained
+predecessor code receives a same-schema code-only transition. `CellHandle::migrate`
+reserves the bounded operation budget, atomically closes the old capability's
+admission, and queues the transition behind work the actor already accepted.
+The assigned SQL worker either executes trusted SQL and records
+`sys_migrations`, or for code-only rollover updates system metadata without
+application SQL. Both forms advance sequence/time in one managed transaction
+and must produce a captured system cut. The executor retains that cut as
+`PendingMigration`; no new capability is returned until immutable preparation
+and the `Migrate` control CAS publish the exact root, schema and code together.
+Success installs a fresh admission token and leaves all old `CellHandle` clones
+permanently closed. Any transaction, capture, deadline or publication failure
+fences the local executor and leaves authority at the last published root. The
+release activator still needs bounded catalog-wide progress and retry orchestration.
 
 Fencing is a two-phase boundary. Admission closes immediately, but the runtime
 retains the accepted operation, worker slot and byte permits until synchronous
@@ -195,7 +197,7 @@ the replacement, then call `Store::update` with exactly the observed token.
 | Takeover | Same epoch/session/progress observed for 15 s | As acquire, preserving exact root |
 | Renew | Same incarnation/epoch/session; before local deadline | progress/revision + 1; retain all other fields |
 | Publish | Same owner identity and predecessor root; serving/recovering | prepared root and due summary; retain code/schema; progress/revision + 1 |
-| Migrate | Same owner identity and predecessor root; serving/recovering; target schema is current + 1; nonzero compiled code | prepared root, due summary and target code/schema; progress/revision + 1 |
+| Migrate | Same owner identity and predecessor root; serving/recovering; nonzero target code; either target schema is current + 1, or schema is unchanged and code changes | prepared root, due summary and target code/schema; progress/revision + 1 |
 | Release | Drained SQL/mailbox; no pending cuts | idle, owner null; retain root/code/schema/epoch; revision + 1 |
 | Tombstone | Maintenance authority; drained writer | tombstoned, owner null, epoch/revision + 1; root retained |
 
@@ -253,18 +255,22 @@ SQL, target schema and code digests are not accepted from HTTP or application
 handlers.
 
 1. Select `Registry::next_migration(namespace, handle.code(), handle.schema())`.
-   Registry construction has already verified a contiguous schema range, exact
-   BLAKE3 digest and a nonempty SQL body no larger than 1 MiB.
-2. Reserve one request plus the SQL byte budget. Close the old admission gate and
-   enqueue the migration. Work already accepted by the actor remains ahead of it;
-   later work through any old handle is rejected.
+   Registry construction has already verified the current code, every explicitly
+   retained predecessor code/schema range, the contiguous schema range and each
+   SQL migration's exact BLAKE3 digest and bounded nonempty body. The selected
+   plan fixes both source and target code/schema.
+2. Reserve one request plus the plan's bounded operation budget. Close the old
+   admission gate and enqueue the migration. Work already accepted by the actor
+   remains ahead of it; later work through any old handle is rejected.
 3. On the fixed SQL worker, verify `sys_meta` still names the exact Cell,
-   incarnation and source schema. Reject an existing target-version migration
-   with another digest.
-4. In one managed transaction, execute trusted migration SQL, insert the target
-   `sys_migrations` row, increment `commit_sequence`, advance logical time and set
-   `sys_meta.schema_version`. Compute the durable scheduler deadline before
-   commit.
+   incarnation and source schema. For an SQL step, reject an existing
+   target-version migration with another digest. For a code-only step, require
+   unchanged schema, different source/target code and no SQL or migration digest.
+4. In one managed transaction, an SQL step executes the trusted migration,
+   inserts the target `sys_migrations` row and updates schema. A code-only step
+   executes no application SQL and creates no migration-ledger row. Both increment
+   `commit_sequence`, advance logical time, update `sys_meta`, and compute the
+   durable scheduler deadline before commit.
 5. Capture a nonempty LTX cut. Capture or ambiguous SQLite failure fences the
    local connection; an unpublished local schema must never serve traffic.
 6. Prepare immutable LTX dependencies against the published predecessor using
@@ -278,7 +284,9 @@ handlers.
 The migration path has the same five-second absolute SQL/sparse-I/O deadline and
 the same lost-CAS reconciliation rules as commands. It does not run arbitrary
 customer SQL and cannot be retried on a locally modified connection after an
-unknown publication result.
+unknown publication result. Retained code is an explicit reviewed compatibility
+claim in the statically linked module descriptor; it is not downloaded code or
+a dynamic dispatch target.
 
 ## Reconciliation and Resolve
 

@@ -510,6 +510,7 @@ fn repository_descriptor() -> &'static ModuleDescriptor {
     DESCRIPTOR.get_or_init(|| ModuleDescriptor {
         name: RepositoryModule::NAME,
         source_digest: repository_source_digest(),
+        retained_codes: &[],
         schema_min: 1,
         schema_max: 1,
         migrations,

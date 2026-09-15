@@ -99,6 +99,7 @@ fn descriptor(name: &'static str, namespace: u8) -> ModuleDescriptor {
     ModuleDescriptor {
         name,
         source_digest: Digest::from_bytes([namespace; 32]),
+        retained_codes: &[],
         schema_min: 1,
         schema_max: 1,
         migrations,

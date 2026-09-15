@@ -92,6 +92,7 @@ pub use registry::{
     BuildDescriptor, CellModule, Command, CommandContext, CommandInvocation, CommandResult,
     MigrationDescriptor, MigrationPlan, ModuleDescriptor, NamespaceDescriptor, OperationDescriptor,
     Query, QueryContext, QueryInvocation, Registry, RegistryBuilder, RegistryError,
+    RetainedCodeDescriptor,
 };
 pub use release::{ReleaseRecord, ReleaseState, ReleaseStore, VersionedRelease};
 pub use scheduler::{
