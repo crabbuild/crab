@@ -1,9 +1,9 @@
-//! Verified loading of one request-minimal root and its bounded capsule frontier.
+//! Verified loading of one capsule-protocol root and its bounded capsule frontier.
 
 use bytes::Bytes;
-use crab_metadata::request_minimal::{
+use crab_metadata::capsule_protocol::{
     Capsule, CapsuleGitPackDescriptor, CapsulePointer, CapsuleRun, Checkpoint, CheckpointPointer,
-    RootRecord, load_root,
+    PointerCatalog, RootRecord, load_root,
 };
 use crab_storage::{Store, StoreLayout};
 use futures_util::future::try_join_all;
@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 
 use crate::{ReadError, Result};
 
-/// Caller-owned memory admission for one request-minimal repository view.
+/// Caller-owned memory admission for one capsule-protocol repository view.
 #[derive(Debug, Clone, Copy)]
-pub struct RequestMinimalReadLimits {
+pub struct CapsuleReadLimits {
     /// Largest individual capsule body accepted by this reader.
     pub max_capsule_bytes: u64,
     /// Largest aggregate capsule frontier accepted by this reader.
@@ -22,13 +22,13 @@ pub struct RequestMinimalReadLimits {
 
 /// One authenticated repository root and every post-checkpoint capsule it names.
 #[derive(Debug, Clone)]
-pub struct RequestMinimalView {
-    root: crab_metadata::request_minimal::RootSnapshot,
+pub struct CapsuleRepositoryView {
+    root: crab_metadata::capsule_protocol::RootSnapshot,
     checkpoint: Option<Checkpoint>,
     capsules: Vec<Capsule>,
 }
 
-impl RequestMinimalView {
+impl CapsuleRepositoryView {
     /// Return the authoritative repository generation and ref state.
     #[must_use]
     pub fn root(&self) -> &RootRecord {
@@ -37,7 +37,7 @@ impl RequestMinimalView {
 
     /// Return the provider CAS token bound to the loaded root.
     #[must_use]
-    pub fn root_snapshot(&self) -> &crab_metadata::request_minimal::RootSnapshot {
+    pub fn root_snapshot(&self) -> &crab_metadata::capsule_protocol::RootSnapshot {
         &self.root
     }
 
@@ -52,6 +52,22 @@ impl RequestMinimalView {
     pub fn capsules(&self) -> &[Capsule] {
         &self.capsules
     }
+
+    /// Materialize the complete generation-pinned external pointer catalog.
+    pub fn pointer_catalog(&self) -> Result<PointerCatalog> {
+        let mut catalog = self
+            .checkpoint
+            .as_ref()
+            .map(Checkpoint::pointer_catalog)
+            .transpose()?
+            .unwrap_or_else(PointerCatalog::new);
+        for capsule in &self.capsules {
+            if let Some(delta) = capsule.pointer_catalog_delta()? {
+                catalog.apply(&delta)?;
+            }
+        }
+        Ok(catalog)
+    }
 }
 
 /// Install every capsule Git pack into a local Git object database.
@@ -59,7 +75,7 @@ impl RequestMinimalView {
 /// Pack bodies, indexes, reverse indexes, and locator metadata are validated
 /// as one descriptor before any new pack becomes visible in the destination.
 pub async fn install_git_packs(
-    view: &RequestMinimalView,
+    view: &CapsuleRepositoryView,
     git_dir: &Path,
     max_input_bytes: u64,
 ) -> Result<Vec<PathBuf>> {
@@ -82,10 +98,10 @@ pub async fn install_git_packs(
                     ReadError::internal("Git pack size cannot be represented as u64")
                 })?;
                 total = total.checked_add(pack_size).ok_or_else(|| {
-                    ReadError::internal("request-minimal Git intake size overflowed")
+                    ReadError::internal("capsule-protocol Git intake size overflowed")
                 })?;
                 if max_input_bytes > 0 && total > max_input_bytes {
-                    return Err(ReadError::RequestMinimalLimit {
+                    return Err(ReadError::CapsuleReadLimit {
                         resource: "Git pack intake",
                         maximum: max_input_bytes,
                     });
@@ -193,8 +209,8 @@ impl GitPackContainer {
 /// size, content identity, transaction, and base-root bindings in the root.
 pub async fn open_view(
     router: &StoreLayout<Store>,
-    limits: RequestMinimalReadLimits,
-) -> Result<RequestMinimalView> {
+    limits: CapsuleReadLimits,
+) -> Result<CapsuleRepositoryView> {
     let snapshot = load_root(router).await?;
     open_view_from_root(router, snapshot, limits).await
 }
@@ -205,9 +221,9 @@ pub async fn open_view(
 /// transfer to one root while avoiding a redundant mutable-root request.
 pub async fn open_view_from_root(
     router: &StoreLayout<Store>,
-    snapshot: crab_metadata::request_minimal::RootSnapshot,
-    limits: RequestMinimalReadLimits,
-) -> Result<RequestMinimalView> {
+    snapshot: crab_metadata::capsule_protocol::RootSnapshot,
+    limits: CapsuleReadLimits,
+) -> Result<CapsuleRepositoryView> {
     admit_frontier(snapshot.record().root().capsule_frontier(), limits)?;
     let checkpoint = async {
         match snapshot.record().root().checkpoint() {
@@ -228,7 +244,7 @@ pub async fn open_view_from_root(
         .into_iter()
         .flat_map(|run| run.capsules().to_vec())
         .collect();
-    Ok(RequestMinimalView {
+    Ok(CapsuleRepositoryView {
         root: snapshot,
         checkpoint,
         capsules,
@@ -238,15 +254,15 @@ pub async fn open_view_from_root(
 async fn load_checkpoint(
     router: &StoreLayout<Store>,
     pointer: &CheckpointPointer,
-    limits: RequestMinimalReadLimits,
+    limits: CapsuleReadLimits,
 ) -> Result<Checkpoint> {
     if pointer.size() > limits.max_capsule_bytes {
-        return Err(ReadError::RequestMinimalLimit {
+        return Err(ReadError::CapsuleReadLimit {
             resource: "checkpoint bytes",
             maximum: limits.max_capsule_bytes,
         });
     }
-    let path = router.request_minimal_checkpoint_path(pointer.hash());
+    let path = router.capsule_checkpoint_path(pointer.hash());
     let (bytes, _) = router
         .store()
         .get_with_etag_bounded(&path, pointer.size())
@@ -272,23 +288,23 @@ async fn load_checkpoint(
     Ok(checkpoint)
 }
 
-fn admit_frontier(pointers: &[CapsulePointer], limits: RequestMinimalReadLimits) -> Result<()> {
+fn admit_frontier(pointers: &[CapsulePointer], limits: CapsuleReadLimits) -> Result<()> {
     let mut total = 0u64;
     for pointer in pointers {
         if pointer.size() > limits.max_capsule_bytes {
-            return Err(ReadError::RequestMinimalLimit {
+            return Err(ReadError::CapsuleReadLimit {
                 resource: "individual capsule bytes",
                 maximum: limits.max_capsule_bytes,
             });
         }
         total = total
             .checked_add(pointer.size())
-            .ok_or(ReadError::RequestMinimalLimit {
+            .ok_or(ReadError::CapsuleReadLimit {
                 resource: "frontier bytes",
                 maximum: limits.max_frontier_bytes,
             })?;
         if total > limits.max_frontier_bytes {
-            return Err(ReadError::RequestMinimalLimit {
+            return Err(ReadError::CapsuleReadLimit {
                 resource: "frontier bytes",
                 maximum: limits.max_frontier_bytes,
             });
@@ -298,7 +314,7 @@ fn admit_frontier(pointers: &[CapsulePointer], limits: RequestMinimalReadLimits)
 }
 
 async fn load_run(router: &StoreLayout<Store>, pointer: &CapsulePointer) -> Result<CapsuleRun> {
-    let path = router.request_minimal_capsule_path(pointer.hash());
+    let path = router.capsule_path(pointer.hash());
     let (bytes, _) = router
         .store()
         .get_with_etag_bounded(&path, pointer.size())
@@ -348,7 +364,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use bytes::Bytes;
-    use crab_metadata::request_minimal::{
+    use crab_metadata::capsule_protocol::{
         CapsuleGitPack, CapsuleRefEdit, CapsuleTransaction, RepositoryRoot,
     };
     use crab_storage::{StorageObservation, StorageObserver, StorageOperation, StorageOutcome};
@@ -356,7 +372,7 @@ mod tests {
 
     use super::*;
 
-    const TEST_LIMITS: RequestMinimalReadLimits = RequestMinimalReadLimits {
+    const TEST_LIMITS: CapsuleReadLimits = CapsuleReadLimits {
         max_capsule_bytes: 1024 * 1024,
         max_frontier_bytes: 8 * 1024 * 1024,
     };
@@ -395,7 +411,7 @@ mod tests {
             &transaction,
             vec![
                 CapsuleGitPack::new(
-                    Bytes::from_static(b"PACK request-minimal read test"),
+                    Bytes::from_static(b"PACK capsule-protocol read test"),
                     Bytes::from_static(b"index"),
                     Bytes::from_static(b"reverse"),
                     Bytes::from_static(b"locator"),
@@ -409,10 +425,7 @@ mod tests {
         .unwrap();
         let run = CapsuleRun::leaf(capsule).unwrap();
         store
-            .put(
-                &router.request_minimal_capsule_path(run.hash()),
-                run.bytes().clone(),
-            )
+            .put(&router.capsule_path(run.hash()), run.bytes().clone())
             .await
             .unwrap();
         let mut transaction_ids = run.transaction_ids();
@@ -440,7 +453,7 @@ mod tests {
             .unwrap();
         let root = RootRecord::encode(next).unwrap();
         store
-            .create_strict(&router.request_minimal_root_path(), root.bytes().clone())
+            .create_strict(&router.capsule_root_path(), root.bytes().clone())
             .await
             .unwrap();
     }
@@ -495,7 +508,7 @@ mod tests {
 
         let error = open_view(
             &router,
-            RequestMinimalReadLimits {
+            CapsuleReadLimits {
                 max_capsule_bytes: 1,
                 max_frontier_bytes: 1,
             },
@@ -503,7 +516,7 @@ mod tests {
         .await
         .expect_err("oversized frontier must fail admission");
 
-        assert!(matches!(error, ReadError::RequestMinimalLimit { .. }));
+        assert!(matches!(error, ReadError::CapsuleReadLimit { .. }));
         let operations = observer
             .observations
             .lock()

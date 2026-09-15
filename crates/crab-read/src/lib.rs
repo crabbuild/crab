@@ -1,5 +1,6 @@
 //! Read and hydration orchestration over Crab storage, metadata, cache, and Xet data.
 
+pub mod capsule_protocol;
 pub mod dependency_proof;
 mod error;
 mod fetch_admission;
@@ -8,7 +9,6 @@ mod hydrator;
 mod integrity;
 pub mod pointer_proof;
 mod ref_advertisement;
-pub mod request_minimal;
 mod selection;
 mod store_client;
 mod term_resolver;

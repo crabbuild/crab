@@ -1,8 +1,8 @@
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
+use crate::capsule_protocol::{CapsuleTransaction, PointerCatalog};
 use crate::error::{MetadataError, Result};
-use crate::request_minimal::CapsuleTransaction;
 use crate::validation::{validate_content_hash, validate_sha1};
 
 const CAPSULE_MAGIC: &[u8; 8] = b"CRBCAPS2";
@@ -186,7 +186,7 @@ struct CapsuleFooter {
     git_packs: Vec<CapsuleGitPackDescriptor>,
 }
 
-/// An immutable, locally verified request-minimal publication capsule.
+/// An immutable, locally verified capsule-protocol publication capsule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Capsule {
     bytes: Bytes,
@@ -382,6 +382,27 @@ impl Capsule {
             .ok_or_else(|| corrupt("section range cannot be represented"))?;
         Ok(self.bytes.slice(start..end))
     }
+
+    /// Decode the authenticated pointer catalog delta, when this push has one.
+    pub fn pointer_catalog_delta(&self) -> Result<Option<PointerCatalog>> {
+        let mut sections = self
+            .footer
+            .sections
+            .iter()
+            .enumerate()
+            .filter(|(_, section)| section.kind == CapsuleSectionKind::CatalogDelta);
+        let Some((index, _)) = sections.next() else {
+            return Ok(None);
+        };
+        if sections.next().is_some() {
+            return Err(corrupt(
+                "capsule contains more than one pointer catalog delta",
+            ));
+        }
+        let index = u32::try_from(index)
+            .map_err(|_| corrupt("pointer catalog section index cannot be represented"))?;
+        PointerCatalog::decode_delta(&self.section_bytes(index)?).map(Some)
+    }
 }
 
 fn validate_footer(footer: &CapsuleFooter, body: &[u8]) -> Result<()> {
@@ -393,12 +414,12 @@ fn validate_footer(footer: &CapsuleFooter, body: &[u8]) -> Result<()> {
     validate_content_hash(
         &footer.base_root_digest,
         "capsule base root digest",
-        "request-minimal capsule",
+        "capsule-protocol capsule",
     )?;
     validate_content_hash(
         &footer.transaction_id,
         "capsule transaction id",
-        "request-minimal capsule",
+        "capsule-protocol capsule",
     )?;
     if footer.sections.is_empty() || footer.sections.len() > MAX_CAPSULE_SECTIONS {
         return Err(corrupt("capsule section count is out of bounds"));
@@ -418,7 +439,7 @@ fn validate_footer(footer: &CapsuleFooter, body: &[u8]) -> Result<()> {
         validate_content_hash(
             &location.blake3,
             "capsule section hash",
-            "request-minimal capsule",
+            "capsule-protocol capsule",
         )?;
         if location.length == 0 || location.offset != expected_offset {
             return Err(corrupt("capsule sections must be non-empty and contiguous"));
@@ -477,7 +498,7 @@ fn validate_git_pack_input(pack: &CapsuleGitPack) -> Result<()> {
     validate_sha1(
         &pack.git_checksum,
         "capsule Git checksum",
-        "request-minimal capsule",
+        "capsule-protocol capsule",
     )?;
     if pack.object_count == 0 {
         return Err(contract_error("capsule Git pack must contain an object"));
@@ -492,7 +513,7 @@ fn validate_git_pack_descriptors(footer: &CapsuleFooter) -> Result<()> {
         validate_sha1(
             &descriptor.git_checksum,
             "capsule Git checksum",
-            "request-minimal capsule",
+            "capsule-protocol capsule",
         )?;
         if descriptor.object_count == 0 {
             return Err(corrupt("capsule Git pack has zero objects"));
@@ -552,7 +573,7 @@ fn is_git_section(kind: CapsuleSectionKind) -> bool {
 }
 
 fn contract_error(reason: impl Into<String>) -> MetadataError {
-    MetadataError::RequestMinimalContract {
+    MetadataError::CapsuleContract {
         record: "capsule",
         reason: reason.into(),
     }
@@ -560,7 +581,7 @@ fn contract_error(reason: impl Into<String>) -> MetadataError {
 
 fn corrupt(reason: impl Into<String>) -> MetadataError {
     MetadataError::CorruptObject {
-        path: "request-minimal capsule".to_owned(),
+        path: "capsule-protocol capsule".to_owned(),
         reason: reason.into(),
     }
 }
@@ -571,7 +592,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::request_minimal::{CapsuleRefEdit, CapsuleTransaction};
+    use crate::capsule_protocol::{CapsuleRefEdit, CapsuleTransaction};
 
     fn transaction() -> CapsuleTransaction {
         CapsuleTransaction::new(
@@ -639,10 +660,7 @@ mod tests {
         )
         .expect_err("Git evidence must be bound to one descriptor");
 
-        assert!(matches!(
-            error,
-            MetadataError::RequestMinimalContract { .. }
-        ));
+        assert!(matches!(error, MetadataError::CapsuleContract { .. }));
     }
 
     #[test]

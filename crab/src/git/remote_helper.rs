@@ -519,7 +519,7 @@ struct SessionCache {
     /// Cached result of the `has_commit_graph_summary` probe.
     has_commit_graph: Option<bool>,
     /// Primary v2 root retained from `list for-push` as the publication CAS base.
-    request_minimal_root: Option<crab_metadata::request_minimal::RootSnapshot>,
+    capsule_root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
     metrics: Arc<Metrics>,
     persisted_metrics: MetricsSummary,
 }
@@ -529,7 +529,7 @@ impl SessionCache {
         Self {
             config,
             has_commit_graph: None,
-            request_minimal_root: None,
+            capsule_root: None,
             metrics: Arc::new(Metrics::new()),
             persisted_metrics: MetricsSummary::zeroed(),
         }
@@ -742,7 +742,7 @@ pub async fn run_remote_helper(
     // Load push state for incremental walk (used by native push pipeline).
     let repo_root = push_state_repo_root();
     let mut cache = SessionCache::new(config);
-    cache.request_minimal_root = Some(resolved.request_minimal_root);
+    cache.capsule_root = Some(resolved.capsule_root);
     let context = RemoteHelperContext {
         store: resolved.store,
         prefix: resolved.repository_prefix,
@@ -1410,15 +1410,15 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                         may_reuse_primary_root,
                     )
                 };
-                let (output, root) = match cache.request_minimal_root.take() {
+                let (output, root) = match cache.capsule_root.take() {
                     Some(root) if may_reuse_primary_root => {
                         (list_output_from_root(&root, &hidden_ref_patterns), root)
                     }
                     _ => read_remote_refs_with_snapshot(&read_store, &router, &hidden_ref_patterns)
                         .await
-                        .map_err(map_missing_request_minimal_root)?,
+                        .map_err(map_missing_capsule_root)?,
                 };
-                cache.request_minimal_root = Some(root);
+                cache.capsule_root = Some(root);
                 output
             } else {
                 ListOutput {
@@ -1644,22 +1644,23 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                         push_store
                             .as_ref()
                             .ok_or_else(|| CrabError::Configuration {
-                                key: "request-minimal push store".to_owned(),
+                                key: "capsule-protocol push store".to_owned(),
                                 origin: "push requires a resolved object store".to_owned(),
                             })?;
-                    match crate::git::request_minimal_push::run(
+                    match crate::git::capsule_push::run(
                         &native_config.push,
                         &specs,
                         push_store,
                         &router,
-                        cache.request_minimal_root.take(),
+                        cache.capsule_root.take(),
                         &config.transfer_hide_refs,
+                        staging.reader(),
                         cancel,
                     )
                     .await
                     {
                         Ok((r, root)) => {
-                            cache.request_minimal_root = root;
+                            cache.capsule_root = root;
                             r
                         }
                         // Partial outcomes carry per-ref state the pipeline
@@ -2172,13 +2173,13 @@ async fn read_remote_refs_with_snapshot(
     store: &crate::storage::store::Store,
     router: &StoreLayout,
     hidden_ref_patterns: &[String],
-) -> Result<(ListOutput, crab_metadata::request_minimal::RootSnapshot)> {
+) -> Result<(ListOutput, crab_metadata::capsule_protocol::RootSnapshot)> {
     let layout = crab_storage::StoreLayout::with_global_prefix(
         store.as_storage().clone(),
         router.repo_prefix().to_owned(),
         router.global_prefix().to_owned(),
     );
-    let snapshot = crab_write::request_minimal::open_root(&layout).await?;
+    let snapshot = crab_write::capsule_protocol::open_root(&layout).await?;
     Ok((
         list_output_from_root(&snapshot, hidden_ref_patterns),
         snapshot,
@@ -2186,7 +2187,7 @@ async fn read_remote_refs_with_snapshot(
 }
 
 fn list_output_from_root(
-    snapshot: &crab_metadata::request_minimal::RootSnapshot,
+    snapshot: &crab_metadata::capsule_protocol::RootSnapshot,
     hidden_ref_patterns: &[String],
 ) -> ListOutput {
     let root = snapshot.record().root();
@@ -2206,7 +2207,7 @@ fn list_output_from_root(
         ref_count = root.refs().len(),
         generation = root.generation(),
         head_symref = ?advertisement.head_symref,
-        "read remote refs from request-minimal root"
+        "read remote refs from capsule-protocol root"
     );
 
     ListOutput {
@@ -2223,14 +2224,14 @@ async fn read_remote_refs_for_advertisement(
 ) -> Result<ListOutput> {
     read_remote_refs(store, router, hidden_ref_patterns)
         .await
-        .map_err(map_missing_request_minimal_root)
+        .map_err(map_missing_capsule_root)
 }
 
-fn map_missing_request_minimal_root(error: CrabError) -> CrabError {
+fn map_missing_capsule_root(error: CrabError) -> CrabError {
     match error {
         CrabError::NotFound { path } if path.ends_with("/v2/root") => CrabError::CorruptObject {
             path,
-            reason: "canonical request-minimal root is missing; retry `crab init` for this isolated development repository".to_owned(),
+            reason: "canonical capsule-protocol root is missing; retry `crab init` for this isolated development repository".to_owned(),
         },
         other => other,
     }
@@ -2522,32 +2523,32 @@ async fn fetch_packs(
 ) -> Result<Option<std::path::PathBuf>> {
     if fetch_options.has_constraints() {
         return Err(CrabError::Protocol(
-            "shallow and filtered fetch are not yet part of the request-minimal protocol"
+            "shallow and filtered fetch are not yet part of the capsule-protocol protocol"
                 .to_owned(),
         ));
     }
     if classify_raw_object_fetch(entries)? {
         return Err(CrabError::Protocol(
-            "raw-object fetch is not yet part of the request-minimal protocol".to_owned(),
+            "raw-object fetch is not yet part of the capsule-protocol protocol".to_owned(),
         ));
     }
-    fetch_request_minimal_packs(
+    fetch_capsule_packs(
         store,
         router,
         entries,
         config,
-        cache.request_minimal_root.take(),
+        cache.capsule_root.take(),
         check_connectivity,
     )
     .await
 }
 
-async fn fetch_request_minimal_packs(
+async fn fetch_capsule_packs(
     store: &crate::storage::store::Store,
     router: &StoreLayout,
     entries: &[FetchEntry],
     config: &crate::core::config::Config,
-    root: Option<crab_metadata::request_minimal::RootSnapshot>,
+    root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
     check_connectivity: bool,
 ) -> Result<Option<std::path::PathBuf>> {
     let layout = crab_storage::StoreLayout::with_global_prefix(
@@ -2560,15 +2561,15 @@ async fn fetch_request_minimal_packs(
     } else {
         config.uploadpack_max_egress_bytes
     };
-    let limits = crab_read::request_minimal::RequestMinimalReadLimits {
+    let limits = crab_read::capsule_protocol::CapsuleReadLimits {
         max_capsule_bytes: maximum,
         max_frontier_bytes: maximum,
     };
     let view = match root {
         Some(root) => {
-            crab_read::request_minimal::open_view_from_root(&layout, root, limits).await?
+            crab_read::capsule_protocol::open_view_from_root(&layout, root, limits).await?
         }
-        None => crab_read::request_minimal::open_view(&layout, limits).await?,
+        None => crab_read::capsule_protocol::open_view(&layout, limits).await?,
     };
     let advertisement =
         crab_read::root_ref_advertisement(view.root().root(), &config.transfer_hide_refs);
@@ -2580,13 +2581,14 @@ async fn fetch_request_minimal_packs(
     for entry in entries {
         if visible.get(entry.ref_name.as_str()).copied() != Some(entry.sha.as_str()) {
             return Err(CrabError::Protocol(format!(
-                "fetch ref {} at {} is not visible in the pinned request-minimal root",
+                "fetch ref {} at {} is not visible in the pinned capsule-protocol root",
                 entry.ref_name, entry.sha
             )));
         }
     }
     let git_dir = super::discover::discover_git_dir()?;
-    let installed = crab_read::request_minimal::install_git_packs(&view, &git_dir, maximum).await?;
+    let installed =
+        crab_read::capsule_protocol::install_git_packs(&view, &git_dir, maximum).await?;
     crate::git::pack::validate_fetched_ref_tips(
         &git_dir,
         &entries
@@ -2597,15 +2599,15 @@ async fn fetch_request_minimal_packs(
     .await?;
     let repo_root = repo_root_from_git_dir(&git_dir);
     if let Err(error) = crate::cmd::init::install_filter_driver(&repo_root) {
-        tracing::warn!(%error, "failed to install filter driver after request-minimal fetch");
+        tracing::warn!(%error, "failed to install filter driver after capsule-protocol fetch");
     }
     if let Err(error) = crate::cmd::init::ensure_crab_dir_excluded(&repo_root) {
-        tracing::warn!(%error, "failed to exclude local Crab state after request-minimal fetch");
+        tracing::warn!(%error, "failed to exclude local Crab state after capsule-protocol fetch");
     }
     tracing::info!(
         installed_packs = installed.len(),
         generation = view.root().root().generation(),
-        "request-minimal fetch installed authenticated capsule packs"
+        "capsule-protocol fetch installed authenticated capsule packs"
     );
     if !check_connectivity {
         return Ok(None);
@@ -3188,7 +3190,7 @@ mod tests {
             .expect("initialize canonical test remote");
     }
 
-    async fn publish_request_minimal_test_refs(
+    async fn publish_capsule_test_refs(
         store: &crate::storage::store::Store,
         router: &StoreLayout,
         refs: &std::collections::BTreeMap<String, String>,
@@ -3199,13 +3201,13 @@ mod tests {
             router.repo_prefix().to_owned(),
             router.global_prefix().to_owned(),
         );
-        let base = crab_write::request_minimal::initialize(&layout, &"9".repeat(64), head)
+        let base = crab_write::capsule_protocol::initialize(&layout, &"9".repeat(64), head)
             .await
-            .expect("initialize request-minimal test root");
+            .expect("initialize capsule-protocol test root");
         let edits = refs
             .iter()
             .map(|(name, oid)| {
-                crab_metadata::request_minimal::CapsuleRefEdit::new(
+                crab_metadata::capsule_protocol::CapsuleRefEdit::new(
                     name.clone(),
                     None,
                     Some(oid.clone()),
@@ -3214,14 +3216,14 @@ mod tests {
             })
             .collect();
         let transaction =
-            crab_metadata::request_minimal::CapsuleTransaction::new(base.record().digest(), edits)
-                .expect("build request-minimal test transaction");
+            crab_metadata::capsule_protocol::CapsuleTransaction::new(base.record().digest(), edits)
+                .expect("build capsule-protocol test transaction");
         let capsule =
-            crab_metadata::request_minimal::Capsule::build(&transaction, Vec::new(), Vec::new())
-                .expect("build request-minimal test capsule");
-        crab_write::request_minimal::publish(&layout, base, &transaction, &capsule)
+            crab_metadata::capsule_protocol::Capsule::build(&transaction, Vec::new(), Vec::new())
+                .expect("build capsule-protocol test capsule");
+        crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
             .await
-            .expect("publish request-minimal test refs");
+            .expect("publish capsule-protocol test refs");
     }
 
     /// Run the production protocol loop with a resolved in-memory context.
@@ -3700,7 +3702,7 @@ mod tests {
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), prefix.to_owned());
         let refs = BTreeMap::from([(ref_name.to_owned(), sha.to_owned())]);
-        publish_request_minimal_test_refs(&store, &router, &refs, ref_name).await;
+        publish_capsule_test_refs(&store, &router, &refs, ref_name).await;
         let mut manifest = Manifest {
             version: crate::metadata::manifest::MANIFEST_VERSION,
             generation: 1,
@@ -3857,7 +3859,15 @@ mod tests {
 
     async fn stage_content(
         staging_root: std::path::PathBuf,
+        tracked_path: &std::path::Path,
         content: &[u8],
+        prepare_xorb: bool,
+        existing_candidates: Option<
+            &std::collections::HashMap<
+                crab_xet::hash::MerkleHash,
+                crab_staging::push_plan::ExistingChunkCandidate,
+            >,
+        >,
     ) -> crab_types::pointer::Pointer {
         use crab_staging::StagingArea;
         use crab_types::pointer::Pointer;
@@ -3900,8 +3910,62 @@ mod tests {
         )
         .expect("build staged recipe");
         staging
-            .publish_verified_recipe_lease(std::path::Path::new("large.bin"), &recipe)
+            .publish_verified_recipe_lease(tracked_path, &recipe)
             .expect("publish staged recipe");
+        if prepare_xorb || existing_candidates.is_some() {
+            let mut plan = crab_staging::push_plan::FilePushPlan::new_verified_recipe(&recipe);
+            if let Some(existing_candidates) = existing_candidates {
+                for (chunk_hash, _) in &recipe_chunks {
+                    let candidate = existing_candidates
+                        .get(chunk_hash)
+                        .expect("remote candidate for staged chunk");
+                    plan.existing.push(
+                        crab_staging::push_plan::PlannedExistingChunk::from_candidate(
+                            *chunk_hash,
+                            *candidate,
+                        ),
+                    );
+                }
+            }
+            if prepare_xorb {
+                let mut builder = crab_xet::xorb::builder::XorbBuilder::new();
+                for (hash, data) in &batch {
+                    builder
+                        .push(
+                            &crab_xet::xorb::format::Chunk {
+                                hash: *hash,
+                                data: bytes::Bytes::copy_from_slice(data),
+                            },
+                            crab_xet::xorb::builder::RunId(0),
+                        )
+                        .expect("build prepared xorb");
+                }
+                let results = builder.finalize().expect("finalize prepared xorb");
+                for result in results {
+                    let path =
+                        crab_staging::push_plan::prepared_xorb_path(staging.root(), &result.hash);
+                    std::fs::create_dir_all(path.parent().expect("prepared xorb parent"))
+                        .expect("create prepared xorb directory");
+                    std::fs::write(&path, &result.bytes).expect("write prepared xorb");
+                    plan.prepared_xorbs
+                        .push(crab_staging::push_plan::PlannedXorb {
+                            hash: result.hash.hex(),
+                            payload_hash: blake3::hash(&result.bytes).to_hex().to_string(),
+                            bytes: result.bytes.len() as u64,
+                            upload: true,
+                            placements: result
+                                .placements
+                                .iter()
+                                .map(crab_staging::push_plan::PlannedPlacement::from_placement)
+                                .collect(),
+                        });
+                }
+            }
+            staging
+                .write_file_push_plan_for_recipe(&plan, &recipe)
+                .await
+                .expect("publish prepared xorb plan");
+        }
         staging.close().await.expect("close staging");
 
         Pointer {
@@ -4193,7 +4257,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn push_dispatch_rejects_unrepresented_staged_pointer() {
+    async fn push_dispatch_publishes_and_hydrates_staged_pointer_through_v2() {
         use crate::storage::store::Store;
         use crab_staging::StagingAreaReadOnly;
         use object_store::memory::InMemory;
@@ -4210,10 +4274,40 @@ mod tests {
         run_git(&repo, &["config", "user.name", "Crab Helper Push"]);
 
         let content = deterministic_bytes(1_048_576);
-        let pointer = stage_content(repo.join(".crab/staging"), &content).await;
+        let pointer = stage_content(
+            repo.join(".crab/staging"),
+            std::path::Path::new("large.bin"),
+            &content,
+            true,
+            None,
+        )
+        .await;
         let pointer_bytes = pointer.serialize();
         std::fs::write(repo.join("large.bin"), &pointer_bytes).expect("write pointer");
-        run_git(&repo, &["add", "large.bin"]);
+        let mut sibling_content = deterministic_bytes(786_432);
+        sibling_content.iter_mut().for_each(|byte| *byte ^= 0xa5);
+        let sibling_pointer = stage_content(
+            repo.join(".crab/staging"),
+            std::path::Path::new("sibling.bin"),
+            &sibling_content,
+            true,
+            None,
+        )
+        .await;
+        let sibling_pointer_bytes = sibling_pointer.serialize();
+        std::fs::write(repo.join("sibling.bin"), &sibling_pointer_bytes)
+            .expect("write sibling pointer");
+        // Published prepared xorbs are complete push authority. Losing redundant
+        // raw segments must not force a second whole-file reconstruction.
+        for entry in
+            std::fs::read_dir(repo.join(".crab/staging/segments")).expect("read staging segments")
+        {
+            let path = entry.expect("staging segment entry").path();
+            if path.is_file() {
+                std::fs::remove_file(path).expect("remove redundant raw segment authority");
+            }
+        }
+        run_git(&repo, &["add", "large.bin", "sibling.bin"]);
         run_git(&repo, &["commit", "-qm", "store pointer"]);
 
         let git_dir = repo.join(".git");
@@ -4260,17 +4354,269 @@ mod tests {
         .expect("dispatch push batch");
 
         let output = String::from_utf8(writer).expect("utf8 helper output");
-        assert!(output.contains("error refs/heads/main internal"));
-        assert!(output.contains("file-data and recipe sections are not yet wired"));
+        assert_eq!(output, "ok refs/heads/main\n\n");
         let layout = crab_storage::StoreLayout::with_global_prefix(
             store.as_storage().clone(),
             router.repo_prefix().to_owned(),
             router.global_prefix().to_owned(),
         );
-        let root = crab_write::request_minimal::open_root(&layout)
+        let root = crab_write::capsule_protocol::open_root(&layout)
             .await
-            .expect("request-minimal root remains readable");
-        assert!(root.record().root().refs().is_empty());
+            .expect("capsule-protocol root is readable");
+        assert_eq!(root.record().root().refs().len(), 1);
+        let catalog = crab_metadata::capsule_protocol::load_pointer_catalog(&layout)
+            .await
+            .expect("load pointer catalog");
+        let expected_file_hash = crab_xet::hash::MerkleHash::from(pointer.file_hash).hex();
+        assert!(
+            catalog.files().contains_key(&expected_file_hash),
+            "catalog keys {:?}, expected {expected_file_hash}",
+            catalog.files().keys().collect::<Vec<_>>()
+        );
+
+        let caching = crab_cache_store::CachingStore::new(
+            store.as_storage().clone(),
+            &crate::core::config::CacheConfig::default(),
+        )
+        .expect("build read cache");
+        let hydrator = crab_read::ReadRuntimeBuilder::new(caching, layout.clone(), 2)
+            .build()
+            .expect("build hydrator");
+        let reconstructed = hydrator
+            .reconstruct_from_pointer(&pointer_bytes)
+            .await
+            .expect("hydrate v2 pointer");
+        assert_eq!(reconstructed, content);
+        let reconstructed = hydrator
+            .reconstruct_from_pointer(&sibling_pointer_bytes)
+            .await
+            .expect("hydrate sibling v2 pointer from shared shard");
+        assert_eq!(reconstructed, sibling_content);
+
+        let mut updated_content = content.clone();
+        let last = updated_content.len() - 1;
+        updated_content[last] ^= 0x5a;
+        let updated_pointer = stage_content(
+            repo.join(".crab/staging"),
+            std::path::Path::new("large.bin"),
+            &updated_content,
+            false,
+            None,
+        )
+        .await;
+        let updated_pointer_bytes = updated_pointer.serialize();
+        std::fs::write(repo.join("large.bin"), &updated_pointer_bytes).expect("update pointer");
+        run_git(&repo, &["add", "large.bin"]);
+        run_git(&repo, &["commit", "-qm", "update pointer"]);
+        let staging = Arc::new(
+            StagingAreaReadOnly::open(repo.join(".crab/staging"))
+                .await
+                .expect("reopen staging readonly"),
+        );
+        let mut writer = Vec::new();
+        dispatch_batch(
+            &batch,
+            &HelperOptions::default(),
+            &mut writer,
+            Some(&store),
+            &PushStaging::Ready(staging),
+            "remote-helper-dispatch",
+            &mut cache,
+            "origin",
+            &mut push_state,
+            OutputMode::Text,
+            None,
+            Some("crab://bucket/remote-helper-dispatch"),
+            None,
+            None,
+            &cancel,
+        )
+        .await
+        .expect("dispatch incremental pointer push");
+        assert_eq!(
+            String::from_utf8(writer).expect("utf8 output"),
+            "ok refs/heads/main\n\n"
+        );
+
+        let updated_catalog = crab_metadata::capsule_protocol::load_pointer_catalog(&layout)
+            .await
+            .expect("load updated pointer catalog");
+        let updated_hash = crab_xet::hash::MerkleHash::from(updated_pointer.file_hash).hex();
+        let updated_file = &updated_catalog.files()[&updated_hash];
+        let closure = updated_catalog.shards()[updated_file.shard_hash()].xorb_hashes();
+        assert!(
+            closure
+                .iter()
+                .any(|hash| catalog.xorbs().contains_key(hash)),
+            "incremental file must reuse a base xorb"
+        );
+        assert!(
+            closure
+                .iter()
+                .any(|hash| !catalog.xorbs().contains_key(hash)),
+            "changed chunks must publish a new xorb"
+        );
+        let fetched = tempfile::tempdir().expect("fresh fetch target");
+        run_git(fetched.path(), &["init", "--bare", "-q"]);
+        let view = crab_read::capsule_protocol::open_view(
+            &layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 32 * 1024 * 1024,
+                max_frontier_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .await
+        .expect("open v2 clone view");
+        crab_read::capsule_protocol::install_git_packs(&view, fetched.path(), 64 * 1024 * 1024)
+            .await
+            .expect("install clone packs");
+        let tip = &view.root().root().refs()["refs/heads/main"];
+        let fetched_pointer = run_git(fetched.path(), &["show", &format!("{tip}:large.bin")]);
+        assert_eq!(fetched_pointer, updated_pointer_bytes);
+        run_git(fetched.path(), &["fsck", "--strict", "--no-dangling"]);
+        let reconstructed = hydrator
+            .reconstruct_from_pointer(&fetched_pointer)
+            .await
+            .expect("hydrate incrementally deduplicated v2 pointer");
+        assert_eq!(reconstructed, updated_content);
+
+        let repack_workspace = tempfile::tempdir().expect("pointer repack workspace");
+        crate::cmd::repack::run_repack(
+            &store,
+            "remote-helper-dispatch",
+            &crate::cmd::repack::RepackConfig {
+                workspace_root: repack_workspace.path().to_owned(),
+                ..crate::cmd::repack::RepackConfig::default()
+            },
+            &cancel,
+        )
+        .await
+        .expect("repack pointer repository");
+        let compacted_catalog = crab_metadata::capsule_protocol::load_pointer_catalog(&layout)
+            .await
+            .expect("load checkpointed pointer catalog");
+        assert_eq!(compacted_catalog, updated_catalog);
+        let reconstructed = hydrator
+            .reconstruct_from_pointer(&fetched_pointer)
+            .await
+            .expect("hydrate pointer after checkpoint");
+        assert_eq!(reconstructed, updated_content);
+
+        let mut remote_candidates = std::collections::HashMap::new();
+        for (xorb_hash, entry) in updated_catalog.xorbs() {
+            let xorb_hash =
+                crab_xet::hash::MerkleHash::from_hex(xorb_hash).expect("catalog xorb hash");
+            for (chunk_index, chunk) in entry.chunks().iter().enumerate() {
+                let chunk_hash =
+                    crab_xet::hash::MerkleHash::from_hex(chunk.hash()).expect("catalog chunk hash");
+                let identity =
+                    *blake3::hash(format!("{xorb_hash}:{chunk_index}:{chunk_hash}").as_bytes())
+                        .as_bytes();
+                remote_candidates.insert(
+                    chunk_hash,
+                    crab_staging::push_plan::ExistingChunkCandidate {
+                        xorb_ref: crab_xet::xorb::format::XorbRef {
+                            xorb_hash,
+                            chunk_index: u32::try_from(chunk_index).expect("chunk index"),
+                            uncompressed_size: chunk.uncompressed_size(),
+                        },
+                        placement_id: identity,
+                        origin_proof_id: identity,
+                    },
+                );
+            }
+        }
+
+        drop(_git_guard);
+        let consumer = tmp.path().join("consumer");
+        std::fs::create_dir_all(&consumer).expect("create consumer repo");
+        run_git(&consumer, &["init", "-q", "--initial-branch=main"]);
+        run_git(
+            &consumer,
+            &["config", "user.email", "consumer-push@crab.local"],
+        );
+        run_git(&consumer, &["config", "user.name", "Crab Consumer Push"]);
+        let consumer_pointer = stage_content(
+            consumer.join(".crab/staging"),
+            std::path::Path::new("shared.bin"),
+            &updated_content,
+            false,
+            Some(&remote_candidates),
+        )
+        .await;
+        let consumer_pointer_bytes = consumer_pointer.serialize();
+        std::fs::write(consumer.join("shared.bin"), &consumer_pointer_bytes)
+            .expect("write consumer pointer");
+        for entry in std::fs::read_dir(consumer.join(".crab/staging/segments"))
+            .expect("read consumer staging segments")
+        {
+            let path = entry.expect("consumer staging segment entry").path();
+            if path.is_file() {
+                std::fs::remove_file(path).expect("remove consumer raw segment authority");
+            }
+        }
+        run_git(&consumer, &["add", "shared.bin"]);
+        run_git(&consumer, &["commit", "-qm", "reuse remote xorb"]);
+
+        let consumer_git_dir = consumer.join(".git");
+        let _consumer_git_guard = GitEnvCwdGuard::set(&consumer, &consumer_git_dir, &consumer);
+        initialize_test_remote(&store, "remote-helper-cold-consumer").await;
+        let consumer_staging = Arc::new(
+            StagingAreaReadOnly::open(consumer.join(".crab/staging"))
+                .await
+                .expect("open consumer staging readonly"),
+        );
+        let mut consumer_config = crate::core::config::Config::default();
+        consumer_config.metadb.chunk_index.local_path =
+            Some(tmp.path().join("consumer-metadb/chunk-index.sqlite"));
+        let mut consumer_cache = SessionCache::new(consumer_config);
+        let mut consumer_push_state = PushState::default();
+        let mut consumer_writer = Vec::new();
+        dispatch_batch(
+            &batch,
+            &HelperOptions::default(),
+            &mut consumer_writer,
+            Some(&store),
+            &PushStaging::Ready(consumer_staging),
+            "remote-helper-cold-consumer",
+            &mut consumer_cache,
+            "origin",
+            &mut consumer_push_state,
+            OutputMode::Text,
+            None,
+            Some("crab://bucket/remote-helper-cold-consumer"),
+            None,
+            None,
+            &cancel,
+        )
+        .await
+        .expect("dispatch cross-repository pointer push");
+        assert_eq!(
+            String::from_utf8(consumer_writer).expect("consumer output"),
+            "ok refs/heads/main\n\n"
+        );
+
+        let consumer_layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            "remote-helper-cold-consumer".to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let consumer_hydrator = crab_read::ReadRuntimeBuilder::new(
+            crab_cache_store::CachingStore::new(
+                store.as_storage().clone(),
+                &crate::core::config::CacheConfig::default(),
+            )
+            .expect("build consumer read cache"),
+            consumer_layout,
+            2,
+        )
+        .build()
+        .expect("build consumer hydrator");
+        let consumer_reconstructed = consumer_hydrator
+            .reconstruct_from_pointer(&consumer_pointer_bytes)
+            .await
+            .expect("hydrate cross-repository pointer");
+        assert_eq!(consumer_reconstructed, updated_content);
     }
 
     #[tokio::test]
@@ -4343,9 +4689,9 @@ mod tests {
             router.repo_prefix().to_owned(),
             router.global_prefix().to_owned(),
         );
-        let root = crab_write::request_minimal::open_root(&layout)
+        let root = crab_write::capsule_protocol::open_root(&layout)
             .await
-            .expect("pushed request-minimal root");
+            .expect("pushed capsule-protocol root");
         assert_eq!(
             root.record().root().refs().get("refs/heads/main"),
             Some(&commit)
@@ -5684,7 +6030,7 @@ mod tests {
             "refs/tags/v1.0".to_owned(),
             "1234567890abcdef1234567890abcdef12345678".to_owned(),
         );
-        publish_request_minimal_test_refs(&store, &router, &refs, "refs/heads/main").await;
+        publish_capsule_test_refs(&store, &router, &refs, "refs/heads/main").await;
 
         let mut manifest = Manifest {
             version: crate::metadata::manifest::MANIFEST_VERSION,

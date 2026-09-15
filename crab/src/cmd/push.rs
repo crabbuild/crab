@@ -382,7 +382,7 @@ pub(crate) fn run_push_prepared_refspecs(
     _cancel: &CancellationToken,
 ) -> Result<PushSummaryPayload> {
     Err(CrabError::Configuration {
-        key: "request-minimal prepared push".to_owned(),
+        key: "capsule-protocol prepared push".to_owned(),
         origin: "mirror and recovery push require a protocol-v2 staged-payload adapter".to_owned(),
     })
 }
@@ -549,14 +549,14 @@ async fn run_push_once(
         crate::core::config::AuthProvider::CrabAuth
     ) {
         return Err(CrabError::Configuration {
-            key: "request-minimal push authorization".to_owned(),
+            key: "capsule-protocol push authorization".to_owned(),
             origin: "managed protected pushes require a protocol-v2 authorization commit adapter"
                 .to_owned(),
         });
     }
     if args.follow_tags || args.no_incremental {
         return Err(CrabError::Configuration {
-            key: "request-minimal push options".to_owned(),
+            key: "capsule-protocol push options".to_owned(),
             origin:
                 "--follow-tags and --no-incremental are not part of the protocol-v2 hard cutover"
                     .to_owned(),
@@ -573,15 +573,19 @@ async fn run_push_once(
     };
     let store = selection.store;
     let router = selection.router;
-    let root = selection.request_minimal_root;
+    let root = selection.capsule_root;
     let repo_prefix = router.repo_prefix().to_owned();
-    let result = match crate::git::request_minimal_push::run(
+    let staging =
+        crate::git::push_staging::PushStaging::open(repo_root.join(".crab").join("staging"))
+            .await?;
+    let result = match crate::git::capsule_push::run(
         &push_config,
         &specs,
         &store,
         &router,
         Some(root),
         &config.transfer_hide_refs,
+        staging.reader(),
         cancel,
     )
     .await

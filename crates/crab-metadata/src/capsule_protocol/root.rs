@@ -195,7 +195,7 @@ impl CheckpointPointer {
     }
 }
 
-/// Complete mutable authority for one request-minimal repository generation.
+/// Complete mutable authority for one capsule-protocol repository generation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryRoot {
@@ -253,7 +253,7 @@ impl RepositoryRoot {
         validate_content_hash(
             transaction_id,
             "new root transaction id",
-            "request-minimal root",
+            "capsule-protocol root",
         )?;
         if capsule_frontier
             .last()
@@ -555,11 +555,11 @@ impl RootRecord {
 }
 
 fn validate_capsule_pointer(pointer: &CapsulePointer) -> Result<()> {
-    validate_content_hash(&pointer.hash, "root capsule hash", "request-minimal root")?;
+    validate_content_hash(&pointer.hash, "root capsule hash", "capsule-protocol root")?;
     validate_content_hash(
         &pointer.newest_base_root_digest,
         "root capsule base digest",
-        "request-minimal root",
+        "capsule-protocol root",
     )?;
     let expected_count = 1_u32
         .checked_shl(u32::from(pointer.level))
@@ -575,7 +575,7 @@ fn validate_capsule_pointer(pointer: &CapsulePointer) -> Result<()> {
         validate_content_hash(
             transaction_id,
             "root transaction id",
-            "request-minimal root",
+            "capsule-protocol root",
         )?;
         if !transactions.insert(transaction_id) {
             return Err(contract_error(
@@ -590,12 +590,12 @@ fn validate_checkpoint_pointer(pointer: &CheckpointPointer) -> Result<()> {
     validate_content_hash(
         &pointer.hash,
         "root checkpoint hash",
-        "request-minimal root",
+        "capsule-protocol root",
     )?;
     validate_content_hash(
         &pointer.covered_root_digest,
         "root checkpoint covered digest",
-        "request-minimal root",
+        "capsule-protocol root",
     )?;
     if pointer.size == 0 || pointer.pack_count == 0 || pointer.object_count == 0 {
         return Err(contract_error("checkpoint descriptor is out of bounds"));
@@ -604,7 +604,7 @@ fn validate_checkpoint_pointer(pointer: &CheckpointPointer) -> Result<()> {
 }
 
 fn validate_gc_fence(fence: &GcFence) -> Result<()> {
-    validate_content_hash(&fence.id, "root GC fence id", "request-minimal root")?;
+    validate_content_hash(&fence.id, "root GC fence id", "capsule-protocol root")?;
     if fence.expires_at_unix == 0 {
         return Err(contract_error("root GC fence expiry must be non-zero"));
     }
@@ -618,7 +618,7 @@ fn validate_root(root: &RepositoryRoot) -> Result<()> {
     validate_content_hash(
         &root.repository_id,
         "root repository id",
-        "request-minimal root",
+        "capsule-protocol root",
     )?;
     if !root.head.starts_with("refs/heads/")
         || crab_git::refname::validate_push_refname(&root.head).is_err()
@@ -629,7 +629,7 @@ fn validate_root(root: &RepositoryRoot) -> Result<()> {
         if !name.starts_with("refs/") || crab_git::refname::validate_push_refname(name).is_err() {
             return Err(contract_error("root contains an invalid ref name"));
         }
-        validate_sha1(oid, "root ref object id", "request-minimal root")?;
+        validate_sha1(oid, "root ref object id", "capsule-protocol root")?;
     }
     crab_git::refname::validate_ref_namespace(root.refs.keys().map(String::as_str))
         .map_err(|error| contract_error(error.to_string()))?;
@@ -663,7 +663,7 @@ fn validate_root(root: &RepositoryRoot) -> Result<()> {
             .parent_root_digest
             .as_deref()
             .ok_or_else(|| contract_error("non-zero root generation requires a parent digest"))?;
-        validate_content_hash(parent, "root parent digest", "request-minimal root")?;
+        validate_content_hash(parent, "root parent digest", "capsule-protocol root")?;
     }
     if let Some(fence) = &root.gc_fence {
         validate_gc_fence(fence)?;
@@ -716,7 +716,7 @@ fn validate_root(root: &RepositoryRoot) -> Result<()> {
             validate_content_hash(
                 base,
                 "latest transaction base digest",
-                "request-minimal root",
+                "capsule-protocol root",
             )?;
         }
         _ => {
@@ -738,7 +738,7 @@ fn enforce_root_size(size: usize) -> Result<()> {
 }
 
 fn contract_error(reason: impl Into<String>) -> MetadataError {
-    MetadataError::RequestMinimalContract {
+    MetadataError::CapsuleContract {
         record: "root",
         reason: reason.into(),
     }
@@ -746,7 +746,7 @@ fn contract_error(reason: impl Into<String>) -> MetadataError {
 
 fn corrupt(reason: impl Into<String>) -> MetadataError {
     MetadataError::CorruptObject {
-        path: "request-minimal root".to_owned(),
+        path: "capsule-protocol root".to_owned(),
         reason: reason.into(),
     }
 }
@@ -829,10 +829,7 @@ mod tests {
         let error = advance_with_synthetic_run(&record, u64::from(MAX_DELTA_DEPTH))
             .expect_err("checkpoint must bound the transaction window");
 
-        assert!(matches!(
-            error,
-            MetadataError::RequestMinimalContract { .. }
-        ));
+        assert!(matches!(error, MetadataError::CapsuleContract { .. }));
     }
 
     #[test]

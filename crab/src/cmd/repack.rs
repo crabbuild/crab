@@ -186,26 +186,26 @@ pub async fn run_repack(
     config: &RepackConfig,
     cancel: &CancellationToken,
 ) -> Result<RepackOutcome> {
-    run_request_minimal_repack(store, prefix, config, cancel, None).await
+    run_capsule_repack(store, prefix, config, cancel, None).await
 }
 
 /// Checkpoint a repository using an already authenticated protocol-v2 root.
 pub async fn run_repack_from_root(
     store: &Store,
     prefix: &str,
-    root: crab_metadata::request_minimal::RootSnapshot,
+    root: crab_metadata::capsule_protocol::RootSnapshot,
     config: &RepackConfig,
     cancel: &CancellationToken,
 ) -> Result<RepackOutcome> {
-    run_request_minimal_repack(store, prefix, config, cancel, Some(root)).await
+    run_capsule_repack(store, prefix, config, cancel, Some(root)).await
 }
 
-async fn run_request_minimal_repack(
+async fn run_capsule_repack(
     store: &Store,
     prefix: &str,
     config: &RepackConfig,
     cancel: &CancellationToken,
-    root: Option<crab_metadata::request_minimal::RootSnapshot>,
+    root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
 ) -> Result<RepackOutcome> {
     const MAX_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
@@ -217,15 +217,15 @@ async fn run_request_minimal_repack(
         router.repo_prefix().to_owned(),
         router.global_prefix().to_owned(),
     );
-    let limits = crab_read::request_minimal::RequestMinimalReadLimits {
+    let limits = crab_read::capsule_protocol::CapsuleReadLimits {
         max_capsule_bytes: MAX_CHECKPOINT_BYTES,
         max_frontier_bytes: MAX_CHECKPOINT_BYTES,
     };
     let view = match root {
         Some(root) => {
-            crab_read::request_minimal::open_view_from_root(&layout, root, limits).await?
+            crab_read::capsule_protocol::open_view_from_root(&layout, root, limits).await?
         }
-        None => crab_read::request_minimal::open_view(&layout, limits).await?,
+        None => crab_read::capsule_protocol::open_view(&layout, limits).await?,
     };
     let root = view.root().root();
     if root.refs().is_empty() {
@@ -243,6 +243,9 @@ async fn run_request_minimal_repack(
         let output = std::process::Command::new("git")
             .args(["init", "--bare", "--quiet"])
             .arg(&init_path)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
             .output()?;
@@ -258,10 +261,10 @@ async fn run_request_minimal_repack(
     .await
     .map_err(|error| CrabError::Internal(format!("checkpoint Git init join failed: {error}")))??;
     check_cancelled(cancel)?;
-    crab_read::request_minimal::install_git_packs(&view, &git_dir, MAX_CHECKPOINT_BYTES).await?;
+    crab_read::capsule_protocol::install_git_packs(&view, &git_dir, MAX_CHECKPOINT_BYTES).await?;
     let tips = root.refs().values().cloned().collect::<Vec<_>>();
     crate::git::pack::validate_fetched_ref_tips(&git_dir, &tips).await?;
-    let packs = crate::git::request_minimal_push::prepare_complete_git_packs(
+    let packs = crate::git::capsule_push::prepare_complete_git_packs(
         &git_dir,
         root.refs(),
         2 * 1024 * 1024 * 1024,
@@ -269,12 +272,13 @@ async fn run_request_minimal_repack(
     .await?;
     let pack_sizes = packs
         .iter()
-        .map(crab_metadata::request_minimal::CapsuleGitPack::pack_size)
+        .map(crab_metadata::capsule_protocol::CapsuleGitPack::pack_size)
         .collect::<Vec<_>>();
-    let checkpoint = crab_metadata::request_minimal::Checkpoint::build(
+    let checkpoint = crab_metadata::capsule_protocol::Checkpoint::build_with_pointer_catalog(
         root.generation(),
         view.root().digest(),
         packs,
+        view.pointer_catalog()?,
     )?;
     let packs_before = view
         .checkpoint()
@@ -286,15 +290,15 @@ async fn run_request_minimal_repack(
             .sum::<usize>();
     let bytes_before = root
         .checkpoint()
-        .map_or(0, crab_metadata::request_minimal::CheckpointPointer::size)
+        .map_or(0, crab_metadata::capsule_protocol::CheckpointPointer::size)
         + root
             .capsule_frontier()
             .iter()
-            .map(crab_metadata::request_minimal::CapsulePointer::size)
+            .map(crab_metadata::capsule_protocol::CapsulePointer::size)
             .sum::<u64>();
     if !config.dry_run {
         check_cancelled(cancel)?;
-        crab_write::request_minimal::publish_checkpoint(
+        crab_write::capsule_protocol::publish_checkpoint(
             &layout,
             view.root_snapshot().clone(),
             &checkpoint,

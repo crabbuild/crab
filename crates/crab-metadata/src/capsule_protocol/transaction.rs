@@ -73,7 +73,7 @@ impl CapsuleTransaction {
         validate_content_hash(
             base_root_digest,
             "transaction base root digest",
-            "request-minimal transaction",
+            "capsule-protocol transaction",
         )?;
         if edits.is_empty() {
             return Err(contract_error("transaction must edit at least one ref"));
@@ -107,16 +107,16 @@ impl CapsuleTransaction {
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
         let transaction: Self =
             serde_json::from_slice(bytes).map_err(|source| MetadataError::CorruptObject {
-                path: "request-minimal capsule transaction".to_owned(),
+                path: "capsule-protocol capsule transaction".to_owned(),
                 reason: format!("transaction is invalid JSON: {source}"),
             })?;
         validate_transaction(&transaction).map_err(|error| MetadataError::CorruptObject {
-            path: "request-minimal capsule transaction".to_owned(),
+            path: "capsule-protocol capsule transaction".to_owned(),
             reason: error.to_string(),
         })?;
         if transaction.encode()?.as_ref() != bytes {
             return Err(MetadataError::CorruptObject {
-                path: "request-minimal capsule transaction".to_owned(),
+                path: "capsule-protocol capsule transaction".to_owned(),
                 reason: "transaction is not canonically encoded".to_owned(),
             });
         }
@@ -150,7 +150,7 @@ fn validate_transaction(transaction: &CapsuleTransaction) -> Result<()> {
     validate_content_hash(
         &transaction.base_root_digest,
         "transaction base root digest",
-        "request-minimal transaction",
+        "capsule-protocol transaction",
     )?;
     if transaction.edits.is_empty() {
         return Err(contract_error("transaction must edit at least one ref"));
@@ -188,7 +188,7 @@ fn validate_edit(edit: &CapsuleRefEdit) -> Result<()> {
         .into_iter()
         .flatten()
     {
-        validate_sha1(oid, "transaction object id", "request-minimal transaction")?;
+        validate_sha1(oid, "transaction object id", "capsule-protocol transaction")?;
     }
     if edit.new_oid.is_none() && edit.peeled_oid.is_some() {
         return Err(contract_error(
@@ -199,7 +199,7 @@ fn validate_edit(edit: &CapsuleRefEdit) -> Result<()> {
 }
 
 fn contract_error(reason: impl Into<String>) -> MetadataError {
-    MetadataError::RequestMinimalContract {
+    MetadataError::CapsuleContract {
         record: "transaction",
         reason: reason.into(),
     }
@@ -224,7 +224,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            MetadataError::RequestMinimalContract {
+            MetadataError::CapsuleContract {
                 record: "transaction",
                 ..
             }

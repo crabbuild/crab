@@ -80,9 +80,9 @@ _Avoid_: Pack, because a capsule contains a Git pack plus non-pack evidence
 **Repository root**:
 The single bounded mutable record that atomically publishes refs, a checkpoint,
 and the capsule frontier for one repository generation.
-_Avoid_: Manifest, when referring to the request-minimal storage protocol
+_Avoid_: Manifest, when referring to the capsule-protocol storage protocol
 
 **Checkpoint**:
 An immutable complete repository view that resets the capsule frontier and
 bounds the number of objects needed for clone, fetch, and reconstruction.
-_Avoid_: Snapshot, when referring to the stored request-minimal artifact
+_Avoid_: Snapshot, when referring to the stored capsule-protocol artifact

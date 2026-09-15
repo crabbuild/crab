@@ -2,12 +2,14 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use std::sync::Arc;
 
 use bytes::Bytes;
+use crab_staging::StagingAreaReadOnly;
 use gix_object::{Exists, Find, FindHeader};
 use tokio_util::sync::CancellationToken;
 
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::git::pack::{
     PushPackConfig, RemotePackExclusions, generate_push_pack_files_with_exclusions,
     install_pack_file_locally_with_timeout,
@@ -22,27 +24,28 @@ const POINTER_SCAN_ALLOCATION_BYTES: usize = 64 * 1024 * 1024;
 
 /// Publish one remote-helper push batch through a single capsule/root transaction.
 ///
-/// Every policy and Git-integrity check completes before the first object-store
-/// mutation. Root CAS is the only concurrency primitive; a stale advertised root
-/// therefore cannot overwrite a concurrent winner.
+/// Ref policy and Git-integrity checks complete before immutable pointer data is
+/// uploaded. Root CAS is the only publication primitive; failed preparation or a
+/// stale base can leave safe immutable orphans but cannot expose partial state.
 pub async fn run(
     config: &PushConfig,
     specs: &[PushSpec],
     store: &crate::storage::store::Store,
     router: &crate::storage::StoreLayout,
-    advertised: Option<crab_metadata::request_minimal::RootSnapshot>,
+    advertised: Option<crab_metadata::capsule_protocol::RootSnapshot>,
     hidden_ref_patterns: &[String],
+    staging: Option<&Arc<StagingAreaReadOnly>>,
     cancel: &CancellationToken,
 ) -> Result<(
     PushResult,
-    Option<crab_metadata::request_minimal::RootSnapshot>,
+    Option<crab_metadata::capsule_protocol::RootSnapshot>,
 )> {
     if let Some(result) = duplicate_destination_result(specs) {
         return Ok((result, advertised));
     }
     if config.protected_push.is_some() || config.active_active_replication.is_some() {
         return Err(CrabError::Configuration {
-            key: "request-minimal push coordination".to_owned(),
+            key: "capsule-protocol push coordination".to_owned(),
             origin: "protected and active-active publication require a protocol-v2 authorization commit adapter"
                 .to_owned(),
         });
@@ -58,7 +61,7 @@ pub async fn run(
     );
     let base = match advertised {
         Some(snapshot) => snapshot,
-        None => crab_write::request_minimal::open_root(&layout).await?,
+        None => crab_write::capsule_protocol::open_root(&layout).await?,
     };
     let git_dir = config
         .git_dir
@@ -120,7 +123,7 @@ pub async fn run(
                     RefPushOutcome::Rejected(PushRejectReason::DenyCurrentBranch),
                 );
             } else {
-                edits.push(crab_metadata::request_minimal::CapsuleRefEdit::new(
+                edits.push(crab_metadata::capsule_protocol::CapsuleRefEdit::new(
                     spec.dst.clone(),
                     current,
                     None,
@@ -169,7 +172,7 @@ pub async fn run(
                 continue;
             }
         }
-        edits.push(crab_metadata::request_minimal::CapsuleRefEdit::new(
+        edits.push(crab_metadata::capsule_protocol::CapsuleRefEdit::new(
             spec.dst.clone(),
             current,
             Some(new_oid.clone()),
@@ -197,45 +200,104 @@ pub async fn run(
     }
     validate_candidate_namespace(root.refs(), &edits).map_err(|reason| {
         CrabError::Protocol(format!(
-            "request-minimal ref transaction is invalid: {reason}"
+            "capsule-protocol ref transaction is invalid: {reason}"
         ))
     })?;
     if cancel.is_cancelled() {
         return Err(CrabError::Cancelled);
     }
 
-    let capsule_packs = prepare_git_packs(
+    let prepared = prepare_git_packs(
         &common_git_dir,
         root.refs(),
         &updates,
         config.receive_max_input_size,
     )
     .await?;
-    let transaction =
-        crab_metadata::request_minimal::CapsuleTransaction::new(base.record().digest(), edits)?;
-    let capsule =
-        crab_metadata::request_minimal::Capsule::build(&transaction, capsule_packs, Vec::new())?;
-    if cancel.is_cancelled() {
-        return Err(CrabError::Cancelled);
-    }
-    let committed =
-        match crab_write::request_minimal::publish(&layout, base, &transaction, &capsule).await {
-            Ok(committed) => committed,
-            Err(crab_write::WriteError::RequestMinimalRootChanged { .. }) => {
-                for edit in transaction.edits() {
-                    outcomes.insert(
-                        edit.ref_name().to_owned(),
-                        RefPushOutcome::Rejected(PushRejectReason::StaleInfo),
-                    );
-                }
-                return Ok((PushResult::new(outcomes), None));
-            }
-            Err(error) => return Err(error.into()),
+    tracing::debug!(
+        git_packs = prepared.packs.len(),
+        pointers = prepared.pointers.len(),
+        "prepared capsule-protocol Git payload"
+    );
+    let gc_writer = if prepared.pointers.is_empty() {
+        None
+    } else {
+        Some(
+            crate::maintenance::GcWriterLeases::acquire(
+                store,
+                router.global_prefix(),
+                router.repo_prefix(),
+                cancel,
+            )
+            .await?,
+        )
+    };
+    let ref_names = edits
+        .iter()
+        .map(|edit| edit.ref_name().to_owned())
+        .collect::<Vec<_>>();
+    let publication: Result<Option<crab_metadata::capsule_protocol::RootSnapshot>> = async {
+        let pointer_delta = super::xet_publication::prepare_delta(
+            &layout,
+            &base,
+            &prepared.pointers,
+            staging,
+            cancel,
+        )
+        .await?;
+        let transaction = crab_metadata::capsule_protocol::CapsuleTransaction::new(
+            base.record().digest(),
+            edits,
+        )?;
+        let sections = if pointer_delta.is_empty() {
+            Vec::new()
+        } else {
+            vec![crab_metadata::capsule_protocol::CapsuleSection::new(
+                crab_metadata::capsule_protocol::CapsuleSectionKind::CatalogDelta,
+                pointer_delta.encode_delta()?,
+            )]
         };
-    for edit in transaction.edits() {
-        outcomes.insert(edit.ref_name().to_owned(), RefPushOutcome::Ok);
+        let capsule = crab_metadata::capsule_protocol::Capsule::build(
+            &transaction,
+            prepared.packs,
+            sections,
+        )?;
+        check_cancelled(cancel)?;
+        match crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule).await {
+            Ok(committed) => Ok(Some(committed)),
+            Err(crab_write::WriteError::CapsuleRootChanged { .. }) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
-    Ok((PushResult::new(outcomes), Some(committed)))
+    .await;
+    let release = match gc_writer {
+        Some(writer) => writer.release().await,
+        None => Ok(()),
+    };
+    let committed = match (publication, release) {
+        (Ok(committed), Ok(())) => committed,
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => return Err(error),
+        (Err(error), Err(release_error)) => {
+            tracing::warn!(
+                error = %release_error,
+                "capsule-protocol GC admission release failed after push failure"
+            );
+            return Err(error);
+        }
+    };
+    if let Some(committed) = committed {
+        for ref_name in ref_names {
+            outcomes.insert(ref_name, RefPushOutcome::Ok);
+        }
+        return Ok((PushResult::new(outcomes), Some(committed)));
+    }
+    for ref_name in ref_names {
+        outcomes.insert(
+            ref_name,
+            RefPushOutcome::Rejected(PushRejectReason::StaleInfo),
+        );
+    }
+    Ok((PushResult::new(outcomes), None))
 }
 
 fn current_branch_is_denied(config: &PushConfig, head: &str, destination: &str) -> bool {
@@ -277,7 +339,7 @@ fn is_ancestor(git_dir: &Path, old_oid: &str, new_oid: &str) -> Result<bool> {
 
 fn validate_candidate_namespace(
     base_refs: &BTreeMap<String, String>,
-    edits: &[crab_metadata::request_minimal::CapsuleRefEdit],
+    edits: &[crab_metadata::capsule_protocol::CapsuleRefEdit],
 ) -> std::result::Result<(), crab_git::refname::RefNamespaceError> {
     let mut refs = base_refs.clone();
     for edit in edits {
@@ -298,9 +360,9 @@ async fn prepare_git_packs(
     remote_refs: &BTreeMap<String, String>,
     updates: &[RefUpdate],
     max_input_size: u64,
-) -> Result<Vec<crab_metadata::request_minimal::CapsuleGitPack>> {
+) -> Result<PreparedGitPush> {
     if updates.is_empty() {
-        return Ok(Vec::new());
+        return Ok(PreparedGitPush::default());
     }
     let exclusions = locally_available_remote_tips(git_dir, remote_refs)?;
     let generated = generate_push_pack_files_with_exclusions(
@@ -320,7 +382,7 @@ pub(crate) async fn prepare_complete_git_packs(
     git_dir: &Path,
     refs: &BTreeMap<String, String>,
     max_input_size: u64,
-) -> Result<Vec<crab_metadata::request_minimal::CapsuleGitPack>> {
+) -> Result<Vec<crab_metadata::capsule_protocol::CapsuleGitPack>> {
     let updates = refs
         .iter()
         .map(|(name, oid)| RefUpdate {
@@ -340,18 +402,29 @@ pub(crate) async fn prepare_complete_git_packs(
         },
     )
     .await?;
-    prepare_generated_git_packs(git_dir, generated, max_input_size).await
+    Ok(
+        prepare_generated_git_packs(git_dir, generated, max_input_size)
+            .await?
+            .packs,
+    )
+}
+
+#[derive(Default)]
+struct PreparedGitPush {
+    packs: Vec<crab_metadata::capsule_protocol::CapsuleGitPack>,
+    pointers: Vec<crab_types::pointer::Pointer>,
 }
 
 async fn prepare_generated_git_packs(
     git_dir: &Path,
     generated: Vec<crate::git::pack::PackedFileData>,
     max_input_size: u64,
-) -> Result<Vec<crab_metadata::request_minimal::CapsuleGitPack>> {
+) -> Result<PreparedGitPush> {
     let evidence_dir = tempfile::Builder::new()
         .prefix(".crab-v2-push-evidence-")
         .tempdir_in(git_dir.join("objects"))?;
     let mut packs = Vec::with_capacity(generated.len());
+    let mut pointers = Vec::new();
     for generated in generated {
         if generated.object_count == 0 {
             continue;
@@ -385,7 +458,7 @@ async fn prepare_generated_git_packs(
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(crab_git::pack::PackError::from)?;
         let kinds = crab_git::object_kinds_from_git_dir(git_dir, &object_ids)?;
-        reject_unrepresented_pointers(git_dir, &object_ids, &kinds)?;
+        pointers.extend(collect_pointers(git_dir, &object_ids, &kinds)?);
         let ordered_kinds = object_ids
             .iter()
             .map(|oid| {
@@ -404,7 +477,7 @@ async fn prepare_generated_git_packs(
             })?;
         let locator = crab_git::pack_locator::encode_pack_kind_metadata(checksum, &ordered_kinds)
             .map_err(crab_git::pack::PackError::from)?;
-        packs.push(crab_metadata::request_minimal::CapsuleGitPack::new(
+        packs.push(crab_metadata::capsule_protocol::CapsuleGitPack::new(
             Bytes::from(std::fs::read(
                 generated.pack_path.as_ref() as &std::path::Path
             )?),
@@ -415,7 +488,9 @@ async fn prepare_generated_git_packs(
             generated.object_count,
         )?);
     }
-    Ok(packs)
+    pointers.sort_by_key(|pointer| (pointer.file_hash, pointer.size));
+    pointers.dedup_by_key(|pointer| (pointer.file_hash, pointer.size));
+    Ok(PreparedGitPush { packs, pointers })
 }
 
 fn locally_available_remote_tips(
@@ -433,11 +508,11 @@ fn locally_available_remote_tips(
         .collect())
 }
 
-fn reject_unrepresented_pointers(
+fn collect_pointers(
     git_dir: &Path,
     object_ids: &[gix_hash::ObjectId],
     kinds: &HashMap<gix_hash::ObjectId, gix_object::Kind>,
-) -> Result<()> {
+) -> Result<Vec<crab_types::pointer::Pointer>> {
     let objects = gix_odb::at_opts(
         git_dir.join("objects"),
         [],
@@ -448,6 +523,7 @@ fn reject_unrepresented_pointers(
     )
     .map_err(|error| CrabError::Internal(format!("failed to open local Git objects: {error}")))?;
     let mut buffer = Vec::new();
+    let mut pointers = Vec::new();
     for oid in object_ids
         .iter()
         .filter(|oid| kinds.get(*oid) == Some(&gix_object::Kind::Blob))
@@ -478,16 +554,11 @@ fn reject_unrepresented_pointers(
                 path: git_dir.display().to_string(),
                 reason: format!("Git blob {oid} failed checksum validation: {error}"),
             })?;
-        if crab_types::pointer::Pointer::parse(data.data).is_ok() {
-            return Err(CrabError::Configuration {
-                key: "request-minimal capsule content".to_owned(),
-                origin: format!(
-                    "Git object {oid} is a Crab pointer; protocol v2 file-data and recipe sections are not yet wired"
-                ),
-            });
+        if let Ok(pointer) = crab_types::pointer::Pointer::parse(data.data) {
+            pointers.push(pointer);
         }
     }
-    Ok(())
+    Ok(pointers)
 }
 
 fn map_push_pack_error(error: CrabError) -> CrabError {
@@ -578,7 +649,7 @@ mod tests {
         let layout =
             crab_storage::StoreLayout::new(store.as_storage().clone(), "repos/test".to_owned());
         let root =
-            crab_write::request_minimal::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
                 .await
                 .expect("initialize root");
         let mut config = PushConfig {
@@ -599,6 +670,7 @@ mod tests {
             &router,
             Some(root),
             &[],
+            None,
             &CancellationToken::new(),
         )
         .await
@@ -610,16 +682,16 @@ mod tests {
 
         let destination = tempfile::tempdir().expect("destination repository");
         git(destination.path(), &["init", "--bare"]);
-        let view = crab_read::request_minimal::open_view(
+        let view = crab_read::capsule_protocol::open_view(
             &layout,
-            crab_read::request_minimal::RequestMinimalReadLimits {
+            crab_read::capsule_protocol::CapsuleReadLimits {
                 max_capsule_bytes: 16 * 1024 * 1024,
                 max_frontier_bytes: 16 * 1024 * 1024,
             },
         )
         .await
         .expect("open first generation");
-        crab_read::request_minimal::install_git_packs(&view, destination.path(), 16 * 1024 * 1024)
+        crab_read::capsule_protocol::install_git_packs(&view, destination.path(), 16 * 1024 * 1024)
             .await
             .expect("install first pack");
         git(
@@ -639,6 +711,7 @@ mod tests {
             &router,
             Some(committed),
             &[],
+            None,
             &CancellationToken::new(),
         )
         .await
@@ -669,7 +742,7 @@ mod tests {
         assert_eq!(repack.packs_before, 2);
         assert_eq!(repack.packs_after, 1);
         assert_eq!(observer.count() - before_repack, 5);
-        let checkpoint_root = crab_write::request_minimal::open_root(&layout)
+        let checkpoint_root = crab_write::capsule_protocol::open_root(&layout)
             .await
             .expect("checkpoint root");
         assert!(checkpoint_root.record().root().checkpoint().is_some());
@@ -696,6 +769,7 @@ mod tests {
             &router,
             Some(checkpoint_root),
             &[],
+            None,
             &CancellationToken::new(),
         )
         .await
@@ -704,9 +778,9 @@ mod tests {
 
         let fresh = tempfile::tempdir().expect("fresh clone target");
         git(fresh.path(), &["init", "--bare"]);
-        let view = crab_read::request_minimal::open_view(
+        let view = crab_read::capsule_protocol::open_view(
             &layout,
-            crab_read::request_minimal::RequestMinimalReadLimits {
+            crab_read::capsule_protocol::CapsuleReadLimits {
                 max_capsule_bytes: 16 * 1024 * 1024,
                 max_frontier_bytes: 16 * 1024 * 1024,
             },
@@ -715,7 +789,7 @@ mod tests {
         .expect("open checkpoint and delta");
         assert!(view.checkpoint().is_some());
         assert_eq!(view.capsules().len(), 1);
-        crab_read::request_minimal::install_git_packs(&view, fresh.path(), 16 * 1024 * 1024)
+        crab_read::capsule_protocol::install_git_packs(&view, fresh.path(), 16 * 1024 * 1024)
             .await
             .expect("install checkpoint and delta");
         git(
@@ -723,7 +797,7 @@ mod tests {
             &["cat-file", "-e", &format!("{third}^{{commit}}")],
         );
 
-        let orphan = layout.request_minimal_capsule_path(&"f".repeat(64));
+        let orphan = layout.capsule_path(&"f".repeat(64));
         store
             .put(&orphan, Bytes::from_static(b"unreachable capsule"))
             .await
@@ -742,16 +816,16 @@ mod tests {
             None,
         )
         .await
-        .expect("request-minimal GC");
+        .expect("capsule-protocol GC");
         assert_eq!(gc.packs_deleted, 3);
         assert!(store.head(&orphan).await.is_err());
-        let root = crab_write::request_minimal::open_root(&layout)
+        let root = crab_write::capsule_protocol::open_root(&layout)
             .await
             .expect("root after GC");
         assert!(root.record().root().gc_fence().is_none());
-        crab_read::request_minimal::open_view(
+        crab_read::capsule_protocol::open_view(
             &layout,
-            crab_read::request_minimal::RequestMinimalReadLimits {
+            crab_read::capsule_protocol::CapsuleReadLimits {
                 max_capsule_bytes: 16 * 1024 * 1024,
                 max_frontier_bytes: 16 * 1024 * 1024,
             },

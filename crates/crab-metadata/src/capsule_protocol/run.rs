@@ -1,8 +1,8 @@
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
+use crate::capsule_protocol::Capsule;
 use crate::error::{MetadataError, Result};
-use crate::request_minimal::Capsule;
 use crate::validation::validate_content_hash;
 
 const RUN_MAGIC: &[u8; 8] = b"CRBRUN02";
@@ -230,17 +230,17 @@ fn validate_location(location: &RunCapsuleLocation, expected_offset: u64) -> Res
     validate_content_hash(
         &location.hash,
         "capsule run capsule hash",
-        "request-minimal capsule run",
+        "capsule-protocol capsule run",
     )?;
     validate_content_hash(
         &location.transaction_id,
         "capsule run transaction id",
-        "request-minimal capsule run",
+        "capsule-protocol capsule run",
     )?;
     validate_content_hash(
         &location.base_root_digest,
         "capsule run base root digest",
-        "request-minimal capsule run",
+        "capsule-protocol capsule run",
     )?;
     if location.length == 0 || location.offset != expected_offset {
         return Err(corrupt(
@@ -251,7 +251,7 @@ fn validate_location(location: &RunCapsuleLocation, expected_offset: u64) -> Res
 }
 
 fn contract_error(reason: impl Into<String>) -> MetadataError {
-    MetadataError::RequestMinimalContract {
+    MetadataError::CapsuleContract {
         record: "capsule run",
         reason: reason.into(),
     }
@@ -259,7 +259,7 @@ fn contract_error(reason: impl Into<String>) -> MetadataError {
 
 fn corrupt(reason: impl Into<String>) -> MetadataError {
     MetadataError::CorruptObject {
-        path: "request-minimal capsule run".to_owned(),
+        path: "capsule-protocol capsule run".to_owned(),
         reason: reason.into(),
     }
 }
@@ -268,7 +268,7 @@ fn corrupt(reason: impl Into<String>) -> MetadataError {
 #[expect(clippy::unwrap_used, clippy::expect_used, reason = "test assertions")]
 mod tests {
     use super::*;
-    use crate::request_minimal::{CapsuleGitPack, CapsuleRefEdit, CapsuleTransaction};
+    use crate::capsule_protocol::{CapsuleGitPack, CapsuleRefEdit, CapsuleTransaction};
 
     fn capsule(base: char, transaction: char) -> Capsule {
         let transaction = CapsuleTransaction::new(
@@ -322,10 +322,7 @@ mod tests {
             .merge(&leaf)
             .expect_err("binary runs merge only at equal levels");
 
-        assert!(matches!(
-            error,
-            MetadataError::RequestMinimalContract { .. }
-        ));
+        assert!(matches!(error, MetadataError::CapsuleContract { .. }));
     }
 
     #[test]

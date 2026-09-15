@@ -6,9 +6,9 @@ pub type Result<T> = std::result::Result<T, MetadataError>;
 /// Errors raised by metadata schema and local index helpers.
 #[derive(thiserror::Error, Debug)]
 pub enum MetadataError {
-    /// A locally constructed request-minimal record violates its wire contract.
-    #[error("invalid request-minimal {record}: {reason}")]
-    RequestMinimalContract {
+    /// A locally constructed capsule-protocol record violates its wire contract.
+    #[error("invalid capsule-protocol {record}: {reason}")]
+    CapsuleContract {
         record: &'static str,
         reason: String,
     },

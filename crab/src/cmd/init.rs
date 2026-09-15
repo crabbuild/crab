@@ -87,7 +87,7 @@ pub async fn run_init_in(url: &str, root: &Path, cancel: &CancellationToken) -> 
     run_init_with_options(url, root, cancel, OutputMode::Text).await
 }
 
-/// Create the generation-zero request-minimal root after local init.
+/// Create the generation-zero capsule-protocol root after local init.
 ///
 /// Existing roots are adopted, so this operation is safe to repeat and
 /// concurrent callers converge on the root created by the first caller.
@@ -131,7 +131,7 @@ pub(crate) async fn initialize_remote_repository_store(
     let repository_id = blake3::hash(uuid::Uuid::now_v7().as_bytes())
         .to_hex()
         .to_string();
-    crab_write::request_minimal::initialize(&layout, &repository_id, head)
+    crab_write::capsule_protocol::initialize(&layout, &repository_id, head)
         .await
         .map(|_| ())
         .map_err(Into::into)
@@ -1873,7 +1873,7 @@ storage_provider = "azure"
     }
 
     #[tokio::test]
-    async fn remote_initialization_adopts_existing_request_minimal_root() {
+    async fn remote_initialization_adopts_existing_capsule_root() {
         use crate::storage::StoreLayout;
         use crate::storage::store::Store;
         use object_store::memory::InMemory;
@@ -1895,7 +1895,7 @@ storage_provider = "azure"
             router.repo_prefix().to_owned(),
             router.global_prefix().to_owned(),
         );
-        let root = crab_write::request_minimal::open_root(&layout)
+        let root = crab_write::capsule_protocol::open_root(&layout)
             .await
             .expect("initialized root should remain readable");
         assert_eq!(root.record().root().generation(), 0);
@@ -1903,7 +1903,7 @@ storage_provider = "azure"
     }
 
     #[tokio::test]
-    async fn remote_initialization_publishes_only_the_request_minimal_root() {
+    async fn remote_initialization_publishes_only_the_capsule_root() {
         use crate::storage::StoreLayout;
         use crate::storage::store::Store;
         use object_store::memory::InMemory;
@@ -1921,16 +1921,16 @@ storage_provider = "azure"
             router.repo_prefix().to_owned(),
             router.global_prefix().to_owned(),
         );
-        let root = crab_write::request_minimal::open_root(&layout)
+        let root = crab_write::capsule_protocol::open_root(&layout)
             .await
-            .expect("request-minimal root should open");
+            .expect("capsule-protocol root should open");
         assert_eq!(root.record().root().generation(), 0);
         assert!(store.head(&router.layout_descriptor_path()).await.is_err());
         assert!(store.head(&router.manifest_path()).await.is_err());
     }
 
     #[tokio::test]
-    async fn existing_v1_layout_prevents_request_minimal_root_creation() {
+    async fn existing_v1_layout_prevents_capsule_root_creation() {
         use crate::storage::StoreLayout;
         use crate::storage::store::Store;
         use bytes::Bytes;
@@ -1958,7 +1958,7 @@ storage_provider = "azure"
             router.global_prefix().to_owned(),
         );
         assert!(
-            crab_write::request_minimal::open_root(&layout)
+            crab_write::capsule_protocol::open_root(&layout)
                 .await
                 .is_err()
         );
@@ -2018,9 +2018,9 @@ storage_provider = "azure"
             router.repo_prefix().to_owned(),
             router.global_prefix().to_owned(),
         );
-        crab_write::request_minimal::open_root(&layout)
+        crab_write::capsule_protocol::open_root(&layout)
             .await
-            .expect("canonical request-minimal root");
+            .expect("canonical capsule-protocol root");
     }
 
     #[tokio::test]
@@ -2049,7 +2049,7 @@ storage_provider = "azure"
             router.global_prefix().to_owned(),
         );
         assert!(
-            crab_write::request_minimal::open_root(&layout)
+            crab_write::capsule_protocol::open_root(&layout)
                 .await
                 .is_err()
         );

@@ -8352,16 +8352,16 @@ pub type ReadStoreSelection = crab_read::ReadStoreSelection<Store, StoreLayout>;
 pub struct WriteStoreSelection {
     pub store: Store,
     pub router: StoreLayout,
-    pub request_minimal_root: crab_metadata::request_minimal::RootSnapshot,
+    pub capsule_root: crab_metadata::capsule_protocol::RootSnapshot,
 }
 
-async fn validate_request_minimal_store(store: &Store, router: &StoreLayout) -> Result<()> {
+async fn validate_capsule_store(store: &Store, router: &StoreLayout) -> Result<()> {
     let layout = crab_storage::StoreLayout::with_global_prefix(
         store.as_storage().clone(),
         router.repo_prefix().to_owned(),
         router.global_prefix().to_owned(),
     );
-    crab_write::request_minimal::open_root(&layout)
+    crab_write::capsule_protocol::open_root(&layout)
         .await
         .map(|_| ())
         .map_err(Into::into)
@@ -8445,9 +8445,7 @@ impl<'a> StoreResolver<'a> {
         let ReadSource::Replica { name } = &selection.source else {
             return Ok(selection);
         };
-        if let Err(error) =
-            validate_request_minimal_store(&selection.store, &selection.router).await
-        {
+        if let Err(error) = validate_capsule_store(&selection.store, &selection.router).await {
             tracing::warn!(replica = %name, error = %error, "replica does not expose a protocol-v2 root; using primary");
             if let Some(replica) = replication
                 .replicas
@@ -8476,7 +8474,7 @@ impl<'a> StoreResolver<'a> {
 
     /// Selects the primary store for write-class operations.
     pub async fn write_store(&self, operation: &str) -> Result<WriteStoreSelection> {
-        let (store, request_minimal_root) = crate::auth::build_repository_url_store_with_root(
+        let (store, capsule_root) = crate::auth::build_repository_url_store_with_root(
             self.config,
             self.primary_url.clone(),
             operation,
@@ -8487,7 +8485,7 @@ impl<'a> StoreResolver<'a> {
         Ok(WriteStoreSelection {
             store,
             router,
-            request_minimal_root,
+            capsule_root,
         })
     }
 }
@@ -8759,9 +8757,7 @@ pub async fn replica_statuses_with_options(
         match build_replica_store(replica, &primary_url.repo_path) {
             Ok((replica_store, replica_prefix)) => {
                 let replica_router = StoreLayout::new(replica_store.clone(), replica_prefix);
-                if let Err(error) =
-                    validate_request_minimal_store(&replica_store, &replica_router).await
-                {
+                if let Err(error) = validate_capsule_store(&replica_store, &replica_router).await {
                     statuses.push(status_with_events(
                         failed_status(
                             replica,
