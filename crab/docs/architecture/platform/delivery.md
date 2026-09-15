@@ -9,7 +9,7 @@ does not establish a working runtime.
 | Source | Current behavior | Required change |
 | --- | --- | --- |
 | [managed.rs](../../../../crates/crab-ltx/src/managed.rs) | Typed mutation callbacks, capture ownership and a temporary SQLite `query_only` read boundary | Keep raw connection access inside the runtime; typed application SQL authorization is implemented above this layer |
-| [cell_replica.rs](../../../../crates/crab-ltx/src/cell_replica.rs) | Native and canonical Cell-selected bundle cuts prepare immutable roots; exact range/full compaction produces representation-only prepared roots; cold reads and sparse writable activation use exact digest-pinned radix paths backed by a process-wide bounded directory cache; incremental publication copy-on-writes only changed directory paths and safely prunes truncation | Add streaming initial construction, external-merge compaction and directory-backed capture checksums |
+| [cell_replica.rs](../../../../crates/crab-ltx/src/cell_replica.rs) | Native and canonical Cell-selected bundle cuts prepare immutable roots; exact range/full compaction produces representation-only prepared roots; cold reads and sparse writable activation use exact digest-pinned radix paths backed by a process-wide bounded directory cache and coalesce adjacent frames into at most 1 MiB range reads; incremental publication copy-on-writes only changed directory paths and safely prunes truncation | Add streaming initial construction, external-merge compaction and directory-backed capture checksums |
 | [replica.rs](../../../../crates/crab-ltx/src/replica.rs) | Standalone immutable manifest plus per-epoch mutable head | Keep existing callers working; Cell runtime uses only `CellReplica` and never treats this head as authority |
 | [append.rs](../../../../crates/crab-ltx/src/replica/append.rs) | Shared native/bundle append verification | Reuse verification under the prepared-root API |
 | [paged.rs](../../../../crates/crab-ltx/src/paged.rs) | Authenticated but resident page map; sparse writable SQL | Bounded directory nodes/cache and capture checksum tracker |
@@ -221,11 +221,11 @@ owner kill, full source-directory removal and query recovery.
 
 ## Work package 3: bounded storage
 
-The authenticated radix directory and incremental copy-on-write update are now
-implemented. Continue with streaming initial root construction, external-merge
-compaction, shared bounded node caching and directory-backed capture checksum
-updates. Remove whole-DB buffers from active paths; do not preserve a second
-unbounded implementation as fallback.
+The authenticated radix directory, incremental copy-on-write update, shared
+bounded node cache and adjacent-frame range coalescing are now implemented.
+Continue with streaming initial root construction, external-merge compaction
+and directory-backed capture checksum updates. Remove whole-DB buffers from
+active paths; do not preserve a second unbounded implementation as fallback.
 
 Add tests `directory_hash_and_coverage_reject_missing_page`,
 `truncate_regrow_cannot_reuse_old_locator`, `changed_cut_loads_only_touched_nodes`,

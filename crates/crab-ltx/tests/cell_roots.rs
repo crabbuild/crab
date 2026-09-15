@@ -296,6 +296,61 @@ async fn directory_nodes_are_shared_across_exact_root_views() {
     assert_eq!(metadata_reads.load(Ordering::SeqCst), before_second_fault);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn sparse_hydration_coalesces_contiguous_cell_frames() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let mut writer =
+        ManagedDb::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE payload(value BLOB NOT NULL);\
+                 INSERT INTO payload VALUES(randomblob(2000000))",
+            )
+        })
+        .unwrap();
+    let range_reads = Arc::new(AtomicU64::new(0));
+    let observed = Arc::clone(&range_reads);
+    let store =
+        Store::new(Arc::new(InMemory::new())).with_read_request_observer(Arc::new(move |kind| {
+            if kind == StorageReadKind::Range {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+    let replica = replica(store, [83; 32], [84; 16]);
+    let root = replica
+        .prepare(None, &writer.capture().unwrap(), 1, 1)
+        .await
+        .unwrap()
+        .root();
+    writer.close().unwrap();
+
+    let writable = replica
+        .open_root(&root)
+        .await
+        .unwrap()
+        .paged()
+        .prepare_writable()
+        .await
+        .unwrap();
+    range_reads.store(0, Ordering::SeqCst);
+    let destination = directory.path().join("sparse.sqlite");
+    let (before, after, reads) = tokio::task::spawn_blocking(move || {
+        let mut writer = writable.open_writable(&destination).unwrap();
+        let before = writer.hydration().unwrap().unwrap();
+        let requests = range_reads.load(Ordering::SeqCst);
+        let after = writer.hydrate_step(64).unwrap();
+        let reads = range_reads.load(Ordering::SeqCst) - requests;
+        writer.close().unwrap();
+        (before, after, reads)
+    })
+    .await
+    .unwrap();
+    let hydrated = after.resolved - before.resolved;
+    assert!(hydrated >= 32);
+    assert!(reads < u64::from(hydrated));
+}
+
 #[tokio::test]
 async fn directory_growth_adds_authenticated_parent_level() {
     let directory = tempfile::TempDir::new().unwrap();

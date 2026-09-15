@@ -226,9 +226,96 @@ impl CellPagedDatabase {
         if max_pages == 0 || first == 0 || first > self.database_pages {
             return Ok(Vec::new());
         }
-        // Cell directory nodes are not resident yet. Avoid multiplying metadata
-        // reads by speculative legacy prefetch until the shared node cache lands.
-        Ok(vec![(first, self.read_page(first).await?)])
+        let lock = crate::ltx::lock_pgno(self.page_size);
+        if first == lock {
+            return Ok(vec![(first, self.read_page(first).await?)]);
+        }
+        let count = max_pages
+            .min((1 << 20) / self.page_size)
+            .min(self.database_pages - first + 1);
+        let verification = directory::Verification {
+            layout: &self.replica.layout,
+            cell: &self.replica.cell,
+            incarnation: &self.replica.incarnation,
+            page_size: self.page_size,
+            database_pages: self.database_pages,
+            extents: &self.extents,
+            host: &self.replica.host,
+        };
+        let first_entry = directory::lookup(
+            verification,
+            self.directory_digest,
+            self.directory_height,
+            first,
+        )
+        .await?;
+        let mut end = first_entry
+            .offset
+            .checked_add(u64::from(first_entry.length))
+            .ok_or(CrabError::LTXCorrupted)?;
+        let mut entries = vec![first_entry];
+        for offset in 1..count {
+            let page = first.checked_add(offset).ok_or(CrabError::LTXCorrupted)?;
+            if page == lock {
+                break;
+            }
+            let entry = directory::lookup(
+                verification,
+                self.directory_digest,
+                self.directory_height,
+                page,
+            )
+            .await?;
+            if entry.object != entries[0].object || entry.offset != end {
+                break;
+            }
+            end = entry
+                .offset
+                .checked_add(u64::from(entry.length))
+                .ok_or(CrabError::LTXCorrupted)?;
+            entries.push(entry);
+        }
+        let extent = self
+            .extents
+            .get(&entries[0].object)
+            .ok_or(CrabError::LTXCorrupted)?;
+        let path = self.replica.layout.incarnation_object_path(
+            &self.replica.cell,
+            &self.replica.incarnation,
+            &entries[0].object,
+            extent.kind,
+        );
+        let start = entries[0].offset;
+        let _permit = self.replica.host.io_permit().await?;
+        let frames = self
+            .replica
+            .layout
+            .store()
+            .range_get(&path, start..end)
+            .await?;
+        if frames.len() as u64 != end - start {
+            return Err(CrabError::ChecksumMismatch);
+        }
+        let mut output = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let offset =
+                usize::try_from(entry.offset - start).map_err(|_| CrabError::LTXCorrupted)?;
+            let frame_end = offset
+                .checked_add(entry.length as usize)
+                .ok_or(CrabError::LTXCorrupted)?;
+            let frame = frames
+                .get(offset..frame_end)
+                .ok_or(CrabError::LTXCorrupted)?;
+            if *blake3::hash(frame).as_bytes() != entry.frame_hash {
+                return Err(CrabError::ChecksumMismatch);
+            }
+            let bytes = crate::paged::decode_frame(frame, self.page_size, entry.page)?;
+            if crate::ltx::checksum_page(entry.page, &bytes) != entry.checksum {
+                return Err(CrabError::ChecksumMismatch);
+            }
+            output.push((entry.page, bytes));
+        }
+        Ok(output)
     }
 }
 

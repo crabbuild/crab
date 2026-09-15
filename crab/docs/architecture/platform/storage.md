@@ -168,7 +168,8 @@ non-reusable Store instance identity, complete typed Cell/incarnation object pat
 and node digest. It inserts only after BLAKE3 verification; FIFO eviction loses
 only verified cached bytes and a different backing Store cannot reuse an entry.
 Disk cache uses the same key and verifies BLAKE3 after reopening. Fault reads
-verify node path, frame hash, decoded page identity and CRC before installation.
+coalesce adjacent frames from one immutable object into at most 1 MiB per range,
+then verify every frame hash, decoded page identity and CRC before installation.
 Hydration and foreground writes retain the existing writable-VFS overwrite and
 truncate ordering. Concurrent hydration cannot reinstall an obsolete page.
 
