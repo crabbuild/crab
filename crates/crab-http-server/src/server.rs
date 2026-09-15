@@ -1116,6 +1116,10 @@ fn integration_api_path(path: &str) -> bool {
 mod maintenance_tests;
 
 #[cfg(test)]
+#[path = "server_peer_e2e_tests.rs"]
+mod peer_e2e_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::Body;

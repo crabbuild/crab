@@ -186,7 +186,9 @@ valid; approaching its expiry withdraws readiness and drains the process.
 implements the receiving product boundary: it accepts only the repository
 namespace, maps the target partition to the stable repository UUID, rechecks the
 current OIDC issuer/subject membership and exact read or mutation action, and
-rejects revoked membership before dispatch. Its production startup also builds
+rejects revoked membership before dispatch. A mutation capability may perform
+only the runtime `Describe` preflight needed to bind incarnation/code/schema; it
+does not gain product query authority. Its production startup also builds
 one `LocalCellResolver` from the authoritative application identity/layout. The
 resolver reloads the verified Cell catalog entry and control, then returns a
 handle only when the process runtime still owns the exact published
@@ -198,8 +200,12 @@ signed operation bytes once more, with a reduced deadline and maximum hop count
 of two. The outbound client never follows redirects or trusts a control-record
 endpoint without the matching live advertisement. The issue/comment product
 routes construct this capability, acquire idle Cells through exact-root restore
-and preserve the public browser JSON contract. Other product domains do not yet
-use it. The server now compiles and binds the complete internal issue/comment operation
+and preserve the public browser JSON contract. A two-node acceptance test starts
+the public listener on an ingress node and the mandatory mTLS management listener
+on a distinct owner node, creates an issue through the ingress, reads it back
+through the same public API, and proves that the owner advanced the published LTX
+root. Other product domains do not yet use it. The server now compiles and binds
+the complete internal issue/comment operation
 set: create and update commands plus get and bounded list queries for both
 resources. Stable codecs include issue label and assignee selections; SQLite
 owns repository identity, sequences, issues, comments and permanent create

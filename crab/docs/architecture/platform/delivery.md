@@ -328,7 +328,12 @@ selection, exact endpoint/certificate/SPKI validation and authoritative reload
 after a stale endpoint returns definitely-not-started. A transport unit test
 proves an ambiguous command is sent once and retains its original request ID and
 operation digest. Repository routing and idle acquisition are now implemented
-and exercised by the public issue/comment adapter.
+and exercised by the public issue/comment adapter. The server acceptance test
+`public_issue_request_reaches_remote_owner_over_mtls_and_publishes_ltx` starts a
+real public HTTP ingress and a distinct real mTLS owner endpoint, then proves
+public JSON create/read, private typed forwarding, current authorization and an
+advanced authoritative LTX root in one path. A mutation capability is admitted
+for its required `Describe` preflight but remains forbidden from product queries.
 `crab-http-server` now supplies the
 first compiled repository implementation, including migration, descriptors,
 typed codecs and bindings for the complete internal issue/comment route group.

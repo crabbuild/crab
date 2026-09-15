@@ -454,25 +454,20 @@ fn authorize_repository(
                     _ => false,
                 }
         }
-        Some(peer_wire::peer_request::Operation::Read(read)) => {
-            access >= RepositoryAccess::Read
-                && request.permits("repository.read")
-                && matches!(
-                    read.operation,
-                    Some(peer_wire::read_request::Operation::Describe(true))
-                        | Some(peer_wire::read_request::Operation::CellQuery(_))
-                )
-        }
+        Some(peer_wire::peer_request::Operation::Read(read)) => match read.operation {
+            Some(peer_wire::read_request::Operation::Describe(true)) => {
+                // Remote commands must bind the active incarnation before mutation.
+                // This preflight exposes no product rows and must not grant query access.
+                (access >= RepositoryAccess::Read && request.permits("repository.read"))
+                    || (access >= RepositoryAccess::Write && permits_repository_mutation(request))
+            }
+            Some(peer_wire::read_request::Operation::CellQuery(_)) => {
+                access >= RepositoryAccess::Read && request.permits("repository.read")
+            }
+            _ => false,
+        },
         Some(peer_wire::peer_request::Operation::Resolve(_)) => {
-            access >= RepositoryAccess::Write
-                && [
-                    "repository.issue.create",
-                    "repository.comment.create",
-                    "repository.issue.update",
-                    "repository.comment.update",
-                ]
-                .iter()
-                .any(|action| request.permits(action))
+            access >= RepositoryAccess::Write && permits_repository_mutation(request)
         }
         _ => false,
     };
@@ -480,6 +475,17 @@ fn authorize_repository(
         return Err(denied());
     }
     Ok(())
+}
+
+fn permits_repository_mutation(request: &VerifiedPeerRequest) -> bool {
+    [
+        "repository.issue.create",
+        "repository.comment.create",
+        "repository.issue.update",
+        "repository.comment.update",
+    ]
+    .iter()
+    .any(|action| request.permits(action))
 }
 
 const fn required_mutation_action(command_id: u32) -> Option<&'static str> {
@@ -578,6 +584,45 @@ mod tests {
         .unwrap()
     }
 
+    fn verified_read(operation: peer_wire::read_request::Operation) -> VerifiedPeerRequest {
+        let key = SigningKey::from_bytes(&[1; 32]);
+        let signer = PeerSigner::new(
+            SessionId::from_bytes([2; 16]),
+            Digest::from_bytes([3; 32]),
+            key,
+        );
+        let encoded = signer
+            .sign(
+                PeerPrincipal {
+                    issuer: "https://issuer.example".into(),
+                    subject: "alice".into(),
+                    actions: vec!["repository.issue.create".into()],
+                },
+                NOW_MS,
+                NOW_MS + 60_000,
+                30_000,
+                PeerOperation::Read(peer_wire::ReadRequest {
+                    target: Some(peer_wire::Target {
+                        tenant_id: vec![4; 16],
+                        application_id: vec![5; 16],
+                        namespace_id: crate::cells::REPOSITORY_NAMESPACE.as_bytes().to_vec(),
+                        partition: [6; 16].to_vec(),
+                    }),
+                    timeout_ms: 30_000,
+                    minimum: None,
+                    operation: Some(operation),
+                }),
+            )
+            .unwrap();
+        PeerVerifier::new(
+            SessionId::from_bytes([2; 16]),
+            Digest::from_bytes([3; 32]),
+            signer.verifying_key(),
+        )
+        .verify(&encoded, NOW_MS)
+        .unwrap()
+    }
+
     #[test]
     fn current_membership_and_exact_action_are_required() {
         let request = verified(1, vec!["repository.issue.create".into()]);
@@ -607,6 +652,24 @@ mod tests {
                     .is_ok()
             );
         }
+    }
+
+    #[test]
+    fn mutation_capability_allows_description_preflight_but_not_product_queries() {
+        let describe = verified_read(peer_wire::read_request::Operation::Describe(true));
+        assert!(
+            authorize_repository(&repository(), Some("https://issuer.example"), &describe).is_ok()
+        );
+        let query = verified_read(peer_wire::read_request::Operation::CellQuery(
+            peer_wire::CellQuery {
+                query_id: 1,
+                codec_version: 1,
+                input: Vec::new(),
+            },
+        ));
+        assert!(
+            authorize_repository(&repository(), Some("https://issuer.example"), &query).is_err()
+        );
     }
 
     #[tokio::test]
