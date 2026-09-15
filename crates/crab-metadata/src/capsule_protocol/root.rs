@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{MetadataError, Result};
 use crate::validation::{validate_content_hash, validate_sha1};
 
+use super::{valid_ref_name, valid_ref_namespace};
+
 const ROOT_MAGIC: &[u8; 8] = b"CRBROOT2";
 const ROOT_VERSION: u32 = 2;
 const ROOT_HEADER_BYTES: usize = ROOT_MAGIC.len() + 4 + 8;
@@ -620,19 +622,18 @@ fn validate_root(root: &RepositoryRoot) -> Result<()> {
         "root repository id",
         "capsule-protocol root",
     )?;
-    if !root.head.starts_with("refs/heads/")
-        || crab_git::refname::validate_push_refname(&root.head).is_err()
-    {
+    if !root.head.starts_with("refs/heads/") || !valid_ref_name(&root.head) {
         return Err(contract_error("root HEAD must name a branch"));
     }
     for (name, oid) in root.refs.iter().chain(root.peeled_refs.iter()) {
-        if !name.starts_with("refs/") || crab_git::refname::validate_push_refname(name).is_err() {
+        if !name.starts_with("refs/") || !valid_ref_name(name) {
             return Err(contract_error("root contains an invalid ref name"));
         }
         validate_sha1(oid, "root ref object id", "capsule-protocol root")?;
     }
-    crab_git::refname::validate_ref_namespace(root.refs.keys().map(String::as_str))
-        .map_err(|error| contract_error(error.to_string()))?;
+    if !valid_ref_namespace(root.refs.keys().map(String::as_str)) {
+        return Err(contract_error("root contains conflicting ref names"));
+    }
     if root
         .peeled_refs
         .keys()
