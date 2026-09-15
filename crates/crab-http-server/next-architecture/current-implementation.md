@@ -11,7 +11,7 @@ Paths in this table are relative to `crates/crab-http-server/` unless stated.
 | Current surface | Entry and owner | Existing behavior | Next design impact |
 | --- | --- | --- | --- |
 | Process CLI | [main.rs](../src/main.rs) | Serve, healthcheck, storage-probe, repository create/adopt/set-members/list | Extend existing storage diagnosis and add scoped migration commands |
-| Server lifecycle | [server.rs](../src/server.rs), [cells.rs](../src/cells.rs) | Two listeners, catalog refresh, Git runtime, plus one compiled-registry-validated Cell runtime/session whose terminal drain participates in readiness and shutdown | Add release/current gate, durable local directory, resource-derived admission, peer client and timed escalation |
+| Server lifecycle | [server.rs](../src/server.rs), [cells.rs](../src/cells.rs), [peer.rs](../src/peer.rs), [peer_tls.rs](../src/peer_tls.rs) | Two listeners, catalog refresh, Git runtime, one compiled-registry-validated Cell runtime/session, mandatory management mTLS, live signed enrollment, local dispatch and owner-selecting outbound peer transport; terminal Cell drain participates in readiness and shutdown | Add full resource-derived admission, idle acquisition, product-route selection and timed shutdown escalation |
 | Repository identity | [catalog.rs](../src/catalog.rs), `materialize_catalog` in [server.rs](../src/server.rs) | Catalog has stable UUID; runtime repository does not retain that field | Carry UUID independently of owner/name and Git placement identity |
 | Application boundary | [app.rs](../src/app.rs) | Repository/principal checks, eight production application slots, 30-second handler deadline | Preserve external contracts; move accepted durable work into tracked cells |
 | Collaboration persistence | [app_storage.rs](../src/app_storage.rs) | Bounded JSON, strict create, ETag update, CAS number allocation | Replace domain document storage with SQL repositories |
@@ -57,9 +57,11 @@ still below the product route. Release administration can now CAS one prepared
 descriptor through activating to ready after checking all catalog shards and live
 control code/schema pairs against the exact binary registry; retries retain the
 same operation, and a real RustFS run reached canonical `current=desired` state.
-Old-version migration and node quorum are not implemented. No HTTP route currently
-calls that module, so application JSON persistence, Git publication
-and browser behavior above remain unchanged. See [remaining gates](validation-and-delivery.md#verification-scope-for-the-current-implementation).
+Old-version migration and node quorum are not implemented. No product HTTP route
+currently calls that repository module. The private management route can dispatch
+or forward registered calls between compatible nodes, but application JSON
+persistence, Git publication and browser behavior above remain unchanged. See
+[remaining gates](validation-and-delivery.md#verification-scope-for-the-current-implementation).
 
 ### Existing tests to preserve or evolve
 

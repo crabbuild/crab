@@ -12,8 +12,12 @@ use axum::extract::connect_info::Connected;
 use crab_cell_runtime::Digest as CellDigest;
 use ed25519_dalek::{SigningKey, pkcs8::DecodePrivateKey};
 use rustls::{
-    RootCertStore, ServerConfig,
-    client::{WebPkiServerVerifier, danger::ServerCertVerifier},
+    CertificateError, ClientConfig, DigitallySignedStruct, RootCertStore, ServerConfig,
+    SignatureScheme,
+    client::{
+        WebPkiServerVerifier,
+        danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    },
     pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
     server::WebPkiClientVerifier,
 };
@@ -31,6 +35,9 @@ const FLEET_DIGEST_DOMAIN: &[u8] = b"crab.peer-ca.v1\0";
 /// Loaded private peer identity and its verified mTLS server configuration.
 pub(crate) struct LoadedPeerTls {
     config: Arc<ServerConfig>,
+    certificates: Vec<CertificateDer<'static>>,
+    private_key: PrivateKeyDer<'static>,
+    roots: Arc<RootCertStore>,
     signing_key: SigningKey,
     certificate: CellDigest,
     fleet: CellDigest,
@@ -59,7 +66,7 @@ impl LoadedPeerTls {
         let authorities = load_certificates(&cells.peer_ca)?;
         let roots = Arc::new(root_store(&authorities)?);
         verify_own_certificate(&certificates, Arc::clone(&roots), cells)?;
-        let client_verifier = WebPkiClientVerifier::builder(roots)
+        let client_verifier = WebPkiClientVerifier::builder(Arc::clone(&roots))
             .build()
             .map_err(|source| Error::PeerTls {
                 context: "Cell peer CA cannot verify clients",
@@ -67,17 +74,21 @@ impl LoadedPeerTls {
             })?;
         let mut config = ServerConfig::builder()
             .with_client_cert_verifier(client_verifier)
-            .with_single_cert(certificates.clone(), private_key)
+            .with_single_cert(certificates.clone(), private_key.clone_key())
             .map_err(|source| Error::PeerTls {
                 context: "Cell peer certificate or private key is invalid",
                 source: Box::new(source),
             })?;
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let certificate = sha256_digest(certificates[0].as_ref());
 
         Ok(Self {
             config: Arc::new(config),
+            certificates,
+            private_key,
+            roots,
             signing_key,
-            certificate: sha256_digest(certificates[0].as_ref()),
+            certificate,
             fleet: fleet_digest(&authorities),
         })
     }
@@ -100,6 +111,130 @@ impl LoadedPeerTls {
     pub(crate) const fn fleet(&self) -> CellDigest {
         self.fleet
     }
+
+    pub(crate) fn client_identity(&self) -> PeerTlsClient {
+        PeerTlsClient {
+            certificates: self.certificates.clone(),
+            private_key: self.private_key.clone_key(),
+            roots: Arc::clone(&self.roots),
+        }
+    }
+}
+
+/// Fleet-authenticated client identity that pins every request to one enrolled leaf.
+pub(crate) struct PeerTlsClient {
+    certificates: Vec<CertificateDer<'static>>,
+    private_key: PrivateKeyDer<'static>,
+    roots: Arc<RootCertStore>,
+}
+
+impl Clone for PeerTlsClient {
+    fn clone(&self) -> Self {
+        Self {
+            certificates: self.certificates.clone(),
+            private_key: self.private_key.clone_key(),
+            roots: Arc::clone(&self.roots),
+        }
+    }
+}
+
+impl PeerTlsClient {
+    pub(crate) fn client(
+        &self,
+        certificate: CellDigest,
+        public_key: [u8; 32],
+    ) -> Result<reqwest::Client> {
+        let verifier = WebPkiServerVerifier::builder(Arc::clone(&self.roots))
+            .build()
+            .map_err(|source| Error::PeerTls {
+                context: "Cell peer CA cannot verify servers",
+                source: Box::new(source),
+            })?;
+        let verifier = Arc::new(PinnedServerVerifier {
+            verifier,
+            certificate,
+            public_key,
+        });
+        let mut config = ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_client_auth_cert(self.certificates.clone(), self.private_key.clone_key())
+            .map_err(|source| Error::PeerTls {
+                context: "Cell peer client identity is invalid",
+                source: Box::new(source),
+            })?;
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        reqwest::Client::builder()
+            .https_only(true)
+            .redirect(reqwest::redirect::Policy::none())
+            .pool_idle_timeout(Duration::from_secs(30))
+            .pool_max_idle_per_host(8)
+            .use_preconfigured_tls(config)
+            .build()
+            .map_err(|source| Error::PeerTls {
+                context: "Cell peer HTTP client initialization failed",
+                source: Box::new(source),
+            })
+    }
+}
+
+#[derive(Debug)]
+struct PinnedServerVerifier {
+    verifier: Arc<WebPkiServerVerifier>,
+    certificate: CellDigest,
+    public_key: [u8; 32],
+}
+
+impl ServerCertVerifier for PinnedServerVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+        let verified = self.verifier.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        )?;
+        let key = certificate_public_key(end_entity).map_err(|_| pin_error())?;
+        if sha256_digest(end_entity.as_ref()) != self.certificate || key != self.public_key {
+            return Err(pin_error());
+        }
+        Ok(verified)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        self.verifier
+            .verify_tls12_signature(message, certificate, signature)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        self.verifier
+            .verify_tls13_signature(message, certificate, signature)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.verifier.supported_verify_schemes()
+    }
+}
+
+const fn pin_error() -> rustls::Error {
+    rustls::Error::InvalidCertificate(CertificateError::ApplicationVerificationFailure)
 }
 
 /// Identity extracted only after rustls validates the complete client chain.
@@ -334,4 +469,4 @@ fn install_crypto_provider() {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

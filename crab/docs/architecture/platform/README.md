@@ -140,10 +140,13 @@ reuses the canonical local transport rather than opening a second SQL execution
 path. The server composition root now owns one process-session
 `CellRuntime`, validates the compiled registry before admission, publishes its
 signed node session, serves its management router through mandatory fleet mTLS,
-and shuts the heartbeat and runtime down with the server. Owner selection and
-bounded stale-owner retry, upgrade migrations, complete resource-derived
-budgets and repository Cell routing remain; KV, SQL, Queue and Workflow primitive
-handles are complete for local routing.
+and shuts the heartbeat and runtime down with the server. The server-side peer
+round trip now reloads authoritative ownership, requires the owner endpoint to
+match a live signed node advertisement, pins CA/hostname/leaf/SPKI through mTLS,
+reuses a bounded client pool and retries only definitely-not-started failures
+once within the original deadline. Upgrade migrations, complete resource-derived
+budgets, idle acquisition and repository product-route integration remain; KV,
+SQL, Queue and Workflow primitive handles are complete for local routing.
 The object-store node directory now strict-creates and conditionally refreshes
 canonical, short-lived advertisements. Each record binds one nonzero boot
 session, HTTPS endpoint, fleet and certificate digests, compiled release,
@@ -169,7 +172,11 @@ handle only when the process runtime still owns the exact published
 incarnation/code/schema. `POST /internal/cells/v1/forward` is registered only on
 the mTLS management listener, requires the exact Protobuf media type and bounded
 body, authenticates the live node session before dispatch, and returns a strict
-Protobuf reply. Outbound owner selection and the peer HTTP client remain.
+Protobuf reply. A stale receiving node can reauthorize and forward those same
+signed operation bytes once more, with a reduced deadline and maximum hop count
+of two. The outbound client never follows redirects or trusts a control-record
+endpoint without the matching live advertisement. Product routes do not yet
+construct this peer capability, acquire an idle Cell or expose it to the browser.
 The server now compiles and binds the first repository module slice: stable
 create-issue/create-comment commands, get-issue/get-comment queries, bounded
 codecs, and the schema that owns repository identity, sequences, issues and

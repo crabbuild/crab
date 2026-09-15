@@ -26,6 +26,18 @@ pub enum Error {
     Peer(&'static str),
     #[error("Cell peer Protobuf decoding failed")]
     PeerDecode(#[from] prost::DecodeError),
+    #[error("Cell peer transport failed: {context}")]
+    PeerTransport {
+        context: &'static str,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("Cell peer transport may have accepted the operation: {context}")]
+    PeerTransportUnknown {
+        context: &'static str,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     #[error("Cell peer signature verification failed")]
     PeerSignature(#[source] ed25519_dalek::SignatureError),
     #[error("Cell peer authorization denied: {0}")]

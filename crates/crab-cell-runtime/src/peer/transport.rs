@@ -106,7 +106,7 @@ impl CellTransport for PeerClientTransport {
                 .now_ms
                 .saturating_add(60_000)
                 .min(command.identity.expires_at_ms);
-            let reply = transport
+            let reply = match transport
                 .exchange(
                     command.target.clone(),
                     command.now_ms,
@@ -127,7 +127,17 @@ impl CellTransport for PeerClientTransport {
                         )),
                     }),
                 )
-                .await?;
+                .await
+            {
+                Err(source @ Error::PeerTransportUnknown { .. }) => {
+                    return Err(Error::OutcomeUnknown {
+                        request_id: command.identity.request_id,
+                        operation_digest: command.operation_digest,
+                        source: Box::new(source),
+                    });
+                }
+                result => result?,
+            };
             match reply.outcome {
                 Some(wire::peer_reply::Outcome::Mutation(reply)) => mutation_outcome(
                     reply,

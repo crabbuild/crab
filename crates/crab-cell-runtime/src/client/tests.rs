@@ -1,7 +1,10 @@
 use std::{
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -12,8 +15,9 @@ use super::{
 use crate::{
     ApplicationId, BuildDescriptor, CatalogRole, CellModule, CellTarget, Command, CommandContext,
     CommandResult, Digest, Error, IncarnationId, MigrationDescriptor, ModuleDescriptor,
-    MutationIdentity, NamespaceDescriptor, NamespaceId, OperationDescriptor, RegistryBuilder,
-    RequestId, Resolution, StoredOutcome, TenantId,
+    MutationIdentity, NamespaceDescriptor, NamespaceId, OperationDescriptor, PeerPrincipal,
+    PeerRoundTrip, PeerSigner, RegistryBuilder, RequestId, Resolution, SessionId, StoredOutcome,
+    TenantId,
 };
 
 const MODULE: &str = "pending-test";
@@ -35,6 +39,94 @@ impl Command for PendingCommand {
     ) -> crate::Result<CommandResult<Self::Output>> {
         Ok(CommandResult::Success(input))
     }
+}
+
+struct AcceptedButLost {
+    calls: Arc<AtomicUsize>,
+}
+
+impl PeerRoundTrip for AcceptedButLost {
+    fn send(
+        &self,
+        _target: CellTarget,
+        _request: Vec<u8>,
+        _remaining_ms: u32,
+    ) -> Pin<Box<dyn Future<Output = crate::Result<Vec<u8>>> + Send + 'static>> {
+        let calls = Arc::clone(&self.calls);
+        Box::pin(async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(Error::PeerTransportUnknown {
+                context: "test accepted request lost its response",
+                source: Box::new(Error::RuntimeClosed),
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn ambiguous_peer_command_preserves_identity_without_retry() {
+    let target = CellTarget::new(
+        TenantId::from_bytes([1; 16]),
+        ApplicationId::from_bytes([2; 16]),
+        NAMESPACE,
+        b"pending",
+    )
+    .unwrap();
+    let identity = MutationIdentity {
+        request_id: RequestId::from_bytes([7; 16]),
+        issued_at_ms: 1_000,
+        expires_at_ms: 61_000,
+    };
+    let operation_digest = Digest::from_bytes([8; 32]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let transport = crate::peer::PeerClientTransport::new(
+        Arc::new(PeerSigner::new(
+            SessionId::from_bytes([9; 16]),
+            Digest::from_bytes([10; 32]),
+            ed25519_dalek::SigningKey::from_bytes(&[11; 32]),
+        )),
+        PeerPrincipal {
+            issuer: "urn:crab:test".into(),
+            subject: "operator".into(),
+            actions: vec!["repository.write".into()],
+        },
+        Arc::new(AcceptedButLost {
+            calls: Arc::clone(&calls),
+        }),
+    );
+
+    let result = CellTransport::command(
+        &transport,
+        EncodedCommand {
+            target: target.clone(),
+            expected: CellDescription {
+                cell: target.cell_id(),
+                incarnation: IncarnationId::from_bytes([12; 16]),
+                code: Digest::from_bytes([13; 32]),
+                schema: 1,
+            },
+            identity,
+            operation_digest,
+            now_ms: 1_000,
+            module: MODULE,
+            operation_id: 1,
+            codec_version: 1,
+            input: b"input".to_vec(),
+            input_limit: 64,
+            output_limit: 64,
+        },
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(Error::OutcomeUnknown {
+            request_id,
+            operation_digest: digest,
+            ..
+        }) if request_id == identity.request_id && digest == operation_digest
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 struct PendingModule;

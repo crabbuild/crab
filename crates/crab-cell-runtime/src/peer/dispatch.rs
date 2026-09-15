@@ -441,6 +441,8 @@ fn error_reply(error: Error) -> wire::PeerReply {
         | Error::Catalog(_)
         | Error::Node(_)
         | Error::Release(_)
+        | Error::PeerTransport { .. }
+        | Error::PeerTransportUnknown { .. }
         | Error::CatalogCollision
         | Error::CatalogFull
         | Error::Json(_)

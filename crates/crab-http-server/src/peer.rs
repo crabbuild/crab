@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, atomic::Ordering},
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use axum::{
@@ -15,7 +15,7 @@ use bytes::Bytes;
 use crab_cell_runtime::{
     ApplicationIdentity, CellAuthority, CellCatalog, CellHandle, CellRuntime, CellTarget, Digest,
     Error as CellError, NodeAdvertisement, NodeCapacity, NodeDirectory, PeerAuthorizer,
-    PeerCellResolver, PeerDispatcher, Registry, SessionId, VerifiedPeerRequest,
+    PeerCellResolver, PeerDispatcher, PeerRoundTrip, Registry, SessionId, VerifiedPeerRequest,
     VersionedNodeAdvertisement, peer_wire,
 };
 use crab_storage::CellStorageLayout;
@@ -23,6 +23,9 @@ use ed25519_dalek::SigningKey;
 use uuid::Uuid;
 
 use crate::{RepositoryAccess, RepositoryConfig, peer_tls::PeerTlsIdentity, server::Server};
+
+mod client;
+pub(crate) use client::PeerHttpRoundTrip;
 
 const PROTOBUF_MEDIA_TYPE: &str = "application/x-protobuf";
 const ADVERTISEMENT_LIFETIME_MS: i64 = 15_000;
@@ -35,6 +38,7 @@ pub(crate) struct PeerReceiver {
     directory: NodeDirectory,
     registry: Arc<Registry>,
     resolver: LocalCellResolver,
+    round_trip: Arc<dyn PeerRoundTrip>,
 }
 
 impl PeerReceiver {
@@ -42,11 +46,13 @@ impl PeerReceiver {
         directory: NodeDirectory,
         registry: Arc<Registry>,
         resolver: LocalCellResolver,
+        round_trip: Arc<dyn PeerRoundTrip>,
     ) -> Self {
         Self {
             directory,
             registry,
             resolver,
+            round_trip,
         }
     }
 }
@@ -258,6 +264,7 @@ pub(crate) async fn forward(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let started = Instant::now();
     if headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -280,23 +287,56 @@ pub(crate) async fn forward(
         Ok(request) => request,
         Err(_) => return peer_http_error(StatusCode::UNAUTHORIZED),
     };
+    if server.authorize(&request).is_err() {
+        return peer_http_error(StatusCode::UNAUTHORIZED);
+    }
+    if request.hop_count() < 2
+        && matches!(
+            receiver.resolver.resolve(request.target().clone()).await,
+            Err(CellError::CellNotActive | CellError::Fenced | CellError::CellDraining)
+        )
+    {
+        let remaining_ms = match remaining_timeout(started, request.remaining_ms()) {
+            Ok(remaining_ms) => remaining_ms.saturating_sub(1),
+            Err(_) => return peer_http_error(StatusCode::GATEWAY_TIMEOUT),
+        };
+        let forwarded = match request.forward(remaining_ms) {
+            Ok(forwarded) => forwarded,
+            Err(_) => return peer_http_error(StatusCode::GATEWAY_TIMEOUT),
+        };
+        return match receiver
+            .round_trip
+            .send(request.target().clone(), forwarded, remaining_ms)
+            .await
+        {
+            Ok(body) => peer_http_reply(body),
+            Err(CellError::PeerAuthorization(_)) => peer_http_error(StatusCode::UNAUTHORIZED),
+            Err(CellError::PeerTransportUnknown { .. }) => peer_http_error(StatusCode::BAD_GATEWAY),
+            Err(CellError::Deadline) => peer_http_error(StatusCode::GATEWAY_TIMEOUT),
+            Err(_) => peer_http_error(StatusCode::SERVICE_UNAVAILABLE),
+        };
+    }
     let dispatcher = PeerDispatcher::new(
         Arc::clone(&receiver.registry),
         Arc::new(receiver.resolver.clone()),
         Arc::clone(&server) as Arc<dyn PeerAuthorizer>,
     );
     match dispatcher.dispatch_bytes(&request, now_ms).await {
-        Ok(body) => (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, PROTOBUF_MEDIA_TYPE),
-                (header::CACHE_CONTROL, "no-store"),
-            ],
-            body,
-        )
-            .into_response(),
+        Ok(body) => peer_http_reply(body),
         Err(_) => peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
     }
+}
+
+fn peer_http_reply(body: Vec<u8>) -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, PROTOBUF_MEDIA_TYPE),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 fn peer_http_error(status: StatusCode) -> Response {
@@ -309,6 +349,14 @@ fn now_ms() -> crate::Result<i64> {
         .map_err(|_| crate::Error::Config("system clock precedes the Unix epoch"))?;
     i64::try_from(duration.as_millis())
         .map_err(|_| crate::Error::Config("system clock exceeds the Cell time range"))
+}
+
+fn remaining_timeout(started: Instant, original_ms: u32) -> crab_cell_runtime::Result<u32> {
+    let elapsed_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+    original_ms
+        .checked_sub(elapsed_ms)
+        .filter(|remaining| *remaining > 0)
+        .ok_or(CellError::Deadline)
 }
 
 fn node_capacity(data_dir: &Path) -> crate::Result<NodeCapacity> {
@@ -438,7 +486,7 @@ const fn denied() -> CellError {
 #[cfg(test)]
 mod tests {
     use crab_cell_runtime::{
-        Digest, PeerOperation, PeerPrincipal, PeerSigner, PeerVerifier, RequestId, SessionId,
+        PeerOperation, PeerPrincipal, PeerSigner, PeerVerifier, RequestId, SessionId,
     };
     use crab_storage::{CellStorageLayout, Store};
     use ed25519_dalek::SigningKey;

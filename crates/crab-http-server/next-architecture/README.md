@@ -6,8 +6,11 @@ repository issue/comment module proven through local LTX publication and
 source-loss restore. The HTTP composition root now starts that native runtime,
 withdraws readiness when it drains and joins its SQL workers during ordinary
 server shutdown. The release CLI now provides resumable exact-compatible
-activation and publishes a verified descriptor as current. Peer routing, importer,
-old-version migration/node quorum and product-route hard cut are not yet integrated.
+activation and publishes a verified descriptor as current. Private routing now
+includes mandatory mTLS ingress, live enrollment, authoritative outbound owner
+lookup and one bounded stale-owner retry. The importer, old-version
+migration/node quorum, public repository routing, idle acquisition and
+product-route hard cut are not yet integrated.
 Prepared 2026-09-13
 against Crab commit
 `f67181e0dcdc69a766b14a8b441e9119d3684f33`; deployment and integration notes were

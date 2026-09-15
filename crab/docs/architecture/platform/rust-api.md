@@ -67,8 +67,10 @@ monomorphized decode/execute/encode trampolines, with no raw byte-handler
 registration escape hatch. The implemented `CellClient` covers canonical
 operation-digest integration across both the local actor path and authenticated
 peer transport. The peer transport signs requests, strictly decodes replies and
-preserves mutation evidence for Resolve; owner selection and bounded stale-owner
-retry remain to implement. Typed local SQL, KV, Queue
+preserves mutation evidence for Resolve. The server implementation selects the
+authoritative owner, authenticates its live advertisement, uses pinned mTLS and
+retries one definitely-not-started stale-owner attempt without retrying ambiguous
+mutations. Typed local SQL, KV, Queue
 and Workflow capabilities are implemented. The server composition root now
 compiles and binds create-issue/create-comment commands and get-issue/get-comment
 queries with its repository identity/sequence/issue/comment migration. A server
@@ -529,10 +531,14 @@ enrolled session public key, release digest, original principal/actions, current
 time, decreasing deadline and operation tag. The HTTP route must use this
 verifier and must not decode `PeerRequest` directly.
 
-`PeerRoundTrip` is the only unimplemented-network ownership boundary exposed to
-the embedded server. Its implementation must select an enrolled owner, send the
-already-signed bytes with the remaining deadline, and return exact response
-bytes. `CellClient::peer` translates typed describe/command/query/Resolve calls
+`PeerRoundTrip` is the only network ownership boundary exposed to the embedded
+server. `crab-http-server::PeerHttpRoundTrip` implements it by reloading the
+Cell control record, rejecting a self owner, loading the exact live enrolled
+session, requiring endpoint equality, and constructing or reusing an mTLS client
+pinned to the advertised CA-valid hostname, leaf SHA-256 and Ed25519 SPKI. It
+sends the already-signed bytes to the fixed private path with the remaining
+deadline and returns exact response bytes. `CellClient::peer` translates typed
+describe/command/query/Resolve calls
 through this boundary and strictly validates the response. `PeerDispatcher`
 accepts only a `VerifiedPeerRequest`, invokes `PeerAuthorizer` before resolving
 the target, asks `PeerCellResolver` for a currently active local `CellHandle`,
@@ -592,14 +598,17 @@ media type and byte limit, matches both the leaf SHA-256 and SPKI to the live
 signed node advertisement, verifies the peer envelope, reauthorizes it and then
 dispatches through that resolver. Health, readiness and metrics use the same
 mTLS listener and the binary healthcheck supplies the configured identity and
-CA. The next routing slice must read a cached owner hint; local requests go to
-CellHandle, remote requests go
-directly to the enrolled owner's advertised endpoint. Maximum two forwards;
-reject a third. On stale-owner response reload origin control once, then route
-or acquire within remaining deadline. Never use the public Service for private
-forwarding. Owner hints cap at 100K entries/32 MiB and 3 s TTL; cache hits do not
-replace control publication checks. Never send credentials to an endpoint copied
-from unverified control data; require the enrolled session/endpoint mapping.
+CA. The outbound implementation reads authoritative control on every attempt;
+local requests go to `CellHandle`, while remote requests go directly to the live
+enrolled owner's advertised endpoint. It retains at most 1,024 TLS clients and
+their connection pools, keyed by session, certificate digest and SPKI; it does
+not cache ownership authority. Maximum two forwards; reject a third. A connect
+failure, HTTP 429/503, or protocol `UNAVAILABLE/NOT_STARTED` reloads control at
+most once within the original deadline. Timeout, response-stream failure,
+malformed success, or HTTP 5xx after connection is an ambiguous mutation and is
+never automatically retried. Never use the public Service for private forwarding
+or send credentials to an endpoint copied from unverified control data. Public
+product routing and idle-owner acquisition remain the next integration slice.
 
 Read describe=true may provision an explicit-key Cell only with create
 capability; absent fixed shards return NOT_FOUND. A null bootstrap root returns

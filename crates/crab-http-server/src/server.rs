@@ -450,8 +450,19 @@ pub async fn serve(config: Config) -> Result<()> {
         startup.identity,
         cell_runtime.clone(),
     );
-    let peer_receiver =
-        crate::peer::PeerReceiver::new(directory.clone(), Arc::clone(&registry), cell_resolver);
+    let peer_round_trip = Arc::new(crate::peer::PeerHttpRoundTrip::new(
+        startup.identity,
+        crab_cell_runtime::CellAuthority::new(startup.layout),
+        directory.clone(),
+        peer_tls.client_identity(),
+        session,
+    ));
+    let peer_receiver = crate::peer::PeerReceiver::new(
+        directory.clone(),
+        Arc::clone(&registry),
+        cell_resolver,
+        peer_round_trip,
+    );
     let advertised = match node_publisher.publish_initial().await {
         Ok(advertised) => advertised,
         Err(error) => {

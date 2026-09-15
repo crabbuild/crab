@@ -35,7 +35,7 @@ ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 rand = "0.9"
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
 object_store = { workspace = true }
-reqwest = { workspace = true, features = ["rustls-tls"] }
+reqwest = { workspace = true, features = ["rustls-tls", "stream"] }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 rustls = "0.23"

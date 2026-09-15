@@ -9,7 +9,7 @@ use url::Url;
 
 use super::*;
 
-struct IdentityFiles {
+pub(crate) struct IdentityFiles {
     _directory: TempDir,
     certificate: std::path::PathBuf,
     private_key: std::path::PathBuf,
@@ -18,7 +18,7 @@ struct IdentityFiles {
 }
 
 impl IdentityFiles {
-    fn generate() -> Self {
+    pub(crate) fn generate() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let ca_key = directory.path().join("ca.key");
         let ca = directory.path().join("ca.crt");
@@ -81,7 +81,7 @@ impl IdentityFiles {
         }
     }
 
-    fn config(&self, endpoint: Url) -> CellsConfig {
+    pub(crate) fn config(&self, endpoint: Url) -> CellsConfig {
         CellsConfig {
             data_dir: self._directory.path().join("cells"),
             peer_advertise: endpoint,
@@ -129,11 +129,10 @@ async fn listener_requires_mtls_and_exposes_the_verified_leaf_identity() {
     let config =
         files.config(Url::parse(&format!("https://localhost:{}", address.port())).unwrap());
     let loaded = LoadedPeerTls::load(&config).unwrap();
-    let expected = format!(
-        "{}:{}",
-        encode(loaded.certificate().as_bytes()),
-        encode(&loaded.signing_key().verifying_key().to_bytes())
-    );
+    let certificate = loaded.certificate();
+    let public_key = loaded.signing_key().verifying_key().to_bytes();
+    let peer_client = loaded.client_identity();
+    let expected = format!("{}:{}", encode(certificate.as_bytes()), encode(&public_key));
     let app = Router::new().route(
         "/identity",
         get(
@@ -163,16 +162,15 @@ async fn listener_requires_mtls_and_exposes_the_verified_leaf_identity() {
     let anonymous = client_builder(roots.clone()).build().unwrap();
     assert!(anonymous.get(&url).send().await.is_err());
 
-    let mut identity = std::fs::read(&files.certificate).unwrap();
-    identity.extend_from_slice(&std::fs::read(&files.private_key).unwrap());
-    let client = client_builder(roots)
-        .identity(reqwest::Identity::from_pem(&identity).unwrap())
-        .build()
-        .unwrap();
+    let client = peer_client.client(certificate, public_key).unwrap();
     assert_eq!(
-        client.get(url).send().await.unwrap().text().await.unwrap(),
+        client.get(&url).send().await.unwrap().text().await.unwrap(),
         expected
     );
+    let wrong_pin = peer_client
+        .client(CellDigest::from_bytes([9; 32]), public_key)
+        .unwrap();
+    assert!(wrong_pin.get(&url).send().await.is_err());
 
     shutdown_tx.send(()).unwrap();
     server.await.unwrap().unwrap();

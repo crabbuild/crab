@@ -11,6 +11,21 @@ use tower::ServiceExt;
 
 const TTL: Duration = Duration::from_secs(60);
 
+struct UnavailableRoundTrip;
+
+impl crab_cell_runtime::PeerRoundTrip for UnavailableRoundTrip {
+    fn send(
+        &self,
+        _target: crab_cell_runtime::CellTarget,
+        _request: Vec<u8>,
+        _remaining_ms: u32,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>,
+    > {
+        Box::pin(async { Err(crab_cell_runtime::Error::CellNotActive) })
+    }
+}
+
 pub(super) async fn fixture() -> Arc<Server> {
     let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
     let admission_store = store.clone();
@@ -159,6 +174,7 @@ fn enable_catalog_readiness(server: &mut Arc<Server>) {
         ),
         registry,
         resolver,
+        Arc::new(UnavailableRoundTrip),
     ));
     server.catalog_healthy.store(true, Ordering::Release);
     server.node_healthy.store(true, Ordering::Release);
