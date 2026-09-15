@@ -688,12 +688,11 @@ jobs:
             '^x-request-id: [0-9a-f-]{36}[[:space:]]*$' \
             "${RUNNER_TEMP}/crab-http-server-headers"
           docker compose --file crates/crab-http-server/deploy/compose.yaml \
-            run --rm --no-deps --entrypoint curl peer-pki-init \
+            run --rm --no-deps metrics-probe \
               --fail --silent --show-error \
               --cacert /identity/ca.crt \
               --cert /identity/peer.crt \
               --key /identity/peer.key \
-              --connect-to localhost:8789:server:8789 \
               https://localhost:8789/metrics \
             | grep -F 'crab_http_server_requests_total{method="get",outcome="2xx"}'
           jq --exit-status \

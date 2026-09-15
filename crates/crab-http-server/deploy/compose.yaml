@@ -178,6 +178,21 @@ services:
       start_period: 2s
     restart: unless-stopped
 
+  metrics-probe:
+    image: ${RUSTFS_IMAGE:-rustfs/rustfs:1.0.0-beta.8-glibc@sha256:040304b66e029a5cde4bed140b41513e925909839a9b912a40a98340610d1f66}
+    network_mode: service:server
+    user: "10001:10001"
+    entrypoint: ["curl"]
+    volumes:
+      - peer-identity:/identity:ro
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    profiles:
+      - qualification
+
 volumes:
   repository-data:
   peer-identity:
