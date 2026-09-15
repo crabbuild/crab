@@ -159,8 +159,21 @@ class RequestCountingProxy:
                         recorded = True
                         self.send_error_response(503, message)
                         return
-                    connection.request(self.command, upstream_path, body=body, headers=headers)
-                    response = connection.getresponse()
+                    try:
+                        connection.request(
+                            self.command, upstream_path, body=body, headers=headers
+                        )
+                    except (BrokenPipeError, ConnectionResetError) as send_error:
+                        # S3 implementations may reject create-only writes as
+                        # soon as they parse the headers. Preserve that real
+                        # response even when it arrives before a large request
+                        # body has finished crossing the proxy.
+                        try:
+                            response = connection.getresponse()
+                        except Exception:
+                            raise send_error
+                    else:
+                        response = connection.getresponse()
                     response_body = response.read()
                     response_headers = response.getheaders()
                     status = response.status

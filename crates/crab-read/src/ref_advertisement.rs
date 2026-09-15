@@ -1,5 +1,5 @@
+use crab_metadata::capsule_protocol::RepositoryRoot;
 use crab_metadata::manifests::Manifest;
-use crab_metadata::request_minimal::RepositoryRoot;
 
 use crate::hidden_refs;
 
@@ -32,7 +32,7 @@ pub fn manifest_ref_advertisement(
     )
 }
 
-/// Builds ref advertisement from the request-minimal repository root.
+/// Builds ref advertisement from the capsule-protocol repository root.
 #[must_use]
 pub fn root_ref_advertisement(
     root: &RepositoryRoot,

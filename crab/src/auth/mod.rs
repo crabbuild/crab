@@ -449,7 +449,7 @@ pub async fn build_repository_url_store_with_root(
     url: impl Into<crab_git::url::CrabUrl>,
     operation: &str,
     cancel: &CancellationToken,
-) -> Result<(Store, crab_metadata::request_minimal::RootSnapshot)> {
+) -> Result<(Store, crab_metadata::capsule_protocol::RootSnapshot)> {
     let url = url.into();
     let repository_prefix = url.repo_path.clone();
     let remote_url = format!("crab://{}/{}", url.bucket, url.repo_path);
@@ -473,14 +473,14 @@ pub(crate) async fn open_repository_root(
     store: &Store,
     repository_prefix: &str,
     remote_url: &str,
-) -> Result<crab_metadata::request_minimal::RootSnapshot> {
+) -> Result<crab_metadata::capsule_protocol::RootSnapshot> {
     let router = crate::storage::StoreLayout::new(store.clone(), repository_prefix.to_owned());
     let layout = crab_storage::StoreLayout::with_global_prefix(
         store.as_storage().clone(),
         router.repo_prefix().to_owned(),
         router.global_prefix().to_owned(),
     );
-    match crab_write::request_minimal::open_root(&layout).await {
+    match crab_write::capsule_protocol::open_root(&layout).await {
         Err(crab_write::WriteError::Metadata(crab_metadata::error::MetadataError::Storage {
             source: crab_storage::StorageError::NotFound { .. },
         })) => Err(CrabError::RepositoryNotInitialized {
@@ -577,7 +577,7 @@ mod tests {
             router.repo_prefix().to_owned(),
             router.global_prefix().to_owned(),
         );
-        crab_write::request_minimal::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+        crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
             .await
             .expect("initialize protocol-v2 root");
 

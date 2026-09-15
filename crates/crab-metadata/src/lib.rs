@@ -9,6 +9,7 @@ pub const CHUNK_INDEX_DB_PATH: &str = ".crab/chunk_index_db/";
 
 #[cfg(feature = "storage")]
 pub mod bloom_prefilter;
+pub mod capsule_protocol;
 pub mod chunk_index;
 pub mod commit_graph;
 pub mod error;
@@ -35,7 +36,6 @@ pub mod ref_journal;
 pub mod ref_registry;
 #[cfg(feature = "remote-index")]
 pub mod remote_index;
-pub mod request_minimal;
 pub mod segmented;
 #[cfg(feature = "storage")]
 pub mod segmented_store;

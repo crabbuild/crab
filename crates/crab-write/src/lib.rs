@@ -1,10 +1,10 @@
 //! Shared publication mechanics; authentication and product policy stay with callers.
+pub mod capsule_protocol;
 pub mod catalog;
 pub mod generation;
 pub mod initialize;
 pub mod journal;
 mod namespace;
-pub mod request_minimal;
 pub use namespace::with_ref_namespace;
 
 /// Failure while preparing or publishing canonical Git metadata.
@@ -25,35 +25,35 @@ pub enum WriteError {
     VisibilityUnavailable { generation: u64 },
     #[error("ref {ref_name} no longer matches its expected old value at {path}")]
     RefChanged { ref_name: String, path: String },
-    #[error("request-minimal root changed at {path}")]
-    RequestMinimalRootChanged { path: String },
-    #[error("request-minimal root is fenced for GC by {fence_id}")]
-    RequestMinimalGcFenced {
+    #[error("capsule-protocol root changed at {path}")]
+    CapsuleRootChanged { path: String },
+    #[error("capsule-protocol root is fenced for GC by {fence_id}")]
+    CapsuleGcFenced {
         fence_id: String,
         expires_at_unix: u64,
     },
     #[error(
-        "request-minimal transaction {transaction_id} may have committed; reconcile exact root evidence before retrying"
+        "capsule-protocol transaction {transaction_id} may have committed; reconcile exact root evidence before retrying"
     )]
-    RequestMinimalCommitUncertain {
+    CapsuleCommitUncertain {
         transaction_id: String,
         #[source]
         source: Box<crab_storage::StorageError>,
         verification: Option<Box<WriteError>>,
     },
     #[error(
-        "request-minimal checkpoint {checkpoint_hash} may have committed; reconcile exact root evidence before retrying"
+        "capsule-protocol checkpoint {checkpoint_hash} may have committed; reconcile exact root evidence before retrying"
     )]
-    RequestMinimalCheckpointCommitUncertain {
+    CapsuleCheckpointCommitUncertain {
         checkpoint_hash: String,
         #[source]
         source: Box<crab_storage::StorageError>,
         verification: Option<Box<WriteError>>,
     },
     #[error(
-        "request-minimal maintenance transition {fence_id} may have committed; reconcile exact root evidence before retrying"
+        "capsule-protocol maintenance transition {fence_id} may have committed; reconcile exact root evidence before retrying"
     )]
-    RequestMinimalMaintenanceCommitUncertain {
+    CapsuleMaintenanceCommitUncertain {
         fence_id: String,
         #[source]
         source: Box<crab_storage::StorageError>,

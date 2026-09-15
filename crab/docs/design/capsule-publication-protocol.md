@@ -1,4 +1,4 @@
-# Object-Store Request-Minimal Protocol
+# Capsule Publication Protocol
 
 ## Document metadata
 
@@ -9,18 +9,18 @@
 | Status | Protocol-v2 ordinary Git path implemented and live-qualified; extended workflows fail closed |
 | Priority | Correctness, then request latency, throughput, and transferred bytes |
 | Replaces | The v1 multi-object publication layout after an explicit cutover |
-| Companion | [Push Pipeline Deep Dive](push.md), [Canonical Object Storage Layout V1](../architecture/object-storage-layout.md) |
+| Companion | [Protocol v2 Xorb and Shard Integration](capsule-xorbs-shards.md), [Push Pipeline Deep Dive](push.md), [Canonical Object Storage Layout V1](../architecture/object-storage-layout.md) |
 
 ### Implementation status
 
 The hard-cutover implementation is wired to the user-facing ordinary Git path:
 
-- `crab-metadata::request_minimal` owns bounded, versioned, checksum-bearing
+- `crab-metadata::capsule_protocol` owns bounded, versioned, checksum-bearing
   repository-root, capsule, ref-transaction, and checkpoint-pointer contracts;
-- `crab-write::request_minimal` initializes and opens a repository root,
+- `crab-write::capsule_protocol` initializes and opens a repository root,
   uploads and independently verifies a capsule, and publishes through one root
   CAS;
-- `crab-read::request_minimal` loads the root and its bounded capsule frontier
+- `crab-read::capsule_protocol` loads the root and its bounded capsule frontier
   concurrently, verifying every size, content, transaction, and base binding;
 - `crab init`, native and remote-helper push, full clone/fetch/pull, `crab
   repack`, and repository GC use protocol v2 without a v1 fallback;
@@ -28,6 +28,9 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
   window has no more than eight run objects and contains six after push 500;
 - the executable clean-path test proves exactly four object-store operations,
   including advertisement: root GET, capsule-run PUT, run GET, and root PUT;
+- the companion xorb/shard path is live-qualified on RustFS with ten 512 MiB
+  files across a seed and ten edits, independent clone/hydration, and 9.30%
+  retained xorb bytes versus logical history;
 - the checksum-qualified AWS S3 test proves exactly three operations, while
   custom S3 endpoints and other providers retain mandatory readback;
 - the executable one-capsule read test proves exactly two object-store
@@ -44,7 +47,7 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
   and p99 927 ms.
 
 The hard cutover deliberately has no v1 fallback. Shallow and filtered fetch,
-raw promisor recovery, capsule-native Crab pointer payloads, managed protected
+raw promisor recovery, protocol-v2 Crab pointer publication, managed protected
 push, active-active publication, and prepared mirror/recovery push currently
 fail closed until their protocol-v2 contracts are implemented. Those failures
 do not reinterpret a v2 repository as v1 or publish partial state.
@@ -52,8 +55,11 @@ do not reinterpret a v2 repository as v1 or publish partial state.
 ## 1. Decision summary
 
 Crab should introduce a hard-cutover protocol that publishes one immutable,
-self-contained **capsule** and then atomically points one mutable repository
-**root** at it. The clean small-push budget is:
+self-contained **capsule** for an ordinary Git transaction and then atomically
+points one mutable repository **root** at it. Pointer pushes keep xorb and shard
+payloads in their canonical external objects and use the capsule to authenticate
+their dependency closure, as specified by the companion xorb/shard design. The
+clean pointer-free small-push budget is:
 
 | Capability | Complete push | After Git advertisement |
 | --- | ---: | ---: |
@@ -120,8 +126,9 @@ The protocol MUST:
 8. Add no foreground `HEAD`, `LIST`, lease, heartbeat, admission, journal, or
    GC-fence requests on that path.
 9. Bound cold-clone metadata amplification through immutable checkpoints.
-10. Scale request count by capsules or multipart parts, not commits, files,
-    chunks, refs, or metadata record count.
+10. Scale pointer-free request count by capsules or multipart parts, not
+    commits, files, refs, or metadata record count. Pointer pushes additionally
+    scale with newly required external xorbs and shards.
 11. Continue serving standard Git packfile responses for full clone, fetch,
     and pull. Unsupported shallow, partial, and lazy-object requests must fail
     before mutating local or remote state.
@@ -130,7 +137,9 @@ The protocol MUST:
 
 This design does not attempt to:
 
-- preserve the v1 physical layout or support dual v1/v2 reads and writes;
+- preserve the v1 repository metadata layout or support dual v1/v2 reads and
+  writes; canonical external xorb and shard identities are deliberately
+  retained by the companion design;
 - guarantee that concurrent losing writers upload zero redundant bytes;
 - retain cross-repository deduplication when proving it would require remote
   point lookups in the foreground push;
@@ -151,7 +160,7 @@ be enforced by transport-level counters, not inferred from application cache
 hits. A provider SDK that internally emits multiple HTTP operations must
 report those operations separately.
 
-### 5.1 Foreground budgets
+### 5.1 Pointer-free foreground budgets
 
 | Operation | Qualified checksum | Independent readback | Notes |
 | --- | ---: | ---: | --- |
@@ -192,6 +201,11 @@ no multi-object transaction.
 Protocol v2 has one mutable foreground object and immutable capsules:
 
 ```text
+{global_prefix}/
+├── xorbs/{first-two-hex}/{blake3}
+├── shards/{first-two-hex}/{blake3}
+└── ref-registry/...
+
 {repo_prefix}/v2/
 ├── root
 ├── capsules/{first-two-hex}/{blake3}
@@ -203,9 +217,11 @@ Protocol v2 has one mutable foreground object and immutable capsules:
 are immutable and use create-only writes. GC state is maintenance-only and
 MUST NOT be touched by a normal push.
 
-There is no v2 foreground dependency on bucket-global xorbs, shards, indexes,
-or a ref registry. Background deduplication MAY produce derived data, but the
-root MUST remain readable when that derived data is absent.
+Pointer-free pushes have no foreground dependency on bucket-global xorbs,
+shards, indexes, or a ref registry. Pointer pushes retain canonical external
+xorbs and shards plus pre-publication registry protection; their complete
+protocol and additional request budget are defined in
+[Protocol v2 Xorb and Shard Integration](capsule-xorbs-shards.md).
 
 ### 6.1 Root
 
@@ -248,12 +264,13 @@ remote helper's protocol-v2 upload-pack boundary must continue producing one
 valid Git packfile response. A capsule is the storage container for those Git
 bytes and their evidence.
 
-A capsule contains every new authoritative artifact for one push:
+A capsule contains every new authoritative Git artifact and authenticated
+external dependency descriptor for one push:
 
 - Git pack bytes;
 - Git object offsets, CRCs, reverse indexes, kinds, and delta-base evidence;
-- newly required file data and xorb-equivalent frames;
-- file reconstruction recipes and chunk locations;
+- newly required xorb and shard identities, sizes, and format versions;
+- file-to-shard and xorb-location catalog deltas;
 - ref transaction and fast-forward evidence;
 - catalog and visibility deltas;
 - base generation, base root digest, and base capsule frontier;
@@ -261,8 +278,9 @@ A capsule contains every new authoritative artifact for one push:
 - per-section and whole-capsule cryptographic hashes.
 
 The pack, `.idx`, `.rev`, metadata, receipts, and catalog deltas are sections
-of one object rather than separate object keys. Readers use exact ranges from
-the footer and validate every returned section.
+of one object rather than separate object keys. Xorb and shard payload bytes
+remain independent content-addressed objects. Readers validate capsule sections
+and every external object through its bound content identity.
 
 The development capsule codec concatenates non-empty sections, followed by a
 bounded deterministic footer, footer length, footer BLAKE3, and `CRBCAPS2`
@@ -286,14 +304,17 @@ A capsule MUST be self-contained relative to the root generation on which it
 is based:
 
 - dependencies reachable from the base root may be referenced;
-- every dependency not reachable from the base root MUST be included in the
-  new capsule;
-- a force-push that resurrects old, currently unreachable content MUST upload
-  that content again unless the current root proves it reachable.
+- every dependency not reachable from the base root MUST be uploaded or fully
+  verified and protected before root publication;
+- a force-push that resurrects old, currently unreachable content MUST treat
+  that content as a new external dependency even when its canonical global
+  object already exists.
 
-This rule is what permits lock-free GC safety. A cache or probabilistic filter
-may prove that data should be uploaded, but it MUST NOT be the sole proof that
-data may be omitted.
+This rule permits lock-free GC safety for base-reachable and newly created
+dependencies. Reuse of an old canonical object outside the base additionally
+requires the external-dependency GC publication guard. A cache or
+probabilistic filter may prove that data should be uploaded, but it MUST NOT be
+the sole proof that data may be omitted.
 
 ### 6.3 Checkpoints
 
@@ -421,9 +442,11 @@ produced the same ref values.
 
 ### 8.1 Durable-before-visible
 
-The root cannot reference a capsule until its PUT and required verification
-complete. A crash before root CAS leaves only unreachable immutable data. A
-crash after a successful CAS leaves a fully verified reachable capsule.
+The root cannot reference a capsule or its external dependencies until every
+required PUT, verification, and GC-protection operation completes. A crash
+before root CAS leaves only unreachable immutable data and conservative
+protection metadata. A crash after a successful CAS leaves a fully verified
+reachable dependency closure.
 
 ### 8.2 Atomic ref updates
 
@@ -446,14 +469,16 @@ CAS cannot change the pinned view.
 ### 8.5 Reconstruction integrity
 
 The root authenticates capsule identity and size. The capsule footer
-authenticates section locations and hashes. Git objects retain Git object and
-pack validation; file data retains file, chunk, and reconstruction hashes.
-Any missing, short, oversized, reordered, or corrupt range fails closed.
+authenticates section locations, hashes, and external xorb/shard descriptors.
+Git objects retain Git object and pack validation; file data retains shard,
+xorb, chunk, and reconstructed-file hashes. Any missing, short, oversized,
+reordered, or corrupt object or range fails closed.
 
-### 8.6 GC safety without writer fences
+### 8.6 GC safety
 
-Normal GC reads a root snapshot and traces every retained checkpoint and
-capsule. It may delete an unreachable object only when all of these hold:
+Normal GC reads a root snapshot and traces every retained checkpoint, capsule,
+shard, xorb, and conservative pre-publication registry root. It may delete an
+unreachable object only when all of these hold:
 
 1. the object is older than the mandatory grace period;
 2. it is unreachable from the GC root snapshot and retained history;
@@ -465,11 +490,13 @@ the run. GC never advances that cutoff while scanning or deleting, so an
 object created after the snapshot remains protected even when a long run
 crosses the nominal grace duration.
 
-A concurrent push can reference old data only when that data was reachable
-from its base root; GC's snapshot therefore marks it. Data that was not
-reachable from the base must be copied into the new, recent capsule, which is
-protected by grace. A concurrent force-push may make old roots unreachable,
-but that only causes conservative retention in the active GC run.
+A concurrent push can reference old data without new protection only when that
+data was reachable from its base root; GC's snapshot therefore marks it. Data
+that was not reachable from the base must be uploaded or independently
+verified while holding the external-dependency GC publication guard, then
+entered into the monotonic pre-publication registry before root CAS. New
+objects are protected by age grace. A concurrent force-push may make old roots
+unreachable, but that only causes conservative retention in the active GC run.
 
 Forced GC that bypasses grace MUST acquire a maintenance generation through
 the root CAS and block publication until it releases that generation. This is
@@ -567,10 +594,11 @@ capsule bytes into Git's object database.
 
 Git pack transfer reconstructs the committed Git objects, including Crab
 pointer objects. Checkout, hydrate, mount, and repository browsing resolve file
-recipes through the pinned checkpoint plus frontier, coalesce the corresponding
-capsule payload ranges, validate chunk and file hashes, and either reproduce
-the exact file bytes or return an error. Native LFS traffic remains outside
-these budgets until section 18's LFS protocol decision is closed.
+recipes through the pinned checkpoint plus frontier, load independently
+addressed shards and xorbs through the pinned catalog, validate shard, xorb,
+chunk, and file hashes, and either reproduce the exact file bytes or return an
+error. Native LFS traffic remains outside these budgets until section 18's LFS
+protocol decision is closed.
 
 ### 10.6 Read request budgets
 
@@ -649,15 +677,17 @@ The new priority order is:
 4. transferred and stored bytes.
 
 Remote dedup is used only when the client already has authoritative local
-knowledge from its pinned base. A cold client uploads uncertain content in
-the capsule instead of probing the object store per chunk. This may duplicate
-bytes already present in older capsules, but it preserves the request budget
-and cannot create missing data.
+knowledge from its pinned base. A cold client uploads uncertain content as
+canonical external xorbs instead of probing the object store per chunk. It may
+reuse an old object outside the base only through independently verified,
+GC-protected publication. This may duplicate temporary transfer work, but it
+cannot create missing data.
 
 Checkpointing, repacking, and background dedup may recover storage efficiency
-without becoming publication dependencies. Derived compacted capsules are
-published only through a root CAS and old capsules remain until normal GC
-proves them unreachable.
+without becoming pointer-free publication dependencies. Pointer-aware
+checkpoints compact file, shard, and xorb catalogs but do not rewrite canonical
+xorb or shard payloads. Derived state is published only through a root CAS and
+old capsules remain until normal GC proves them unreachable.
 
 ## 13. Provider contract
 
@@ -703,7 +733,8 @@ The release must include deterministic tests proving:
 
 - exact three-request clean push on a checksum-qualified fake provider;
 - exact four-request clean push on a readback-required provider;
-- no HEAD, LIST, lock, admission, heartbeat, journal, or fence operation;
+- no HEAD, LIST, lock, admission, heartbeat, journal, or fence operation on a
+  pointer-free clean push;
 - one capsule for a multi-commit, multi-ref transaction;
 - CAS losers cannot publish stale or non-fast-forward refs;
 - disjoint ref edits merge without re-uploading their capsules;
@@ -711,7 +742,8 @@ The release must include deterministic tests proving:
   root;
 - uncertain root CAS is classified from exact transaction identity;
 - concurrent normal GC cannot delete base-reachable or recent capsule data;
-- force-push resurrection re-embeds data absent from the base root;
+- force-push resurrection uploads or independently verifies and protects every
+  dependency absent from the base root;
 - fresh clone at checkpoint generation directly streams only an exact,
   fully-authorized checkpoint catalog;
 - fresh clone at maximum delta depth produces one self-contained Git pack;
@@ -751,7 +783,9 @@ translation from v1. The cutover procedure is:
 5. fresh-clone through v2, run strict Git fsck, hydrate, and compare file
    digests;
 6. enable v2 writers;
-7. remove v1 data only through a separately reviewed, exact-scope cleanup.
+7. remove obsolete v1 repository metadata only through a separately reviewed,
+   exact-scope cleanup; retain every canonical xorb and shard still reachable
+   from a v2 root, checkpoint, capsule, or registry record.
 
 A v2 client encountering v1-only state fails with an explicit unsupported
 layout error. A v1 client does not recognize `v2/root` and must not be allowed
@@ -770,7 +804,7 @@ range access, compaction, and GC provider-specific.
 ### 16.2 One custom transactional service request
 
 A service could receive data and atomically publish refs in one API call. That
-is not an object-store request-minimal protocol; it introduces a Crab data
+is not an object-store capsule-protocol protocol; it introduces a Crab data
 server and moves the multi-object transaction behind that service.
 
 ### 16.3 Preserve separate sidecars and batch requests
@@ -791,7 +825,7 @@ appropriate only for exceptional maintenance that bypasses those rules.
 
 Bloom or cache hits may be stale or false positive. They may guide redundant
 upload avoidance only when followed by an authoritative proof. The
-request-minimal path instead uploads uncertain data, because extra bytes are
+capsule-protocol path instead uploads uncertain data, because extra bytes are
 safe while omitted required bytes violate reconstruction.
 
 ## 17. Implementation sequence
@@ -820,7 +854,11 @@ safe while omitted required bytes violate reconstruction.
     incremental pushes, 10 fetches, 11 checkpoints including the seed, a final
     independent clone, and full Git integrity verification. Hosted-provider,
     injected-failure, and concurrency qualification remain release gates.
-11. **Complete for the ordinary Git path:** v2 is canonical and v1 fallback is
+11. **Complete on RustFS:** live-qualify external xorbs and shards with ten
+    non-zero 512 MiB files, ten versioned edits, cold cross-repository reuse,
+    independent clone, two hydrate/dehydrate cycles, byte-digest comparison,
+    and strict Git fsck. See the companion design's section 17.1 for metrics.
+12. **Complete for the ordinary Git path:** v2 is canonical and v1 fallback is
     absent. Extended v1-only workflows are rejected rather than invoked.
 
 Each step must keep one canonical implementation. Temporary development code

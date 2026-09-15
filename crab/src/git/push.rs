@@ -3626,16 +3626,15 @@ fn uncertain_commit_identity(error: &CrabError) -> Option<&str> {
     let source = io_error.get_ref()?;
     if let Some(write_error) = source.downcast_ref::<crab_write::WriteError>() {
         return match write_error {
-            crab_write::WriteError::RequestMinimalCommitUncertain { transaction_id, .. } => {
+            crab_write::WriteError::CapsuleCommitUncertain { transaction_id, .. } => {
                 Some(transaction_id)
             }
-            crab_write::WriteError::RequestMinimalCheckpointCommitUncertain {
-                checkpoint_hash,
-                ..
+            crab_write::WriteError::CapsuleCheckpointCommitUncertain {
+                checkpoint_hash, ..
             } => Some(checkpoint_hash),
-            crab_write::WriteError::RequestMinimalMaintenanceCommitUncertain {
-                fence_id, ..
-            } => Some(fence_id),
+            crab_write::WriteError::CapsuleMaintenanceCommitUncertain { fence_id, .. } => {
+                Some(fence_id)
+            }
             _ => None,
         };
     }

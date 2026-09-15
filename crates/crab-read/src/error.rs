@@ -78,8 +78,8 @@ pub enum ReadError {
     #[error("requested object is outside the visible generation")]
     UnauthorizedObject,
 
-    #[error("request-minimal read exceeds {resource} limit ({maximum} bytes)")]
-    RequestMinimalLimit {
+    #[error("capsule-protocol read exceeds {resource} limit ({maximum} bytes)")]
+    CapsuleReadLimit {
         resource: &'static str,
         maximum: u64,
     },

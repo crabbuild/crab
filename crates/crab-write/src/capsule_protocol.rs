@@ -1,6 +1,6 @@
-//! Request-minimal publication through one immutable capsule and one mutable root.
+//! Capsule publication through one immutable transaction object and one mutable root.
 
-use crab_metadata::request_minimal::{
+use crab_metadata::capsule_protocol::{
     Capsule, CapsulePointer, CapsuleRun, CapsuleTransaction, Checkpoint, CheckpointPointer,
     RepositoryRoot, RootRecord, create_root, load_root,
 };
@@ -8,9 +8,9 @@ use crab_storage::{StorageError, Store, StoreLayout};
 
 use crate::{Result, WriteError};
 
-pub use crab_metadata::request_minimal::RootSnapshot;
+pub use crab_metadata::capsule_protocol::RootSnapshot;
 
-/// Initialize a request-minimal repository with one unborn generation-zero root.
+/// Initialize a capsule-protocol repository with one unborn generation-zero root.
 pub async fn initialize(
     router: &StoreLayout<Store>,
     repository_id: &str,
@@ -34,7 +34,7 @@ pub async fn initialize(
                 source: StorageError::NotFound { .. },
             }) => Err(WriteError::CorruptObject {
                 path: prefix.to_string(),
-                reason: "repository prefix contains data but has no request-minimal root; Crab left it unchanged"
+                reason: "repository prefix contains data but has no capsule-protocol root; Crab left it unchanged"
                     .to_owned(),
             }),
             Err(error) => Err(error.into()),
@@ -82,7 +82,7 @@ pub async fn publish(
         let older = load_run(router, &pointer).await?;
         run = older.merge(&run)?;
     }
-    let capsule_path = router.request_minimal_capsule_path(run.hash());
+    let capsule_path = router.capsule_path(run.hash());
     router
         .store()
         .put_if_absent_verified(&capsule_path, run.bytes().clone())
@@ -105,14 +105,14 @@ pub async fn publish(
         &transaction_id,
     )?;
     let candidate = RootRecord::encode(next)?;
-    let root_path = router.request_minimal_root_path();
+    let root_path = router.capsule_root_path();
     match router
         .store()
         .update(&root_path, candidate.bytes().clone(), base.etag().clone())
         .await
     {
         Ok(etag) => Ok(base.committed_successor(candidate, etag)?),
-        Err(StorageError::StateConflict { .. }) => Err(WriteError::RequestMinimalRootChanged {
+        Err(StorageError::StateConflict { .. }) => Err(WriteError::CapsuleRootChanged {
             path: root_path.to_string(),
         }),
         Err(source) => {
@@ -128,7 +128,7 @@ pub async fn publish_checkpoint(
     checkpoint: &Checkpoint,
 ) -> Result<RootSnapshot> {
     if let Some(fence) = base.record().root().gc_fence() {
-        return Err(WriteError::RequestMinimalGcFenced {
+        return Err(WriteError::CapsuleGcFenced {
             fence_id: fence.id().to_owned(),
             expires_at_unix: fence.expires_at_unix(),
         });
@@ -137,7 +137,7 @@ pub async fn publish_checkpoint(
         || checkpoint.covered_root_digest() != base.record().digest()
     {
         return Err(WriteError::CorruptObject {
-            path: "request-minimal checkpoint".to_owned(),
+            path: "capsule-protocol checkpoint".to_owned(),
             reason: "checkpoint does not cover the exact CAS base".to_owned(),
         });
     }
@@ -151,7 +151,7 @@ pub async fn publish_checkpoint(
         })?;
     let pack_count = u32::try_from(checkpoint.git_packs().len())
         .map_err(|_| WriteError::Internal("checkpoint pack count overflowed".to_owned()))?;
-    let path = router.request_minimal_checkpoint_path(checkpoint.hash());
+    let path = router.capsule_checkpoint_path(checkpoint.hash());
     router
         .store()
         .put_if_absent_verified(&path, checkpoint.bytes().clone())
@@ -169,14 +169,14 @@ pub async fn publish_checkpoint(
         .root()
         .install_checkpoint(base.record().digest(), pointer)?;
     let candidate = RootRecord::encode(next)?;
-    let root_path = router.request_minimal_root_path();
+    let root_path = router.capsule_root_path();
     match router
         .store()
         .update(&root_path, candidate.bytes().clone(), base.etag().clone())
         .await
     {
         Ok(etag) => Ok(base.committed_checkpoint(candidate, etag)?),
-        Err(StorageError::StateConflict { .. }) => Err(WriteError::RequestMinimalRootChanged {
+        Err(StorageError::StateConflict { .. }) => Err(WriteError::CapsuleRootChanged {
             path: root_path.to_string(),
         }),
         Err(source) => {
@@ -189,7 +189,7 @@ pub async fn publish_checkpoint(
 pub async fn begin_gc(
     router: &StoreLayout<Store>,
     base: RootSnapshot,
-    fence: crab_metadata::request_minimal::GcFence,
+    fence: crab_metadata::capsule_protocol::GcFence,
 ) -> Result<RootSnapshot> {
     let fence_id = fence.id().to_owned();
     let next = base
@@ -218,14 +218,14 @@ async fn update_maintenance_root(
     candidate: RootRecord,
     fence_id: &str,
 ) -> Result<RootSnapshot> {
-    let root_path = router.request_minimal_root_path();
+    let root_path = router.capsule_root_path();
     match router
         .store()
         .update(&root_path, candidate.bytes().clone(), base.etag().clone())
         .await
     {
         Ok(etag) => Ok(base.committed_maintenance(candidate, etag)?),
-        Err(StorageError::StateConflict { .. }) => Err(WriteError::RequestMinimalRootChanged {
+        Err(StorageError::StateConflict { .. }) => Err(WriteError::CapsuleRootChanged {
             path: root_path.to_string(),
         }),
         Err(source) => {
@@ -235,12 +235,12 @@ async fn update_maintenance_root(
                 Ok(snapshot) if snapshot.record().digest() == base.record().digest() => {
                     Err(source.into())
                 }
-                Ok(_) => Err(WriteError::RequestMinimalMaintenanceCommitUncertain {
+                Ok(_) => Err(WriteError::CapsuleMaintenanceCommitUncertain {
                     fence_id: fence_id.to_owned(),
                     source: Box::new(source),
                     verification: None,
                 }),
-                Err(verification) => Err(WriteError::RequestMinimalMaintenanceCommitUncertain {
+                Err(verification) => Err(WriteError::CapsuleMaintenanceCommitUncertain {
                     fence_id: fence_id.to_owned(),
                     source: Box::new(source),
                     verification: Some(Box::new(verification)),
@@ -251,7 +251,7 @@ async fn update_maintenance_root(
 }
 
 async fn load_run(router: &StoreLayout<Store>, pointer: &CapsulePointer) -> Result<CapsuleRun> {
-    let path = router.request_minimal_capsule_path(pointer.hash());
+    let path = router.capsule_path(pointer.hash());
     let (bytes, _) = router
         .store()
         .get_with_etag_bounded(&path, pointer.size())
@@ -279,7 +279,7 @@ fn validate_capsule_binding(
     capsule: &Capsule,
 ) -> Result<()> {
     if let Some(fence) = base.record().root().gc_fence() {
-        return Err(WriteError::RequestMinimalGcFenced {
+        return Err(WriteError::CapsuleGcFenced {
             fence_id: fence.id().to_owned(),
             expires_at_unix: fence.expires_at_unix(),
         });
@@ -289,7 +289,7 @@ fn validate_capsule_binding(
         || capsule.transaction_id() != transaction.id()?
     {
         return Err(WriteError::CorruptObject {
-            path: "request-minimal capsule".to_owned(),
+            path: "capsule-protocol capsule".to_owned(),
             reason: "capsule, transaction, and advertised root are not cryptographically bound"
                 .to_owned(),
         });
@@ -311,7 +311,7 @@ fn apply_ref_edits(
         if observed != edit.expected_old() {
             return Err(WriteError::RefChanged {
                 ref_name: edit.ref_name().to_owned(),
-                path: "request-minimal root".to_owned(),
+                path: "capsule-protocol root".to_owned(),
             });
         }
         match edit.new_oid() {
@@ -354,12 +354,12 @@ async fn reconcile_root_update(
             Ok(snapshot)
         }
         Ok(snapshot) if snapshot.record().digest() == base.digest() => Err(source.into()),
-        Ok(_) => Err(WriteError::RequestMinimalCommitUncertain {
+        Ok(_) => Err(WriteError::CapsuleCommitUncertain {
             transaction_id: transaction.id()?,
             source: Box::new(source),
             verification: None,
         }),
-        Err(verification) => Err(WriteError::RequestMinimalCommitUncertain {
+        Err(verification) => Err(WriteError::CapsuleCommitUncertain {
             transaction_id: transaction.id()?,
             source: Box::new(source),
             verification: Some(Box::new(verification)),
@@ -378,12 +378,12 @@ async fn reconcile_checkpoint_update(
     match verification {
         Ok(snapshot) if snapshot.record().digest() == candidate.digest() => Ok(snapshot),
         Ok(snapshot) if snapshot.record().digest() == base.digest() => Err(source.into()),
-        Ok(_) => Err(WriteError::RequestMinimalCheckpointCommitUncertain {
+        Ok(_) => Err(WriteError::CapsuleCheckpointCommitUncertain {
             checkpoint_hash: checkpoint.hash().to_owned(),
             source: Box::new(source),
             verification: None,
         }),
-        Err(verification) => Err(WriteError::RequestMinimalCheckpointCommitUncertain {
+        Err(verification) => Err(WriteError::CapsuleCheckpointCommitUncertain {
             checkpoint_hash: checkpoint.hash().to_owned(),
             source: Box::new(source),
             verification: Some(Box::new(verification)),
@@ -401,7 +401,7 @@ mod tests {
     };
 
     use bytes::Bytes;
-    use crab_metadata::request_minimal::{CapsuleGitPack, CapsuleRefEdit};
+    use crab_metadata::capsule_protocol::{CapsuleGitPack, CapsuleRefEdit};
     use crab_storage::{
         ImmutableWriteVerification, StorageObservation, StorageObserver, StorageOperation,
         StorageOutcome,
@@ -455,7 +455,7 @@ mod tests {
             let result = self.inner.put_opts(location, payload, options).await?;
             if lose_reply {
                 return Err(object_store::Error::Generic {
-                    store: "request-minimal-root-test",
+                    store: "capsule-protocol-root-test",
                     source: Box::new(std::io::Error::new(
                         std::io::ErrorKind::ConnectionReset,
                         "lost root update reply",
@@ -530,7 +530,7 @@ mod tests {
             transaction,
             vec![
                 CapsuleGitPack::new(
-                    Bytes::from_static(b"PACK request-minimal test"),
+                    Bytes::from_static(b"PACK capsule-protocol test"),
                     Bytes::from_static(b"index"),
                     Bytes::from_static(b"reverse"),
                     Bytes::from_static(b"locator"),
@@ -740,10 +740,7 @@ mod tests {
         .await
         .expect_err("stale root CAS must fail");
 
-        assert!(matches!(
-            error,
-            WriteError::RequestMinimalRootChanged { .. }
-        ));
+        assert!(matches!(error, WriteError::CapsuleRootChanged { .. }));
         let visible = open_root(&router).await.unwrap();
         assert_eq!(
             visible.record().root().refs().get("refs/heads/main"),
@@ -762,7 +759,7 @@ mod tests {
         let fault_store = Store::with_retry(
             Arc::new(LostRootReplyStore {
                 inner,
-                root_path: seed_router.request_minimal_root_path().to_string(),
+                root_path: seed_router.capsule_root_path().to_string(),
                 lost: AtomicBool::new(false),
             }),
             crab_storage::RetryPolicy {

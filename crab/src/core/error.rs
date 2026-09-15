@@ -1134,8 +1134,8 @@ impl From<crab_read::ReadError> for CrabError {
             crab_read::ReadError::UnauthorizedObject => {
                 Self::Protocol("requested object is outside the visible generation".to_owned())
             }
-            crab_read::ReadError::RequestMinimalLimit { resource, maximum } => Self::Protocol(
-                format!("request-minimal read exceeds {resource} limit ({maximum} bytes)"),
+            crab_read::ReadError::CapsuleReadLimit { resource, maximum } => Self::Protocol(
+                format!("capsule-protocol read exceeds {resource} limit ({maximum} bytes)"),
             ),
             crab_read::ReadError::Internal(message) => Self::Internal(message),
         }
@@ -1974,15 +1974,15 @@ impl From<crab_write::WriteError> for CrabError {
                 path,
                 expected_etag: None,
             },
-            crab_write::WriteError::RequestMinimalRootChanged { path } => Self::CasConflict {
+            crab_write::WriteError::CapsuleRootChanged { path } => Self::CasConflict {
                 path,
                 expected_etag: None,
             },
-            crab_write::WriteError::RequestMinimalGcFenced {
+            crab_write::WriteError::CapsuleGcFenced {
                 fence_id,
                 expires_at_unix,
             } => Self::PushLockHeld {
-                ref_name: "request-minimal-gc".to_owned(),
+                ref_name: "capsule-protocol-gc".to_owned(),
                 holder: fence_id,
                 expires_at_unix: Some(expires_at_unix),
             },
@@ -2000,11 +2000,9 @@ impl From<crab_write::WriteError> for CrabError {
             crab_write::WriteError::Cancelled => Self::Cancelled,
             error @ (crab_write::WriteError::Namespace(_)
             | crab_write::WriteError::InitialHead { .. }
-            | crab_write::WriteError::RequestMinimalCommitUncertain { .. }
-            | crab_write::WriteError::RequestMinimalCheckpointCommitUncertain { .. }
-            | crab_write::WriteError::RequestMinimalMaintenanceCommitUncertain {
-                ..
-            }
+            | crab_write::WriteError::CapsuleCommitUncertain { .. }
+            | crab_write::WriteError::CapsuleCheckpointCommitUncertain { .. }
+            | crab_write::WriteError::CapsuleMaintenanceCommitUncertain { .. }
             | crab_write::WriteError::Worker(_)
             | crab_write::WriteError::VisibilityUnavailable { .. }
             | crab_write::WriteError::PackIdentity { .. }
@@ -2035,7 +2033,7 @@ impl From<crab_metadata::error::MetadataError> for CrabError {
             }
             error @ (crab_metadata::error::MetadataError::FileLookupAdmission { .. }
             | crab_metadata::error::MetadataError::FileLookupWorker { .. }
-            | crab_metadata::error::MetadataError::RequestMinimalContract { .. }
+            | crab_metadata::error::MetadataError::CapsuleContract { .. }
             | crab_metadata::error::MetadataError::PlanAlreadyAttempted { .. }
             | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }
             | crab_metadata::error::MetadataError::ManifestCommitUncertain { .. }) => {
@@ -4067,8 +4065,8 @@ mod tests {
     }
 
     #[test]
-    fn request_minimal_read_limit_is_a_protocol_rejection() {
-        let error = CrabError::from(crab_read::ReadError::RequestMinimalLimit {
+    fn capsule_protocol_read_limit_is_a_protocol_rejection() {
+        let error = CrabError::from(crab_read::ReadError::CapsuleReadLimit {
             resource: "frontier bytes",
             maximum: 1024,
         });
@@ -4076,8 +4074,8 @@ mod tests {
     }
 
     #[test]
-    fn request_minimal_root_change_is_a_cas_conflict() {
-        let error = CrabError::from(crab_write::WriteError::RequestMinimalRootChanged {
+    fn capsule_root_change_is_a_cas_conflict() {
+        let error = CrabError::from(crab_write::WriteError::CapsuleRootChanged {
             path: "repositories/test/root".to_owned(),
         });
         assert!(
@@ -4086,13 +4084,11 @@ mod tests {
     }
 
     #[test]
-    fn request_minimal_contract_error_retains_its_source() {
-        let error = CrabError::from(
-            crab_metadata::error::MetadataError::RequestMinimalContract {
-                record: "root",
-                reason: "invalid digest".to_owned(),
-            },
-        );
+    fn capsule_protocol_contract_error_retains_its_source() {
+        let error = CrabError::from(crab_metadata::error::MetadataError::CapsuleContract {
+            record: "root",
+            reason: "invalid digest".to_owned(),
+        });
         let CrabError::Io(error) = error else {
             panic!("expected typed I/O error");
         };

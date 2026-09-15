@@ -176,22 +176,22 @@ impl<S> StoreLayout<S> {
         self.repo_path("layout")
     }
 
-    /// Path to the request-minimal repository root.
+    /// Path to the capsule-protocol repository root.
     #[must_use]
-    pub fn request_minimal_root_path(&self) -> ObjectPath {
+    pub fn capsule_root_path(&self) -> ObjectPath {
         self.repo_path("v2/root")
     }
 
-    /// Path to one immutable request-minimal capsule.
+    /// Path to one immutable capsule-protocol capsule.
     #[must_use]
-    pub fn request_minimal_capsule_path(&self, hash: &str) -> ObjectPath {
+    pub fn capsule_path(&self, hash: &str) -> ObjectPath {
         let partition = hash.get(..GLOBAL_CONTENT_FANOUT_WIDTH).unwrap_or(hash);
         self.repo_path(&format!("v2/capsules/{partition}/{hash}"))
     }
 
-    /// Path to one immutable request-minimal checkpoint.
+    /// Path to one immutable capsule-protocol checkpoint.
     #[must_use]
-    pub fn request_minimal_checkpoint_path(&self, hash: &str) -> ObjectPath {
+    pub fn capsule_checkpoint_path(&self, hash: &str) -> ObjectPath {
         let partition = hash.get(..GLOBAL_CONTENT_FANOUT_WIDTH).unwrap_or(hash);
         self.repo_path(&format!("v2/checkpoints/{partition}/{hash}"))
     }
@@ -541,20 +541,17 @@ mod tests {
     }
 
     #[test]
-    fn request_minimal_paths_stay_inside_repository_prefix() {
+    fn capsule_protocol_paths_stay_inside_repository_prefix() {
         let layout = test_layout();
         let hash = format!("ab{}", "1".repeat(62));
 
+        assert_eq!(layout.capsule_root_path().as_ref(), "org/models/v2/root");
         assert_eq!(
-            layout.request_minimal_root_path().as_ref(),
-            "org/models/v2/root"
-        );
-        assert_eq!(
-            layout.request_minimal_capsule_path(&hash).as_ref(),
+            layout.capsule_path(&hash).as_ref(),
             format!("org/models/v2/capsules/ab/{hash}")
         );
         assert_eq!(
-            layout.request_minimal_checkpoint_path(&hash).as_ref(),
+            layout.capsule_checkpoint_path(&hash).as_ref(),
             format!("org/models/v2/checkpoints/ab/{hash}")
         );
     }

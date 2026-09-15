@@ -1,10 +1,11 @@
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{MetadataError, Result};
-use crate::request_minimal::{
+use crate::capsule_protocol::{
     CapsuleGitPack, CapsuleGitPackDescriptor, CapsuleSectionKind, CapsuleSectionLocation,
+    PointerCatalog,
 };
+use crate::error::{MetadataError, Result};
 use crate::validation::{validate_content_hash, validate_sha1};
 
 const CHECKPOINT_MAGIC: &[u8; 8] = b"CRBCKP02";
@@ -38,10 +39,25 @@ impl Checkpoint {
         covered_root_digest: &str,
         git_packs: Vec<CapsuleGitPack>,
     ) -> Result<Self> {
+        Self::build_with_pointer_catalog(
+            covered_generation,
+            covered_root_digest,
+            git_packs,
+            PointerCatalog::new(),
+        )
+    }
+
+    /// Build a complete Git checkpoint carrying the compacted pointer catalog.
+    pub fn build_with_pointer_catalog(
+        covered_generation: u64,
+        covered_root_digest: &str,
+        git_packs: Vec<CapsuleGitPack>,
+        pointer_catalog: PointerCatalog,
+    ) -> Result<Self> {
         validate_content_hash(
             covered_root_digest,
             "checkpoint covered root digest",
-            "request-minimal checkpoint",
+            "capsule-protocol checkpoint",
         )?;
         if git_packs.is_empty() || git_packs.len() > MAX_CHECKPOINT_PACKS {
             return Err(contract_error("checkpoint Git pack count is out of bounds"));
@@ -61,7 +77,7 @@ impl Checkpoint {
             validate_sha1(
                 &pack.git_checksum,
                 "checkpoint Git checksum",
-                "request-minimal checkpoint",
+                "capsule-protocol checkpoint",
             )?;
             let first = u32::try_from(sections.len())
                 .map_err(|_| contract_error("checkpoint section index overflowed"))?;
@@ -97,6 +113,14 @@ impl Checkpoint {
                 git_checksum: pack.git_checksum,
                 object_count: pack.object_count,
             });
+        }
+        if !pointer_catalog.is_empty() {
+            append_section(
+                &mut body,
+                &mut sections,
+                CapsuleSectionKind::CatalogDelta,
+                pointer_catalog.encode()?,
+            )?;
         }
         let footer = CheckpointFooter {
             version: CHECKPOINT_VERSION,
@@ -205,6 +229,25 @@ impl Checkpoint {
             .ok_or_else(|| corrupt("section range cannot be represented"))?;
         Ok(self.bytes.slice(start..end))
     }
+
+    /// Decode the complete pointer catalog compacted by this checkpoint.
+    pub fn pointer_catalog(&self) -> Result<PointerCatalog> {
+        let mut sections = self
+            .footer
+            .sections
+            .iter()
+            .enumerate()
+            .filter(|(_, section)| section.kind == CapsuleSectionKind::CatalogDelta);
+        let Some((index, _)) = sections.next() else {
+            return Ok(PointerCatalog::new());
+        };
+        if sections.next().is_some() {
+            return Err(corrupt("checkpoint contains more than one pointer catalog"));
+        }
+        let index = u32::try_from(index)
+            .map_err(|_| corrupt("pointer catalog section index cannot be represented"))?;
+        PointerCatalog::decode(&self.section_bytes(index)?)
+    }
 }
 
 fn append_section(
@@ -231,21 +274,27 @@ fn validate_footer(footer: &CheckpointFooter, body: &[u8]) -> Result<()> {
     if footer.version != CHECKPOINT_VERSION
         || footer.git_packs.is_empty()
         || footer.git_packs.len() > MAX_CHECKPOINT_PACKS
-        || footer.sections.len() != footer.git_packs.len() * 4
+        || !matches!(
+            footer
+                .sections
+                .len()
+                .checked_sub(footer.git_packs.len() * 4),
+            Some(0 | 1)
+        )
     {
         return Err(corrupt("checkpoint footer shape is invalid"));
     }
     validate_content_hash(
         &footer.covered_root_digest,
         "checkpoint covered root digest",
-        "request-minimal checkpoint",
+        "capsule-protocol checkpoint",
     )?;
     let mut expected_offset = 0_u64;
     for location in &footer.sections {
         validate_content_hash(
             &location.blake3,
             "checkpoint section hash",
-            "request-minimal checkpoint",
+            "capsule-protocol checkpoint",
         )?;
         if location.length == 0 || location.offset != expected_offset {
             return Err(corrupt(
@@ -277,7 +326,7 @@ fn validate_footer(footer: &CheckpointFooter, body: &[u8]) -> Result<()> {
         validate_sha1(
             &descriptor.git_checksum,
             "checkpoint Git checksum",
-            "request-minimal checkpoint",
+            "capsule-protocol checkpoint",
         )?;
         if descriptor.object_count == 0 {
             return Err(corrupt("checkpoint Git pack has zero objects"));
@@ -307,11 +356,19 @@ fn validate_footer(footer: &CheckpointFooter, body: &[u8]) -> Result<()> {
             }
         }
     }
+    if footer.sections.len() == footer.git_packs.len() * 4 + 1
+        && footer.sections.last().map(|section| section.kind)
+            != Some(CapsuleSectionKind::CatalogDelta)
+    {
+        return Err(corrupt(
+            "checkpoint trailing section must be the pointer catalog",
+        ));
+    }
     Ok(())
 }
 
 fn contract_error(reason: impl Into<String>) -> MetadataError {
-    MetadataError::RequestMinimalContract {
+    MetadataError::CapsuleContract {
         record: "checkpoint",
         reason: reason.into(),
     }
@@ -319,7 +376,7 @@ fn contract_error(reason: impl Into<String>) -> MetadataError {
 
 fn corrupt(reason: impl Into<String>) -> MetadataError {
     MetadataError::CorruptObject {
-        path: "request-minimal checkpoint".to_owned(),
+        path: "capsule-protocol checkpoint".to_owned(),
         reason: reason.into(),
     }
 }

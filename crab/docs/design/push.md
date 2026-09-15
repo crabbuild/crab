@@ -12,7 +12,7 @@ durable, deduplicated objects on cloud storage.**
 | Project      | crab                                                        |
 | Scope        | Push pipeline architecture, data flow, performance analysis |
 | Status       | Living document                                             |
-| Companion to | [Object-Store Request-Minimal Protocol](object-store-request-minimization.md) |
+| Companion to | [Capsule Publication Protocol](capsule-publication-protocol.md) |
 | Version      | 0.1                                                         |
 
 -----

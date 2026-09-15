@@ -2916,7 +2916,7 @@ pub async fn run_repo_remote_gc(
     grace_period: Duration,
     _jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
 ) -> Result<GcOutcome> {
-    run_request_minimal_gc(
+    run_capsule_gc(
         args,
         store,
         router,
@@ -2927,7 +2927,7 @@ pub async fn run_repo_remote_gc(
     .await
 }
 
-async fn run_request_minimal_gc(
+async fn run_capsule_gc(
     args: &GcArgs,
     store: &Store,
     router: &StoreLayout,
@@ -2955,7 +2955,7 @@ async fn run_request_minimal_gc(
         router.repo_prefix().to_owned(),
         router.global_prefix().to_owned(),
     );
-    let base = crab_write::request_minimal::open_root(&layout).await?;
+    let base = crab_write::capsule_protocol::open_root(&layout).await?;
     if base.record().root().generation() == 0 {
         return Ok(GcOutcome {
             dry_run: args.dry_run,
@@ -2973,14 +2973,14 @@ async fn run_request_minimal_gc(
     let fenced = if args.dry_run {
         base
     } else {
-        crab_write::request_minimal::begin_gc(
+        crab_write::capsule_protocol::begin_gc(
             &layout,
             base,
-            crab_metadata::request_minimal::GcFence::new(&fence_id, expires_at_unix)?,
+            crab_metadata::capsule_protocol::GcFence::new(&fence_id, expires_at_unix)?,
         )
         .await?
     };
-    let sweep = sweep_request_minimal_objects(
+    let sweep = sweep_capsule_objects(
         args,
         store,
         &layout,
@@ -2995,7 +2995,7 @@ async fn run_request_minimal_gc(
     if args.dry_run {
         return sweep;
     }
-    let release = crab_write::request_minimal::end_gc(&layout, fenced, &fence_id).await;
+    let release = crab_write::capsule_protocol::end_gc(&layout, fenced, &fence_id).await;
     match (sweep, release) {
         (Ok(outcome), Ok(_)) => Ok(outcome),
         (Err(error), _) => Err(error),
@@ -3007,11 +3007,11 @@ async fn run_request_minimal_gc(
     clippy::too_many_arguments,
     reason = "GC sweep keeps its safety snapshot and policy explicit"
 )]
-async fn sweep_request_minimal_objects(
+async fn sweep_capsule_objects(
     args: &GcArgs,
     store: &Store,
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
-    root: &crab_metadata::request_minimal::RepositoryRoot,
+    root: &crab_metadata::capsule_protocol::RepositoryRoot,
     coordinator_protected_keys: &HashSet<String>,
     cancel: &CancellationToken,
     snapshot_at: SystemTime,
@@ -3022,14 +3022,14 @@ async fn sweep_request_minimal_objects(
     if let Some(checkpoint) = root.checkpoint() {
         reachable.insert(
             layout
-                .request_minimal_checkpoint_path(checkpoint.hash())
+                .capsule_checkpoint_path(checkpoint.hash())
                 .to_string(),
         );
     }
     reachable.extend(
         root.capsule_frontier()
             .iter()
-            .map(|run| layout.request_minimal_capsule_path(run.hash()).to_string()),
+            .map(|run| layout.capsule_path(run.hash()).to_string()),
     );
     reachable.extend(coordinator_protected_keys.iter().cloned());
 
@@ -4841,9 +4841,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_minimal_gc_retains_root_frontier_and_clears_fence() {
+    async fn capsule_protocol_gc_retains_root_frontier_and_clears_fence() {
         use bytes::Bytes;
-        use crab_metadata::request_minimal::{Capsule, CapsuleRefEdit, CapsuleTransaction};
+        use crab_metadata::capsule_protocol::{Capsule, CapsuleRefEdit, CapsuleTransaction};
         use object_store::memory::InMemory;
         use object_store::path::Path as ObjectPath;
         use std::sync::Arc;
@@ -4857,7 +4857,7 @@ mod tests {
             router.global_prefix().to_owned(),
         );
         let base =
-            crab_write::request_minimal::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
                 .await
                 .unwrap();
         let transaction = CapsuleTransaction::new(
@@ -4871,12 +4871,12 @@ mod tests {
         )
         .unwrap();
         let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
-        let published = crab_write::request_minimal::publish(&layout, base, &transaction, &capsule)
-            .await
-            .unwrap();
-        let live = layout
-            .request_minimal_capsule_path(published.record().root().capsule_frontier()[0].hash());
-        let orphan = layout.request_minimal_capsule_path(&"f".repeat(64));
+        let published =
+            crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+                .await
+                .unwrap();
+        let live = layout.capsule_path(published.record().root().capsule_frontier()[0].hash());
+        let orphan = layout.capsule_path(&"f".repeat(64));
         store
             .put(
                 &ObjectPath::from(orphan.to_string()),
@@ -4907,7 +4907,7 @@ mod tests {
             store.head(&orphan).await,
             Err(CrabError::NotFound { .. })
         ));
-        let root = crab_write::request_minimal::open_root(&layout)
+        let root = crab_write::capsule_protocol::open_root(&layout)
             .await
             .unwrap();
         assert!(root.record().root().gc_fence().is_none());

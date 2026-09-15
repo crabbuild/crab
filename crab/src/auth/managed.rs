@@ -12,7 +12,7 @@ use crate::storage::store::Store;
 pub struct RepositoryStore {
     pub store: Store,
     pub repository_prefix: String,
-    pub request_minimal_root: crab_metadata::request_minimal::RootSnapshot,
+    pub capsule_root: crab_metadata::capsule_protocol::RootSnapshot,
 }
 
 /// Resolves a direct or managed repository into the canonical store abstraction.
@@ -33,12 +33,12 @@ pub async fn build_repository_store(
                 cancel,
             )
             .await?;
-            let request_minimal_root =
+            let capsule_root =
                 open_repository_root(&store, &repository_prefix, &canonical_url).await?;
             Ok(RepositoryStore {
                 store,
                 repository_prefix,
-                request_minimal_root,
+                capsule_root,
             })
         }
         crab_git::RepositoryLocator::Managed(repository) => {
@@ -48,12 +48,12 @@ pub async fn build_repository_store(
                 .resolve(&repository, operation, cancel)
                 .await?;
             let store = Store::from_storage(managed.store);
-            let request_minimal_root =
+            let capsule_root =
                 open_repository_root(&store, &managed.repository_prefix, &canonical_url).await?;
             Ok(RepositoryStore {
                 store,
                 repository_prefix: managed.repository_prefix,
-                request_minimal_root,
+                capsule_root,
             })
         }
     }

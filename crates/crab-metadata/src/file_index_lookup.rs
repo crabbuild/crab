@@ -224,6 +224,7 @@ async fn lookup_committed_record(
 /// Opens the repo's `file_index_db` once, serves one or many point lookups, and
 /// closes the underlying SlateDB reader when consumed.
 pub struct FileIndexLookupSession {
+    static_entries: Option<Arc<HashMap<MerkleHash, MerkleHash>>>,
     reader: Option<Arc<slatedb::DbReader>>,
     anchor: Option<CommittedShardAnchor>,
     storage: crab_storage::Store,
@@ -243,6 +244,7 @@ impl FileIndexLookupSession {
         snapshot: &RepositorySnapshot,
     ) -> Result<Self> {
         Ok(Self {
+            static_entries: None,
             reader: None,
             anchor: CommittedShardAnchor::from_snapshot(snapshot)?,
             storage: router.store().clone(),
@@ -305,6 +307,7 @@ impl FileIndexLookupSession {
         )?;
         let anchor = CommittedShardAnchor::from_snapshot(snapshot)?;
         Ok(Self {
+            static_entries: None,
             reader: None,
             anchor,
             storage: router.store().clone(),
@@ -364,6 +367,7 @@ impl FileIndexLookupSession {
             })
         };
         Ok(Self {
+            static_entries: None,
             reader: None,
             anchor,
             storage: router.store().clone(),
@@ -380,6 +384,47 @@ impl FileIndexLookupSession {
         use_acceleration: bool,
     ) -> Result<Self> {
         let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.to_owned());
+        match crate::capsule_protocol::load_pointer_catalog(&router).await {
+            Ok(catalog) => {
+                let entries = catalog
+                    .files()
+                    .iter()
+                    .map(|(file_hash, entry)| {
+                        Ok((
+                            MerkleHash::from_hex(file_hash).map_err(|error| {
+                                MetadataError::CorruptObject {
+                                    path: "capsule-protocol pointer catalog".to_owned(),
+                                    reason: format!("invalid file hash {file_hash}: {error}"),
+                                }
+                            })?,
+                            MerkleHash::from_hex(entry.shard_hash()).map_err(|error| {
+                                MetadataError::CorruptObject {
+                                    path: "capsule-protocol pointer catalog".to_owned(),
+                                    reason: format!(
+                                        "invalid shard hash {}: {error}",
+                                        entry.shard_hash()
+                                    ),
+                                }
+                            })?,
+                        ))
+                    })
+                    .collect::<Result<HashMap<_, _>>>()?;
+                return Ok(Self {
+                    static_entries: Some(Arc::new(entries)),
+                    reader: None,
+                    anchor: None,
+                    storage,
+                    router,
+                    parsers: tokio_util::task::TaskTracker::new(),
+                    manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
+                    limits: FileIndexLookupLimits::CURRENT_STATE,
+                });
+            }
+            Err(MetadataError::Storage {
+                source: crab_storage::StorageError::NotFound { .. },
+            }) => {}
+            Err(error) => return Err(error),
+        }
         let anchor = match crate::manifest_store::read_repository_snapshot(&storage, &router).await
         {
             Ok(snapshot) => CommittedShardAnchor::from_snapshot(&snapshot)?,
@@ -389,6 +434,7 @@ impl FileIndexLookupSession {
             Err(error) => return Err(error),
         };
         let mut session = Self {
+            static_entries: None,
             reader: None,
             anchor,
             storage,
@@ -427,6 +473,9 @@ impl FileIndexLookupSession {
 
     /// Look up one file hash in the open session.
     pub async fn lookup(&self, file_hash: &MerkleHash) -> Result<Option<MerkleHash>> {
+        if let Some(entries) = &self.static_entries {
+            return Ok(entries.get(file_hash).copied());
+        }
         if let Some(reader) = self.reader.as_ref()
             && let Some(record) =
                 lookup_committed_record(reader, *file_hash, self.anchor.as_ref()).await?
@@ -451,6 +500,12 @@ impl FileIndexLookupSession {
         check_limit(file_hashes.len(), self.limits.max_files, "file queries")?;
         if file_hashes.is_empty() {
             return Ok(Vec::new());
+        }
+        if let Some(entries) = &self.static_entries {
+            return Ok(file_hashes
+                .iter()
+                .map(|file_hash| entries.get(file_hash).copied())
+                .collect());
         }
 
         let records = self.lookup_committed_records_batch(file_hashes).await?;

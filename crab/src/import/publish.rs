@@ -143,7 +143,7 @@ pub struct PublishStats {
 pub async fn run_publish(inputs: PublishInputs) -> Result<PublishStats> {
     if cfg!(not(test)) {
         return Err(CrabError::Configuration {
-            key: "request-minimal import publish".to_owned(),
+            key: "capsule-protocol import publish".to_owned(),
             origin: "import requires protocol-v2 file-data and recipe sections".to_owned(),
         });
     }

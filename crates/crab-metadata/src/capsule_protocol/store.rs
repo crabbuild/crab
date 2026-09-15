@@ -1,7 +1,8 @@
 use crab_storage::{ETag, Store, StoreLayout};
 
+use crate::capsule_protocol::{CapsuleRun, Checkpoint, MAX_ROOT_BYTES, PointerCatalog, RootRecord};
+use crate::error::MetadataError;
 use crate::error::Result;
-use crate::request_minimal::{MAX_ROOT_BYTES, RootRecord};
 
 /// A verified stored root and the provider token protecting its next update.
 #[derive(Debug, Clone)]
@@ -87,7 +88,7 @@ pub async fn create_root(router: &StoreLayout<Store>, record: RootRecord) -> Res
     }
     let etag = router
         .store()
-        .create_strict_with_etag(&router.request_minimal_root_path(), record.bytes().clone())
+        .create_strict_with_etag(&router.capsule_root_path(), record.bytes().clone())
         .await?;
     Ok(RootSnapshot { record, etag })
 }
@@ -96,7 +97,7 @@ pub async fn create_root(router: &StoreLayout<Store>, record: RootRecord) -> Res
 pub async fn load_root(router: &StoreLayout<Store>) -> Result<RootSnapshot> {
     let (bytes, etag) = router
         .store()
-        .get_with_etag_bounded(&router.request_minimal_root_path(), MAX_ROOT_BYTES)
+        .get_with_etag_bounded(&router.capsule_root_path(), MAX_ROOT_BYTES)
         .await?;
     Ok(RootSnapshot {
         record: RootRecord::decode(bytes)?,
@@ -104,8 +105,71 @@ pub async fn load_root(router: &StoreLayout<Store>) -> Result<RootSnapshot> {
     })
 }
 
+/// Load the complete authenticated pointer catalog named by one v2 root.
+pub async fn load_pointer_catalog(router: &StoreLayout<Store>) -> Result<PointerCatalog> {
+    let snapshot = load_root(router).await?;
+    let root = snapshot.record().root();
+    let mut catalog = if let Some(pointer) = root.checkpoint() {
+        let path = router.capsule_checkpoint_path(pointer.hash());
+        let (bytes, _) = router
+            .store()
+            .get_with_etag_bounded(&path, pointer.size())
+            .await?;
+        let checkpoint = Checkpoint::decode(bytes)?;
+        let object_count = checkpoint
+            .git_packs()
+            .iter()
+            .try_fold(0_u64, |total, pack| total.checked_add(pack.object_count()))
+            .ok_or_else(|| corrupt(&path, "checkpoint object count overflowed"))?;
+        if checkpoint.hash() != pointer.hash()
+            || checkpoint.bytes().len() as u64 != pointer.size()
+            || checkpoint.covered_generation() != pointer.covered_generation()
+            || checkpoint.covered_root_digest() != pointer.covered_root_digest()
+            || checkpoint.git_packs().len() as u32 != pointer.pack_count()
+            || object_count != pointer.object_count()
+        {
+            return Err(corrupt(&path, "checkpoint does not match its root pointer"));
+        }
+        checkpoint.pointer_catalog()?
+    } else {
+        PointerCatalog::new()
+    };
+    for pointer in root.capsule_frontier() {
+        let path = router.capsule_path(pointer.hash());
+        let (bytes, _) = router
+            .store()
+            .get_with_etag_bounded(&path, pointer.size())
+            .await?;
+        let run = CapsuleRun::decode(bytes)?;
+        if run.hash() != pointer.hash()
+            || run.bytes().len() as u64 != pointer.size()
+            || run.level() != pointer.level()
+            || run.transaction_ids() != pointer.transaction_ids()
+            || run.newest_base_root_digest() != pointer.newest_base_root_digest()
+        {
+            return Err(corrupt(
+                &path,
+                "capsule run does not match its root pointer",
+            ));
+        }
+        for capsule in run.capsules() {
+            if let Some(delta) = capsule.pointer_catalog_delta()? {
+                catalog.apply(&delta)?;
+            }
+        }
+    }
+    Ok(catalog)
+}
+
+fn corrupt(path: &object_store::path::Path, reason: impl Into<String>) -> MetadataError {
+    MetadataError::CorruptObject {
+        path: path.to_string(),
+        reason: reason.into(),
+    }
+}
+
 fn contract_error(reason: impl Into<String>) -> crate::error::MetadataError {
-    crate::error::MetadataError::RequestMinimalContract {
+    crate::error::MetadataError::CapsuleContract {
         record: "stored root",
         reason: reason.into(),
     }

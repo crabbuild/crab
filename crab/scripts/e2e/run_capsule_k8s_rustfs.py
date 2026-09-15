@@ -40,7 +40,7 @@ class Qualification:
         self.final_clone = self.root / "final-clone"
         self.bin_dir = self.root / "bin"
         self.crab = self.bin_dir / "crab"
-        self.remote_prefix = f"e2e-request-minimal/{args.run_id}"
+        self.remote_prefix = f"e2e-capsule-protocol/{args.run_id}"
         self.remote_url = f"crab://{args.bucket}/{self.remote_prefix}"
         self.proxy = RequestCountingProxy(
             args.endpoint_url,
@@ -158,7 +158,7 @@ class Qualification:
         binary_sha256 = hashlib.sha256(self.crab.read_bytes()).hexdigest()
 
         self.report = {
-            "schema": "crab.request-minimal-k8s-rustfs",
+            "schema": "crab.capsule-protocol-k8s-rustfs",
             "version": "1.0",
             "status": "running",
             "started_at": now(),
