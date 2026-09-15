@@ -51,7 +51,7 @@ owner and epoch. Local tentative state remains quarantined; a changed owner is
 left untouched. The next idle acquisition reopens the exact authoritative root,
 so it cannot publish a late tentative commit. Streaming initial directory construction
 and directory-backed capture checksums, shared directory caching, prepared compaction/bundles,
-Workflow effect supervision, catalog-driven activity scheduling, scheduler
+Workflow/Queue effect adapters, catalog-driven effect/activity scheduling, scheduler
 progress advertisement and remote/idle scheduler routing, remaining HTTP domain
 cutovers and capacity qualification remain incomplete. The scoped
 KV primitive now installs
@@ -114,8 +114,13 @@ and private Resolve reads the inbox after exact-root restoration. The strict
 signed peer protocol now carries generic compiled Cell-command effects and
 effect Resolve, verifies the source-derived identity, destination incarnation
 and operation digest, and exposes a typed source-side `EffectPeerClient`.
-Workflow/Queue effect adapters, source claim/ack orchestration and the node
-effect supervisor still remain.
+`EffectModule` now binds source claim/lease/validation operations into the
+compiled registry, and `EffectSource` publishes every claim, acknowledgement
+and retry through `CellClient`. `EffectSupervisor` claims one published
+intention, revalidates its exact lease at the claim receipt, delivers or
+resolves it through the signed peer client, and then publishes the matching
+source acknowledgement or retry. Workflow/Queue effect adapters and
+catalog-driven node polling still remain.
 Bootstrap and every committed command now derive the earliest durable work or
 retention deadline from SQLite inside the same transaction. The runtime binds
 that summary to the pending LTX cut and publishes it in control; application

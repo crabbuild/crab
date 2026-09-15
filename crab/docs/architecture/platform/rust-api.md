@@ -256,8 +256,8 @@ but returns a typed committed, absent, unknown or expired observation and never
 reruns the handler. The effect entry points are private runtime construction
 APIs: they share Cell admission, FIFO actor ordering, SQL-worker affinity,
 cancellation-safe execution, exact-root publication and fence/unknown semantics.
-They are not exposed to application or browser callers; the pending peer
-translator must derive `InboxDelivery` only from authenticated source evidence.
+They are not exposed to application or browser callers; the implemented peer
+translator derives `InboxDelivery` only from authenticated source evidence.
 
 ```rust,ignore
 pub trait WireValue: Sized + Send + 'static {
@@ -428,8 +428,8 @@ from the workflow ID and registry topology, binds the start run identity to the
 runtime mutation identity, returns durable typed rejection for non-applied
 outcomes and supports bounded minimum-receipt state reads. Its integration test
 proves start, signal, duplicate replay, conflict rejection, exact-root restore,
-state and cancellation. Catalog-driven activity scheduling and effect supervision
-remain node services outside this application capability. `WorkflowActivities<M>` and
+state and cancellation. Catalog-driven activity/effect polling remains a node
+service outside this application capability. `WorkflowActivities<M>` and
 `ActivitySupervisor<M>` now implement the first native execution unit: registry
 freeze verifies the exact definition/type/handler matrix, claims and validation
 cross a published receipt, the statically linked future runs without a SQLite
@@ -602,8 +602,77 @@ rechecks source Cell/incarnation/sequence, target Cell, expiry and digest, then
 signs and routes it. `PeerDispatcher` rechecks the derived effect ID and target
 incarnation before calling `CellHandle::deliver_effect`. Ambiguous transport or
 publication returns `EffectOutcomeUnknown`; `EffectPeerClient::resolve` queries
-the destination inbox with the same identity and digest. The remaining
-supervisor must own claim validation, retry, Resolve and source acknowledgement.
+the destination inbox with the same identity and digest. The source-side Rust
+API is:
+
+```rust,ignore
+pub trait EffectModule: Send + Sync + 'static {
+    const MODULE: &'static str;
+    const CODEC_VERSION: u32 = 1;
+    const CLAIM_COMMAND_ID: u32;
+    const LEASE_COMMAND_ID: u32;
+    const VALIDATE_QUERY_ID: u32;
+}
+
+pub fn register_effect_delivery<M: EffectModule>(
+    registry: &mut RegistryBuilder,
+) -> Result<()>;
+
+impl<M: EffectModule> EffectSource<M> {
+    pub fn new(client: CellClient, target: CellTarget) -> Self;
+    pub async fn claim(
+        &self,
+        identity: MutationIdentity,
+        request: EffectClaimRequest,
+    ) -> Result<Committed<Vec<EffectClaim>>, InvocationError<Vec<EffectClaim>>>;
+    pub async fn validate(
+        &self,
+        claimed: Vec<EffectClaim>,
+        minimum: Receipt,
+    ) -> Result<Observed<bool>, InvocationError<bool>>;
+    pub async fn ack(
+        &self,
+        identity: MutationIdentity,
+        claim: EffectClaim,
+        result: Vec<u8>,
+    ) -> Result<Committed<EffectLeaseOutcome>, InvocationError<EffectLeaseOutcome>>;
+    pub async fn retry(
+        &self,
+        identity: MutationIdentity,
+        claim: EffectClaim,
+    ) -> Result<Committed<EffectLeaseOutcome>, InvocationError<EffectLeaseOutcome>>;
+}
+
+impl<M: EffectModule> EffectSupervisor<M> {
+    pub fn new(
+        source: EffectSource<M>,
+        peer: EffectPeerClient,
+        lease_ms: u32,
+    ) -> Result<Self>;
+    pub async fn run_once(&self)
+        -> Result<EffectRunOutcome, EffectSupervisorError>;
+}
+```
+
+`run_once` owns the complete one-item protocol: publish a source claim, validate
+the lease after that receipt, deliver to the destination, Resolve an ambiguous
+delivery, then publish either the exact acknowledgement or a bounded retry.
+Destination business rejection is a delivered result, not a transport failure.
+Known transient owner, capacity, deadline and transport failures publish a
+retry. Non-transient authorization, registry and malformed-protocol failures
+return `EffectSupervisorError::Runtime` and leave the lease to expire/reclaim.
+An unknown source mutation returns `Pending` with its original resolution
+evidence. A node scheduler may call `run_once` only after selecting and routing
+an explicit due source Cell; catalog-driven polling is not implemented by this
+type.
+
+The claim command's complete encoded output and lease command's complete input
+must each remain within the registry's 1 MiB operation limit. Therefore the
+lease transition wire value contains only `{effect_id, attempt, token,
+expires_at_ms}`; it never repeats the destination operation. Fixed codec
+overhead leaves 1,048,412 bytes for one claimed operation and 1,048,503 bytes
+for one acknowledgement result. Boundary tests pin both exact sizes and reject
+one byte beyond either limit.
 
 Before constructing `PeerVerifier`, the HTTP receiver calls
 `claimed_peer_session` to obtain only a structurally validated lookup key. That

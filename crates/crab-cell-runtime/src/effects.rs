@@ -5,8 +5,25 @@ use crate::{
     CellId, Digest, Error, HandlerOutcome, IncarnationId, Resolution, Result, StoredOutcome,
 };
 
+mod api;
+mod supervisor;
+
+pub use api::{
+    EffectAckRequest, EffectClaimCommand, EffectClaimRequest, EffectLeaseCommand,
+    EffectLeaseRequest, EffectModule, EffectSource, EffectValidateClaimQuery,
+    EffectValidateRequest, register_effect_delivery,
+};
+pub use supervisor::{EffectRunOutcome, EffectSupervisor, EffectSupervisorError};
+
 const MAX_EFFECTS_PER_COMMAND: usize = 128;
 const MAX_EFFECT_BYTES: usize = 1 << 20;
+const EFFECT_CLAIM_FIXED_BYTES: usize = 160;
+const EFFECT_CLAIM_LIST_BYTES: usize = 4;
+const EFFECT_ACK_FIXED_BYTES: usize = 73;
+// Full typed claim outputs and acknowledgement inputs share the registry's 1 MiB ceiling.
+pub(crate) const MAX_EFFECT_OPERATION_BYTES: usize =
+    MAX_EFFECT_BYTES - EFFECT_CLAIM_LIST_BYTES - EFFECT_CLAIM_FIXED_BYTES;
+pub(crate) const MAX_EFFECT_RESULT_BYTES: usize = MAX_EFFECT_BYTES - EFFECT_ACK_FIXED_BYTES;
 const MAX_CLAIM_ITEMS: usize = 32;
 const MAX_RECLAIM_ITEMS: usize = 128;
 const MAX_ATTEMPTS: u32 = 20;
@@ -64,9 +81,13 @@ pub struct SystemEffectTokens;
 
 impl EffectTokenSource for SystemEffectTokens {
     fn next_token(&mut self) -> Result<[u8; 16]> {
-        let mut token = [0; 16];
-        rand::rng().fill_bytes(&mut token);
-        Ok(token)
+        loop {
+            let mut token = [0; 16];
+            rand::rng().fill_bytes(&mut token);
+            if token != [0; 16] {
+                return Ok(token);
+            }
+        }
     }
 }
 
@@ -82,6 +103,26 @@ pub struct EffectClaim {
     pub lease_until_ms: i64,
     pub expires_at_ms: i64,
     pub created_sequence: u64,
+}
+
+/// Minimal identity needed to mutate one exact source lease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EffectLease {
+    pub effect_id: [u8; 32],
+    pub attempt: u32,
+    pub token: [u8; 16],
+    pub expires_at_ms: i64,
+}
+
+impl From<&EffectClaim> for EffectLease {
+    fn from(claim: &EffectClaim) -> Self {
+        Self {
+            effect_id: claim.effect_id,
+            attempt: claim.attempt,
+            token: claim.token,
+            expires_at_ms: claim.expires_at_ms,
+        }
+    }
 }
 
 /// Exact target-side identity and expiry carried by a private delivery.
@@ -124,7 +165,7 @@ pub fn effect_insert(
         || sequence > i64::MAX as u64
         || ordinal as usize >= MAX_EFFECTS_PER_COMMAND
         || intent.operation.is_empty()
-        || intent.operation.len() > MAX_EFFECT_BYTES
+        || intent.operation.len() > MAX_EFFECT_OPERATION_BYTES
         || intent.expires_at_ms <= now_ms
         || intent.expires_at_ms > now_ms.saturating_add(EFFECT_LIFETIME_MS)
     {
@@ -222,7 +263,7 @@ pub fn effect_claim(
     let requested_deadline = now_ms
         .checked_add(i64::from(lease_ms))
         .ok_or(Error::Command("effect lease deadline overflow"))?;
-    let mut bytes = 0_usize;
+    let mut bytes = EFFECT_CLAIM_LIST_BYTES;
     let mut claimed = Vec::with_capacity(limit);
     for (effect_id, destination, operation, attempt, expires_at_ms, created_sequence) in candidates
     {
@@ -235,14 +276,15 @@ pub fn effect_claim(
             "invalid stored effect destination",
         )?);
         if operation.is_empty()
-            || operation.len() > MAX_EFFECT_BYTES
+            || operation.len() > MAX_EFFECT_OPERATION_BYTES
             || attempt < 0
             || created_sequence <= 0
         {
             return Err(Error::Command("invalid stored effect"));
         }
         let prospective = bytes
-            .checked_add(operation.len())
+            .checked_add(EFFECT_CLAIM_FIXED_BYTES)
+            .and_then(|bytes| bytes.checked_add(operation.len()))
             .ok_or(Error::Command("effect claim byte count overflow"))?;
         if prospective > MAX_EFFECT_BYTES {
             break;
@@ -297,7 +339,7 @@ pub fn effect_validate_claim(
         .ok_or(Error::Command("effect delivery margin overflow"))?;
     for effect in claimed {
         if effect.operation.is_empty()
-            || effect.operation.len() > MAX_EFFECT_BYTES
+            || effect.operation.len() > MAX_EFFECT_OPERATION_BYTES
             || effect.lease_until_ms < minimum
             || effect.operation_digest
                 != effect_operation_digest(effect.destination, effect.effect_id, &effect.operation)
@@ -336,14 +378,25 @@ pub fn effect_ack_delivered(
     claim: &EffectClaim,
     result: &[u8],
 ) -> Result<EffectLeaseOutcome> {
+    effect_ack_lease(transaction, now_ms, EffectLease::from(claim), result)
+}
+
+pub(crate) fn effect_ack_lease(
+    transaction: &Transaction<'_>,
+    now_ms: i64,
+    lease: EffectLease,
+    result: &[u8],
+) -> Result<EffectLeaseOutcome> {
     validate_now(now_ms)?;
-    if result.len() > MAX_EFFECT_BYTES {
-        return Err(Error::Command("effect result exceeds 1 MiB"));
+    if result.len() > MAX_EFFECT_RESULT_BYTES {
+        return Err(Error::Command(
+            "effect result exceeds acknowledgement wire limit",
+        ));
     }
     if apply_lease(
         transaction,
         now_ms,
-        claim,
+        &lease,
         EffectState::Delivered,
         None,
         Some(result),
@@ -360,10 +413,18 @@ pub fn effect_retry(
     now_ms: i64,
     claim: &EffectClaim,
 ) -> Result<EffectLeaseOutcome> {
+    effect_retry_lease(transaction, now_ms, EffectLease::from(claim))
+}
+
+pub(crate) fn effect_retry_lease(
+    transaction: &Transaction<'_>,
+    now_ms: i64,
+    lease: EffectLease,
+) -> Result<EffectLeaseOutcome> {
     validate_now(now_ms)?;
-    let delay = retry_delay_ms(claim.attempt);
+    let delay = retry_delay_ms(lease.attempt);
     let due_at_ms = now_ms.saturating_add(delay);
-    let state = if claim.attempt >= MAX_ATTEMPTS || due_at_ms >= claim.expires_at_ms {
+    let state = if lease.attempt >= MAX_ATTEMPTS || due_at_ms >= lease.expires_at_ms {
         EffectState::Failed
     } else {
         EffectState::Ready
@@ -371,7 +432,7 @@ pub fn effect_retry(
     if !apply_lease(
         transaction,
         now_ms,
-        claim,
+        &lease,
         state,
         (state == EffectState::Ready).then_some(due_at_ms),
         None,
@@ -656,22 +717,23 @@ pub fn effect_id(
 fn apply_lease(
     transaction: &Transaction<'_>,
     now_ms: i64,
-    claim: &EffectClaim,
+    lease: &EffectLease,
     state: EffectState,
     due_at_ms: Option<i64>,
     result: Option<&[u8]>,
 ) -> Result<bool> {
     let due_at_ms = due_at_ms.unwrap_or(0);
     let changed = transaction.execute(
-        "UPDATE sys_effects SET state = ?1, due_at_ms = CASE WHEN ?1 = 0 THEN ?2 ELSE due_at_ms END, token = NULL, lease_until_ms = NULL, result = ?3 WHERE effect_id = ?4 AND state = 1 AND attempt = ?5 AND token = ?6 AND lease_until_ms > ?7",
+        "UPDATE sys_effects SET state = ?1, due_at_ms = CASE WHEN ?1 = 0 THEN ?2 ELSE due_at_ms END, token = NULL, lease_until_ms = NULL, result = ?3 WHERE effect_id = ?4 AND state = 1 AND attempt = ?5 AND token = ?6 AND lease_until_ms > ?7 AND expires_at_ms = ?8",
         (
             state.encode(),
             due_at_ms,
             result,
-            claim.effect_id.as_slice(),
-            i64::from(claim.attempt),
-            claim.token.as_slice(),
+            lease.effect_id.as_slice(),
+            i64::from(lease.attempt),
+            lease.token.as_slice(),
             now_ms,
+            lease.expires_at_ms,
         ),
     )?;
     Ok(changed == 1)

@@ -68,8 +68,10 @@ Implementation status: `crab-cell-runtime::effects` implements the reusable
 source `sys_effects` and destination `sys_inbox` mechanics. It derives effect
 IDs from source Cell/incarnation/sequence/ordinal, binds the destination and
 exact operation bytes in a stable digest, enforces 128 intentions/1 MiB per
-command, claims at most 32/1 MiB, and revalidates attempt/token/deadline only
-after publication. Delivery results use a nested savepoint so a business
+command, returns at most 32 claims in a 1 MiB canonical result, and revalidates
+attempt/token/deadline only after publication. One stored operation is capped at
+1,048,412 bytes so its fixed 164-byte single-claim envelope fits that result.
+Delivery results use a nested savepoint so a business
 rejection rolls back destination writes while its inbox result remains durable.
 Lost responses retry the same effect bytes; the inbox returns the stored result
 without invoking the handler. Source retry/extension/delivery and both retention
@@ -80,8 +82,19 @@ published inbox, including after exact-root restoration. Accepted delivery
 continues after caller cancellation. The signed peer transport strictly validates
 and dispatches generic compiled Cell-command DeliverEffect/ResolveEffect messages;
 `EffectPeerClient` validates a canonical stored request against its published
-claim before signing it. Workflow/Queue effect insertion and codecs, source
-claim/ack orchestration and the node delivery supervisor remain.
+claim before signing it. `EffectModule` and `register_effect_delivery` bind
+claim, validation and lease-transition codecs to fixed compiled operation IDs.
+`EffectSource` sends those operations through `CellClient`, so a claim cannot
+leave SQLite before its LTX root publishes. `EffectSupervisor::run_once` claims
+one intention, performs a minimum-receipt lease validation, delivers it through
+the signed peer path, resolves an ambiguous target result, then publishes the
+exact source acknowledgement or bounded retry. It surfaces non-transient
+authorization/protocol failures without releasing the live lease; normal lease
+reclamation remains the recovery path. Workflow/Queue effect insertion adapters
+and catalog-driven node polling remain. Ack/retry codecs carry only effect ID,
+attempt, token and expiry rather than repeating operation bytes. Ack results are
+capped at 1,048,503 bytes so that identity plus result remains within the same
+1 MiB registered-command input ceiling.
 
 Runtime request outcome values: 1=success, 2=business rejection. Its result is
 the encoded MutationResult or Error, not a transport header. The stored sequence

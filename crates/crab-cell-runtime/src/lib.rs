@@ -44,10 +44,14 @@ pub use codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 pub use control::{Control, ControlState, Owner, RootRef, Transition};
 pub use crab_ltx::{CellReplica, Limits as ReplicaLimits};
 pub use effects::{
-    EffectClaim, EffectIntent, EffectLeaseOutcome, EffectState, EffectTokenSource,
-    InboxApplyOutcome, InboxDelivery, SystemEffectTokens, effect_ack_delivered, effect_claim,
-    effect_cleanup_terminal, effect_extend, effect_id, effect_insert, effect_operation_digest,
-    effect_retry, effect_validate_claim, inbox_apply, inbox_cleanup_expired, inbox_resolve,
+    EffectAckRequest, EffectClaim, EffectClaimCommand, EffectClaimRequest, EffectIntent,
+    EffectLease, EffectLeaseCommand, EffectLeaseOutcome, EffectLeaseRequest, EffectModule,
+    EffectRunOutcome, EffectSource, EffectState, EffectSupervisor, EffectSupervisorError,
+    EffectTokenSource, EffectValidateClaimQuery, EffectValidateRequest, InboxApplyOutcome,
+    InboxDelivery, SystemEffectTokens, effect_ack_delivered, effect_claim, effect_cleanup_terminal,
+    effect_extend, effect_id, effect_insert, effect_operation_digest, effect_retry,
+    effect_validate_claim, inbox_apply, inbox_cleanup_expired, inbox_resolve,
+    register_effect_delivery,
 };
 pub use error::{Error, Result};
 pub use executor::{

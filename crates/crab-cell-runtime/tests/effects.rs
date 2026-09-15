@@ -250,6 +250,18 @@ fn one_command_cannot_exceed_effect_count_or_byte_limits() {
     let destination = CellId::from_bytes([3; 32]);
     let mut source = connection(1, 2);
     let transaction = source.transaction().unwrap();
+    assert!(
+        effect_insert(
+            &transaction,
+            source_cell,
+            incarnation,
+            1,
+            0,
+            0,
+            &intent(destination, &vec![0; 1 << 20], 10_000),
+        )
+        .is_err()
+    );
     for ordinal in 0..128 {
         effect_insert(
             &transaction,
