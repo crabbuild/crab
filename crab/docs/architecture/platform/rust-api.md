@@ -547,9 +547,10 @@ pub trait ActivityHandler: Send + Sync + 'static {
 The registry binds a definition digest to the exact transition implementation
 and its state/event codecs. Activity is registered generically; private
 type-erasure is an implementation detail, not a dynamic-library ABI. Validate
-Decision bounds before any writes and apply all actions in the same transaction.
-Emit uses the pre-resolved destination procedure in primitives.md; action IDs
-come from TransitionContext, never random callback-local state.
+`WorkflowDecision` bounds before any writes and apply all actions in the same
+transaction. `WorkflowAction::Effect` uses the pre-resolved destination
+procedure in primitives.md; action IDs come from `WorkflowContext`, never
+random callback-local state.
 
 Use a node-wide Tokio supervisor with at most min(32, 2 * vCPU) running activities
 and byte reservations for input/output. It cycles eligible shards, backs off
