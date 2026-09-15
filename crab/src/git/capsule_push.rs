@@ -1,6 +1,6 @@
 //! Canonical protocol-v2 Git push path.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -35,6 +35,7 @@ pub async fn run(
     advertised: Option<crab_metadata::capsule_protocol::RootSnapshot>,
     hidden_ref_patterns: &[String],
     staging: Option<&Arc<StagingAreaReadOnly>>,
+    caching_store: Option<&crab_cache_store::CachingStore>,
     cancel: &CancellationToken,
 ) -> Result<(
     PushResult,
@@ -214,6 +215,7 @@ pub async fn run(
         config.receive_max_input_size,
     )
     .await?;
+    let visibility_delta = prepare_visibility_delta(&common_git_dir, root.refs(), &edits)?;
     tracing::debug!(
         git_packs = prepared.packs.len(),
         pointers = prepared.pointers.len(),
@@ -242,6 +244,7 @@ pub async fn run(
             &base,
             &prepared.pointers,
             staging,
+            caching_store,
             cancel,
         )
         .await?;
@@ -249,14 +252,19 @@ pub async fn run(
             base.record().digest(),
             edits,
         )?;
-        let sections = if pointer_delta.is_empty() {
-            Vec::new()
-        } else {
-            vec![crab_metadata::capsule_protocol::CapsuleSection::new(
+        let mut sections = Vec::with_capacity(2);
+        if !pointer_delta.is_empty() {
+            sections.push(crab_metadata::capsule_protocol::CapsuleSection::new(
                 crab_metadata::capsule_protocol::CapsuleSectionKind::CatalogDelta,
                 pointer_delta.encode_delta()?,
-            )]
-        };
+            ));
+        }
+        if let Some(visibility_delta) = visibility_delta {
+            sections.push(crab_metadata::capsule_protocol::CapsuleSection::new(
+                crab_metadata::capsule_protocol::CapsuleSectionKind::VisibilityDelta,
+                visibility_delta.encode()?,
+            ));
+        }
         let capsule = crab_metadata::capsule_protocol::Capsule::build(
             &transaction,
             prepared.packs,
@@ -298,6 +306,75 @@ pub async fn run(
         );
     }
     Ok((PushResult::new(outcomes), None))
+}
+
+fn prepare_visibility_delta(
+    git_dir: &Path,
+    base_refs: &BTreeMap<String, String>,
+    edits: &[crab_metadata::capsule_protocol::CapsuleRefEdit],
+) -> Result<Option<crab_metadata::capsule_protocol::CapsuleVisibilityDelta>> {
+    let maximum = usize::try_from(crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS)
+        .map_err(|_| CrabError::Internal("Git visibility limit does not fit usize".to_owned()))?;
+    let mut visibility = BTreeMap::new();
+    let reusable_tips = base_refs.values().cloned().collect::<BTreeSet<_>>();
+    for edit in edits {
+        let Some(new_oid) = edit.new_oid() else {
+            continue;
+        };
+        let evidence = if let Some(old_oid) = edit.expected_old() {
+            let added = super::push::enumerate_visibility_difference(
+                git_dir,
+                new_oid,
+                Some(old_oid),
+                maximum,
+            )?
+            .ok_or_else(|| visibility_limit_error(edit.ref_name()))?;
+            let removed = super::push::enumerate_visibility_difference(
+                git_dir,
+                old_oid,
+                Some(new_oid),
+                maximum.saturating_sub(added.len()),
+            )?
+            .ok_or_else(|| visibility_limit_error(edit.ref_name()))?;
+            crab_metadata::git_visibility::GitVisibilityEdit::from_delta_objects(
+                Some(old_oid.to_owned()),
+                new_oid.to_owned(),
+                added,
+                removed,
+            )
+        } else if reusable_tips.contains(new_oid) {
+            crab_metadata::git_visibility::GitVisibilityEdit::from_delta_objects(
+                Some(new_oid.to_owned()),
+                new_oid.to_owned(),
+                Vec::new(),
+                Vec::new(),
+            )
+        } else {
+            let objects =
+                super::push::enumerate_visibility_difference(git_dir, new_oid, None, maximum)?
+                    .ok_or_else(|| visibility_limit_error(edit.ref_name()))?;
+            crab_metadata::git_visibility::GitVisibilityEdit::from_replacement_objects(
+                None,
+                new_oid.to_owned(),
+                objects,
+            )
+        };
+        evidence.validate()?;
+        visibility.insert(edit.ref_name().to_owned(), evidence);
+    }
+    if visibility.is_empty() {
+        Ok(None)
+    } else {
+        crab_metadata::capsule_protocol::CapsuleVisibilityDelta::new(visibility)
+            .map(Some)
+            .map_err(Into::into)
+    }
+}
+
+fn visibility_limit_error(ref_name: &str) -> CrabError {
+    CrabError::Protocol(format!(
+        "Git visibility for {ref_name} exceeds the protocol-v2 object limit"
+    ))
 }
 
 fn current_branch_is_denied(config: &PushConfig, head: &str, destination: &str) -> bool {
@@ -671,6 +748,7 @@ mod tests {
             Some(root),
             &[],
             None,
+            None,
             &CancellationToken::new(),
         )
         .await
@@ -711,6 +789,7 @@ mod tests {
             &router,
             Some(committed),
             &[],
+            None,
             None,
             &CancellationToken::new(),
         )
@@ -769,6 +848,7 @@ mod tests {
             &router,
             Some(checkpoint_root),
             &[],
+            None,
             None,
             &CancellationToken::new(),
         )

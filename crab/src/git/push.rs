@@ -18208,7 +18208,7 @@ fn visibility_base_oid(git_dir: &Path, new_oid: &str) -> Result<Option<String>> 
     Ok(parents.into_iter().next())
 }
 
-fn enumerate_visibility_difference(
+pub(crate) fn enumerate_visibility_difference(
     git_dir: &Path,
     include: &str,
     exclude: Option<&str>,

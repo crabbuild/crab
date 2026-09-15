@@ -9,9 +9,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-#[cfg(test)]
 use crab_metadata::git_visibility::GitVisibilityIndex;
-#[cfg(test)]
 use crab_read::plan_upload_pack;
 use crab_read::upload_pack_wire::{
     FetchRequest, LsRefsRequest, MAX_PACKET_BYTES, flush_cancellable, parse_fetch, parse_ls_refs,
@@ -107,7 +105,6 @@ enum VisibilityRequirement {
 }
 
 enum UploadPackVisibilityProof {
-    #[cfg(test)]
     Materialized(GitVisibilityIndex),
     Catalog(GitCatalogVisibilityIndex),
 }
@@ -116,7 +113,6 @@ impl UploadPackVisibilityProof {
     fn as_catalog(&self) -> Option<&GitCatalogVisibilityIndex> {
         match self {
             Self::Catalog(visibility) => Some(visibility),
-            #[cfg(test)]
             Self::Materialized(_) => None,
         }
     }
@@ -125,7 +121,6 @@ impl UploadPackVisibilityProof {
     fn into_catalog(self) -> Result<GitCatalogVisibilityIndex> {
         match self {
             Self::Catalog(visibility) => Ok(visibility),
-            #[cfg(test)]
             Self::Materialized(_) => Err(CrabError::Internal(
                 "catalog upload-pack proof was not returned".to_owned(),
             )),
@@ -134,7 +129,6 @@ impl UploadPackVisibilityProof {
 
     fn object_count_for_refs(&self, refs: &[String]) -> usize {
         match self {
-            #[cfg(test)]
             Self::Materialized(visibility) => {
                 visibility.object_count_for_refs(refs.iter().map(String::as_str))
             }
@@ -146,7 +140,6 @@ impl UploadPackVisibilityProof {
 
     fn authorization_digest_for_refs(&self, refs: &[String]) -> [u8; 32] {
         match self {
-            #[cfg(test)]
             Self::Materialized(visibility) => {
                 visibility.authorization_digest_for_refs(refs.iter().map(String::as_str))
             }
@@ -366,6 +359,7 @@ pub async fn serve<R, W>(
     hidden_ref_patterns: &[String],
     fetch_policy: &FetchAdmissionPolicy,
     progress: bool,
+    capsule_root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
     cancellation: &CancellationToken,
 ) -> Result<()>
 where
@@ -383,6 +377,7 @@ where
         hidden_ref_patterns,
         fetch_policy,
         progress,
+        capsule_root,
         cancellation,
     )
     .await;
@@ -515,6 +510,7 @@ async fn serve_with_read_admission<R, W>(
     hidden_ref_patterns: &[String],
     fetch_policy: &FetchAdmissionPolicy,
     progress: bool,
+    capsule_root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
     cancellation: &CancellationToken,
 ) -> Result<()>
 where
@@ -537,6 +533,7 @@ where
         hidden_ref_patterns,
         fetch_policy,
         progress,
+        capsule_root,
         &admission,
         cancellation,
     );
@@ -606,6 +603,7 @@ async fn serve_admitted<R, W>(
     hidden_ref_patterns: &[String],
     fetch_policy: &FetchAdmissionPolicy,
     progress: bool,
+    capsule_root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
     admission: &Arc<tokio::sync::Mutex<Option<crab_coordination::ReadAdmissionTicket>>>,
     cancellation: &CancellationToken,
 ) -> Result<()>
@@ -613,22 +611,58 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let (refs, mut discovery_packs) = {
-        let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
-        let snapshot = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Err(CrabError::Cancelled),
-            result = crab_metadata::manifest_store::read_repository_snapshot(store, &layout) => result?,
-        };
-        let manifest = snapshot.materialized_manifest();
-        let refs = RepositoryRefs::try_from(&manifest).map_err(remote_error)?;
-        (refs, snapshot.journal.packs)
+    let (refs, mut discovery_packs, mut fetch_snapshot) = match capsule_root {
+        Some(root) => {
+            let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
+            let options = upload_pack_repository_options().map_err(remote_error)?;
+            let maximum = options.operation_limits().max_fetched_bytes;
+            let view = crab_read::capsule_protocol::open_view_from_root(
+                &layout,
+                root,
+                crab_read::capsule_protocol::CapsuleReadLimits {
+                    max_capsule_bytes: maximum,
+                    max_frontier_bytes: maximum,
+                },
+            )
+            .await?;
+            let bucket = store.bucket_identity();
+            let provider = format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container);
+            let identity =
+                RepositoryIdentity::new(provider, prefix.to_owned(), 1).map_err(remote_error)?;
+            let visibility = if view.root().root().refs().is_empty() {
+                None
+            } else {
+                Some(UploadPackVisibilityProof::Materialized(
+                    view.git_visibility_index()?,
+                ))
+            };
+            let repository = view
+                .git_repository(
+                    identity,
+                    Arc::new(RemoteGitRuntime::default()),
+                    options,
+                    maximum,
+                    cancellation,
+                )
+                .await?;
+            let refs = repository.refs().clone();
+            (refs, Vec::new(), Some((repository, visibility)))
+        }
+        None => {
+            let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
+            let snapshot = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(CrabError::Cancelled),
+                result = crab_metadata::manifest_store::read_repository_snapshot(store, &layout) => result?,
+            };
+            let manifest = snapshot.materialized_manifest();
+            let refs = RepositoryRefs::try_from(&manifest).map_err(remote_error)?;
+            (refs, snapshot.journal.packs, None)
+        }
     };
     let visible_ref_names = visible_ref_names(&refs, hidden_ref_patterns)?;
     // Discovery reads canonical metadata, even if payloads or derived indexes
     // are damaged. Fetch still requires its complete verified admission path.
-    let mut fetch_snapshot = None;
-
     // The remote-helper positive response is one raw blank line. Only after
     // this acknowledgement does the stdio stream become protocol-v2 bytes.
     tracing::debug!(
@@ -727,11 +761,9 @@ where
                     )
                     .await;
                 };
-                if let Err(error) = validate_fetch_admission_catalog(
+                if let Err(error) = validate_fetch_admission(
                     repository,
-                    proof.as_catalog().ok_or_else(|| {
-                        CrabError::Internal("upload-pack did not retain catalog proof".to_owned())
-                    })?,
+                    proof,
                     &visible_ref_names,
                     &fetch,
                     fetch_policy,
@@ -742,18 +774,9 @@ where
                     return reject_protocol_request(writer, error, cancellation).await;
                 }
                 if !fetch.done {
-                    let common_haves = common_haves_catalog(
-                        repository,
-                        proof.as_catalog().ok_or_else(|| {
-                            CrabError::Internal(
-                                "upload-pack did not retain catalog proof".to_owned(),
-                            )
-                        })?,
-                        &fetch,
-                        &visible_ref_names,
-                        cancellation,
-                    )
-                    .await?;
+                    let common_haves =
+                        common_haves(repository, proof, &fetch, &visible_ref_names, cancellation)
+                            .await?;
                     if common_haves.is_empty() {
                         write_acknowledgments(writer, cancellation).await?;
                     } else {
@@ -802,7 +825,6 @@ where
     }
 }
 
-#[cfg(test)]
 fn validate_fetch_wants(
     advertised_tips: &HashSet<ObjectId>,
     visibility: &GitVisibilityIndex,
@@ -825,6 +847,46 @@ fn validate_fetch_wants(
         )));
     }
     Ok(())
+}
+
+async fn validate_fetch_admission(
+    repository: &RemoteGitRepository,
+    proof: &UploadPackVisibilityProof,
+    visible_ref_names: &[String],
+    request: &FetchRequest,
+    policy: &FetchAdmissionPolicy,
+    cancellation: &CancellationToken,
+) -> Result<()> {
+    match proof {
+        UploadPackVisibilityProof::Materialized(visibility) => {
+            let advertised_tips = repository
+                .refs()
+                .entries
+                .iter()
+                .filter(|reference| visible_ref_names.contains(&reference.name))
+                .flat_map(|reference| [Some(reference.target), reference.peeled])
+                .flatten()
+                .collect::<HashSet<_>>();
+            validate_fetch_wants(
+                &advertised_tips,
+                visibility,
+                visible_ref_names,
+                request,
+                policy,
+            )
+        }
+        UploadPackVisibilityProof::Catalog(visibility) => {
+            validate_fetch_admission_catalog(
+                repository,
+                visibility,
+                visible_ref_names,
+                request,
+                policy,
+                cancellation,
+            )
+            .await
+        }
+    }
 }
 
 async fn validate_fetch_admission_catalog(
@@ -1322,6 +1384,37 @@ async fn common_haves_catalog(
         .collect())
 }
 
+async fn common_haves(
+    repository: &RemoteGitRepository,
+    proof: &UploadPackVisibilityProof,
+    request: &FetchRequest,
+    visible_ref_names: &[String],
+    cancellation: &CancellationToken,
+) -> Result<Vec<ObjectId>> {
+    match proof {
+        UploadPackVisibilityProof::Materialized(visibility) => Ok(request
+            .haves
+            .iter()
+            .copied()
+            .filter(|have| {
+                have.as_bytes().try_into().ok().is_some_and(|oid| {
+                    visibility.contains_for_refs(visible_ref_names.iter().map(String::as_str), &oid)
+                })
+            })
+            .collect()),
+        UploadPackVisibilityProof::Catalog(visibility) => {
+            common_haves_catalog(
+                repository,
+                visibility,
+                request,
+                visible_ref_names,
+                cancellation,
+            )
+            .await
+        }
+    }
+}
+
 async fn visible_objects_catalog(
     repository: &RemoteGitRepository,
     visibility: &GitCatalogVisibilityIndex,
@@ -1500,7 +1593,6 @@ async fn write_preplanned_cached_fetch_response<W: AsyncWrite + Unpin>(
             }
         }
         let plan = match proof {
-            #[cfg(test)]
             UploadPackVisibilityProof::Materialized(visibility) => {
                 plan_upload_pack(
                     repository,
@@ -1641,7 +1733,6 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
         .await;
     }
     let plan = match match proof {
-        #[cfg(test)]
         UploadPackVisibilityProof::Materialized(visibility) => {
             plan_upload_pack(
                 repository,
@@ -2280,6 +2371,7 @@ mod tests {
                 &hidden_refs,
                 &FetchAdmissionPolicy::default(),
                 false,
+                None,
                 &CancellationToken::new(),
             )
             .await;
@@ -2359,6 +2451,7 @@ mod tests {
             &["refs/heads/secret".to_owned()],
             &FetchAdmissionPolicy::default(),
             false,
+            None,
             &CancellationToken::new(),
         )
         .await
@@ -2400,6 +2493,7 @@ mod tests {
                 &[],
                 &FetchAdmissionPolicy::default(),
                 false,
+                None,
                 &CancellationToken::new(),
             ))
             .await

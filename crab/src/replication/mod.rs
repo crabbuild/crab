@@ -13676,11 +13676,6 @@ mod tests {
                 reason: "compaction rewrites remote storage layout state and must target primary storage",
             },
             CliStoreOperationClassification {
-                operation: "fsck",
-                class: "primary-maintenance",
-                reason: "fsck must inspect primary authority state; repair mode may mutate only that authority",
-            },
-            CliStoreOperationClassification {
                 operation: "gc",
                 class: "primary-maintenance",
                 reason: "garbage collection and registry deregistration delete primary-authority objects",

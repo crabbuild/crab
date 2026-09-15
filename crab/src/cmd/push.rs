@@ -574,6 +574,13 @@ async fn run_push_once(
     let store = selection.store;
     let router = selection.router;
     let root = selection.capsule_root;
+    let caching_store = match crab_cache_store::CachingStore::new(store.clone(), &config.cache) {
+        Ok(cache) => Some(cache),
+        Err(error) => {
+            warn!(%error, "failed to build CachingStore, using origin only");
+            None
+        }
+    };
     let repo_prefix = router.repo_prefix().to_owned();
     let staging =
         crate::git::push_staging::PushStaging::open(repo_root.join(".crab").join("staging"))
@@ -586,6 +593,7 @@ async fn run_push_once(
         Some(root),
         &config.transfer_hide_refs,
         staging.reader(),
+        caching_store.as_ref(),
         cancel,
     )
     .await

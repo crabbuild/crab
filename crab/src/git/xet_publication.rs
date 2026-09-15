@@ -24,6 +24,7 @@ pub(crate) async fn prepare_delta(
     base: &crab_metadata::capsule_protocol::RootSnapshot,
     pointers: &[crab_types::pointer::Pointer],
     staging: Option<&Arc<StagingAreaReadOnly>>,
+    caching_store: Option<&crab_cache_store::CachingStore>,
     cancel: &CancellationToken,
 ) -> Result<crab_metadata::capsule_protocol::PointerCatalog> {
     use crab_metadata::capsule_protocol::{
@@ -277,8 +278,15 @@ pub(crate) async fn prepare_delta(
             let bytes = Bytes::from(tokio::fs::read(&path).await?);
             let (entry, xorb_placements) =
                 verify_prepared_xorb(&path, planned_hash, &planned, bytes.clone())?;
-            let (entry, xorb_placements, created) =
-                publish_xorb_candidate(layout, planned_hash, bytes, entry, xorb_placements).await?;
+            let (entry, xorb_placements, created) = publish_xorb_candidate(
+                layout,
+                caching_store,
+                planned_hash,
+                bytes,
+                entry,
+                xorb_placements,
+            )
+            .await?;
             Ok::<_, CrabError>((ordinal, planned_hash, entry, xorb_placements, created))
         },
     ))
@@ -328,6 +336,7 @@ pub(crate) async fn prepare_delta(
                     while let Some(result) = builder.take_completed() {
                         publish_built_xorb(
                             layout,
+                            caching_store,
                             result,
                             &mut placements,
                             &mut xorb_entries,
@@ -340,6 +349,7 @@ pub(crate) async fn prepare_delta(
             for result in builder.finalize()? {
                 publish_built_xorb(
                     layout,
+                    caching_store,
                     result,
                     &mut placements,
                     &mut xorb_entries,
@@ -381,10 +391,16 @@ pub(crate) async fn prepare_delta(
     let shards = shard_session.finalize()?;
     let mut shard_hashes = Vec::with_capacity(shards.len());
     for (bytes, hash) in &shards {
-        layout
+        let path = layout.shard_path(hash);
+        let bytes = Bytes::from(bytes.clone());
+        let created = layout
             .store()
-            .put_if_absent_verified(&layout.shard_path(hash), Bytes::from(bytes.clone()))
+            .put_if_absent_verified(&path, bytes.clone())
             .await?;
+        if created && let Some(cache) = caching_store {
+            warm_published_cache_object(cache, &path, crab_cache::CacheKey::Shard(*hash), bytes)
+                .await;
+        }
         shard_hashes.push(hash.hex());
     }
     // Registry partitions are monotonic. Re-registering the pinned catalog
@@ -453,6 +469,7 @@ pub(crate) async fn prepare_delta(
 
 async fn publish_built_xorb(
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    caching_store: Option<&crab_cache_store::CachingStore>,
     result: XorbResult,
     placements: &mut ChunkPlacementMap,
     xorb_entries: &mut HashMap<MerkleHash, crab_metadata::capsule_protocol::XorbCatalogEntry>,
@@ -460,8 +477,15 @@ async fn publish_built_xorb(
 ) -> Result<()> {
     let body_digest = blake3::hash(&result.bytes).to_hex().to_string();
     let entry = catalog_xorb_entry(result.bytes.len() as u64, body_digest, &result.placements)?;
-    let (entry, xorb_placements, created) =
-        publish_xorb_candidate(layout, result.hash, result.bytes, entry, result.placements).await?;
+    let (entry, xorb_placements, created) = publish_xorb_candidate(
+        layout,
+        caching_store,
+        result.hash,
+        result.bytes,
+        entry,
+        result.placements,
+    )
+    .await?;
     if created {
         uploaded_xorbs.insert(result.hash);
     }
@@ -474,6 +498,7 @@ async fn publish_built_xorb(
 
 async fn publish_xorb_candidate(
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    caching_store: Option<&crab_cache_store::CachingStore>,
     xorb_hash: MerkleHash,
     bytes: Bytes,
     local_entry: crab_metadata::capsule_protocol::XorbCatalogEntry,
@@ -484,12 +509,74 @@ async fn publish_xorb_candidate(
     bool,
 )> {
     let path = layout.xorb_path(&xorb_hash);
+    let cache_has_candidate = match caching_store {
+        Some(cache) => {
+            cache
+                .local_cache()
+                .contains_verified(&crab_cache::CacheKey::Xorb(xorb_hash))
+                .await
+                || cache_service_has_candidate_xorb(
+                    cache,
+                    layout.repo_prefix(),
+                    xorb_hash,
+                    &local_placements,
+                )
+                .await
+        }
+        None => false,
+    };
+    if cache_has_candidate {
+        match layout
+            .store()
+            .get_with_etag_bounded(&path, MAX_XORB_SIZE as u64)
+            .await
+        {
+            Ok((existing, _)) => {
+                let expected_refs = local_placements
+                    .iter()
+                    .map(|placement| {
+                        (
+                            placement.chunk_hash,
+                            XorbRef {
+                                xorb_hash,
+                                chunk_index: placement.chunk_index,
+                                uncompressed_size: placement.uncompressed_size,
+                            },
+                        )
+                    })
+                    .collect::<HashMap<_, _>>();
+                let verified = verify_external_xorb(&path, xorb_hash, &expected_refs, existing)?
+                    .ok_or_else(|| CrabError::CorruptObject {
+                        path: path.to_string(),
+                        reason: format!(
+                            "existing xorb {} does not authenticate as the requested logical content",
+                            xorb_hash.hex()
+                        ),
+                    })?;
+                return Ok((verified.1, verified.2, false));
+            }
+            Err(crab_storage::StorageError::NotFound { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let cache_bytes = caching_store.map(|_| bytes.clone());
     match layout
         .store()
         .create_or_read_immutable(&path, bytes, MAX_XORB_SIZE as u64)
         .await?
     {
-        crab_storage::ImmutableCreateOutcome::Created => Ok((local_entry, local_placements, true)),
+        crab_storage::ImmutableCreateOutcome::Created => {
+            if let (Some(cache), Some(bytes)) = (caching_store, cache_bytes) {
+                warm_published_cache_object(
+                    cache,
+                    &path,
+                    crab_cache::CacheKey::Xorb(xorb_hash),
+                    bytes,
+                )
+                .await;
+            }
+            Ok((local_entry, local_placements, true))
+        }
         crab_storage::ImmutableCreateOutcome::Existing(existing) => {
             let expected_refs = local_placements
                 .iter()
@@ -515,6 +602,77 @@ async fn publish_xorb_candidate(
             Ok((verified.1, verified.2, false))
         }
     }
+}
+
+async fn warm_published_cache_object(
+    cache: &crab_cache_store::CachingStore,
+    path: &object_store::path::Path,
+    key: crab_cache::CacheKey,
+    bytes: Bytes,
+) {
+    if let Err(error) = cache.local_cache().put_bytes(&key, bytes.clone()).await {
+        tracing::warn!(
+            path = %path,
+            error = %error,
+            "published immutable object could not be installed in the local cache"
+        );
+    }
+    if let Err(error) = cache.warm_remote_only(path, bytes).await {
+        tracing::warn!(
+            path = %path,
+            error = %error,
+            "published immutable object could not be warmed in the cache service"
+        );
+    }
+}
+
+async fn cache_service_has_candidate_xorb(
+    cache: &crab_cache_store::CachingStore,
+    repo_prefix: &str,
+    expected_xorb: MerkleHash,
+    placements: &[ChunkPlacement],
+) -> bool {
+    if placements.is_empty() {
+        return false;
+    }
+    let chunk_hashes = placements
+        .iter()
+        .map(|placement| <MerkleHash as Into<[u8; 32]>>::into(placement.chunk_hash))
+        .collect::<Vec<_>>();
+    let result = match cache.dedup_query(repo_prefix, &chunk_hashes).await {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::warn!(
+                repo_prefix,
+                error = %error,
+                "cache service xorb lookup failed; using conditional origin publication"
+            );
+            return false;
+        }
+    };
+    if !result.unknown.is_empty() || result.known.len() != placements.len() {
+        return false;
+    }
+
+    let mut matches = vec![false; placements.len()];
+    for known in result.known {
+        let Some(expected) = placements.get(known.index) else {
+            return false;
+        };
+        let Ok(actual_xorb) = MerkleHash::from_hex(&known.xorb_hash) else {
+            return false;
+        };
+        if !known.cache_verified
+            || actual_xorb != expected_xorb
+            || known.chunk_index != expected.chunk_index
+            || known.length != expected.uncompressed_size
+            || matches[known.index]
+        {
+            return false;
+        }
+        matches[known.index] = true;
+    }
+    matches.into_iter().all(|matched| matched)
 }
 
 fn planned_xorbs_match(
@@ -808,6 +966,7 @@ mod tests {
 
         let (entry, placements, created) = publish_xorb_candidate(
             &layout,
+            None,
             candidate.hash,
             candidate.bytes,
             candidate_entry,

@@ -1294,7 +1294,7 @@ async fn plan_from_visibility_catalog(
     if !request.filter.is_catalog_exact() || !visibility_selection_request_supported(request) {
         return Ok(None);
     }
-    if request.haves.is_empty() {
+    if request.haves.is_empty() && matches!(visibility, VisibilitySource::Catalog(_)) {
         return plan_from_visibility_catalog_ordinals(
             operation,
             references,
@@ -1317,19 +1317,29 @@ async fn plan_from_visibility_catalog(
     else {
         return Ok(None);
     };
-    let object_bytes = selection
-        .objects
-        .iter()
-        .map(|oid| {
-            oid.as_bytes()
-                .try_into()
-                .map_err(|_| RemoteGitError::Corrupt {
-                    stage: CorruptionStage::Locator,
+    let kinds = match visibility {
+        VisibilitySource::Materialized(_) => operation
+            .pinned_object_metadata(&selection.objects)
+            .await?
+            .into_iter()
+            .map(|metadata| metadata.kind)
+            .collect(),
+        VisibilitySource::Catalog(_) => {
+            let object_bytes = selection
+                .objects
+                .iter()
+                .map(|oid| {
+                    oid.as_bytes()
+                        .try_into()
+                        .map_err(|_| RemoteGitError::Corrupt {
+                            stage: CorruptionStage::Locator,
+                        })
                 })
-        })
-        .collect::<std::result::Result<Vec<[u8; 20]>, RemoteGitError>>()?;
-    let kinds = operation.catalog_object_kinds(&object_bytes).await?;
-    if kinds.iter().any(Option::is_none) {
+                .collect::<std::result::Result<Vec<[u8; 20]>, RemoteGitError>>()?;
+            operation.catalog_object_kinds(&object_bytes).await?
+        }
+    };
+    if kinds.len() != selection.objects.len() || kinds.iter().any(Option::is_none) {
         tracing::debug!(
             requested_objects = selection.objects.len(),
             "published Git object-kind metadata is incomplete; using bounded upload-pack traversal"

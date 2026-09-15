@@ -8,6 +8,8 @@ use crab_metadata::capsule_protocol::{
 use crab_storage::{Store, StoreLayout};
 use futures_util::future::try_join_all;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 use crate::{ReadError, Result};
 
@@ -67,6 +69,312 @@ impl CapsuleRepositoryView {
             }
         }
         Ok(catalog)
+    }
+
+    /// Open the authenticated embedded Git packs as a filesystem-free repository.
+    ///
+    /// The returned handle is pinned to this exact root and uses a private
+    /// in-memory object store. This lets protocol-v2 upload-pack reuse the
+    /// bounded remote Git reader without publishing legacy manifests or pack
+    /// sidecars alongside the capsule protocol.
+    pub async fn git_repository(
+        &self,
+        identity: crab_remote_git::RepositoryIdentity,
+        runtime: Arc<crab_remote_git::RemoteGitRuntime>,
+        options: crab_remote_git::RepositoryOptions,
+        max_input_bytes: u64,
+        cancellation: &CancellationToken,
+    ) -> Result<crab_remote_git::RemoteGitRepository> {
+        if cancellation.is_cancelled() {
+            return Err(ReadError::Cancelled);
+        }
+        let workspace = tempfile::tempdir()?;
+        let installed = install_git_packs(self, workspace.path(), max_input_bytes).await?;
+        let artifacts = self
+            .checkpoint
+            .iter()
+            .cloned()
+            .map(GitPackContainer::Checkpoint)
+            .chain(self.capsules.iter().cloned().map(GitPackContainer::Capsule))
+            .flat_map(|container| {
+                let descriptors = container.git_packs().to_vec();
+                descriptors.into_iter().map(move |descriptor| {
+                    let locator = container.section_bytes(descriptor.locator_section());
+                    locator.map(|locator| (descriptor, locator))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if installed.len() != artifacts.len() {
+            return Err(ReadError::internal(
+                "capsule Git installation changed descriptor cardinality",
+            ));
+        }
+
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let layout = StoreLayout::new(store.clone(), "capsule-snapshot".to_owned());
+        let mut packs = Vec::with_capacity(installed.len());
+        let mut inline_locators = std::collections::HashMap::new();
+        for (pack_path, (descriptor, locator_bytes)) in installed.into_iter().zip(artifacts) {
+            if cancellation.is_cancelled() {
+                return Err(ReadError::Cancelled);
+            }
+            let pack = Bytes::from(tokio::fs::read(&pack_path).await?);
+            let index = Bytes::from(tokio::fs::read(pack_path.with_extension("idx")).await?);
+            let reverse = Bytes::from(tokio::fs::read(pack_path.with_extension("rev")).await?);
+            let pack_id = blake3::hash(&pack).to_hex().to_string();
+            let locations = crab_git::pack_locator::PackLocationIter::open(
+                &pack_path.with_extension("idx"),
+                &pack_path.with_extension("rev"),
+                pack.len() as u64,
+            )
+            .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+            let locator_entries =
+                crab_git::pack_locator::decode_pack_kind_metadata_with_external_deltas(
+                    &locator_bytes,
+                    locations,
+                )
+                .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+            let locator_locations = crab_git::pack_locator::PackLocationIter::open(
+                &pack_path.with_extension("idx"),
+                &pack_path.with_extension("rev"),
+                pack.len() as u64,
+            )
+            .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+            let locator_pack_id = crab_xet::hash::MerkleHash::from_hex(&pack_id)
+                .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+            for (ordinal, ((oid, kind, delta_base_oid), location)) in locator_entries
+                .into_iter()
+                .zip(locator_locations)
+                .enumerate()
+            {
+                let location = location
+                    .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+                let oid_bytes = oid
+                    .as_bytes()
+                    .try_into()
+                    .map_err(|_| ReadError::internal("capsule Git locator is not SHA-1"))?;
+                let ordinal = u32::try_from(ordinal)
+                    .map_err(|_| ReadError::internal("capsule Git locator ordinal overflowed"))?;
+                let kind = match kind {
+                    gix_object::Kind::Commit => {
+                        crab_metadata::git_object_locator::GitObjectKind::Commit
+                    }
+                    gix_object::Kind::Tree => {
+                        crab_metadata::git_object_locator::GitObjectKind::Tree
+                    }
+                    gix_object::Kind::Blob => {
+                        crab_metadata::git_object_locator::GitObjectKind::Blob
+                    }
+                    gix_object::Kind::Tag => crab_metadata::git_object_locator::GitObjectKind::Tag,
+                };
+                inline_locators.insert(
+                    oid_bytes,
+                    crab_metadata::git_object_locator::GitObjectLocator {
+                        ordinal,
+                        pack_id: locator_pack_id,
+                        location: crab_metadata::git_object_locator::GitObjectLocation {
+                            pack_offset: location.pack_offset,
+                            entry_len: location.entry_len,
+                            crc32: location.crc32,
+                        },
+                        metadata: crab_metadata::git_object_locator::GitObjectMetadata {
+                            kind: Some(kind),
+                            logical_size: None,
+                            delta_base_oid: delta_base_oid
+                                .map(|oid| oid.as_bytes().try_into())
+                                .transpose()
+                                .map_err(|_| {
+                                    ReadError::internal("capsule Git delta base is not SHA-1")
+                                })?,
+                        },
+                    },
+                );
+            }
+            let pack_object = layout.pack_path(&pack_id);
+            let index_object = layout.pack_index_path(&pack_id);
+            let reverse_object = layout.pack_reverse_index_path(&pack_id);
+            tokio::try_join!(
+                store.put(&pack_object, pack.clone()),
+                store.put(&index_object, index),
+                store.put(&reverse_object, reverse),
+            )?;
+            packs.push(crab_metadata::manifests::PackManifestEntry {
+                pack_id: pack_id.clone(),
+                size: pack.len() as u64,
+                content_hash: pack_id,
+                ref_tips: Vec::new(),
+                object_count: descriptor.object_count(),
+            });
+        }
+
+        let manifest = self.git_manifest(&packs)?;
+        let root = self.root();
+        let snapshot = crab_metadata::manifest_store::RepositorySnapshot {
+            layout: crab_metadata::layout_descriptor::LayoutDescriptor::canonical(),
+            manifest: manifest.clone(),
+            manifest_etag: root.digest().to_owned(),
+            journal: crab_metadata::ref_journal::RefJournalSnapshot {
+                refs: manifest.refs.clone(),
+                peeled_refs: manifest.peeled_refs.clone(),
+                head: manifest.head.clone(),
+                packs,
+                shards: Vec::new(),
+                transactions: Vec::new(),
+                ordered_edits: Vec::new(),
+                visible_heads: std::collections::BTreeMap::new(),
+                state_digest: root.digest().to_owned(),
+            },
+        };
+        crab_remote_git::RemoteGitRepository::from_snapshot_with_inline_locators(
+            layout,
+            &snapshot,
+            identity,
+            runtime,
+            options,
+            inline_locators,
+            cancellation,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Materialize the complete generation-bound Git visibility proof.
+    pub fn git_visibility_index(
+        &self,
+    ) -> Result<crab_metadata::git_visibility::GitVisibilityIndex> {
+        let mut refs = self
+            .checkpoint
+            .as_ref()
+            .map(Checkpoint::visibility_snapshot)
+            .transpose()?
+            .flatten()
+            .map(|snapshot| snapshot.refs().clone())
+            .unwrap_or_default();
+
+        for capsule in &self.capsules {
+            let transaction = capsule.transaction()?;
+            let delta = capsule.visibility_delta()?;
+            let mut evidence = delta.map(|delta| delta.edits().clone()).unwrap_or_default();
+            for edit in transaction.edits() {
+                let Some(new_oid) = edit.new_oid() else {
+                    if evidence.remove(edit.ref_name()).is_some() {
+                        return Err(corrupt_path(
+                            "capsule Git visibility",
+                            "deleted ref has visibility evidence",
+                        ));
+                    }
+                    refs.remove(edit.ref_name());
+                    continue;
+                };
+                let visibility = evidence.remove(edit.ref_name()).ok_or_else(|| {
+                    corrupt_path(
+                        "capsule Git visibility",
+                        "live ref edit has no visibility evidence",
+                    )
+                })?;
+                if visibility.new_oid != new_oid {
+                    return Err(corrupt_path(
+                        "capsule Git visibility",
+                        "visibility evidence does not match its ref edit",
+                    ));
+                }
+                let prior = match edit.expected_old() {
+                    Some(expected_old) => {
+                        if visibility.old_oid.as_deref() != Some(expected_old) {
+                            return Err(corrupt_path(
+                                "capsule Git visibility",
+                                "visibility evidence does not match the expected old ref",
+                            ));
+                        }
+                        refs.get(edit.ref_name()).map(Vec::as_slice)
+                    }
+                    None if visibility.replaces => None,
+                    None => visibility.old_oid.as_deref().and_then(|old_oid| {
+                        refs.values()
+                            .find(|objects| {
+                                objects
+                                    .binary_search_by(|oid| oid.as_str().cmp(old_oid))
+                                    .is_ok()
+                            })
+                            .map(Vec::as_slice)
+                    }),
+                };
+                refs.insert(edit.ref_name().to_owned(), visibility.apply(prior)?);
+            }
+            if !evidence.is_empty() {
+                return Err(corrupt_path(
+                    "capsule Git visibility",
+                    "visibility evidence contains an uncommitted ref",
+                ));
+            }
+        }
+
+        let packs = self.git_pack_manifest_entries()?;
+        let manifest = self.git_manifest(&packs)?;
+        if refs.keys().ne(manifest.refs.keys())
+            || manifest.refs.iter().any(|(name, tip)| {
+                refs.get(name)
+                    .is_none_or(|objects| objects.binary_search(tip).is_err())
+            })
+            || manifest.peeled_refs.iter().any(|(name, peeled)| {
+                refs.get(name)
+                    .is_none_or(|objects| objects.binary_search(peeled).is_err())
+            })
+        {
+            return Err(corrupt_path(
+                "capsule Git visibility",
+                "materialized visibility does not cover the pinned root",
+            ));
+        }
+        crab_metadata::git_visibility::GitVisibilityIndex::new(
+            manifest.generation,
+            manifest.pack_index_hash,
+            manifest.git_validation_digest,
+            refs,
+        )
+        .map_err(Into::into)
+    }
+
+    fn git_pack_manifest_entries(
+        &self,
+    ) -> Result<Vec<crab_metadata::manifests::PackManifestEntry>> {
+        self.checkpoint
+            .iter()
+            .cloned()
+            .map(GitPackContainer::Checkpoint)
+            .chain(self.capsules.iter().cloned().map(GitPackContainer::Capsule))
+            .flat_map(|container| {
+                let descriptors = container.git_packs().to_vec();
+                descriptors.into_iter().map(move |descriptor| {
+                    let pack = container.section_bytes(descriptor.pack_section())?;
+                    let pack_id = blake3::hash(&pack).to_hex().to_string();
+                    Ok(crab_metadata::manifests::PackManifestEntry {
+                        pack_id: pack_id.clone(),
+                        size: pack.len() as u64,
+                        content_hash: pack_id,
+                        ref_tips: Vec::new(),
+                        object_count: descriptor.object_count(),
+                    })
+                })
+            })
+            .collect()
+    }
+
+    fn git_manifest(
+        &self,
+        packs: &[crab_metadata::manifests::PackManifestEntry],
+    ) -> Result<crab_metadata::manifests::Manifest> {
+        let root = self.root().root();
+        let mut manifest = crab_metadata::manifests::Manifest::default_for_repo(root.head());
+        manifest.generation = root.generation();
+        manifest.refs = root.refs().clone();
+        manifest.peeled_refs = root.peeled_refs().clone();
+        if !packs.is_empty() {
+            manifest.pack_index_hash =
+                crab_metadata::manifests::compact_pack_index(manifest.generation, packs)?.0;
+        }
+        manifest.seal_git_validation();
+        Ok(manifest)
     }
 }
 
