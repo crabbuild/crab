@@ -3,7 +3,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, UNIX_EPOCH},
 };
@@ -84,6 +84,9 @@ const QUERIES: &[OperationDescriptor] = &[
     operation(2, 1024 * 1024, 1),
 ];
 static HEARTBEAT_OBSERVED: AtomicBool = AtomicBool::new(false);
+static FAILOVER_ACTIVITY_ENTERED: AtomicBool = AtomicBool::new(false);
+static FAILOVER_ACTIVITY_BLOCKED: AtomicBool = AtomicBool::new(false);
+static FAILOVER_ACTIVITY_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 
 struct Definition;
 
@@ -108,7 +111,7 @@ impl WorkflowDefinition for Definition {
     ) -> crab_cell_runtime::Result<WorkflowDecision> {
         if matches!(
             event,
-            b"activity" | b"activity-retry" | b"activity-blocking"
+            b"activity" | b"activity-retry" | b"activity-blocking" | b"activity-failover"
         ) {
             return Ok(WorkflowDecision {
                 status: WorkflowStatus::Running,
@@ -120,10 +123,10 @@ impl WorkflowDefinition for Definition {
                     } else {
                         "echo".into()
                     },
-                    input: if event == b"activity-retry" {
-                        b"retry".to_vec()
-                    } else {
-                        b"payload".to_vec()
+                    input: match event {
+                        b"activity-retry" => b"retry".to_vec(),
+                        b"activity-failover" => b"failover".to_vec(),
+                        _ => b"payload".to_vec(),
                     },
                     due_at_ms: context.now_ms(),
                     expires_at_ms: context.now_ms() + 60_000,
@@ -239,6 +242,13 @@ impl ActivityHandler for EchoActivity {
                     details: b"temporary".to_vec(),
                     retryable: true,
                 };
+            }
+            if input == b"failover" {
+                FAILOVER_ACTIVITY_ATTEMPTS.fetch_add(1, Ordering::AcqRel);
+                FAILOVER_ACTIVITY_ENTERED.store(true, Ordering::Release);
+                while FAILOVER_ACTIVITY_BLOCKED.load(Ordering::Acquire) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
             }
             let initial_deadline = context.lease_until_ms();
             assert_ne!(context.idempotency_key(), [0; 32]);
@@ -660,8 +670,11 @@ async fn typed_workflow_namespace_publishes_rejects_reads_and_survives_restore()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn native_activity_supervisor_heartbeats_completes_and_restores_result() {
+async fn native_activity_heartbeats_and_recovers_after_node_loss() {
     HEARTBEAT_OBSERVED.store(false, Ordering::Release);
+    FAILOVER_ACTIVITY_ENTERED.store(false, Ordering::Release);
+    FAILOVER_ACTIVITY_BLOCKED.store(true, Ordering::Release);
+    FAILOVER_ACTIVITY_ATTEMPTS.store(0, Ordering::Release);
     let registry = registry();
     assert!(registry.has_blocking_activities());
     assert!(registry.requires_blocking_activity(WORKFLOW_NAMESPACE));
@@ -732,13 +745,14 @@ async fn native_activity_supervisor_heartbeats_completes_and_restores_result() {
         first_session,
     )
     .unwrap();
+    let first_database = directory.path().join("activity-first.sqlite");
     let handle = runtime
         .bootstrap(
             proof.clone(),
             replica.clone(),
             authority.clone(),
             control,
-            directory.path().join("activity-first.sqlite"),
+            first_database.clone(),
             install_workflow_schema,
         )
         .await
@@ -844,10 +858,60 @@ async fn native_activity_supervisor_heartbeats_completes_and_restores_result() {
             .unwrap()
             .ends_with(b"payload-blocking")
     );
+    workflows
+        .start(
+            identity(30),
+            b"failover-build".to_vec(),
+            b"activity-failover".to_vec(),
+        )
+        .await
+        .unwrap();
+    let failover_registry = registry.clone();
+    let failover_client = CellClient::local(registry.clone(), handle.clone());
+    let failover_target = target.clone();
+    let failover_reservation = blocking_pool.try_reserve().unwrap();
+    let first_attempt = tokio::spawn(async move {
+        failover_registry
+            .run_activity_once(
+                failover_client,
+                &failover_target,
+                5_000,
+                failover_reservation,
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !FAILOVER_ACTIVITY_ENTERED.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    first_attempt.abort();
+    assert!(first_attempt.await.unwrap_err().is_cancelled());
+    assert_eq!(FAILOVER_ACTIVITY_ATTEMPTS.load(Ordering::Acquire), 1);
     blocking_pool.shutdown().await.unwrap();
-    handle.drain().await.unwrap();
+    drop(workflows);
+    drop(handle);
+    drop(runtime);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match std::fs::remove_file(&first_database) {
+                Ok(()) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await
+    .expect("dropped node did not release its local SQLite file");
 
-    let idle = authority.load(cell).await.unwrap().unwrap();
+    let stale_owner = authority.load(cell).await.unwrap().unwrap();
+    assert_eq!(
+        stale_owner.value().owner.as_ref().unwrap().session,
+        first_session
+    );
+    assert!(stale_owner.value().root.is_some());
     let second_session = SessionId::from_bytes([27; 16]);
     let runtime = CellRuntime::new(
         SqlWorkerPool::new(1, 10).unwrap(),
@@ -856,11 +920,11 @@ async fn native_activity_supervisor_heartbeats_completes_and_restores_result() {
     )
     .unwrap();
     let restored = runtime
-        .acquire_idle_restored(
+        .takeover_restored(
             proof,
             replica,
-            authority,
-            idle,
+            authority.clone(),
+            stale_owner,
             directory.path().join("activity-second.sqlite"),
             Owner {
                 session: second_session,
@@ -870,7 +934,7 @@ async fn native_activity_supervisor_heartbeats_completes_and_restores_result() {
         .await
         .unwrap();
     let restored_workflows = WorkflowNamespace::<TestWorkflow>::new(
-        CellClient::local(registry, restored.clone()),
+        CellClient::local(registry.clone(), restored.clone()),
         target.tenant(),
         target.application(),
     )
@@ -885,5 +949,62 @@ async fn native_activity_supervisor_heartbeats_completes_and_restores_result() {
             .state,
         b"activity-complete"
     );
+    let current = authority.load(cell).await.unwrap().unwrap();
+    let current_sequence = current.value().root.as_ref().unwrap().commit_sequence;
+    let restored_client = CellClient::local(registry.clone(), restored.clone());
+    let reclaimed = registry
+        .run_maintenance_once(
+            restored_client.clone(),
+            target.clone(),
+            identity(31),
+            MaintenanceTickRequest {
+                expected_commit_sequence: current_sequence,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        reclaimed.output,
+        MaintenanceTickOutcome::Applied { processed: 1 }
+    );
+    FAILOVER_ACTIVITY_BLOCKED.store(false, Ordering::Release);
+    let restored_blocking_pool = BlockingActivityPool::new(1).unwrap();
+    let older_retry = registry
+        .run_activity_once(
+            restored_client.clone(),
+            &target,
+            5_000,
+            restored_blocking_pool.try_reserve().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(older_retry, ActivityRunOutcome::Retrying { .. }));
+    let failover = registry
+        .run_activity_once(
+            restored_client,
+            &target,
+            5_000,
+            restored_blocking_pool.try_reserve().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(failover, ActivityRunOutcome::Completed { .. }),
+        "unexpected failover outcome: {failover:?}"
+    );
+    assert_eq!(FAILOVER_ACTIVITY_ATTEMPTS.load(Ordering::Acquire), 2);
+    assert!(
+        restored_workflows
+            .state(b"failover-build".to_vec(), None)
+            .await
+            .unwrap()
+            .output
+            .unwrap()
+            .result
+            .unwrap()
+            .ends_with(b"failover-complete")
+    );
+    restored_blocking_pool.shutdown().await.unwrap();
     restored.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
 }

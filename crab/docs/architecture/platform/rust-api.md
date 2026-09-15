@@ -546,8 +546,11 @@ forward. Scanner cycles preserve one revision-pinned cursor per assigned shard,
 offer every shard one attempt before filling unused capacity, rotate their
 starting shard and reload the newest catalog head only after a complete pass.
 Failed processing leaves `next_due_ms` durable and is retried on the next pass,
-so neither an early Cell nor a busy namespace can pin later entries. Multi-node
-activity failure qualification remains. For a locally owned Cell,
+so neither an early Cell nor a busy namespace can pin later entries. Runtime
+integration now proves an unchanged-owner takeover after node/local-volume loss,
+exact-root restore, lease reclaim and safe activity retry under a second
+session. Real multi-Pod process/network fault qualification remains. For a
+locally owned Cell,
 `CellRuntime::local_handle` asks the dispatcher for a capability and
 returns one only if the scanned control's session/incarnation/code/schema still
 match an unfenced, non-draining active entry. Callers never inspect the runtime's

@@ -362,7 +362,34 @@ lease tokens; completion identity is deterministic per attempt. Pending command
 outcomes retain their mutation evidence, and cancellation is signalled if the
 cycle is dropped or loses its lease. Integration coverage holds an activity
 past its first heartbeat, completes its state-machine transition, then restores
-and reads that terminal result from the exact LTX root. Effect actions are now
+and reads that terminal result from the exact LTX root. The same test publishes
+a second claim, aborts its supervisor, drops the owning runtime without an idle
+release, deletes its local SQLite file, and leaves the active owner unchanged.
+A new session observes that owner for 15 seconds, wins the epoch takeover CAS,
+restores the claimed root from object storage, reclaims the expired lease in a
+Tick, and completes attempt two. This is the executable node-loss contract;
+external activity effects must still deduplicate by stable `(run_id,
+activity_id)` because both attempts may have reached an external system.
+
+```mermaid
+sequenceDiagram
+    participant A as Node A / session A
+    participant C as control.json
+    participant O as immutable LTX objects
+    participant B as Node B / session B
+    A->>O: publish claim root N
+    A->>C: CAS root=N, owner=A
+    A->>A: start attempt 1
+    Note over A: process and local SQLite are lost
+    B->>C: read same active owner twice, 15 s apart
+    B->>C: takeover CAS epoch+1, owner=B
+    B->>O: restore and verify exact root N
+    B->>O: Tick publishes expired-lease reclaim root N+1
+    B->>B: execute attempt 2 with stable idempotency key
+    B->>O: publish one completion transition
+```
+
+Effect actions are now
 persisted as owner-independent typed commands; raw peer requests are not an
 application surface. Activity registration installs one type-erased runner for
 the compiled Workflow namespace. The catalog scanner invokes it with
@@ -499,8 +526,10 @@ share and passes unused capacity forward. The node retains a revision-pinned
 cursor for every assigned shard, offers each shard one attempt before
 work-conserving fill and rotates the first shard each cycle. Failed items keep
 their durable due control and re-enter after a complete cursor wrap; a dominant
-namespace therefore cannot permanently hide later Cells. Multi-node activity
-failure qualification remains. Active-local routing recovers a capability
+namespace therefore cannot permanently hide later Cells. The node-loss
+integration path above proves the runtime transition between two sessions; real
+multi-Pod process/network fault qualification remains. Active-local routing
+recovers a capability
 from the dispatcher only when session, incarnation, code and schema match the
 scanned control and the Cell is not fenced or draining.
 

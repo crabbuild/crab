@@ -200,7 +200,10 @@ shard one attempt before filling unused capacity, rotates the first shard and
 never discards the tail of a bounded control batch. A failed Cell remains due in
 its published control and is retried after the cursor completes and reloads the
 latest shard head, so a hot Cell or namespace cannot pin the catalog prefix.
-Multi-node activity failure qualification and dirty-job admission remain.
+Cross-session activity recovery is now integration-proven through unchanged-owner
+takeover, source-volume loss, exact-root restore, expired-lease reclaim and
+attempt-two completion. Real multi-Pod process/network fault qualification and
+dirty-job admission remain.
 `CellRuntime::local_handle` now resolves a due Cell
 only when the dispatcher still owns the exact incarnation/code/schema under the
 current session and the admission is neither fenced nor draining; it never
