@@ -262,6 +262,7 @@ crab-http-server --config CONFIG cells release bootstrap --image DIGEST
 crab-http-server --config CONFIG cells release prepare --expected-revision N --image DIGEST
 crab-http-server --config CONFIG cells release activate --expected-revision N --strategy compatible --minimum-eligible-nodes K
 crab-http-server --config CONFIG cells release status
+crab-http-server --config CONFIG cells release migrations [--after CELL_ID] [--limit N]
 crab-http-server --config CONFIG cells import-repository-issues --owner OWNER --name NAME --operation UUID
 ```
 
@@ -289,12 +290,15 @@ The required count is explicit and bounded from 1 through 10,000; a single-node
 VM passes 1 and the two-replica Helm deployment passes 2. The same quorum is
 reloaded after the complete catalog compatibility scan and immediately before
 the ready CAS. Repeating the original command adopts the same ready record. It
-currently admits initial, current-code, or explicitly retained compatible
+admits initial, current-code, or explicitly retained compatible
 code/schema inventories for candidate startup and continued serving. Its final
 activation scan separately requires every non-tombstoned Cell to use the current
 module code and `schema_max`; a retained predecessor leaves the release in
-`activating` with an explicit migration-required error. It does not yet execute
-those migrations or persist a separate catalog-wide progress report.
+`activating` with an explicit migration-required error. Running servers then
+enumerate their rendezvous-assigned catalog shards and migrate those Cells in the
+background. Repeating the same activation command completes the ready CAS after
+the current-version scan succeeds. `cells release migrations` returns the
+bounded, cursor-paginated pending and terminal-failure view for that operation.
 Prepare alone never makes the descriptor current. Administrative
 storage credentials provide authority; there is no public deployment API.
 
@@ -364,6 +368,33 @@ using exact operation ID/digest. Retrying a phase retains its operation ID.
    inspects published code/schema and skips completed migrations. Partial progress
    never makes an unpublished SQL migration authoritative.
 
+While a release is `activating`, every server's one-second scheduler pass reuses
+the signed live-node directory and rendezvous assignment already used for due
+work. It retains one revision-pinned `CatalogShardScan` for each assigned shard,
+examines at most 128 scan items per cycle, admits at most 16 migration jobs per
+node, and deduplicates concurrent work by `CellId`. A job routes through the ordinary local-owner, authenticated remote-owner,
+idle-restore, or unchanged-control takeover path. Local temporary activation is
+drained after each migration step. Each loop reloads release state and stops if
+the operation is no longer the exact compiled desired release.
+
+Remote migration uses the signed peer `MigrationRequest`. The request contains
+the target, incarnation and exact source/successor code/schema pairs; it never
+contains SQL. The receiving node requires `state=activating`, requires
+`desired` to equal its compiled registry digest, reloads the exact local handle,
+and derives the one allowed `MigrationPlan` from its own frozen registry. An
+unknown transport result is reconciled with authenticated `Describe` and is
+accepted only when the authoritative description proves the requested successor.
+
+Each terminal attempt is conditionally written to
+`cells/<cell-id>/migration/<operation-id>/release.json`. The canonical record is
+limited to 4 KiB and binds application, operation, release, session, Cell,
+source/target versions, revision, attempt count, update time and either
+`completed` or one bounded failure class. Completion is monotonic: a late failure
+cannot replace it. Pending state is derived from catalog plus control rather than
+written once per Cell, so an interrupted scan cannot hide unvisited work. Status
+reads at most 1,024 catalog entries per page and returns at most 256 results;
+the default CLI limit is 100.
+
 Compatible means both old and new published schema/code pairs remain executable
 in the rolling binary set; no automatic downmigration. Incompatible activation
 first enters maintenance, stops public admission and background activities,
@@ -402,19 +433,20 @@ A routing rollback cannot undo migrated data. Retain rollback images and release
 descriptors alongside backups. Queue payload changes require compatibility
 or drained/transformed messages; never implicitly coerce bytes.
 
-Implementation status: the runtime-level path is complete for current code and
-explicitly retained predecessor code. The frozen registry selects either the next
+Implementation status: the runtime and catalog-wide paths are complete for current
+code and explicitly retained predecessor code. The frozen registry selects either the next
 verified adjacent-schema migration or a same-schema code-only transition; the old
 capability becomes terminal; the fixed SQL worker commits the SQL ledger or the
 code-only system metadata update; LTX captures the cut; and
 `Transition::Migrate` publishes root/schema/code atomically before returning a
 new capability. Tests cover digest conflict without authority movement,
 old-capability rejection, retained typed-client execution, code-only publication,
-a post-migration write, local-source loss and exact-root restore. Release
-activation does not yet walk the catalog or persist per-Cell migration progress.
-Until that orchestration exists, operators cannot treat a prepared release as an
-automatic fleet schema rollout. The final current-version scan does prevent it
-from marking a merely compatible retained inventory ready.
+a post-migration write, local-source loss and exact-root restore. Additional
+tests cover authenticated remote migration and retry reconciliation, one-node
+catalog scheduling through an idle Cell, durable terminal progress, exact status
+pagination and the final current-version gate. Production qualification still
+requires real multi-Pod process/network failure and sustained large-catalog load;
+operators must not infer those deployment properties from in-process tests.
 
 ## Kubernetes and VM process lifecycle
 

@@ -174,6 +174,7 @@ async fn public_issue_request_reaches_remote_owner_over_mtls_and_publishes_ltx()
         Some(PeerReceiver::new(
             directory.clone(),
             Arc::clone(&registry),
+            crab_cell_runtime::ReleaseStore::new(cell_layout.clone(), identity).unwrap(),
             LocalCellResolver::new(cell_layout.clone(), identity, owner_runtime.clone()),
             Arc::new(UnavailablePeer),
         )),

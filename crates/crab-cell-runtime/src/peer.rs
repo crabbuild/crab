@@ -11,9 +11,9 @@ mod protobuf;
 mod transport;
 
 pub use dispatch::{PeerAuthorizer, PeerCellResolver, PeerDispatcher};
-pub use transport::EffectPeerClient;
 pub(crate) use transport::PeerClientTransport;
 pub use transport::PeerRoundTrip;
+pub use transport::{EffectPeerClient, MigrationPeerClient};
 
 use protobuf::{
     MessageKind, field_payload, oneof_payload, require_fields, validate_message, validate_operation,
@@ -43,6 +43,7 @@ pub enum PeerOperation {
     Resolve(wire::ResolveRequest),
     DeliverEffect(wire::EffectRequest),
     ResolveEffect(wire::EffectResolveRequest),
+    Migrate(wire::MigrationRequest),
 }
 
 impl PeerOperation {
@@ -53,6 +54,7 @@ impl PeerOperation {
             Self::Resolve(_) => 12,
             Self::DeliverEffect(_) => 13,
             Self::ResolveEffect(_) => 14,
+            Self::Migrate(_) => 15,
         }
     }
 
@@ -63,6 +65,7 @@ impl PeerOperation {
             Self::Resolve(value) => value.encode_to_vec(),
             Self::DeliverEffect(value) => value.encode_to_vec(),
             Self::ResolveEffect(value) => value.encode_to_vec(),
+            Self::Migrate(value) => value.encode_to_vec(),
         }
     }
 
@@ -73,6 +76,7 @@ impl PeerOperation {
             Self::Resolve(value) => validate_resolve(value, now_ms),
             Self::DeliverEffect(value) => validate_effect(value, now_ms),
             Self::ResolveEffect(value) => validate_effect_resolve(value, now_ms),
+            Self::Migrate(value) => validate_migration(value),
         }
     }
 }
@@ -167,7 +171,7 @@ impl PeerVerifier {
         }
         let fields = validate_message(input, MessageKind::PeerRequest)?;
         require_fields(&fields, &[1, 2, 3, 4])?;
-        let (tag, payload) = oneof_payload(input, &fields, &[10, 11, 12, 13, 14])?;
+        let (tag, payload) = oneof_payload(input, &fields, &[10, 11, 12, 13, 14, 15])?;
         if payload.len() > MAX_OPERATION_BYTES {
             return Err(Error::Peer("operation exceeds one MiB"));
         }
@@ -336,7 +340,7 @@ pub fn decode_peer_reply(input: &[u8]) -> Result<wire::PeerReply> {
         return Err(Error::Peer("reply exceeds peer byte limit"));
     }
     let fields = validate_message(input, MessageKind::PeerReply)?;
-    if !fields.iter().any(|field| matches!(field.tag(), 1..=4)) {
+    if !fields.iter().any(|field| matches!(field.tag(), 1..=5)) {
         return Err(Error::Peer("peer reply outcome is missing"));
     }
     let reply = wire::PeerReply::decode(input)?;
@@ -350,6 +354,12 @@ fn validate_reply(reply: &wire::PeerReply) -> Result<()> {
         Some(wire::peer_reply::Outcome::Read(reply)) => validate_read_reply(reply),
         Some(wire::peer_reply::Outcome::Resolve(reply)) => validate_resolve_reply(reply),
         Some(wire::peer_reply::Outcome::Error(error)) => validate_error(error),
+        Some(wire::peer_reply::Outcome::Migration(reply)) => validate_description_wire(
+            reply
+                .description
+                .as_ref()
+                .ok_or(Error::Peer("migration reply description is missing"))?,
+        ),
         None => Err(Error::Peer("peer reply outcome is missing")),
     }
 }
@@ -541,6 +551,7 @@ fn operation_target(operation: Option<&wire::peer_request::Operation>) -> Result
         Some(wire::peer_request::Operation::Resolve(value)) => value.target.as_ref(),
         Some(wire::peer_request::Operation::DeliverEffect(value)) => value.target.as_ref(),
         Some(wire::peer_request::Operation::ResolveEffect(value)) => value.target.as_ref(),
+        Some(wire::peer_request::Operation::Migrate(value)) => value.target.as_ref(),
         None => return Err(Error::Peer("peer operation is missing")),
     }
     .ok_or(Error::Peer("peer target is missing"))?;
@@ -564,6 +575,7 @@ fn validate_decoded_operation(
         Some(wire::peer_request::Operation::ResolveEffect(value)) => {
             validate_effect_resolve(value, now_ms)
         }
+        Some(wire::peer_request::Operation::Migrate(value)) => validate_migration(value),
         None => Err(Error::Peer("peer operation is missing")),
     }
 }
@@ -667,6 +679,31 @@ fn validate_effect_resolve(request: &wire::EffectResolveRequest, now_ms: i64) ->
             .ok_or(Error::Peer("effect Resolve identity is missing"))?,
         now_ms,
     )
+}
+
+fn validate_migration(request: &wire::MigrationRequest) -> Result<()> {
+    validate_target_wire(request.target.as_ref())?;
+    if request.incarnation.len() != 16
+        || request.from_code.len() != 32
+        || request.to_code.len() != 32
+        || request.from_schema == 0
+        || request.to_schema == 0
+        || request.from_code == request.to_code && request.from_schema == request.to_schema
+    {
+        return Err(Error::Peer("invalid peer migration versions"));
+    }
+    Ok(())
+}
+
+fn validate_description_wire(description: &wire::CellDescription) -> Result<()> {
+    if description.cell_id.len() != 32
+        || description.incarnation.len() != 16
+        || description.code.len() != 32
+        || description.schema == 0
+    {
+        return Err(Error::Peer("invalid peer Cell description"));
+    }
+    Ok(())
 }
 
 fn validate_effect_identity(identity: &wire::EffectIdentity, now_ms: i64) -> Result<()> {

@@ -25,6 +25,7 @@ mod publication;
 mod queue;
 mod registry;
 mod release;
+mod release_progress;
 mod scheduler;
 mod schema;
 mod sql;
@@ -75,9 +76,10 @@ pub use maintenance::{
 };
 pub use node::{NodeAdvertisement, NodeCapacity, NodeDirectory, VersionedNodeAdvertisement};
 pub use peer::{
-    EffectPeerClient, MAX_PEER_REQUEST_BYTES, PeerAuthorizer, PeerCellResolver, PeerDispatcher,
-    PeerOperation, PeerPrincipal, PeerRoundTrip, PeerSigner, PeerVerifier, VerifiedPeerRequest,
-    claimed_peer_session, decode_peer_reply, encode_peer_reply, wire as peer_wire,
+    EffectPeerClient, MAX_PEER_REQUEST_BYTES, MigrationPeerClient, PeerAuthorizer,
+    PeerCellResolver, PeerDispatcher, PeerOperation, PeerPrincipal, PeerRoundTrip, PeerSigner,
+    PeerVerifier, VerifiedPeerRequest, claimed_peer_session, decode_peer_reply, encode_peer_reply,
+    wire as peer_wire,
 };
 pub use publication::CellPublisher;
 pub use queue::{
@@ -95,6 +97,10 @@ pub use registry::{
     RetainedCodeDescriptor,
 };
 pub use release::{ReleaseRecord, ReleaseState, ReleaseStore, VersionedRelease};
+pub use release_progress::{
+    MigrationFailure, MigrationProgress, MigrationProgressAttempt, MigrationProgressState,
+    MigrationProgressStore,
+};
 pub use scheduler::{
     DueCell, DueCellScan, SchedulerFleet, SchedulerTickOutcome, preferred_scanner,
     scheduler_next_due_ms, scheduler_tick,

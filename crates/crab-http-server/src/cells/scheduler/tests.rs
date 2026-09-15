@@ -12,10 +12,10 @@ use crab_cell_runtime::{
     CellModule, CellReplica, CellRuntime, CellTarget, Digest, IncarnationId, MaintenanceModule,
     MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor, NamespaceId, NodeAdvertisement,
     NodeCapacity, OperationDescriptor, Owner, PeerRoundTrip, PeerSigner, RegistryBuilder,
-    ReplicaLimits, SqlWorkerPool, TenantId, WorkflowAction, WorkflowActivityModule,
-    WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowModule, WorkflowNamespace,
-    WorkflowStatus, install_workflow_schema, register_blocking_activity, register_maintenance,
-    register_workflow, register_workflow_activities,
+    ReplicaLimits, RetainedCodeDescriptor, SqlWorkerPool, TenantId, WorkflowAction,
+    WorkflowActivityModule, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowModule,
+    WorkflowNamespace, WorkflowStatus, install_workflow_schema, register_blocking_activity,
+    register_maintenance, register_workflow, register_workflow_activities,
 };
 use crab_storage::{CellStorageLayout, StorageError, Store};
 use ed25519_dalek::SigningKey;
@@ -42,6 +42,7 @@ const WORKFLOW_COMMANDS: &[OperationDescriptor] = &[
 const WORKFLOW_QUERIES: &[OperationDescriptor] =
     &[operation(1, 2048, 1 << 20), operation(2, 1 << 20, 1)];
 const WORKFLOW_DEFINITION_DIGEST: Digest = Digest::from_bytes([32; 32]);
+const WORKFLOW_PREDECESSOR: Digest = Digest::from_bytes([34; 32]);
 static WORKFLOW_ACTIVITY_RUNS: AtomicUsize = AtomicUsize::new(0);
 static WORKFLOW_ACTIVITY_RELEASE: AtomicBool = AtomicBool::new(false);
 static WORKFLOW_DEFINITION: SchedulerWorkflowDefinition = SchedulerWorkflowDefinition;
@@ -150,7 +151,11 @@ impl CellModule for SchedulerWorkflow {
         DESCRIPTOR.get_or_init(|| ModuleDescriptor {
             name: WORKFLOW_MODULE,
             source_digest: Digest::from_bytes([33; 32]),
-            retained_codes: &[],
+            retained_codes: &[RetainedCodeDescriptor {
+                code: WORKFLOW_PREDECESSOR,
+                schema_min: 1,
+                schema_max: 1,
+            }],
             schema_min: 1,
             schema_max: 1,
             migrations: Box::leak(Box::new([MigrationDescriptor {
@@ -764,5 +769,201 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
             .await,
         Err(StorageError::NotFound { .. })
     ));
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn activating_release_migrates_idle_cell_before_ready_gate() {
+    let identity = ApplicationIdentity::new(
+        TenantId::from_bytes([71; 16]),
+        ApplicationId::from_bytes([72; 16]),
+    );
+    let mut builder = RegistryBuilder::new(BuildDescriptor {
+        source_revision: "scheduler-migration-test".into(),
+        cargo_lock_digest: Digest::from_bytes([73; 32]),
+    });
+    builder.register(SchedulerWorkflow).unwrap();
+    let registry = Arc::new(builder.finish().unwrap());
+    let layout = CellStorageLayout::new(
+        Store::new(Arc::new(InMemory::new())),
+        Path::from("scheduler-release-migration"),
+        *identity.application().as_bytes(),
+    );
+    let first_image = format!("sha256:{}", "4a".repeat(32));
+    bootstrap_release_at(&layout, identity, &registry, &first_image)
+        .await
+        .unwrap();
+
+    let target = CellTarget::new(
+        identity.tenant(),
+        identity.application(),
+        WORKFLOW_NAMESPACE,
+        b"retained-workflow",
+    )
+    .unwrap();
+    let catalog = crab_cell_runtime::CellCatalog::new(layout.clone(), identity.tenant());
+    let proof = catalog
+        .provision(
+            crab_cell_runtime::CatalogEntry::new(
+                &target,
+                crab_cell_runtime::CatalogRole::Workflow,
+                WORKFLOW_PREDECESSOR,
+                1,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let authority = CellAuthority::new(layout.clone());
+    let session = SessionId::from_bytes([74; 16]);
+    let endpoint = "https://scheduler-migration.internal:8789".to_owned();
+    let owner = Owner {
+        session,
+        endpoint: endpoint.clone(),
+    };
+    let initial = authority
+        .create_initial(&proof, IncarnationId::from_bytes([75; 16]), owner.clone())
+        .await
+        .unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 4).unwrap(), 16 * 1024 * 1024, session).unwrap();
+    runtime
+        .bootstrap(
+            proof,
+            CellReplica::new(
+                layout.clone(),
+                *target.cell_id().as_bytes(),
+                *initial.value().incarnation.as_bytes(),
+                ReplicaLimits::default(),
+            )
+            .unwrap(),
+            authority.clone(),
+            initial,
+            local.path().join("retained.sqlite"),
+            install_workflow_schema,
+        )
+        .await
+        .unwrap()
+        .drain()
+        .await
+        .unwrap();
+
+    let releases = crab_cell_runtime::ReleaseStore::new(layout.clone(), identity).unwrap();
+    let ready = releases.load().await.unwrap().unwrap();
+    let operation = RequestId::from_bytes([76; 16]);
+    let second_image = format!("sha256:{}", "4b".repeat(32));
+    let prepared = releases
+        .prepare(
+            registry.release_bytes(),
+            registry.release_digest(),
+            ready.record().revision(),
+            &second_image,
+            operation,
+        )
+        .await
+        .unwrap();
+    let activating = releases
+        .start_activation(prepared.revision(), operation)
+        .await
+        .unwrap();
+
+    let fleet = Digest::from_bytes([77; 32]);
+    let image = Digest::from_bytes([78; 32]);
+    let certificate = Digest::from_bytes([79; 32]);
+    let node_directory =
+        NodeDirectory::new(layout.clone(), fleet, image, registry.release_digest());
+    let key = SigningKey::from_bytes(&[80; 32]);
+    let now_ms = super::super::unix_now_ms().unwrap();
+    node_directory
+        .create(
+            NodeAdvertisement::sign(
+                session,
+                endpoint,
+                fleet,
+                certificate,
+                image,
+                registry.release_digest(),
+                &key,
+                1,
+                now_ms,
+                now_ms + 15_000,
+                registry.module_digests(),
+                vec![1],
+                NodeCapacity {
+                    free_memory_bytes: 1024 * 1024 * 1024,
+                    free_disk_bytes: 1024 * 1024 * 1024,
+                    job_credits: 1,
+                },
+            )
+            .unwrap(),
+            now_ms,
+        )
+        .await
+        .unwrap();
+    let router = RepositoryCellRouter::new(
+        identity,
+        layout.clone(),
+        Arc::clone(&registry),
+        runtime.clone(),
+        super::super::RepositoryCellPeer::new(
+            node_directory.clone(),
+            Arc::new(PeerSigner::new(session, registry.release_digest(), key)),
+            Arc::new(UnavailablePeer),
+            owner,
+        ),
+        local.path().join("session"),
+    )
+    .unwrap();
+    let status = SchedulerStatus::new(now_ms).unwrap();
+    let mut scheduler = RepositoryCellScheduler::new(
+        identity,
+        layout.clone(),
+        node_directory,
+        router,
+        session,
+        status,
+    )
+    .unwrap();
+
+    for _ in 0..2 {
+        scheduler.scan_once().await.unwrap();
+        if !scheduler.migration_jobs.is_empty() {
+            break;
+        }
+    }
+    scheduler
+        .migration_jobs
+        .join_next()
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let migrated = authority.load(target.cell_id()).await.unwrap().unwrap();
+    assert_eq!(
+        migrated.value().code,
+        registry.module_code(WORKFLOW_MODULE).unwrap()
+    );
+    assert_eq!(migrated.value().schema, 1);
+    assert_eq!(migrated.value().root.as_ref().unwrap().commit_sequence, 1);
+    assert_eq!(migrated.value().state, ControlState::Idle);
+    let progress = crab_cell_runtime::MigrationProgressStore::new(layout.clone(), identity)
+        .unwrap()
+        .load(target.cell_id(), operation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        progress.state(),
+        crab_cell_runtime::MigrationProgressState::Completed
+    );
+    assert_eq!(progress.attempts(), 1);
+    super::super::verify_current_cells(&layout, identity, &registry)
+        .await
+        .unwrap();
+    releases
+        .complete_activation(activating.revision(), operation)
+        .await
+        .unwrap();
     runtime.shutdown().await.unwrap();
 }

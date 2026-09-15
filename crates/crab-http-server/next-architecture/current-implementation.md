@@ -73,10 +73,14 @@ runtime now declares retained predecessor code/schema compatibility, uses it for
 typed local and peer dispatch, and atomically publishes adjacent schema or
 same-schema code-only transitions. It replaces the old capability only after
 control publication, and restores the schema-migrated root after local loss. The
-server release activator does not yet enumerate and migrate the catalog or persist
-per-Cell progress. It does separately require current code/maximum schema before
-the final ready CAS, so retained compatibility cannot be mistaken for completed
-migration. The complete issue/comment HTTP route
+server scheduler now enumerates rendezvous-assigned catalog shards while the
+compiled release is activating, bounds migration concurrency at 16 per node,
+deduplicates by Cell, routes through the normal local/remote/idle/takeover path,
+and conditionally persists monotonic terminal progress. Remote owners accept only
+signed source/successor pairs and derive SQL from their frozen registry. The
+activator requires current code/maximum schema before the final ready CAS, so
+retained compatibility cannot be mistaken for completed migration; the bounded
+`cells release migrations` cursor reports pending and failed Cells. The complete issue/comment HTTP route
 group now calls the typed repository module and publishes through LTX. The
 private management route can dispatch or forward registered calls between
 compatible nodes. The repository module additionally registers private Tick and

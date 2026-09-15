@@ -15,8 +15,8 @@ use bytes::Bytes;
 use crab_cell_runtime::{
     ApplicationIdentity, CellAuthority, CellCatalog, CellHandle, CellRuntime, CellTarget, Digest,
     Error as CellError, NodeAdvertisement, NodeCapacity, NodeDirectory, PeerAuthorizer,
-    PeerCellResolver, PeerDispatcher, PeerRoundTrip, Registry, SessionId, VerifiedPeerRequest,
-    VersionedNodeAdvertisement, peer_wire,
+    PeerCellResolver, PeerDispatcher, PeerRoundTrip, Registry, ReleaseState, ReleaseStore,
+    SessionId, VerifiedPeerRequest, VersionedNodeAdvertisement, peer_wire,
 };
 use crab_storage::CellStorageLayout;
 use ed25519_dalek::SigningKey;
@@ -37,6 +37,7 @@ const HEARTBEAT_RETRY: Duration = Duration::from_millis(500);
 pub(crate) struct PeerReceiver {
     directory: NodeDirectory,
     registry: Arc<Registry>,
+    releases: ReleaseStore,
     resolver: LocalCellResolver,
     round_trip: Arc<dyn PeerRoundTrip>,
 }
@@ -45,12 +46,14 @@ impl PeerReceiver {
     pub(crate) fn new(
         directory: NodeDirectory,
         registry: Arc<Registry>,
+        releases: ReleaseStore,
         resolver: LocalCellResolver,
         round_trip: Arc<dyn PeerRoundTrip>,
     ) -> Self {
         Self {
             directory,
             registry,
+            releases,
             resolver,
             round_trip,
         }
@@ -362,6 +365,7 @@ fn runtime_cell_action(registry: &Registry, request: &VerifiedPeerRequest) -> Op
             _ => None,
         },
         Some(peer_wire::peer_request::Operation::Resolve(_)) => runtime_principal_action(request),
+        Some(peer_wire::peer_request::Operation::Migrate(_)) => Some("cell.release.migrate"),
         _ => None,
     }
 }
@@ -407,6 +411,22 @@ pub(crate) async fn forward(
     };
     if server.authorize(&request).is_err() {
         return peer_http_error(StatusCode::UNAUTHORIZED);
+    }
+    if matches!(
+        request.operation(),
+        Some(peer_wire::peer_request::Operation::Migrate(_))
+    ) {
+        let allowed = match receiver.releases.load().await {
+            Ok(Some(release)) => {
+                release.record().state() == ReleaseState::Activating
+                    && release.record().desired() == Some(receiver.registry.release_digest())
+            }
+            Ok(None) => false,
+            Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
+        };
+        if !allowed {
+            return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+        }
     }
     if request.hop_count() < 2
         && matches!(

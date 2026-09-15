@@ -96,6 +96,13 @@ try {
         + target + identity + 'cell_command { command_id: 17 codec_version: 2 input: "comment" } }',
       expected: /cell_command \{\s+command_id: 17\s+codec_version: 2\s+input: "comment"/,
     },
+    {
+      type: 'MigrationRequest',
+      input: target
+        + 'incarnation: "abcdefghijklmnop" from_code: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" from_schema: 1 '
+        + 'to_code: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" to_schema: 2',
+      expected: /from_schema: 1\s+to_code: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"\s+to_schema: 2/,
+    },
   ];
   for (const fixture of fixtures) {
     const type = 'crab.cell.peer.v1.' + fixture.type;

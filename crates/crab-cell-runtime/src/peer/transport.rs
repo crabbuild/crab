@@ -8,7 +8,7 @@ use std::{
 use prost::Message;
 
 use crate::{
-    CellDescription, CellId, CellTarget, Digest, EffectClaim, Error, IncarnationId,
+    CellDescription, CellId, CellTarget, Digest, EffectClaim, Error, IncarnationId, MigrationPlan,
     MutationIdentity, Receipt, Resolution, Result, StoredOutcome,
     client::{CellTransport, EncodedCommand, EncodedObservation, EncodedQuery, EncodedResolve},
 };
@@ -37,6 +37,96 @@ pub(crate) struct PeerClientTransport {
 #[derive(Clone)]
 pub struct EffectPeerClient {
     transport: PeerClientTransport,
+}
+
+/// Authenticated private control client for one registry-selected Cell migration.
+#[derive(Clone)]
+pub struct MigrationPeerClient {
+    transport: PeerClientTransport,
+}
+
+impl MigrationPeerClient {
+    #[must_use]
+    pub fn new(
+        signer: Arc<PeerSigner>,
+        principal: PeerPrincipal,
+        round_trip: Arc<dyn PeerRoundTrip>,
+    ) -> Self {
+        Self {
+            transport: PeerClientTransport::new(signer, principal, round_trip),
+        }
+    }
+
+    /// Migrates one exact remote capability without accepting migration SQL on the wire.
+    pub async fn migrate(
+        &self,
+        target: CellTarget,
+        expected: CellDescription,
+        plan: MigrationPlan,
+        now_ms: i64,
+    ) -> Result<CellDescription> {
+        if expected.cell != target.cell_id()
+            || expected.code != plan.from_code()
+            || expected.schema != plan.from_schema()
+        {
+            return Err(Error::Registry(
+                "peer migration plan does not match described Cell",
+            ));
+        }
+        let expires_at_ms = now_ms.saturating_add(60_000);
+        let operation = PeerOperation::Migrate(wire::MigrationRequest {
+            target: Some(wire_target(&target)),
+            incarnation: expected.incarnation.as_bytes().to_vec(),
+            from_code: plan.from_code().as_bytes().to_vec(),
+            from_schema: plan.from_schema(),
+            to_code: plan.to_code().as_bytes().to_vec(),
+            to_schema: plan.to_schema(),
+        });
+        let reply = match self
+            .transport
+            .exchange(target.clone(), now_ms, expires_at_ms, operation)
+            .await
+        {
+            Ok(reply) => reply,
+            Err(source @ Error::PeerTransportUnknown { .. }) => {
+                let observed = self.transport.describe(target).await?;
+                if migrated_description(observed, expected, plan) {
+                    return Ok(observed);
+                }
+                return Err(source);
+            }
+            Err(error) => return Err(error),
+        };
+        match reply.outcome {
+            Some(wire::peer_reply::Outcome::Migration(reply)) => {
+                let observed = runtime_description(
+                    reply
+                        .description
+                        .ok_or(Error::Peer("migration reply description is missing"))?,
+                )?;
+                if migrated_description(observed, expected, plan) {
+                    Ok(observed)
+                } else {
+                    Err(Error::Peer(
+                        "migration reply does not match the requested successor",
+                    ))
+                }
+            }
+            Some(wire::peer_reply::Outcome::Error(error)) => Err(runtime_error(error)),
+            _ => Err(Error::Peer("unexpected migration reply")),
+        }
+    }
+}
+
+fn migrated_description(
+    observed: CellDescription,
+    expected: CellDescription,
+    plan: MigrationPlan,
+) -> bool {
+    observed.cell == expected.cell
+        && observed.incarnation == expected.incarnation
+        && observed.code == plan.to_code()
+        && observed.schema >= plan.to_schema()
 }
 
 impl EffectPeerClient {

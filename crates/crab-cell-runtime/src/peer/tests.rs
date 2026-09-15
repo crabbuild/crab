@@ -78,6 +78,17 @@ fn effect() -> wire::EffectRequest {
     }
 }
 
+fn migration() -> wire::MigrationRequest {
+    wire::MigrationRequest {
+        target: Some(target()),
+        incarnation: vec![8; 16],
+        from_code: vec![9; 32],
+        from_schema: 1,
+        to_code: vec![10; 32],
+        to_schema: 2,
+    }
+}
+
 fn verifier(signer: &PeerSigner) -> PeerVerifier {
     PeerVerifier::new(
         SessionId::from_bytes([1; 16]),
@@ -174,6 +185,46 @@ fn signed_effect_delivery_and_resolve_bind_derived_identity() {
                 NOW_MS + 60_000,
                 30_000,
                 PeerOperation::DeliverEffect(invalid),
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn signed_migration_binds_source_and_successor_versions() {
+    let signer = signer();
+    let encoded = signer
+        .sign(
+            PeerPrincipal {
+                issuer: "crab-runtime:test".into(),
+                subject: "release-operator".into(),
+                actions: vec!["cell.release.migrate".into()],
+            },
+            NOW_MS,
+            NOW_MS + 60_000,
+            30_000,
+            PeerOperation::Migrate(migration()),
+        )
+        .unwrap();
+    let verified = verifier(&signer).verify(&encoded, NOW_MS + 1_000).unwrap();
+    assert_eq!(verified.operation_tag(), 15);
+    assert!(matches!(
+        verified.operation(),
+        Some(wire::peer_request::Operation::Migrate(request))
+            if request.from_schema == 1 && request.to_schema == 2
+    ));
+
+    let mut unchanged = migration();
+    unchanged.to_code = unchanged.from_code.clone();
+    unchanged.to_schema = unchanged.from_schema;
+    assert!(
+        signer
+            .sign(
+                principal(),
+                NOW_MS,
+                NOW_MS + 60_000,
+                30_000,
+                PeerOperation::Migrate(unchanged),
             )
             .is_err()
     );
@@ -330,4 +381,21 @@ fn reply_codec_rejects_unknown_fields_and_invalid_enums() {
         })),
     };
     assert!(encode_peer_reply(&invalid).is_err());
+
+    let migration = wire::PeerReply {
+        outcome: Some(wire::peer_reply::Outcome::Migration(wire::MigrationReply {
+            description: Some(wire::CellDescription {
+                cell_id: vec![1; 32],
+                incarnation: vec![2; 16],
+                code: vec![3; 32],
+                schema: 2,
+            }),
+        })),
+    };
+    assert!(matches!(
+        decode_peer_reply(&encode_peer_reply(&migration).unwrap())
+            .unwrap()
+            .outcome,
+        Some(wire::peer_reply::Outcome::Migration(_))
+    ));
 }

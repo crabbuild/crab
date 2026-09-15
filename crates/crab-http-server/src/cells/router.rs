@@ -1,10 +1,11 @@
 use std::{path::PathBuf, sync::Arc};
 
 use crab_cell_runtime::{
-    ApplicationIdentity, CatalogProof, CellAuthority, CellCatalog, CellClient, CellReplica,
-    CellRuntime, CellTarget, ControlState, EffectPeerClient, MAX_ACTIVITY_PAYLOAD_BYTES,
-    NodeByteReservation, NodeDirectory, Owner, PeerPrincipal, PeerRoundTrip, PeerSigner, Registry,
-    ReplicaLimits, VersionedControl,
+    ApplicationIdentity, CatalogProof, CellAuthority, CellCatalog, CellClient, CellDescription,
+    CellHandle, CellReplica, CellRuntime, CellTarget, ControlState, EffectPeerClient,
+    MAX_ACTIVITY_PAYLOAD_BYTES, MigrationPeerClient, NodeByteReservation, NodeDirectory, Owner,
+    PeerPrincipal, PeerRoundTrip, PeerSigner, Registry, ReleaseState, ReleaseStore, ReplicaLimits,
+    VersionedControl,
 };
 use crab_storage::CellStorageLayout;
 use tokio::sync::Mutex;
@@ -39,6 +40,7 @@ pub(crate) struct RepositoryCellPeer {
 pub(crate) struct RepositoryCell {
     pub(crate) target: CellTarget,
     pub(crate) client: CellClient,
+    handle: Option<CellHandle>,
 }
 
 pub(crate) struct ScheduledRepositoryCell {
@@ -150,6 +152,109 @@ impl RepositoryCellRouter {
         )
     }
 
+    pub(crate) async fn migrate_target(&self, target: CellTarget) -> crate::Result<()> {
+        if target.tenant() != self.identity.tenant()
+            || target.application() != self.identity.application()
+        {
+            return Err(crab_cell_runtime::Error::PeerAuthorization(
+                "migration target belongs to another application",
+            )
+            .into());
+        }
+        loop {
+            self.require_activating_release().await?;
+            let proof = self
+                .catalog
+                .lookup(target.cell_id())
+                .await?
+                .ok_or(crab_cell_runtime::Error::CellNotActive)?;
+            let control = self
+                .authority
+                .load(target.cell_id())
+                .await?
+                .ok_or(crab_cell_runtime::Error::CellNotActive)?;
+            if control.value().state == ControlState::Tombstoned {
+                return Ok(());
+            }
+            if self.registry.is_current_cell(
+                proof.entry().namespace(),
+                proof.entry().role(),
+                control.value().code,
+                control.value().schema,
+            ) {
+                return Ok(());
+            }
+            let plan = self
+                .registry
+                .next_migration(
+                    proof.entry().namespace(),
+                    control.value().code,
+                    control.value().schema,
+                )?
+                .ok_or(crab_cell_runtime::Error::Registry(
+                    "cataloged Cell has no migration to the current release",
+                ))?;
+            let expected = CellDescription {
+                cell: target.cell_id(),
+                incarnation: control.value().incarnation,
+                code: control.value().code,
+                schema: control.value().schema,
+            };
+            let scheduled = self
+                .route_runtime(
+                    target.clone(),
+                    self.runtime_principal(&["cell.release.migrate"]),
+                )
+                .await?;
+            let release_after = scheduled.should_release();
+            match scheduled.cell.handle {
+                Some(handle)
+                    if handle.code() == plan.from_code()
+                        && handle.schema() == plan.from_schema() =>
+                {
+                    handle.migrate(plan, super::unix_now_ms()?).await?;
+                }
+                Some(handle)
+                    if handle.code() == plan.to_code() && handle.schema() >= plan.to_schema() => {}
+                Some(_) => return Err(crab_cell_runtime::Error::Fenced.into()),
+                None => {
+                    self.migration_peer_client()
+                        .migrate(target.clone(), expected, plan, super::unix_now_ms()?)
+                        .await?;
+                }
+            }
+            if release_after {
+                self.drain_local_target(&target).await?;
+            }
+        }
+    }
+
+    fn migration_peer_client(&self) -> MigrationPeerClient {
+        MigrationPeerClient::new(
+            Arc::clone(&self.peer.signer),
+            self.runtime_principal(&["cell.release.migrate"]),
+            Arc::clone(&self.peer.round_trip),
+        )
+    }
+
+    async fn require_activating_release(&self) -> crate::Result<()> {
+        let release = ReleaseStore::new(self.layout.clone(), self.identity)?
+            .load()
+            .await?
+            .ok_or(crab_cell_runtime::Error::Release(
+                "release is unavailable during Cell migration",
+            ))?;
+        if release.record().state() != ReleaseState::Activating
+            || release.record().desired() != Some(self.registry.release_digest())
+        {
+            return Err(crab_cell_runtime::Error::Release(
+                "Cell migration requires the compiled release to be activating",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     pub(crate) fn reserve_activity_payloads(&self) -> crate::Result<NodeByteReservation> {
         self.runtime
             .try_reserve_node_bytes(2 * MAX_ACTIVITY_PAYLOAD_BYTES)
@@ -239,7 +344,8 @@ impl RepositoryCellRouter {
             .await?
             .map(|handle| RepositoryCell {
                 target: target.clone(),
-                client: CellClient::local(Arc::clone(&self.registry), handle),
+                client: CellClient::local(Arc::clone(&self.registry), handle.clone()),
+                handle: Some(handle),
             }))
     }
 
@@ -325,7 +431,8 @@ impl RepositoryCellRouter {
         Ok(ScheduledRepositoryCell {
             cell: RepositoryCell {
                 target,
-                client: CellClient::local(Arc::clone(&self.registry), handle),
+                client: CellClient::local(Arc::clone(&self.registry), handle.clone()),
+                handle: Some(handle),
             },
             release_after: true,
         })
@@ -340,6 +447,7 @@ impl RepositoryCellRouter {
                 principal,
                 Arc::clone(&self.peer.round_trip),
             ),
+            handle: None,
         }
     }
 

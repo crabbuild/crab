@@ -540,6 +540,7 @@ pub async fn serve(config: Config) -> Result<()> {
     let peer_receiver = crate::peer::PeerReceiver::new(
         directory.clone(),
         Arc::clone(&registry),
+        crab_cell_runtime::ReleaseStore::new(startup.layout.clone(), startup.identity)?,
         cell_resolver,
         Arc::clone(&peer_round_trip),
     );

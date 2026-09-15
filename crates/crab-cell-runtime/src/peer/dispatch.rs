@@ -79,6 +79,9 @@ impl PeerDispatcher {
             Some(wire::peer_request::Operation::ResolveEffect(resolve)) => {
                 self.resolve_effect(&transport, resolve, now_ms).await
             }
+            Some(wire::peer_request::Operation::Migrate(migration)) => {
+                self.migrate(&transport, migration, now_ms).await
+            }
             None => error_reply(Error::Peer("peer operation is missing")),
         }
     }
@@ -404,6 +407,67 @@ impl PeerDispatcher {
                 transport, resolution,
             ))),
         }
+    }
+
+    async fn migrate(
+        &self,
+        transport: &LocalCellTransport,
+        request: &wire::MigrationRequest,
+        now_ms: i64,
+    ) -> wire::PeerReply {
+        let result = self.migrate_inner(transport, request, now_ms).await;
+        match result {
+            Ok(current) => wire::PeerReply {
+                outcome: Some(wire::peer_reply::Outcome::Migration(wire::MigrationReply {
+                    description: Some(description(current)),
+                })),
+            },
+            Err(error) => error_reply(error),
+        }
+    }
+
+    async fn migrate_inner(
+        &self,
+        transport: &LocalCellTransport,
+        request: &wire::MigrationRequest,
+        now_ms: i64,
+    ) -> Result<CellDescription> {
+        let target = request_target(request.target.as_ref())?;
+        let from_code = Digest::try_from(request.from_code.as_slice())?;
+        let to_code = Digest::try_from(request.to_code.as_slice())?;
+        let plan = self
+            .registry
+            .next_migration(target.namespace(), from_code, request.from_schema)?
+            .ok_or(Error::Registry("requested Cell migration has no successor"))?;
+        if plan.to_code() != to_code || plan.to_schema() != request.to_schema {
+            return Err(Error::Registry(
+                "requested Cell migration differs from the compiled successor",
+            ));
+        }
+
+        let current = local_description(&transport.handle);
+        if current.cell != target.cell_id()
+            || current.incarnation != IncarnationId::try_from(request.incarnation.as_slice())?
+        {
+            return Err(Error::Fenced);
+        }
+        if current.code == plan.to_code() && current.schema >= plan.to_schema() {
+            return Ok(current);
+        }
+        if current.code != plan.from_code() || current.schema != plan.from_schema() {
+            return Err(Error::Fenced);
+        }
+
+        let migrated = transport.handle.migrate(plan, now_ms).await?;
+        let description = local_description(&migrated.handle);
+        if description.code != migrated.outcome.code
+            || description.schema != migrated.outcome.schema
+        {
+            return Err(Error::Control(
+                "published migration capability and outcome differ",
+            ));
+        }
+        Ok(description)
     }
 }
 

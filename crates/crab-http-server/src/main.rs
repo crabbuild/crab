@@ -85,6 +85,13 @@ enum CellReleaseCommand {
     },
     /// Print the canonical durable release selection.
     Status,
+    /// List a bounded page of pending or failed Cell migrations.
+    Migrations {
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -247,6 +254,9 @@ async fn cells(
         CellsCommand::Release {
             command: CellReleaseCommand::Status,
         } => crab_http_server::cell_release_status(config).await?,
+        CellsCommand::Release {
+            command: CellReleaseCommand::Migrations { after, limit },
+        } => crab_http_server::cell_release_migrations(config, after.as_deref(), limit).await?,
         CellsCommand::ImportRepositoryIssues {
             owner,
             name,
@@ -505,6 +515,31 @@ mod tests {
                     command: CellReleaseCommand::Status
                 }
             })
+        ));
+
+        let migrations = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "release",
+            "migrations",
+            "--after",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--limit",
+            "25",
+        ])
+        .unwrap();
+        assert!(matches!(
+            migrations.command,
+            Some(Command::Cells {
+                command: CellsCommand::Release {
+                    command: CellReleaseCommand::Migrations {
+                        after: Some(after),
+                        limit: 25,
+                    }
+                }
+            }) if after == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ));
     }
 

@@ -1,10 +1,16 @@
-use std::sync::{Arc, OnceLock};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{Arc, OnceLock},
+};
 
 use crab_cell_runtime::{
     ApplicationId, BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellCatalog,
     CellModule, CellRuntime, CellTarget, Digest, HandlerOutcome, IncarnationId,
-    MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor, NamespaceId, Owner, Registry,
-    RegistryBuilder, RetainedCodeDescriptor, SessionId, SqlWorkerPool, TenantId,
+    MigrationDescriptor, MigrationPeerClient, ModuleDescriptor, NamespaceDescriptor, NamespaceId,
+    Owner, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerPrincipal, PeerRoundTrip,
+    PeerSigner, PeerVerifier, Registry, RegistryBuilder, RetainedCodeDescriptor, SessionId,
+    SqlWorkerPool, TenantId, VerifiedPeerRequest,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{CellStorageLayout, Store};
@@ -77,6 +83,84 @@ fn compiled_registry() -> Registry {
     });
     registry.register(MigrationModule).unwrap();
     registry.finish().unwrap()
+}
+
+struct RuntimeResolver {
+    target: CellTarget,
+    proof: crab_cell_runtime::CatalogProof,
+    authority: CellAuthority,
+    runtime: CellRuntime,
+}
+
+impl PeerCellResolver for RuntimeResolver {
+    fn resolve(
+        &self,
+        target: CellTarget,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = crab_cell_runtime::Result<crab_cell_runtime::CellHandle>>
+                + Send
+                + 'static,
+        >,
+    > {
+        let matches = target == self.target;
+        let proof = self.proof.clone();
+        let authority = self.authority.clone();
+        let runtime = self.runtime.clone();
+        Box::pin(async move {
+            if !matches {
+                return Err(crab_cell_runtime::Error::CellNotActive);
+            }
+            let control = authority
+                .load(proof.entry().cell())
+                .await?
+                .ok_or(crab_cell_runtime::Error::CellNotActive)?;
+            runtime
+                .local_handle(proof, &control)
+                .await?
+                .ok_or(crab_cell_runtime::Error::CellNotActive)
+        })
+    }
+}
+
+struct MigrationAuthorizer;
+
+impl PeerAuthorizer for MigrationAuthorizer {
+    fn authorize(&self, request: &VerifiedPeerRequest) -> crab_cell_runtime::Result<()> {
+        if request.permits("cell.release.migrate") {
+            Ok(())
+        } else {
+            Err(crab_cell_runtime::Error::PeerAuthorization(
+                "missing release migration action",
+            ))
+        }
+    }
+}
+
+struct LoopbackRoundTrip {
+    verifier: Arc<PeerVerifier>,
+    dispatcher: Arc<PeerDispatcher>,
+}
+
+impl PeerRoundTrip for LoopbackRoundTrip {
+    fn send(
+        &self,
+        target: CellTarget,
+        request: Vec<u8>,
+        _remaining_ms: u32,
+    ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>> {
+        let verifier = Arc::clone(&self.verifier);
+        let dispatcher = Arc::clone(&self.dispatcher);
+        Box::pin(async move {
+            let verified = verifier.verify(&request, 10)?;
+            if verified.target() != &target {
+                return Err(crab_cell_runtime::Error::Peer(
+                    "loopback migration target changed",
+                ));
+            }
+            dispatcher.dispatch_bytes(&verified, 10).await
+        })
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -378,6 +462,136 @@ async fn code_only_migration_publishes_new_code_without_schema_ledger_entry() {
     assert_eq!(published.value().root.as_ref().unwrap().commit_sequence, 1);
 
     migrated.handle.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn authenticated_peer_migration_derives_plan_and_reconciles_retry() {
+    let registry = Arc::new(compiled_registry());
+    let target = CellTarget::new(
+        TenantId::from_bytes([80; 16]),
+        ApplicationId::from_bytes([81; 16]),
+        NAMESPACE,
+        b"peer-code-only",
+    )
+    .unwrap();
+    let incarnation = IncarnationId::from_bytes([82; 16]);
+    let layout = CellStorageLayout::new(
+        Store::new(Arc::new(InMemory::new())),
+        Path::from("peer-code-only-migration"),
+        [81; 16],
+    );
+    let catalog = CellCatalog::new(layout.clone(), target.tenant());
+    let proof = catalog
+        .provision(CatalogEntry::new(&target, CatalogRole::Sql, PREDECESSOR_CODE, 2).unwrap())
+        .await
+        .unwrap();
+    let authority = CellAuthority::new(layout.clone());
+    let owner_session = SessionId::from_bytes([83; 16]);
+    let initial = authority
+        .create_initial(
+            &proof,
+            incarnation,
+            Owner {
+                session: owner_session,
+                endpoint: "https://peer-migration.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 2).unwrap(),
+        16 * 1024 * 1024,
+        owner_session,
+    )
+    .unwrap();
+    let files = tempfile::TempDir::new().unwrap();
+    let replica = CellReplica::new(
+        layout,
+        *target.cell_id().as_bytes(),
+        *incarnation.as_bytes(),
+        Limits::default(),
+    )
+    .unwrap();
+    let handle = runtime
+        .bootstrap(
+            proof.clone(),
+            replica,
+            authority.clone(),
+            initial,
+            files.path().join("peer-code-only.sqlite"),
+            |transaction| {
+                transaction.execute_batch(MIGRATION_ONE)?;
+                transaction.execute_batch(MIGRATION_TWO)?;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    let expected = crab_cell_runtime::CellDescription {
+        cell: target.cell_id(),
+        incarnation,
+        code: handle.code(),
+        schema: handle.schema(),
+    };
+    let plan = registry
+        .next_migration(target.namespace(), expected.code, expected.schema)
+        .unwrap()
+        .unwrap();
+    let signing_session = SessionId::from_bytes([84; 16]);
+    let signer = PeerSigner::new(
+        signing_session,
+        registry.release_digest(),
+        ed25519_dalek::SigningKey::from_bytes(&[85; 32]),
+    );
+    let verifier = Arc::new(PeerVerifier::new(
+        signing_session,
+        registry.release_digest(),
+        signer.verifying_key(),
+    ));
+    let dispatcher = Arc::new(PeerDispatcher::new(
+        Arc::clone(&registry),
+        Arc::new(RuntimeResolver {
+            target: target.clone(),
+            proof: proof.clone(),
+            authority: authority.clone(),
+            runtime: runtime.clone(),
+        }),
+        Arc::new(MigrationAuthorizer),
+    ));
+    let client = MigrationPeerClient::new(
+        Arc::new(signer),
+        PeerPrincipal {
+            issuer: "crab-runtime:test".into(),
+            subject: "release-operator".into(),
+            actions: vec!["cell.release.migrate".into()],
+        },
+        Arc::new(LoopbackRoundTrip {
+            verifier,
+            dispatcher,
+        }),
+    );
+
+    let migrated = client
+        .migrate(target.clone(), expected, plan, 10)
+        .await
+        .unwrap();
+    assert_eq!(migrated.code, registry.module_code(MODULE).unwrap());
+    assert_eq!(migrated.schema, 2);
+    assert_eq!(
+        client.migrate(target, expected, plan, 10).await.unwrap(),
+        migrated
+    );
+
+    let control = authority.load(proof.entry().cell()).await.unwrap().unwrap();
+    runtime
+        .local_handle(proof, &control)
+        .await
+        .unwrap()
+        .unwrap()
+        .drain()
+        .await
+        .unwrap();
     runtime.shutdown().await.unwrap();
 }
 

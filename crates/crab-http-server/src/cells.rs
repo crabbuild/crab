@@ -2,13 +2,15 @@ use std::sync::OnceLock;
 
 use crab_cell_runtime::{
     ApplicationId, ApplicationIdentity, ApplicationIdentityStore, BuildDescriptor, CatalogRole,
-    CellAuthority, CellCatalog, CellModule, ControlState, Digest, EffectModule, MaintenanceModule,
-    MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor, NamespaceId, NodeDirectory,
+    CellAuthority, CellCatalog, CellId, CellModule, ControlState, Digest, EffectModule,
+    MaintenanceModule, MigrationDescriptor, MigrationFailure, MigrationProgressState,
+    MigrationProgressStore, ModuleDescriptor, NamespaceDescriptor, NamespaceId, NodeDirectory,
     OperationDescriptor, Registry, RegistryBuilder, ReleaseState, ReleaseStore, RequestId,
     TenantId, register_effect_delivery, register_maintenance,
 };
 use crab_storage::CellStorageLayout;
 use object_store::path::Path;
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{Config, Error, Result, storage_root::StorageRoot};
@@ -34,6 +36,8 @@ pub(crate) const REPOSITORY_EFFECT_CLAIM_COMMAND_ID: u32 = 6;
 pub(crate) const REPOSITORY_EFFECT_LEASE_COMMAND_ID: u32 = 7;
 pub(crate) const REPOSITORY_EFFECT_VALIDATE_QUERY_ID: u32 = 5;
 const MAX_LIVE_NODES: usize = 10_000;
+const MAX_MIGRATION_STATUS_LIMIT: usize = 256;
+const MAX_MIGRATION_STATUS_EXAMINED: usize = 1_024;
 const REPOSITORY_COMMANDS: &[OperationDescriptor] = &[
     operation(1, 80 * 1024, 80 * 1024),
     operation(2, 80 * 1024, 80 * 1024),
@@ -261,6 +265,226 @@ pub(crate) async fn release_status(config: &Config) -> Result<Vec<u8>> {
         .record()
         .encode()
         .map_err(Error::from)
+}
+
+#[derive(Serialize)]
+struct MigrationStatusPage {
+    version: u8,
+    operation: String,
+    release: String,
+    entries: Vec<MigrationStatusEntry>,
+    next_after: Option<String>,
+    has_more: bool,
+}
+
+#[derive(Serialize)]
+struct MigrationStatusEntry {
+    cell: String,
+    namespace: String,
+    state: MigrationStatusState,
+    code: String,
+    schema: u32,
+    target_code: String,
+    target_schema: u32,
+    attempts: u32,
+    failure: Option<MigrationFailure>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum MigrationStatusState {
+    Pending,
+    Failed,
+}
+
+pub(crate) async fn release_migrations(
+    config: &Config,
+    after: Option<&str>,
+    limit: usize,
+) -> Result<Vec<u8>> {
+    if limit == 0 || limit > MAX_MIGRATION_STATUS_LIMIT {
+        return Err(Error::Config(
+            "release migration status limit must be 1..=256",
+        ));
+    }
+    let after = after.map(decode_cell_cursor).transpose()?;
+    let root = StorageRoot::build(&config.storage)?;
+    let identities =
+        ApplicationIdentityStore::new(root.store.clone(), Path::from(root.prefix.clone()));
+    let identity = identities
+        .load()
+        .await?
+        .ok_or(Error::Config("Cell application is not initialized"))?;
+    let layout = identities.layout(identity).await?;
+    release_migrations_at(&layout, identity, &compiled_registry()?, after, limit).await
+}
+
+async fn release_migrations_at(
+    layout: &CellStorageLayout,
+    identity: ApplicationIdentity,
+    registry: &Registry,
+    after: Option<CellId>,
+    limit: usize,
+) -> Result<Vec<u8>> {
+    let release = ReleaseStore::new(layout.clone(), identity)?
+        .load()
+        .await?
+        .ok_or(Error::Config("Cell application release is not prepared"))?;
+    let selected = release
+        .record()
+        .desired()
+        .or(release.record().current())
+        .ok_or(Error::Config(
+            "Cell application release has no selected descriptor",
+        ))?;
+    if selected != registry.release_digest() {
+        return Err(Error::Config(
+            "selected Cell release differs from this binary",
+        ));
+    }
+    if ReleaseStore::new(layout.clone(), identity)?
+        .descriptor(selected)
+        .await?
+        != registry.release_bytes()
+    {
+        return Err(Error::Config(
+            "selected Cell descriptor differs from this binary",
+        ));
+    }
+    let catalog = CellCatalog::new(layout.clone(), identity.tenant());
+    let authority = CellAuthority::new(layout.clone());
+    let progress = MigrationProgressStore::new(layout.clone(), identity)?;
+    let operation = release.record().operation();
+    let mut entries = Vec::new();
+    let mut examined = 0;
+    let mut last_examined = None;
+    let mut last_returned = None;
+    let start_shard = after.map_or(0, |cell| cell.as_bytes()[0]);
+    for shard in start_shard..=u8::MAX {
+        let mut scan = catalog.scan_shard(shard).await?;
+        while let Some(page) = scan.next_page().await? {
+            for proof in page.entries() {
+                let cell = proof.entry().cell();
+                if after.is_some_and(|after| cell.as_bytes() <= after.as_bytes()) {
+                    continue;
+                }
+                if examined == MAX_MIGRATION_STATUS_EXAMINED {
+                    return encode_migration_status(
+                        operation,
+                        selected,
+                        entries,
+                        last_examined,
+                        true,
+                    );
+                }
+                examined += 1;
+                last_examined = Some(cell);
+                let control = authority.load(cell).await?;
+                if control
+                    .as_ref()
+                    .is_some_and(|control| control.value().state == ControlState::Tombstoned)
+                {
+                    continue;
+                }
+                let (code, schema) = control.as_ref().map_or(
+                    (proof.entry().initial_code(), proof.entry().initial_schema()),
+                    |control| (control.value().code, control.value().schema),
+                );
+                if registry.is_current_cell(
+                    proof.entry().namespace(),
+                    proof.entry().role(),
+                    code,
+                    schema,
+                ) {
+                    continue;
+                }
+                let (target_code, target_schema) = registry
+                    .current_cell_version(proof.entry().namespace(), proof.entry().role())
+                    .ok_or(Error::Config(
+                        "cataloged Cell namespace has no current release version",
+                    ))?;
+                if entries.len() == limit {
+                    return encode_migration_status(
+                        operation,
+                        selected,
+                        entries,
+                        last_returned,
+                        true,
+                    );
+                }
+                let recorded = progress.load(cell, operation).await?;
+                let failed = recorded.as_ref().is_some_and(|recorded| {
+                    recorded.attempt().release() == selected
+                        && recorded.attempt().to() == (target_code, target_schema)
+                        && recorded.state() == MigrationProgressState::Failed
+                });
+                entries.push(MigrationStatusEntry {
+                    cell: status_hex(cell.as_bytes()),
+                    namespace: status_hex(proof.entry().namespace().as_bytes()),
+                    state: if failed {
+                        MigrationStatusState::Failed
+                    } else {
+                        MigrationStatusState::Pending
+                    },
+                    code: status_hex(code.as_bytes()),
+                    schema,
+                    target_code: status_hex(target_code.as_bytes()),
+                    target_schema,
+                    attempts: recorded.as_ref().map_or(0, |recorded| recorded.attempts()),
+                    failure: recorded.and_then(|recorded| recorded.failure()),
+                });
+                last_returned = Some(cell);
+            }
+        }
+    }
+    encode_migration_status(operation, selected, entries, None, false)
+}
+
+fn encode_migration_status(
+    operation: RequestId,
+    release: Digest,
+    entries: Vec<MigrationStatusEntry>,
+    next_after: Option<CellId>,
+    has_more: bool,
+) -> Result<Vec<u8>> {
+    serde_json::to_vec(&MigrationStatusPage {
+        version: 1,
+        operation: status_hex(operation.as_bytes()),
+        release: status_hex(release.as_bytes()),
+        entries,
+        next_after: next_after.map(|cell| status_hex(cell.as_bytes())),
+        has_more,
+    })
+    .map_err(Error::from)
+}
+
+fn decode_cell_cursor(value: &str) -> Result<CellId> {
+    if value.len() != 64 {
+        return Err(Error::Config(
+            "release migration cursor must be a lowercase Cell ID",
+        ));
+    }
+    let mut bytes = [0; 32];
+    for (output, pair) in bytes.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+        let high = image_nibble(pair[0]).ok_or(Error::Config(
+            "release migration cursor must be a lowercase Cell ID",
+        ))?;
+        let low = image_nibble(pair[1]).ok_or(Error::Config(
+            "release migration cursor must be a lowercase Cell ID",
+        ))?;
+        *output = (high << 4) | low;
+    }
+    Ok(CellId::from_bytes(bytes))
+}
+
+fn status_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
 
 pub(crate) async fn verify_startup_release(config: &Config) -> Result<VerifiedStartupCells> {
@@ -1018,6 +1242,103 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn release_migration_status_is_bounded_paginated_and_reports_terminal_failure() {
+        let identity = ApplicationIdentity::new(
+            TenantId::from_bytes([41; 16]),
+            ApplicationId::from_bytes([42; 16]),
+        );
+        let layout = CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            Path::from("release-migration-status"),
+            *identity.application().as_bytes(),
+        );
+        let registry = rollover_registry();
+        let catalog = CellCatalog::new(layout.clone(), identity.tenant());
+        let mut cells = Vec::new();
+        for partition in [b"status-a".as_slice(), b"status-b".as_slice()] {
+            let target = CellTarget::new(
+                identity.tenant(),
+                identity.application(),
+                ROLLOVER_NAMESPACE,
+                partition,
+            )
+            .unwrap();
+            catalog
+                .provision(
+                    CatalogEntry::new(&target, CatalogRole::Sql, ROLLOVER_PREDECESSOR, 1).unwrap(),
+                )
+                .await
+                .unwrap();
+            cells.push(target.cell_id());
+        }
+        cells.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+
+        let operation = RequestId::from_bytes([43; 16]);
+        let releases = ReleaseStore::new(layout.clone(), identity).unwrap();
+        let prepared = releases
+            .prepare(
+                registry.release_bytes(),
+                registry.release_digest(),
+                0,
+                &format!("sha256:{}", "a".repeat(64)),
+                operation,
+            )
+            .await
+            .unwrap();
+        releases
+            .start_activation(prepared.revision(), operation)
+            .await
+            .unwrap();
+
+        let target_version = registry
+            .current_cell_version(ROLLOVER_NAMESPACE, CatalogRole::Sql)
+            .unwrap();
+        MigrationProgressStore::new(layout.clone(), identity)
+            .unwrap()
+            .failed(
+                crab_cell_runtime::MigrationProgressAttempt::new(
+                    operation,
+                    registry.release_digest(),
+                    SessionId::from_bytes([44; 16]),
+                    cells[0],
+                    (ROLLOVER_PREDECESSOR, 1),
+                    target_version,
+                )
+                .unwrap(),
+                MigrationFailure::Unavailable,
+                10,
+            )
+            .await
+            .unwrap();
+
+        let first: Value = serde_json::from_slice(
+            &release_migrations_at(&layout, identity, &registry, None, 1)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(first["entries"][0]["cell"], status_hex(cells[0].as_bytes()));
+        assert_eq!(first["entries"][0]["state"], "failed");
+        assert_eq!(first["entries"][0]["failure"], "unavailable");
+        assert_eq!(first["entries"][0]["attempts"], 1);
+        assert_eq!(first["has_more"], true);
+
+        let second: Value = serde_json::from_slice(
+            &release_migrations_at(&layout, identity, &registry, Some(cells[0]), 1)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            second["entries"][0]["cell"],
+            status_hex(cells[1].as_bytes())
+        );
+        assert_eq!(second["entries"][0]["state"], "pending");
+        assert_eq!(second["entries"][0]["attempts"], 0);
+        assert_eq!(second["has_more"], false);
     }
 
     #[tokio::test]

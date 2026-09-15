@@ -25,6 +25,7 @@ message PeerRequest {
     ResolveRequest resolve = 12;
     EffectRequest deliver_effect = 13;
     EffectResolveRequest resolve_effect = 14;
+    MigrationRequest migrate = 15;
   }
 }
 message PeerReply {
@@ -33,6 +34,7 @@ message PeerReply {
     ReadReply read = 2;
     ResolveReply resolve = 3;
     Error error = 4;
+    MigrationReply migration = 5;
   }
 }
 
@@ -61,6 +63,18 @@ message EffectResolveRequest {
   EffectIdentity identity = 3;
   bytes operation_digest = 4;
 }
+
+// Release control request. The receiver derives SQL from its frozen registry;
+// callers can only bind the exact source and expected successor versions.
+message MigrationRequest {
+  Target target = 1;
+  bytes incarnation = 2;
+  bytes from_code = 3;
+  uint32 from_schema = 4;
+  bytes to_code = 5;
+  uint32 to_schema = 6;
+}
+message MigrationReply { CellDescription description = 1; }
 
 message Target {
   bytes tenant_id = 1;

@@ -11,6 +11,7 @@ pub(super) enum MessageKind {
     ResolveRequest,
     EffectRequest,
     EffectResolveRequest,
+    MigrationRequest,
     EffectIdentity,
     Target,
     MutationIdentity,
@@ -24,6 +25,7 @@ pub(super) enum MessageKind {
     ResolveReply,
     Error,
     CellDescription,
+    MigrationReply,
 }
 
 #[derive(Clone, Copy)]
@@ -97,6 +99,7 @@ fn rules(kind: MessageKind) -> Vec<FieldRule> {
             oneof(12, Some(MessageKind::ResolveRequest), 1),
             oneof(13, Some(MessageKind::EffectRequest), 1),
             oneof(14, Some(MessageKind::EffectResolveRequest), 1),
+            oneof(15, Some(MessageKind::MigrationRequest), 1),
         ],
         MessageKind::Authorization => vec![
             scalar(1, 2),
@@ -156,6 +159,14 @@ fn rules(kind: MessageKind) -> Vec<FieldRule> {
             message(3, MessageKind::EffectIdentity),
             scalar(4, 2),
         ],
+        MessageKind::MigrationRequest => vec![
+            message(1, MessageKind::Target),
+            scalar(2, 2),
+            scalar(3, 2),
+            scalar(4, 0),
+            scalar(5, 2),
+            scalar(6, 0),
+        ],
         MessageKind::EffectIdentity => vec![
             scalar(1, 2),
             scalar(2, 2),
@@ -177,6 +188,7 @@ fn rules(kind: MessageKind) -> Vec<FieldRule> {
             oneof(2, Some(MessageKind::ReadReply), 1),
             oneof(3, Some(MessageKind::ResolveReply), 1),
             oneof(4, Some(MessageKind::Error), 1),
+            oneof(5, Some(MessageKind::MigrationReply), 1),
         ],
         MessageKind::MutationReply => vec![
             message(1, MessageKind::Receipt),
@@ -212,6 +224,7 @@ fn rules(kind: MessageKind) -> Vec<FieldRule> {
         MessageKind::CellDescription => {
             vec![scalar(1, 2), scalar(2, 2), scalar(3, 2), scalar(4, 0)]
         }
+        MessageKind::MigrationReply => vec![message(1, MessageKind::CellDescription)],
     }
 }
 
@@ -352,6 +365,7 @@ pub(super) fn validate_operation(tag: u32, payload: &[u8]) -> Result<()> {
         12 => (MessageKind::ResolveRequest, &[1, 2, 3], &[]),
         13 => (MessageKind::EffectRequest, &[1, 2, 3], &[10]),
         14 => (MessageKind::EffectResolveRequest, &[1, 2, 3, 4], &[]),
+        15 => (MessageKind::MigrationRequest, &[1, 2, 3, 4, 5, 6], &[]),
         _ => return Err(Error::Peer("peer operation is not implemented")),
     };
     let fields = validate_message(payload, kind)?;

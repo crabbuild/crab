@@ -255,8 +255,11 @@ registry. It can execute typed local and peer operations for those declared
 code/schema pairs, publish either one verified `N→N+1` SQL migration or one
 same-schema code-only system transaction, and replace the old capability only
 after the new LTX root/schema/code control transition is authoritative.
-Fleet-wide catalog migration orchestration and progress, native task/actor and
-dirty-job admission, and the remaining collaboration-domain route cuts remain;
+Fleet-wide catalog migration orchestration now walks rendezvous-assigned shards,
+routes each transition through local or authenticated peer ownership, caps work
+at 16 concurrent Cells per node, and conditionally stores monotonic terminal
+progress for the activating release. Native task/actor and dirty-job admission,
+and the remaining collaboration-domain route cuts remain;
 effective-memory and free-volume startup
 floors, a resource-derived node mailbox and page-cache/file-descriptor-derived
 active-Cell admission are implemented. A single 110-second absolute shutdown
@@ -330,7 +333,9 @@ restoration by a new owner.
 emits those exact registry bytes from the built binary. `cells release prepare` now strict-creates
 or adopts the root's canonical tenant/application identity, uploads the exact
 digest-addressed descriptor, and conditionally publishes a canonical prepared
-release; `cells release status` reads that checked state. `cells release activate
+release; `cells release status` reads that checked state, and `cells release
+migrations [--after CELL_ID] [--limit N]` returns a bounded cursor page of
+pending and failed Cells. `cells release activate
 --strategy compatible --minimum-eligible-nodes K` now verifies the exact compiled
 descriptor, CASes the
 operation-bound release through `prepared → activating → ready`, scans all 256
@@ -370,9 +375,13 @@ adjacent schema SQL, and same-schema code-only rollover. The code-only path is
 proven through an authoritative LTX/control publication, while the schema path is
 also proven through exact-root restoration. Release activation now treats a
 retained pair as executable but not complete, and refuses its final `ready` CAS
-until every non-tombstoned Cell uses the target code and maximum schema.
-Catalog-wide migration execution/progress, remaining collaboration-domain
-import/adapters and capacity qualification remain.
+until every non-tombstoned Cell uses the target code and maximum schema. During
+`activating`, the ordinary server scheduler migrates catalog Cells through the
+same local/remote/idle/takeover router. Its signed peer request carries only the
+exact source and successor versions; the owner derives trusted SQL from its own
+frozen registry. Per-operation terminal progress uses conditional writes and
+cannot regress from completed to failed. Remaining collaboration-domain
+import/adapters, real multi-Pod fault proof and capacity qualification remain.
 Issue/comment HTTP reads and mutations now enter
 through the authenticated repository router and typed Cell API; legacy issue
 objects are maintenance-import input only and are ignored by serving code.

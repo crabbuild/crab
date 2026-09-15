@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
@@ -9,9 +9,11 @@ use std::{
 
 use crab_cell_runtime::{
     ActivityRunOutcome, ApplicationIdentity, BlockingActivityPool, BlockingActivityReservation,
-    CellAuthority, CellCatalog, CellId, CellTarget, DueCellScan, EffectRunOutcome, InvocationError,
-    MaintenanceTickOutcome, MaintenanceTickRequest, MutationIdentity, NodeDirectory, Registry,
-    RequestId, SchedulerFleet, SessionId, preferred_scanner,
+    CatalogProof, CatalogShardScan, CellAuthority, CellCatalog, CellId, CellTarget, ControlState,
+    DueCellScan, EffectRunOutcome, InvocationError, MaintenanceTickOutcome, MaintenanceTickRequest,
+    MigrationFailure, MigrationProgressAttempt, MigrationProgressStore, MutationIdentity,
+    NodeDirectory, Registry, ReleaseState, ReleaseStore, RequestId, SchedulerFleet, SessionId,
+    preferred_scanner,
 };
 use crab_storage::CellStorageLayout;
 use tokio_util::sync::CancellationToken;
@@ -25,6 +27,8 @@ const MAX_DUE_PER_CYCLE: usize = 128;
 const EFFECT_LEASE_MS: u32 = 30_000;
 const ACTIVITY_LEASE_MS: u32 = 30_000;
 const MAX_ACTIVITY_JOBS: usize = 16;
+const MAX_MIGRATION_JOBS: usize = 16;
+const MAX_MIGRATION_SCANS_PER_CYCLE: usize = 128;
 const SCHEDULER_STALE_AFTER_MS: i64 = 15_000;
 const NODE_COLLECTION_INTERVAL_MS: i64 = 60_000;
 const NODE_COLLECTION_LIMIT: usize = 128;
@@ -81,6 +85,8 @@ pub(crate) struct RepositoryCellScheduler {
     identity: ApplicationIdentity,
     catalog: CellCatalog,
     authority: CellAuthority,
+    releases: ReleaseStore,
+    migration_progress: MigrationProgressStore,
     directory: NodeDirectory,
     router: RepositoryCellRouter,
     session: SessionId,
@@ -88,6 +94,11 @@ pub(crate) struct RepositoryCellScheduler {
     fleet: SchedulerFleet,
     registry: Arc<Registry>,
     scans: HashMap<u8, DueCellScan>,
+    migration_operation: Option<RequestId>,
+    migration_scans: HashMap<u8, MigrationShardScan>,
+    migration_cells: Arc<Mutex<HashSet<CellId>>>,
+    migration_jobs: tokio::task::JoinSet<crate::Result<()>>,
+    next_migration_shard: u8,
     next_shard: u8,
     activity_admission: Arc<tokio::sync::Semaphore>,
     blocking_activities: Option<BlockingActivityPool>,
@@ -113,7 +124,9 @@ impl RepositoryCellScheduler {
         Ok(Self {
             identity,
             catalog: CellCatalog::new(layout.clone(), identity.tenant()),
-            authority: CellAuthority::new(layout),
+            authority: CellAuthority::new(layout.clone()),
+            releases: ReleaseStore::new(layout.clone(), identity)?,
+            migration_progress: MigrationProgressStore::new(layout, identity)?,
             directory,
             router,
             session,
@@ -121,6 +134,11 @@ impl RepositoryCellScheduler {
             fleet: SchedulerFleet::default(),
             registry,
             scans: HashMap::new(),
+            migration_operation: None,
+            migration_scans: HashMap::new(),
+            migration_cells: Arc::new(Mutex::new(HashSet::new())),
+            migration_jobs: tokio::task::JoinSet::new(),
+            next_migration_shard: 0,
             next_shard: 0,
             activity_admission: Arc::new(tokio::sync::Semaphore::new(
                 std::thread::available_parallelism()
@@ -140,6 +158,7 @@ impl RepositoryCellScheduler {
                 break;
             }
             self.reap_activity_jobs();
+            self.reap_migration_jobs();
             match self.scan_once().await {
                 Ok(()) => self.status.mark_completed(super::unix_now_ms()?),
                 Err(error) => {
@@ -152,7 +171,9 @@ impl RepositoryCellScheduler {
             }
         }
         self.activity_jobs.abort_all();
+        self.migration_jobs.abort_all();
         while self.activity_jobs.join_next().await.is_some() {}
+        while self.migration_jobs.join_next().await.is_some() {}
         if let Some(pool) = &self.blocking_activities {
             pool.shutdown().await?;
         }
@@ -169,6 +190,7 @@ impl RepositoryCellScheduler {
                 crab_cell_runtime::Error::Control("scheduler cycle limit is invalid").into(),
             );
         }
+        self.reap_migration_jobs();
         let now_ms = super::unix_now_ms()?;
         let advertisements = self.directory.live(now_ms, MAX_LIVE_NODES).await?;
         let nodes =
@@ -192,8 +214,11 @@ impl RepositoryCellScheduler {
                 assigned.push(shard);
             } else {
                 self.scans.remove(&shard);
+                self.migration_scans.remove(&shard);
             }
         }
+
+        self.schedule_migrations(&assigned).await?;
 
         let mut remaining = cycle_limit;
         let mut exhausted = HashSet::new();
@@ -224,6 +249,124 @@ impl RepositoryCellScheduler {
         }
         self.next_shard = next_shard;
         Ok(())
+    }
+
+    async fn schedule_migrations(&mut self, assigned: &[u8]) -> crate::Result<()> {
+        let operation = match self.releases.load().await? {
+            Some(release)
+                if release.record().state() == ReleaseState::Activating
+                    && release.record().desired() == Some(self.registry.release_digest()) =>
+            {
+                release.record().operation()
+            }
+            _ => {
+                self.migration_operation = None;
+                self.migration_scans.clear();
+                self.next_migration_shard = 0;
+                return Ok(());
+            }
+        };
+        if self.migration_operation != Some(operation) {
+            self.migration_operation = Some(operation);
+            self.migration_scans.clear();
+            self.next_migration_shard = 0;
+        }
+
+        let mut remaining = MAX_MIGRATION_JOBS.saturating_sub(self.migration_jobs.len());
+        if remaining == 0 {
+            return Ok(());
+        }
+        let mut scans = MAX_MIGRATION_SCANS_PER_CYCLE;
+        let mut migration_shards = assigned.to_vec();
+        migration_shards
+            .sort_unstable_by_key(|shard| shard.wrapping_sub(self.next_migration_shard));
+        for shard in migration_shards {
+            while remaining != 0 && scans != 0 {
+                scans -= 1;
+                let proof = self.next_migration_entry(shard).await?;
+                let Some(proof) = proof else {
+                    self.migration_scans.remove(&shard);
+                    break;
+                };
+                let cell = proof.entry().cell();
+                let Some(control) = self.authority.load(cell).await? else {
+                    continue;
+                };
+                if control.value().state == ControlState::Tombstoned
+                    || self.registry.is_current_cell(
+                        proof.entry().namespace(),
+                        proof.entry().role(),
+                        control.value().code,
+                        control.value().schema,
+                    )
+                {
+                    continue;
+                }
+                let Some(reservation) = self.reserve_migration(cell) else {
+                    continue;
+                };
+                let target = CellTarget::new(
+                    self.identity.tenant(),
+                    self.identity.application(),
+                    proof.entry().namespace(),
+                    proof.entry().partition(),
+                )?;
+                let target_version = self
+                    .registry
+                    .current_cell_version(proof.entry().namespace(), proof.entry().role())
+                    .ok_or(crab_cell_runtime::Error::Registry(
+                        "cataloged Cell namespace has no current release version",
+                    ))?;
+                let attempt = MigrationProgressAttempt::new(
+                    operation,
+                    self.registry.release_digest(),
+                    self.session,
+                    cell,
+                    (control.value().code, control.value().schema),
+                    target_version,
+                )?;
+                let router = self.router.clone();
+                let progress = self.migration_progress.clone();
+                self.migration_jobs.spawn(async move {
+                    let _reservation = reservation;
+                    let result = router.migrate_target(target).await;
+                    let recorded = match &result {
+                        Ok(()) => progress.completed(attempt, super::unix_now_ms()?).await,
+                        Err(error) => {
+                            progress
+                                .failed(attempt, migration_failure(error), super::unix_now_ms()?)
+                                .await
+                        }
+                    };
+                    recorded?;
+                    result
+                });
+                remaining -= 1;
+            }
+            if remaining == 0 || scans == 0 {
+                self.next_migration_shard = shard;
+                break;
+            }
+            self.next_migration_shard = shard.wrapping_add(1);
+        }
+        Ok(())
+    }
+
+    async fn next_migration_entry(&mut self, shard: u8) -> crate::Result<Option<CatalogProof>> {
+        if !self.migration_scans.contains_key(&shard) {
+            self.migration_scans.insert(
+                shard,
+                MigrationShardScan::new(self.catalog.scan_shard(shard).await?),
+            );
+        }
+        self.migration_scans
+            .get_mut(&shard)
+            .ok_or(crab_cell_runtime::Error::Control(
+                "release migration shard cursor disappeared",
+            ))?
+            .next()
+            .await
+            .map_err(Into::into)
     }
 
     async fn scan_shard(
@@ -416,6 +559,30 @@ impl RepositoryCellScheduler {
         }
     }
 
+    fn reap_migration_jobs(&mut self) {
+        while let Some(result) = self.migration_jobs.try_join_next() {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::warn!(error = %error, "Cell release migration failed"),
+                Err(error) if !error.is_cancelled() => {
+                    tracing::warn!(error = %error, "Cell release migration task failed");
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
+    fn reserve_migration(&self, cell: CellId) -> Option<MigrationCellReservation> {
+        let mut cells = self
+            .migration_cells
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cells.insert(cell).then(|| MigrationCellReservation {
+            cell,
+            cells: Arc::clone(&self.migration_cells),
+        })
+    }
+
     fn reserve_activity(&self, cell: CellId) -> Option<ActivityCellReservation> {
         let mut cells = self
             .activity_cells
@@ -444,9 +611,49 @@ impl RepositoryCellScheduler {
     }
 }
 
+struct MigrationShardScan {
+    scan: CatalogShardScan,
+    entries: VecDeque<CatalogProof>,
+}
+
+impl MigrationShardScan {
+    fn new(scan: CatalogShardScan) -> Self {
+        Self {
+            scan,
+            entries: VecDeque::new(),
+        }
+    }
+
+    async fn next(&mut self) -> crab_cell_runtime::Result<Option<CatalogProof>> {
+        loop {
+            if let Some(entry) = self.entries.pop_front() {
+                return Ok(Some(entry));
+            }
+            let Some(page) = self.scan.next_page().await? else {
+                return Ok(None);
+            };
+            self.entries.extend(page.entries().iter().cloned());
+        }
+    }
+}
+
 struct ActivityCellReservation {
     cell: CellId,
     cells: Arc<Mutex<HashSet<CellId>>>,
+}
+
+struct MigrationCellReservation {
+    cell: CellId,
+    cells: Arc<Mutex<HashSet<CellId>>>,
+}
+
+impl Drop for MigrationCellReservation {
+    fn drop(&mut self) {
+        self.cells
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.cell);
+    }
 }
 
 impl Drop for ActivityCellReservation {
@@ -492,6 +699,30 @@ fn mutation_identity() -> crate::Result<MutationIdentity> {
                 "scheduler request expiry overflow",
             ))?,
     })
+}
+
+fn migration_failure(error: &crate::Error) -> MigrationFailure {
+    match error {
+        crate::Error::Cell(crab_cell_runtime::Error::Capacity(_)) => MigrationFailure::Capacity,
+        crate::Error::Cell(crab_cell_runtime::Error::Deadline) => MigrationFailure::Deadline,
+        crate::Error::Cell(
+            crab_cell_runtime::Error::Registry(_)
+            | crab_cell_runtime::Error::Control(_)
+            | crab_cell_runtime::Error::Release(_),
+        )
+        | crate::Error::Config(_) => MigrationFailure::Incompatible,
+        crate::Error::Cell(
+            crab_cell_runtime::Error::CellNotActive
+            | crab_cell_runtime::Error::CellDraining
+            | crab_cell_runtime::Error::Fenced
+            | crab_cell_runtime::Error::RuntimeClosed
+            | crab_cell_runtime::Error::PeerTransport { .. }
+            | crab_cell_runtime::Error::PeerTransportUnknown { .. }
+            | crab_cell_runtime::Error::Storage(_),
+        )
+        | crate::Error::Storage(_) => MigrationFailure::Unavailable,
+        _ => MigrationFailure::Internal,
+    }
 }
 
 #[cfg(test)]

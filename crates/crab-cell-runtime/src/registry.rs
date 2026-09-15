@@ -887,15 +887,24 @@ impl Registry {
         code: Digest,
         schema: u32,
     ) -> bool {
-        let Some((module, descriptor)) = self.namespace_modules.get(&namespace) else {
-            return false;
-        };
-        descriptor.role == role
-            && self.module_codes.get(*module) == Some(&code)
-            && self
-                .module_schemas
-                .get(*module)
-                .is_some_and(|(_, schema_max)| *schema_max == schema)
+        self.current_cell_version(namespace, role) == Some((code, schema))
+    }
+
+    /// Returns the target code and schema for one registered namespace role.
+    #[must_use]
+    pub fn current_cell_version(
+        &self,
+        namespace: NamespaceId,
+        role: CatalogRole,
+    ) -> Option<(Digest, u32)> {
+        let (module, descriptor) = self.namespace_modules.get(&namespace)?;
+        if descriptor.role != role {
+            return None;
+        }
+        Some((
+            *self.module_codes.get(*module)?,
+            self.module_schemas.get(*module)?.1,
+        ))
     }
 
     /// Selects the next compiled migration for one exact Cell code/schema pair.

@@ -26,9 +26,12 @@ loses readiness and is excluded so the next rendezvous candidate takes over.
 Durable scheduler retry/fairness and multi-node activity failure qualification
 remain. The shared runtime now supports declared predecessor code/schema pairs,
 serves them through the same typed local/peer bindings, and can publish adjacent
-schema or same-schema code-only transitions. The HTTP release activator does not
-yet orchestrate those transitions across the catalog or persist per-Cell progress,
-but its final gate refuses `ready` while any retained predecessor remains.
+schema or same-schema code-only transitions. While a release is activating, the
+server scans its rendezvous-assigned catalog shards, runs at most 16 local or
+authenticated peer migrations concurrently, and persists monotonic terminal
+progress under the release operation. The final gate refuses `ready` while any
+retained predecessor remains, and `cells release migrations` exposes a bounded
+cursor view of pending and failed Cells.
 Remaining collaboration-domain import, configured multi-node quorum and the
 remaining product-domain route cuts are not yet integrated. New repository
 creation explicitly publishes an empty Cell and marks

@@ -63,6 +63,16 @@ pub async fn cell_release_status(config: &Config) -> Result<Vec<u8>> {
     cells::release_status(config).await
 }
 
+/// Returns a bounded page of Cells still pending or failed for the selected release.
+pub async fn cell_release_migrations(
+    config: &Config,
+    after: Option<&str>,
+    limit: usize,
+) -> Result<Vec<u8>> {
+    config.validate()?;
+    cells::release_migrations(config, after, limit).await
+}
+
 /// Activates the prepared release after the requested live-node quorum is eligible.
 pub async fn activate_cell_release(
     config: &Config,

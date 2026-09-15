@@ -294,8 +294,13 @@ work, creates one managed system transaction, captures LTX and publishes
 root/schema/code together. It returns the replacement handle only after the
 authority CAS is proven. The typed client and authenticated peer dispatcher use
 the same registry compatibility declaration for old code/schema operations.
-`crab-http-server` still needs a bounded catalog walker and durable per-Cell
-activation progress to invoke these completed single-Cell transitions fleet-wide.
+`crab-http-server` now invokes these transitions fleet-wide with revision-pinned
+catalog shard scans, at most 16 concurrent migration jobs per node and one job
+per Cell. `MigrationPeerClient` signs only the exact source/successor pair; the
+receiver derives SQL from its own frozen registry. `MigrationProgressStore`
+conditionally publishes the latest monotonic terminal record, while pending work
+is derived from catalog/control state and exposed through the cursor-based
+`cells release migrations` command.
 
 ```rust,ignore
 pub trait WireValue: Sized + Send + 'static {
