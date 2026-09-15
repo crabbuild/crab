@@ -254,6 +254,12 @@ pub struct NodeDirectory {
     release: Digest,
 }
 
+#[derive(Clone, Copy)]
+enum AdvertisementScan {
+    LiveRelease,
+    AdvertisedFleet,
+}
+
 impl NodeDirectory {
     #[must_use]
     pub fn new(layout: CellStorageLayout, fleet: Digest, image: Digest, release: Digest) -> Self {
@@ -333,12 +339,40 @@ impl NodeDirectory {
     /// foreign live records fail closed so maintenance cannot mistake an active
     /// incompatible fleet for an offline deployment.
     pub async fn live(&self, now_ms: i64, limit: usize) -> Result<Vec<NodeAdvertisement>> {
+        self.scan_advertisements(now_ms, limit, AdvertisementScan::LiveRelease)
+            .await
+    }
+
+    /// Lists every unfenced advertised session in this fleet, including expired records.
+    ///
+    /// Graceful withdrawal happens only after writers close. Stale collection first fences
+    /// the exact record by ETag. Maintenance must not interpret heartbeat expiry alone as drain.
+    pub async fn advertised_sessions(&self, now_ms: i64, limit: usize) -> Result<Vec<SessionId>> {
+        Ok(self
+            .scan_advertisements(now_ms, limit, AdvertisementScan::AdvertisedFleet)
+            .await?
+            .into_iter()
+            .map(|advertisement| advertisement.session)
+            .collect())
+    }
+
+    async fn scan_advertisements(
+        &self,
+        now_ms: i64,
+        limit: usize,
+        scan: AdvertisementScan,
+    ) -> Result<Vec<NodeAdvertisement>> {
         if limit == 0 {
-            return Err(Error::Node("live node limit must be nonzero"));
+            return Err(Error::Node(match scan {
+                AdvertisementScan::LiveRelease => "live node limit must be nonzero",
+                AdvertisementScan::AdvertisedFleet => {
+                    "advertised node session limit must be nonzero"
+                }
+            }));
         }
         let prefix = self.layout.node_directory_path();
         let mut stream = self.layout.store().inner().list(Some(&prefix));
-        let mut live = Vec::new();
+        let mut advertisements = Vec::new();
         while let Some(item) = stream.next().await {
             let meta = item.map_err(|error| map_object_store_error(error, prefix.as_ref()))?;
             let (body, _) = match self
@@ -356,17 +390,36 @@ impl NodeDirectory {
                 continue;
             };
             validate_record_path(&self.layout, advertisement.session, &meta.location)?;
-            if advertisement.expires_at_ms <= now_ms {
-                continue;
+            match scan {
+                AdvertisementScan::LiveRelease => {
+                    if advertisement.expires_at_ms <= now_ms {
+                        continue;
+                    }
+                    self.validate(&advertisement, now_ms)?;
+                }
+                AdvertisementScan::AdvertisedFleet => {
+                    advertisement.validate_shape()?;
+                    advertisement.verify_signature()?;
+                    if advertisement.fleet != self.fleet
+                        || advertisement.issued_at_ms > now_ms.saturating_add(MAX_CLOCK_SKEW_MS)
+                    {
+                        return Err(Error::Node("advertised node fleet or issue time differs"));
+                    }
+                }
             }
-            self.validate(&advertisement, now_ms)?;
-            if live.len() == limit {
-                return Err(Error::Node("live node directory exceeds its limit"));
+            if advertisements.len() == limit {
+                return Err(Error::Node(match scan {
+                    AdvertisementScan::LiveRelease => "live node directory exceeds its limit",
+                    AdvertisementScan::AdvertisedFleet => {
+                        "advertised node session directory exceeds its limit"
+                    }
+                }));
             }
-            live.push(*advertisement);
+            advertisements.push(*advertisement);
         }
-        live.sort_unstable_by(|left, right| left.session.as_bytes().cmp(right.session.as_bytes()));
-        Ok(live)
+        advertisements
+            .sort_unstable_by(|left, right| left.session.as_bytes().cmp(right.session.as_bytes()));
+        Ok(advertisements)
     }
 
     /// Fences and removes a bounded number of advertisements past the clock-skew horizon.

@@ -1,4 +1,5 @@
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use crab_cell_runtime::{
     ApplicationId, ApplicationIdentity, ApplicationIdentityStore, BuildDescriptor, CatalogRole,
@@ -38,6 +39,8 @@ pub(crate) const REPOSITORY_EFFECT_VALIDATE_QUERY_ID: u32 = 5;
 const MAX_LIVE_NODES: usize = 10_000;
 const MAX_MIGRATION_STATUS_LIMIT: usize = 256;
 const MAX_MIGRATION_STATUS_EXAMINED: usize = 1_024;
+const MAINTENANCE_DRAIN_TIMEOUT: Duration = Duration::from_secs(125);
+const MAINTENANCE_DRAIN_POLL: Duration = Duration::from_secs(1);
 const REPOSITORY_COMMANDS: &[OperationDescriptor] = &[
     operation(1, 80 * 1024, 80 * 1024),
     operation(2, 80 * 1024, 80 * 1024),
@@ -641,6 +644,82 @@ pub(crate) async fn activate_release(
         .map_err(Error::from)
 }
 
+pub(crate) async fn enter_maintenance(config: &Config, expected_revision: u64) -> Result<Vec<u8>> {
+    let root = StorageRoot::build(&config.storage)?;
+    let identities =
+        ApplicationIdentityStore::new(root.store.clone(), Path::from(root.prefix.clone()));
+    let identity = identities
+        .load()
+        .await?
+        .ok_or(Error::Config("Cell application is not initialized"))?;
+    let layout = identities.layout(identity).await?;
+    let registry = compiled_registry()?;
+    let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
+    let releases = ReleaseStore::new(layout.clone(), identity)?;
+    let observed = releases
+        .load()
+        .await?
+        .ok_or(Error::Config("Cell application release is not prepared"))?;
+    let directory = NodeDirectory::new(
+        layout,
+        peer_tls.fleet(),
+        image_digest(observed.record().desired_image())?,
+        registry.release_digest(),
+    );
+    enter_maintenance_at(
+        &releases,
+        &registry,
+        &directory,
+        expected_revision,
+        MAINTENANCE_DRAIN_TIMEOUT,
+    )
+    .await
+}
+
+async fn enter_maintenance_at(
+    releases: &ReleaseStore,
+    registry: &Registry,
+    directory: &NodeDirectory,
+    expected_revision: u64,
+    timeout: Duration,
+) -> Result<Vec<u8>> {
+    let observed = releases
+        .load()
+        .await?
+        .ok_or(Error::Config("Cell application release is not prepared"))?;
+    if observed.record().desired() != Some(registry.release_digest()) {
+        return Err(Error::Config(
+            "prepared Cell release differs from this binary",
+        ));
+    }
+    if releases.descriptor(registry.release_digest()).await? != registry.release_bytes() {
+        return Err(Error::Config(
+            "prepared Cell descriptor differs from this binary",
+        ));
+    }
+    let operation = observed.record().operation();
+    let maintenance = releases
+        .start_maintenance(expected_revision, operation)
+        .await?;
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if directory
+            .advertised_sessions(unix_now_ms()?, MAX_LIVE_NODES)
+            .await?
+            .is_empty()
+        {
+            return maintenance.encode().map_err(Error::from);
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(Error::Config(
+                "Cell maintenance still has advertised node sessions",
+            ));
+        }
+        tokio::time::sleep(MAINTENANCE_DRAIN_POLL.min(deadline - now)).await;
+    }
+}
+
 async fn verify_rolling_predecessor(
     releases: &ReleaseStore,
     release: &crab_cell_runtime::ReleaseRecord,
@@ -1129,6 +1208,93 @@ mod tests {
                 "live Cell node does not contain the selected module inventory"
             ))
         ));
+    }
+
+    #[tokio::test]
+    async fn maintenance_waits_for_expired_sessions_and_resumes_after_withdrawal() {
+        let identity = ApplicationIdentity::new(
+            TenantId::from_bytes([51; 16]),
+            ApplicationId::from_bytes([52; 16]),
+        );
+        let layout = CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            Path::from("maintenance-drain"),
+            *identity.application().as_bytes(),
+        );
+        let registry = compiled_registry().unwrap();
+        let image = Digest::from_bytes([0xaa; 32]);
+        let releases = ReleaseStore::new(layout.clone(), identity).unwrap();
+        let operation = RequestId::from_bytes([53; 16]);
+        let prepared = releases
+            .prepare(
+                registry.release_bytes(),
+                registry.release_digest(),
+                0,
+                &format!("sha256:{}", "aa".repeat(32)),
+                operation,
+            )
+            .await
+            .unwrap();
+        let fleet = Digest::from_bytes([54; 32]);
+        let directory = NodeDirectory::new(layout, fleet, image, registry.release_digest());
+        let now_ms = unix_now_ms().unwrap();
+        let session = directory
+            .create(
+                NodeAdvertisement::sign(
+                    SessionId::from_bytes([55; 16]),
+                    "https://node.internal:8789".into(),
+                    fleet,
+                    Digest::from_bytes([56; 32]),
+                    image,
+                    registry.release_digest(),
+                    &SigningKey::from_bytes(&[57; 32]),
+                    1,
+                    now_ms - 20_000,
+                    now_ms - 10_000,
+                    registry.module_digests(),
+                    vec![1],
+                    NodeCapacity {
+                        free_memory_bytes: 1,
+                        free_disk_bytes: 1,
+                        job_credits: 1,
+                    },
+                )
+                .unwrap(),
+                now_ms - 20_000,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            enter_maintenance_at(
+                &releases,
+                &registry,
+                &directory,
+                prepared.revision(),
+                Duration::ZERO,
+            )
+            .await,
+            Err(Error::Config(
+                "Cell maintenance still has advertised node sessions"
+            ))
+        ));
+        assert_eq!(
+            releases.load().await.unwrap().unwrap().record().state(),
+            ReleaseState::Maintenance
+        );
+
+        directory.withdraw(&session, now_ms).await.unwrap();
+        let resumed = enter_maintenance_at(
+            &releases,
+            &registry,
+            &directory,
+            prepared.revision(),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        let encoded: Value = serde_json::from_slice(&resumed).unwrap();
+        assert_eq!(encoded["state"], "maintenance");
     }
 
     #[tokio::test]

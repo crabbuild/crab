@@ -269,6 +269,7 @@ crab-http-server --config CONFIG cells release inspect --json
 crab-http-server --config CONFIG cells release bootstrap --image DIGEST
 crab-http-server --config CONFIG cells release prepare --expected-revision N --image DIGEST
 crab-http-server --config CONFIG cells release activate --expected-revision N --strategy compatible --minimum-eligible-nodes K
+crab-http-server --config CONFIG cells release activate --expected-revision N --strategy maintenance
 crab-http-server --config CONFIG cells release status
 crab-http-server --config CONFIG cells release migrations [--after CELL_ID] [--limit N]
 crab-http-server --config CONFIG cells import-repository-issues --owner OWNER --name NAME --operation UUID
@@ -277,8 +278,8 @@ crab-http-server --config CONFIG cells import-repository-issues --owner OWNER --
 `cells release inspect --json` is now implemented and read-only; it prints the
 canonical descriptor compiled into the binary without accessing object storage.
 `cells release bootstrap`, `cells release prepare`, `cells release activate
---strategy compatible --minimum-eligible-nodes K` and `cells release status` are
-also implemented.
+--strategy compatible --minimum-eligible-nodes K`, `cells release activate
+--strategy maintenance` and `cells release status` are also implemented.
 Bootstrap is an idempotent first-install operation: concurrent callers derive the
 same operation identity and converge on one descriptor/image. It resumes only
 the initial activation it created, admits an exact operator-prepared rollout
@@ -309,6 +310,27 @@ the current-version scan succeeds. `cells release migrations` returns the
 bounded, cursor-paginated pending and terminal-failure view for that operation.
 Prepare alone never makes the descriptor current. Administrative
 storage credentials provide authority; there is no public deployment API.
+
+Maintenance activation is intentionally a bounded entry and drain gate, not yet
+a complete breaking-schema activation. It verifies the prepared descriptor,
+CASes the same operation from `prepared` to `maintenance`, then waits at most
+125 seconds for the fleet's unfenced advertisement inventory to become empty.
+The inventory includes expired advertisements; a record disappears only after
+graceful shutdown withdraws its exact ETag or stale collection first replaces
+that exact ETag. Repeating the command with the original prepared revision
+resumes the same operation. It returns the canonical `maintenance` record and
+does not run transforms or publish `current=desired,state=ready`.
+
+Every serving process polls the canonical release once per second. `maintenance`
+and `failed` admit no process. `prepared` and `activating` admit only the current
+or desired compiled release; `ready` admits only the exact current release. A
+process excluded by a newer record cancels normal server admission and follows
+the same bounded drain path as SIGTERM. While draining it continues refreshing
+its advertisement with zero memory, disk and job capacity. It withdraws the
+session only after listeners, receives, schedulers, activities, repository jobs,
+Cell publication, SQLite handles and worker threads settle. A heartbeat failure
+also cancels the server and retains its last record until shutdown or ETag-fenced
+stale collection; heartbeat expiry alone is not drain evidence.
 
 `cells import-repository-issues` is the first maintenance importer slice. It
 requires the exact ready release, resolves the catalog repository UUID, rejects
@@ -405,9 +427,11 @@ the default CLI limit is 100.
 
 Compatible means both old and new published schema/code pairs remain executable
 in the rolling binary set; no automatic downmigration. Incompatible activation
-first enters maintenance, stops public admission and background activities,
-drains publishers, and verifies all old process sessions have stopped or lost
-storage write access. Only then may the maintenance binary change Cell schemas.
+now enters maintenance, stops public admission and background activities, drains
+publishers, and verifies all old process sessions have stopped or been
+ETag-fenced. The subsequent persisted-work inventory, Cell transformation and
+final ready CAS remain to be implemented. Only that future maintenance runner
+may change Cell schemas.
 A release flag alone cannot fence a stale process because it is not the per-Cell
 CAS authority. Leave affected admission gated after failure. Resume using the
 same operation identity and already published roots.
@@ -490,6 +514,10 @@ once the runtime enters terminal drain, and calls its shutdown after public HTTP
 Git receives, transfer permits and repository maintenance settle. Shutdown closes
 every active SQLite Cell, conditionally releases its exact control ownership,
 closes the fixed pool and joins all SQL worker threads before process return.
+The release observer uses this same cancellation path. Node heartbeat switches
+to a zero-capacity drain advertisement at cancellation and uses a separate
+shutdown token, so session withdrawal happens after runtime closure rather than
+when cancellation first arrives.
 Cancellation starts one absolute 110-second deadline over both Axum listeners
 and every subsequent background, transfer, maintenance, Cell and worker drain.
 Expiry drops the unfinished shutdown future and returns `ShutdownTimeout`, so

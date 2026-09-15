@@ -83,6 +83,12 @@ pub async fn activate_cell_release(
     cells::activate_release(config, expected_revision, minimum_eligible_nodes).await
 }
 
+/// Enters offline maintenance and waits for every advertised node to withdraw.
+pub async fn enter_cell_maintenance(config: &Config, expected_revision: u64) -> Result<Vec<u8>> {
+    config.validate()?;
+    cells::enter_maintenance(config, expected_revision).await
+}
+
 /// Initializes the empty application Cell for one newly cataloged repository.
 pub async fn initialize_repository_cell(config: &Config, repository: uuid::Uuid) -> Result<()> {
     config.validate()?;

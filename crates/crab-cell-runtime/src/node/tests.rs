@@ -76,6 +76,37 @@ async fn live_listing_is_sorted_bounded_and_ignores_expired_sessions() {
 }
 
 #[tokio::test]
+async fn maintenance_inventory_retains_expired_session_until_withdrawal() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    let session = SessionId::from_bytes([1; 16]);
+    let observed = directory
+        .create(advertisement(&key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+
+    assert!(directory.live(NOW_MS + 10_000, 1).await.unwrap().is_empty());
+    assert_eq!(
+        directory
+            .advertised_sessions(NOW_MS + 10_000, 1)
+            .await
+            .unwrap(),
+        [session]
+    );
+    directory
+        .withdraw(&observed, NOW_MS + 10_001)
+        .await
+        .unwrap();
+    assert!(
+        directory
+            .advertised_sessions(NOW_MS + 10_001, 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn stale_collection_fences_records_after_the_clock_skew_horizon() {
     let key = SigningKey::from_bytes(&[7; 32]);
     let directory = directory();
@@ -100,6 +131,13 @@ async fn stale_collection_fences_records_after_the_clock_skew_horizon() {
     );
     assert_eq!(directory.collect_stale(collection_ms, 1).await.unwrap(), 1);
     assert!(directory.load_canonical(stale).await.unwrap().is_none());
+    assert!(
+        !directory
+            .advertised_sessions(collection_ms, 2)
+            .await
+            .unwrap()
+            .contains(&stale)
+    );
     assert!(directory.is_live(current, collection_ms + 1).await.unwrap());
 }
 

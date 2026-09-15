@@ -82,6 +82,13 @@ activator requires current code/maximum schema before the final ready CAS, so
 retained compatibility cannot be mistaken for completed migration; the bounded
 `cells release migrations` cursor reports pending and failed Cells. The complete issue/comment HTTP route
 group now calls the typed repository module and publishes through LTX. The
+operation-bound `--strategy maintenance` release path now CASes a prepared
+release into `maintenance`; every server's one-second release observer starts
+normal drain, and the command waits for expired as well as live unfenced sessions.
+Draining nodes advertise zero capacity until listener, background, Cell, SQLite
+and worker shutdown completes, then withdraw the exact session. This proves
+maintenance entry and new-fleet drain, but does not yet perform persisted-work
+inventory, offline data transformation or the final ready CAS. The
 private management route can dispatch or forward registered calls between
 compatible nodes. The repository module additionally registers private Tick and
 effect claim/lease/validation operations. Its server-owned due scanner reads the
@@ -98,7 +105,7 @@ unchanged progress after 15 seconds, and local readiness plus Prometheus health,
 progress and lag use the same deadline. The shard-zero rendezvous owner performs
 bounded minute-level stale-node collection through an ETag-fenced tombstone, so
 a racing heartbeat cannot be deleted. Shutdown uses the same exact-ETag
-tombstone path to withdraw the latest local advertisement immediately. Durable
+tombstone path to withdraw the latest local advertisement after runtime drain. Durable
 scheduler retry/fairness and multi-node activity failure qualification remain;
 other collaboration domains still use application JSON.
 Git publication behavior remains unchanged. See

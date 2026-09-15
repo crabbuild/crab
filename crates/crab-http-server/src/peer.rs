@@ -20,6 +20,7 @@ use crab_cell_runtime::{
 };
 use crab_storage::CellStorageLayout;
 use ed25519_dalek::SigningKey;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{RepositoryAccess, RepositoryConfig, peer_tls::PeerTlsIdentity, server::Server};
@@ -126,7 +127,7 @@ impl NodePublisher {
         Ok(self
             .directory
             .create(
-                self.advertisement(self.scheduler.progress(), now_ms)?,
+                self.advertisement(self.scheduler.progress(), now_ms, false)?,
                 now_ms,
             )
             .await?)
@@ -146,15 +147,18 @@ impl NodePublisher {
         self,
         server: Arc<Server>,
         mut observed: VersionedNodeAdvertisement,
+        shutdown: CancellationToken,
     ) -> crate::Result<()> {
+        let mut draining = false;
         let heartbeat = 'heartbeat: loop {
             tokio::select! {
-                () = server.cancellation.cancelled() => break Ok(()),
+                () = shutdown.cancelled() => break Ok(()),
+                () = server.cancellation.cancelled(), if !draining => draining = true,
                 () = tokio::time::sleep(HEARTBEAT_INTERVAL) => {}
             }
             loop {
                 let now_ms = now_ms()?;
-                let next = self.advertisement(self.scheduler.progress(), now_ms)?;
+                let next = self.advertisement(self.scheduler.progress(), now_ms, draining)?;
                 match self.directory.refresh(&observed, next, now_ms).await {
                     Ok(next) => {
                         observed = next;
@@ -174,13 +178,16 @@ impl NodePublisher {
                             .saturating_sub(now_ms)
                             .min(HEARTBEAT_RETRY.as_millis() as i64);
                         tokio::select! {
-                            () = server.cancellation.cancelled() => break 'heartbeat Ok(()),
+                            () = shutdown.cancelled() => break 'heartbeat Ok(()),
                             () = tokio::time::sleep(Duration::from_millis(retry_ms as u64)) => {}
                         }
                     }
                 }
             }
         };
+        if heartbeat.is_err() && !shutdown.is_cancelled() {
+            shutdown.cancelled().await;
+        }
         let withdrawal = match now_ms() {
             Ok(now_ms) => self
                 .directory
@@ -199,7 +206,21 @@ impl NodePublisher {
         }
     }
 
-    fn advertisement(&self, progress: u64, now_ms: i64) -> crate::Result<NodeAdvertisement> {
+    fn advertisement(
+        &self,
+        progress: u64,
+        now_ms: i64,
+        draining: bool,
+    ) -> crate::Result<NodeAdvertisement> {
+        let capacity = if draining {
+            NodeCapacity {
+                free_memory_bytes: 0,
+                free_disk_bytes: 0,
+                job_credits: 0,
+            }
+        } else {
+            node_capacity(&self.data_dir)?
+        };
         Ok(NodeAdvertisement::sign(
             self.session,
             self.endpoint.clone(),
@@ -213,7 +234,7 @@ impl NodePublisher {
             now_ms.saturating_add(ADVERTISEMENT_LIFETIME_MS),
             self.module_digests.clone(),
             vec![1],
-            node_capacity(&self.data_dir)?,
+            capacity,
         )?)
     }
 }
@@ -999,6 +1020,17 @@ mod tests {
         .unwrap();
 
         let published = publisher.publish_initial().await.unwrap();
+        assert_eq!(
+            publisher
+                .advertisement(2, now_ms().unwrap(), true)
+                .unwrap()
+                .capacity(),
+            NodeCapacity {
+                free_memory_bytes: 0,
+                free_disk_bytes: 0,
+                job_credits: 0,
+            }
+        );
         let loaded = directory
             .load(session, now_ms().unwrap())
             .await

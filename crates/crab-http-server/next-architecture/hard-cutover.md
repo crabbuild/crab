@@ -83,7 +83,16 @@ head. Reopening traffic is the fleet's operational cutover point; there is no
 claim of a multi-repository atomic object-store transaction. Partial completion
 keeps the deployment in maintenance until imports are resolved and verified.
 
-The current maintenance command implements steps 3 through 7 only for the
+The release command `cells release activate --strategy maintenance` now
+implements the new-fleet portion of step 1: an operation-bound release CAS stops
+admission, every observing server drains, zero-capacity heartbeats remain visible
+through runtime shutdown, and the command waits for live or expired unfenced
+sessions to disappear. It cannot prove termination of a legacy fleet that never
+advertised into this directory, and it intentionally stops in `maintenance`.
+Persisted-work inventory, multi-domain transforms and final release publication
+remain required before reopening traffic.
+
+The current issue import command implements steps 3 through 7 only for the
 legacy `app/v1/issues` tree. It retains issue/comment sequences, all visible
 versions and incomplete request reservations; records exact source object
 identity and body hashes; verifies a second inventory; performs one SQLite

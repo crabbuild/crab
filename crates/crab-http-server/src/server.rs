@@ -15,8 +15,8 @@ use axum::{
 };
 use bytes::Bytes;
 use crab_cell_runtime::{
-    ACTIVE_CELL_FILE_DESCRIPTORS, ACTIVE_CELL_PAGE_CACHE_BYTES, CellRuntime, NodeDirectory, Owner,
-    PeerRoundTrip, PeerSigner, SessionId, SqlWorkerPool,
+    ACTIVE_CELL_FILE_DESCRIPTORS, ACTIVE_CELL_PAGE_CACHE_BYTES, CellRuntime, Digest, NodeDirectory,
+    Owner, PeerRoundTrip, PeerSigner, ReleaseState, ReleaseStore, SessionId, SqlWorkerPool,
 };
 use crab_metadata::manifest_store::read_manifest;
 use crab_remote_git::{
@@ -51,6 +51,7 @@ const MIN_CELL_MEMORY_BYTES: u64 = 2 * GIB;
 const MIN_USABLE_CELL_DISK_BYTES: u64 = 20 * GIB;
 const FILE_DESCRIPTOR_RESERVE_MINIMUM: usize = 128;
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(110);
+const RELEASE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CellRuntimeBudget {
@@ -128,6 +129,50 @@ async fn before_shutdown_deadline<T>(
     tokio::time::timeout_at(deadline.into(), future)
         .await
         .map_err(|_| crate::Error::ShutdownTimeout)
+}
+
+fn release_admits_process(
+    state: ReleaseState,
+    current: Option<Digest>,
+    desired: Option<Digest>,
+    compiled: Digest,
+) -> bool {
+    match state {
+        ReleaseState::Ready => current == Some(compiled) && desired == Some(compiled),
+        ReleaseState::Prepared | ReleaseState::Activating => {
+            current == Some(compiled) || desired == Some(compiled)
+        }
+        ReleaseState::Maintenance | ReleaseState::Failed => false,
+    }
+}
+
+async fn watch_release(
+    releases: ReleaseStore,
+    compiled: Digest,
+    cancellation: CancellationToken,
+) -> Result<()> {
+    loop {
+        tokio::select! {
+            () = cancellation.cancelled() => return Ok(()),
+            () = tokio::time::sleep(RELEASE_POLL_INTERVAL) => {}
+        }
+        let observed = match releases.load().await {
+            Ok(Some(observed)) => observed,
+            Ok(None) => {
+                cancellation.cancel();
+                return Err(crate::Error::Config("Cell application release disappeared"));
+            }
+            Err(error) => {
+                cancellation.cancel();
+                return Err(error.into());
+            }
+        };
+        let record = observed.record();
+        if !release_admits_process(record.state(), record.current(), record.desired(), compiled) {
+            cancellation.cancel();
+            return Ok(());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -537,10 +582,11 @@ pub async fn serve(config: Config) -> Result<()> {
         peer_tls.client_identity(),
         session,
     ));
+    let release_store = ReleaseStore::new(startup.layout.clone(), startup.identity)?;
     let peer_receiver = crate::peer::PeerReceiver::new(
         directory.clone(),
         Arc::clone(&registry),
-        crab_cell_runtime::ReleaseStore::new(startup.layout.clone(), startup.identity)?,
+        release_store.clone(),
         cell_resolver,
         Arc::clone(&peer_round_trip),
     );
@@ -617,8 +663,19 @@ pub async fn serve(config: Config) -> Result<()> {
     let refresh_server = Arc::clone(&server);
     let refresh =
         tokio::spawn(async move { refresh_catalog(refresh_server, catalog_version).await });
+    let node_shutdown = CancellationToken::new();
     let node_server = Arc::clone(&server);
-    let heartbeat = tokio::spawn(async move { node_publisher.run(node_server, advertised).await });
+    let heartbeat_shutdown = node_shutdown.clone();
+    let heartbeat = tokio::spawn(async move {
+        node_publisher
+            .run(node_server, advertised, heartbeat_shutdown)
+            .await
+    });
+    let release_cancellation = cancellation.clone();
+    let compiled_release = registry.release_digest();
+    let release_watch = tokio::spawn(async move {
+        watch_release(release_store, compiled_release, release_cancellation).await
+    });
     let scheduler_cancellation = cancellation.clone();
     let scheduler = tokio::spawn(async move { cell_scheduler.run(scheduler_cancellation).await });
     let public_shutdown = cancellation.clone();
@@ -649,14 +706,15 @@ pub async fn serve(config: Config) -> Result<()> {
     signal.abort();
     let result = listener_result?;
     before_shutdown_deadline(shutdown_deadline, async move {
+        let _cancel_heartbeat_on_drop = node_shutdown.clone().drop_guard();
         if let Err(error) = refresh.await {
             tracing::warn!(error = %error, "repository catalog refresh task failed");
         }
-        let heartbeat = match heartbeat.await {
+        let scheduler = match scheduler.await {
             Ok(result) => result,
             Err(error) => Err(error.into()),
         };
-        let scheduler = match scheduler.await {
+        let release_watch = match release_watch.await {
             Ok(result) => result,
             Err(error) => Err(error.into()),
         };
@@ -669,11 +727,17 @@ pub async fn serve(config: Config) -> Result<()> {
         server.transfer_admission.wait().await;
         let maintenance = server.finish_maintenance().await;
         let runtimes = server.shutdown_runtimes().await;
+        node_shutdown.cancel();
+        let heartbeat = match heartbeat.await {
+            Ok(result) => result,
+            Err(error) => Err(error.into()),
+        };
         result
             .map(|_| ())
             .map_err(crate::Error::from)
             .and(heartbeat)
             .and(scheduler)
+            .and(release_watch)
             .and(maintenance)
             .and(runtimes)
     })
@@ -1274,6 +1338,45 @@ mod tests {
                 max_active_cells: 1_125,
             }
         );
+    }
+
+    #[test]
+    fn release_lifecycle_admits_only_the_current_rollout_members() {
+        let current = Digest::from_bytes([1; 32]);
+        let desired = Digest::from_bytes([2; 32]);
+
+        assert!(release_admits_process(
+            ReleaseState::Ready,
+            Some(current),
+            Some(current),
+            current,
+        ));
+        assert!(release_admits_process(
+            ReleaseState::Prepared,
+            Some(current),
+            Some(desired),
+            current,
+        ));
+        assert!(release_admits_process(
+            ReleaseState::Activating,
+            Some(current),
+            Some(desired),
+            desired,
+        ));
+        assert!(!release_admits_process(
+            ReleaseState::Ready,
+            Some(desired),
+            Some(desired),
+            current,
+        ));
+        for state in [ReleaseState::Maintenance, ReleaseState::Failed] {
+            assert!(!release_admits_process(
+                state,
+                Some(current),
+                Some(desired),
+                current,
+            ));
+        }
     }
 
     #[test]

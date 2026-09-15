@@ -120,7 +120,7 @@ impl ReleaseRecord {
         validate_image(&self.desired_image)?;
         if matches!(
             self.state,
-            ReleaseState::Prepared | ReleaseState::Activating
+            ReleaseState::Prepared | ReleaseState::Maintenance | ReleaseState::Activating
         ) && self.desired.is_none()
         {
             return Err(Error::Release(
@@ -396,6 +396,47 @@ impl ReleaseStore {
         self.update_exact(observed, next).await
     }
 
+    /// Enters the operation-bound offline maintenance phase.
+    ///
+    /// This transition only closes release admission. The caller must drain every
+    /// writer and prove the advertised fleet empty before changing Cell data.
+    pub async fn start_maintenance(
+        &self,
+        expected_revision: u64,
+        operation: RequestId,
+    ) -> Result<ReleaseRecord> {
+        let observed = self
+            .load()
+            .await?
+            .ok_or(Error::Release("release is not prepared"))?;
+        if maintenance_retry(&observed.record, expected_revision, operation) {
+            let desired = observed
+                .record
+                .desired
+                .ok_or(Error::Release("maintenance release has no descriptor"))?;
+            self.descriptor(desired).await?;
+            return Ok(observed.record);
+        }
+        if observed.record.revision != expected_revision
+            || observed.record.state != ReleaseState::Prepared
+            || observed.record.operation != operation
+        {
+            return Err(Error::Release("prepared release changed concurrently"));
+        }
+        let desired = observed
+            .record
+            .desired
+            .ok_or(Error::Release("prepared release has no descriptor"))?;
+        self.descriptor(desired).await?;
+        let mut next = observed.record.clone();
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or(Error::Release("release revision overflow"))?;
+        next.state = ReleaseState::Maintenance;
+        self.update_exact(observed, next).await
+    }
+
     /// Publishes the desired descriptor as current after caller-side admission.
     pub async fn complete_activation(
         &self,
@@ -521,6 +562,15 @@ fn activation_retry(record: &ReleaseRecord, expected_revision: u64, operation: R
         }
         _ => false,
     }
+}
+
+fn maintenance_retry(record: &ReleaseRecord, expected_revision: u64, operation: RequestId) -> bool {
+    record.operation == operation
+        && record.state == ReleaseState::Maintenance
+        && record.desired.is_some()
+        && expected_revision
+            .checked_add(1)
+            .is_some_and(|revision| record.revision == revision)
 }
 
 fn completion_retry(record: &ReleaseRecord, expected_revision: u64, operation: RequestId) -> bool {
@@ -814,6 +864,56 @@ mod tests {
         assert!(
             releases
                 .start_activation(prepared.revision(), operation)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn maintenance_is_operation_bound_and_resumable() {
+        let (releases, descriptor, digest) = fixture();
+        let operation = RequestId::from_bytes([3; 16]);
+        let prepared = releases
+            .prepare(
+                &descriptor,
+                digest,
+                0,
+                &format!("sha256:{}", "a".repeat(64)),
+                operation,
+            )
+            .await
+            .unwrap();
+
+        let maintenance = releases
+            .start_maintenance(prepared.revision(), operation)
+            .await
+            .unwrap();
+        assert_eq!(maintenance.revision(), 2);
+        assert_eq!(maintenance.state(), ReleaseState::Maintenance);
+        assert_eq!(maintenance.current(), None);
+        assert_eq!(maintenance.desired(), Some(digest));
+        assert_eq!(
+            releases
+                .start_maintenance(prepared.revision(), operation)
+                .await
+                .unwrap(),
+            maintenance
+        );
+        assert!(
+            releases
+                .start_activation(prepared.revision(), operation)
+                .await
+                .is_err()
+        );
+        assert!(
+            releases
+                .prepare(
+                    &descriptor,
+                    digest,
+                    maintenance.revision(),
+                    &format!("sha256:{}", "b".repeat(64)),
+                    RequestId::from_bytes([4; 16]),
+                )
                 .await
                 .is_err()
         );

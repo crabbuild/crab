@@ -80,8 +80,8 @@ enum CellReleaseCommand {
         expected_revision: u64,
         #[arg(long, value_enum)]
         strategy: ActivationStrategy,
-        #[arg(long)]
-        minimum_eligible_nodes: usize,
+        #[arg(long, required_if_eq("strategy", "compatible"))]
+        minimum_eligible_nodes: Option<usize>,
     },
     /// Print the canonical durable release selection.
     Status,
@@ -97,6 +97,7 @@ enum CellReleaseCommand {
 #[derive(Clone, Copy, ValueEnum)]
 enum ActivationStrategy {
     Compatible,
+    Maintenance,
 }
 
 #[derive(Subcommand)]
@@ -241,7 +242,7 @@ async fn cells(
                 CellReleaseCommand::Activate {
                     expected_revision,
                     strategy: ActivationStrategy::Compatible,
-                    minimum_eligible_nodes,
+                    minimum_eligible_nodes: Some(minimum_eligible_nodes),
                 },
         } => {
             crab_http_server::activate_cell_release(
@@ -250,6 +251,38 @@ async fn cells(
                 minimum_eligible_nodes,
             )
             .await?
+        }
+        CellsCommand::Release {
+            command:
+                CellReleaseCommand::Activate {
+                    expected_revision: _,
+                    strategy: ActivationStrategy::Compatible,
+                    minimum_eligible_nodes: None,
+                },
+        } => {
+            return Err(crab_http_server::Error::Config(
+                "compatible activation requires --minimum-eligible-nodes",
+            ));
+        }
+        CellsCommand::Release {
+            command:
+                CellReleaseCommand::Activate {
+                    expected_revision,
+                    strategy: ActivationStrategy::Maintenance,
+                    minimum_eligible_nodes: None,
+                },
+        } => crab_http_server::enter_cell_maintenance(config, expected_revision).await?,
+        CellsCommand::Release {
+            command:
+                CellReleaseCommand::Activate {
+                    expected_revision: _,
+                    strategy: ActivationStrategy::Maintenance,
+                    minimum_eligible_nodes: Some(_),
+                },
+        } => {
+            return Err(crab_http_server::Error::Config(
+                "maintenance activation does not accept --minimum-eligible-nodes",
+            ));
         }
         CellsCommand::Release {
             command: CellReleaseCommand::Status,
@@ -477,12 +510,11 @@ mod tests {
                     command: CellReleaseCommand::Activate {
                         expected_revision: 8,
                         strategy: ActivationStrategy::Compatible,
-                        minimum_eligible_nodes: 2,
+                        minimum_eligible_nodes: Some(2),
                     }
                 }
             })
         ));
-
         assert!(
             Arguments::try_parse_from([
                 "crab-http-server",
@@ -498,6 +530,32 @@ mod tests {
             ])
             .is_err()
         );
+
+        let maintenance = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "release",
+            "activate",
+            "--expected-revision",
+            "8",
+            "--strategy",
+            "maintenance",
+        ])
+        .unwrap();
+        assert!(matches!(
+            maintenance.command,
+            Some(Command::Cells {
+                command: CellsCommand::Release {
+                    command: CellReleaseCommand::Activate {
+                        expected_revision: 8,
+                        strategy: ActivationStrategy::Maintenance,
+                        minimum_eligible_nodes: None,
+                    }
+                }
+            })
+        ));
 
         let status = Arguments::try_parse_from([
             "crab-http-server",

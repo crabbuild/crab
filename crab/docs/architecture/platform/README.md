@@ -282,18 +282,24 @@ replaces the exact expired ETag with a canonical tombstone before deletion; a
 concurrent heartbeat therefore either wins intact or loses its old ETag before
 deletion. Explicit compatible release activation now requires an operator-chosen
 1–10,000 live-node quorum for the exact fleet/image/release and compiled module
-inventory before entering the activation state machine. Maintenance activation
-remains. The peer
+inventory before entering the activation state machine. The maintenance entry is
+also operation-bound and resumable: it selects `maintenance` by release
+CAS, causes every serving binary to self-drain, and waits for the complete
+unfenced session inventory rather than treating heartbeat expiry as shutdown
+proof. Maintenance-only persisted-work inventory, data transformation and final
+`ready` publication remain. The peer
 pre-decoder can extract the structurally valid but explicitly untrusted session
 claim for that lookup. The server now loads only CA-trusted Ed25519 PKCS#8
 identities, proves the leaf certificate covers its advertised host and both TLS
 roles, binds its SHA-256 and public key to enrollment, measures current memory,
 volume and CPU hints, strict-publishes before readiness and refreshes every three
 seconds. A failed refresh retries while the current advertisement remains safely
-valid; approaching its expiry withdraws readiness and drains the process. Every
-normal or unhealthy heartbeat-loop exit conditionally tombstones and deletes its
-latest observed advertisement before server shutdown completes. A successor
-heartbeat that won the ETag race is retained rather than deleted.
+valid; approaching its expiry withdraws readiness and drains the process. Once
+drain begins, the process refreshes a zero-capacity advertisement until HTTP,
+background work and SQLite runtimes close, then conditionally tombstones and
+deletes its latest observation. A stale collector may instead ETag-fence that
+expired record; expiry by itself is never sufficient maintenance evidence. A
+successor heartbeat that won the ETag race is retained rather than deleted.
 `crab-http-server` now retains repository UUIDs in its live catalog index and
 implements the receiving product boundary: it accepts only the repository
 namespace, maps the target partition to the stable repository UUID, rechecks the
@@ -365,6 +371,17 @@ listener. A candidate binary is eligible while its exact digest is `prepared` or
 and the ECS evaluation task execute bootstrap before first start. The server
 constructs one repository router before readiness; every public issue/comment
 route now invokes it.
+`cells release activate --strategy maintenance --expected-revision N` verifies
+this binary's prepared descriptor, CASes only that operation from `prepared` to
+`maintenance`, and waits up to 125 seconds for all advertised sessions in the
+fleet to be gracefully withdrawn or ETag-fenced as stale. Every server polls
+release state once per second; `maintenance`, `failed`, or a completed `ready`
+release that excludes its compiled digest starts normal server drain. Draining
+nodes keep zero-capacity advertisements until accepted HTTP and Git work,
+schedulers, activities, maintenance jobs, Cell publication, SQLite close and
+worker joins have settled. Retrying with the original prepared revision adopts
+the same maintenance operation. This command deliberately returns a
+`maintenance` record: it does not transform Cell data or publish `ready`.
 The maintenance CLI now implements a resumable issue/comment repository import:
 `cells import-repository-issues --owner OWNER --name NAME --operation UUID`.
 It stages a bounded, version-pinned `app/v1/issues` inventory in SQLite, verifies
