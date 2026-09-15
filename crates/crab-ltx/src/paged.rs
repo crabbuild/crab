@@ -18,7 +18,7 @@ pub(crate) struct IndexEntry {
 }
 
 struct IndexEntries<'a> {
-    chunks: std::slice::ChunksExact<'a, u8>,
+    chunks: std::slice::Iter<'a, [u8; ENTRY_BYTES]>,
 }
 
 impl Iterator for IndexEntries<'_> {
@@ -314,11 +314,12 @@ pub(crate) fn decode_index(bytes: &[u8]) -> Result<Vec<IndexEntry>> {
 }
 
 fn index_entries(bytes: &[u8]) -> Result<IndexEntries<'_>> {
-    if !bytes.len().is_multiple_of(ENTRY_BYTES) {
+    let (entries, remainder) = bytes.as_chunks::<ENTRY_BYTES>();
+    if !remainder.is_empty() {
         return Err(CrabError::LTXCorrupted);
     }
     Ok(IndexEntries {
-        chunks: bytes.chunks_exact(ENTRY_BYTES),
+        chunks: entries.iter(),
     })
 }
 
