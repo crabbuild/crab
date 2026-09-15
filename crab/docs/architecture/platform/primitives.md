@@ -432,9 +432,13 @@ live node directory, rendezvous-assigns all 256 shards, caps each one-second
 cycle at 128 due Cells, and routes Tick through an existing local owner,
 authenticated remote owner or temporary exact-root activation. Temporary local
 acquisitions drain back to Idle. A zero-item Tick triggers one effect-supervisor
-step because a published effect deadline may be the due source. Node-progress
-advertisement, 15-second scanner fallback, bounded retry queues and generic
-Workflow-activity routing remain. Active-local routing recovers a capability
+step because a published effect deadline may be the due source. Completed cycles
+advance signed node progress; equal-progress heartbeats keep the session live
+without claiming scanner progress. Every scanner excludes a session after 15
+seconds without progress and restores it after the counter advances. The local
+readiness gate opens only after the first complete cycle, then uses the same
+deadline as scheduler health/progress/lag metrics.
+Bounded retry queues and generic Workflow-activity routing remain. Active-local routing recovers a capability
 from the dispatcher only when session, incarnation, code and schema match the
 scanned control and the Cell is not fenced or draining.
 

@@ -68,6 +68,7 @@ pub(crate) struct NodePublisher {
     release: Digest,
     module_digests: Vec<Digest>,
     data_dir: PathBuf,
+    scheduler: crate::cells::SchedulerStatus,
 }
 
 impl NodePublisher {
@@ -86,6 +87,7 @@ impl NodePublisher {
         release: Digest,
         module_digests: Vec<Digest>,
         data_dir: PathBuf,
+        scheduler: crate::cells::SchedulerStatus,
     ) -> crate::Result<Self> {
         std::fs::create_dir_all(&data_dir)?;
         if !std::fs::metadata(&data_dir)?.is_dir() {
@@ -105,6 +107,7 @@ impl NodePublisher {
             release,
             module_digests,
             data_dir,
+            scheduler,
         })
     }
 
@@ -112,7 +115,10 @@ impl NodePublisher {
         let now_ms = now_ms()?;
         Ok(self
             .directory
-            .create(self.advertisement(1, now_ms)?, now_ms)
+            .create(
+                self.advertisement(self.scheduler.progress(), now_ms)?,
+                now_ms,
+            )
             .await?)
     }
 
@@ -132,10 +138,9 @@ impl NodePublisher {
                 () = server.cancellation.cancelled() => return Ok(()),
                 () = tokio::time::sleep(HEARTBEAT_INTERVAL) => {}
             }
-            let next_progress = observed.advertisement().progress().saturating_add(1);
             loop {
                 let now_ms = now_ms()?;
-                let next = self.advertisement(next_progress, now_ms)?;
+                let next = self.advertisement(self.scheduler.progress(), now_ms)?;
                 match self.directory.refresh(&observed, next, now_ms).await {
                     Ok(next) => {
                         observed = next;
@@ -905,6 +910,7 @@ mod tests {
             release,
             vec![Digest::from_bytes([16; 32])],
             data_dir.path().into(),
+            crate::cells::SchedulerStatus::new(now_ms().unwrap()).unwrap(),
         )
         .unwrap();
 
@@ -928,6 +934,7 @@ mod tests {
                 release,
                 vec![Digest::from_bytes([16; 32])],
                 data_dir.path().into(),
+                crate::cells::SchedulerStatus::new(now_ms().unwrap()).unwrap(),
             )
             .is_err()
         );

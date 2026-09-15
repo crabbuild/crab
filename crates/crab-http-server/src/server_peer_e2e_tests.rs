@@ -97,6 +97,7 @@ async fn public_issue_request_reaches_remote_owner_over_mtls_and_publishes_ltx()
         registry.release_digest(),
         registry.module_digests(),
         ingress_dir.path().to_path_buf(),
+        crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap()).unwrap(),
     )
     .unwrap();
     let owner_publisher = NodePublisher::new(
@@ -110,6 +111,7 @@ async fn public_issue_request_reaches_remote_owner_over_mtls_and_publishes_ltx()
         registry.release_digest(),
         registry.module_digests(),
         owner_dir.path().to_path_buf(),
+        crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap()).unwrap(),
     )
     .unwrap();
     ingress_publisher.publish_initial().await.unwrap();
@@ -358,6 +360,8 @@ fn server(
         catalog: None,
         catalog_healthy: AtomicBool::new(false),
         node_healthy: AtomicBool::new(false),
+        scheduler_status: crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap())
+            .unwrap(),
         metrics: crate::metrics::Metrics::new().unwrap(),
     })
 }

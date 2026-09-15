@@ -18,7 +18,9 @@ expired session and uses the runtime's unchanged-control observation before
 takeover. The server now also runs a bounded catalog-driven repository scheduler:
 live-node rendezvous ownership selects shards, typed Tick and effect operations
 route to local/remote owners, and scheduler-only activations drain back to Idle.
-Scheduler progress/fallback and Workflow activity polling remain. Remaining
+Completed cycles advance signed node progress; a node stalled for 15 seconds
+loses readiness and is excluded so the next rendezvous candidate takes over.
+Workflow activity polling remains. Remaining
 collaboration-domain import, old-version migration/configured
 multi-node quorum and the remaining product-domain route cuts are not yet
 integrated. New repository creation explicitly publishes an empty Cell and marks

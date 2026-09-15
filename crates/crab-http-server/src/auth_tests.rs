@@ -325,6 +325,10 @@ impl Harness {
             catalog: None,
             catalog_healthy: AtomicBool::new(false),
             node_healthy: AtomicBool::new(false),
+            scheduler_status: crate::cells::SchedulerStatus::new(
+                crate::cells::unix_now_ms().unwrap(),
+            )
+            .unwrap(),
             metrics: crate::metrics::Metrics::new().unwrap(),
         });
         let app = router(Arc::clone(&server));

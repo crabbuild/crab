@@ -1,9 +1,10 @@
 use crab_cell_runtime::{
-    CellId, IncarnationId, SessionId, WorkflowAction, WorkflowContext, WorkflowDecision,
-    WorkflowDefinition, WorkflowStatus, effect_id, install_kv_schema, install_queue_schema,
-    install_runtime_schema, install_workflow_schema, preferred_scanner, scheduler_next_due_ms,
-    scheduler_tick,
+    CellId, Digest, IncarnationId, NodeAdvertisement, NodeCapacity, SchedulerFleet, SessionId,
+    WorkflowAction, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowStatus,
+    effect_id, install_kv_schema, install_queue_schema, install_runtime_schema,
+    install_workflow_schema, preferred_scanner, scheduler_next_due_ms, scheduler_tick,
 };
+use ed25519_dalek::SigningKey;
 
 struct ExpiryDefinition;
 
@@ -210,6 +211,71 @@ fn rendezvous_scanner_choice_is_order_independent_and_uses_both_nodes() {
     }
     assert_eq!(winners.len(), 2);
     assert!(preferred_scanner(0, &[first, first]).is_err());
+}
+
+#[test]
+fn stalled_scanner_is_removed_until_its_advertised_progress_advances() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let first = advertisement(1, 1, 0, &key);
+    let second = advertisement(2, 1, 0, &key);
+    let mut fleet = SchedulerFleet::default();
+    assert_eq!(
+        fleet
+            .eligible_sessions(&[first.clone(), second], 0, 100)
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let second = advertisement(2, 2, 50, &key);
+    assert_eq!(
+        fleet
+            .eligible_sessions(&[first.clone(), second.clone()], 101, 100)
+            .unwrap(),
+        vec![SessionId::from_bytes([2; 16])]
+    );
+    assert_eq!(
+        fleet
+            .eligible_sessions(&[advertisement(1, 2, 102, &key), second], 102, 100)
+            .unwrap(),
+        vec![
+            SessionId::from_bytes([1; 16]),
+            SessionId::from_bytes([2; 16])
+        ]
+    );
+    assert!(
+        fleet
+            .eligible_sessions(&[advertisement(1, 1, 103, &key)], 103, 100)
+            .is_err()
+    );
+}
+
+fn advertisement(
+    session: u8,
+    progress: u64,
+    issued_at_ms: i64,
+    key: &SigningKey,
+) -> NodeAdvertisement {
+    NodeAdvertisement::sign(
+        SessionId::from_bytes([session; 16]),
+        format!("https://node-{session}.internal:8789"),
+        Digest::from_bytes([1; 32]),
+        Digest::from_bytes([2; 32]),
+        Digest::from_bytes([3; 32]),
+        Digest::from_bytes([4; 32]),
+        key,
+        progress,
+        issued_at_ms,
+        issued_at_ms + 10_000,
+        vec![Digest::from_bytes([5; 32])],
+        vec![1],
+        NodeCapacity {
+            free_memory_bytes: 1,
+            free_disk_bytes: 1,
+            job_credits: 1,
+        },
+    )
+    .unwrap()
 }
 
 #[test]

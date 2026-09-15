@@ -52,8 +52,7 @@ left untouched. The next idle acquisition reopens the exact authoritative root,
 so it cannot publish a late tentative commit. Streaming initial directory construction
 and directory-backed capture checksums, shared directory caching, prepared compaction/bundles,
 Queue dead-letter effect adapters, catalog-driven Workflow activity scheduling,
-scheduler progress advertisement/fallback, remaining HTTP domain cutovers and
-capacity qualification remain incomplete. The scoped
+remaining HTTP domain cutovers and capacity qualification remain incomplete. The scoped
 KV primitive now installs
 the normative schema and implements atomic checks/mutations, incarnation/sequence
 versions, logical TTL, bounded binary-prefix reads and cleanup through the same
@@ -141,8 +140,14 @@ owner, or temporarily acquires an idle/stale-owner Cell from its exact root. A
 temporary local activation drains back to `Idle` after processing. When Tick
 reports no maintenance item, the same cycle runs one source effect supervision
 step. Tick/effect peer operations use fleet/session-bound internal grants, not a
-browser principal. Node-progress advertisements, 15-second scanner fallback,
-bounded retry queues and general Workflow activity polling remain.
+browser principal. Each completed cycle advances a shared boot-session progress
+counter. Heartbeats publish that counter while allowing unchanged progress, and
+every scheduler tracks the last observed change per live session. A node with no
+advertised progress for 15 seconds is removed from rendezvous assignment until
+it advances again; its own readiness stays closed until the first complete cycle
+and fails again on the same deadline. Prometheus
+exports scheduler health, progress and lag. Bounded retry queues and general
+Workflow activity polling remain.
 `CellRuntime::local_handle` now resolves a due Cell
 only when the dispatcher still owns the exact incarnation/code/schema under the
 current session and the admission is neither fenced nor draining; it never
@@ -202,7 +207,7 @@ sort live sessions deterministically and fail on misplaced, foreign or excessive
 live records. Explicit compatible release activation now requires at least one
 live node for the exact fleet/image/release and compiled module inventory before
 entering the activation state machine. Configured multi-replica quorum and
-scheduler progress aggregation remain. The peer
+stale advertisement collection remain. The peer
 pre-decoder can extract the structurally valid but explicitly untrusted session
 claim for that lookup. The server now loads only CA-trusted Ed25519 PKCS#8
 identities, proves the leaf certificate covers its advertised host and both TLS

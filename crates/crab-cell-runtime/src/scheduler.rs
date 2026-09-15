@@ -1,10 +1,10 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crab_ltx::rusqlite::Transaction;
 
 use crate::{
-    CatalogProof, CatalogShardScan, CellAuthority, CellCatalog, EffectBatch, Error, Result,
-    SessionId, VersionedControl, WorkflowDefinition,
+    CatalogProof, CatalogShardScan, CellAuthority, CellCatalog, EffectBatch, Error,
+    NodeAdvertisement, Result, SessionId, VersionedControl, WorkflowDefinition,
     effects::{
         effect_cleanup_terminal_bounded, effect_expire_ready_bounded,
         effect_reclaim_expired_bounded, inbox_cleanup_expired_bounded,
@@ -22,6 +22,62 @@ use crate::{
 const WORKFLOW_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const MAX_TICK_ITEMS: usize = 128;
 const CONTROL_BATCH: usize = 32;
+
+#[derive(Clone, Copy)]
+struct ProgressObservation {
+    progress: u64,
+    changed_at_ms: i64,
+}
+
+/// Tracks advertised scanner progress and excludes sessions that stop advancing.
+#[derive(Default)]
+pub struct SchedulerFleet {
+    observations: HashMap<SessionId, ProgressObservation>,
+}
+
+impl SchedulerFleet {
+    /// Returns sessions eligible for rendezvous assignment at this observation.
+    pub fn eligible_sessions(
+        &mut self,
+        nodes: &[NodeAdvertisement],
+        now_ms: i64,
+        stale_after_ms: i64,
+    ) -> Result<Vec<SessionId>> {
+        if now_ms < 0 || stale_after_ms <= 0 {
+            return Err(Error::Control("scheduler liveness interval is invalid"));
+        }
+        let live = nodes
+            .iter()
+            .map(NodeAdvertisement::session)
+            .collect::<HashSet<_>>();
+        self.observations
+            .retain(|session, _| live.contains(session));
+
+        let mut eligible = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            let observation =
+                self.observations
+                    .entry(node.session())
+                    .or_insert(ProgressObservation {
+                        progress: node.progress(),
+                        changed_at_ms: now_ms,
+                    });
+            if node.progress() < observation.progress {
+                return Err(Error::Control("scheduler progress regressed"));
+            }
+            if node.progress() > observation.progress {
+                *observation = ProgressObservation {
+                    progress: node.progress(),
+                    changed_at_ms: now_ms,
+                };
+            }
+            if now_ms.saturating_sub(observation.changed_at_ms) < stale_after_ms {
+                eligible.push(node.session());
+            }
+        }
+        Ok(eligible)
+    }
+}
 
 /// One due catalog entry and its exact observed control token.
 pub struct DueCell {

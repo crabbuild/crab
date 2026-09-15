@@ -1,10 +1,16 @@
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use crab_cell_runtime::{
     ApplicationIdentity, CatalogRole, CellAuthority, CellCatalog, DueCellScan, EffectRunOutcome,
     EffectSource, EffectSupervisor, InvocationError, MaintenanceTickCommand,
     MaintenanceTickOutcome, MaintenanceTickRequest, MutationIdentity, NodeDirectory, RequestId,
-    SessionId, preferred_scanner,
+    SchedulerFleet, SessionId, preferred_scanner,
 };
 use crab_storage::CellStorageLayout;
 use tokio_util::sync::CancellationToken;
@@ -16,6 +22,54 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_LIVE_NODES: usize = 10_000;
 const MAX_DUE_PER_CYCLE: usize = 128;
 const EFFECT_LEASE_MS: u32 = 30_000;
+const SCHEDULER_STALE_AFTER_MS: i64 = 15_000;
+
+/// Shared scanner progress used by enrollment, readiness and metrics.
+#[derive(Clone)]
+pub(crate) struct SchedulerStatus {
+    progress: Arc<AtomicU64>,
+    last_completed_ms: Arc<AtomicI64>,
+    completed: Arc<AtomicBool>,
+}
+
+impl SchedulerStatus {
+    pub(crate) fn new(now_ms: i64) -> crate::Result<Self> {
+        if now_ms < 0 {
+            return Err(crab_cell_runtime::Error::Control("negative scheduler status time").into());
+        }
+        Ok(Self {
+            progress: Arc::new(AtomicU64::new(1)),
+            last_completed_ms: Arc::new(AtomicI64::new(now_ms)),
+            completed: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    pub(crate) fn progress(&self) -> u64 {
+        self.progress.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn lag_ms(&self, now_ms: i64) -> u64 {
+        u64::try_from(now_ms.saturating_sub(self.last_completed_ms.load(Ordering::Acquire)))
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn is_healthy(&self, now_ms: i64) -> bool {
+        let last = self.last_completed_ms.load(Ordering::Acquire);
+        self.completed.load(Ordering::Acquire)
+            && now_ms >= last
+            && now_ms - last < SCHEDULER_STALE_AFTER_MS
+    }
+
+    pub(crate) fn mark_completed(&self, now_ms: i64) {
+        self.last_completed_ms.store(now_ms, Ordering::Release);
+        self.completed.store(true, Ordering::Release);
+        let _ = self
+            .progress
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |progress| {
+                progress.checked_add(1)
+            });
+    }
+}
 
 /// Fleet-assigned scanner for repository Cell maintenance and effects.
 pub(crate) struct RepositoryCellScheduler {
@@ -24,6 +78,8 @@ pub(crate) struct RepositoryCellScheduler {
     directory: NodeDirectory,
     router: RepositoryCellRouter,
     session: SessionId,
+    status: SchedulerStatus,
+    fleet: SchedulerFleet,
 }
 
 impl RepositoryCellScheduler {
@@ -33,6 +89,7 @@ impl RepositoryCellScheduler {
         directory: NodeDirectory,
         router: RepositoryCellRouter,
         session: SessionId,
+        status: SchedulerStatus,
     ) -> Self {
         Self {
             catalog: CellCatalog::new(layout.clone(), identity.tenant()),
@@ -40,16 +97,21 @@ impl RepositoryCellScheduler {
             directory,
             router,
             session,
+            status,
+            fleet: SchedulerFleet::default(),
         }
     }
 
-    pub(crate) async fn run(self, cancellation: CancellationToken) -> crate::Result<()> {
+    pub(crate) async fn run(mut self, cancellation: CancellationToken) -> crate::Result<()> {
         loop {
             if cancellation.is_cancelled() {
                 return Ok(());
             }
-            if let Err(error) = self.scan_once().await {
-                tracing::warn!(error = %error, "repository Cell scheduler scan failed");
+            match self.scan_once().await {
+                Ok(()) => self.status.mark_completed(super::unix_now_ms()?),
+                Err(error) => {
+                    tracing::warn!(error = %error, "repository Cell scheduler scan failed");
+                }
             }
             tokio::select! {
                 () = cancellation.cancelled() => return Ok(()),
@@ -58,15 +120,12 @@ impl RepositoryCellScheduler {
         }
     }
 
-    async fn scan_once(&self) -> crate::Result<()> {
+    async fn scan_once(&mut self) -> crate::Result<()> {
         let now_ms = super::unix_now_ms()?;
-        let nodes = self
-            .directory
-            .live(now_ms, MAX_LIVE_NODES)
-            .await?
-            .into_iter()
-            .map(|node| node.session())
-            .collect::<Vec<_>>();
+        let advertisements = self.directory.live(now_ms, MAX_LIVE_NODES).await?;
+        let nodes =
+            self.fleet
+                .eligible_sessions(&advertisements, now_ms, SCHEDULER_STALE_AFTER_MS)?;
         let mut remaining = MAX_DUE_PER_CYCLE;
         for shard in 0_u8..=u8::MAX {
             if remaining == 0 || preferred_scanner(shard, &nodes)? != Some(self.session) {
@@ -332,15 +391,24 @@ mod tests {
             directory.path().join("session"),
         )
         .unwrap();
-        RepositoryCellScheduler::new(identity, layout, node_directory, router, session)
-            .scan_once()
-            .await
-            .unwrap();
+        let status = SchedulerStatus::new(now_ms).unwrap();
+        let mut scheduler = RepositoryCellScheduler::new(
+            identity,
+            layout,
+            node_directory,
+            router,
+            session,
+            status.clone(),
+        );
+        scheduler.scan_once().await.unwrap();
+        status.mark_completed(super::super::unix_now_ms().unwrap());
 
         let after = authority.load(target.cell_id()).await.unwrap().unwrap();
         assert_eq!(after.value().root.as_ref().unwrap().commit_sequence, 1);
         assert!(after.value().next_due_ms.is_some_and(|due| due > now_ms));
         assert_eq!(after.value().state, crab_cell_runtime::ControlState::Idle);
+        assert_eq!(status.progress(), 2);
+        assert!(status.is_healthy(super::super::unix_now_ms().unwrap()));
         runtime.shutdown().await.unwrap();
     }
 }

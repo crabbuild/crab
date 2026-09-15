@@ -78,6 +78,8 @@ pub(super) async fn fixture() -> Arc<Server> {
         catalog: None,
         catalog_healthy: AtomicBool::new(false),
         node_healthy: AtomicBool::new(false),
+        scheduler_status: crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap())
+            .unwrap(),
         metrics: crate::metrics::Metrics::new().unwrap(),
     })
 }
@@ -179,6 +181,9 @@ fn enable_catalog_readiness(server: &mut Arc<Server>) {
     ));
     server.catalog_healthy.store(true, Ordering::Release);
     server.node_healthy.store(true, Ordering::Release);
+    server
+        .scheduler_status
+        .mark_completed(crate::cells::unix_now_ms().unwrap());
 }
 
 #[tokio::test]
@@ -251,6 +256,50 @@ async fn readiness_rejects_a_draining_cell_runtime() {
             .and_then(|value| value.to_str().ok()),
         Some("5")
     );
+}
+
+#[tokio::test]
+async fn readiness_rejects_a_stalled_cell_scheduler() {
+    let mut server = fixture().await;
+    enable_catalog_readiness(&mut server);
+    let now_ms = crate::cells::unix_now_ms().unwrap();
+    let stalled = crate::cells::SchedulerStatus::new(now_ms - 15_000).unwrap();
+    stalled.mark_completed(now_ms - 15_000);
+    Arc::get_mut(&mut server).unwrap().scheduler_status = stalled;
+
+    let response = management_router(Arc::clone(&server))
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    close(&server).await;
+}
+
+#[tokio::test]
+async fn readiness_requires_the_first_cell_scheduler_cycle() {
+    let mut server = fixture().await;
+    enable_catalog_readiness(&mut server);
+    Arc::get_mut(&mut server).unwrap().scheduler_status =
+        crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap()).unwrap();
+
+    let response = management_router(Arc::clone(&server))
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    close(&server).await;
 }
 
 #[tokio::test]

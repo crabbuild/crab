@@ -187,8 +187,17 @@ async fn create_load_and_refresh_preserve_signed_boot_identity() {
     let refreshed = directory
         .refresh(
             &created,
-            advertisement(&key, 2, NOW_MS + 1_000),
+            advertisement(&key, 1, NOW_MS + 1_000),
             NOW_MS + 1_000,
+        )
+        .await
+        .unwrap();
+    assert_eq!(refreshed.advertisement().progress(), 1);
+    let refreshed = directory
+        .refresh(
+            &refreshed,
+            advertisement(&key, 2, NOW_MS + 2_000),
+            NOW_MS + 2_000,
         )
         .await
         .unwrap();

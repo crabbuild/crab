@@ -458,8 +458,13 @@ all 256 shards, processes at most 128 due Cells, and routes each one to the
 existing local or authenticated remote owner. It may acquire an Idle Cell or
 perform the normal observed stale-owner takeover; activations created solely for
 the scheduler drain after the Tick/effect cycle, while already-active Cells stay
-owned. Node-progress advertisement, 15-second scanner fallback, bounded retry
-queues and generic Workflow activity polling remain. For a locally owned Cell,
+owned. Each successful full cycle advances the shared node progress used by the
+heartbeat. `SchedulerFleet` remembers the last progress change for every live
+session and excludes a stalled session after 15 seconds, allowing the next
+rendezvous candidate to scan; progress recovery readmits it. Local readiness and
+Prometheus scheduler health/progress/lag use the same completion timestamp, and
+readiness cannot open before the first completed cycle.
+Bounded retry queues and generic Workflow activity polling remain. For a locally owned Cell,
 `CellRuntime::local_handle` asks the dispatcher for a capability and
 returns one only if the scanned control's session/incarnation/code/schema still
 match an unfenced, non-draining active entry. Callers never inspect the runtime's

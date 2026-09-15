@@ -92,8 +92,8 @@ pub use registry::{
 };
 pub use release::{ReleaseRecord, ReleaseState, ReleaseStore, VersionedRelease};
 pub use scheduler::{
-    DueCell, DueCellScan, SchedulerTickOutcome, preferred_scanner, scheduler_next_due_ms,
-    scheduler_tick,
+    DueCell, DueCellScan, SchedulerFleet, SchedulerTickOutcome, preferred_scanner,
+    scheduler_next_due_ms, scheduler_tick,
 };
 pub use schema::{install_runtime_schema, verify_runtime_schema};
 pub use sql::{

@@ -338,6 +338,7 @@ pub(crate) struct Server {
     catalog: Option<CatalogStore>,
     catalog_healthy: AtomicBool,
     pub(crate) node_healthy: AtomicBool,
+    scheduler_status: crate::cells::SchedulerStatus,
     metrics: crate::metrics::Metrics,
 }
 
@@ -437,6 +438,7 @@ pub async fn serve(config: Config) -> Result<()> {
         startup.image,
         registry.release_digest(),
     );
+    let scheduler_status = crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms()?)?;
     let node_publisher = crate::peer::NodePublisher::new(
         directory.clone(),
         peer_tls.signing_key().clone(),
@@ -448,6 +450,7 @@ pub async fn serve(config: Config) -> Result<()> {
         registry.release_digest(),
         registry.module_digests(),
         config.cells.data_dir.clone(),
+        scheduler_status.clone(),
     )?;
     let session_dir = node_publisher.session_dir();
     // A pod must prove the complete storage contract before it owns any socket;
@@ -500,6 +503,7 @@ pub async fn serve(config: Config) -> Result<()> {
         directory.clone(),
         repository_cells.clone(),
         session,
+        scheduler_status.clone(),
     );
     let advertised = match node_publisher.publish_initial().await {
         Ok(advertised) => advertised,
@@ -531,6 +535,7 @@ pub async fn serve(config: Config) -> Result<()> {
         catalog: Some(catalog),
         catalog_healthy: AtomicBool::new(true),
         node_healthy: AtomicBool::new(true),
+        scheduler_status,
         metrics,
     });
     let app = router(Arc::clone(&server));
@@ -834,9 +839,13 @@ fn management_router(server: Arc<Server>) -> Router {
 }
 
 async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
+    let scheduler_now_ms = crate::cells::unix_now_ms().unwrap_or(0);
     let body = server.metrics.render(crate::metrics::RuntimeSnapshot {
         repositories: server.repositories.len(),
         catalog_healthy: server.catalog_healthy.load(Ordering::Acquire),
+        scheduler_healthy: server.scheduler_status.is_healthy(scheduler_now_ms),
+        scheduler_progress: server.scheduler_status.progress(),
+        scheduler_lag_seconds: server.scheduler_status.lag_ms(scheduler_now_ms) as f64 / 1_000.0,
         draining: server.cancellation.is_cancelled(),
         receive_workers: server.receives.len(),
         admission_available: [
@@ -891,6 +900,12 @@ async fn check_readiness(server: &Server) -> Result<()> {
     }
     if !server.node_healthy.load(Ordering::Acquire) {
         return Err(crate::Error::Config("Cell node advertisement is unhealthy"));
+    }
+    if !server
+        .scheduler_status
+        .is_healthy(crate::cells::unix_now_ms()?)
+    {
+        return Err(crate::Error::Config("Cell scheduler is unhealthy"));
     }
     if !server.catalog_healthy.load(Ordering::Acquire) {
         return Err(crate::Error::Config("catalog refresh is unhealthy"));
@@ -1216,6 +1231,10 @@ mod tests {
             catalog: None,
             catalog_healthy: AtomicBool::new(false),
             node_healthy: AtomicBool::new(false),
+            scheduler_status: crate::cells::SchedulerStatus::new(
+                crate::cells::unix_now_ms().unwrap(),
+            )
+            .unwrap(),
             metrics: crate::metrics::Metrics::new().unwrap(),
         });
         let app = router(Arc::clone(&server));

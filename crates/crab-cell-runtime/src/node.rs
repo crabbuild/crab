@@ -473,7 +473,7 @@ fn validate_successor(current: &NodeAdvertisement, next: &NodeAdvertisement) -> 
         || current.public_key != next.public_key
         || current.module_digests != next.module_digests
         || current.peer_versions != next.peer_versions
-        || next.progress <= current.progress
+        || next.progress < current.progress
         || next.issued_at_ms <= current.issued_at_ms
         || next.expires_at_ms <= current.expires_at_ms
     {

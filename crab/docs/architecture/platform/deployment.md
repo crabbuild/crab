@@ -60,7 +60,8 @@ Ed25519 public key used by peer envelopes. It binds the fleet, leaf-certificate
 SHA-256 digest, release, endpoint, module inventory, peer versions, monotonic
 progress and capacity hints. Loading rejects expiry, noncanonical JSON, signature
 failure, wrong fleet/image/release and path/session mismatch. Refresh rejects boot
-identity or inventory changes and progress/time regression; ambiguous writes
+identity or inventory changes and progress/time regression; an equal-progress
+refresh is valid so heartbeat liveness cannot impersonate scheduler work. Ambiguous writes
 are accepted only when an exact successor is readable. `claimed_peer_session`
 strictly validates the request structure before returning an untrusted lookup
 key; only subsequent advertisement, certificate and envelope verification can
@@ -71,7 +72,10 @@ DER set; and carries the verified leaf SHA-256 plus Ed25519 SPKI from the TLS
 connection into request verification. It exclusively creates the boot-session
 directory, publishes before readiness, refreshes every three seconds and drains
 when a refresh cannot complete before the existing advertisement's one-second
-expiry margin. Capacity hints currently measure OS/cgroup-available memory,
+expiry margin. The scheduler advances progress only after a complete scan cycle;
+15 seconds without progress removes the node from scheduler rendezvous and
+withdraws its readiness while heartbeats may keep the peer endpoint live. A new
+process does not become ready before its first full scheduler cycle. Capacity hints currently measure OS/cgroup-available memory,
 volume free space and 1–16 CPU job credits; full budget reservation and admission
 remain.
 
