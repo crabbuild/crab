@@ -6,7 +6,7 @@
 | --- | --- |
 | Project | Crab |
 | Scope | Pointer push, clone, fetch, hydrate, mount, recovery, and GC |
-| Status | Protocol core and large-file RustFS qualification complete; v1 product parity and hosted-provider qualification open |
+| Status | Protocol core, terminal Git, large-file, and mirror RustFS qualification complete; v1 product parity and hosted-provider qualification open |
 | Priority | Correctness, large-file efficiency, then request latency and throughput |
 | Companion | [Capsule Publication Protocol](capsule-publication-protocol.md), [Push Pipeline Deep Dive](push.md), [Canonical Object Storage Layout V1](../architecture/object-storage-layout.md) |
 
@@ -731,6 +731,11 @@ Implemented:
 9. Immutable runs cap at 512 capsules and per-ref frontiers retain up to 64
    segments, keeping carry latency bounded while supporting more than the
    5,000-push qualification interval.
+10. Readers retain authenticated predecessor edges from every per-ref
+    frontier while ordering capsules. Expected-old OIDs remain a consistency
+    check, but do not define causality by themselves: a force-push sequence
+    such as `A -> B -> A -> C` must not make the final `A -> C` capsule eligible
+    before the intervening transactions.
 
 ### 16.1 V1 product-parity inventory
 
@@ -744,12 +749,12 @@ explicit `not yet part of the capsule protocol` error is a parity blocker.
 | --- | --- | --- | --- |
 | Repository initialization and ordinary single-/multi-ref push | Implemented with per-ref heads and transaction records | Qualify provider conditional-write and uncertain-response behavior | Concurrent same-ref and disjoint-ref pushes on S3, GCS, and Azure; fresh clone and fsck after every run |
 | Full clone, fetch, pull, and ref advertisement | Implemented for complete repository views | Bound full-view read amplification as ref count grows; add derived indexes only if measurements require them | Repositories with thousands of refs; exact refs, byte-identical checkout, strict fsck, bounded requests and memory |
-| Shallow, deepen, unshallow, filtered/partial, and raw-object/promisor fetch | Rejected by the v2 remote helper | Add v2 closure negotiation, authenticated pack selection, and missing-object repair without weakening visibility | Git compatibility matrix for every fetch mode, including interrupted resume and adversarial missing objects |
+| Shallow, deepen, unshallow, filtered/partial, and raw-object/promisor fetch | Implemented through the terminal Git protocol-v2 upload-pack path and qualified on RustFS | Complete released-shape, older-Git, hosted-provider, interrupted-resume, and adversarial transport qualification | Git compatibility matrix for every fetch mode, including interrupted resume and adversarial missing objects |
 | Explicit tag push | Uses the ordinary ref transaction | Add `--follow-tags`; decide whether `--no-incremental` remains a supported contract or is removed | Annotated/lightweight tag creation, replacement, deletion, atomic branch-plus-tag push, and follow-tags behavior |
 | Managed/protected push and active-active publication | Rejected before v2 publication | Add authorization and external-consensus commit adapters whose decision is bound to the exact v2 transaction | Deny/allow/stale-policy races, lost responses, regional failover, and all-old/all-new multi-ref visibility |
 | Xet add, dedup, push, clone checkout, smudge, hydrate, prefetch, and diff | Whole-object RustFS path implemented | Finish hosted checksum/multipart, cross-repository reuse, cache, and corrupt-object qualification | Byte equality, dedup accounting, retry safety, and integrity failures across supported providers and object sizes |
 | FUSE/NFS mount | Shared v2 file-index and hydrator wiring implemented | Qualify range reads, cold/warm cache, eviction, cancellation, unmount, and restored-tier objects | Mount/read/stat/range/concurrent-reader suite on every supported mount platform and provider |
-| `download`, `export`, and remote `run` inputs | Remote snapshot materialization still reads the v1 manifest | Replace v1 snapshot/revision/pack loading with one authenticated v2 view adapter | Every revision form and missing/corrupt-pack failure; output equality against a local clone |
+| `download`, `export`, and remote `run` inputs | Remote snapshot materialization now resolves refs and installs Git packs from one authenticated v2 view; direct RustFS file equality is proven | Complete every revision form, selector shape, pointer payload, missing/corrupt-pack, and cancellation case | Output equality against a local clone for `download`, `export`, and workflow `--pull` |
 | Import publication | Production path is disabled pending v2 file/recipe support | Make import populate canonical staging recipes and invoke the one v2 publisher, or implement the required capsule sections | Large-file import, resume, cancellation, dedup, clone, hydrate, and fsck without a v1 manifest |
 | HTTP server, repository browser, smart Git receive, and server maintenance | Catalog and receive paths still read and mutate the v1 manifest | Introduce a v2 repository-view adapter and route receive through the canonical v2 transaction publisher | Browser and smart-HTTP read/write/auth/maintenance suites against a v2-only repository |
 | S3 gateway read and mutation | Git snapshot and mutation publication still depend on the v1 manifest/journal | Resolve trees from v2 packs/refs and publish gateway mutations through v2 ref transactions | S3 read/list/write/delete/multipart semantics, concurrent mutations, restart, and clone/fsck verification |
@@ -757,16 +762,16 @@ explicit `not yet part of the capsule protocol` error is a parity blocker.
 | Replica selection, readiness, repair, and active-active reconciliation | Root validation exists, but readiness and repair still use v1 manifest state | Define readiness from authenticated v2 root/ref/checkpoint/capsule closure and repair immutable dependencies before authority | Lag, partial replication, corrupt replica, failover/failback, repair, and concurrent publication matrix |
 | Tiering and archive restore | Canonical xorb identity is reusable, but v2 reachability integration is unqualified | Drive lifecycle and restore decisions from v2 reachability while keeping restore state non-authoritative | Transition/restore/hydrate/mount/GC race tests for every supported storage class |
 | Doctor, history inspection/restore, and v1-to-v2 cutover | Remote doctor and history recovery remain v1-shaped; the cutover procedure is designed but not implemented | Add v2-native diagnosis/recovery plus an offline, verified, one-way migration command | Migrate a populated v1 repository, reject dual authority, recover retained v2 history, then clone/hydrate/fsck |
-| Mirror plans and reconciliation | V2 intent/terminal receipts and marker repair implemented | Qualify process interruption, restart, hook delivery, authorization, and provider behavior | Repeated crash-resume and duplicate-delivery runs with exact final refs and no partial transaction |
-| Git LFS and backup/restore | Payload layouts are independent, but their product workflows have not been requalified with v2-only metadata | Prove LFS endpoints and repository-prefix backup/restore discover all v2 authority and dependencies | LFS push/clone plus backup/delete/restore/fresh-clone/fsck/hydrate on a v2-only repository |
+| Mirror plans and reconciliation | V2 intent/terminal receipts, marker repair, hook delivery, interruption, cache exclusion, deletion approval, and metadata-staleness behavior are qualified on RustFS | Complete authorization and hosted-provider behavior | Repeated crash-resume and duplicate-delivery runs with exact final refs and no partial transaction |
+| Git LFS and backup/restore | Canonical v2 push now publishes and verifies reachable LFS dependencies before ref visibility; mirror-hook push plus fresh hydrated clone are qualified on RustFS | Qualify direct LFS endpoint modes and make repository-prefix backup/restore discover all v2 authority and dependencies | LFS push/clone plus backup/delete/restore/fresh-clone/fsck/hydrate on a v2-only repository |
 
 ### 16.2 Parity closure order
 
 Parity closes in dependency order:
 
-1. **Complete Git semantics:** advanced fetch, tag options, managed/protected
-   authorization, and active-active consensus must operate on the canonical v2
-   view and publisher.
+1. **Complete Git semantics:** keep terminal advanced fetch on the canonical v2
+   view, then close tag-option, managed/protected authorization, released-shape,
+   older-Git, and active-active consensus gates.
 2. **Remove v1 product adapters:** remote snapshot commands, import, HTTP
    server/browser, and S3 gateway must use the same v2 read and publication
    contracts. No second publisher is permitted.
@@ -855,9 +860,35 @@ chunks, performed one canonical xorb GET and one shard GET, and performed zero
 xorb PUTs; an injected cache-warm failure did not affect publication or later
 byte-identical hydration.
 
+The `v2-parity-partial-20260915-c` terminal Git run used the installed release
+binary against a fresh repository prefix in the existing RustFS qualification
+bucket. It passed all 92 assertions across 323 commands. Expected non-zero
+commands covered stale-lease rejection, offline promised-object failure,
+hidden/dangling/unknown OID rejection, and injected disconnects. The successful
+matrix covered full and legacy clone, shallow/deepen/unshallow, filtered and
+lazy fetch, raw-OID/promisor admission, ref lifecycle, ordinary
+pull-rebase-push, security, and disconnect recovery. The formerly corrupting
+multi-ref create/update, force-update-plus-delete, then single-ref successor
+sequence completed with a readable peer pull. Separate v2-only command checks
+downloaded and exported the same file and restored the same missing workflow
+dependency through `run --pull`, with byte-identical outputs.
+
+The superseding mirror-enabled `v2-parity-mirror-20260915-g` run passed 144
+assertions across 512 commands from a fresh local cache and repository prefix.
+Its 479 successful commands covered the terminal Git matrix plus composed
+mirror hooks, real Xet and LFS dependency publication, pointer verification,
+hydrated clone and strict fsck, initial plan/apply and historical replay,
+metadata-only v2 checkpoint staleness, invalid-root fail-closed behavior,
+cache ownership/exclusion, interruption recovery, deletion approval, and
+provider-failure reporting. All 33 non-zero commands were expected rejection
+or injected-failure cases. The qualification runner now faults the v2
+authenticated root rather than the removed v1 layout/manifest and proves that
+mirror verification neither needs nor recreates the v1 file-index database.
+
 This qualifies the ordinary RustFS whole-object path. Hosted-provider,
-multipart, mount-range, replica, tiering, and browsing coverage remain release
-gates; this evidence does not waive them.
+multipart, replica, tiering, mount-range, browser/HTTP, S3-gateway, import,
+migration/recovery, managed publication, and backup/restore coverage remain
+explicit release gates; this evidence does not waive them.
 
 ## 18. Acceptance boundary
 
