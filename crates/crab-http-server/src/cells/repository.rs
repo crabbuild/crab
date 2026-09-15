@@ -23,9 +23,16 @@ pub(crate) struct RepositoryAuthor {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CreateIssueInput {
+    pub submission_id: [u8; 16],
     pub author: RepositoryAuthor,
     pub title: String,
     pub body: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CreateIssueOutcome {
+    Created(Box<IssueRecord>),
+    RequestConflict,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,6 +51,7 @@ pub(crate) struct IssueRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CreateCommentInput {
+    pub submission_id: [u8; 16],
     pub issue: u64,
     pub author: RepositoryAuthor,
     pub body: String,
@@ -64,6 +72,7 @@ pub(crate) struct CommentRecord {
 pub(crate) enum CreateCommentOutcome {
     Created(CommentRecord),
     IssueNotFound,
+    RequestConflict,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -161,7 +170,7 @@ impl Command for CreateIssue {
     const ID: u32 = 1;
     const CODEC_VERSION: u32 = 1;
     type Input = CreateIssueInput;
-    type Output = IssueRecord;
+    type Output = CreateIssueOutcome;
 
     fn execute(
         context: &mut CommandContext<'_, '_>,
@@ -170,6 +179,52 @@ impl Command for CreateIssue {
         validate_author(&input.author)?;
         validate_title(&input.title)?;
         validate_body(&input.body, false)?;
+        let payload_digest = issue_submission_digest(&input);
+        let reservation = context.sql(&SqlBatch {
+            statements: vec![statement(
+                "SELECT payload_digest, issue_number, author_name, created_at_ms FROM repository_issue_submissions WHERE request_id = ?",
+                vec![SqlValue::Blob(input.submission_id.to_vec())],
+            )],
+        })?;
+        if let Some(row) = reservation[0].rows.first() {
+            if result_blob(row, 0)? != payload_digest.as_bytes() {
+                return Ok(CommandResult::Rejected(CreateIssueOutcome::RequestConflict));
+            }
+            let number = result_u64_from_row(row, 1)?;
+            let current = context.sql(&SqlBatch {
+                statements: vec![statement(
+                    "SELECT number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms FROM repository_issues WHERE number = ?",
+                    vec![integer(number)?],
+                )],
+            })?;
+            if let Some(issue) = current[0].rows.first() {
+                return Ok(CommandResult::Success(CreateIssueOutcome::Created(
+                    Box::new(issue_from_row(issue)?),
+                )));
+            }
+            let created_at_ms = result_u64_from_row(row, 3)?;
+            let record = IssueRecord {
+                number,
+                author: RepositoryAuthor {
+                    issuer: input.author.issuer,
+                    subject: input.author.subject,
+                    name: result_text(row, 2)?,
+                },
+                title: input.title,
+                body: input.body,
+                state: 0,
+                label_ids: vec![],
+                assignee_subjects: vec![],
+                version: 1,
+                created_at_ms,
+                updated_at_ms: created_at_ms,
+            };
+            insert_issue(context, &record)?;
+            advance_revision(context)?;
+            return Ok(CommandResult::Success(CreateIssueOutcome::Created(
+                Box::new(record),
+            )));
+        }
         let now = timestamp(context.now_ms())?;
         let sequence = context.sql(&SqlBatch {
             statements: vec![
@@ -203,25 +258,21 @@ impl Command for CreateIssue {
         };
         context.sql(&SqlBatch {
             statements: vec![statement(
-                "INSERT INTO repository_issues(number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO repository_issue_submissions(request_id, payload_digest, issue_number, author_name, created_at_ms) VALUES (?, ?, ?, ?, ?)",
                 vec![
+                    SqlValue::Blob(input.submission_id.to_vec()),
+                    SqlValue::Blob(payload_digest.as_bytes().to_vec()),
                     integer(record.number)?,
-                    SqlValue::Text(record.author.issuer.clone()),
-                    SqlValue::Text(record.author.subject.clone()),
                     SqlValue::Text(record.author.name.clone()),
-                    SqlValue::Text(record.title.clone()),
-                    SqlValue::Text(record.body.clone()),
-                    SqlValue::Integer(i64::from(record.state)),
-                    SqlValue::Blob(encode_label_ids(&record.label_ids)?),
-                    SqlValue::Blob(encode_assignees(&record.assignee_subjects)?),
-                    integer(record.version)?,
                     integer(record.created_at_ms)?,
-                    integer(record.updated_at_ms)?,
                 ],
             )],
         })?;
+        insert_issue(context, &record)?;
         advance_revision(context)?;
-        Ok(CommandResult::Success(record))
+        Ok(CommandResult::Success(CreateIssueOutcome::Created(
+            Box::new(record),
+        )))
     }
 }
 
@@ -249,6 +300,51 @@ impl Command for CreateComment {
         })?;
         if exists[0].rows.is_empty() {
             return Ok(CommandResult::Rejected(CreateCommentOutcome::IssueNotFound));
+        }
+        let payload_digest = comment_submission_digest(&input);
+        let reservation = context.sql(&SqlBatch {
+            statements: vec![statement(
+                "SELECT payload_digest, comment_number, author_name, created_at_ms FROM repository_comment_submissions WHERE issue_number = ? AND request_id = ?",
+                vec![integer(input.issue)?, SqlValue::Blob(input.submission_id.to_vec())],
+            )],
+        })?;
+        if let Some(row) = reservation[0].rows.first() {
+            if result_blob(row, 0)? != payload_digest.as_bytes() {
+                return Ok(CommandResult::Rejected(
+                    CreateCommentOutcome::RequestConflict,
+                ));
+            }
+            let number = result_u64_from_row(row, 1)?;
+            let current = context.sql(&SqlBatch {
+                statements: vec![statement(
+                    "SELECT issue_number, number, author_issuer, author_subject, author_name, body, version, created_at_ms, updated_at_ms FROM repository_issue_comments WHERE issue_number = ? AND number = ?",
+                    vec![integer(input.issue)?, integer(number)?],
+                )],
+            })?;
+            if let Some(comment) = current[0].rows.first() {
+                return Ok(CommandResult::Success(CreateCommentOutcome::Created(
+                    comment_from_row(comment)?,
+                )));
+            }
+            let created_at_ms = result_u64_from_row(row, 3)?;
+            let record = CommentRecord {
+                issue: input.issue,
+                number,
+                author: RepositoryAuthor {
+                    issuer: input.author.issuer,
+                    subject: input.author.subject,
+                    name: result_text(row, 2)?,
+                },
+                body: input.body,
+                version: 1,
+                created_at_ms,
+                updated_at_ms: created_at_ms,
+            };
+            insert_comment(context, &record)?;
+            advance_revision(context)?;
+            return Ok(CommandResult::Success(CreateCommentOutcome::Created(
+                record,
+            )));
         }
         let now = timestamp(context.now_ms())?;
         let sequence = context.sql(&SqlBatch {
@@ -280,20 +376,18 @@ impl Command for CreateComment {
         };
         context.sql(&SqlBatch {
             statements: vec![statement(
-                "INSERT INTO repository_issue_comments(issue_number, number, author_issuer, author_subject, author_name, body, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO repository_comment_submissions(issue_number, request_id, payload_digest, comment_number, author_name, created_at_ms) VALUES (?, ?, ?, ?, ?, ?)",
                 vec![
                     integer(record.issue)?,
+                    SqlValue::Blob(input.submission_id.to_vec()),
+                    SqlValue::Blob(payload_digest.as_bytes().to_vec()),
                     integer(record.number)?,
-                    SqlValue::Text(record.author.issuer.clone()),
-                    SqlValue::Text(record.author.subject.clone()),
                     SqlValue::Text(record.author.name.clone()),
-                    SqlValue::Text(record.body.clone()),
-                    integer(record.version)?,
                     integer(record.created_at_ms)?,
-                    integer(record.updated_at_ms)?,
                 ],
             )],
         })?;
+        insert_comment(context, &record)?;
         advance_revision(context)?;
         Ok(CommandResult::Success(CreateCommentOutcome::Created(
             record,
@@ -376,6 +470,83 @@ fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlStatement {
         sql: sql.to_owned(),
         parameters,
     }
+}
+
+fn insert_issue(
+    context: &CommandContext<'_, '_>,
+    record: &IssueRecord,
+) -> crab_cell_runtime::Result<()> {
+    context.sql(&SqlBatch {
+        statements: vec![statement(
+            "INSERT INTO repository_issues(number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            vec![
+                integer(record.number)?,
+                SqlValue::Text(record.author.issuer.clone()),
+                SqlValue::Text(record.author.subject.clone()),
+                SqlValue::Text(record.author.name.clone()),
+                SqlValue::Text(record.title.clone()),
+                SqlValue::Text(record.body.clone()),
+                SqlValue::Integer(i64::from(record.state)),
+                SqlValue::Blob(encode_label_ids(&record.label_ids)?),
+                SqlValue::Blob(encode_assignees(&record.assignee_subjects)?),
+                integer(record.version)?,
+                integer(record.created_at_ms)?,
+                integer(record.updated_at_ms)?,
+            ],
+        )],
+    })?;
+    Ok(())
+}
+
+fn insert_comment(
+    context: &CommandContext<'_, '_>,
+    record: &CommentRecord,
+) -> crab_cell_runtime::Result<()> {
+    context.sql(&SqlBatch {
+        statements: vec![statement(
+            "INSERT INTO repository_issue_comments(issue_number, number, author_issuer, author_subject, author_name, body, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            vec![
+                integer(record.issue)?,
+                integer(record.number)?,
+                SqlValue::Text(record.author.issuer.clone()),
+                SqlValue::Text(record.author.subject.clone()),
+                SqlValue::Text(record.author.name.clone()),
+                SqlValue::Text(record.body.clone()),
+                integer(record.version)?,
+                integer(record.created_at_ms)?,
+                integer(record.updated_at_ms)?,
+            ],
+        )],
+    })?;
+    Ok(())
+}
+
+pub(super) fn issue_submission_digest(input: &CreateIssueInput) -> blake3::Hash {
+    // Display names are snapshots; stable issuer/subject identity preserves the
+    // legacy retry contract when a user changes their presentation name.
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"crab.repository.issue-submission.v1\0");
+    hash_text(&mut hasher, &input.author.issuer);
+    hash_text(&mut hasher, &input.author.subject);
+    hash_text(&mut hasher, &input.title);
+    hash_text(&mut hasher, &input.body);
+    hasher.finalize()
+}
+
+pub(super) fn comment_submission_digest(input: &CreateCommentInput) -> blake3::Hash {
+    // Keep this identity rule aligned with issue submissions and legacy retries.
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"crab.repository.comment-submission.v1\0");
+    hasher.update(&input.issue.to_be_bytes());
+    hash_text(&mut hasher, &input.author.issuer);
+    hash_text(&mut hasher, &input.author.subject);
+    hash_text(&mut hasher, &input.body);
+    hasher.finalize()
+}
+
+fn hash_text(hasher: &mut blake3::Hasher, value: &str) {
+    hasher.update(&(value.len() as u64).to_be_bytes());
+    hasher.update(value.as_bytes());
 }
 
 fn integer(value: u64) -> crab_cell_runtime::Result<SqlValue> {

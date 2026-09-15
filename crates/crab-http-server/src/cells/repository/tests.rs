@@ -30,28 +30,32 @@ fn repository_codec_v1_has_stable_command_and_query_fixtures() {
     };
     assert_fixture(
         &CreateIssueInput {
+            submission_id: [1; 16],
             author: author.clone(),
             title: "t".into(),
             body: "b".into(),
         },
-        "00000001690000000173000000016e00000001740000000162",
+        "000000100101010101010101010101010101010100000001690000000173000000016e00000001740000000162",
     );
     assert_fixture(
-        &issue,
-        "000000000000000900000001690000000173000000016e00000001740000000162000000000000000000000000000000000200000000000000030000000000000004",
+        &CreateIssueOutcome::Created(Box::new(issue.clone())),
+        "01000000000000000900000001690000000173000000016e00000001740000000162000000000000000000000000000000000200000000000000030000000000000004",
     );
     assert_fixture(
         &CreateCommentInput {
+            submission_id: [2; 16],
             issue: 7,
             author,
             body: "b".into(),
         },
-        "000000000000000700000001690000000173000000016e0000000162",
+        "0000001002020202020202020202020202020202000000000000000700000001690000000173000000016e0000000162",
     );
     assert_fixture(
         &CreateCommentOutcome::Created(comment.clone()),
         "010000000000000007000000000000000900000001690000000173000000016e0000000162000000000000000200000000000000030000000000000004",
     );
+    assert_fixture(&CreateIssueOutcome::RequestConflict, "02");
+    assert_fixture(&CreateCommentOutcome::RequestConflict, "03");
     assert_fixture(&7_u64, "0000000000000007");
     assert_fixture(
         &Some(issue),

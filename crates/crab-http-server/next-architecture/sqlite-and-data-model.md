@@ -201,8 +201,10 @@ second executable schema into this design. Schema v1 currently contains:
 | --- | --- | --- |
 | `repository_identity` | singleton `1` | 16-byte catalog repository UUID and checked application revision |
 | `repository_sequences` | kind | issue-number allocator, initially `('issue', 0)` |
+| `repository_issue_submissions` | 16-byte submission ID | permanent payload digest, allocated issue number, original display name and creation time |
 | `repository_issues` | number | author snapshot, title/body, state, version and timestamps |
 | `repository_comment_sequences` | issue number | independent checked comment allocator per issue |
+| `repository_comment_submissions` | issue number, 16-byte submission ID | permanent payload digest, allocated comment number, original display name and creation time |
 | `repository_issue_comments` | issue number, comment number | author snapshot, body, version and timestamps |
 
 All tables are `STRICT`. JavaScript-visible counters are checked against
@@ -210,12 +212,24 @@ All tables are `STRICT`. JavaScript-visible counters are checked against
 deletion, although command handlers also verify parent existence explicitly so
 their business rejection does not depend on connection pragma state.
 
-Runtime-owned `sys_requests` is the sole command deduplication ledger. Do not add
-a second repository `requests` table: `CellClient` binds the request ID to the
-module/command/codec/input digest and the actor stores the typed success or
-business rejection in the same transaction as domain state. Planned outbox rows
-reference their stable effect/operation identity and domain object, not a
-duplicated HTTP response cache.
+Retry identity has two deliberately different lifetimes. Runtime-owned
+`sys_requests` is the bounded execution-attempt ledger: `CellClient` binds one
+`MutationIdentity` to the module, command, codec and exact input digest, and the
+actor temporarily retains that attempt's typed success or business rejection.
+The repository submission tables are the permanent product ledger for browser
+create operations. They bind the stable submission UUID to a domain payload
+digest and allocated number without retaining encoded HTTP responses.
+
+The public adapter creates a fresh runtime `MutationIdentity` for each HTTP
+attempt while preserving the browser's submission UUID in the typed command.
+An exact transport retry is resolved by `sys_requests`; a later product retry,
+including one after runtime retention expires, resolves through the repository
+submission row and returns the current visible record. Reusing a submission UUID
+with a different issuer, subject or content is a durable request conflict.
+Display name is intentionally excluded from the domain digest to preserve the
+existing identity rule, but the original display name and timestamp are retained
+so an imported incomplete reservation can become visible without rewriting its
+historical presentation fields.
 
 ### Remaining domain tables
 
@@ -227,7 +241,7 @@ duplicated HTTP response cache.
 | Statuses | `commit_statuses` | Immutable status events, exact commit OID and context, deterministic latest selection |
 | Checks | `check_runs`, `check_outputs`, supported annotation rows | Existing state transitions, revision checks, bounded output and request replay |
 | Releases | `releases`, `release_assets`, tag/name claims and upload reservations | Tag identity, asset integrity, metadata tombstones, uniqueness rules |
-| Retry state | Offline mapping from imported reservations/claims into `sys_requests` outcomes | Preserve actor/content conflicts and allocated IDs even for incomplete operations |
+| Retry state | Domain-specific permanent submission/claim tables; `sys_requests` remains runtime-owned and bounded | Preserve actor/content conflicts and allocated IDs even for incomplete operations |
 | Replication metadata | Managed capture control tables | Reserved names; never mistaken for user/domain tables |
 
 Separate issue and PR comment tables keep foreign keys concrete. Do not add
@@ -240,25 +254,31 @@ relational domain model.
 
 Within `BEGIN IMMEDIATE`:
 
-1. The actor looks up request ID plus canonical command digest in `sys_requests`.
-   A matching outcome returns without invoking the handler; a different digest
-   is a request conflict and does not allocate.
-2. Open the application savepoint and validate actor/title/body again inside the
-   compiled handler.
-3. Increment `repository_sequences.last` for kind `issue` with a checked upper
-   bound and read the resulting number in the same outer transaction.
-4. Insert the issue and version 1, then increment
-   `repository_identity.app_revision` exactly once.
-5. Encode the typed result within the registered 80 KiB bound; release the
-   application savepoint and insert the `sys_requests` outcome and runtime
+1. Before invoking the handler, the actor looks up the runtime request ID plus
+   canonical command digest in `sys_requests`. A matching retained outcome
+   returns immediately; a different digest is an execution request conflict.
+2. Open the application savepoint and validate actor/title/body inside the
+   compiled handler. Compute the domain-separated submission digest.
+3. Look up the stable submission UUID. A different domain digest returns a
+   durable product request conflict. A matching visible issue returns its current
+   row. A matching imported reservation without a visible issue inserts the
+   reserved number using its original display name and creation timestamp.
+4. For a new submission, increment `repository_sequences.last` for kind `issue`
+   with a checked upper bound, then insert the permanent submission row and issue
+   version 1 in the same application savepoint.
+5. Increment `repository_identity.app_revision` exactly once for a newly visible
+   issue. Encode the typed result within the registered 80 KiB bound; release the
+   application savepoint and insert the bounded `sys_requests` outcome and runtime
    sequence.
 6. Commit locally, capture, upload and publish through the barrier. Return the
    typed output and receipt only after control names that exact root.
 
-The canonical digest covers Cell/incarnation identity, module, command ID, codec
-version, and the exact bounded input bytes. Because author identity is part of
-the input, another actor reusing the same request ID conflicts. Handler-generated
-timestamps are not input bytes and are never regenerated for an exact replay.
+The runtime digest covers Cell/incarnation identity, module, command ID, codec
+version, issued/expiry times and exact bounded input bytes. The permanent
+submission digest separately covers stable author identity and domain content,
+not the runtime timestamps or display name. Handler-generated timestamps are
+not regenerated for exact runtime replay; permanent retry reads the current
+visible record, while incomplete imported reservations reuse their stored time.
 
 ### Versioned edits and durable retries
 

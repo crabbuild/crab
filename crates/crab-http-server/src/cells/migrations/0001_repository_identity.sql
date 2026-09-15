@@ -12,6 +12,16 @@ CREATE TABLE repository_sequences (
 
 INSERT INTO repository_sequences(kind, last) VALUES ('issue', 0);
 
+-- This row may precede its visible issue during offline import and retry repair.
+CREATE TABLE repository_issue_submissions (
+    request_id BLOB PRIMARY KEY CHECK (length(request_id) = 16),
+    payload_digest BLOB NOT NULL CHECK (length(payload_digest) = 32),
+    issue_number INTEGER NOT NULL UNIQUE
+        CHECK (issue_number BETWEEN 1 AND 9007199254740991),
+    author_name TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0)
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE repository_issues (
     number INTEGER PRIMARY KEY CHECK (number BETWEEN 1 AND 9007199254740991),
     author_issuer TEXT NOT NULL,
@@ -32,6 +42,19 @@ CREATE TABLE repository_comment_sequences (
     last INTEGER NOT NULL CHECK (last BETWEEN 1 AND 9007199254740991),
     FOREIGN KEY (issue_number) REFERENCES repository_issues(number) ON DELETE CASCADE
 ) STRICT;
+
+CREATE TABLE repository_comment_submissions (
+    issue_number INTEGER NOT NULL,
+    request_id BLOB NOT NULL CHECK (length(request_id) = 16),
+    payload_digest BLOB NOT NULL CHECK (length(payload_digest) = 32),
+    comment_number INTEGER NOT NULL
+        CHECK (comment_number BETWEEN 1 AND 9007199254740991),
+    author_name TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (issue_number, request_id),
+    UNIQUE (issue_number, comment_number),
+    FOREIGN KEY (issue_number) REFERENCES repository_issues(number) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE repository_issue_comments (
     issue_number INTEGER NOT NULL,

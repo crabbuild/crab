@@ -330,11 +330,15 @@ impl Command for AddComment {
 ```
 
 The HTTP layer supplies author identity from authenticated Principal, validates
-repository write access and input, and creates/preserves the operation identity.
-The owner revalidates authorization before admission. The handler inserts only
-application rows: runtime adds dedup, commits, captures and publishes. HTTP 201
-is emitted only after Committed. A dropped HTTP waiter does not cancel accepted
-publication. Browser retries must preserve the submission ID and original input.
+repository write access and input, preserves the product submission ID, and
+creates a bounded runtime `MutationIdentity` for that HTTP attempt. The owner
+revalidates authorization before admission. The compiled handler owns permanent
+domain submission deduplication; runtime owns exact-attempt deduplication,
+commit, capture and publication. HTTP 201 is emitted only after Committed. A
+dropped HTTP waiter does not cancel accepted publication. A later browser retry
+uses the same submission ID and original identity/content with a fresh runtime
+identity; it returns the current visible object even after `sys_requests`
+retention expires.
 
 SQL helpers implement the authorizer and bounds in [primitives](primitives.md).
 A command can atomically modify several application tables and its local outbox.

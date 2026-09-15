@@ -2,8 +2,8 @@ use crab_cell_runtime::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 
 use super::{
     CommentKey, CommentPage, CommentRecord, CreateCommentInput, CreateCommentOutcome,
-    CreateIssueInput, IssuePage, IssueRecord, IssueSummary, ListCommentsInput, ListIssuesInput,
-    RepositoryAuthor, UpdateCommentInput, UpdateCommentOutcome, UpdateIssueInput,
+    CreateIssueInput, CreateIssueOutcome, IssuePage, IssueRecord, IssueSummary, ListCommentsInput,
+    ListIssuesInput, RepositoryAuthor, UpdateCommentInput, UpdateCommentOutcome, UpdateIssueInput,
     UpdateIssueOutcome,
 };
 
@@ -25,6 +25,7 @@ impl WireValue for RepositoryAuthor {
 
 impl WireValue for CreateIssueInput {
     fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        encoder.write_bytes(&self.submission_id)?;
         self.author.encode(encoder)?;
         encoder.write_text(&self.title)?;
         encoder.write_text(&self.body)
@@ -32,10 +33,31 @@ impl WireValue for CreateIssueInput {
 
     fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
         Ok(Self {
+            submission_id: read_fixed(decoder, "issue submission ID length")?,
             author: RepositoryAuthor::decode(decoder)?,
             title: decoder.read_text()?.to_owned(),
             body: decoder.read_text()?.to_owned(),
         })
+    }
+}
+
+impl WireValue for CreateIssueOutcome {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        match self {
+            Self::Created(record) => {
+                encoder.write_u8(1)?;
+                record.encode(encoder)
+            }
+            Self::RequestConflict => encoder.write_u8(2),
+        }
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
+        match decoder.read_u8()? {
+            1 => Ok(Self::Created(Box::new(IssueRecord::decode(decoder)?))),
+            2 => Ok(Self::RequestConflict),
+            _ => Err(CodecError::Invalid("invalid create-issue outcome")),
+        }
     }
 }
 
@@ -71,6 +93,7 @@ impl WireValue for IssueRecord {
 
 impl WireValue for CreateCommentInput {
     fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        encoder.write_bytes(&self.submission_id)?;
         encoder.write_u64(self.issue)?;
         self.author.encode(encoder)?;
         encoder.write_text(&self.body)
@@ -78,6 +101,7 @@ impl WireValue for CreateCommentInput {
 
     fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
         Ok(Self {
+            submission_id: read_fixed(decoder, "comment submission ID length")?,
             issue: decoder.read_u64()?,
             author: RepositoryAuthor::decode(decoder)?,
             body: decoder.read_text()?.to_owned(),
@@ -117,6 +141,7 @@ impl WireValue for CreateCommentOutcome {
                 record.encode(encoder)
             }
             Self::IssueNotFound => encoder.write_u8(2),
+            Self::RequestConflict => encoder.write_u8(3),
         }
     }
 
@@ -124,9 +149,20 @@ impl WireValue for CreateCommentOutcome {
         match decoder.read_u8()? {
             1 => Ok(Self::Created(CommentRecord::decode(decoder)?)),
             2 => Ok(Self::IssueNotFound),
+            3 => Ok(Self::RequestConflict),
             _ => Err(CodecError::Invalid("invalid create-comment outcome")),
         }
     }
+}
+
+fn read_fixed<const N: usize>(
+    decoder: &mut BoundedDecoder<'_>,
+    context: &'static str,
+) -> Result<[u8; N], CodecError> {
+    decoder
+        .read_bytes()?
+        .try_into()
+        .map_err(|_| CodecError::Invalid(context))
 }
 
 impl WireValue for CommentKey {

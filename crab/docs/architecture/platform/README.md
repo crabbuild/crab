@@ -190,11 +190,15 @@ construct this peer capability, acquire an idle Cell or expose it to the browser
 The server now compiles and binds the complete internal issue/comment operation
 set: create and update commands plus get and bounded list queries for both
 resources. Stable codecs include issue label and assignee selections; SQLite
-owns repository identity, sequences, issues and comments. Its integration test
-executes all eight typed operations through `CellClient`, proves exact request
-replay and durable missing-resource/author rejection, updates metadata and
-comments, deletes the first owner's complete local database, and reads the
-published detail and list results after exact-root restoration by a new owner.
+owns repository identity, sequences, issues, comments and permanent create
+submission ledgers. The ledgers preserve browser idempotency beyond bounded
+runtime request retention and can complete imported reservations whose allocated
+object was not yet visible. Integration tests execute all eight typed operations
+through `CellClient`, prove exact runtime replay, later same-submission replay,
+payload conflict rejection, incomplete-reservation repair and durable
+missing-resource/author rejection, then delete the first owner's complete local
+database and read the published detail and list results after exact-root
+restoration by a new owner.
 `cells release inspect --json`
 emits those exact registry bytes from the built binary. `cells release prepare` now strict-creates
 or adopts the root's canonical tenant/application identity, uploads the exact
@@ -252,6 +256,12 @@ application extension boundary is reviewed Rust source compiled with
 `crab-http-server`. A release is the ordinary Crab OCI image plus its canonical
 compiled-registry descriptor; operators do not upload functions, modules or
 language bundles at runtime.
+
+There is no application sidecar, guest ABI, dynamic module loader or independent
+TypeScript/JavaScript service runtime. The React and Git clients remain protocol
+consumers of Crab's public routes; they never execute inside a Cell. Supporting
+another application language later requires a new architecture decision rather
+than an adapter hidden behind the Rust API.
 
 The extension author is therefore a Crab contributor, not an independent
 platform tenant. Adding a service operation changes the server source, its SQL

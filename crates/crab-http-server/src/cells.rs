@@ -281,12 +281,16 @@ fn image_digest(image: &str) -> Result<Digest> {
         return Err(Error::Config("selected Cell image digest is invalid"));
     }
     let mut bytes = [0; 32];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return Err(Error::Config("selected Cell image digest is invalid"));
+    }
+    for (output, pair) in bytes.iter_mut().zip(pairs) {
         let high =
             image_nibble(pair[0]).ok_or(Error::Config("selected Cell image digest is invalid"))?;
         let low =
             image_nibble(pair[1]).ok_or(Error::Config("selected Cell image digest is invalid"))?;
-        bytes[index] = (high << 4) | low;
+        *output = (high << 4) | low;
     }
     Ok(Digest::from_bytes(bytes))
 }
@@ -468,9 +472,9 @@ mod tests {
 
     use super::repository::{
         CommentKey, CommentPage, CreateComment, CreateCommentInput, CreateCommentOutcome,
-        CreateIssue, CreateIssueInput, GetComment, GetIssue, IssuePage, ListComments,
-        ListCommentsInput, ListIssues, ListIssuesInput, RepositoryAuthor, UpdateComment,
-        UpdateCommentInput, UpdateCommentOutcome, UpdateIssue, UpdateIssueInput,
+        CreateIssue, CreateIssueInput, CreateIssueOutcome, GetComment, GetIssue, IssuePage,
+        ListComments, ListCommentsInput, ListIssues, ListIssuesInput, RepositoryAuthor,
+        UpdateComment, UpdateCommentInput, UpdateCommentOutcome, UpdateIssue, UpdateIssueInput,
         UpdateIssueOutcome,
     };
     use super::*;
@@ -487,7 +491,7 @@ mod tests {
         assert_eq!(descriptor["modules"][0]["name"], "repository");
         assert_eq!(
             descriptor["modules"][0]["code"],
-            "eda57736a6d7954df989676442990b50ed6aa2ba677be5e20cceb339d19974a1"
+            "d8592cba8054a11332d32fe8254e8d2ee690ada6d4bd5783d0925161ad6f55b4"
         );
         assert_eq!(descriptor["modules"][0]["schema_min"], 1);
         assert_eq!(descriptor["modules"][0]["schema_max"], 1);
@@ -867,6 +871,7 @@ mod tests {
                 &target,
                 issue_identity,
                 CreateIssueInput {
+                    submission_id: [1; 16],
                     author: author.clone(),
                     title: "Durable issue".into(),
                     body: "published through LTX".into(),
@@ -874,7 +879,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(issue.output.number, 1);
+        let CreateIssueOutcome::Created(issue_record) = &issue.output else {
+            panic!("successful issue command returned a rejection outcome");
+        };
+        assert_eq!(issue_record.number, 1);
         assert_eq!(issue.receipt.commit_sequence, 1);
         assert_eq!(
             first_client
@@ -882,6 +890,7 @@ mod tests {
                     &target,
                     issue_identity,
                     CreateIssueInput {
+                        submission_id: [1; 16],
                         author: author.clone(),
                         title: "Durable issue".into(),
                         body: "published through LTX".into(),
@@ -891,12 +900,47 @@ mod tests {
                 .unwrap(),
             issue
         );
+        let domain_replay = first_client
+            .command::<CreateIssue>(
+                &target,
+                mutation(12),
+                CreateIssueInput {
+                    submission_id: [1; 16],
+                    author: author.clone(),
+                    title: "Durable issue".into(),
+                    body: "published through LTX".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(domain_replay.output, issue.output);
+        assert_eq!(domain_replay.receipt.commit_sequence, 2);
+        let submission_conflict = first_client
+            .command::<CreateIssue>(
+                &target,
+                mutation(13),
+                CreateIssueInput {
+                    submission_id: [1; 16],
+                    author: author.clone(),
+                    title: "Different issue".into(),
+                    body: "published through LTX".into(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            submission_conflict,
+            InvocationError::Rejected(ref outcome)
+                if outcome.output == CreateIssueOutcome::RequestConflict
+                    && outcome.receipt.commit_sequence == 3
+        ));
 
         let missing = first_client
             .command::<CreateComment>(
                 &target,
                 mutation(7),
                 CreateCommentInput {
+                    submission_id: [2; 16],
                     issue: 99,
                     author: author.clone(),
                     body: "missing".into(),
@@ -908,7 +952,7 @@ mod tests {
             missing,
             InvocationError::Rejected(ref outcome)
                 if outcome.output == CreateCommentOutcome::IssueNotFound
-                    && outcome.receipt.commit_sequence == 2
+                    && outcome.receipt.commit_sequence == 4
         ));
 
         let comment = first_client
@@ -916,7 +960,8 @@ mod tests {
                 &target,
                 mutation(8),
                 CreateCommentInput {
-                    issue: issue.output.number,
+                    submission_id: [3; 16],
+                    issue: issue_record.number,
                     author: author.clone(),
                     body: "survives local source loss".into(),
                 },
@@ -927,14 +972,14 @@ mod tests {
             panic!("successful comment command returned a rejection outcome");
         };
         assert_eq!(comment_record.number, 1);
-        assert_eq!(comment.receipt.commit_sequence, 3);
+        assert_eq!(comment.receipt.commit_sequence, 5);
 
         let forbidden = first_client
             .command::<UpdateIssue>(
                 &target,
                 mutation(9),
                 UpdateIssueInput {
-                    number: issue.output.number,
+                    number: issue_record.number,
                     actor: RepositoryAuthor {
                         issuer: author.issuer.clone(),
                         subject: "another-user".into(),
@@ -955,7 +1000,7 @@ mod tests {
             forbidden,
             InvocationError::Rejected(ref outcome)
                 if outcome.output == UpdateIssueOutcome::Forbidden
-                    && outcome.receipt.commit_sequence == 4
+                    && outcome.receipt.commit_sequence == 6
         ));
 
         let updated_issue = first_client
@@ -963,10 +1008,10 @@ mod tests {
                 &target,
                 mutation(10),
                 UpdateIssueInput {
-                    number: issue.output.number,
+                    number: issue_record.number,
                     actor: author.clone(),
                     can_manage_metadata: true,
-                    version: issue.output.version,
+                    version: issue_record.version,
                     title: Some("Durable issue updated".into()),
                     body: None,
                     state: Some(1),
@@ -981,7 +1026,7 @@ mod tests {
         };
         assert_eq!(updated_issue_record.version, 2);
         assert_eq!(updated_issue_record.label_ids, [5, 8]);
-        assert_eq!(updated_issue.receipt.commit_sequence, 5);
+        assert_eq!(updated_issue.receipt.commit_sequence, 7);
 
         let updated_comment = first_client
             .command::<UpdateComment>(
@@ -1003,7 +1048,7 @@ mod tests {
             panic!("successful comment update returned a rejection outcome");
         };
         assert_eq!(updated_comment_record.version, 2);
-        assert_eq!(updated_comment.receipt.commit_sequence, 6);
+        assert_eq!(updated_comment.receipt.commit_sequence, 8);
 
         assert_eq!(
             first_client
@@ -1031,7 +1076,7 @@ mod tests {
                     &target,
                     Some(updated_comment.receipt),
                     ListCommentsInput {
-                        issue: issue.output.number,
+                        issue: issue_record.number,
                         before: None,
                         limit: 30,
                     },
@@ -1074,7 +1119,7 @@ mod tests {
         let second_client = CellClient::local(registry, second_handle.clone());
         assert_eq!(
             second_client
-                .query::<GetIssue>(&target, Some(comment.receipt), issue.output.number)
+                .query::<GetIssue>(&target, Some(comment.receipt), issue_record.number)
                 .await
                 .unwrap()
                 .output,
@@ -1136,6 +1181,148 @@ mod tests {
         );
         second_handle.drain().await.unwrap();
         second_runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn repository_submission_reservations_repair_incomplete_visibility() {
+        let registry = Arc::new(compiled_registry().unwrap());
+        let tenant = TenantId::from_bytes([21; 16]);
+        let application = ApplicationId::from_bytes([22; 16]);
+        let repository_id = [23; 16];
+        let target =
+            CellTarget::new(tenant, application, REPOSITORY_NAMESPACE, &repository_id).unwrap();
+        let cell = target.cell_id();
+        let incarnation = IncarnationId::from_bytes([24; 16]);
+        let layout = CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            Path::from("repository-reservations"),
+            *application.as_bytes(),
+        );
+        let replica = CellReplica::new(
+            layout.clone(),
+            *cell.as_bytes(),
+            *incarnation.as_bytes(),
+            ReplicaLimits::default(),
+        )
+        .unwrap();
+        let catalog = CellCatalog::new(layout.clone(), tenant);
+        let proof = catalog
+            .provision(
+                CatalogEntry::new(
+                    &target,
+                    CatalogRole::Repository,
+                    registry.module_code(RepositoryModule::NAME).unwrap(),
+                    1,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let authority = CellAuthority::new(layout);
+        let session = SessionId::from_bytes([25; 16]);
+        let recovering = authority
+            .create_initial(
+                &proof,
+                incarnation,
+                Owner {
+                    session,
+                    endpoint: "https://reservations.internal:8081".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let issue_input = CreateIssueInput {
+            submission_id: [26; 16],
+            author: RepositoryAuthor {
+                issuer: "https://crab.build".into(),
+                subject: "user-1".into(),
+                name: "Current Display Name".into(),
+            },
+            title: "Reserved issue".into(),
+            body: "repair this incomplete reservation".into(),
+        };
+        let comment_input = CreateCommentInput {
+            submission_id: [27; 16],
+            issue: 1,
+            author: issue_input.author.clone(),
+            body: "repair this incomplete comment".into(),
+        };
+        let issue_digest = repository::issue_submission_digest(&issue_input);
+        let comment_digest = repository::comment_submission_digest(&comment_input);
+        let issue_submission_id = issue_input.submission_id;
+        let comment_submission_id = comment_input.submission_id;
+        let local = tempfile::TempDir::new().unwrap();
+        let runtime = CellRuntime::new(
+            SqlWorkerPool::new(1, 10).unwrap(),
+            16 * 1024 * 1024,
+            session,
+        )
+        .unwrap();
+        let handle = runtime
+            .bootstrap(
+                proof,
+                replica,
+                authority,
+                recovering,
+                local.path().join("repository.sqlite"),
+                move |transaction| {
+                    transaction.execute_batch(REPOSITORY_MIGRATION)?;
+                    transaction.execute(
+                        "INSERT INTO repository_identity(singleton, repository_uuid) VALUES (1, ?1)",
+                        [repository_id.as_slice()],
+                    )?;
+                    transaction.execute(
+                        "UPDATE repository_sequences SET last = 8 WHERE kind = 'issue'",
+                        [],
+                    )?;
+                    transaction.execute(
+                        "INSERT INTO repository_issues(number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms) VALUES (1, 'https://crab.build', 'user-1', 'Parent', 'Parent issue', '', 0, X'00000000', X'00000000', 1, 1000, 1000)",
+                        [],
+                    )?;
+                    transaction.execute(
+                        "INSERT INTO repository_issue_submissions(request_id, payload_digest, issue_number, author_name, created_at_ms) VALUES (?1, ?2, 8, 'Original Issue Name', 2000)",
+                        (issue_submission_id.as_slice(), issue_digest.as_bytes().as_slice()),
+                    )?;
+                    transaction.execute(
+                        "INSERT INTO repository_comment_sequences(issue_number, last) VALUES (1, 4)",
+                        [],
+                    )?;
+                    transaction.execute(
+                        "INSERT INTO repository_comment_submissions(issue_number, request_id, payload_digest, comment_number, author_name, created_at_ms) VALUES (1, ?1, ?2, 4, 'Original Comment Name', 3000)",
+                        (
+                            comment_submission_id.as_slice(),
+                            comment_digest.as_bytes().as_slice(),
+                        ),
+                    )?;
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        let client = CellClient::local(registry, handle.clone());
+        let repaired_issue = client
+            .command::<CreateIssue>(&target, mutation(28), issue_input)
+            .await
+            .unwrap();
+        let CreateIssueOutcome::Created(repaired_issue) = repaired_issue.output else {
+            panic!("reserved issue did not become visible");
+        };
+        assert_eq!(repaired_issue.number, 8);
+        assert_eq!(repaired_issue.author.name, "Original Issue Name");
+        assert_eq!(repaired_issue.created_at_ms, 2000);
+
+        let repaired_comment = client
+            .command::<CreateComment>(&target, mutation(29), comment_input)
+            .await
+            .unwrap();
+        let CreateCommentOutcome::Created(repaired_comment) = repaired_comment.output else {
+            panic!("reserved comment did not become visible");
+        };
+        assert_eq!(repaired_comment.number, 4);
+        assert_eq!(repaired_comment.author.name, "Original Comment Name");
+        assert_eq!(repaired_comment.created_at_ms, 3000);
+        handle.drain().await.unwrap();
+        runtime.shutdown().await.unwrap();
     }
 
     fn mutation(byte: u8) -> MutationIdentity {

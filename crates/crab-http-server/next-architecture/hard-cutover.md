@@ -56,7 +56,9 @@ stateDiagram-v2
    tombstones. Record key, version/digest and semantic type in import evidence.
 4. Validate schemas, identities, references and uniqueness. Preserve number gaps
    and incomplete but recoverable submissions. Import each repository in one SQL
-   transaction, including outstanding requests and verified allocation counters.
+   transaction, including outstanding product submission rows and verified
+   allocation counters. Do not synthesize retained runtime `sys_requests` rows:
+   those identify bounded execution attempts, not permanent browser submissions.
    Retained direct-CAS settings do not become a second SQL policy authority.
 5. Run integrity and foreign-key checks; compare domain counts, sorted semantic
    digests, allocated counters, replay behavior and representative views.
@@ -89,9 +91,13 @@ response to an import error, or overwrite an already published import blindly.
 
 Existing request reservations sometimes contain a complete proposed domain
 object even when its visible object was never created. Import the established
-number and original validation inputs. The next retry must complete the same
-logical operation, not allocate a new number or present an invisible reservation
-as already visible content.
+number, canonical payload digest, original display name and creation time into
+the appropriate permanent repository submission table. If the visible object is
+present, import both records and verify they agree. If it is absent, keep only
+the reservation; the next matching retry inserts the reserved visible row in one
+transaction. A mismatched retry returns a durable request conflict. It must not
+allocate a new number or present an invisible reservation as already visible
+content.
 
 Pending PR merges and tag publications must be settled using canonical Git
 evidence or imported as explicit reconciliation work. Do not drop them because

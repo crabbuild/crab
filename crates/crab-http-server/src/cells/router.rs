@@ -424,6 +424,7 @@ mod tests {
                 &routed.target,
                 mutation(5),
                 CreateIssueInput {
+                    submission_id: [8; 16],
                     author: RepositoryAuthor {
                         issuer: principal.issuer.clone(),
                         subject: principal.subject.clone(),
@@ -435,6 +436,10 @@ mod tests {
             )
             .await
             .unwrap();
+        let crate::cells::repository::CreateIssueOutcome::Created(created_issue) = &created.output
+        else {
+            panic!("successful issue command returned a rejection outcome");
+        };
         let reused = first
             .route(repository, &principal, "repository.read")
             .await
@@ -442,11 +447,11 @@ mod tests {
         assert_eq!(
             reused
                 .client
-                .query::<GetIssue>(&reused.target, Some(created.receipt), created.output.number)
+                .query::<GetIssue>(&reused.target, Some(created.receipt), created_issue.number)
                 .await
                 .unwrap()
                 .output,
-            Some(created.output.clone())
+            Some(created_issue.as_ref().clone())
         );
         first_runtime.shutdown().await.unwrap();
 
@@ -476,12 +481,12 @@ mod tests {
                 .query::<GetIssue>(
                     &restored.target,
                     Some(created.receipt),
-                    created.output.number,
+                    created_issue.number,
                 )
                 .await
                 .unwrap()
                 .output,
-            Some(created.output)
+            Some(created_issue.as_ref().clone())
         );
         second_runtime.shutdown().await.unwrap();
     }
