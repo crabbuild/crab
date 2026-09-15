@@ -12,9 +12,11 @@ lookup and one bounded stale-owner retry. Explicit release activation now also
 requires one live exact fleet/image/release/module-compatible candidate. The
 maintenance importer now covers the legacy issue/comment tree, including
 counters, visible edits and incomplete reservations, with two-pass source
-verification, immutable evidence and crash-resumable LTX publication. Remaining
-collaboration-domain import, old-version migration/configured multi-node quorum,
-active-owner takeover and the remaining product-domain route cuts are not yet
+verification, immutable evidence and crash-resumable LTX publication. The
+repository router now distinguishes a live signed remote owner from an absent or
+expired session and uses the runtime's unchanged-control observation before
+takeover. Remaining collaboration-domain import, old-version migration/configured
+multi-node quorum and the remaining product-domain route cuts are not yet
 integrated. New repository creation explicitly publishes an empty Cell and marks
 the catalog ready; adoption remains blocked until verified import. Startup
 rejects every missing or rootless repository Cell. The issue/comment HTTP group

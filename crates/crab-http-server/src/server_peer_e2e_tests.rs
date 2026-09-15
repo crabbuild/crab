@@ -121,16 +121,19 @@ async fn public_issue_request_reaches_remote_owner_over_mtls_and_publishes_ltx()
         cell_layout.clone(),
         Arc::clone(&registry),
         owner_runtime.clone(),
-        Arc::new(crab_cell_runtime::PeerSigner::new(
-            owner_session,
-            registry.release_digest(),
-            peer_tls.signing_key().clone(),
-        )),
-        Arc::new(UnavailablePeer),
-        crab_cell_runtime::Owner {
-            session: owner_session,
-            endpoint: management_endpoint,
-        },
+        crate::cells::RepositoryCellPeer::new(
+            directory.clone(),
+            Arc::new(crab_cell_runtime::PeerSigner::new(
+                owner_session,
+                registry.release_digest(),
+                peer_tls.signing_key().clone(),
+            )),
+            Arc::new(UnavailablePeer),
+            crab_cell_runtime::Owner {
+                session: owner_session,
+                endpoint: management_endpoint,
+            },
+        ),
         owner_publisher.session_dir(),
     )
     .unwrap();
@@ -192,25 +195,28 @@ async fn public_issue_request_reaches_remote_owner_over_mtls_and_publishes_ltx()
     let round_trip: Arc<dyn PeerRoundTrip> = Arc::new(PeerHttpRoundTrip::new(
         identity,
         authority.clone(),
-        directory,
+        directory.clone(),
         peer_tls.client_identity(),
         ingress_session,
     ));
     let ingress_router = crate::cells::RepositoryCellRouter::new(
         identity,
-        cell_layout,
+        cell_layout.clone(),
         Arc::clone(&registry),
         ingress_runtime.clone(),
-        Arc::new(crab_cell_runtime::PeerSigner::new(
-            ingress_session,
-            registry.release_digest(),
-            peer_tls.signing_key().clone(),
-        )),
-        round_trip,
-        crab_cell_runtime::Owner {
-            session: ingress_session,
-            endpoint: "https://localhost:2".into(),
-        },
+        crate::cells::RepositoryCellPeer::new(
+            directory.clone(),
+            Arc::new(crab_cell_runtime::PeerSigner::new(
+                ingress_session,
+                registry.release_digest(),
+                peer_tls.signing_key().clone(),
+            )),
+            round_trip,
+            crab_cell_runtime::Owner {
+                session: ingress_session,
+                endpoint: "https://localhost:2".into(),
+            },
+        ),
         ingress_publisher.session_dir(),
     )
     .unwrap();

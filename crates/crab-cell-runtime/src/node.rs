@@ -152,12 +152,6 @@ impl NodeAdvertisement {
         Ok(encoded)
     }
 
-    fn decode(bytes: &[u8], now_ms: i64) -> Result<Self> {
-        let advertisement = Self::decode_canonical(bytes)?;
-        advertisement.validate_at(now_ms)?;
-        Ok(advertisement)
-    }
-
     fn decode_canonical(bytes: &[u8]) -> Result<Self> {
         if bytes.len() as u64 > MAX_NODE_BYTES {
             return Err(Error::Node("advertisement exceeds 64 KiB"));
@@ -301,26 +295,29 @@ impl NodeDirectory {
         session: SessionId,
         now_ms: i64,
     ) -> Result<Option<VersionedNodeAdvertisement>> {
-        let path = self.layout.node_path(session.as_bytes());
-        let (body, token) = match self
-            .layout
-            .store()
-            .get_with_etag_bounded(&path, MAX_NODE_BYTES)
-            .await
-        {
-            Ok(value) => value,
-            Err(StorageError::NotFound { .. }) => return Ok(None),
-            Err(error) => return Err(error.into()),
+        let Some((advertisement, token)) = self.load_canonical(session).await? else {
+            return Ok(None);
         };
-        let advertisement = NodeAdvertisement::decode(&body, now_ms)?;
-        if advertisement.session != session {
-            return Err(Error::Node("advertisement path and session differ"));
-        }
         self.validate(&advertisement, now_ms)?;
         Ok(Some(VersionedNodeAdvertisement {
             advertisement,
             token,
         }))
+    }
+
+    /// Reports whether an exact canonical session is currently live.
+    ///
+    /// Missing and expired sessions return `false`. Malformed, misplaced, or
+    /// foreign records fail closed instead of being treated as takeover evidence.
+    pub async fn is_live(&self, session: SessionId, now_ms: i64) -> Result<bool> {
+        let Some((advertisement, _)) = self.load_canonical(session).await? else {
+            return Ok(false);
+        };
+        self.validate_scope(&advertisement)?;
+        if advertisement.issued_at_ms > now_ms.saturating_add(MAX_CLOCK_SKEW_MS) {
+            return Err(Error::Node("advertisement is not currently valid"));
+        }
+        Ok(advertisement.expires_at_ms > now_ms)
     }
 
     /// Streams and verifies every currently live boot-session advertisement.
@@ -425,6 +422,32 @@ impl NodeDirectory {
     fn validate(&self, advertisement: &NodeAdvertisement, now_ms: i64) -> Result<()> {
         advertisement.validate_at(now_ms)?;
         advertisement.verify_signature()?;
+        self.validate_scope(advertisement)
+    }
+
+    async fn load_canonical(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<(NodeAdvertisement, ETag)>> {
+        let path = self.layout.node_path(session.as_bytes());
+        let (body, token) = match self
+            .layout
+            .store()
+            .get_with_etag_bounded(&path, MAX_NODE_BYTES)
+            .await
+        {
+            Ok(value) => value,
+            Err(StorageError::NotFound { .. }) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let advertisement = NodeAdvertisement::decode_canonical(&body)?;
+        if advertisement.session != session {
+            return Err(Error::Node("advertisement path and session differ"));
+        }
+        Ok(Some((advertisement, token)))
+    }
+
+    fn validate_scope(&self, advertisement: &NodeAdvertisement) -> Result<()> {
         if advertisement.fleet != self.fleet
             || advertisement.image != self.image
             || advertisement.release != self.release

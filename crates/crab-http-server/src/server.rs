@@ -479,16 +479,19 @@ pub async fn serve(config: Config) -> Result<()> {
         startup.layout,
         Arc::clone(&registry),
         cell_runtime.clone(),
-        Arc::new(PeerSigner::new(
-            session,
-            registry.release_digest(),
-            peer_tls.signing_key().clone(),
-        )),
-        peer_round_trip,
-        Owner {
-            session,
-            endpoint: config.cells.peer_advertise.to_string(),
-        },
+        crate::cells::RepositoryCellPeer::new(
+            directory,
+            Arc::new(PeerSigner::new(
+                session,
+                registry.release_digest(),
+                peer_tls.signing_key().clone(),
+            )),
+            peer_round_trip,
+            Owner {
+                session,
+                endpoint: config.cells.peer_advertise.to_string(),
+            },
+        ),
         session_dir,
     )?;
     let advertised = match node_publisher.publish_initial().await {

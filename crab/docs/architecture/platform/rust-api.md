@@ -646,11 +646,15 @@ directory. Its repository route algorithm is fixed:
    repository application, never authority to initialize an empty database.
 3. Return an exact local handle if the current
    runtime still owns it; construct a signed `CellClient::peer` when another
-   session owns it; fence a same-session/different-endpoint observation.
+   live session owns it; fence a same-session/different-endpoint observation.
 4. Serialize a cold path with one of 4,096 Cell-ID shards, then reload both
    records. For `Idle`, win owner CAS and restore the exact
    published root. For a same-session handle lost from memory, restore the exact
-   root without changing authority. Every attempt uses a unique SQLite path
+   root without changing authority. If the remote owner's canonical signed node
+   advertisement is absent or expired, require the exact control to remain
+   unchanged for 15 seconds, CAS a new owner/epoch, and only then restore. A
+   malformed or foreign advertisement fails closed and cannot authorize takeover.
+   Every attempt uses a unique SQLite path
    below `cells.data_dir/sessions/<session>/<cell>/`; failed files remain
    quarantined from later activation.
 5. Return only a typed `CellClient`; HTTP handlers never receive a SQLite
@@ -672,8 +676,9 @@ exact-root restoration and stable submission replay. The maintenance CLI imports
 the legacy issue/comment object tree with bounded two-pass source verification,
 immutable evidence, LTX publication and exact crash-resume checks. Remaining
 collaboration-domain import and route cuts remain. A live remote owner is
-forwarded to rather than stolen; expired active-owner takeover remains a
-separate bounded ownership procedure.
+forwarded to rather than stolen; absent/expired active owners use the bounded
+ownership procedure above. Tests cover live mTLS forwarding, idle restoration,
+the full 15-second no-progress observation and exact-root takeover.
 
 Read describe=true may provision an explicit-key Cell only with create
 capability; absent fixed shards return NOT_FOUND. A null bootstrap root returns

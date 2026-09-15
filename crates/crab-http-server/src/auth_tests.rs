@@ -279,19 +279,27 @@ impl Harness {
         .unwrap();
         let repository_cells = crate::cells::RepositoryCellRouter::new(
             cell_identity,
-            cell_layout,
+            cell_layout.clone(),
             Arc::clone(&registry),
             cell_runtime.clone(),
-            Arc::new(crab_cell_runtime::PeerSigner::new(
-                cell_session,
-                registry.release_digest(),
-                ed25519_dalek::SigningKey::from_bytes(&[5; 32]),
-            )),
-            Arc::new(UnavailablePeer),
-            crab_cell_runtime::Owner {
-                session: cell_session,
-                endpoint: "https://server.test:8081".into(),
-            },
+            crate::cells::RepositoryCellPeer::new(
+                crab_cell_runtime::NodeDirectory::new(
+                    cell_layout,
+                    crab_cell_runtime::Digest::from_bytes([6; 32]),
+                    crab_cell_runtime::Digest::from_bytes([7; 32]),
+                    registry.release_digest(),
+                ),
+                Arc::new(crab_cell_runtime::PeerSigner::new(
+                    cell_session,
+                    registry.release_digest(),
+                    ed25519_dalek::SigningKey::from_bytes(&[5; 32]),
+                )),
+                Arc::new(UnavailablePeer),
+                crab_cell_runtime::Owner {
+                    session: cell_session,
+                    endpoint: "https://server.test:8081".into(),
+                },
+            ),
             cell_dir.path().to_path_buf(),
         )
         .unwrap();

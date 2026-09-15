@@ -1,6 +1,6 @@
 # Embedded Rust Cell runtime: low-level implementation specification
 
-Status: implementation in progress. Revision: 2026-09-14. Existing-code baseline:
+Status: implementation in progress. Revision: 2026-09-15. Existing-code baseline:
 `ec20643073a`. SQL and peer contracts are implementation inputs. The initial
 identity/control/schema foundation and native-cut immutable root preparation now
 exist in `crab-cell-runtime` and `crab-ltx`; exact roots support lazy,
@@ -52,8 +52,8 @@ left untouched. The next idle acquisition reopens the exact authoritative root,
 so it cannot publish a late tentative commit. Streaming initial directory construction
 and directory-backed capture checksums, shared directory caching, prepared compaction/bundles,
 Workflow effect supervision, catalog-driven activity scheduling, scheduler
-progress advertisement and remote/idle routing, private peer routing, HTTP
-cutover and capacity qualification remain incomplete. The scoped
+progress advertisement and remote/idle scheduler routing, remaining HTTP domain
+cutovers and capacity qualification remain incomplete. The scoped
 KV primitive now installs
 the normative schema and implements atomic checks/mutations, incarnation/sequence
 versions, logical TTL, bounded binary-prefix reads and cleanup through the same
@@ -152,15 +152,18 @@ match a live signed node advertisement, pins CA/hostname/leaf/SPKI through mTLS,
 reuses a bounded client pool and retries only definitely-not-started failures
 once within the original deadline. The server-owned repository router now
 serializes activation, reuses an exact local handle, selects the authenticated
-remote peer, and acquires an idle Cell by restoring its exact root. Explicit
+remote peer, acquires an idle Cell by restoring its exact root, and takes over a
+published active owner only when its canonical node session is absent or expired
+and the exact control then remains unchanged for 15 seconds. Malformed or foreign
+node records fail closed. Explicit
 `repository create` now provisions and publishes an empty Cell before marking
 the catalog application ready; imported repositories receive the same marker
 only after verified publication. Serving fails before listener bind when any
 cataloged repository is pending import/initialization or lacks a published root,
 and request routing never authorizes an empty bootstrap. The complete public
 issue/comment route group now uses typed Cell commands and queries. Upgrade
-migrations, active-owner takeover, complete resource-derived budgets and the
-remaining collaboration-domain route cuts remain; KV, SQL, Queue and Workflow
+migrations, complete resource-derived budgets and the remaining
+collaboration-domain route cuts remain; KV, SQL, Queue and Workflow
 primitive handles are complete for local routing.
 The object-store node directory now strict-creates and conditionally refreshes
 canonical, short-lived advertisements. Each record binds one nonzero boot
@@ -241,8 +244,8 @@ selected descriptor bytes and complete Cell inventory before binding either
 listener. A candidate binary is eligible while its exact digest is `prepared` or
 `activating`; a steady server requires its exact `ready.current`. Compose, Helm
 and the ECS evaluation task execute bootstrap before first start. The server
-constructs one repository router before readiness, but no public product route
-invokes it yet.
+constructs one repository router before readiness; every public issue/comment
+route now invokes it.
 The maintenance CLI now implements a resumable issue/comment repository import:
 `cells import-repository-issues --owner OWNER --name NAME --operation UUID`.
 It stages a bounded, version-pinned `app/v1/issues` inventory in SQLite, verifies
@@ -253,9 +256,9 @@ completed import; interruption after root publication restores and verifies that
 root before writing completion evidence. The command refuses a live signed Cell
 fleet, but operators must still independently prove that every legacy writer has
 stopped because the legacy deployment did not publish those node records.
-Configured multi-replica quorum, old-code/schema migration,
-active-owner takeover, remaining collaboration-domain import/adapters and
-capacity qualification remain. Issue/comment HTTP reads and mutations now enter
+Configured multi-replica quorum, old-code/schema migration, remaining
+collaboration-domain import/adapters and capacity qualification remain.
+Issue/comment HTTP reads and mutations now enter
 through the authenticated repository router and typed Cell API; legacy issue
 objects are maintenance-import input only and are ignored by serving code.
 

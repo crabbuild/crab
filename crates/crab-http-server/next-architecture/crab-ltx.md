@@ -25,7 +25,7 @@ remain delivery work.
 | Paged SQL | Authenticated immutable views and writable sparse activation; incremental hydration, bounded range read-ahead |
 | Failure/retention | Capture failure fences the handle; fresh-directory reactivation; exact published local cuts can be pruned |
 | Host facilities | Injectable filesystem/base VFS/clock/executor; shared page-fault worker/cache and I/O/job/recovery concurrency budgets |
-| Server wiring | Repository issue/comment SQL, owner/control publication, local/remote/idle routing, public HTTP response gating and source-loss restore are wired; remaining collaboration domains and active-owner takeover are not |
+| Server wiring | Repository issue/comment SQL, owner/control publication, local/remote/idle/stale-owner routing, public HTTP response gating and source-loss restore are wired; remaining collaboration domains are not |
 
 Source and usage: [crate README](../../crab-ltx/README.md),
 [public API](../../crab-ltx/src/lib.rs),

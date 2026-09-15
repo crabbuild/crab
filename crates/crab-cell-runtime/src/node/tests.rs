@@ -127,6 +127,12 @@ async fn live_listing_rejects_misplaced_or_foreign_active_records() {
         )
         .await
         .unwrap();
+    assert!(
+        clean
+            .is_live(SessionId::from_bytes([9; 16]), NOW_MS + 1)
+            .await
+            .is_err()
+    );
     assert!(matches!(
         clean.live(NOW_MS + 1, 2).await,
         Err(Error::Node(_))
@@ -165,6 +171,18 @@ async fn create_load_and_refresh_preserve_signed_boot_identity() {
         .unwrap()
         .unwrap();
     assert_eq!(loaded.advertisement(), created.advertisement());
+    assert!(
+        directory
+            .is_live(SessionId::from_bytes([1; 16]), NOW_MS + 1)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !directory
+            .is_live(SessionId::from_bytes([9; 16]), NOW_MS + 1)
+            .await
+            .unwrap()
+    );
 
     let refreshed = directory
         .refresh(
@@ -211,7 +229,7 @@ async fn invalid_signature_expiry_and_identity_change_fail_closed() {
         .unwrap()
         + b"node-".len();
     tampered[endpoint_byte] = b'2';
-    assert!(NodeAdvertisement::decode(&tampered, NOW_MS).is_err());
+    assert!(NodeAdvertisement::decode_canonical(&tampered).is_err());
 
     let created = directory.create(original, NOW_MS).await.unwrap();
     assert!(
@@ -219,6 +237,12 @@ async fn invalid_signature_expiry_and_identity_change_fail_closed() {
             .load(SessionId::from_bytes([1; 16]), NOW_MS + 10_000)
             .await
             .is_err()
+    );
+    assert!(
+        !directory
+            .is_live(SessionId::from_bytes([1; 16]), NOW_MS + 10_000)
+            .await
+            .unwrap()
     );
 
     let other_key = SigningKey::from_bytes(&[8; 32]);

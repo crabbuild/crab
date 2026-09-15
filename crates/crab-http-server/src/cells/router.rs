@@ -2,8 +2,8 @@ use std::{path::PathBuf, sync::Arc};
 
 use crab_cell_runtime::{
     ApplicationIdentity, CatalogProof, CellAuthority, CellCatalog, CellClient, CellReplica,
-    CellRuntime, CellTarget, ControlState, Owner, PeerPrincipal, PeerRoundTrip, PeerSigner,
-    Registry, ReplicaLimits, VersionedControl,
+    CellRuntime, CellTarget, ControlState, NodeDirectory, Owner, PeerPrincipal, PeerRoundTrip,
+    PeerSigner, Registry, ReplicaLimits, VersionedControl,
 };
 use crab_storage::CellStorageLayout;
 use tokio::sync::Mutex;
@@ -22,11 +22,17 @@ pub(crate) struct RepositoryCellRouter {
     catalog: CellCatalog,
     authority: CellAuthority,
     runtime: CellRuntime,
+    peer: RepositoryCellPeer,
+    session_dir: PathBuf,
+    activation: Arc<[Mutex<()>]>,
+}
+
+#[derive(Clone)]
+pub(crate) struct RepositoryCellPeer {
+    directory: NodeDirectory,
     signer: Arc<PeerSigner>,
     round_trip: Arc<dyn PeerRoundTrip>,
     owner: Owner,
-    session_dir: PathBuf,
-    activation: Arc<[Mutex<()>]>,
 }
 
 pub(crate) struct RepositoryCell {
@@ -40,12 +46,10 @@ impl RepositoryCellRouter {
         layout: CellStorageLayout,
         registry: Arc<Registry>,
         runtime: CellRuntime,
-        signer: Arc<PeerSigner>,
-        round_trip: Arc<dyn PeerRoundTrip>,
-        owner: Owner,
+        peer: RepositoryCellPeer,
         session_dir: PathBuf,
     ) -> crate::Result<Self> {
-        if !session_dir.is_absolute() || owner.endpoint.is_empty() {
+        if !session_dir.is_absolute() || peer.owner.endpoint.is_empty() {
             return Err(crate::Error::Config(
                 "repository Cell routing requires an absolute session directory and endpoint",
             ));
@@ -57,9 +61,7 @@ impl RepositoryCellRouter {
             layout,
             registry,
             runtime,
-            signer,
-            round_trip,
-            owner,
+            peer,
             session_dir,
             activation: (0..ACTIVATION_SHARDS)
                 .map(|_| Mutex::new(()))
@@ -136,10 +138,16 @@ impl RepositoryCellRouter {
         let Some(owner) = control.value().owner.as_ref() else {
             return Ok(None);
         };
-        if owner.session != self.owner.session {
-            return Ok(Some(self.peer(target.clone(), principal, action)));
+        if owner.session != self.peer.owner.session {
+            // Only a missing or canonically expired session can begin takeover.
+            // Corrupt or foreign directory state must fail closed.
+            return if self.remote_owner_is_live(owner).await? {
+                Ok(Some(self.peer(target.clone(), principal, action)))
+            } else {
+                Ok(None)
+            };
         }
-        if owner != &self.owner {
+        if owner != &self.peer.owner {
             return Err(crab_cell_runtime::Error::Fenced.into());
         }
         Ok(self
@@ -163,17 +171,20 @@ impl RepositoryCellRouter {
         if observed.value().state == ControlState::Tombstoned {
             return Err(crab_cell_runtime::Error::CellNotActive.into());
         }
-        if let Some(owner) = observed.value().owner.as_ref()
-            && owner.session != self.owner.session
-        {
-            return Ok(self.peer(target, principal, action));
-        }
-        if observed
+        let remote_owner = observed
             .value()
             .owner
             .as_ref()
-            .is_some_and(|owner| owner != &self.owner)
+            .filter(|owner| owner.session != self.peer.owner.session);
+        if let Some(owner) = remote_owner
+            && self.remote_owner_is_live(owner).await?
         {
+            return Ok(self.peer(target, principal, action));
+        }
+        let takeover = remote_owner.is_some();
+        if observed.value().owner.as_ref().is_some_and(|owner| {
+            owner.session == self.peer.owner.session && owner != &self.peer.owner
+        }) {
             return Err(crab_cell_runtime::Error::Fenced.into());
         }
 
@@ -194,20 +205,33 @@ impl RepositoryCellRouter {
                         self.authority.clone(),
                         observed,
                         destination,
-                        self.owner.clone(),
+                        self.peer.owner.clone(),
                     )
                     .await?
             }
             ControlState::Recovering | ControlState::Serving => {
-                self.runtime
-                    .activate_restored(
-                        proof,
-                        replica,
-                        self.authority.clone(),
-                        observed,
-                        destination,
-                    )
-                    .await?
+                if takeover {
+                    self.runtime
+                        .takeover_restored(
+                            proof,
+                            replica,
+                            self.authority.clone(),
+                            observed,
+                            destination,
+                            self.peer.owner.clone(),
+                        )
+                        .await?
+                } else {
+                    self.runtime
+                        .activate_restored(
+                            proof,
+                            replica,
+                            self.authority.clone(),
+                            observed,
+                            destination,
+                        )
+                        .await?
+                }
             }
             ControlState::Tombstoned => {
                 return Err(crab_cell_runtime::Error::CellNotActive.into());
@@ -229,15 +253,23 @@ impl RepositoryCellRouter {
             target,
             client: CellClient::peer(
                 Arc::clone(&self.registry),
-                Arc::clone(&self.signer),
+                Arc::clone(&self.peer.signer),
                 PeerPrincipal {
                     issuer: principal.issuer.clone(),
                     subject: principal.subject.clone(),
                     actions: vec![action.to_owned()],
                 },
-                Arc::clone(&self.round_trip),
+                Arc::clone(&self.peer.round_trip),
             ),
         }
+    }
+
+    async fn remote_owner_is_live(&self, owner: &Owner) -> crate::Result<bool> {
+        Ok(self
+            .peer
+            .directory
+            .is_live(owner.session, super::unix_now_ms()?)
+            .await?)
     }
 
     async fn activation_path(&self, target: &CellTarget) -> crate::Result<PathBuf> {
@@ -272,6 +304,22 @@ impl RepositoryCellRouter {
             .await?
             .ok_or(crab_cell_runtime::Error::CellNotActive)?;
         handle.drain().await.map_err(Into::into)
+    }
+}
+
+impl RepositoryCellPeer {
+    pub(crate) fn new(
+        directory: NodeDirectory,
+        signer: Arc<PeerSigner>,
+        round_trip: Arc<dyn PeerRoundTrip>,
+        owner: Owner,
+    ) -> Self {
+        Self {
+            directory,
+            signer,
+            round_trip,
+            owner,
+        }
     }
 }
 
@@ -314,7 +362,7 @@ mod tests {
 
     use crab_cell_runtime::{
         ApplicationId, IncarnationId, MutationIdentity, RequestId, SessionId, SqlWorkerPool,
-        TenantId,
+        TenantId, Transition,
     };
     use crab_storage::Store;
     use ed25519_dalek::SigningKey;
@@ -341,7 +389,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn route_reuses_and_restores_explicit_repository_cell() {
+    async fn route_reuses_restores_idle_and_takes_over_stale_owner() {
         let identity = ApplicationIdentity::new(
             TenantId::from_bytes([1; 16]),
             ApplicationId::from_bytes([2; 16]),
@@ -478,7 +526,7 @@ mod tests {
         let second_dir = tempfile::TempDir::new().unwrap();
         let second = router(
             identity,
-            layout,
+            layout.clone(),
             Arc::clone(&registry),
             second_runtime.clone(),
             second_session,
@@ -502,6 +550,52 @@ mod tests {
             Some(created_issue.as_ref().clone())
         );
         second_runtime.shutdown().await.unwrap();
+
+        let authority = CellAuthority::new(layout.clone());
+        let idle = authority.load(target.cell_id()).await.unwrap().unwrap();
+        let stale_session = SessionId::from_bytes([10; 16]);
+        let stale = idle.value().takeover(owner(stale_session)).unwrap();
+        authority
+            .transition(&idle, stale, Transition::Takeover)
+            .await
+            .unwrap();
+        let third_session = SessionId::from_bytes([11; 16]);
+        let third_runtime = CellRuntime::new(
+            SqlWorkerPool::new(1, 10).unwrap(),
+            16 * 1024 * 1024,
+            third_session,
+        )
+        .unwrap();
+        let third_dir = tempfile::TempDir::new().unwrap();
+        let third = router(
+            identity,
+            layout,
+            Arc::clone(&registry),
+            third_runtime.clone(),
+            third_session,
+            third_dir.path().to_path_buf(),
+        );
+
+        let recovered = third
+            .route(repository, &principal, "repository.read")
+            .await
+            .unwrap();
+        assert_eq!(
+            recovered
+                .client
+                .query::<GetIssue>(
+                    &recovered.target,
+                    Some(created.receipt),
+                    created_issue.number,
+                )
+                .await
+                .unwrap()
+                .output,
+            Some(created_issue.as_ref().clone())
+        );
+        let owned = authority.load(target.cell_id()).await.unwrap().unwrap();
+        assert_eq!(owned.value().owner.as_ref(), Some(&owner(third_session)));
+        third_runtime.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -567,16 +661,24 @@ mod tests {
     ) -> RepositoryCellRouter {
         RepositoryCellRouter::new(
             identity,
-            layout,
+            layout.clone(),
             Arc::clone(&registry),
             runtime,
-            Arc::new(PeerSigner::new(
-                session,
-                registry.release_digest(),
-                SigningKey::from_bytes(&[7; 32]),
-            )),
-            Arc::new(UnavailablePeer),
-            owner(session),
+            RepositoryCellPeer::new(
+                NodeDirectory::new(
+                    layout,
+                    crab_cell_runtime::Digest::from_bytes([21; 32]),
+                    crab_cell_runtime::Digest::from_bytes([22; 32]),
+                    registry.release_digest(),
+                ),
+                Arc::new(PeerSigner::new(
+                    session,
+                    registry.release_digest(),
+                    SigningKey::from_bytes(&[7; 32]),
+                )),
+                Arc::new(UnavailablePeer),
+                owner(session),
+            ),
             session_dir,
         )
         .unwrap()
