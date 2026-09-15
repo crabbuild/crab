@@ -1,6 +1,6 @@
 # Hard cutover and future upgrades
 
-[Design index](README.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Target architecture; issue/comment import slice implemented.
 
 The transition imports the [current collaboration storage](current-implementation.md)
 into the [repository SQL model](sqlite-and-data-model.md), then publishes each
@@ -82,6 +82,17 @@ The per-repository control CAS establishes that repository's imported durable
 head. Reopening traffic is the fleet's operational cutover point; there is no
 claim of a multi-repository atomic object-store transaction. Partial completion
 keeps the deployment in maintenance until imports are resolved and verified.
+
+The current maintenance command implements steps 3 through 7 only for the
+legacy `app/v1/issues` tree. It retains issue/comment sequences, all visible
+versions and incomplete request reservations; records exact source object
+identity and body hashes; verifies a second inventory; performs one SQLite
+bootstrap transaction; publishes/restores the initial LTX root; and writes
+operation-bound completion evidence. It refuses a live signed new Cell fleet.
+That check does not observe legacy processes, so step 1's independent proof that
+old processes and schedulers are stopped and lack write authority remains
+mandatory. Other collaboration domains and the fleet-wide completion checklist
+are not implemented.
 
 An uncertain head publication requires rereading authority and matching import
 evidence before retry. Do not start either server version as an automatic

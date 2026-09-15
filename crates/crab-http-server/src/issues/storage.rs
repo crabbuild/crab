@@ -12,7 +12,7 @@ pub(super) use app_storage::MAX_NUMBER;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub(super) enum IssueState {
+pub(crate) enum IssueState {
     #[default]
     Open,
     Closed,
@@ -20,7 +20,7 @@ pub(super) enum IssueState {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Issue {
+pub(crate) struct Issue {
     pub number: u64,
     pub request_id: String,
     pub author: Identity,
@@ -38,7 +38,7 @@ pub(super) struct Issue {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Comment {
+pub(crate) struct Comment {
     pub number: u64,
     pub request_id: String,
     pub author: Identity,

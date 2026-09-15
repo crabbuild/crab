@@ -65,6 +65,14 @@ or forward registered calls between compatible nodes, but application JSON
 persistence, Git publication and browser behavior above remain unchanged. See
 [remaining gates](validation-and-delivery.md#verification-scope-for-the-current-implementation).
 
+The maintenance command `cells import-repository-issues` now captures the exact
+legacy issue/comment object tree into a bounded SQLite staging database, verifies
+a second stable listing, installs the repository schema and publishes a verified
+initial LTX root. Immutable source/completion evidence and rootless or
+post-publication recovery make exact operation retries resumable. This is a
+single domain slice, not the full-fleet cutover importer: pull requests, releases,
+labels, milestones and pending cross-domain work still require import support.
+
 ### Existing tests to preserve or evolve
 
 - [Issue authorization tests](../src/auth_tests/issues.rs) cover author checks,

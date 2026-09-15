@@ -220,6 +220,7 @@ crab-http-server --config CONFIG cells release bootstrap --image DIGEST
 crab-http-server --config CONFIG cells release prepare --expected-revision N --image DIGEST
 crab-http-server --config CONFIG cells release activate --expected-revision N --strategy compatible
 crab-http-server --config CONFIG cells release status
+crab-http-server --config CONFIG cells import-repository-issues --owner OWNER --name NAME --operation UUID
 ```
 
 `cells release inspect --json` is now implemented and read-only; it prints the
@@ -245,6 +246,27 @@ command adopts the same ready record. It currently admits initial or already exa
 compatible inventories; old-code/schema migration and a configured multi-replica
 eligible-node quorum remain target behavior. Prepare alone never makes the descriptor current. Administrative
 storage credentials provide authority; there is no public deployment API.
+
+`cells import-repository-issues` is the first maintenance importer slice. It
+requires the exact ready release, resolves the catalog repository UUID, rejects
+any live signed Cell node, captures at most 2,000,000 issue-tree objects and 8
+GiB of source, and requires three times the source bytes plus 256 MiB of local
+free space. A bounded channel feeds a temporary SQLite staging database while
+the reader hashes every object. A second complete LIST must reproduce every
+path, size, ETag/version and semantic kind before import begins. One bootstrap
+transaction installs the repository schema and copies issue/comment sequences,
+visible records and incomplete submission reservations. The command then
+publishes the initial LTX root, restores and compares the semantic summary, and
+strict-creates completion evidence bound to the operation, repository, Cell,
+source inventory and published root. A retry resumes rootless ownership after
+an observed stale interval, or restores an already published root before
+finishing evidence. This slice intentionally excludes pull requests, releases,
+labels, milestones and their pending cross-domain work.
+
+An empty signed node directory is only a mutual-exclusion check for the new Cell
+fleet. It cannot prove that a legacy server has stopped because legacy servers
+never registered there. Operators must still satisfy the external process,
+scheduler and storage-write revocation proof required by the hard-cut procedure.
 
 `ReleaseStore::provision` implements the release-aware catalog boundary. It first
 requires the exact compiled descriptor bytes selected by `ready.current` or

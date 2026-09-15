@@ -231,8 +231,19 @@ listener. A candidate binary is eligible while its exact digest is `prepared` or
 and the ECS evaluation task execute bootstrap before first start. The server
 constructs one repository router before readiness, but no public product route
 invokes it yet.
+The maintenance CLI now implements a resumable issue/comment repository import:
+`cells import-repository-issues --owner OWNER --name NAME --operation UUID`.
+It stages a bounded, version-pinned `app/v1/issues` inventory in SQLite, verifies
+the source with a second complete listing, imports visible records, counters and
+incomplete reservations in one transaction, publishes an initial LTX root, and
+records content-addressed source and completion evidence. Exact retries adopt a
+completed import; interruption after root publication restores and verifies that
+root before writing completion evidence. The command refuses a live signed Cell
+fleet, but operators must still independently prove that every legacy writer has
+stopped because the legacy deployment did not publish those node records.
 Configured multi-replica quorum, old-code/schema migration,
-active-owner takeover, product route adapters, offline import and capacity
+active-owner takeover, product route adapters, remaining collaboration-domain
+import and capacity
 qualification remain. Existing HTTP issue/comment routes still use the old
 object documents; the native module is not yet a user-visible storage path.
 

@@ -10,8 +10,12 @@ activation and publishes a verified descriptor as current. Private routing now
 includes mandatory mTLS ingress, live enrollment, authoritative outbound owner
 lookup and one bounded stale-owner retry. Explicit release activation now also
 requires one live exact fleet/image/release/module-compatible candidate. The
-importer, old-version migration/configured multi-node quorum, active-owner takeover, public repository adapters and
-product-route hard cut are not yet integrated. The server now owns a
+maintenance importer now covers the legacy issue/comment tree, including
+counters, visible edits and incomplete reservations, with two-pass source
+verification, immutable evidence and crash-resumable LTX publication. Remaining
+collaboration-domain import, old-version migration/configured multi-node quorum,
+active-owner takeover, public repository adapters and product-route hard cut are
+not yet integrated. The server now owns a
 release-aware repository router that provisions, bootstraps, reuses local
 handles, selects authenticated remote owners and restores idle Cells.
 Prepared 2026-09-13

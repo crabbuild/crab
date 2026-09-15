@@ -646,8 +646,11 @@ directory. Its repository route algorithm is fixed:
 
 The router is integration-qualified for provision/bootstrap, local reuse, clean
 idle release, source-independent exact-root acquisition by a second session and
-post-restore typed reads. Public issue/comment adapters, offline import and the
-single route-group hard cut remain. A live remote owner is forwarded to rather
+post-restore typed reads. The maintenance CLI now imports the legacy issue and
+comment object tree into that schema with bounded two-pass source verification,
+immutable evidence, LTX publication and exact crash-resume checks. Public
+issue/comment adapters, remaining collaboration-domain import and the single
+route-group hard cut remain. A live remote owner is forwarded to rather
 than stolen; expired active-owner takeover remains a separate bounded ownership
 procedure.
 

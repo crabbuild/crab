@@ -112,6 +112,16 @@ impl CellStorageLayout {
     }
 
     #[must_use]
+    pub fn migration_path(&self, cell: &[u8; 32], operation: &[u8; 16], suffix: &str) -> Path {
+        self.application_path(&format!(
+            "cells/{}/migration/{}/{}",
+            hex(cell),
+            hex(operation),
+            suffix
+        ))
+    }
+
+    #[must_use]
     pub fn node_path(&self, session: &[u8; 16]) -> Path {
         Path::from(format!(
             "{}/cells/v1/nodes/{}.json",
@@ -167,6 +177,12 @@ mod tests {
         assert_eq!(
             layout.node_directory_path().as_ref(),
             "tenant-root/cells/v1/nodes"
+        );
+        assert_eq!(
+            layout
+                .migration_path(&[0xcd; 32], &[0xee; 16], "source.json")
+                .as_ref(),
+            "tenant-root/cells/v1/apps/abababababababababababababababab/cells/cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd/migration/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/source.json"
         );
         assert_eq!(
             layout

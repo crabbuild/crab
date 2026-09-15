@@ -2315,6 +2315,7 @@ dependencies = [
  "openidconnect",
  "rand 0.9.4",
  "reqwest 0.12.28",
+ "rusqlite",
  "rustls 0.23.40",
  "rustls-pemfile",
  "serde",

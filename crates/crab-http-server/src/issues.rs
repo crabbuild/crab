@@ -20,7 +20,7 @@ use crate::{
     labels::{self, Label},
     server::Server,
 };
-mod storage;
+pub(crate) mod storage;
 use storage::{Comment, Issue, IssueState};
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {

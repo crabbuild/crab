@@ -44,6 +44,15 @@ enum CellsCommand {
         #[command(subcommand)]
         command: CellReleaseCommand,
     },
+    /// Run a bounded, resumable offline repository migration.
+    ImportRepositoryIssues {
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        operation: uuid::Uuid,
+    },
 }
 
 #[derive(Subcommand)]
@@ -228,6 +237,11 @@ async fn cells(
         CellsCommand::Release {
             command: CellReleaseCommand::Status,
         } => crab_http_server::cell_release_status(config).await?,
+        CellsCommand::ImportRepositoryIssues {
+            owner,
+            name,
+            operation,
+        } => crab_http_server::import_repository_issues(config, &owner, &name, operation).await?,
     };
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(&bytes)?;
@@ -456,6 +470,49 @@ mod tests {
                 }
             })
         ));
+    }
+
+    #[test]
+    fn repository_issue_import_requires_explicit_repository_and_operation() {
+        let operation = "00000000-0000-0000-0000-000000000001";
+        let arguments = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "import-repository-issues",
+            "--owner",
+            "team",
+            "--name",
+            "repo",
+            "--operation",
+            operation,
+        ])
+        .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Some(Command::Cells {
+                command: CellsCommand::ImportRepositoryIssues {
+                    owner,
+                    name,
+                    operation: parsed,
+                }
+            }) if owner == "team" && name == "repo" && parsed.hyphenated().to_string() == operation
+        ));
+        assert!(
+            Arguments::try_parse_from([
+                "crab-http-server",
+                "--config",
+                "server.toml",
+                "cells",
+                "import-repository-issues",
+                "--owner",
+                "team",
+                "--name",
+                "repo",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

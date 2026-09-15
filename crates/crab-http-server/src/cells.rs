@@ -12,9 +12,11 @@ use uuid::Uuid;
 
 use crate::{Config, Error, Result, storage_root::StorageRoot};
 
+mod importer;
 mod repository;
 mod router;
 
+pub(crate) use importer::import_repository_issues;
 pub(crate) use router::RepositoryCellRouter;
 
 const REPOSITORY_MIGRATION: &str = include_str!("cells/migrations/0001_repository_identity.sql");

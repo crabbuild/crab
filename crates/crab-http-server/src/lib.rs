@@ -69,6 +69,17 @@ pub async fn activate_cell_release(config: &Config, expected_revision: u64) -> R
     cells::activate_release(config, expected_revision).await
 }
 
+/// Imports one repository's legacy issue and comment documents into its Cell.
+pub async fn import_repository_issues(
+    config: &Config,
+    owner: &str,
+    name: &str,
+    operation: uuid::Uuid,
+) -> Result<Vec<u8>> {
+    config.validate()?;
+    cells::import_repository_issues(config, owner, name, operation).await
+}
+
 /// Startup and server lifecycle errors with their original sources retained.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
