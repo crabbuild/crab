@@ -239,12 +239,14 @@ manifest. `crab-cell-runtime` must not depend on server/auth/Git crates, and no
 application registration, module upload or handler replacement is accepted after
 `RegistryBuilder::finish`.
 
-The first server-side slice is implemented: `cells.rs` is the single registry
-composition root; its schema and stable codecs bind native issue/comment
-commands and queries. The integration fixture provisions a repository Cell,
-creates and replays an issue, records a missing-issue rejection, creates a
-comment, drains the first owner, removes its local database and restores both
-rows from the exact published root on a new owner.
+The internal repository operation set is implemented: `cells.rs` is the single
+registry composition root; its schema and stable codecs bind create/update and
+get/list operations for issues and comments, including label and assignee
+selection state. The integration fixture provisions a repository Cell, creates
+and replays an issue, records missing-resource and wrong-author rejections,
+creates and updates a comment, updates issue metadata, exercises both list
+queries, drains the first owner, removes its local database and restores the
+updated detail and list results from the exact published root on a new owner.
 
 The private wire/authentication and local-dispatch slice is also implemented in
 `peer.rs`. Its
@@ -318,11 +320,14 @@ proves an ambiguous command is sent once and retains its original request ID and
 operation digest. Public route selection and idle acquisition remain.
 `crab-http-server` now supplies the
 first compiled repository implementation, including migration, descriptors,
-typed codecs and bindings. Its runtime test
+typed codecs and bindings for the complete internal issue/comment route group.
+Its runtime test
 `repository_commands_publish_replay_reject_and_restore_from_exact_root` proves
-native issue/comment mutation, replay, rejection and source-loss recovery; its
-codec test pins exact bytes for all four operation input/output pairs; its binary
-command and inspection tests prove release bytes remain deterministic.
+native create/update/list/detail behavior, replay, rejection and source-loss
+recovery; its codec tests pin exact bytes for all eight operation input/output
+pairs; its binary command and inspection tests prove release bytes remain
+deterministic. Offline import, product routing and the coherent HTTP hard cut
+remain.
 
 Fuzz peer decoding, signed envelope validation and path/identity encoding.
 Pin independent command/input/output fixtures for every registered codec version.

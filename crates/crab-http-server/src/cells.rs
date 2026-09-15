@@ -19,9 +19,15 @@ pub(crate) const REPOSITORY_NAMESPACE: NamespaceId = NamespaceId::from_bytes(*b"
 const REPOSITORY_COMMANDS: &[OperationDescriptor] = &[
     operation(1, 80 * 1024, 80 * 1024),
     operation(2, 80 * 1024, 80 * 1024),
+    operation(3, 96 * 1024, 80 * 1024),
+    operation(4, 80 * 1024, 80 * 1024),
 ];
-const REPOSITORY_QUERIES: &[OperationDescriptor] =
-    &[operation(1, 8, 80 * 1024), operation(2, 16, 80 * 1024)];
+const REPOSITORY_QUERIES: &[OperationDescriptor] = &[
+    operation(1, 8, 80 * 1024),
+    operation(2, 16, 80 * 1024),
+    operation(3, 1024, 1024 * 1024),
+    operation(4, 32, 1024 * 1024),
+];
 
 struct RepositoryModule;
 
@@ -418,6 +424,8 @@ fn repository_source_digest() -> Digest {
     hasher.update(b"crab.http.repository.module.v1\0");
     hasher.update(REPOSITORY_MIGRATION.as_bytes());
     hasher.update(include_bytes!("cells/repository.rs"));
+    hasher.update(include_bytes!("cells/repository/codec.rs"));
+    hasher.update(include_bytes!("cells/repository/operations.rs"));
     Digest::from_bytes(*hasher.finalize().as_bytes())
 }
 
@@ -456,8 +464,11 @@ mod tests {
     use serde_json::Value;
 
     use super::repository::{
-        CommentKey, CreateComment, CreateCommentInput, CreateCommentOutcome, CreateIssue,
-        CreateIssueInput, GetComment, GetIssue, RepositoryAuthor,
+        CommentKey, CommentPage, CreateComment, CreateCommentInput, CreateCommentOutcome,
+        CreateIssue, CreateIssueInput, GetComment, GetIssue, IssuePage, ListComments,
+        ListCommentsInput, ListIssues, ListIssuesInput, RepositoryAuthor, UpdateComment,
+        UpdateCommentInput, UpdateCommentOutcome, UpdateIssue, UpdateIssueInput,
+        UpdateIssueOutcome,
     };
     use super::*;
 
@@ -473,7 +484,7 @@ mod tests {
         assert_eq!(descriptor["modules"][0]["name"], "repository");
         assert_eq!(
             descriptor["modules"][0]["code"],
-            "fe8972321d1b64847d25ef44c2241c203ff46b2354eee29eab3a559929649361"
+            "6c2ba0a24f1cfbb00849e55156a855ed2be4141850837d2fa4fdc1a8ddf8766d"
         );
         assert_eq!(descriptor["modules"][0]["schema_min"], 1);
         assert_eq!(descriptor["modules"][0]["schema_max"], 1);
@@ -482,14 +493,14 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            2
+            4
         );
         assert_eq!(
             descriptor["modules"][0]["queries"]
                 .as_array()
                 .unwrap()
                 .len(),
-            2
+            4
         );
         assert_eq!(descriptor["namespaces"][0]["role"], "repository");
         assert_eq!(descriptor["namespaces"][0]["shards"], 1);
@@ -903,7 +914,7 @@ mod tests {
                 mutation(8),
                 CreateCommentInput {
                     issue: issue.output.number,
-                    author,
+                    author: author.clone(),
                     body: "survives local source loss".into(),
                 },
             )
@@ -914,6 +925,122 @@ mod tests {
         };
         assert_eq!(comment_record.number, 1);
         assert_eq!(comment.receipt.commit_sequence, 3);
+
+        let forbidden = first_client
+            .command::<UpdateIssue>(
+                &target,
+                mutation(9),
+                UpdateIssueInput {
+                    number: issue.output.number,
+                    actor: RepositoryAuthor {
+                        issuer: author.issuer.clone(),
+                        subject: "another-user".into(),
+                        name: "Another User".into(),
+                    },
+                    can_manage_metadata: false,
+                    version: 1,
+                    title: Some("not allowed".into()),
+                    body: None,
+                    state: None,
+                    label_ids: None,
+                    assignee_subjects: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            forbidden,
+            InvocationError::Rejected(ref outcome)
+                if outcome.output == UpdateIssueOutcome::Forbidden
+                    && outcome.receipt.commit_sequence == 4
+        ));
+
+        let updated_issue = first_client
+            .command::<UpdateIssue>(
+                &target,
+                mutation(10),
+                UpdateIssueInput {
+                    number: issue.output.number,
+                    actor: author.clone(),
+                    can_manage_metadata: true,
+                    version: issue.output.version,
+                    title: Some("Durable issue updated".into()),
+                    body: None,
+                    state: Some(1),
+                    label_ids: Some(vec![5, 8]),
+                    assignee_subjects: Some(vec!["user-1".into()]),
+                },
+            )
+            .await
+            .unwrap();
+        let UpdateIssueOutcome::Updated(updated_issue_record) = &updated_issue.output else {
+            panic!("successful issue update returned a rejection outcome");
+        };
+        assert_eq!(updated_issue_record.version, 2);
+        assert_eq!(updated_issue_record.label_ids, [5, 8]);
+        assert_eq!(updated_issue.receipt.commit_sequence, 5);
+
+        let updated_comment = first_client
+            .command::<UpdateComment>(
+                &target,
+                mutation(11),
+                UpdateCommentInput {
+                    key: CommentKey {
+                        issue: comment_record.issue,
+                        number: comment_record.number,
+                    },
+                    actor: author,
+                    version: comment_record.version,
+                    body: "edited before source loss".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let UpdateCommentOutcome::Updated(updated_comment_record) = &updated_comment.output else {
+            panic!("successful comment update returned a rejection outcome");
+        };
+        assert_eq!(updated_comment_record.version, 2);
+        assert_eq!(updated_comment.receipt.commit_sequence, 6);
+
+        assert_eq!(
+            first_client
+                .query::<ListIssues>(
+                    &target,
+                    Some(updated_comment.receipt),
+                    ListIssuesInput {
+                        before: None,
+                        limit: 30,
+                        state: 2,
+                        query: Some("updated".into()),
+                    },
+                )
+                .await
+                .unwrap()
+                .output,
+            IssuePage {
+                items: vec![updated_issue_record.as_ref().clone().into()],
+                next: None,
+            }
+        );
+        assert_eq!(
+            first_client
+                .query::<ListComments>(
+                    &target,
+                    Some(updated_comment.receipt),
+                    ListCommentsInput {
+                        issue: issue.output.number,
+                        before: None,
+                        limit: 30,
+                    },
+                )
+                .await
+                .unwrap()
+                .output,
+            CommentPage::Found {
+                items: vec![updated_comment_record.clone()],
+                next: None,
+            }
+        );
         first_handle.drain().await.unwrap();
         first_runtime.shutdown().await.unwrap();
         first_local.close().unwrap();
@@ -948,13 +1075,13 @@ mod tests {
                 .await
                 .unwrap()
                 .output,
-            Some(issue.output)
+            Some(updated_issue_record.as_ref().clone())
         );
         assert_eq!(
             second_client
                 .query::<GetComment>(
                     &target,
-                    Some(comment.receipt),
+                    Some(updated_comment.receipt),
                     CommentKey {
                         issue: comment_record.issue,
                         number: comment_record.number,
@@ -963,7 +1090,46 @@ mod tests {
                 .await
                 .unwrap()
                 .output,
-            Some(comment_record.clone())
+            Some(updated_comment_record.clone())
+        );
+        assert_eq!(
+            second_client
+                .query::<ListIssues>(
+                    &target,
+                    Some(updated_comment.receipt),
+                    ListIssuesInput {
+                        before: None,
+                        limit: 30,
+                        state: 1,
+                        query: None,
+                    },
+                )
+                .await
+                .unwrap()
+                .output,
+            IssuePage {
+                items: vec![updated_issue_record.as_ref().clone().into()],
+                next: None,
+            }
+        );
+        assert_eq!(
+            second_client
+                .query::<ListComments>(
+                    &target,
+                    Some(updated_comment.receipt),
+                    ListCommentsInput {
+                        issue: updated_issue_record.number,
+                        before: None,
+                        limit: 30,
+                    },
+                )
+                .await
+                .unwrap()
+                .output,
+            CommentPage::Found {
+                items: vec![updated_comment_record.clone()],
+                next: None,
+            }
         );
         second_handle.drain().await.unwrap();
         second_runtime.shutdown().await.unwrap();

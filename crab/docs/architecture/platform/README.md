@@ -183,13 +183,15 @@ signed operation bytes once more, with a reduced deadline and maximum hop count
 of two. The outbound client never follows redirects or trusts a control-record
 endpoint without the matching live advertisement. Product routes do not yet
 construct this peer capability, acquire an idle Cell or expose it to the browser.
-The server now compiles and binds the first repository module slice: stable
-create-issue/create-comment commands, get-issue/get-comment queries, bounded
-codecs, and the schema that owns repository identity, sequences, issues and
-comments. Its integration test executes those typed operations through
-`CellClient`, proves exact request replay and a durable business rejection,
-deletes the first owner's complete local database, and reads the published rows
-after exact-root restoration by a new owner. `cells release inspect --json`
+The server now compiles and binds the complete internal issue/comment operation
+set: create and update commands plus get and bounded list queries for both
+resources. Stable codecs include issue label and assignee selections; SQLite
+owns repository identity, sequences, issues and comments. Its integration test
+executes all eight typed operations through `CellClient`, proves exact request
+replay and durable missing-resource/author rejection, updates metadata and
+comments, deletes the first owner's complete local database, and reads the
+published detail and list results after exact-root restoration by a new owner.
+`cells release inspect --json`
 emits those exact registry bytes from the built binary. `cells release prepare` now strict-creates
 or adopts the root's canonical tenant/application identity, uploads the exact
 digest-addressed descriptor, and conditionally publishes a canonical prepared

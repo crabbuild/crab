@@ -1,12 +1,18 @@
 use crab_cell_runtime::{
-    BoundedDecoder, BoundedEncoder, CellModule, CodecError, Command, CommandContext, CommandResult,
-    Query, QueryContext, RegistryBuilder, SqlBatch, SqlResultSet, SqlStatement, SqlValue,
-    WireValue,
+    BoundedDecoder, BoundedEncoder, CellModule, Command, CommandContext, CommandResult, Query,
+    QueryContext, RegistryBuilder, SqlBatch, SqlResultSet, SqlStatement, SqlValue, WireValue,
 };
 
 use super::RepositoryModule;
 
+pub(crate) use operations::{ListComments, ListIssues, UpdateComment, UpdateIssue};
+
 const MAX_NUMBER: u64 = 9_007_199_254_740_991;
+const MAX_LIST_ITEMS: usize = 50;
+const MAX_LIST_SCAN: u64 = 200;
+const MAX_LABELS: usize = 20;
+const MAX_ASSIGNEES: usize = 10;
+const MAX_LIST_OUTPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RepositoryAuthor {
@@ -29,6 +35,8 @@ pub(crate) struct IssueRecord {
     pub title: String,
     pub body: String,
     pub state: u8,
+    pub label_ids: Vec<u64>,
+    pub assignee_subjects: Vec<String>,
     pub version: u64,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
@@ -62,6 +70,88 @@ pub(crate) enum CreateCommentOutcome {
 pub(crate) struct CommentKey {
     pub issue: u64,
     pub number: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UpdateIssueInput {
+    pub number: u64,
+    pub actor: RepositoryAuthor,
+    pub can_manage_metadata: bool,
+    pub version: u64,
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub state: Option<u8>,
+    pub label_ids: Option<Vec<u64>>,
+    pub assignee_subjects: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum UpdateIssueOutcome {
+    Updated(Box<IssueRecord>),
+    NotFound,
+    Forbidden,
+    LabelForbidden,
+    AssigneeForbidden,
+    Conflict,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UpdateCommentInput {
+    pub key: CommentKey,
+    pub actor: RepositoryAuthor,
+    pub version: u64,
+    pub body: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum UpdateCommentOutcome {
+    Updated(CommentRecord),
+    NotFound,
+    Forbidden,
+    Conflict,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ListIssuesInput {
+    pub before: Option<u64>,
+    pub limit: u8,
+    pub state: u8,
+    pub query: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct IssueSummary {
+    pub number: u64,
+    pub author: RepositoryAuthor,
+    pub title: String,
+    pub state: u8,
+    pub label_ids: Vec<u64>,
+    pub assignee_subjects: Vec<String>,
+    pub version: u64,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct IssuePage {
+    pub items: Vec<IssueSummary>,
+    pub next: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ListCommentsInput {
+    pub issue: u64,
+    pub before: Option<u64>,
+    pub limit: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CommentPage {
+    Found {
+        items: Vec<CommentRecord>,
+        next: Option<u64>,
+    },
+    IssueNotFound,
 }
 
 pub(crate) struct CreateIssue;
@@ -105,13 +195,15 @@ impl Command for CreateIssue {
             title: input.title,
             body: input.body,
             state: 0,
+            label_ids: vec![],
+            assignee_subjects: vec![],
             version: 1,
             created_at_ms: now,
             updated_at_ms: now,
         };
         context.sql(&SqlBatch {
             statements: vec![statement(
-                "INSERT INTO repository_issues(number, author_issuer, author_subject, author_name, title, body, state, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO repository_issues(number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 vec![
                     integer(record.number)?,
                     SqlValue::Text(record.author.issuer.clone()),
@@ -120,6 +212,8 @@ impl Command for CreateIssue {
                     SqlValue::Text(record.title.clone()),
                     SqlValue::Text(record.body.clone()),
                     SqlValue::Integer(i64::from(record.state)),
+                    SqlValue::Blob(encode_label_ids(&record.label_ids)?),
+                    SqlValue::Blob(encode_assignees(&record.assignee_subjects)?),
                     integer(record.version)?,
                     integer(record.created_at_ms)?,
                     integer(record.updated_at_ms)?,
@@ -223,7 +317,7 @@ impl Query for GetIssue {
         validate_number(number)?;
         let result = context.sql(&SqlBatch {
             statements: vec![statement(
-                "SELECT number, author_issuer, author_subject, author_name, title, body, state, version, created_at_ms, updated_at_ms FROM repository_issues WHERE number = ?",
+                "SELECT number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms FROM repository_issues WHERE number = ?",
                 vec![integer(number)?],
             )],
         })?;
@@ -264,11 +358,17 @@ impl Query for GetComment {
     }
 }
 
+mod operations;
+
 pub(crate) fn register(registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
     registry.bind_command::<CreateIssue>()?;
     registry.bind_command::<CreateComment>()?;
+    registry.bind_command::<UpdateIssue>()?;
+    registry.bind_command::<UpdateComment>()?;
     registry.bind_query::<GetIssue>()?;
-    registry.bind_query::<GetComment>()
+    registry.bind_query::<GetComment>()?;
+    registry.bind_query::<ListIssues>()?;
+    registry.bind_query::<ListComments>()
 }
 
 fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlStatement {
@@ -322,6 +422,15 @@ fn result_text(row: &[SqlValue], column: usize) -> crab_cell_runtime::Result<Str
     }
 }
 
+fn result_blob(row: &[SqlValue], column: usize) -> crab_cell_runtime::Result<&[u8]> {
+    match row.get(column) {
+        Some(SqlValue::Blob(value)) => Ok(value),
+        _ => Err(crab_cell_runtime::Error::Command(
+            "repository query returned invalid bytes",
+        )),
+    }
+}
+
 fn issue_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<IssueRecord> {
     let state = u8::try_from(result_u64_from_row(row, 6)?)
         .map_err(|_| crab_cell_runtime::Error::Command("invalid issue state"))?;
@@ -338,9 +447,11 @@ fn issue_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<IssueRecord> {
         title: result_text(row, 4)?,
         body: result_text(row, 5)?,
         state,
-        version: result_u64_from_row(row, 7)?,
-        created_at_ms: result_u64_from_row(row, 8)?,
-        updated_at_ms: result_u64_from_row(row, 9)?,
+        label_ids: decode_label_ids(result_blob(row, 7)?)?,
+        assignee_subjects: decode_assignees(result_blob(row, 8)?)?,
+        version: result_u64_from_row(row, 9)?,
+        created_at_ms: result_u64_from_row(row, 10)?,
+        updated_at_ms: result_u64_from_row(row, 11)?,
     };
     validate_issue(&record)?;
     Ok(record)
@@ -407,7 +518,11 @@ fn validate_author(author: &RepositoryAuthor) -> crab_cell_runtime::Result<()> {
 }
 
 fn validate_title(title: &str) -> crab_cell_runtime::Result<()> {
-    if title.trim() != title || title.is_empty() || title.chars().count() > 256 {
+    if title.trim() != title
+        || title.is_empty()
+        || title.chars().count() > 256
+        || title.chars().any(char::is_control)
+    {
         return Err(crab_cell_runtime::Error::Command(
             "repository issue title is invalid",
         ));
@@ -416,7 +531,7 @@ fn validate_title(title: &str) -> crab_cell_runtime::Result<()> {
 }
 
 fn validate_body(body: &str, required: bool) -> crab_cell_runtime::Result<()> {
-    if (required && body.is_empty()) || body.len() > 64 * 1024 {
+    if (required && body.trim().is_empty()) || body.len() > 64 * 1024 || body.contains('\0') {
         return Err(crab_cell_runtime::Error::Command(
             "repository discussion body is invalid",
         ));
@@ -429,6 +544,8 @@ fn validate_issue(record: &IssueRecord) -> crab_cell_runtime::Result<()> {
     validate_author(&record.author)?;
     validate_title(&record.title)?;
     validate_body(&record.body, false)?;
+    validate_label_ids(&record.label_ids)?;
+    validate_assignees(&record.assignee_subjects)?;
     validate_number(record.version)?;
     if record.state > 1 || record.updated_at_ms < record.created_at_ms {
         return Err(crab_cell_runtime::Error::Command(
@@ -436,6 +553,164 @@ fn validate_issue(record: &IssueRecord) -> crab_cell_runtime::Result<()> {
         ));
     }
     Ok(())
+}
+
+fn validate_label_ids(labels: &[u64]) -> crab_cell_runtime::Result<()> {
+    if labels.len() > MAX_LABELS
+        || labels.contains(&0)
+        || labels.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(crab_cell_runtime::Error::Command(
+            "repository issue labels are invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_assignees(assignees: &[String]) -> crab_cell_runtime::Result<()> {
+    if assignees.len() > MAX_ASSIGNEES
+        || assignees.iter().any(|subject| {
+            subject.is_empty()
+                || subject.chars().count() > 512
+                || subject.chars().any(char::is_control)
+        })
+        || assignees.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(crab_cell_runtime::Error::Command(
+            "repository issue assignees are invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_list(before: Option<u64>, limit: u8) -> crab_cell_runtime::Result<()> {
+    if limit == 0
+        || usize::from(limit) > MAX_LIST_ITEMS
+        || before.is_some_and(|value| value == 0 || value > MAX_NUMBER)
+    {
+        return Err(crab_cell_runtime::Error::Command(
+            "repository list bounds are invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_query(query: Option<&str>) -> crab_cell_runtime::Result<()> {
+    if query.is_some_and(|query| {
+        query.is_empty()
+            || query.trim() != query
+            || query.chars().count() > 256
+            || query.chars().any(char::is_control)
+            || query.to_lowercase() != query
+    }) {
+        return Err(crab_cell_runtime::Error::Command(
+            "repository search query is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn matches_query(query: Option<&str>, issue: &IssueRecord) -> bool {
+    query.is_none_or(|query| {
+        [&issue.title, &issue.body, &issue.author.name]
+            .iter()
+            .any(|value| value.to_lowercase().contains(query))
+    })
+}
+
+fn same_author(left: &RepositoryAuthor, right: &RepositoryAuthor) -> bool {
+    left.issuer == right.issuer && left.subject == right.subject
+}
+
+fn encode_label_ids(labels: &[u64]) -> crab_cell_runtime::Result<Vec<u8>> {
+    let mut encoder = BoundedEncoder::new(16 * 1024)
+        .map_err(|_| crab_cell_runtime::Error::Command("repository label encoding failed"))?;
+    encoder
+        .write_count(labels.len())
+        .map_err(|_| crab_cell_runtime::Error::Command("repository label encoding failed"))?;
+    for label in labels {
+        encoder
+            .write_u64(*label)
+            .map_err(|_| crab_cell_runtime::Error::Command("repository label encoding failed"))?;
+    }
+    Ok(encoder.finish())
+}
+
+fn decode_label_ids(bytes: &[u8]) -> crab_cell_runtime::Result<Vec<u64>> {
+    let mut decoder = BoundedDecoder::new(bytes, 16 * 1024)
+        .map_err(|_| crab_cell_runtime::Error::Command("repository label encoding is invalid"))?;
+    let count = decoder
+        .read_count()
+        .map_err(|_| crab_cell_runtime::Error::Command("repository label encoding is invalid"))?;
+    if count > MAX_LABELS {
+        return Err(crab_cell_runtime::Error::Command(
+            "repository label encoding is invalid",
+        ));
+    }
+    let mut labels = Vec::with_capacity(count);
+    for _ in 0..count {
+        labels.push(decoder.read_u64().map_err(|_| {
+            crab_cell_runtime::Error::Command("repository label encoding is invalid")
+        })?);
+    }
+    decoder
+        .finish()
+        .map_err(|_| crab_cell_runtime::Error::Command("repository label encoding is invalid"))?;
+    validate_label_ids(&labels)?;
+    Ok(labels)
+}
+
+fn encode_assignees(assignees: &[String]) -> crab_cell_runtime::Result<Vec<u8>> {
+    let mut encoder = BoundedEncoder::new(16 * 1024)
+        .map_err(|_| crab_cell_runtime::Error::Command("repository assignee encoding failed"))?;
+    encoder
+        .write_count(assignees.len())
+        .map_err(|_| crab_cell_runtime::Error::Command("repository assignee encoding failed"))?;
+    for assignee in assignees {
+        encoder.write_text(assignee).map_err(|_| {
+            crab_cell_runtime::Error::Command("repository assignee encoding failed")
+        })?;
+    }
+    Ok(encoder.finish())
+}
+
+fn decode_assignees(bytes: &[u8]) -> crab_cell_runtime::Result<Vec<String>> {
+    let mut decoder = BoundedDecoder::new(bytes, 16 * 1024).map_err(|_| {
+        crab_cell_runtime::Error::Command("repository assignee encoding is invalid")
+    })?;
+    let count = decoder.read_count().map_err(|_| {
+        crab_cell_runtime::Error::Command("repository assignee encoding is invalid")
+    })?;
+    if count > MAX_ASSIGNEES {
+        return Err(crab_cell_runtime::Error::Command(
+            "repository assignee encoding is invalid",
+        ));
+    }
+    let mut assignees = Vec::with_capacity(count);
+    for _ in 0..count {
+        assignees.push(
+            decoder
+                .read_text()
+                .map_err(|_| {
+                    crab_cell_runtime::Error::Command("repository assignee encoding is invalid")
+                })?
+                .to_owned(),
+        );
+    }
+    decoder.finish().map_err(|_| {
+        crab_cell_runtime::Error::Command("repository assignee encoding is invalid")
+    })?;
+    validate_assignees(&assignees)?;
+    Ok(assignees)
+}
+
+fn encoded_size<T: WireValue>(value: &T) -> crab_cell_runtime::Result<usize> {
+    let mut encoder = BoundedEncoder::new(MAX_LIST_OUTPUT_BYTES as u32)
+        .map_err(|_| crab_cell_runtime::Error::Command("repository result encoding failed"))?;
+    value
+        .encode(&mut encoder)
+        .map_err(|_| crab_cell_runtime::Error::Command("repository result encoding failed"))?;
+    Ok(encoder.finish().len())
 }
 
 fn validate_comment(record: &CommentRecord) -> crab_cell_runtime::Result<()> {
@@ -452,137 +727,7 @@ fn validate_comment(record: &CommentRecord) -> crab_cell_runtime::Result<()> {
     Ok(())
 }
 
-impl WireValue for RepositoryAuthor {
-    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
-        encoder.write_text(&self.issuer)?;
-        encoder.write_text(&self.subject)?;
-        encoder.write_text(&self.name)
-    }
-
-    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
-        Ok(Self {
-            issuer: decoder.read_text()?.to_owned(),
-            subject: decoder.read_text()?.to_owned(),
-            name: decoder.read_text()?.to_owned(),
-        })
-    }
-}
-
-impl WireValue for CreateIssueInput {
-    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
-        self.author.encode(encoder)?;
-        encoder.write_text(&self.title)?;
-        encoder.write_text(&self.body)
-    }
-
-    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
-        Ok(Self {
-            author: RepositoryAuthor::decode(decoder)?,
-            title: decoder.read_text()?.to_owned(),
-            body: decoder.read_text()?.to_owned(),
-        })
-    }
-}
-
-impl WireValue for IssueRecord {
-    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
-        encoder.write_u64(self.number)?;
-        self.author.encode(encoder)?;
-        encoder.write_text(&self.title)?;
-        encoder.write_text(&self.body)?;
-        encoder.write_u8(self.state)?;
-        encoder.write_u64(self.version)?;
-        encoder.write_u64(self.created_at_ms)?;
-        encoder.write_u64(self.updated_at_ms)
-    }
-
-    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
-        Ok(Self {
-            number: decoder.read_u64()?,
-            author: RepositoryAuthor::decode(decoder)?,
-            title: decoder.read_text()?.to_owned(),
-            body: decoder.read_text()?.to_owned(),
-            state: decoder.read_u8()?,
-            version: decoder.read_u64()?,
-            created_at_ms: decoder.read_u64()?,
-            updated_at_ms: decoder.read_u64()?,
-        })
-    }
-}
-
-impl WireValue for CreateCommentInput {
-    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
-        encoder.write_u64(self.issue)?;
-        self.author.encode(encoder)?;
-        encoder.write_text(&self.body)
-    }
-
-    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
-        Ok(Self {
-            issue: decoder.read_u64()?,
-            author: RepositoryAuthor::decode(decoder)?,
-            body: decoder.read_text()?.to_owned(),
-        })
-    }
-}
-
-impl WireValue for CommentRecord {
-    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
-        encoder.write_u64(self.issue)?;
-        encoder.write_u64(self.number)?;
-        self.author.encode(encoder)?;
-        encoder.write_text(&self.body)?;
-        encoder.write_u64(self.version)?;
-        encoder.write_u64(self.created_at_ms)?;
-        encoder.write_u64(self.updated_at_ms)
-    }
-
-    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
-        Ok(Self {
-            issue: decoder.read_u64()?,
-            number: decoder.read_u64()?,
-            author: RepositoryAuthor::decode(decoder)?,
-            body: decoder.read_text()?.to_owned(),
-            version: decoder.read_u64()?,
-            created_at_ms: decoder.read_u64()?,
-            updated_at_ms: decoder.read_u64()?,
-        })
-    }
-}
-
-impl WireValue for CreateCommentOutcome {
-    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
-        match self {
-            Self::Created(record) => {
-                encoder.write_u8(1)?;
-                record.encode(encoder)
-            }
-            Self::IssueNotFound => encoder.write_u8(2),
-        }
-    }
-
-    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
-        match decoder.read_u8()? {
-            1 => Ok(Self::Created(CommentRecord::decode(decoder)?)),
-            2 => Ok(Self::IssueNotFound),
-            _ => Err(CodecError::Invalid("invalid create-comment outcome")),
-        }
-    }
-}
-
-impl WireValue for CommentKey {
-    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
-        encoder.write_u64(self.issue)?;
-        encoder.write_u64(self.number)
-    }
-
-    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
-        Ok(Self {
-            issue: decoder.read_u64()?,
-            number: decoder.read_u64()?,
-        })
-    }
-}
+mod codec;
 
 #[cfg(test)]
 mod tests;

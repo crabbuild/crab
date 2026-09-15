@@ -72,12 +72,12 @@ authoritative owner, authenticates its live advertisement, uses pinned mTLS and
 retries one definitely-not-started stale-owner attempt without retrying ambiguous
 mutations. Typed local SQL, KV, Queue
 and Workflow capabilities are implemented. The server composition root now
-compiles and binds create-issue/create-comment commands and get-issue/get-comment
-queries with its repository identity/sequence/issue/comment migration. A server
-integration test drives those bindings through the runtime, publishes each
+compiles and binds create/update and get/list operations for issues and comments
+with its repository identity/sequence/issue/comment migration. A server
+integration test drives all eight bindings through the runtime, publishes each
 decision through LTX, removes the first local SQLite database and restores the
-same records under a second owner. The built-binary release inspection command
-exposes the resulting exact canonical registry bytes.
+updated detail and list results under a second owner. The built-binary release
+inspection command exposes the resulting exact canonical registry bytes.
 
 The currently assigned repository operation inventory is fixed below. IDs are
 scoped independently to commands and queries; a later operation must use a new
@@ -88,16 +88,24 @@ roots during rollout.
 | --- | ---: | --- | ---: | ---: | --- |
 | command | 1 | `CreateIssue` | 80 KiB | 80 KiB | Allocate issue number, insert row, advance app revision |
 | command | 2 | `CreateComment` | 80 KiB | 80 KiB | Reject if issue is absent; otherwise allocate number, insert row, advance app revision |
+| command | 3 | `UpdateIssue` | 96 KiB | 80 KiB | Check actor/metadata permission and version, replace supplied fields, advance app revision |
+| command | 4 | `UpdateComment` | 80 KiB | 80 KiB | Check author and version, replace body, advance app revision |
 | query | 1 | `GetIssue` | 8 B | 80 KiB | Primary-key read |
 | query | 2 | `GetComment` | 16 B | 80 KiB | `(issue, number)` primary-key read |
+| query | 3 | `ListIssues` | 1 KiB | 1 MiB | Descending cursor/state/search page, at most 50 results and 200 number probes |
+| query | 4 | `ListComments` | 32 B | 1 MiB | Descending cursor page, at most 50 results and 200 number probes |
 
-All four use codec version 1 and schema version 1. Issue/comment numbers and
+All eight use codec version 1 and schema version 1. Issue/comment numbers and
 versions are positive integers no larger than 9,007,199,254,740,991. The
 initializer writes the catalog repository UUID to the singleton identity row;
 handlers fail the complete application savepoint if that row is missing or its
 application revision is exhausted. The durable missing-issue rejection does not
 consume a comment number or advance the application revision, but does advance
-the runtime command sequence and therefore carries a receipt.
+the runtime command sequence and therefore carries a receipt. Author, metadata
+permission, missing-row and version failures on updates are also durable typed
+rejections. Label IDs and assignee subjects are canonical sorted bounded vectors
+stored with each issue; the HTTP adapter remains responsible for checking them
+against the current label and repository-member catalogs before dispatch.
 One exact byte fixture for every command input/output and query input/output
 pins codec v1 independently of descriptor construction and runtime dispatch.
 
