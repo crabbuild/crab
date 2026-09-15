@@ -1,6 +1,6 @@
 # SQLite runtime and application data model
 
-[Design index](README.md) · Repository issue/comment/label schema implemented; remaining domains proposed.
+[Design index](README.md) · Repository issue/comment/label/status schema implemented; remaining domains proposed.
 
 The SQL transaction and WAL boundaries here feed the
 [publication coordinator](storage-protocol.md#commit-publication-and-response-gating).
@@ -9,7 +9,7 @@ snapshot and exact restore, plus optional remote transport, immutable views and
 writable sparse SQL with checksum-seeded continuation. Full restoration remains
 the initial server activation policy; sparse support is a library capability,
 not yet a wired AppCell workflow. The fixed SQL worker executor, repository
-identity, issue/comment/label schema, typed operations, publication barrier and public
+identity, issue/comment/label/status schema, typed operations, publication barrier and public
 HTTP adapter are implemented. Pulls, releases, checks, outbox/workflow
 tables and their route cuts remain proposed.
 Restore and takeover follow [recovery rules](recovery-and-retention.md);
@@ -210,6 +210,8 @@ second executable schema into this design. Schema v1 currently contains:
 | `repository_comment_sequences` | issue number | independent checked comment allocator per issue |
 | `repository_comment_submissions` | issue number, 16-byte submission ID | permanent payload digest, allocated comment number, original display name and creation time |
 | `repository_issue_comments` | issue number, comment number | author snapshot, body, version and timestamps |
+| `repository_status_sequences` | exact commit OID | Checked per-commit allocator capped at 1,000 submissions |
+| `repository_commit_statuses` | exact commit OID, 16-byte submission ID | Permanent payload digest, immutable event, case-insensitive context key, visibility and creation snapshot |
 
 All tables are `STRICT`. JavaScript-visible counters are checked against
 9,007,199,254,740,991. The foreign keys from comment state to issues use cascade
@@ -242,7 +244,6 @@ historical presentation fields.
 | PRs | `pulls`, `pull_comments`, `pull_reviews`, review comments if supported | Base/head refs, recorded OIDs, method, state, version, immutable merge intent |
 | Assignments | `issue_assignees`, `pull_assignees` | Distinct stable subjects; resolve against current membership |
 | Pull labels | relational pull-to-label selection | Validate active label IDs transactionally when Pull records move into SQLite |
-| Statuses | `commit_statuses` | Immutable status events, exact commit OID and context, deterministic latest selection |
 | Checks | `check_runs`, `check_outputs`, supported annotation rows | Existing state transitions, revision checks, bounded output and request replay |
 | Releases | `releases`, `release_assets`, tag/name claims and upload reservations | Tag identity, asset integrity, metadata tombstones, uniqueness rules |
 | Retry state | Domain-specific permanent submission/claim tables; `sys_requests` remains runtime-owned and bounded | Preserve actor/content conflicts and allocated IDs even for incomplete operations |

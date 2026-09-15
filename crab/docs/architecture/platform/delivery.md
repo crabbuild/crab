@@ -27,9 +27,9 @@ does not establish a working runtime.
 | [application.rs](../../../../crates/crab-cell-runtime/src/application.rs), [release.rs](../../../../crates/crab-cell-runtime/src/release.rs) | Canonical immutable root identity, exact-winner initialization, immutable descriptor upload, expected-revision prepared CAS, verified descriptor reads, operation-bound resumable activating/ready and prepared/maintenance/ready transitions, explicit 1–10,000 live-compatible-node activation quorum and release-aware catalog provisioning with post-publication operation recheck; retained code/schema pairs pass serving compatibility but fail the separate final current-version gate | Add arbitrary transform contracts |
 | [node.rs](../../../../crates/crab-cell-runtime/src/node.rs) | Canonical signed 15-second node advertisements, strict-create/ETag refresh and explicit shutdown withdrawal with exact ambiguous-write reconciliation, fleet/certificate/release/key/inventory/capacity binding, non-regressing scheduler progress, certificate-SPKI-bound session verification, streaming bounded live-fleet enumeration, expired-but-unfenced maintenance inventory and ETag-fenced stale-record collection after the clock-skew horizon | Add qualified large-directory latency evidence |
 | [codec.rs](../../../../crates/crab-cell-runtime/src/codec.rs), [peer.rs](../../../../crates/crab-cell-runtime/src/peer.rs) | Canonical bounded scalar/bytes/text/option encoding; generated peer Protobuf messages; strict request/reply unknown/duplicate/oneof rejection; exact nested-payload BLAKE3; canonical Ed25519 signing; enrollment/release/time binding; two-hop forwarding; mandatory authorization; active-owner resolution; canonical local command/query/effect dispatch; registry-derived migration without SQL on the wire and Describe-based unknown-result reconciliation; bounded mTLS management ingress; and mutation/effect-safe ambiguous transport classification | Fuzz the complete boundary |
-| [client.rs](../../../../crates/crab-cell-runtime/src/client.rs) | Typed local and authenticated peer command/query/Resolve capabilities, namespace/code/schema/incarnation checks, canonical operation digest, outcome classification and minimum receipts; repository issue/comment/label routes and typed KV, SQL, Queue and Workflow handles use it | Add remaining product-domain adapters |
-| [HTTP server.rs](../../../../crates/crab-http-server/src/server.rs), [issues.rs](../../../../crates/crab-http-server/src/issues.rs), [labels.rs](../../../../crates/crab-http-server/src/labels.rs), [peer.rs](../../../../crates/crab-http-server/src/peer.rs), [peer_tls.rs](../../../../crates/crab-http-server/src/peer_tls.rs), [cells.rs](../../../../crates/crab-http-server/src/cells.rs), [cells/initializer.rs](../../../../crates/crab-http-server/src/cells/initializer.rs), [cells/repository.rs](../../../../crates/crab-http-server/src/cells/repository.rs), [cells/router.rs](../../../../crates/crab-http-server/src/cells/router.rs), [cells/scheduler.rs](../../../../crates/crab-http-server/src/cells/scheduler.rs), [cells/importer.rs](../../../../crates/crab-http-server/src/cells/importer.rs) | Static repository registry with UUID lookup; typed issue/comment/label HTTP bindings; bounded runtime replay plus permanent product-submission replay/conflict and source-loss restore; explicit new-repository bootstrap; import/initialization/ready catalog states; startup and changed-catalog rejection of missing roots; process-session runtime lifecycle; authoritative local peer resolution; current repository issuer/member/action reauthorization; strict Ed25519 certificate/key/CA loading; mandatory management mTLS; initial node publication and heartbeat; authoritative outbound owner reload; endpoint/enrollment equality; pinned bounded peer client reuse; one definitely-not-started stale-owner retry; exact local reuse, authenticated remote selection, idle exact-root restore and absent/expired active-owner takeover after an unchanged 15-second observation; one-second Cell scanning across rendezvous-assigned catalog shards, retained revision-pinned per-shard cursors, fair first attempts plus work-conserving fill and durable retry after full-pass wrap, 128-Cell cycle bounds, compiled Tick/effect/activity supervision for registered namespaces, CPU-derived activity admission capped at 16 and one job per Cell, shared node-byte reservation for maximum activity input plus output before claim, nonblocking activity jobs, blocking-handler pre-claim admission on a fixed joined OS-thread pool, exact registry-derived peer grants, temporary-activation drain, signed scan progress, 15-second fallback/readiness and scheduler health/progress/lag metrics; activating-release shard scans with 16-job migration admission, per-Cell deduplication, signed remote execution, durable terminal progress and cursor status; shard-zero-elected bounded stale-node collection; descriptor/inventory startup gate; one-second release self-fencing; operation-bound maintenance entry, expired-session-aware drain, signed operation-keyed singleton executor lease, local-only single-worker full-catalog migration, conservative breaking-release persisted-work admission, exclusive-directory/current-inventory gate and final Ready CAS; zero-capacity heartbeat through listener/background/Cell/worker shutdown; effective-memory/free-volume startup floors, resource-derived node retained-byte budget and page-cache/file-descriptor-derived active-Cell limit; one absolute 110-second listener/background/runtime/worker shutdown deadline; maintenance-only, two-pass verified and resumable legacy issue/comment/label import preserving counters, edits, tombstones and incomplete reservations | Add remaining collaboration-domain import/adapters, unsupported-source/namespace maintenance transforms, dirty-job resource admission and real multi-Pod process/network fault qualification |
-| [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Remaining pulls, releases, statuses, checks and settings still use object application storage; issue and label serving no longer call their legacy storage paths | Retain legacy codecs only in maintenance import, then remove remaining serving callers domain by domain during the hard cut |
+| [client.rs](../../../../crates/crab-cell-runtime/src/client.rs) | Typed local and authenticated peer command/query/Resolve capabilities, namespace/code/schema/incarnation checks, canonical operation digest, outcome classification and minimum receipts; repository issue/comment/label/status routes and typed KV, SQL, Queue and Workflow handles use it | Add remaining product-domain adapters |
+| [HTTP server.rs](../../../../crates/crab-http-server/src/server.rs), [issues.rs](../../../../crates/crab-http-server/src/issues.rs), [labels.rs](../../../../crates/crab-http-server/src/labels.rs), [statuses.rs](../../../../crates/crab-http-server/src/statuses.rs), [peer.rs](../../../../crates/crab-http-server/src/peer.rs), [peer_tls.rs](../../../../crates/crab-http-server/src/peer_tls.rs), [cells.rs](../../../../crates/crab-http-server/src/cells.rs), [cells/initializer.rs](../../../../crates/crab-http-server/src/cells/initializer.rs), [cells/repository.rs](../../../../crates/crab-http-server/src/cells/repository.rs), [cells/router.rs](../../../../crates/crab-http-server/src/cells/router.rs), [cells/scheduler.rs](../../../../crates/crab-http-server/src/cells/scheduler.rs), [cells/importer.rs](../../../../crates/crab-http-server/src/cells/importer.rs) | Static repository registry with UUID lookup; typed issue/comment/label/status HTTP bindings; bounded runtime replay plus permanent product-submission replay/conflict and source-loss restore; explicit new-repository bootstrap; import/initialization/ready catalog states; startup and changed-catalog rejection of missing roots; process-session runtime lifecycle; authoritative local peer resolution; current repository issuer/member/action reauthorization; strict Ed25519 certificate/key/CA loading; mandatory management mTLS; initial node publication and heartbeat; authoritative outbound owner reload; endpoint/enrollment equality; pinned bounded peer client reuse; one definitely-not-started stale-owner retry; exact local reuse, authenticated remote selection, idle exact-root restore and absent/expired active-owner takeover after an unchanged 15-second observation; one-second Cell scanning across rendezvous-assigned catalog shards, retained revision-pinned per-shard cursors, fair first attempts plus work-conserving fill and durable retry after full-pass wrap, 128-Cell cycle bounds, compiled Tick/effect/activity supervision for registered namespaces, CPU-derived activity admission capped at 16 and one job per Cell, shared node-byte reservation for maximum activity input plus output before claim, nonblocking activity jobs, blocking-handler pre-claim admission on a fixed joined OS-thread pool, exact registry-derived peer grants, temporary-activation drain, signed scan progress, 15-second fallback/readiness and scheduler health/progress/lag metrics; activating-release shard scans with 16-job migration admission, per-Cell deduplication, signed remote execution, durable terminal progress and cursor status; shard-zero-elected bounded stale-node collection; descriptor/inventory startup gate; one-second release self-fencing; operation-bound maintenance entry, expired-session-aware drain, signed operation-keyed singleton executor lease, local-only single-worker full-catalog migration, conservative breaking-release persisted-work admission, exclusive-directory/current-inventory gate and final Ready CAS; zero-capacity heartbeat through listener/background/Cell/worker shutdown; effective-memory/free-volume startup floors, resource-derived node retained-byte budget and page-cache/file-descriptor-derived active-Cell limit; one absolute 110-second listener/background/runtime/worker shutdown deadline; maintenance-only, two-pass verified and resumable legacy issue/comment/label/status import preserving counters, edits/latest contexts, tombstones and incomplete reservations | Add remaining collaboration-domain import/adapters, unsupported-source/namespace maintenance transforms, dirty-job resource admission and real multi-Pod process/network fault qualification |
+| [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Remaining pulls, releases, checks and settings still use object application storage; issue, label and commit-status serving no longer call their legacy storage paths | Retain legacy codecs only in maintenance import, then remove remaining serving callers domain by domain during the hard cut |
 
 Reuse existing [publication tests](../../../../crates/crab-ltx/tests/publication.rs),
 [host tests](../../../../crates/crab-ltx/tests/host_hooks.rs) and
@@ -308,11 +308,11 @@ application registration, module upload or handler replacement is accepted after
 
 The internal repository operation set is implemented: `cells.rs` is the single
 registry composition root; its schema and stable codecs bind create/update and
-get/list operations for issues and comments plus create/update/delete/list for
-labels, including atomic active-label validation for issue selection state. The
+get/list operations for issues and comments, create/update/delete/list for
+labels, and create/latest/replay for commit statuses, including atomic active-label validation for issue selection state. The
 integration fixture provisions a repository Cell, creates
 and replays an issue, records missing-resource and wrong-author rejections,
-creates and updates a comment, updates issue metadata, exercises both list
+creates and updates a comment and statuses, updates issue metadata, exercises the list
 queries, drains the first owner, removes its local database and restores the
 updated detail and list results from the exact published root on a new owner.
 
@@ -341,10 +341,10 @@ The server-owned `RepositoryCellRouter` now resolves authorized identities to a
 local-or-peer `CellClient`, including release-fenced provision, serialized
 rootless bootstrap, local handle reuse and idle exact-root acquisition. Its test
 publishes through the router, drains the first owner and verifies a second
-session restores and reads the same row. Authorized issue/comment/label handlers
+session restores and reads the same row. Authorized issue/comment/label/status handlers
 now use that result while retaining product HTTP authorization in app.rs. Label
 create/edit/delete/list is a hard cut with no JSON serving fallback; the offline
-repository importer preserves active Labels, tombstones and incomplete reservations. Do not ship
+repository importer preserves active Labels, tombstones, latest status contexts and incomplete reservations. Do not ship
 a selectable second persistence backend or route related mutations and reads to
 different authorities.
 
@@ -391,7 +391,7 @@ selection, exact endpoint/certificate/SPKI validation and authoritative reload
 after a stale endpoint returns definitely-not-started. A transport unit test
 proves an ambiguous command is sent once and retains its original request ID and
 operation digest. Repository routing and idle acquisition are now implemented
-and exercised by the public issue/comment/label adapters. The server acceptance test
+and exercised by the public issue/comment/label/status adapters. The server acceptance test
 `public_collaboration_requests_reach_remote_owner_over_mtls_and_publish_ltx` starts a
 real public HTTP ingress and a distinct real mTLS owner endpoint, then proves
 public Issue/Label create/assign/read, private typed forwarding, current authorization and an
@@ -399,24 +399,24 @@ advanced authoritative LTX root in one path. A mutation capability is admitted
 for its required `Describe` preflight but remains forbidden from product queries.
 `crab-http-server` now supplies the
 first compiled repository implementation, including migration, descriptors,
-typed codecs and bindings for the internal issue/comment/label route group.
+typed codecs and bindings for the internal issue/comment/label/status route group.
 Its runtime test
 `repository_commands_publish_replay_reject_and_restore_from_exact_root` proves
 native create/update/list/detail behavior, exact runtime replay, later permanent
 submission replay, conflict rejection and source-loss recovery. The companion
 `repository_submission_reservations_repair_incomplete_visibility` test proves an
-imported issue, comment or label reservation retains its number, display name and time
+imported issue, comment, label or status reservation retains its number, display name and time
 when the matching product retry makes it visible. Codec tests pin exact bytes for
-the discussion and label operations; binary command and inspection tests prove
+the discussion, label and commit-status operations; binary command and inspection tests prove
 release bytes remain deterministic.
 `route_reuses_and_restores_explicit_repository_cell` additionally proves local
 reuse and second-session idle restoration through the server-owned router. The
 authenticated HTTP fixture provisions a ready release, explicitly initializes
 the repository, publishes issue/comment/label mutations, closes the Cell, removes
 its local SQLite state and restores the exact root before replay. It also proves
-legacy issue and label objects cannot affect native serving paths. The offline
+legacy issue, label and status objects cannot affect native serving paths. The offline
 import test restores the published root and verifies active and deleted Labels
-plus an incomplete Label reservation. Remaining
+plus incomplete Label and status reservations. Remaining
 collaboration-domain imports and route cuts remain.
 
 Fuzz peer decoding, signed envelope validation and path/identity encoding.

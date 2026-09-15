@@ -11,7 +11,7 @@ use uuid::Uuid;
 use super::source::StagedSource;
 use super::{SemanticSummary, sqlite_error};
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 const PAGE_ENTRIES: usize = 256;
 const MAX_PAGE_BYTES: u64 = 256 * 1024;
 const MAX_SOURCE_BYTES: u64 = 1024 * 1024;

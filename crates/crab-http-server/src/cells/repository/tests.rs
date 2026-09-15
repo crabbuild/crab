@@ -226,6 +226,58 @@ fn repository_codec_v1_pins_label_fixtures() {
 }
 
 #[test]
+fn repository_codec_v1_pins_commit_status_fixtures() {
+    let record = CommitStatusRecord {
+        number: 9,
+        submission_id: [4; 16],
+        author: RepositoryAuthor {
+            issuer: "i".into(),
+            subject: "s".into(),
+            name: "n".into(),
+        },
+        oid: "0123456789abcdef0123456789abcdef01234567".into(),
+        context: "ci/test".into(),
+        state: 3,
+        description: Some("passed".into()),
+        target_url: Some("https://ci.example.test/4".into()),
+        created_at_ms: 5,
+    };
+    let input = CreateCommitStatusInput {
+        submission_id: record.submission_id,
+        author: record.author.clone(),
+        oid: record.oid.clone(),
+        context: record.context.clone(),
+        state: record.state,
+        description: record.description.clone(),
+        target_url: record.target_url.clone(),
+    };
+    assert_fixture(
+        &input,
+        "000000100404040404040404040404040404040400000001690000000173000000016e00000028303132333435363738396162636465663031323334353637383961626364656630313233343536370000000763692f74657374030100000006706173736564010000001968747470733a2f2f63692e6578616d706c652e746573742f34",
+    );
+    assert_fixture(
+        &CreateCommitStatusOutcome::Created(Box::new(record.clone())),
+        "010000000000000009000000100404040404040404040404040404040400000001690000000173000000016e00000028303132333435363738396162636465663031323334353637383961626364656630313233343536370000000763692f74657374030100000006706173736564010000001968747470733a2f2f63692e6578616d706c652e746573742f340000000000000005",
+    );
+    assert_fixture(
+        &CommitStatusSubmissionKey {
+            oid: record.oid.clone(),
+            submission_id: record.submission_id,
+        },
+        "00000028303132333435363738396162636465663031323334353637383961626364656630313233343536370000001004040404040404040404040404040404",
+    );
+    assert_fixture(
+        &CommitStatusCatalog {
+            statuses: vec![record],
+        },
+        "000000010000000000000009000000100404040404040404040404040404040400000001690000000173000000016e00000028303132333435363738396162636465663031323334353637383961626364656630313233343536370000000763692f74657374030100000006706173736564010000001968747470733a2f2f63692e6578616d706c652e746573742f340000000000000005",
+    );
+    assert_fixture(&CreateCommitStatusOutcome::RequestConflict, "02");
+    assert_fixture(&CreateCommitStatusOutcome::ContextLimit, "03");
+    assert_fixture(&CreateCommitStatusOutcome::SubmissionLimit, "04");
+}
+
+#[test]
 fn maximum_utf8_label_catalog_fits_its_registered_output_bound() {
     let label = LabelRecord {
         number: 1,
@@ -242,6 +294,35 @@ fn maximum_utf8_label_catalog_fits_its_registered_output_bound() {
     let mut encoder = BoundedEncoder::new(384 * 1024).unwrap();
     catalog.encode(&mut encoder).unwrap();
     assert!(encoder.finish().len() <= 384 * 1024);
+}
+
+#[test]
+fn maximum_utf8_status_catalog_fits_its_registered_output_bound() {
+    let target_prefix = "https://example.test/";
+    let status = CommitStatusRecord {
+        number: 1,
+        submission_id: [1; 16],
+        author: RepositoryAuthor {
+            issuer: "🦀".repeat(512),
+            subject: "🦀".repeat(512),
+            name: "🦀".repeat(160),
+        },
+        oid: "0123456789abcdef0123456789abcdef01234567".into(),
+        context: "🦀".repeat(100),
+        state: 3,
+        description: Some("🦀".repeat(140)),
+        target_url: Some(format!(
+            "{target_prefix}{}",
+            "a".repeat(2_048 - target_prefix.len())
+        )),
+        created_at_ms: 1,
+    };
+    let catalog = CommitStatusCatalog {
+        statuses: vec![status; 128],
+    };
+    let mut encoder = BoundedEncoder::new(1024 * 1024).unwrap();
+    catalog.encode(&mut encoder).unwrap();
+    assert!(encoder.finish().len() <= 1024 * 1024);
 }
 
 fn assert_fixture<T: WireValue + PartialEq + std::fmt::Debug>(value: &T, fixture: &str) {

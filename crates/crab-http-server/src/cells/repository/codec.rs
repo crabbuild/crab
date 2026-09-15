@@ -1,12 +1,125 @@
 use crab_cell_runtime::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 
 use super::{
-    CommentKey, CommentPage, CommentRecord, CreateCommentInput, CreateCommentOutcome,
-    CreateIssueInput, CreateIssueOutcome, CreateLabelInput, CreateLabelOutcome, DeleteLabelInput,
-    DeleteLabelOutcome, IssuePage, IssueRecord, IssueSummary, LabelCatalog, LabelRecord,
-    ListCommentsInput, ListIssuesInput, RepositoryAuthor, UpdateCommentInput, UpdateCommentOutcome,
-    UpdateIssueInput, UpdateIssueOutcome, UpdateLabelInput, UpdateLabelOutcome,
+    CommentKey, CommentPage, CommentRecord, CommitStatusCatalog, CommitStatusRecord,
+    CommitStatusSubmissionKey, CreateCommentInput, CreateCommentOutcome, CreateCommitStatusInput,
+    CreateCommitStatusOutcome, CreateIssueInput, CreateIssueOutcome, CreateLabelInput,
+    CreateLabelOutcome, DeleteLabelInput, DeleteLabelOutcome, IssuePage, IssueRecord, IssueSummary,
+    LabelCatalog, LabelRecord, ListCommentsInput, ListIssuesInput, RepositoryAuthor,
+    UpdateCommentInput, UpdateCommentOutcome, UpdateIssueInput, UpdateIssueOutcome,
+    UpdateLabelInput, UpdateLabelOutcome,
 };
+
+impl WireValue for CommitStatusRecord {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        encoder.write_u64(self.number)?;
+        encoder.write_bytes(&self.submission_id)?;
+        self.author.encode(encoder)?;
+        encoder.write_text(&self.oid)?;
+        encoder.write_text(&self.context)?;
+        encoder.write_u8(self.state)?;
+        self.description.encode(encoder)?;
+        self.target_url.encode(encoder)?;
+        encoder.write_u64(self.created_at_ms)
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
+        Ok(Self {
+            number: decoder.read_u64()?,
+            submission_id: read_fixed(decoder, "status submission ID length")?,
+            author: RepositoryAuthor::decode(decoder)?,
+            oid: decoder.read_text()?.to_owned(),
+            context: decoder.read_text()?.to_owned(),
+            state: decoder.read_u8()?,
+            description: Option::<String>::decode(decoder)?,
+            target_url: Option::<String>::decode(decoder)?,
+            created_at_ms: decoder.read_u64()?,
+        })
+    }
+}
+
+impl WireValue for CreateCommitStatusInput {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        encoder.write_bytes(&self.submission_id)?;
+        self.author.encode(encoder)?;
+        encoder.write_text(&self.oid)?;
+        encoder.write_text(&self.context)?;
+        encoder.write_u8(self.state)?;
+        self.description.encode(encoder)?;
+        self.target_url.encode(encoder)
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
+        Ok(Self {
+            submission_id: read_fixed(decoder, "status submission ID length")?,
+            author: RepositoryAuthor::decode(decoder)?,
+            oid: decoder.read_text()?.to_owned(),
+            context: decoder.read_text()?.to_owned(),
+            state: decoder.read_u8()?,
+            description: Option::<String>::decode(decoder)?,
+            target_url: Option::<String>::decode(decoder)?,
+        })
+    }
+}
+
+impl WireValue for CreateCommitStatusOutcome {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        match self {
+            Self::Created(status) => {
+                encoder.write_u8(1)?;
+                status.encode(encoder)
+            }
+            Self::RequestConflict => encoder.write_u8(2),
+            Self::ContextLimit => encoder.write_u8(3),
+            Self::SubmissionLimit => encoder.write_u8(4),
+        }
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
+        match decoder.read_u8()? {
+            1 => Ok(Self::Created(Box::new(CommitStatusRecord::decode(
+                decoder,
+            )?))),
+            2 => Ok(Self::RequestConflict),
+            3 => Ok(Self::ContextLimit),
+            4 => Ok(Self::SubmissionLimit),
+            _ => Err(CodecError::Invalid("invalid create-status outcome")),
+        }
+    }
+}
+
+impl WireValue for CommitStatusSubmissionKey {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        encoder.write_text(&self.oid)?;
+        encoder.write_bytes(&self.submission_id)
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
+        Ok(Self {
+            oid: decoder.read_text()?.to_owned(),
+            submission_id: read_fixed(decoder, "status submission ID length")?,
+        })
+    }
+}
+
+impl WireValue for CommitStatusCatalog {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        encoder.write_count(self.statuses.len())?;
+        for status in &self.statuses {
+            status.encode(encoder)?;
+        }
+        Ok(())
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
+        let count = bounded_count(decoder, 128)?;
+        let mut statuses = Vec::with_capacity(count);
+        for _ in 0..count {
+            statuses.push(CommitStatusRecord::decode(decoder)?);
+        }
+        Ok(Self { statuses })
+    }
+}
 
 impl WireValue for LabelRecord {
     fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {

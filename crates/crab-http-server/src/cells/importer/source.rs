@@ -13,7 +13,7 @@ mod labels;
 use decode::{SourceKind, StageRecord, classify, decode_record};
 
 use super::{SemanticSummary, semantic_summary, sqlite_error};
-use crate::cells::repository::{CommentRecord, IssueRecord, RepositoryAuthor};
+use crate::cells::repository::{CommentRecord, CommitStatusRecord, IssueRecord, RepositoryAuthor};
 
 const MAX_DOCUMENT_BYTES: u64 = 256 * 1024;
 const MAX_SOURCE_OBJECTS: u64 = 2_000_000;
@@ -123,6 +123,43 @@ CREATE TABLE repository_issue_comments (
     PRIMARY KEY (issue_number, number),
     UNIQUE (issue_number, source_request_id)
 ) STRICT;
+CREATE TABLE repository_status_sequences (
+    oid TEXT PRIMARY KEY,
+    last INTEGER NOT NULL
+) STRICT, WITHOUT ROWID;
+CREATE TABLE repository_commit_statuses (
+    oid TEXT NOT NULL,
+    request_id BLOB NOT NULL,
+    payload_digest BLOB NOT NULL,
+    number INTEGER NOT NULL,
+    author_issuer TEXT NOT NULL,
+    author_subject TEXT NOT NULL,
+    author_name TEXT NOT NULL,
+    context_key TEXT NOT NULL,
+    context TEXT NOT NULL,
+    state INTEGER NOT NULL,
+    description TEXT,
+    target_url TEXT,
+    created_at_ms INTEGER NOT NULL,
+    visible INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (oid, request_id),
+    UNIQUE (oid, number)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE repository_status_summary_items (
+    oid TEXT NOT NULL,
+    context_key TEXT NOT NULL,
+    request_id BLOB NOT NULL,
+    number INTEGER NOT NULL,
+    author_issuer TEXT NOT NULL,
+    author_subject TEXT NOT NULL,
+    author_name TEXT NOT NULL,
+    context TEXT NOT NULL,
+    state INTEGER NOT NULL,
+    description TEXT,
+    target_url TEXT,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (oid, context_key)
+) STRICT, WITHOUT ROWID;
 "#;
 
 pub(super) struct StagedSource {
@@ -159,18 +196,22 @@ pub(super) async fn capture(
     store: &Store,
     issue_prefix: &Path,
     label_prefix: &Path,
+    status_prefix: &Path,
     data_dir: &FilePath,
 ) -> crate::Result<StagedSource> {
     let (issue_objects, issue_bytes) = preflight(store, issue_prefix, "issues").await?;
     let (label_objects, label_bytes) = preflight(store, label_prefix, "labels").await?;
+    let (status_objects, status_bytes) = preflight(store, status_prefix, "statuses").await?;
     let expected_objects = issue_objects
         .checked_add(label_objects)
+        .and_then(|value| value.checked_add(status_objects))
         .filter(|value| *value <= MAX_SOURCE_OBJECTS)
         .ok_or(crate::Error::Config(
             "legacy repository source exceeds the object limit",
         ))?;
     let expected_bytes = issue_bytes
         .checked_add(label_bytes)
+        .and_then(|value| value.checked_add(status_bytes))
         .filter(|value| *value <= MAX_SOURCE_BYTES)
         .ok_or(crate::Error::Config(
             "legacy repository source exceeds the byte limit",
@@ -185,7 +226,8 @@ pub(super) async fn capture(
     let writer = tokio::task::spawn_blocking(move || stage(writer_database, receiver));
     let feed = async {
         feed_source(store, issue_prefix, "issues", sender.clone()).await?;
-        feed_source(store, label_prefix, "labels", sender).await
+        feed_source(store, label_prefix, "labels", sender.clone()).await?;
+        feed_source(store, status_prefix, "statuses", sender).await
     }
     .await;
     let written = writer.await?;
@@ -200,6 +242,7 @@ pub(super) async fn capture(
         store,
         issue_prefix,
         label_prefix,
+        status_prefix,
         database.clone(),
         expected_objects,
     )
@@ -306,13 +349,18 @@ async fn verify_source(
     store: &Store,
     issue_prefix: &Path,
     label_prefix: &Path,
+    status_prefix: &Path,
     database: PathBuf,
     expected_objects: u64,
 ) -> crate::Result<()> {
     let (sender, receiver) = mpsc::channel(WRITER_QUEUE);
     let writer = tokio::task::spawn_blocking(move || verify(database, receiver, expected_objects));
     let feed: crate::Result<()> = async {
-        for (prefix, domain) in [(issue_prefix, "issues"), (label_prefix, "labels")] {
+        for (prefix, domain) in [
+            (issue_prefix, "issues"),
+            (label_prefix, "labels"),
+            (status_prefix, "statuses"),
+        ] {
             let mut stream = store.inner().list(Some(prefix));
             while let Some(item) = stream.next().await {
                 let meta = item.map_err(|error| map_object_store_error(error, prefix.as_ref()))?;
@@ -360,6 +408,7 @@ fn stage(database: PathBuf, mut receiver: mpsc::Receiver<StageItem>) -> crate::R
         .map_err(sqlite_error)?;
     let (labels, deleted) = label_catalog.unwrap_or_default();
     labels::materialize(&transaction, labels, deleted)?;
+    materialize_statuses(&transaction)?;
     let label_versions = super::sum_versions(&transaction, "repository_labels")?;
     let deleted_labels: i64 = transaction
         .query_row(
@@ -370,6 +419,7 @@ fn stage(database: PathBuf, mut receiver: mpsc::Receiver<StageItem>) -> crate::R
         .map_err(sqlite_error)?;
     let deleted_labels = u64::try_from(deleted_labels)
         .map_err(|_| crate::Error::Config("legacy label count is negative"))?;
+    let status_revisions = visible_statuses(&transaction)?;
     let app_revision = super::sum_versions(&transaction, "repository_issues")?
         .checked_add(super::sum_versions(
             &transaction,
@@ -377,6 +427,7 @@ fn stage(database: PathBuf, mut receiver: mpsc::Receiver<StageItem>) -> crate::R
         )?)
         .and_then(|value| value.checked_add(label_versions))
         .and_then(|value| value.checked_add(deleted_labels))
+        .and_then(|value| value.checked_add(status_revisions))
         .filter(|value| *value <= crate::app_storage::MAX_NUMBER)
         .ok_or(crate::Error::Config(
             "imported application revision exceeds its limit",
@@ -412,6 +463,11 @@ fn insert_stage_item(
         StageRecord::LabelSequence(_) => SourceKind::LabelSequence,
         StageRecord::LabelReservation { .. } => SourceKind::LabelReservation,
         StageRecord::LabelCatalog { .. } => SourceKind::LabelCatalog,
+        StageRecord::StatusSequence { oid, .. } => SourceKind::StatusSequence { oid: oid.clone() },
+        StageRecord::StatusReservation { record, .. } => SourceKind::StatusReservation {
+            oid: record.oid.clone(),
+        },
+        StageRecord::StatusSummary { oid, .. } => SourceKind::StatusSummary { oid: oid.clone() },
     };
     transaction
         .execute(
@@ -501,6 +557,32 @@ fn insert_stage_item(
                 ));
             }
         }
+        StageRecord::StatusSequence { oid, last } => {
+            transaction
+                .execute(
+                    "INSERT INTO repository_status_sequences(oid, last) VALUES (?1, ?2)",
+                    params![oid, to_i64(last)?],
+                )
+                .map_err(sqlite_error)?;
+        }
+        StageRecord::StatusReservation { record, digest } => {
+            insert_status_reservation(transaction, &record, digest)?;
+        }
+        StageRecord::StatusSummary { oid, statuses } => {
+            if statuses.len() > 128 {
+                return Err(crate::Error::Config(
+                    "legacy status summary exceeds the context limit",
+                ));
+            }
+            for status in statuses {
+                if status.oid != oid {
+                    return Err(crate::Error::Config(
+                        "legacy status summary contains another commit",
+                    ));
+                }
+                insert_status_summary_item(transaction, &status)?;
+            }
+        }
     }
     *bytes = bytes.checked_add(item.size).ok_or(crate::Error::Config(
         "legacy repository byte count overflow",
@@ -544,6 +626,100 @@ fn insert_comment_submission(
         )
         .map_err(sqlite_error)?;
     Ok(())
+}
+
+fn insert_status_reservation(
+    transaction: &rusqlite::Transaction<'_>,
+    record: &CommitStatusRecord,
+    digest: [u8; 32],
+) -> crate::Result<()> {
+    transaction
+        .execute(
+            "INSERT INTO repository_commit_statuses(oid, request_id, payload_digest, number, author_issuer, author_subject, author_name, context_key, context, state, description, target_url, created_at_ms, visible) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0)",
+            params![
+                record.oid,
+                record.submission_id.as_slice(),
+                digest.as_slice(),
+                to_i64(record.number)?,
+                record.author.issuer,
+                record.author.subject,
+                record.author.name,
+                record.context.to_lowercase(),
+                record.context,
+                i64::from(record.state),
+                record.description,
+                record.target_url,
+                to_i64(record.created_at_ms)?,
+            ],
+        )
+        .map_err(sqlite_error)?;
+    Ok(())
+}
+
+fn insert_status_summary_item(
+    transaction: &rusqlite::Transaction<'_>,
+    record: &CommitStatusRecord,
+) -> crate::Result<()> {
+    transaction
+        .execute(
+            "INSERT INTO repository_status_summary_items(oid, context_key, request_id, number, author_issuer, author_subject, author_name, context, state, description, target_url, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                record.oid,
+                record.context.to_lowercase(),
+                record.submission_id.as_slice(),
+                to_i64(record.number)?,
+                record.author.issuer,
+                record.author.subject,
+                record.author.name,
+                record.context,
+                i64::from(record.state),
+                record.description,
+                record.target_url,
+                to_i64(record.created_at_ms)?,
+            ],
+        )
+        .map_err(sqlite_error)?;
+    Ok(())
+}
+
+fn materialize_statuses(transaction: &rusqlite::Transaction<'_>) -> crate::Result<()> {
+    let summaries: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM repository_status_summary_items",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_error)?;
+    let matched: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM repository_status_summary_items AS i JOIN repository_commit_statuses AS s ON i.oid = s.oid AND i.request_id = s.request_id AND i.number = s.number AND i.author_issuer = s.author_issuer AND i.author_subject = s.author_subject AND i.author_name = s.author_name AND i.context = s.context AND i.state = s.state AND i.description IS s.description AND i.target_url IS s.target_url AND i.created_at_ms = s.created_at_ms",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_error)?;
+    if matched != summaries {
+        return Err(crate::Error::Config(
+            "legacy status summary has no matching reservation",
+        ));
+    }
+    transaction
+        .execute(
+            "UPDATE repository_commit_statuses AS s SET visible = 1 WHERE EXISTS (SELECT 1 FROM repository_status_summary_items AS i WHERE i.oid = s.oid AND i.context_key = s.context_key AND s.number <= i.number)",
+            [],
+        )
+        .map_err(sqlite_error)?;
+    Ok(())
+}
+
+fn visible_statuses(connection: &Connection) -> crate::Result<u64> {
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM repository_commit_statuses WHERE visible = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_error)?;
+    u64::try_from(count).map_err(|_| crate::Error::Config("legacy status count is negative"))
 }
 
 fn verify(
@@ -626,6 +802,22 @@ fn validate_staged(connection: &Connection) -> crate::Result<()> {
                     LEFT JOIN repository_issues i ON i.number = s.issue_number
                     LEFT JOIN repository_comment_sequences q ON q.issue_number = s.issue_number
                     WHERE i.number IS NULL OR q.issue_number IS NULL
+                )
+                OR EXISTS (
+                    SELECT 1 FROM repository_status_sequences q
+                    WHERE q.last < 1 OR q.last > 1000
+                        OR q.last < COALESCE((SELECT MAX(s.number) FROM repository_commit_statuses s WHERE s.oid = q.oid), 0)
+                )
+                OR EXISTS (
+                    SELECT 1 FROM repository_commit_statuses s
+                    LEFT JOIN repository_status_sequences q ON q.oid = s.oid
+                    WHERE q.oid IS NULL
+                )
+                OR EXISTS (
+                    SELECT oid FROM repository_commit_statuses
+                    WHERE visible = 1
+                    GROUP BY oid
+                    HAVING COUNT(DISTINCT context_key) > 128
                 )
             LIMIT 1",
             [],
@@ -723,6 +915,34 @@ pub(super) fn validate_comment_v1(record: &CommentRecord) -> crate::Result<()> {
         ));
     }
     validate_number_v1(record.version)
+}
+
+pub(super) fn validate_status_v1(record: &CommitStatusRecord) -> crate::Result<()> {
+    validate_author_v1(&record.author)?;
+    if record.number == 0
+        || record.number > 1_000
+        || record.oid.len() != 40
+        || !record
+            .oid
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        || record.oid.bytes().all(|byte| byte == b'0')
+        || record.context.is_empty()
+        || record.context.trim() != record.context
+        || record.context.chars().count() > 100
+        || record.context.chars().any(char::is_control)
+        || record.state > 3
+        || record
+            .description
+            .as_ref()
+            .is_some_and(|value| value.chars().count() > 140 || value.chars().any(char::is_control))
+        || crate::statuses::validate_target(record.target_url.as_deref()).is_err()
+    {
+        return Err(crate::Error::Config(
+            "legacy commit status violates repository schema v1",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn validate_number_v1(value: u64) -> crate::Result<()> {

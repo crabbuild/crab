@@ -698,3 +698,234 @@ impl Query for ListLabels {
         Ok(LabelCatalog { labels })
     }
 }
+
+pub(crate) struct CreateCommitStatus;
+
+impl Command for CreateCommitStatus {
+    const MODULE: &'static str = RepositoryModule::NAME;
+    const ID: u32 = 11;
+    const CODEC_VERSION: u32 = 1;
+    type Input = CreateCommitStatusInput;
+    type Output = CreateCommitStatusOutcome;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        input: Self::Input,
+    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+        validate_author(&input.author)?;
+        validate_status_fields(
+            &input.oid,
+            &input.context,
+            input.state,
+            input.description.as_deref(),
+            input.target_url.as_deref(),
+        )?;
+        let payload_digest = status_submission_digest(&input);
+        let existing = context.sql(&SqlBatch {
+            statements: vec![statement(
+                "SELECT payload_digest, number, request_id, author_issuer, author_subject, author_name, oid, context, state, description, target_url, created_at_ms, visible FROM repository_commit_statuses WHERE oid = ? AND request_id = ?",
+                vec![
+                    SqlValue::Text(input.oid.clone()),
+                    SqlValue::Blob(input.submission_id.to_vec()),
+                ],
+            )],
+        })?;
+        if let Some(row) = existing[0].rows.first() {
+            if result_blob(row, 0)? != payload_digest.as_bytes() {
+                return Ok(CommandResult::Rejected(
+                    CreateCommitStatusOutcome::RequestConflict,
+                ));
+            }
+            let status = status_from_row(&row[1..12])?;
+            if result_u64_from_row(row, 12)? == 0 {
+                if !status_context_available(context, &status.oid, &status.context)? {
+                    return Ok(CommandResult::Rejected(
+                        CreateCommitStatusOutcome::ContextLimit,
+                    ));
+                }
+                let published = context.sql(&SqlBatch {
+                    statements: vec![statement(
+                        "UPDATE repository_commit_statuses SET visible = 1 WHERE oid = ? AND request_id = ? AND visible = 0",
+                        vec![
+                            SqlValue::Text(status.oid.clone()),
+                            SqlValue::Blob(status.submission_id.to_vec()),
+                        ],
+                    )],
+                })?;
+                if published[0].rows_affected != 1 {
+                    return Err(crab_cell_runtime::Error::Command(
+                        "repository commit status repair lost its reservation",
+                    ));
+                }
+                advance_revision(context)?;
+            }
+            return Ok(CommandResult::Success(CreateCommitStatusOutcome::Created(
+                Box::new(status),
+            )));
+        }
+
+        if !status_context_available(context, &input.oid, &input.context)? {
+            return Ok(CommandResult::Rejected(
+                CreateCommitStatusOutcome::ContextLimit,
+            ));
+        }
+        let sequence = context.sql(&SqlBatch {
+            statements: vec![
+                statement(
+                    "INSERT INTO repository_status_sequences(oid, last) VALUES (?, 1) ON CONFLICT(oid) DO UPDATE SET last = last + 1 WHERE last < 1000",
+                    vec![SqlValue::Text(input.oid.clone())],
+                ),
+                statement(
+                    "SELECT last FROM repository_status_sequences WHERE oid = ?",
+                    vec![SqlValue::Text(input.oid.clone())],
+                ),
+            ],
+        })?;
+        if sequence[0].rows_affected != 1 {
+            return Ok(CommandResult::Rejected(
+                CreateCommitStatusOutcome::SubmissionLimit,
+            ));
+        }
+        let status = CommitStatusRecord {
+            number: result_u64(&sequence, 1, 0)?,
+            submission_id: input.submission_id,
+            author: input.author,
+            oid: input.oid,
+            context: input.context,
+            state: input.state,
+            description: input.description,
+            target_url: input.target_url,
+            created_at_ms: timestamp(context.now_ms())?,
+        };
+        let context_key = status.context.to_lowercase();
+        context.sql(&SqlBatch {
+            statements: vec![statement(
+                "INSERT INTO repository_commit_statuses(oid, request_id, payload_digest, number, author_issuer, author_subject, author_name, context_key, context, state, description, target_url, created_at_ms, visible) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+                vec![
+                    SqlValue::Text(status.oid.clone()),
+                    SqlValue::Blob(status.submission_id.to_vec()),
+                    SqlValue::Blob(payload_digest.as_bytes().to_vec()),
+                    integer(status.number)?,
+                    SqlValue::Text(status.author.issuer.clone()),
+                    SqlValue::Text(status.author.subject.clone()),
+                    SqlValue::Text(status.author.name.clone()),
+                    SqlValue::Text(context_key),
+                    SqlValue::Text(status.context.clone()),
+                    SqlValue::Integer(i64::from(status.state)),
+                    status
+                        .description
+                        .clone()
+                        .map_or(SqlValue::Null, SqlValue::Text),
+                    status
+                        .target_url
+                        .clone()
+                        .map_or(SqlValue::Null, SqlValue::Text),
+                    integer(status.created_at_ms)?,
+                ],
+            )],
+        })?;
+        advance_revision(context)?;
+        Ok(CommandResult::Success(CreateCommitStatusOutcome::Created(
+            Box::new(status),
+        )))
+    }
+}
+
+pub(crate) struct ListCommitStatuses;
+
+impl Query for ListCommitStatuses {
+    const MODULE: &'static str = RepositoryModule::NAME;
+    const ID: u32 = 7;
+    const CODEC_VERSION: u32 = 1;
+    type Input = String;
+    type Output = CommitStatusCatalog;
+
+    fn execute(
+        context: &mut QueryContext<'_>,
+        oid: Self::Input,
+    ) -> crab_cell_runtime::Result<Self::Output> {
+        validate_status_fields(&oid, "status", 0, None, None)?;
+        let result = context.sql(&SqlBatch {
+            statements: vec![statement(
+                "SELECT number, request_id, author_issuer, author_subject, author_name, oid, context, state, description, target_url, created_at_ms, context_key FROM repository_commit_statuses WHERE oid = ? AND visible = 1 ORDER BY context_key, number DESC",
+                vec![SqlValue::Text(oid)],
+            )],
+        })?;
+        if result[0].rows.len() > MAX_STATUS_SUBMISSIONS as usize {
+            return Err(crab_cell_runtime::Error::Command(
+                "repository commit status catalog exceeds its bound",
+            ));
+        }
+        let mut statuses = Vec::new();
+        let mut previous = None;
+        for row in &result[0].rows {
+            let key = result_text(row, 11)?;
+            if previous.as_deref() == Some(key.as_str()) {
+                continue;
+            }
+            statuses.push(status_from_row(&row[..11])?);
+            previous = Some(key);
+        }
+        if statuses.len() > MAX_STATUS_CONTEXTS as usize {
+            return Err(crab_cell_runtime::Error::Command(
+                "repository commit status contexts exceed their bound",
+            ));
+        }
+        Ok(CommitStatusCatalog { statuses })
+    }
+}
+
+pub(crate) struct GetCommitStatusSubmission;
+
+impl Query for GetCommitStatusSubmission {
+    const MODULE: &'static str = RepositoryModule::NAME;
+    const ID: u32 = 8;
+    const CODEC_VERSION: u32 = 1;
+    type Input = CommitStatusSubmissionKey;
+    type Output = Option<CommitStatusRecord>;
+
+    fn execute(
+        context: &mut QueryContext<'_>,
+        key: Self::Input,
+    ) -> crab_cell_runtime::Result<Self::Output> {
+        validate_status_fields(&key.oid, "status", 0, None, None)?;
+        let result = context.sql(&SqlBatch {
+            statements: vec![statement(
+                "SELECT number, request_id, author_issuer, author_subject, author_name, oid, context, state, description, target_url, created_at_ms FROM repository_commit_statuses WHERE oid = ? AND request_id = ?",
+                vec![
+                    SqlValue::Text(key.oid),
+                    SqlValue::Blob(key.submission_id.to_vec()),
+                ],
+            )],
+        })?;
+        result[0]
+            .rows
+            .first()
+            .map(|row| status_from_row(row))
+            .transpose()
+    }
+}
+
+fn status_context_available(
+    context: &CommandContext<'_, '_>,
+    oid: &str,
+    status_context: &str,
+) -> crab_cell_runtime::Result<bool> {
+    let context_key = status_context.to_lowercase();
+    let result = context.sql(&SqlBatch {
+        statements: vec![
+            statement(
+                "SELECT 1 FROM repository_commit_statuses WHERE oid = ? AND context_key = ? AND visible = 1 LIMIT 1",
+                vec![
+                    SqlValue::Text(oid.to_owned()),
+                    SqlValue::Text(context_key),
+                ],
+            ),
+            statement(
+                "SELECT COUNT(DISTINCT context_key) FROM repository_commit_statuses WHERE oid = ? AND visible = 1",
+                vec![SqlValue::Text(oid.to_owned())],
+            ),
+        ],
+    })?;
+    Ok(!result[0].rows.is_empty() || result_u64(&result, 1, 0)? < MAX_STATUS_CONTEXTS)
+}

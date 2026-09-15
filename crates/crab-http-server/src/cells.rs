@@ -65,6 +65,7 @@ const REPOSITORY_COMMANDS: &[OperationDescriptor] = &[
     operation(8, 8 * 1024, 4 * 1024),
     operation(9, 8 * 1024, 4 * 1024),
     operation(10, 16, 1),
+    operation(11, 8 * 1024, 8 * 1024),
 ];
 const REPOSITORY_QUERIES: &[OperationDescriptor] = &[
     operation(1, 8, 80 * 1024),
@@ -73,6 +74,8 @@ const REPOSITORY_QUERIES: &[OperationDescriptor] = &[
     operation(4, 32, 1024 * 1024),
     operation(REPOSITORY_EFFECT_VALIDATE_QUERY_ID, 1024 * 1024, 1),
     operation(6, 8, 384 * 1024),
+    operation(7, 128, 1024 * 1024),
+    operation(8, 64, 8 * 1024),
 ];
 
 struct RepositoryModule;
@@ -1327,12 +1330,13 @@ mod tests {
     use serde_json::Value;
 
     use super::repository::{
-        CommentKey, CommentPage, CreateComment, CreateCommentInput, CreateCommentOutcome,
-        CreateIssue, CreateIssueInput, CreateIssueOutcome, CreateLabel, CreateLabelInput,
-        CreateLabelOutcome, GetComment, GetIssue, IssuePage, LabelCatalog, ListComments,
-        ListCommentsInput, ListIssues, ListIssuesInput, ListLabels, RepositoryAuthor,
-        UpdateComment, UpdateCommentInput, UpdateCommentOutcome, UpdateIssue, UpdateIssueInput,
-        UpdateIssueOutcome,
+        CommentKey, CommentPage, CommitStatusCatalog, CreateComment, CreateCommentInput,
+        CreateCommentOutcome, CreateCommitStatus, CreateCommitStatusInput,
+        CreateCommitStatusOutcome, CreateIssue, CreateIssueInput, CreateIssueOutcome, CreateLabel,
+        CreateLabelInput, CreateLabelOutcome, GetComment, GetIssue, IssuePage, LabelCatalog,
+        ListComments, ListCommentsInput, ListCommitStatuses, ListIssues, ListIssuesInput,
+        ListLabels, RepositoryAuthor, UpdateComment, UpdateCommentInput, UpdateCommentOutcome,
+        UpdateIssue, UpdateIssueInput, UpdateIssueOutcome,
     };
     use super::*;
 
@@ -1410,7 +1414,7 @@ mod tests {
         assert_eq!(descriptor["modules"][0]["name"], "repository");
         assert_eq!(
             descriptor["modules"][0]["code"],
-            "2501a79d687e3cf8b895752359c72ddf7b5033886895d9d34953076831220a84"
+            "23e5e5ab7a8e8876d74c7fbaa3c643a16fc116d879e7c80bb9937e0338b7141d"
         );
         assert_eq!(descriptor["modules"][0]["schema_min"], 1);
         assert_eq!(descriptor["modules"][0]["schema_max"], 1);
@@ -1419,14 +1423,14 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            10
+            11
         );
         assert_eq!(
             descriptor["modules"][0]["queries"]
                 .as_array()
                 .unwrap()
                 .len(),
-            6
+            8
         );
         assert_eq!(descriptor["namespaces"][0]["role"], "repository");
         assert_eq!(descriptor["namespaces"][0]["shards"], 1);
@@ -2816,6 +2820,60 @@ mod tests {
         assert_eq!(updated_comment_record.version, 2);
         assert_eq!(updated_comment.receipt.commit_sequence, 11);
 
+        let status_input = CreateCommitStatusInput {
+            submission_id: [17; 16],
+            author: updated_comment_record.author.clone(),
+            oid: "0123456789abcdef0123456789abcdef01234567".into(),
+            context: "ci/test".into(),
+            state: 2,
+            description: Some("Tests are running".into()),
+            target_url: Some("https://ci.example.test/build/17".into()),
+        };
+        let first_status = first_client
+            .command::<CreateCommitStatus>(&target, mutation(17), status_input.clone())
+            .await
+            .unwrap();
+        let CreateCommitStatusOutcome::Created(first_status_record) = &first_status.output else {
+            panic!("successful status command returned a rejection outcome");
+        };
+        assert_eq!(first_status_record.number, 1);
+        let second_status = first_client
+            .command::<CreateCommitStatus>(
+                &target,
+                mutation(18),
+                CreateCommitStatusInput {
+                    submission_id: [18; 16],
+                    author: status_input.author.clone(),
+                    oid: status_input.oid.clone(),
+                    context: "CI/Test".into(),
+                    state: 3,
+                    description: Some("Tests passed".into()),
+                    target_url: Some("https://ci.example.test/build/18".into()),
+                },
+            )
+            .await
+            .unwrap();
+        let CreateCommitStatusOutcome::Created(second_status_record) = &second_status.output else {
+            panic!("second status command returned a rejection outcome");
+        };
+        assert_eq!(second_status_record.number, 2);
+        let status_conflict = first_client
+            .command::<CreateCommitStatus>(
+                &target,
+                mutation(19),
+                CreateCommitStatusInput {
+                    state: 1,
+                    ..status_input.clone()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            status_conflict,
+            InvocationError::Rejected(ref outcome)
+                if outcome.output == CreateCommitStatusOutcome::RequestConflict
+        ));
+
         assert_eq!(
             first_client
                 .query::<ListIssues>(
@@ -2834,6 +2892,20 @@ mod tests {
             IssuePage {
                 items: vec![updated_issue_record.as_ref().clone().into()],
                 next: None,
+            }
+        );
+        assert_eq!(
+            first_client
+                .query::<ListCommitStatuses>(
+                    &target,
+                    Some(second_status.receipt),
+                    status_input.oid.clone(),
+                )
+                .await
+                .unwrap()
+                .output,
+            CommitStatusCatalog {
+                statuses: vec![second_status_record.as_ref().clone()],
             }
         );
         assert_eq!(
@@ -2924,6 +2996,20 @@ mod tests {
                 .output,
             LabelCatalog {
                 labels: vec![first_label_record.clone(), second_label_record.clone()],
+            }
+        );
+        assert_eq!(
+            second_client
+                .query::<ListCommitStatuses>(
+                    &target,
+                    Some(second_status.receipt),
+                    status_input.oid,
+                )
+                .await
+                .unwrap()
+                .output,
+            CommitStatusCatalog {
+                statuses: vec![second_status_record.as_ref().clone()],
             }
         );
         assert_eq!(

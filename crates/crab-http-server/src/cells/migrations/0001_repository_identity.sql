@@ -93,3 +93,32 @@ CREATE TABLE repository_issue_comments (
     PRIMARY KEY (issue_number, number),
     FOREIGN KEY (issue_number) REFERENCES repository_issues(number) ON DELETE CASCADE
 ) STRICT;
+
+CREATE TABLE repository_status_sequences (
+    oid TEXT PRIMARY KEY CHECK (length(oid) = 40),
+    last INTEGER NOT NULL CHECK (last BETWEEN 1 AND 1000)
+) STRICT, WITHOUT ROWID;
+
+-- Invisible rows preserve legacy reservations whose summary publication did not finish.
+CREATE TABLE repository_commit_statuses (
+    oid TEXT NOT NULL CHECK (length(oid) = 40),
+    request_id BLOB NOT NULL CHECK (length(request_id) = 16),
+    payload_digest BLOB NOT NULL CHECK (length(payload_digest) = 32),
+    number INTEGER NOT NULL CHECK (number BETWEEN 1 AND 1000),
+    author_issuer TEXT NOT NULL,
+    author_subject TEXT NOT NULL,
+    author_name TEXT NOT NULL,
+    context_key TEXT NOT NULL,
+    context TEXT NOT NULL,
+    state INTEGER NOT NULL CHECK (state BETWEEN 0 AND 3),
+    description TEXT,
+    target_url TEXT,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    visible INTEGER NOT NULL DEFAULT 1 CHECK (visible IN (0, 1)),
+    PRIMARY KEY (oid, request_id),
+    UNIQUE (oid, number)
+) STRICT, WITHOUT ROWID;
+
+CREATE INDEX repository_visible_commit_statuses
+ON repository_commit_statuses(oid, context_key, number DESC)
+WHERE visible = 1;

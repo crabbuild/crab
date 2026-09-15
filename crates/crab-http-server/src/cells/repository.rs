@@ -6,8 +6,8 @@ use crab_cell_runtime::{
 use super::RepositoryModule;
 
 pub(crate) use operations::{
-    CreateLabel, DeleteLabel, ListComments, ListIssues, ListLabels, UpdateComment, UpdateIssue,
-    UpdateLabel,
+    CreateCommitStatus, CreateLabel, DeleteLabel, GetCommitStatusSubmission, ListComments,
+    ListCommitStatuses, ListIssues, ListLabels, UpdateComment, UpdateIssue, UpdateLabel,
 };
 
 const MAX_NUMBER: u64 = 9_007_199_254_740_991;
@@ -15,6 +15,8 @@ const MAX_LIST_ITEMS: usize = 50;
 const MAX_LIST_SCAN: u64 = 200;
 const MAX_LABELS: usize = 20;
 const MAX_REPOSITORY_LABELS: u64 = 500;
+const MAX_STATUS_CONTEXTS: u64 = 128;
+const MAX_STATUS_SUBMISSIONS: u64 = 1_000;
 const MAX_ASSIGNEES: usize = 10;
 const MAX_LIST_OUTPUT_BYTES: usize = 1024 * 1024;
 
@@ -23,6 +25,49 @@ pub(crate) struct RepositoryAuthor {
     pub issuer: String,
     pub subject: String,
     pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CommitStatusRecord {
+    pub number: u64,
+    pub submission_id: [u8; 16],
+    pub author: RepositoryAuthor,
+    pub oid: String,
+    pub context: String,
+    pub state: u8,
+    pub description: Option<String>,
+    pub target_url: Option<String>,
+    pub created_at_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CreateCommitStatusInput {
+    pub submission_id: [u8; 16],
+    pub author: RepositoryAuthor,
+    pub oid: String,
+    pub context: String,
+    pub state: u8,
+    pub description: Option<String>,
+    pub target_url: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CreateCommitStatusOutcome {
+    Created(Box<CommitStatusRecord>),
+    RequestConflict,
+    ContextLimit,
+    SubmissionLimit,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CommitStatusSubmissionKey {
+    pub oid: String,
+    pub submission_id: [u8; 16],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CommitStatusCatalog {
+    pub statuses: Vec<CommitStatusRecord>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -531,11 +576,14 @@ pub(crate) fn register(registry: &mut RegistryBuilder) -> crab_cell_runtime::Res
     registry.bind_command::<CreateLabel>()?;
     registry.bind_command::<UpdateLabel>()?;
     registry.bind_command::<DeleteLabel>()?;
+    registry.bind_command::<CreateCommitStatus>()?;
     registry.bind_query::<GetIssue>()?;
     registry.bind_query::<GetComment>()?;
     registry.bind_query::<ListIssues>()?;
     registry.bind_query::<ListComments>()?;
-    registry.bind_query::<ListLabels>()
+    registry.bind_query::<ListLabels>()?;
+    registry.bind_query::<ListCommitStatuses>()?;
+    registry.bind_query::<GetCommitStatusSubmission>()
 }
 
 fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlStatement {
@@ -636,6 +684,31 @@ pub(super) fn label_submission_digest(input: &CreateLabelInput) -> blake3::Hash 
     hasher.finalize()
 }
 
+pub(super) fn status_submission_digest(input: &CreateCommitStatusInput) -> blake3::Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"crab.repository.commit-status-submission.v1\0");
+    hash_text(&mut hasher, &input.author.issuer);
+    hash_text(&mut hasher, &input.author.subject);
+    hash_text(&mut hasher, &input.oid);
+    hash_text(&mut hasher, &input.context);
+    hasher.update(&[input.state]);
+    hash_optional_text(&mut hasher, input.description.as_deref());
+    hash_optional_text(&mut hasher, input.target_url.as_deref());
+    hasher.finalize()
+}
+
+fn hash_optional_text(hasher: &mut blake3::Hasher, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            hasher.update(&[1]);
+            hash_text(hasher, value);
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+}
+
 fn hash_text(hasher: &mut blake3::Hasher, value: &str) {
     hasher.update(&(value.len() as u64).to_be_bytes());
     hasher.update(value.as_bytes());
@@ -718,6 +791,32 @@ fn label_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<LabelRecord> {
         updated_at_ms: result_u64_from_row(row, 6)?,
     };
     validate_label(&record)?;
+    Ok(record)
+}
+
+fn status_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<CommitStatusRecord> {
+    let submission = result_blob(row, 1)?;
+    let submission_id = <[u8; 16]>::try_from(submission).map_err(|_| {
+        crab_cell_runtime::Error::Command("repository status submission ID is invalid")
+    })?;
+    let state = u8::try_from(result_u64_from_row(row, 7)?)
+        .map_err(|_| crab_cell_runtime::Error::Command("repository status state is invalid"))?;
+    let record = CommitStatusRecord {
+        number: result_u64_from_row(row, 0)?,
+        submission_id,
+        author: RepositoryAuthor {
+            issuer: result_text(row, 2)?,
+            subject: result_text(row, 3)?,
+            name: result_text(row, 4)?,
+        },
+        oid: result_text(row, 5)?,
+        context: result_text(row, 6)?,
+        state,
+        description: result_optional_text(row, 8)?,
+        target_url: result_optional_text(row, 9)?,
+        created_at_ms: result_u64_from_row(row, 10)?,
+    };
+    validate_status_record(&record)?;
     Ok(record)
 }
 
@@ -853,6 +952,59 @@ fn validate_label_fields(
         ));
     }
     Ok(())
+}
+
+fn validate_status_fields(
+    oid: &str,
+    context: &str,
+    state: u8,
+    description: Option<&str>,
+    target_url: Option<&str>,
+) -> crab_cell_runtime::Result<()> {
+    if oid.len() != 40
+        || !oid
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        || oid.bytes().all(|byte| byte == b'0')
+        || context.is_empty()
+        || context.trim() != context
+        || context.chars().count() > 100
+        || context.chars().any(char::is_control)
+        || state > 3
+        || description
+            .is_some_and(|value| value.chars().count() > 140 || value.chars().any(char::is_control))
+        || target_url
+            .is_some_and(|value| value.len() > 2_048 || value.chars().any(char::is_control))
+    {
+        return Err(crab_cell_runtime::Error::Command(
+            "repository commit status is invalid",
+        ));
+    }
+    if let Some(value) = target_url {
+        let url = url::Url::parse(value).map_err(|_| {
+            crab_cell_runtime::Error::Command("repository commit status target is invalid")
+        })?;
+        crate::config::validate_identity_url(&url, true).map_err(|_| {
+            crab_cell_runtime::Error::Command("repository commit status target is invalid")
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_status_record(record: &CommitStatusRecord) -> crab_cell_runtime::Result<()> {
+    if record.number == 0 || record.number > MAX_STATUS_SUBMISSIONS {
+        return Err(crab_cell_runtime::Error::Command(
+            "repository commit status number is invalid",
+        ));
+    }
+    validate_author(&record.author)?;
+    validate_status_fields(
+        &record.oid,
+        &record.context,
+        record.state,
+        record.description.as_deref(),
+        record.target_url.as_deref(),
+    )
 }
 
 fn validate_label(record: &LabelRecord) -> crab_cell_runtime::Result<()> {

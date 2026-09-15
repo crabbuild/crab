@@ -73,7 +73,8 @@ retries one definitely-not-started stale-owner attempt without retrying ambiguou
 mutations. Typed local SQL, KV, Queue
 and Workflow capabilities are implemented. The server composition root now
 compiles and binds create/update and get/list operations for issues and comments,
-plus create/update/delete/list operations for labels, with its repository
+plus create/update/delete/list operations for labels and create/latest/replay
+operations for commit statuses, with its repository
 identity and collaboration migration. Server integration tests drive these bindings through the runtime, publish each
 decision through LTX, removes the first local SQLite database and restores the
 updated detail and list results under a second owner. The built-binary release
@@ -96,14 +97,17 @@ roots during rollout.
 | command | 8 | `CreateLabel` | 8 KiB | 4 KiB | Enforce permanent submission and name uniqueness, allocate a lifetime number, insert the label, advance app revision |
 | command | 9 | `UpdateLabel` | 8 KiB | 4 KiB | Check active row, version and normalized name uniqueness; update display fields and app revision |
 | command | 10 | `DeleteLabel` | 16 B | 1 B | Persist the deletion version tombstone and advance app revision; exact retries are idempotent |
+| command | 11 | `CreateCommitStatus` | 8 KiB | 8 KiB | Enforce permanent per-commit submission identity, 1,000-event and 128-context bounds; append the status and advance app revision |
 | query | 1 | `GetIssue` | 8 B | 80 KiB | Primary-key read |
 | query | 2 | `GetComment` | 16 B | 80 KiB | `(issue, number)` primary-key read |
 | query | 3 | `ListIssues` | 1 KiB | 1 MiB | Descending cursor/state/search page, at most 50 results and 200 number probes |
 | query | 4 | `ListComments` | 32 B | 1 MiB | Descending cursor page, at most 50 results and 200 number probes |
 | query | 5 | `EffectValidate` | 1 MiB | 1 B | Validate the exact published source lease at a minimum receipt |
 | query | 6 | `ListLabels` | 8 B | 384 KiB | Return at most 500 active labels in normalized-name order, including maximum UTF-8 fields |
+| query | 7 | `ListCommitStatuses` | 128 B | 1 MiB | Return the latest visible status for each case-insensitive context in deterministic context order |
+| query | 8 | `GetCommitStatusSubmission` | 64 B | 8 KiB | Resolve a permanent submission before Git reachability admission so exact retries remain stable |
 
-All sixteen use codec version 1 and schema version 1. Issue/comment numbers and
+All nineteen use codec version 1 and schema version 1. Issue/comment numbers and
 versions are positive integers no larger than 9,007,199,254,740,991. The
 initializer writes the catalog repository UUID to the singleton identity row;
 handlers fail the complete application savepoint if that row is missing or its
@@ -115,6 +119,11 @@ rejections. Label IDs and assignee subjects are canonical sorted bounded vectors
 stored with each issue. The adapter validates both catalogs before dispatch, and
 the issue command rechecks active label existence in its SQLite transaction to
 close the delete/assignment race; repository membership remains an HTTP authority.
+Commit statuses use exact lowercase SHA-1 OIDs, immutable numbered events and a
+case-insensitive context key. The HTTP adapter verifies commit reachability only
+for new submissions; it resolves an existing permanent submission first, then
+replays or completes it without depending on later ref reachability. Pull views
+and merge admission read the same typed latest-status query.
 One exact byte fixture for every command input/output and query input/output
 pins codec v1 independently of descriptor construction and runtime dispatch.
 
@@ -1039,7 +1048,7 @@ ready record with a missing control/root fails verification rather than
 bootstrapping again. `serve` verifies this state and root for every repository
 before binding either listener.
 
-The router and authenticated issue/comment/label HTTP routes are integration-qualified
+The router and authenticated issue/comment/label/status HTTP routes are integration-qualified
 for explicit bootstrap, local reuse, clean idle release, source-independent
 exact-root restoration and stable submission replay. The maintenance CLI imports
 the legacy issue/comment and Label object trees with bounded two-pass source

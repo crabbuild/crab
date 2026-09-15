@@ -688,6 +688,7 @@ fn permits_repository_mutation(request: &VerifiedPeerRequest) -> bool {
         "repository.label.create",
         "repository.label.update",
         "repository.label.delete",
+        "repository.status.create",
     ]
     .iter()
     .any(|action| request.permits(action))
@@ -702,6 +703,7 @@ const fn required_mutation_action(command_id: u32) -> Option<&'static str> {
         8 => Some("repository.label.create"),
         9 => Some("repository.label.update"),
         10 => Some("repository.label.delete"),
+        11 => Some("repository.status.create"),
         _ => None,
     }
 }
@@ -929,6 +931,7 @@ mod tests {
             (8, "repository.label.create"),
             (9, "repository.label.update"),
             (10, "repository.label.delete"),
+            (11, "repository.status.create"),
         ] {
             let request = verified(command, vec![action.into()]);
             assert!(

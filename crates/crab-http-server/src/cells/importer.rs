@@ -38,6 +38,8 @@ pub(super) struct SemanticSummary {
     issue_submissions: u64,
     comments: u64,
     comment_submissions: u64,
+    statuses: u64,
+    status_submissions: u64,
     app_revision: u64,
 }
 
@@ -106,6 +108,7 @@ pub(crate) async fn import_repository(
             repository_layout.store(),
             &repository_layout.repo_path("app/v1/issues"),
             &repository_layout.repo_path("app/v1/labels"),
+            &repository_layout.repo_path("app/v1/statuses"),
             directory.path(),
         )
         .await?;
@@ -475,6 +478,8 @@ fn copy_staged(
     copy_comment_sequences(&source, target)?;
     copy_comment_submissions(&source, target)?;
     copy_comments(&source, target)?;
+    copy_status_sequences(&source, target)?;
+    copy_statuses(&source, target)?;
     let summary = semantic_summary(&source).map_err(|error| match error {
         Error::Cell(error) => error,
         _ => crab_cell_runtime::Error::Command("legacy semantic summary failed"),
@@ -579,6 +584,30 @@ fn copy_comments(
     )
 }
 
+fn copy_status_sequences(
+    source: &Connection,
+    target: &rusqlite::Transaction<'_>,
+) -> crab_cell_runtime::Result<()> {
+    copy_rows(
+        source,
+        target,
+        "SELECT oid, last FROM repository_status_sequences ORDER BY oid",
+        "INSERT INTO repository_status_sequences(oid, last) VALUES (?1, ?2)",
+    )
+}
+
+fn copy_statuses(
+    source: &Connection,
+    target: &rusqlite::Transaction<'_>,
+) -> crab_cell_runtime::Result<()> {
+    copy_rows(
+        source,
+        target,
+        "SELECT oid, request_id, payload_digest, number, author_issuer, author_subject, author_name, context_key, context, state, description, target_url, created_at_ms, visible FROM repository_commit_statuses ORDER BY oid, number",
+        "INSERT INTO repository_commit_statuses(oid, request_id, payload_digest, number, author_issuer, author_subject, author_name, context_key, context, state, description, target_url, created_at_ms, visible) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+    )
+}
+
 fn copy_rows(
     source: &Connection,
     target: &rusqlite::Transaction<'_>,
@@ -599,7 +628,7 @@ fn copy_rows(
 
 pub(super) fn semantic_summary(connection: &Connection) -> Result<SemanticSummary> {
     let mut hasher = Hasher::new();
-    hasher.update(b"crab.repository.import.semantic.v2\0");
+    hasher.update(b"crab.repository.import.semantic.v3\0");
     for query in [
         "SELECT app_revision FROM repository_identity WHERE singleton = 1",
         "SELECT kind, last FROM repository_sequences WHERE kind IN ('issue', 'label') ORDER BY kind",
@@ -610,6 +639,8 @@ pub(super) fn semantic_summary(connection: &Connection) -> Result<SemanticSummar
         "SELECT issue_number, last FROM repository_comment_sequences ORDER BY issue_number",
         "SELECT issue_number, request_id, payload_digest, comment_number, author_name, created_at_ms FROM repository_comment_submissions ORDER BY issue_number, request_id",
         "SELECT issue_number, number, author_issuer, author_subject, author_name, body, version, created_at_ms, updated_at_ms FROM repository_issue_comments ORDER BY issue_number, number",
+        "SELECT oid, last FROM repository_status_sequences ORDER BY oid",
+        "SELECT oid, request_id, payload_digest, number, author_issuer, author_subject, author_name, context_key, context, state, description, target_url, created_at_ms, visible FROM repository_commit_statuses ORDER BY oid, number",
     ] {
         hash_query(connection, &mut hasher, query)?;
     }
@@ -624,11 +655,14 @@ pub(super) fn semantic_summary(connection: &Connection) -> Result<SemanticSummar
     let issue_submissions = count(connection, "repository_issue_submissions")?;
     let comments = count(connection, "repository_issue_comments")?;
     let comment_submissions = count(connection, "repository_comment_submissions")?;
+    let statuses = count_where(connection, "repository_commit_statuses", "visible = 1")?;
+    let status_submissions = count(connection, "repository_commit_statuses")?;
     let label_versions = sum_versions(connection, "repository_labels")?;
     let app_revision = sum_versions(connection, "repository_issues")?
         .checked_add(sum_versions(connection, "repository_issue_comments")?)
         .and_then(|value| value.checked_add(label_versions))
         .and_then(|value| value.checked_add(deleted_labels))
+        .and_then(|value| value.checked_add(statuses))
         .filter(|value| *value <= crate::app_storage::MAX_NUMBER)
         .ok_or(Error::Config(
             "imported application revision exceeds its limit",
@@ -654,6 +688,8 @@ pub(super) fn semantic_summary(connection: &Connection) -> Result<SemanticSummar
         issue_submissions,
         comments,
         comment_submissions,
+        statuses,
+        status_submissions,
         app_revision,
     })
 }

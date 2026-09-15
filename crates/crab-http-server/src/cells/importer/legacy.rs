@@ -74,3 +74,24 @@ pub(super) struct LabelCatalog {
     #[serde(default)]
     pub deleted: Vec<DeletedLabel>,
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CommitStatus {
+    pub number: u64,
+    pub request_id: String,
+    pub author: Identity,
+    pub oid: String,
+    pub context: String,
+    pub state: crate::statuses::StatusState,
+    pub description: Option<String>,
+    pub target_url: Option<String>,
+    pub created_at: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct StatusSummary {
+    pub oid: String,
+    pub statuses: Vec<CommitStatus>,
+}

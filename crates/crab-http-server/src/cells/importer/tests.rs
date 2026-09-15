@@ -19,6 +19,9 @@ const RESERVED_COMMENT_REQUEST: &str = "00000000-0000-0000-0000-000000000004";
 const LABEL_REQUEST: &str = "00000000-0000-0000-0000-000000000005";
 const DELETED_LABEL_REQUEST: &str = "00000000-0000-0000-0000-000000000006";
 const RESERVED_LABEL_REQUEST: &str = "00000000-0000-0000-0000-000000000007";
+const STATUS_REQUEST: &str = "00000000-0000-0000-0000-000000000009";
+const RESERVED_STATUS_REQUEST: &str = "00000000-0000-0000-0000-000000000010";
+const STATUS_OID: &str = "0123456789abcdef0123456789abcdef01234567";
 
 #[tokio::test]
 async fn repository_import_rejects_a_label_without_its_reservation() {
@@ -49,6 +52,7 @@ async fn repository_import_rejects_a_label_without_its_reservation() {
             layout.store(),
             &layout.repo_path("app/v1/issues"),
             &layout.repo_path("app/v1/labels"),
+            &layout.repo_path("app/v1/statuses"),
             files.path(),
         )
         .await,
@@ -88,6 +92,7 @@ async fn repository_import_publishes_verifies_releases_and_replays_completion() 
         repository_layout.store(),
         &repository_layout.repo_path("app/v1/issues"),
         &repository_layout.repo_path("app/v1/labels"),
+        &repository_layout.repo_path("app/v1/statuses"),
         files.path(),
     )
     .await
@@ -99,7 +104,9 @@ async fn repository_import_publishes_verifies_releases_and_replays_completion() 
     assert_eq!(source.semantic.labels, 1);
     assert_eq!(source.semantic.deleted_labels, 1);
     assert_eq!(source.semantic.label_submissions, 3);
-    assert_eq!(source.semantic.app_revision, 8);
+    assert_eq!(source.semantic.statuses, 1);
+    assert_eq!(source.semantic.status_submissions, 2);
+    assert_eq!(source.semantic.app_revision, 9);
 
     let target = CellTarget::new(
         identity.tenant(),
@@ -193,7 +200,23 @@ async fn repository_import_publishes_verifies_releases_and_replays_completion() 
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(revision, 8);
+    assert_eq!(revision, 9);
+    let visible_status: (String, i64) = connection
+        .query_row(
+            "SELECT context, state FROM repository_commit_statuses WHERE oid = ?1 AND visible = 1",
+            [STATUS_OID],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(visible_status, ("CI/Test".to_owned(), 3));
+    let incomplete_status: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM repository_commit_statuses WHERE oid = ?1 AND visible = 0",
+            [STATUS_OID],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(incomplete_status, 1);
     drop(connection);
 
     layout
@@ -357,7 +380,13 @@ async fn write_source(layout: &StoreLayout<Store>) {
     put(
         layout,
         &format!("app/v1/labels/requests/{RESERVED_LABEL_REQUEST}.json"),
-        label_reservation(4, RESERVED_LABEL_REQUEST, author, "Future", "ffffff"),
+        label_reservation(
+            4,
+            RESERVED_LABEL_REQUEST,
+            author.clone(),
+            "Future",
+            "ffffff",
+        ),
     )
     .await;
     put(
@@ -377,6 +406,58 @@ async fn write_source(layout: &StoreLayout<Store>) {
         }),
     )
     .await;
+    put(
+        layout,
+        &format!("app/v1/statuses/{STATUS_OID}/sequence.json"),
+        json!({"last": 2}),
+    )
+    .await;
+    let reserved_status = status(
+        1,
+        RESERVED_STATUS_REQUEST,
+        author.clone(),
+        "ci/lint",
+        "pending",
+    );
+    put(
+        layout,
+        &format!("app/v1/statuses/{STATUS_OID}/requests/{RESERVED_STATUS_REQUEST}.json"),
+        reserved_status,
+    )
+    .await;
+    let visible_status = status(2, STATUS_REQUEST, author, "CI/Test", "success");
+    put(
+        layout,
+        &format!("app/v1/statuses/{STATUS_OID}/requests/{STATUS_REQUEST}.json"),
+        visible_status.clone(),
+    )
+    .await;
+    put(
+        layout,
+        &format!("app/v1/statuses/{STATUS_OID}/summary.json"),
+        json!({"oid": STATUS_OID, "statuses": [visible_status]}),
+    )
+    .await;
+}
+
+fn status(
+    number: u64,
+    request: &str,
+    author: serde_json::Value,
+    context: &str,
+    state: &str,
+) -> serde_json::Value {
+    json!({
+        "number": number,
+        "request_id": request,
+        "author": author,
+        "oid": STATUS_OID,
+        "context": context,
+        "state": state,
+        "description": null,
+        "target_url": null,
+        "created_at": 1000
+    })
 }
 
 fn label_reservation(

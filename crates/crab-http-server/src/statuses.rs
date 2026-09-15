@@ -8,21 +8,27 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
+use crab_cell_runtime::{Committed, InvocationError, MutationIdentity, Observed, RequestId};
 use crab_remote_git::{OperationKind, Revision, RevisionError};
 use gix_hash::ObjectId;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use url::Url;
+use uuid::Uuid;
 
 use crate::{
     app::{self, Error, Result},
-    app_storage,
     auth::{Identity, Principal},
+    cells::{
+        RepositoryCell, RepositoryCellRouter,
+        repository::{
+            CommitStatusRecord, CommitStatusSubmissionKey, CreateCommitStatus,
+            CreateCommitStatusInput, CreateCommitStatusOutcome, GetCommitStatusSubmission,
+            ListCommitStatuses, RepositoryAuthor,
+        },
+    },
     server::{Repository, Server},
 };
-
-const ROOT: &str = "app/v1/statuses";
-const MAX_CONTEXTS: usize = 128;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -47,13 +53,6 @@ pub(crate) struct CommitStatus {
     pub created_at: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct StatusSummary {
-    oid: String,
-    statuses: Vec<CommitStatus>,
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NewStatus {
@@ -73,18 +72,6 @@ pub(crate) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         )
         .layer(axum::extract::DefaultBodyLimit::max(8 * 1024))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
-}
-
-fn root(oid: &str) -> String {
-    format!("{ROOT}/{oid}")
-}
-
-fn summary_path(oid: &str) -> String {
-    format!("{}/summary.json", root(oid))
-}
-
-fn request_path(oid: &str, request_id: &str) -> String {
-    format!("{}/requests/{request_id}.json", root(oid))
 }
 
 fn context_key(context: &str) -> String {
@@ -173,7 +160,8 @@ pub(crate) async fn require_commit(
 
 fn same_status(left: &CommitStatus, right: &CommitStatus) -> bool {
     left.request_id == right.request_id
-        && app_storage::same_author(&left.author, &right.author)
+        && left.author.issuer == right.author.issuer
+        && left.author.subject == right.author.subject
         && left.oid == right.oid
         && left.context == right.context
         && left.state == right.state
@@ -181,85 +169,24 @@ fn same_status(left: &CommitStatus, right: &CommitStatus) -> bool {
         && left.target_url == right.target_url
 }
 
-async fn record(repo: &Repository, proposed: CommitStatus) -> Result<CommitStatus> {
-    let reservation = request_path(&proposed.oid, &proposed.request_id);
-    let status = app_storage::create_or_read(repo, &reservation, proposed.clone()).await?;
-    if !same_status(&status, &proposed) {
-        return Err(Error::RequestConflict);
-    }
-    apply(repo, &status).await?;
-    Ok(status)
-}
-
-async fn apply(repo: &Repository, status: &CommitStatus) -> Result<()> {
-    let path = summary_path(&status.oid);
-    for _ in 0..10 {
-        let Some((mut summary, etag)) = app_storage::read::<StatusSummary>(repo, &path).await?
-        else {
-            let created = app_storage::create_or_read(
-                repo,
-                &path,
-                StatusSummary {
-                    oid: status.oid.clone(),
-                    statuses: vec![status.clone()],
-                },
-            )
-            .await?;
-            if created.oid != status.oid {
-                return Err(Error::Conflict);
-            }
-            if created.statuses.iter().any(|current| {
-                context_key(&current.context) == context_key(&status.context)
-                    && current.number >= status.number
-            }) {
-                return Ok(());
-            }
-            continue;
-        };
-        if summary.oid != status.oid {
-            return Err(Error::Conflict);
-        }
-        let key = context_key(&status.context);
-        if summary
-            .statuses
-            .iter()
-            .any(|current| context_key(&current.context) == key && current.number >= status.number)
-        {
-            return Ok(());
-        }
-        match summary
-            .statuses
-            .iter()
-            .position(|current| context_key(&current.context) == key)
-        {
-            Some(index) => summary.statuses[index] = status.clone(),
-            None if summary.statuses.len() < MAX_CONTEXTS => summary.statuses.push(status.clone()),
-            None => {
-                return Err(Error::Invalid(
-                    "A commit supports at most 128 status contexts",
-                ));
-            }
-        }
-        match app_storage::update(repo, &path, &summary, etag).await {
-            Ok(()) => return Ok(()),
-            Err(Error::Storage(crab_storage::StorageError::StateConflict { .. })) => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    Err(Error::Conflict)
-}
-
-pub(crate) async fn latest(repo: &Repository, oid: &str) -> Result<Vec<CommitStatus>> {
-    let Some((summary, _)) = app_storage::read::<StatusSummary>(repo, &summary_path(oid)).await?
-    else {
-        return Ok(vec![]);
-    };
-    if summary.oid != oid {
-        return Err(Error::Conflict);
-    }
-    let mut statuses = summary.statuses;
-    statuses.sort_by_cached_key(|status| context_key(&status.context));
-    Ok(statuses)
+pub(crate) async fn latest(
+    server: &Server,
+    repo: &Repository,
+    principal: &Identity,
+    oid: &str,
+) -> Result<Vec<CommitStatus>> {
+    let routed = route(server, repo, principal, "repository.read").await?;
+    let catalog = query_output(
+        routed
+            .client
+            .query::<ListCommitStatuses>(&routed.target, None, oid.to_owned())
+            .await,
+    )?;
+    catalog
+        .statuses
+        .into_iter()
+        .map(status_from_record)
+        .collect()
 }
 
 fn status_view(status: &CommitStatus) -> Value {
@@ -298,7 +225,8 @@ async fn list(
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
     let oid = require_commit(&server, repo, parse_oid(&oid)?).await?;
-    let statuses = latest(repo, &oid).await?;
+    let actor = app::actor(&principal)?;
+    let statuses = latest(&server, repo, &actor, &oid).await?;
     Ok(Json(json!({
         "sha": oid,
         "state": combined(&statuses),
@@ -323,13 +251,26 @@ async fn create(
     validate_target(input.target_url.as_deref())?;
     let parsed_oid = parse_oid(&oid)?;
     let oid = parsed_oid.to_string();
-    let request_id = app::submission(&input.request_id)?;
+    let request_id = submission_id(&input.request_id)?;
     let author = app::actor(&principal)?;
-    let reservation = request_path(&oid, &request_id);
-    if let Some((status, _)) = app_storage::read::<CommitStatus>(repo, &reservation).await? {
+    let replay_route = route(&server, repo, &author, "repository.read").await?;
+    if let Some(record) = query_output(
+        replay_route
+            .client
+            .query::<GetCommitStatusSubmission>(
+                &replay_route.target,
+                None,
+                CommitStatusSubmissionKey {
+                    oid: oid.clone(),
+                    submission_id: request_id,
+                },
+            )
+            .await,
+    )? {
+        let status = status_from_record(record)?;
         let candidate = CommitStatus {
             number: status.number,
-            request_id,
+            request_id: Uuid::from_bytes(request_id).to_string(),
             author,
             oid,
             context: input.context,
@@ -341,37 +282,170 @@ async fn create(
         if !same_status(&status, &candidate) {
             return Err(Error::RequestConflict);
         }
-        if !principal.can_write(&repo.config) {
-            return Err(Error::StatusPermission);
-        }
-        apply(repo, &status).await?;
+        let routed = route(&server, repo, &candidate.author, "repository.status.create").await?;
+        let outcome = command_output(
+            routed
+                .client
+                .command::<CreateCommitStatus>(
+                    &routed.target,
+                    mutation_identity()?,
+                    CreateCommitStatusInput {
+                        submission_id: request_id,
+                        author: repository_author(&candidate.author),
+                        oid: candidate.oid,
+                        context: candidate.context,
+                        state: status_state_code(candidate.state),
+                        description: candidate.description,
+                        target_url: candidate.target_url,
+                    },
+                )
+                .await,
+        )?;
+        let status = created_status(outcome)?;
         return Ok((StatusCode::CREATED, Json(status_view(&status))));
     }
     let oid = require_commit(&server, repo, parsed_oid).await?;
     if !principal.can_write(&repo.config) {
         return Err(Error::StatusPermission);
     }
-    let root = root(&oid);
-    let number = app_storage::reserve_number(repo, &root).await?;
-    if number > 1_000 {
-        return Err(Error::Invalid(
-            "A commit supports at most 1,000 status submissions",
-        ));
-    }
-    let status = record(
-        repo,
-        CommitStatus {
-            number,
-            request_id,
-            author,
-            oid,
-            context: input.context,
-            state: input.state,
-            description: input.description,
-            target_url: input.target_url,
-            created_at: app_storage::now()?,
-        },
-    )
-    .await?;
+    let routed = route(&server, repo, &author, "repository.status.create").await?;
+    let outcome = command_output(
+        routed
+            .client
+            .command::<CreateCommitStatus>(
+                &routed.target,
+                mutation_identity()?,
+                CreateCommitStatusInput {
+                    submission_id: request_id,
+                    author: repository_author(&author),
+                    oid,
+                    context: input.context,
+                    state: status_state_code(input.state),
+                    description: input.description,
+                    target_url: input.target_url,
+                },
+            )
+            .await,
+    )?;
+    let status = created_status(outcome)?;
     Ok((StatusCode::CREATED, Json(status_view(&status))))
+}
+
+async fn route(
+    server: &Server,
+    repository: &Repository,
+    principal: &Identity,
+    action: &'static str,
+) -> Result<RepositoryCell> {
+    let router: &RepositoryCellRouter = server
+        .repository_cells
+        .as_ref()
+        .ok_or(Error::CellUnavailable)?;
+    router
+        .route(repository.id, principal, action)
+        .await
+        .map_err(|error| match error {
+            crate::Error::Cell(source) => Error::Cell(source),
+            source => Error::Repository(source),
+        })
+}
+
+fn repository_author(identity: &Identity) -> RepositoryAuthor {
+    RepositoryAuthor {
+        issuer: identity.issuer.clone(),
+        subject: identity.subject.clone(),
+        name: identity.name.clone(),
+    }
+}
+
+fn submission_id(value: &str) -> Result<[u8; 16]> {
+    Uuid::parse_str(&app::submission(value)?)
+        .map(Uuid::into_bytes)
+        .map_err(|_| Error::Invalid("Submission ID must be a UUID"))
+}
+
+fn mutation_identity() -> Result<MutationIdentity> {
+    let now_ms = crate::cells::unix_now_ms().map_err(Error::Repository)?;
+    let expires_at_ms = now_ms
+        .checked_add(60_000)
+        .ok_or(Error::CellContract("Cell request expiry overflowed"))?;
+    Ok(MutationIdentity {
+        request_id: RequestId::from_bytes(Uuid::now_v7().into_bytes()),
+        issued_at_ms: now_ms,
+        expires_at_ms,
+    })
+}
+
+fn status_state_code(state: StatusState) -> u8 {
+    match state {
+        StatusState::Error => 0,
+        StatusState::Failure => 1,
+        StatusState::Pending => 2,
+        StatusState::Success => 3,
+    }
+}
+
+fn status_state(code: u8) -> Result<StatusState> {
+    match code {
+        0 => Ok(StatusState::Error),
+        1 => Ok(StatusState::Failure),
+        2 => Ok(StatusState::Pending),
+        3 => Ok(StatusState::Success),
+        _ => Err(Error::CellContract("Cell returned an invalid status state")),
+    }
+}
+
+fn status_from_record(record: CommitStatusRecord) -> Result<CommitStatus> {
+    Ok(CommitStatus {
+        number: record.number,
+        request_id: Uuid::from_bytes(record.submission_id).to_string(),
+        author: Identity {
+            issuer: record.author.issuer,
+            subject: record.author.subject,
+            name: record.author.name,
+        },
+        oid: record.oid,
+        context: record.context,
+        state: status_state(record.state)?,
+        description: record.description,
+        target_url: record.target_url,
+        created_at: record.created_at_ms,
+    })
+}
+
+fn created_status(outcome: CreateCommitStatusOutcome) -> Result<CommitStatus> {
+    match outcome {
+        CreateCommitStatusOutcome::Created(status) => status_from_record(*status),
+        CreateCommitStatusOutcome::RequestConflict => Err(Error::RequestConflict),
+        CreateCommitStatusOutcome::ContextLimit => Err(Error::Invalid(
+            "A commit supports at most 128 status contexts",
+        )),
+        CreateCommitStatusOutcome::SubmissionLimit => Err(Error::Invalid(
+            "A commit supports at most 1,000 status submissions",
+        )),
+    }
+}
+
+fn command_output<T>(result: std::result::Result<Committed<T>, InvocationError<T>>) -> Result<T> {
+    match result {
+        Ok(committed) => Ok(committed.output),
+        Err(InvocationError::Rejected(committed)) => Ok(committed.output),
+        Err(InvocationError::Pending(_)) => Err(Error::CellPending),
+        Err(InvocationError::InvalidPublishedResult { source, .. }) => Err(Error::Cell(*source)),
+        Err(InvocationError::NotStarted(source)) => Err(Error::Cell(source)),
+    }
+}
+
+fn query_output<T>(result: std::result::Result<Observed<T>, InvocationError<T>>) -> Result<T> {
+    match result {
+        Ok(observed) => Ok(observed.output),
+        Err(InvocationError::Rejected(_)) => Err(Error::CellContract(
+            "Cell query returned a durable rejection",
+        )),
+        Err(InvocationError::Pending(_)) => Err(Error::CellContract(
+            "Cell query returned pending mutation evidence",
+        )),
+        Err(InvocationError::InvalidPublishedResult { source, .. }) => Err(Error::Cell(*source)),
+        Err(InvocationError::NotStarted(source)) => Err(Error::Cell(source)),
+    }
 }

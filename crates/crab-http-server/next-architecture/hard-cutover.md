@@ -1,6 +1,6 @@
 # Hard cutover and future upgrades
 
-[Design index](README.md) · Target architecture; issue/comment/Label import slice implemented.
+[Design index](README.md) · Target architecture; issue/comment/Label/status import slice implemented.
 
 The transition imports the [current collaboration storage](current-implementation.md)
 into the [repository SQL model](sqlite-and-data-model.md), then publishes each
@@ -99,8 +99,8 @@ unsupported-source transforms remain required for release changes that need
 them; such a command fails and leaves the release in `maintenance`.
 
 The current repository import command implements steps 3 through 7 for the
-legacy `app/v1/issues` and `app/v1/labels` trees. It retains issue/comment/Label
-sequences, all visible versions, Label deletion tombstones and incomplete
+legacy `app/v1/issues`, `app/v1/labels` and `app/v1/statuses` trees. It retains issue/comment/Label/status
+sequences, all visible versions/latest status contexts, Label deletion tombstones and incomplete
 request reservations; records exact source object identity and body hashes;
 verifies a second inventory; performs one SQLite bootstrap transaction;
 publishes/restores the initial LTX root; and writes operation-bound completion
@@ -109,8 +109,8 @@ That check does not observe legacy processes, so step 1's independent proof that
 old processes and schedulers are stopped and lack write authority remains
 mandatory. On exact completion it moves the repository catalog from
 `import_required` to `cell_ready`; a different operation is rejected after that
-transition. Public issue/comment/label routes are now native typed Cell consumers
-and ignore legacy issue and label objects. Startup and catalog refresh reject any repository
+transition. Public issue/comment/label/status routes and Pull status requirements are now native typed Cell consumers
+and ignore legacy issue, label and status objects. Startup and catalog refresh reject any repository
 that is not ready or lacks a published root, while request routing has no
 bootstrap path. Other collaboration domains and the fleet-wide completion
 checklist are not implemented.

@@ -367,13 +367,13 @@ stale collection; heartbeat expiry alone is not drain evidence.
 
 `cells import-repository` is the first maintenance importer slice. It
 requires the exact ready release, resolves the catalog repository UUID, rejects
-any live signed Cell node, captures at most 2,000,000 issue/comment/Label objects
+any live signed Cell node, captures at most 2,000,000 issue/comment/Label/status objects
 and 8 GiB of source, and requires three times the source bytes plus 256 MiB of
 local free space. A bounded channel feeds a temporary SQLite staging database
 while the reader hashes every object. A second complete LIST must reproduce
 every path, size, ETag/version and semantic kind before import begins. One
 bootstrap transaction installs the repository schema and copies issue/comment/
-Label sequences, visible records, Label tombstones and incomplete submission
+Label/status sequences, visible records/latest status contexts, Label tombstones and incomplete submission
 reservations. The command then
 publishes the initial LTX root, restores and compares the semantic summary, and
 strict-creates completion evidence bound to the operation, repository, Cell,
@@ -381,8 +381,8 @@ source inventory and published root. A retry resumes rootless ownership after
 an observed stale interval, or restores an already published root before
 finishing evidence. The exact completed operation then moves the catalog from
 `import_required` to `cell_ready`. A different operation cannot overwrite a
-ready repository. This slice intentionally excludes pull requests, releases,
-milestones and their pending cross-domain work; those sources remain outside the
+ready repository. This slice intentionally excludes pull requests, checks,
+releases, milestones and their pending cross-domain work; those sources remain outside the
 captured inventory and must receive their own explicit importer before cutover.
 
 An empty signed node directory is only a mutual-exclusion check for the new Cell

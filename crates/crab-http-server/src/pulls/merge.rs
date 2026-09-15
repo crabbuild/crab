@@ -340,7 +340,7 @@ async fn execute(
     let protection = protections.protection(&pull.base_ref);
     let (statuses, check_runs) = match protection {
         Some(rule) if !rule.required_checks.is_empty() => (
-            statuses::latest(repo, &candidate.head_oid).await?,
+            statuses::latest(&server, repo, &candidate.author, &candidate.head_oid).await?,
             checks::latest(repo, &candidate.head_oid).await?,
         ),
         _ => (vec![], vec![]),

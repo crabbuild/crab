@@ -2,18 +2,19 @@
 
 Status: target server architecture. Local and optional remote `crab-ltx`
 mechanics are implemented, and the server now has a statically registered
-repository issue/comment/label module proven through local LTX publication and
-source-loss restore. Label create/edit/delete/list and issue label assignment now
-share one repository transaction boundary; Pull metadata consumes the same Cell
-catalog while its own record remains on legacy storage. The HTTP composition root now starts that native runtime,
+repository issue/comment/label/status module proven through local LTX publication and
+source-loss restore. Label create/edit/delete/list, issue label assignment and
+commit-status create/latest/replay now share one repository transaction boundary;
+Pull metadata consumes the same Cell label and status catalogs while its own
+record remains on legacy storage. The HTTP composition root now starts that native runtime,
 withdraws readiness when it drains and joins its SQL workers during ordinary
 server shutdown. The release CLI now provides resumable exact-compatible
 activation and publishes a verified descriptor as current. Private routing now
 includes mandatory mTLS ingress, live enrollment, authoritative outbound owner
 lookup and one bounded stale-owner retry. Explicit release activation now also
 requires one live exact fleet/image/release/module-compatible candidate. The
-maintenance importer now covers the legacy issue/comment and Label trees,
-including counters, visible edits, Label tombstones and incomplete reservations,
+maintenance importer now covers the legacy issue/comment, Label and commit-status trees,
+including counters, visible edits/latest contexts, Label tombstones and incomplete reservations,
 with two-pass source verification, immutable evidence and crash-resumable LTX publication. The
 repository router now distinguishes a live signed remote owner from an absent or
 expired session and uses the runtime's unchanged-control observation before
@@ -38,7 +39,7 @@ Remaining collaboration-domain import, configured multi-node quorum and the
 remaining product-domain route cuts are not yet integrated. New repository
 creation explicitly publishes an empty Cell and marks
 the catalog ready; adoption remains blocked until verified import. Startup
-rejects every missing or rootless repository Cell. The issue/comment/label HTTP group
+rejects every missing or rootless repository Cell. The issue/comment/label/status HTTP group
 now uses the release-aware router, which reuses local handles, selects
 authenticated remote owners and restores idle Cells without request-time empty
 bootstrap.
