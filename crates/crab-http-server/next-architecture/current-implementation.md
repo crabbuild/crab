@@ -57,7 +57,9 @@ still below the product route. Release administration can now CAS one prepared
 descriptor through activating to ready after checking all catalog shards and live
 control code/schema pairs against the exact binary registry; retries retain the
 same operation, and a real RustFS run reached canonical `current=desired` state.
-Old-version migration and node quorum are not implemented. No product HTTP route
+Explicit activation now also requires one live signed node with the exact fleet,
+image, release and module inventory. Configured multi-replica quorum and
+old-version migration are not implemented. No product HTTP route
 currently calls that repository module. The private management route can dispatch
 or forward registered calls between compatible nodes, but application JSON
 persistence, Git publication and browser behavior above remain unchanged. See

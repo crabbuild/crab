@@ -13,8 +13,17 @@ use crate::{
 const NOW_MS: i64 = 1_000_000;
 
 fn advertisement(key: &SigningKey, progress: u64, issued_at_ms: i64) -> NodeAdvertisement {
+    advertisement_for(SessionId::from_bytes([1; 16]), key, progress, issued_at_ms)
+}
+
+fn advertisement_for(
+    session: SessionId,
+    key: &SigningKey,
+    progress: u64,
+    issued_at_ms: i64,
+) -> NodeAdvertisement {
     NodeAdvertisement::sign(
-        SessionId::from_bytes([1; 16]),
+        session,
         "https://node-1.internal:8789".into(),
         Digest::from_bytes([2; 32]),
         Digest::from_bytes([3; 32]),
@@ -33,6 +42,95 @@ fn advertisement(key: &SigningKey, progress: u64, issued_at_ms: i64) -> NodeAdve
         },
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn live_listing_is_sorted_bounded_and_ignores_expired_sessions() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    for session in [
+        SessionId::from_bytes([8; 16]),
+        SessionId::from_bytes([1; 16]),
+    ] {
+        directory
+            .create(advertisement_for(session, &key, 1, NOW_MS), NOW_MS)
+            .await
+            .unwrap();
+    }
+
+    let live = directory.live(NOW_MS + 1, 2).await.unwrap();
+    assert_eq!(
+        live.iter()
+            .map(NodeAdvertisement::session)
+            .collect::<Vec<_>>(),
+        [
+            SessionId::from_bytes([1; 16]),
+            SessionId::from_bytes([8; 16])
+        ]
+    );
+    assert!(matches!(
+        directory.live(NOW_MS + 1, 1).await,
+        Err(Error::Node(_))
+    ));
+    assert!(directory.live(NOW_MS + 10_000, 1).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn live_listing_rejects_misplaced_or_foreign_active_records() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let subject = directory();
+    let advertisement = advertisement(&key, 1, NOW_MS);
+    subject
+        .layout
+        .store()
+        .put_overwrite(
+            &subject
+                .layout
+                .node_directory_path()
+                .join("ffffffffffffffffffffffffffffffff.json"),
+            advertisement.encode().unwrap().into(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        subject.live(NOW_MS + 1, 2).await,
+        Err(Error::Node(_))
+    ));
+
+    let foreign = NodeAdvertisement::sign(
+        SessionId::from_bytes([9; 16]),
+        "https://node-1.internal:8789".into(),
+        Digest::from_bytes([10; 32]),
+        Digest::from_bytes([3; 32]),
+        Digest::from_bytes([4; 32]),
+        Digest::from_bytes([5; 32]),
+        &key,
+        1,
+        NOW_MS,
+        NOW_MS + 10_000,
+        vec![Digest::from_bytes([6; 32])],
+        vec![1],
+        NodeCapacity {
+            free_memory_bytes: 1,
+            free_disk_bytes: 1,
+            job_credits: 1,
+        },
+    )
+    .unwrap();
+    let clean = directory();
+    clean
+        .layout
+        .store()
+        .put_overwrite(
+            &clean.layout.node_path(foreign.session().as_bytes()),
+            foreign.encode().unwrap().into(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        clean.live(NOW_MS + 1, 2).await,
+        Err(Error::Node(_))
+    ));
 }
 
 fn directory() -> NodeDirectory {

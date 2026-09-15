@@ -237,10 +237,13 @@ or ETag-updates canonical release state at the expected revision. Exact retries
 reuse the winning operation ID and bytes. Activate reloads the desired descriptor,
 requires byte equality with this binary, enters `activating` through CAS, scans
 every catalog shard and exact control code/schema pair, verifies shard revisions
-remain stable, then CASes `current=desired,state=ready`. Repeating the original
+remain stable, then CASes `current=desired,state=ready`. Before changing release
+state it streams signed node advertisements and requires at least one unexpired
+node matching the exact fleet, image, release and module inventory; malformed,
+misplaced, foreign or excessive live records fail closed. Repeating the original
 command adopts the same ready record. It currently admits initial or already exact
-compatible inventories; old-code/schema migration and eligible-node quorum remain
-target behavior. Prepare alone never makes the descriptor current. Administrative
+compatible inventories; old-code/schema migration and a configured multi-replica
+eligible-node quorum remain target behavior. Prepare alone never makes the descriptor current. Administrative
 storage credentials provide authority; there is no public deployment API.
 
 `ReleaseStore::provision` implements the release-aware catalog boundary. It first

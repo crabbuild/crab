@@ -2193,6 +2193,7 @@ dependencies = [
  "crab-ltx",
  "crab-storage",
  "ed25519-dalek",
+ "futures-util",
  "object_store",
  "prost",
  "prost-build",

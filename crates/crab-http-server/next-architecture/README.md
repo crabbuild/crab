@@ -8,8 +8,9 @@ withdraws readiness when it drains and joins its SQL workers during ordinary
 server shutdown. The release CLI now provides resumable exact-compatible
 activation and publishes a verified descriptor as current. Private routing now
 includes mandatory mTLS ingress, live enrollment, authoritative outbound owner
-lookup and one bounded stale-owner retry. The importer, old-version
-migration/node quorum, active-owner takeover, public repository adapters and
+lookup and one bounded stale-owner retry. Explicit release activation now also
+requires one live exact fleet/image/release/module-compatible candidate. The
+importer, old-version migration/configured multi-node quorum, active-owner takeover, public repository adapters and
 product-route hard cut are not yet integrated. The server now owns a
 release-aware repository router that provisions, bootstraps, reuses local
 handles, selects authenticated remote owners and restores idle Cells.

@@ -3,8 +3,8 @@ use std::sync::OnceLock;
 use crab_cell_runtime::{
     ApplicationId, ApplicationIdentity, ApplicationIdentityStore, BuildDescriptor, CatalogRole,
     CellAuthority, CellCatalog, CellModule, ControlState, Digest, MigrationDescriptor,
-    ModuleDescriptor, NamespaceDescriptor, NamespaceId, OperationDescriptor, Registry,
-    RegistryBuilder, ReleaseState, ReleaseStore, RequestId, TenantId,
+    ModuleDescriptor, NamespaceDescriptor, NamespaceId, NodeDirectory, OperationDescriptor,
+    Registry, RegistryBuilder, ReleaseState, ReleaseStore, RequestId, TenantId,
 };
 use crab_storage::CellStorageLayout;
 use object_store::path::Path;
@@ -19,6 +19,7 @@ pub(crate) use router::RepositoryCellRouter;
 
 const REPOSITORY_MIGRATION: &str = include_str!("cells/migrations/0001_repository_identity.sql");
 pub(crate) const REPOSITORY_NAMESPACE: NamespaceId = NamespaceId::from_bytes(*b"crab-repository1");
+const MAX_LIVE_NODES: usize = 10_000;
 const REPOSITORY_COMMANDS: &[OperationDescriptor] = &[
     operation(1, 80 * 1024, 80 * 1024),
     operation(2, 80 * 1024, 80 * 1024),
@@ -329,6 +330,16 @@ pub(crate) async fn activate_release(config: &Config, expected_revision: u64) ->
             "prepared Cell descriptor differs from this binary",
         ));
     }
+    if observed.record().state() != ReleaseState::Ready {
+        let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
+        let directory = NodeDirectory::new(
+            layout.clone(),
+            peer_tls.fleet(),
+            image_digest(observed.record().desired_image())?,
+            registry.release_digest(),
+        );
+        verify_eligible_nodes(&directory, &registry, unix_now_ms()?).await?;
+    }
     let operation = observed.record().operation();
     let activating = releases
         .start_activation(expected_revision, operation)
@@ -342,6 +353,37 @@ pub(crate) async fn activate_release(config: &Config, expected_revision: u64) ->
         .await?
         .encode()
         .map_err(Error::from)
+}
+
+async fn verify_eligible_nodes(
+    directory: &NodeDirectory,
+    registry: &Registry,
+    now_ms: i64,
+) -> Result<()> {
+    let live = directory.live(now_ms, MAX_LIVE_NODES).await?;
+    if live.is_empty() {
+        return Err(Error::Config(
+            "Cell release activation requires a live eligible node",
+        ));
+    }
+    let required_modules = registry.module_digests();
+    if live
+        .iter()
+        .any(|node| node.module_digests() != required_modules)
+    {
+        return Err(Error::Config(
+            "live Cell node does not contain the selected module inventory",
+        ));
+    }
+    Ok(())
+}
+
+fn unix_now_ms() -> Result<i64> {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| Error::Config("system clock precedes the Unix epoch"))?;
+    i64::try_from(elapsed.as_millis())
+        .map_err(|_| Error::Config("system clock exceeds the supported Cell range"))
 }
 
 async fn verify_compatible_cells(
@@ -463,10 +505,11 @@ mod tests {
 
     use crab_cell_runtime::{
         ApplicationIdentity, CatalogEntry, CellAuthority, CellClient, CellReplica, CellRuntime,
-        CellTarget, IncarnationId, InvocationError, MutationIdentity, Owner, PeerCellResolver,
-        ReplicaLimits, SessionId, SqlWorkerPool,
+        CellTarget, IncarnationId, InvocationError, MutationIdentity, NodeAdvertisement,
+        NodeCapacity, Owner, PeerCellResolver, ReplicaLimits, SessionId, SqlWorkerPool,
     };
     use crab_storage::{CellStorageLayout, Store};
+    use ed25519_dalek::SigningKey;
     use object_store::memory::InMemory;
     use serde_json::Value;
 
@@ -511,6 +554,104 @@ mod tests {
         );
         assert_eq!(descriptor["namespaces"][0]["role"], "repository");
         assert_eq!(descriptor["namespaces"][0]["shards"], 1);
+    }
+
+    #[tokio::test]
+    async fn release_activation_requires_a_live_node_with_exact_modules() {
+        let registry = compiled_registry().unwrap();
+        let fleet = Digest::from_bytes([10; 32]);
+        let image = Digest::from_bytes([11; 32]);
+        let now_ms = 1_000_000;
+        let directory = NodeDirectory::new(
+            CellStorageLayout::new(
+                Store::new(Arc::new(InMemory::new())),
+                Path::from("eligible-nodes"),
+                [9; 16],
+            ),
+            fleet,
+            image,
+            registry.release_digest(),
+        );
+        assert!(matches!(
+            verify_eligible_nodes(&directory, &registry, now_ms).await,
+            Err(Error::Config(
+                "Cell release activation requires a live eligible node"
+            ))
+        ));
+
+        let key = SigningKey::from_bytes(&[12; 32]);
+        directory
+            .create(
+                NodeAdvertisement::sign(
+                    SessionId::from_bytes([13; 16]),
+                    "https://node-1.internal:8081".into(),
+                    fleet,
+                    Digest::from_bytes([14; 32]),
+                    image,
+                    registry.release_digest(),
+                    &key,
+                    1,
+                    now_ms,
+                    now_ms + 10_000,
+                    registry.module_digests(),
+                    vec![1],
+                    NodeCapacity {
+                        free_memory_bytes: 1,
+                        free_disk_bytes: 1,
+                        job_credits: 1,
+                    },
+                )
+                .unwrap(),
+                now_ms,
+            )
+            .await
+            .unwrap();
+        verify_eligible_nodes(&directory, &registry, now_ms + 1)
+            .await
+            .unwrap();
+
+        let foreign_directory = NodeDirectory::new(
+            CellStorageLayout::new(
+                Store::new(Arc::new(InMemory::new())),
+                Path::from("foreign-node"),
+                [9; 16],
+            ),
+            fleet,
+            image,
+            registry.release_digest(),
+        );
+        foreign_directory
+            .create(
+                NodeAdvertisement::sign(
+                    SessionId::from_bytes([15; 16]),
+                    "https://node-2.internal:8081".into(),
+                    fleet,
+                    Digest::from_bytes([16; 32]),
+                    image,
+                    registry.release_digest(),
+                    &key,
+                    1,
+                    now_ms,
+                    now_ms + 10_000,
+                    vec![Digest::from_bytes([17; 32])],
+                    vec![1],
+                    NodeCapacity {
+                        free_memory_bytes: 1,
+                        free_disk_bytes: 1,
+                        job_credits: 1,
+                    },
+                )
+                .unwrap(),
+                now_ms,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            verify_eligible_nodes(&foreign_directory, &registry, now_ms + 1).await,
+            Err(Error::Config(
+                "live Cell node does not contain the selected module inventory"
+            ))
+        ));
     }
 
     #[tokio::test]

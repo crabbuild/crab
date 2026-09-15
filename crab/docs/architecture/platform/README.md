@@ -163,7 +163,13 @@ session, HTTPS endpoint, fleet and certificate digests, compiled release,
 Ed25519 peer key, sorted module/peer-version inventory, monotonic progress and
 capacity hints under a signed canonical encoding. Loads verify the signature,
 scope, time and exact session path before returning an ETag-bearing observation;
-ambiguous creates/refreshes adopt only the exact published record. The peer
+ambiguous creates/refreshes adopt only the exact published record. Fleet scans
+stream the complete directory, ignore only canonically verified expired sessions,
+sort live sessions deterministically and fail on misplaced, foreign or excessive
+live records. Explicit compatible release activation now requires at least one
+live node for the exact fleet/image/release and compiled module inventory before
+entering the activation state machine. Configured multi-replica quorum and
+scheduler progress aggregation remain. The peer
 pre-decoder can extract the structurally valid but explicitly untrusted session
 claim for that lookup. The server now loads only CA-trusted Ed25519 PKCS#8
 identities, proves the leaf certificate covers its advertised host and both TLS
@@ -225,7 +231,7 @@ listener. A candidate binary is eligible while its exact digest is `prepared` or
 and the ECS evaluation task execute bootstrap before first start. The server
 constructs one repository router before readiness, but no public product route
 invokes it yet.
-Eligible-node quorum, old-code/schema migration,
+Configured multi-replica quorum, old-code/schema migration,
 active-owner takeover, product route adapters, offline import and capacity
 qualification remain. Existing HTTP issue/comment routes still use the old
 object documents; the native module is not yet a user-visible storage path.

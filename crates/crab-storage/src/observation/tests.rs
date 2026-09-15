@@ -1,7 +1,6 @@
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use futures_util::StreamExt as _;
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::{ObjectStoreExt as _, PutMode, PutOptions};

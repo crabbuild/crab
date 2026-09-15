@@ -1,6 +1,7 @@
 use bytes::Bytes;
-use crab_storage::{CellStorageLayout, ETag, StorageError};
+use crab_storage::{CellStorageLayout, ETag, StorageError, map_object_store_error};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::{Digest, Error, Result, SessionId};
@@ -152,12 +153,18 @@ impl NodeAdvertisement {
     }
 
     fn decode(bytes: &[u8], now_ms: i64) -> Result<Self> {
+        let advertisement = Self::decode_canonical(bytes)?;
+        advertisement.validate_at(now_ms)?;
+        Ok(advertisement)
+    }
+
+    fn decode_canonical(bytes: &[u8]) -> Result<Self> {
         if bytes.len() as u64 > MAX_NODE_BYTES {
             return Err(Error::Node("advertisement exceeds 64 KiB"));
         }
         let raw: RawAdvertisement = serde_json::from_slice(bytes)?;
         let advertisement = Self::try_from(raw)?;
-        advertisement.validate_at(now_ms)?;
+        advertisement.validate_shape()?;
         advertisement.verify_signature()?;
         if advertisement.encode()?.as_slice() != bytes {
             return Err(Error::Node("advertisement JSON is not canonical"));
@@ -314,6 +321,47 @@ impl NodeDirectory {
             advertisement,
             token,
         }))
+    }
+
+    /// Streams and verifies every currently live boot-session advertisement.
+    ///
+    /// Expired records do not count against `limit`; malformed, misplaced, or
+    /// foreign live records fail closed so maintenance cannot mistake an active
+    /// incompatible fleet for an offline deployment.
+    pub async fn live(&self, now_ms: i64, limit: usize) -> Result<Vec<NodeAdvertisement>> {
+        if limit == 0 {
+            return Err(Error::Node("live node limit must be nonzero"));
+        }
+        let prefix = self.layout.node_directory_path();
+        let mut stream = self.layout.store().inner().list(Some(&prefix));
+        let mut live = Vec::new();
+        while let Some(item) = stream.next().await {
+            let meta = item.map_err(|error| map_object_store_error(error, prefix.as_ref()))?;
+            let (body, _) = match self
+                .layout
+                .store()
+                .get_with_etag_bounded(&meta.location, MAX_NODE_BYTES)
+                .await
+            {
+                Ok(value) => value,
+                Err(StorageError::NotFound { .. }) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let advertisement = NodeAdvertisement::decode_canonical(&body)?;
+            if self.layout.node_path(advertisement.session.as_bytes()) != meta.location {
+                return Err(Error::Node("advertisement path and session differ"));
+            }
+            if advertisement.expires_at_ms <= now_ms {
+                continue;
+            }
+            self.validate(&advertisement, now_ms)?;
+            if live.len() == limit {
+                return Err(Error::Node("live node directory exceeds its limit"));
+            }
+            live.push(advertisement);
+        }
+        live.sort_unstable_by(|left, right| left.session.as_bytes().cmp(right.session.as_bytes()));
+        Ok(live)
     }
 
     /// Authenticates one request against its live advertisement and mTLS leaf digest.

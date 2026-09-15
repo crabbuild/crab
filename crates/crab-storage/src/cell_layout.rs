@@ -120,6 +120,11 @@ impl CellStorageLayout {
         ))
     }
 
+    #[must_use]
+    pub fn node_directory_path(&self) -> Path {
+        Path::from(format!("{}/cells/v1/nodes", self.root))
+    }
+
     fn application_path(&self, suffix: &str) -> Path {
         Path::from(format!(
             "{}/cells/v1/apps/{}/{}",
@@ -158,6 +163,10 @@ mod tests {
         assert_eq!(
             layout.control_path(&[0xcd; 32]).as_ref(),
             "tenant-root/cells/v1/apps/abababababababababababababababab/cells/cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd/control.json"
+        );
+        assert_eq!(
+            layout.node_directory_path().as_ref(),
+            "tenant-root/cells/v1/nodes"
         );
         assert_eq!(
             layout
