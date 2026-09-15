@@ -35,6 +35,42 @@ export function browse(repository: Repository) {
   repository.open();
 }
 `;
+const additionalSymbolSources = {
+  "src/main.py": `class Repository:
+    def open(self):
+        return None
+
+def browse(repository):
+    repository.open()
+`,
+  "cmd/crab/main.go": `package main
+
+type Repository struct{}
+
+func (Repository) Open() {}
+
+func Browse(repository Repository) { repository.Open() }
+`,
+  "src/Repository.java": `class Repository {
+  void open() {}
+}
+
+class Browser {
+  void browse(Repository repository) { repository.open(); }
+}
+`,
+  "src/repository.c": `struct Repository { int open; };
+
+void browse(struct Repository *repository) {}
+`,
+  "src/repository.cpp": `class Repository {
+ public:
+  void open() {}
+};
+
+void browse(Repository& repository) { repository.open(); }
+`,
+} as const;
 const pathHex = (path: string) =>
   Array.from(new TextEncoder().encode(path), (byte) =>
     byte.toString(16).padStart(2, "0"),
@@ -497,6 +533,9 @@ test.beforeEach(async ({ page }) => {
       });
     if (url.pathname.endsWith("/file")) {
       const requestedPath = url.searchParams.get("path_hex");
+      const additionalSymbolSource = Object.entries(
+        additionalSymbolSources,
+      ).find(([path]) => requestedPath === pathHex(path))?.[1];
       const text =
         requestedPath === pathHex("README.md")
           ? currentReadme
@@ -504,7 +543,7 @@ test.beforeEach(async ({ page }) => {
             ? rustSource
             : requestedPath === pathHex("src/symbols.ts")
               ? typescriptSource
-              : "Hello, team!";
+              : (additionalSymbolSource ?? "Hello, team!");
       return route.fulfill({
         json: {
           oid:
@@ -1125,7 +1164,7 @@ test("code palette persists and follows light and dark appearance", async ({
   );
 });
 
-test("Rust and TypeScript source expose browser-parsed current-file symbols", async ({
+test("supported source files expose browser-parsed current-file symbols", async ({
   page,
 }) => {
   await page.goto(
@@ -1179,6 +1218,23 @@ test("Rust and TypeScript source expose browser-parsed current-file symbols", as
   await expect(
     typeScriptSymbols.getByRole("button", { name: /browse function 5/ }),
   ).toBeVisible();
+
+  for (const [path, symbol] of [
+    ["src/main.py", /browse function 5/],
+    ["cmd/crab/main.go", /Browse function 7/],
+    ["src/Repository.java", /browse method 6/],
+    ["src/repository.c", /browse function 3/],
+    ["src/repository.cpp", /browse function 6/],
+  ] as const) {
+    await page.goto(
+      `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex(path)}&kind=Blob`,
+    );
+    await expect(
+      page
+        .getByRole("complementary", { name: "Code symbols" })
+        .getByRole("button", { name: symbol }),
+    ).toBeVisible();
+  }
 });
 
 test("format-aware previews explore data, office files, media, and databases locally", async ({

@@ -1,6 +1,14 @@
 import { useEffect, useState } from "react";
 
-export type CodeSymbolLanguage = "javascript" | "rust" | "typescript";
+export type CodeSymbolLanguage =
+  | "c"
+  | "cpp"
+  | "go"
+  | "java"
+  | "javascript"
+  | "python"
+  | "rust"
+  | "typescript";
 export type CodeSymbolRole = "definition" | "reference";
 
 export type CodeSymbol = {
@@ -26,6 +34,17 @@ type WorkerResponse =
 
 export function codeSymbolLanguage(name: string): CodeSymbolLanguage | null {
   const extension = name.toLowerCase().split(".").pop();
+  if (extension === "c" || extension === "h") return "c";
+  if (
+    ["cc", "cp", "cpp", "cxx", "c++", "hh", "hpp", "hxx", "h++"].includes(
+      extension ?? "",
+    )
+  ) {
+    return "cpp";
+  }
+  if (extension === "go") return "go";
+  if (extension === "java") return "java";
+  if (["py", "pyi", "pyw"].includes(extension ?? "")) return "python";
   if (extension === "rs") return "rust";
   if (["ts", "tsx", "mts", "cts"].includes(extension ?? "")) {
     return "typescript";

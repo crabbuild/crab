@@ -17,7 +17,15 @@ const definition: CodeSymbol = {
 
 describe("code symbols", () => {
   it.each([
+    ["src/main.c", "c"],
+    ["include/crab.h", "c"],
+    ["src/main.cpp", "cpp"],
+    ["include/crab.hpp", "cpp"],
+    ["cmd/crab/main.go", "go"],
+    ["src/main.java", "java"],
     ["src/lib.rs", "rust"],
+    ["src/main.py", "python"],
+    ["src/types.pyi", "python"],
     ["src/app.tsx", "typescript"],
     ["src/module.mts", "typescript"],
     ["src/index.jsx", "javascript"],

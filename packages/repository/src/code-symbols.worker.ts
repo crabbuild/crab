@@ -21,6 +21,41 @@ const languageLoaders: Record<
   CodeSymbolLanguage,
   () => Promise<LanguageBundle>
 > = {
+  c: async () => {
+    const [wasm, tags] = await Promise.all([
+      import("tree-sitter-c/tree-sitter-c.wasm?url"),
+      import("tree-sitter-c/queries/tags.scm?raw"),
+    ]);
+    return { wasmUrl: wasm.default, querySource: tags.default };
+  },
+  cpp: async () => {
+    const [wasm, tags] = await Promise.all([
+      import("tree-sitter-cpp/tree-sitter-cpp.wasm?url"),
+      import("tree-sitter-cpp/queries/tags.scm?raw"),
+    ]);
+    return { wasmUrl: wasm.default, querySource: tags.default };
+  },
+  go: async () => {
+    const [wasm, tags] = await Promise.all([
+      import("tree-sitter-go/tree-sitter-go.wasm?url"),
+      import("tree-sitter-go/queries/tags.scm?raw"),
+    ]);
+    return { wasmUrl: wasm.default, querySource: tags.default };
+  },
+  java: async () => {
+    const [wasm, tags] = await Promise.all([
+      import("tree-sitter-java/tree-sitter-java.wasm?url"),
+      import("tree-sitter-java/queries/tags.scm?raw"),
+    ]);
+    return { wasmUrl: wasm.default, querySource: tags.default };
+  },
+  python: async () => {
+    const [wasm, tags] = await Promise.all([
+      import("tree-sitter-python/tree-sitter-python.wasm?url"),
+      import("tree-sitter-python/queries/tags.scm?raw"),
+    ]);
+    return { wasmUrl: wasm.default, querySource: tags.default };
+  },
   rust: async () => {
     const [wasm, tags] = await Promise.all([
       import("tree-sitter-rust/tree-sitter-rust.wasm?url"),
@@ -82,9 +117,14 @@ function containingName(node: Node, language: CodeSymbolLanguage) {
         if (name) return `mod ${name}`;
       }
     } else if (
-      ["class_declaration", "class", "interface_declaration"].includes(
-        parent.type,
-      )
+      [
+        "class_declaration",
+        "class",
+        "class_definition",
+        "class_specifier",
+        "interface_declaration",
+        "struct_specifier",
+      ].includes(parent.type)
     ) {
       const name = parent.childForFieldName("name")?.text;
       if (name) return name;
