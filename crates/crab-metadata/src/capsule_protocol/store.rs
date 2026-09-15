@@ -1,6 +1,13 @@
-use crab_storage::{ETag, Store, StoreLayout};
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::capsule_protocol::{CapsuleRun, Checkpoint, MAX_ROOT_BYTES, PointerCatalog, RootRecord};
+use crab_storage::{ETag, Store, StoreLayout};
+use futures_util::{StreamExt, TryStreamExt};
+use object_store::ObjectMeta;
+
+use crate::capsule_protocol::{
+    Capsule, CapsuleRefHead, CapsuleRun, Checkpoint, MAX_CAPSULE_REF_HEADS, MAX_ROOT_BYTES,
+    PointerCatalog, RootRecord, capsule_ref_name_key,
+};
 use crate::error::MetadataError;
 use crate::error::Result;
 
@@ -60,6 +67,28 @@ impl RootSnapshot {
         Ok(Self { record, etag })
     }
 
+    /// Bind a checkpoint that folds visible per-ref heads into a new root generation.
+    pub fn committed_ref_checkpoint(&self, record: RootRecord, etag: ETag) -> Result<Self> {
+        let generation = self
+            .record
+            .root()
+            .generation()
+            .checked_add(1)
+            .ok_or_else(|| contract_error("root generation overflowed"))?;
+        if record.root().generation() != generation
+            || record.root().parent_root_digest() != Some(self.record.digest())
+            || record.root().repository_id() != self.record.root().repository_id()
+            || record.root().head() != self.record.root().head()
+            || !record.root().capsule_frontier().is_empty()
+            || record.root().checkpoint().is_none()
+        {
+            return Err(contract_error(
+                "committed ref checkpoint does not extend its exact CAS snapshot",
+            ));
+        }
+        Ok(Self { record, etag })
+    }
+
     /// Bind a GC fence transition that preserves all logical repository state.
     pub fn committed_maintenance(&self, record: RootRecord, etag: ETag) -> Result<Self> {
         if record.root().generation() != self.record.root().generation()
@@ -70,6 +99,8 @@ impl RootSnapshot {
             || record.root().head() != self.record.root().head()
             || record.root().checkpoint() != self.record.root().checkpoint()
             || record.root().capsule_frontier() != self.record.root().capsule_frontier()
+            || record.root().compacted_ref_transactions()
+                != self.record.root().compacted_ref_transactions()
         {
             return Err(contract_error(
                 "committed maintenance root changed logical repository state",
@@ -108,7 +139,7 @@ pub async fn load_root(router: &StoreLayout<Store>) -> Result<RootSnapshot> {
 /// Load the complete authenticated pointer catalog named by one v2 root.
 pub async fn load_pointer_catalog(router: &StoreLayout<Store>) -> Result<PointerCatalog> {
     let snapshot = load_root(router).await?;
-    let root = snapshot.record().root();
+    let root = snapshot.record().root().clone();
     let mut catalog = if let Some(pointer) = root.checkpoint() {
         let path = router.capsule_checkpoint_path(pointer.hash());
         let (bytes, _) = router
@@ -135,30 +166,309 @@ pub async fn load_pointer_catalog(router: &StoreLayout<Store>) -> Result<Pointer
         PointerCatalog::new()
     };
     for pointer in root.capsule_frontier() {
-        let path = router.capsule_path(pointer.hash());
-        let (bytes, _) = router
-            .store()
-            .get_with_etag_bounded(&path, pointer.size())
-            .await?;
-        let run = CapsuleRun::decode(bytes)?;
-        if run.hash() != pointer.hash()
-            || run.bytes().len() as u64 != pointer.size()
-            || run.level() != pointer.level()
-            || run.transaction_ids() != pointer.transaction_ids()
-            || run.newest_base_root_digest() != pointer.newest_base_root_digest()
-        {
-            return Err(corrupt(
-                &path,
-                "capsule run does not match its root pointer",
-            ));
-        }
+        let run = load_run(router, pointer).await?;
         for capsule in run.capsules() {
             if let Some(delta) = capsule.pointer_catalog_delta()? {
                 catalog.apply(&delta)?;
             }
         }
     }
+    for capsule in load_visible_ref_capsules(router, &root, &catalog).await? {
+        if let Some(delta) = capsule.pointer_catalog_delta()? {
+            catalog.apply(&delta)?;
+        }
+    }
     Ok(catalog)
+}
+
+async fn load_visible_ref_capsules(
+    router: &StoreLayout<Store>,
+    root: &super::RepositoryRoot,
+    base_catalog: &PointerCatalog,
+) -> Result<Vec<Capsule>> {
+    let (heads, active) = capture_ref_heads(router).await?;
+
+    let mut pointers = BTreeMap::new();
+    let mut sequences = BTreeMap::new();
+    let mut expected_refs = root.refs().clone();
+    for head in heads {
+        let state = head.visible(&active);
+        if state.transaction_id()
+            == root
+                .compacted_ref_transactions()
+                .get(head.ref_name())
+                .map(String::as_str)
+        {
+            continue;
+        }
+        match state.oid() {
+            Some(oid) => {
+                expected_refs.insert(head.ref_name().to_owned(), oid.to_owned());
+            }
+            None => {
+                expected_refs.remove(head.ref_name());
+            }
+        }
+        for pointer in state.frontier() {
+            match pointers.get(pointer.hash()) {
+                Some(existing) if existing != pointer => {
+                    return Err(contract_error(
+                        "capsule run identity has conflicting authenticated metadata",
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    pointers.insert(pointer.hash().to_owned(), pointer.clone());
+                }
+            }
+        }
+        sequences.insert(head.ref_name().to_owned(), state.frontier().to_vec());
+    }
+
+    let run_router = router.clone();
+    let runs = futures_util::stream::iter(pointers.into_values().map(move |pointer| {
+        let router = run_router.clone();
+        async move {
+            load_run(&router, &pointer)
+                .await
+                .map(|run| (run.hash().to_owned(), run))
+        }
+    }))
+    .buffer_unordered(32)
+    .try_collect::<BTreeMap<_, _>>()
+    .await?;
+    let mut required = BTreeSet::new();
+    for (ref_name, frontier) in sequences {
+        let transaction_ids = frontier
+            .iter()
+            .flat_map(|pointer| {
+                runs.get(pointer.hash())
+                    .into_iter()
+                    .flat_map(|run| run.capsules().iter().map(Capsule::transaction_id))
+            })
+            .collect::<Vec<_>>();
+        let start = match root.compacted_ref_transactions().get(&ref_name) {
+            Some(compacted) => transaction_ids
+                .iter()
+                .position(|transaction_id| *transaction_id == compacted)
+                .map(|index| index + 1)
+                .ok_or_else(|| {
+                    contract_error(format!(
+                        "ref {ref_name} does not extend its compacted transaction"
+                    ))
+                })?,
+            None => 0,
+        };
+        required.extend(
+            transaction_ids[start..]
+                .iter()
+                .map(|transaction_id| (*transaction_id).to_owned()),
+        );
+    }
+    let mut pending = BTreeMap::new();
+    for capsule in runs
+        .values()
+        .flat_map(|run| run.capsules())
+        .filter(|capsule| required.contains(capsule.transaction_id()))
+    {
+        match pending.get(capsule.transaction_id()) {
+            Some(existing) if existing != capsule => {
+                return Err(contract_error(
+                    "transaction identity names conflicting capsules",
+                ));
+            }
+            Some(_) => {}
+            None => {
+                pending.insert(capsule.transaction_id().to_owned(), capsule.clone());
+            }
+        }
+    }
+    let mut refs = root.refs().clone();
+    let mut catalog = base_catalog.clone();
+    let mut ordered = Vec::with_capacity(pending.len());
+    while !pending.is_empty() {
+        let mut ready = None;
+        for (id, capsule) in &pending {
+            let transaction = capsule.transaction()?;
+            if transaction
+                .edits()
+                .iter()
+                .any(|edit| refs.get(edit.ref_name()).map(String::as_str) != edit.expected_old())
+            {
+                continue;
+            }
+            let mut candidate = catalog.clone();
+            if let Some(delta) = capsule.pointer_catalog_delta()?
+                && candidate.apply(&delta).is_err()
+            {
+                continue;
+            }
+            ready = Some(id.clone());
+            break;
+        }
+        let Some(ready) = ready else {
+            return Err(contract_error(
+                "capsule ref history is cyclic or has an unsatisfied catalog dependency",
+            ));
+        };
+        let capsule = pending
+            .remove(&ready)
+            .ok_or_else(|| contract_error("ready capsule disappeared"))?;
+        for edit in capsule.transaction()?.edits() {
+            match edit.new_oid() {
+                Some(oid) => {
+                    refs.insert(edit.ref_name().to_owned(), oid.to_owned());
+                }
+                None => {
+                    refs.remove(edit.ref_name());
+                }
+            }
+        }
+        if let Some(delta) = capsule.pointer_catalog_delta()? {
+            catalog.apply(&delta)?;
+        }
+        ordered.push(capsule);
+    }
+    if refs != expected_refs {
+        return Err(contract_error(
+            "materialized capsules do not match visible ref-head state",
+        ));
+    }
+    Ok(ordered)
+}
+
+async fn capture_ref_heads(
+    router: &StoreLayout<Store>,
+) -> Result<(Vec<CapsuleRefHead>, BTreeSet<String>)> {
+    for _ in 0..8 {
+        let before = list_ref_head_objects(router).await?;
+        let head_router = router.clone();
+        let loaded = futures_util::stream::iter(before.iter().cloned().map(move |object| {
+            let router = head_router.clone();
+            async move {
+                let (bytes, etag) = router.store().get_with_etag(&object.location).await?;
+                let head = CapsuleRefHead::decode(&bytes)?;
+                if router.capsule_ref_head_path(&capsule_ref_name_key(head.ref_name()))
+                    != object.location
+                {
+                    return Err(corrupt(
+                        &object.location,
+                        "capsule ref-head key does not match its ref name",
+                    ));
+                }
+                Ok::<_, MetadataError>((head, listed_version_matches(&object, &etag)))
+            }
+        }))
+        .buffer_unordered(32)
+        .try_collect::<Vec<_>>()
+        .await?;
+        if loaded.iter().any(|(_, matched)| !matched) {
+            continue;
+        }
+        let mut heads = loaded.into_iter().map(|(head, _)| head).collect::<Vec<_>>();
+        heads.sort_unstable_by(|left, right| left.ref_name().cmp(right.ref_name()));
+        let active = resolve_referenced_activations(router, &heads).await?;
+        let after = list_ref_head_objects(router).await?;
+        if before != after {
+            continue;
+        }
+        return Ok((heads, active));
+    }
+    Err(contract_error(
+        "capsule ref snapshot changed during every bounded capture attempt",
+    ))
+}
+
+async fn list_ref_head_objects(router: &StoreLayout<Store>) -> Result<Vec<ObjectMeta>> {
+    let mut objects = router
+        .store()
+        .list_prefix_bounded(&router.capsule_ref_heads_prefix(), MAX_CAPSULE_REF_HEADS)
+        .await?
+        .ok_or_else(|| contract_error("capsule ref-head limit exceeded"))?;
+    objects.sort_unstable_by(|left, right| left.location.cmp(&right.location));
+    Ok(objects)
+}
+
+fn listed_version_matches(object: &ObjectMeta, etag: &ETag) -> bool {
+    object
+        .e_tag
+        .as_ref()
+        .is_none_or(|listed| etag.e_tag.as_ref() == Some(listed))
+        && object
+            .version
+            .as_ref()
+            .is_none_or(|listed| etag.version.as_ref() == Some(listed))
+}
+
+async fn resolve_referenced_activations(
+    router: &StoreLayout<Store>,
+    heads: &[CapsuleRefHead],
+) -> Result<BTreeSet<String>> {
+    let referenced = heads
+        .iter()
+        .filter_map(CapsuleRefHead::prepared_activation_id)
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    futures_util::stream::iter(referenced.into_iter().map(|activation_id| async move {
+        let path = router.capsule_transaction_path(&activation_id);
+        let (body, _) = router
+            .store()
+            .get_with_etag_bounded(&path, super::MAX_CAPSULE_TRANSACTION_RECORD_BYTES)
+            .await?;
+        let record = super::CapsuleTransactionRecord::decode(&body)?;
+        if record.activation_id() != activation_id {
+            return Err(corrupt(
+                &path,
+                "transaction record does not match its activation key",
+            ));
+        }
+        if heads.iter().any(|head| {
+            head.prepared_activation_id() == Some(activation_id.as_str())
+                && head
+                    .visible(&BTreeSet::from([activation_id.clone()]))
+                    .transaction_id()
+                    != Some(record.transaction_id())
+        }) {
+            return Err(corrupt(
+                &path,
+                "transaction record does not match its prepared ref heads",
+            ));
+        }
+        Ok::<_, MetadataError>((
+            activation_id,
+            record.status() == super::CapsuleTransactionStatus::Committed,
+        ))
+    }))
+    .buffer_unordered(32)
+    .try_filter_map(
+        |(activation_id, committed)| async move { Ok(committed.then_some(activation_id)) },
+    )
+    .try_collect()
+    .await
+}
+
+async fn load_run(
+    router: &StoreLayout<Store>,
+    pointer: &super::CapsulePointer,
+) -> Result<CapsuleRun> {
+    let path = router.capsule_path(pointer.hash());
+    let (bytes, _) = router
+        .store()
+        .get_with_etag_bounded(&path, pointer.size())
+        .await?;
+    let run = CapsuleRun::decode(bytes)?;
+    if run.hash() != pointer.hash()
+        || run.bytes().len() as u64 != pointer.size()
+        || run.level() != pointer.level()
+        || run.transaction_ids() != pointer.transaction_ids()
+        || run.newest_base_root_digest() != pointer.newest_base_root_digest()
+    {
+        return Err(corrupt(
+            &path,
+            "capsule run does not match its authenticated pointer",
+        ));
+    }
+    Ok(run)
 }
 
 fn corrupt(path: &object_store::path::Path, reason: impl Into<String>) -> MetadataError {

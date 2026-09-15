@@ -6,7 +6,7 @@
 //! Produces identical remote state to `git push` via the remote helper,
 //! just faster for multi-file pushes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -191,7 +191,9 @@ struct PushIntegrationSummary {
 /// Resolves the remote, validates the URL, opens staging, resolves refspecs,
 /// and runs the push pipeline. Updates push state on success.
 pub async fn run_push(args: &PushArgs, cancel: &CancellationToken) -> Result<()> {
-    execute_push(args, cancel, true, None).await.map(|_| ())
+    execute_push(args, cancel, true, None, None)
+        .await
+        .map(|_| ())
 }
 
 /// Run push without emitting its terminal result envelope.
@@ -199,7 +201,7 @@ pub(crate) async fn run_push_without_terminal_output(
     args: &PushArgs,
     cancel: &CancellationToken,
 ) -> Result<PushSummaryPayload> {
-    execute_push(args, cancel, false, None).await
+    execute_push(args, cancel, false, None, None).await
 }
 
 /// Run push for an explicit worktree without changing process-global cwd.
@@ -208,7 +210,7 @@ pub(crate) async fn run_push_without_terminal_output_in(
     args: &PushArgs,
     cancel: &CancellationToken,
 ) -> Result<PushSummaryPayload> {
-    execute_push(args, cancel, false, Some(repo_root)).await
+    execute_push(args, cancel, false, Some(repo_root), None).await
 }
 
 async fn execute_push(
@@ -216,6 +218,7 @@ async fn execute_push(
     cancel: &CancellationToken,
     emit_terminal: bool,
     repo_root: Option<&Path>,
+    expected_refs: Option<&BTreeMap<String, Option<String>>>,
 ) -> Result<PushSummaryPayload> {
     let mode = OutputMode::from_flags(args.json, args.jsonl);
     let mut retry_attempts = 0u32;
@@ -229,6 +232,7 @@ async fn execute_push(
             &retry_stages,
             emit_terminal,
             repo_root,
+            expected_refs,
         )
         .await?
         {
@@ -371,20 +375,31 @@ fn push_failure_source(specs: &[PushSpec], result: &PushResult) -> CrabError {
     CrabError::Internal("push failed without a per-ref failure outcome".to_owned())
 }
 
-/// Reject prepared mirror and recovery pushes until they have a v2 adapter.
-///
-/// Continuing through the retired staged-payload publisher would create v1
-/// objects that protocol-v2 readers cannot observe.
-pub(crate) fn run_push_prepared_refspecs(
-    _remote: Option<&str>,
-    _refspecs: &[String],
-    _expected_refs: Option<BTreeMap<String, Option<String>>>,
-    _cancel: &CancellationToken,
+/// Publish a prevalidated hook batch through the canonical capsule pipeline.
+pub(crate) async fn run_push_prepared_refspecs(
+    remote: Option<&str>,
+    refspecs: &[String],
+    expected_refs: Option<BTreeMap<String, Option<String>>>,
+    cancel: &CancellationToken,
 ) -> Result<PushSummaryPayload> {
-    Err(CrabError::Configuration {
-        key: "capsule-protocol prepared push".to_owned(),
-        origin: "mirror and recovery push require a protocol-v2 staged-payload adapter".to_owned(),
-    })
+    let args = PushArgs {
+        remote: remote.map(str::to_owned),
+        refspecs: refspecs.to_vec(),
+        upload_concurrency: None,
+        lock_wait_secs: None,
+        manifest_cas_retries: None,
+        rebase_on_non_fast_forward: false,
+        rebase_retry_limit: DEFAULT_AGENT_REBASE_RETRY_LIMIT,
+        dry_run: false,
+        force: false,
+        follow_tags: false,
+        verbose: false,
+        no_incremental: false,
+        no_color: true,
+        json: false,
+        jsonl: false,
+    };
+    execute_push(&args, cancel, false, None, expected_refs.as_ref()).await
 }
 
 async fn run_push_once(
@@ -394,6 +409,7 @@ async fn run_push_once(
     integration_retry_stages: &BTreeMap<String, u32>,
     emit_terminal: bool,
     explicit_repo_root: Option<&Path>,
+    prepared_expected_refs: Option<&BTreeMap<String, Option<String>>>,
 ) -> Result<PushAttempt> {
     let start = Instant::now();
     let mode = OutputMode::from_flags(args.json, args.jsonl);
@@ -534,6 +550,10 @@ async fn run_push_once(
         push_config.git_dir = Some(context.per_worktree_git_dir.clone());
     }
     apply_push_cli_overrides(args, &mut push_config);
+    if let Some(expected) = prepared_expected_refs {
+        push_config.expected_refs.clone_from(expected);
+        push_config.atomic = true;
+    }
     if let Err(error) = configure_active_active_push_coordinator(
         &config,
         Some(&remote_url),
@@ -582,6 +602,25 @@ async fn run_push_once(
         }
     };
     let repo_prefix = router.repo_prefix().to_owned();
+    let capsule_layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let requested_refs = specs
+        .iter()
+        .map(|spec| spec.dst.clone())
+        .collect::<BTreeSet<_>>();
+    let capsule_view = crab_read::capsule_protocol::open_view_from_root_for_refs(
+        &capsule_layout,
+        root,
+        &requested_refs,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: push_config.receive_max_input_size,
+            max_frontier_bytes: push_config.receive_max_input_size,
+        },
+    )
+    .await?;
     let staging =
         crate::git::push_staging::PushStaging::open(repo_root.join(".crab").join("staging"))
             .await?;
@@ -590,7 +629,7 @@ async fn run_push_once(
         &specs,
         &store,
         &router,
-        Some(root),
+        Some(capsule_view),
         &config.transfer_hide_refs,
         staging.reader(),
         caching_store.as_ref(),
@@ -735,13 +774,6 @@ fn current_head_push_branch(specs: &[PushSpec]) -> Option<&str> {
     Some(branch)
 }
 
-#[cfg(test)]
-fn agent_integration_lock_branch<'a>(args: &PushArgs, specs: &'a [PushSpec]) -> Option<&'a str> {
-    args.rebase_on_non_fast_forward
-        .then(|| current_head_push_branch(specs))
-        .flatten()
-}
-
 fn rebase_retry_branch<'a>(specs: &'a [PushSpec], result: &PushResult) -> Option<&'a str> {
     let branch = current_head_push_branch(specs)?;
     let [spec] = specs else {
@@ -750,7 +782,9 @@ fn rebase_retry_branch<'a>(specs: &'a [PushSpec], result: &PushResult) -> Option
     let outcome = result.outcomes.get(&spec.dst)?;
     if !matches!(
         outcome,
-        RefPushOutcome::Rejected(PushRejectReason::NonFastForward { .. })
+        RefPushOutcome::Rejected(
+            PushRejectReason::NonFastForward { .. } | PushRejectReason::StaleInfo
+        )
     ) {
         return None;
     }
@@ -870,30 +904,6 @@ fn run_git_pull_rebase(
     Err(git_command_diagnostics(&output.stdout, &output.stderr))
 }
 
-#[cfg(test)]
-fn remote_branch_exists(
-    repo_root: &Path,
-    remote: &str,
-    branch: &str,
-) -> std::result::Result<bool, String> {
-    let ref_name = format!("refs/heads/{branch}");
-    let output = Command::new("git")
-        .args(["ls-remote", "--exit-code", remote, &ref_name])
-        .current_dir(repo_root)
-        .env(AGENT_REBASE_FETCH_REF_FILTERING_ENV, "1")
-        .output()
-        .map_err(|e| format!("failed to spawn git ls-remote: {e}"))?;
-
-    if output.status.success() {
-        return Ok(true);
-    }
-    if output.status.code() == Some(2) {
-        return Ok(false);
-    }
-
-    Err(git_command_diagnostics(&output.stdout, &output.stderr))
-}
-
 fn rebase_for_integration(
     failure: &mut PushAttemptFailure,
     branch: &str,
@@ -933,11 +943,6 @@ fn mark_integration_failed(
 
 fn integration_command(remote: &str, branch: &str) -> String {
     format!("git pull --rebase --autostash {remote} {branch}")
-}
-
-#[cfg(test)]
-fn remote_branch_probe_command(remote: &str, branch: &str) -> String {
-    format!("git ls-remote --exit-code {remote} refs/heads/{branch}")
 }
 
 fn git_command_diagnostics(stdout: &[u8], stderr: &[u8]) -> String {
@@ -1309,38 +1314,6 @@ pub(crate) fn git_config_value(key: &str) -> Option<String> {
     }
 }
 
-/// Resolve a ref to its SHA via `git rev-parse`.
-///
-/// On `--features gix-facade`, resolves through `repo.rev_parse_single()`.
-/// Default builds shell out to `git rev-parse <spec>`.
-#[cfg(test)]
-fn resolve_rev(refspec: &str) -> Option<String> {
-    #[cfg(feature = "gix-facade")]
-    {
-        let repo = crate::git::facade::open().ok()?;
-        crate::git::facade::rev_parse_hex(&repo, refspec)
-            .ok()
-            .flatten()
-    }
-
-    #[cfg(not(feature = "gix-facade"))]
-    {
-        let output = Command::new("git")
-            .args(["rev-parse", refspec])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
-
-        if !output.status.success() {
-            return None;
-        }
-
-        let sha = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if sha.is_empty() { None } else { Some(sha) }
-    }
-}
-
 /// Print dry-run summary showing what would be pushed.
 fn print_dry_run(remote: &str, url: &str, specs: &[PushSpec]) {
     println!("Would push to {remote} ({url}):");
@@ -1477,6 +1450,23 @@ mod tests {
             }),
         );
         let result = PushResult::new(outcomes);
+
+        assert_eq!(rebase_retry_branch(&[spec], &result), Some("main"));
+    }
+
+    #[test]
+    fn rebase_retry_branch_accepts_same_ref_cas_loss() {
+        use std::collections::HashMap;
+
+        let spec = PushSpec {
+            force: false,
+            src: "HEAD".to_owned(),
+            dst: "refs/heads/main".to_owned(),
+        };
+        let result = PushResult::new(HashMap::from([(
+            spec.dst.clone(),
+            RefPushOutcome::Rejected(PushRejectReason::StaleInfo),
+        )]));
 
         assert_eq!(rebase_retry_branch(&[spec], &result), Some("main"));
     }

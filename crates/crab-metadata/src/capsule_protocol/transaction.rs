@@ -66,12 +66,32 @@ impl CapsuleRefEdit {
 pub struct CapsuleTransaction {
     version: u32,
     base_root_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    plan_id: Option<String>,
     edits: Vec<CapsuleRefEdit>,
 }
 
 impl CapsuleTransaction {
     /// Create a canonical transaction, sorting edits and rejecting duplicate refs.
-    pub fn new(base_root_digest: &str, mut edits: Vec<CapsuleRefEdit>) -> Result<Self> {
+    pub fn new(base_root_digest: &str, edits: Vec<CapsuleRefEdit>) -> Result<Self> {
+        Self::new_inner(base_root_digest, None, edits)
+    }
+
+    /// Create a transaction whose identity is bound to one reviewed mirror plan.
+    pub fn for_plan(
+        base_root_digest: &str,
+        plan_id: &str,
+        edits: Vec<CapsuleRefEdit>,
+    ) -> Result<Self> {
+        validate_content_hash(plan_id, "mirror plan id", "capsule-protocol transaction")?;
+        Self::new_inner(base_root_digest, Some(plan_id.to_owned()), edits)
+    }
+
+    fn new_inner(
+        base_root_digest: &str,
+        plan_id: Option<String>,
+        mut edits: Vec<CapsuleRefEdit>,
+    ) -> Result<Self> {
         validate_content_hash(
             base_root_digest,
             "transaction base root digest",
@@ -92,6 +112,7 @@ impl CapsuleTransaction {
         Ok(Self {
             version: TRANSACTION_VERSION,
             base_root_digest: base_root_digest.to_owned(),
+            plan_id,
             edits,
         })
     }
@@ -136,6 +157,12 @@ impl CapsuleTransaction {
         &self.base_root_digest
     }
 
+    /// Return the reviewed mirror plan committed by this transaction, if any.
+    #[must_use]
+    pub fn plan_id(&self) -> Option<&str> {
+        self.plan_id.as_deref()
+    }
+
     /// Return the canonically ordered ref edits.
     #[must_use]
     pub fn edits(&self) -> &[CapsuleRefEdit] {
@@ -154,6 +181,9 @@ fn validate_transaction(transaction: &CapsuleTransaction) -> Result<()> {
         "transaction base root digest",
         "capsule-protocol transaction",
     )?;
+    if let Some(plan_id) = &transaction.plan_id {
+        validate_content_hash(plan_id, "mirror plan id", "capsule-protocol transaction")?;
+    }
     if transaction.edits.is_empty() {
         return Err(contract_error("transaction must edit at least one ref"));
     }

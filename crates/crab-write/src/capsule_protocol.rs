@@ -1,10 +1,11 @@
-//! Capsule publication through one immutable transaction object and one mutable root.
+//! Capsule publication through independently mutable ref heads and transaction records.
 
 use crab_metadata::capsule_protocol::{
     Capsule, CapsulePointer, CapsuleRun, CapsuleTransaction, Checkpoint, CheckpointPointer,
     RepositoryRoot, RootRecord, create_root, load_root,
 };
-use crab_storage::{StorageError, Store, StoreLayout};
+use crab_storage::{ETag, StorageError, Store, StoreLayout};
+use futures_util::future::try_join_all;
 
 use crate::{Result, WriteError};
 
@@ -49,19 +50,16 @@ pub async fn initialize(
     }
 }
 
-/// Open and verify the single root used for advertisement and publication CAS.
+/// Open and verify the checkpoint root used as the base of per-ref state.
 pub async fn open_root(router: &StoreLayout<Store>) -> Result<RootSnapshot> {
     Ok(load_root(router).await?)
 }
 
-/// Publish one verified capsule, then atomically advance the root.
+/// Publish one verified capsule through independently mutable per-ref heads.
 ///
-/// The caller supplies the root snapshot retained from advertisement and must
-/// first prove authorization, exact Git graph closure, pack integrity,
-/// fast-forward policy, and every external content dependency against that
-/// snapshot. A clean attempt performs capsule PUT, optional capsule readback,
-/// and root CAS; together with [`open_root`] the complete push uses three
-/// requests for a checksum-qualified provider and four otherwise.
+/// A single-ref push commits at that ref's head CAS. Multi-ref pushes prepare
+/// every head and become visible through one per-attempt transaction-record
+/// CAS, so unrelated refs never contend on the repository root.
 pub async fn publish(
     router: &StoreLayout<Store>,
     base: RootSnapshot,
@@ -69,54 +67,613 @@ pub async fn publish(
     capsule: &Capsule,
 ) -> Result<RootSnapshot> {
     validate_capsule_binding(&base, transaction, capsule)?;
-    let (refs, peeled_refs) = apply_ref_edits(&base, transaction)?;
-    let mut run = CapsuleRun::leaf(capsule.clone())?;
-    let mut frontier = base.record().root().capsule_frontier().to_vec();
-    while frontier
-        .last()
-        .is_some_and(|existing| existing.level() == run.level())
+    let transaction_id = transaction.id()?;
+    let snapshots = try_join_all(
+        transaction
+            .edits()
+            .iter()
+            .map(|edit| read_ref_head(router, base.record().root(), edit.ref_name())),
+    )
+    .await?;
+    for (edit, snapshot) in transaction.edits().iter().zip(&snapshots) {
+        if snapshot.visible.oid() != edit.expected_old() {
+            return Err(WriteError::RefChanged {
+                ref_name: edit.ref_name().to_owned(),
+                path: router
+                    .capsule_ref_head_path(&crab_metadata::capsule_protocol::capsule_ref_name_key(
+                        edit.ref_name(),
+                    ))
+                    .to_string(),
+            });
+        }
+    }
+
+    let prepared = try_join_all(transaction.edits().iter().zip(snapshots).map(
+        |(edit, snapshot)| {
+            prepare_ref_successor(router, snapshot, edit, &transaction_id, capsule.clone())
+        },
+    ))
+    .await?;
+    let mut runs = std::collections::BTreeMap::new();
+    for (_, run) in &prepared {
+        match runs.get(run.hash()) {
+            Some(existing) if existing != run => {
+                return Err(WriteError::Internal(
+                    "capsule run hash names conflicting bodies".to_owned(),
+                ));
+            }
+            Some(_) => {}
+            None => {
+                runs.insert(run.hash().to_owned(), run.clone());
+            }
+        }
+    }
+    try_join_all(runs.into_values().map(|run| async move {
+        let path = router.capsule_path(run.hash());
+        router
+            .store()
+            .put_if_absent_verified(&path, run.bytes().clone())
+            .await
+    }))
+    .await?;
+    let prepared = prepared
+        .into_iter()
+        .map(|(prepared, _)| prepared)
+        .collect::<Vec<_>>();
+
+    if prepared.len() == 1 && transaction.plan_id().is_none() {
+        let prepared = prepared
+            .into_iter()
+            .next()
+            .ok_or_else(|| WriteError::Internal("single-ref publication disappeared".to_owned()))?;
+        commit_single_ref(router, prepared).await?;
+        return Ok(base);
+    }
+
+    let activation_id = activation_id(&transaction_id);
+    let plan_intent = match transaction.plan_id() {
+        Some(_) => Some(
+            crab_metadata::capsule_protocol::prepare_capsule_plan(
+                router.store(),
+                router,
+                transaction,
+                &activation_id,
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    commit_multi_ref(router, &transaction_id, &activation_id, prepared).await?;
+    if let Some(intent) = plan_intent {
+        crab_metadata::capsule_protocol::publish_capsule_plan_receipt(
+            router.store(),
+            router,
+            &intent,
+        )
+        .await?;
+    }
+    Ok(base)
+}
+
+/// Recheck the complete Git ref namespace inside the caller's conflict-domain lease.
+pub async fn validate_ref_namespace(
+    router: &StoreLayout<Store>,
+    root: &RepositoryRoot,
+    edits: &[crab_metadata::capsule_protocol::CapsuleRefEdit],
+) -> Result<()> {
+    let edited_names = edits
+        .iter()
+        .map(|edit| edit.ref_name())
+        .collect::<std::collections::BTreeSet<_>>();
+    let prefix = router.capsule_ref_heads_prefix();
+    let objects = router
+        .store()
+        .list_prefix_bounded(
+            &prefix,
+            crab_metadata::capsule_protocol::MAX_CAPSULE_REF_HEADS,
+        )
+        .await?
+        .ok_or_else(|| WriteError::Internal("capsule ref-head limit exceeded".to_owned()))?;
+    let prefix = format!("{prefix}/");
+    let mut names = Vec::new();
+    for object in objects {
+        let key = object
+            .location
+            .as_ref()
+            .strip_prefix(&prefix)
+            .and_then(|name| name.strip_suffix(".json"))
+            .ok_or_else(|| WriteError::CorruptObject {
+                path: object.location.to_string(),
+                reason: "capsule ref-head key has an invalid shape".to_owned(),
+            })?;
+        let name = crab_metadata::capsule_protocol::capsule_ref_name_from_key(key)?;
+        if edited_names.iter().any(|edited| {
+            name.as_str() == *edited
+                || name
+                    .strip_prefix(*edited)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+                || edited
+                    .strip_prefix(&name)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        }) {
+            names.push(name);
+        }
+    }
+    let heads = try_join_all(names.iter().map(|name| read_ref_head(router, root, name))).await?;
+    let mut refs = root.refs().clone();
+    for head in heads {
+        match head.visible.oid() {
+            Some(oid) => {
+                refs.insert(head.head.ref_name().to_owned(), oid.to_owned());
+            }
+            None => {
+                refs.remove(head.head.ref_name());
+            }
+        }
+    }
+    for edit in edits {
+        match edit.new_oid() {
+            Some(oid) => {
+                refs.insert(edit.ref_name().to_owned(), oid.to_owned());
+            }
+            None => {
+                refs.remove(edit.ref_name());
+            }
+        }
+    }
+    crab_git::refname::validate_ref_namespace(refs.keys().map(String::as_str))?;
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct RefHeadSnapshot {
+    head: crab_metadata::capsule_protocol::CapsuleRefHead,
+    visible: crab_metadata::capsule_protocol::CapsuleRefState,
+    active: std::collections::BTreeSet<String>,
+    etag: Option<ETag>,
+}
+
+#[derive(Debug)]
+struct PreparedRefHead {
+    original: RefHeadSnapshot,
+    candidate: crab_metadata::capsule_protocol::CapsuleRefHead,
+}
+
+async fn read_ref_head(
+    router: &StoreLayout<Store>,
+    root: &RepositoryRoot,
+    ref_name: &str,
+) -> Result<RefHeadSnapshot> {
+    let path = router.capsule_ref_head_path(
+        &crab_metadata::capsule_protocol::capsule_ref_name_key(ref_name),
+    );
+    let (head, etag) = match router.store().get_with_etag(&path).await {
+        Ok((body, etag)) => {
+            let head = crab_metadata::capsule_protocol::CapsuleRefHead::decode(&body)?;
+            if head.ref_name() != ref_name {
+                return Err(WriteError::CorruptObject {
+                    path: path.to_string(),
+                    reason: "capsule ref-head key does not match its ref name".to_owned(),
+                });
+            }
+            (head, Some(etag))
+        }
+        Err(StorageError::NotFound { .. }) => (
+            crab_metadata::capsule_protocol::CapsuleRefHead::from_root(
+                ref_name,
+                root.refs().get(ref_name).cloned(),
+                root.peeled_refs().get(ref_name).cloned(),
+            )?,
+            None,
+        ),
+        Err(source) => return Err(source.into()),
+    };
+    let mut active = std::collections::BTreeSet::new();
+    if let Some(activation_id) = head.prepared_activation_id()
+        && resolve_prepared_activation(router, activation_id).await?
     {
+        active.insert(activation_id.to_owned());
+    }
+    let visible = head.visible(&active).clone();
+    Ok(RefHeadSnapshot {
+        head,
+        visible,
+        active,
+        etag,
+    })
+}
+
+async fn resolve_prepared_activation(
+    router: &StoreLayout<Store>,
+    activation_id: &str,
+) -> Result<bool> {
+    let path = router.capsule_transaction_path(activation_id);
+    loop {
+        let (body, etag) = router
+            .store()
+            .get_with_etag_bounded(
+                &path,
+                crab_metadata::capsule_protocol::MAX_CAPSULE_TRANSACTION_RECORD_BYTES,
+            )
+            .await?;
+        let record = crab_metadata::capsule_protocol::CapsuleTransactionRecord::decode(&body)?;
+        if record.activation_id() != activation_id {
+            return Err(WriteError::CorruptObject {
+                path: path.to_string(),
+                reason: "transaction record key does not match its activation id".to_owned(),
+            });
+        }
+        match record.status() {
+            crab_metadata::capsule_protocol::CapsuleTransactionStatus::Committed => {
+                let marker_path = router.capsule_committed_transaction_path(activation_id);
+                let marker = router
+                    .store()
+                    .get_with_etag_bounded(
+                        &marker_path,
+                        crab_metadata::capsule_protocol::MAX_CAPSULE_TRANSACTION_RECORD_BYTES,
+                    )
+                    .await;
+                let (marker, _) = match marker {
+                    Ok(marker) => marker,
+                    Err(StorageError::NotFound { .. }) => {
+                        let body = record.encode()?;
+                        let created = router
+                            .store()
+                            .put_if_absent_verified(&marker_path, body.clone())
+                            .await
+                            .map_err(|source| WriteError::CapsuleCommitUncertain {
+                                transaction_id: record.transaction_id().to_owned(),
+                                source: Box::new(source),
+                                verification: None,
+                            })?;
+                        if !created {
+                            let (actual, _) = router
+                                .store()
+                                .get_with_etag_bounded(
+                                    &marker_path,
+                                    crab_metadata::capsule_protocol::MAX_CAPSULE_TRANSACTION_RECORD_BYTES,
+                                )
+                                .await?;
+                            if actual != body {
+                                return Err(WriteError::CorruptObject {
+                                    path: marker_path.to_string(),
+                                    reason:
+                                        "committed marker conflicts with its transaction record"
+                                            .to_owned(),
+                                });
+                            }
+                        }
+                        return Ok(true);
+                    }
+                    Err(source) => {
+                        return Err(WriteError::CapsuleCommitUncertain {
+                            transaction_id: record.transaction_id().to_owned(),
+                            source: Box::new(source),
+                            verification: None,
+                        });
+                    }
+                };
+                let marker =
+                    crab_metadata::capsule_protocol::CapsuleTransactionRecord::decode(&marker)?;
+                if marker != record {
+                    return Err(WriteError::CorruptObject {
+                        path: marker_path.to_string(),
+                        reason: "committed marker does not match its transaction record".to_owned(),
+                    });
+                }
+                return Ok(true);
+            }
+            crab_metadata::capsule_protocol::CapsuleTransactionStatus::Aborted => {
+                return Ok(false);
+            }
+            crab_metadata::capsule_protocol::CapsuleTransactionStatus::Preparing => {
+                let aborted = record.abort()?;
+                match router.store().update(&path, aborted.encode()?, etag).await {
+                    Ok(_) => return Ok(false),
+                    Err(StorageError::StateConflict { .. }) => continue,
+                    Err(source) => {
+                        let (actual, _) = match router
+                            .store()
+                            .get_with_etag_bounded(
+                                &path,
+                                crab_metadata::capsule_protocol::MAX_CAPSULE_TRANSACTION_RECORD_BYTES,
+                            )
+                            .await
+                        {
+                            Ok(actual) => actual,
+                            Err(_) => return Err(source.into()),
+                        };
+                        let actual =
+                            crab_metadata::capsule_protocol::CapsuleTransactionRecord::decode(
+                                &actual,
+                            )?;
+                        return match actual.status() {
+                            crab_metadata::capsule_protocol::CapsuleTransactionStatus::Committed => Ok(true),
+                            crab_metadata::capsule_protocol::CapsuleTransactionStatus::Aborted => Ok(false),
+                            crab_metadata::capsule_protocol::CapsuleTransactionStatus::Preparing => Err(source.into()),
+                        };
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn prepare_ref_successor(
+    router: &StoreLayout<Store>,
+    snapshot: RefHeadSnapshot,
+    edit: &crab_metadata::capsule_protocol::CapsuleRefEdit,
+    transaction_id: &str,
+    capsule: Capsule,
+) -> Result<(PreparedRefHead, CapsuleRun)> {
+    let mut run = CapsuleRun::leaf(capsule)?;
+    let mut frontier = snapshot.visible.frontier().to_vec();
+    while frontier.last().is_some_and(|pointer| {
+        pointer.level() == run.level()
+            && run.capsules().len() < crab_metadata::capsule_protocol::MAX_CAPSULES_PER_RUN
+    }) {
         let pointer = frontier
             .pop()
-            .ok_or_else(|| WriteError::Internal("capsule run frontier became empty".to_owned()))?;
+            .ok_or_else(|| WriteError::Internal("capsule ref frontier became empty".to_owned()))?;
         let older = load_run(router, &pointer).await?;
         run = older.merge(&run)?;
     }
-    let capsule_path = router.capsule_path(run.hash());
-    router
-        .store()
-        .put_if_absent_verified(&capsule_path, run.bytes().clone())
-        .await?;
-
-    let pointer = CapsulePointer::new(
+    frontier.push(CapsulePointer::new(
         run.hash(),
         run.bytes().len() as u64,
         run.level(),
         run.transaction_ids(),
         run.newest_base_root_digest(),
-    )?;
-    frontier.push(pointer);
-    let transaction_id = transaction.id()?;
-    let next = base.record().root().advance(
-        base.record().digest(),
-        refs,
-        peeled_refs,
+    )?);
+    let state = snapshot.head.successor_state(
+        &snapshot.active,
+        edit.new_oid().map(str::to_owned),
+        edit.peeled_oid().map(str::to_owned),
+        transaction_id.to_owned(),
         frontier,
-        &transaction_id,
     )?;
-    let candidate = RootRecord::encode(next)?;
-    let root_path = router.capsule_root_path();
-    match router
+    let candidate = snapshot.head.commit(state)?;
+    Ok((
+        PreparedRefHead {
+            original: snapshot,
+            candidate,
+        },
+        run,
+    ))
+}
+
+async fn commit_single_ref(router: &StoreLayout<Store>, prepared: PreparedRefHead) -> Result<()> {
+    write_ref_head(router, &prepared.original, &prepared.candidate)
+        .await
+        .map(|_| ())
+}
+
+async fn commit_multi_ref(
+    router: &StoreLayout<Store>,
+    transaction_id: &str,
+    activation_id: &str,
+    prepared: Vec<PreparedRefHead>,
+) -> Result<()> {
+    let conflict_ref = prepared
+        .first()
+        .map(|item| item.original.head.ref_name().to_owned())
+        .ok_or_else(|| WriteError::Internal("multi-ref publication has no refs".to_owned()))?;
+    let path = router.capsule_transaction_path(activation_id);
+    let preparing = crab_metadata::capsule_protocol::CapsuleTransactionRecord::preparing(
+        activation_id.to_owned(),
+        transaction_id.to_owned(),
+    )?;
+    let preparing_body = preparing.encode()?;
+    let record_etag = match router
         .store()
-        .update(&root_path, candidate.bytes().clone(), base.etag().clone())
+        .create_strict_with_etag(&path, preparing_body.clone())
         .await
     {
-        Ok(etag) => Ok(base.committed_successor(candidate, etag)?),
-        Err(StorageError::StateConflict { .. }) => Err(WriteError::CapsuleRootChanged {
-            path: root_path.to_string(),
-        }),
+        Ok(etag) => etag,
+        Err(source) => match router
+            .store()
+            .get_with_etag_bounded(&path, preparing_body.len() as u64)
+            .await
+        {
+            Ok((actual, etag)) if actual == preparing_body => etag,
+            _ => return Err(source.into()),
+        },
+    };
+    let mut written = Vec::with_capacity(prepared.len());
+    for item in prepared {
+        let new_state = item
+            .candidate
+            .visible(&std::collections::BTreeSet::new())
+            .clone();
+        let candidate = item.original.head.prepare(
+            item.original.visible.clone(),
+            activation_id.to_owned(),
+            new_state,
+        )?;
+        match write_ref_head(router, &item.original, &candidate).await {
+            Ok(etag) => written.push((item.original, candidate, etag)),
+            Err(error) => {
+                abort_transaction(router, &path, &preparing, record_etag).await;
+                rollback_ref_heads(router, &written).await;
+                return Err(error);
+            }
+        }
+    }
+
+    let committed = preparing.commit()?;
+    let committed_body = committed.encode()?;
+    if let Err(source) = router
+        .store()
+        .update(&path, committed_body.clone(), record_etag)
+        .await
+    {
+        let actual = router
+            .store()
+            .get_with_etag_bounded(
+                &path,
+                crab_metadata::capsule_protocol::MAX_CAPSULE_TRANSACTION_RECORD_BYTES,
+            )
+            .await;
+        match actual {
+            Ok((actual, _)) if actual == committed_body => {}
+            Ok((actual, _)) => {
+                let actual =
+                    crab_metadata::capsule_protocol::CapsuleTransactionRecord::decode(&actual)?;
+                rollback_ref_heads(router, &written).await;
+                if actual.activation_id() == activation_id
+                    && actual.transaction_id() == transaction_id
+                    && actual.status()
+                        == crab_metadata::capsule_protocol::CapsuleTransactionStatus::Aborted
+                {
+                    return Err(WriteError::RefChanged {
+                        ref_name: conflict_ref,
+                        path: path.to_string(),
+                    });
+                }
+                return Err(WriteError::CapsuleCommitUncertain {
+                    transaction_id: transaction_id.to_owned(),
+                    source: Box::new(source),
+                    verification: None,
+                });
+            }
+            Err(verification) => {
+                rollback_ref_heads(router, &written).await;
+                return Err(WriteError::CapsuleCommitUncertain {
+                    transaction_id: transaction_id.to_owned(),
+                    source: Box::new(source),
+                    verification: Some(Box::new(verification.into())),
+                });
+            }
+        }
+    }
+
+    let marker_path = router.capsule_committed_transaction_path(activation_id);
+    let marker_created = match router
+        .store()
+        .put_if_absent_verified(&marker_path, committed_body.clone())
+        .await
+    {
+        Ok(created) => created,
         Err(source) => {
-            reconcile_root_update(router, base.record(), candidate, transaction, source).await
+            return Err(WriteError::CapsuleCommitUncertain {
+                transaction_id: transaction_id.to_owned(),
+                source: Box::new(source),
+                verification: None,
+            });
+        }
+    };
+    if !marker_created {
+        let (actual, _) = router
+            .store()
+            .get_with_etag_bounded(
+                &marker_path,
+                crab_metadata::capsule_protocol::MAX_CAPSULE_TRANSACTION_RECORD_BYTES,
+            )
+            .await
+            .map_err(|source| WriteError::CapsuleCommitUncertain {
+                transaction_id: transaction_id.to_owned(),
+                source: Box::new(source),
+                verification: None,
+            })?;
+        if actual != committed_body {
+            return Err(WriteError::CorruptObject {
+                path: marker_path.to_string(),
+                reason: "committed marker conflicts with its transaction record".to_owned(),
+            });
+        }
+    }
+
+    // Prepared heads remain in two-version form. Readers resolve this atomic
+    // record once while double-collecting head versions, preserving all-old/all-new.
+    Ok(())
+}
+
+fn activation_id(transaction_id: &str) -> String {
+    let mut hasher = blake3::Hasher::new_derive_key("crab capsule activation id v2");
+    hasher.update(transaction_id.as_bytes());
+    hasher.update(uuid::Uuid::now_v7().as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+async fn abort_transaction(
+    router: &StoreLayout<Store>,
+    path: &object_store::path::Path,
+    preparing: &crab_metadata::capsule_protocol::CapsuleTransactionRecord,
+    etag: ETag,
+) {
+    let result = match preparing.abort().and_then(|record| record.encode()) {
+        Ok(body) => router.store().update(path, body, etag).await,
+        Err(error) => {
+            tracing::warn!(%error, "could not encode capsule transaction abort");
+            return;
+        }
+    };
+    if let Err(error) = result {
+        tracing::warn!(%error, "capsule transaction abort needs reconciliation");
+    }
+}
+
+async fn write_ref_head(
+    router: &StoreLayout<Store>,
+    original: &RefHeadSnapshot,
+    candidate: &crab_metadata::capsule_protocol::CapsuleRefHead,
+) -> Result<ETag> {
+    let path = router.capsule_ref_head_path(
+        &crab_metadata::capsule_protocol::capsule_ref_name_key(original.head.ref_name()),
+    );
+    let body = candidate.encode()?;
+    let result = match &original.etag {
+        Some(etag) => {
+            router
+                .store()
+                .update(&path, body.clone(), etag.clone())
+                .await
+        }
+        None => {
+            router
+                .store()
+                .create_strict_with_etag(&path, body.clone())
+                .await
+        }
+    };
+    match result {
+        Ok(etag) => Ok(etag),
+        Err(StorageError::StateConflict { .. }) => Err(WriteError::RefChanged {
+            ref_name: original.head.ref_name().to_owned(),
+            path: path.to_string(),
+        }),
+        Err(source) => match router
+            .store()
+            .get_with_etag_bounded(&path, body.len() as u64)
+            .await
+        {
+            Ok((actual, etag)) if actual == body => Ok(etag),
+            _ => Err(source.into()),
+        },
+    }
+}
+
+async fn rollback_ref_heads(
+    router: &StoreLayout<Store>,
+    written: &[(
+        RefHeadSnapshot,
+        crab_metadata::capsule_protocol::CapsuleRefHead,
+        ETag,
+    )],
+) {
+    for (original, candidate, etag) in written.iter().rev() {
+        let path = router.capsule_ref_head_path(
+            &crab_metadata::capsule_protocol::capsule_ref_name_key(original.head.ref_name()),
+        );
+        let result = match original.head.encode() {
+            Ok(body) => router.store().update(&path, body, etag.clone()).await,
+            Err(error) => {
+                tracing::warn!(ref_name = %original.head.ref_name(), %error, "could not encode capsule ref-head rollback");
+                continue;
+            }
+        };
+        if let Err(error) = result {
+            tracing::warn!(ref_name = %candidate.ref_name(), %error, "capsule ref-head rollback needs repair");
         }
     }
 }
@@ -126,6 +683,37 @@ pub async fn publish_checkpoint(
     router: &StoreLayout<Store>,
     base: RootSnapshot,
     checkpoint: &Checkpoint,
+) -> Result<RootSnapshot> {
+    publish_checkpoint_inner(router, base, checkpoint, None).await
+}
+
+/// Publish a checkpoint and fold the exact captured per-ref positions into the root.
+pub async fn publish_ref_checkpoint(
+    router: &StoreLayout<Store>,
+    base: RootSnapshot,
+    checkpoint: &Checkpoint,
+    refs: std::collections::BTreeMap<String, String>,
+    peeled_refs: std::collections::BTreeMap<String, String>,
+    compacted_ref_transactions: std::collections::BTreeMap<String, String>,
+) -> Result<RootSnapshot> {
+    publish_checkpoint_inner(
+        router,
+        base,
+        checkpoint,
+        Some((refs, peeled_refs, compacted_ref_transactions)),
+    )
+    .await
+}
+
+async fn publish_checkpoint_inner(
+    router: &StoreLayout<Store>,
+    base: RootSnapshot,
+    checkpoint: &Checkpoint,
+    ref_state: Option<(
+        std::collections::BTreeMap<String, String>,
+        std::collections::BTreeMap<String, String>,
+        std::collections::BTreeMap<String, String>,
+    )>,
 ) -> Result<RootSnapshot> {
     if let Some(fence) = base.record().root().gc_fence() {
         return Err(WriteError::CapsuleGcFenced {
@@ -164,10 +752,22 @@ pub async fn publish_checkpoint(
         pack_count,
         object_count,
     )?;
-    let next = base
-        .record()
-        .root()
-        .install_checkpoint(base.record().digest(), pointer)?;
+    let is_ref_checkpoint = ref_state.is_some();
+    let next = match ref_state {
+        Some((refs, peeled_refs, compacted_ref_transactions)) => {
+            base.record().root().install_ref_checkpoint(
+                base.record().digest(),
+                pointer,
+                refs,
+                peeled_refs,
+                compacted_ref_transactions,
+            )?
+        }
+        None => base
+            .record()
+            .root()
+            .install_checkpoint(base.record().digest(), pointer)?,
+    };
     let candidate = RootRecord::encode(next)?;
     let root_path = router.capsule_root_path();
     match router
@@ -175,6 +775,7 @@ pub async fn publish_checkpoint(
         .update(&root_path, candidate.bytes().clone(), base.etag().clone())
         .await
     {
+        Ok(etag) if is_ref_checkpoint => Ok(base.committed_ref_checkpoint(candidate, etag)?),
         Ok(etag) => Ok(base.committed_checkpoint(candidate, etag)?),
         Err(StorageError::StateConflict { .. }) => Err(WriteError::CapsuleRootChanged {
             path: root_path.to_string(),
@@ -297,76 +898,6 @@ fn validate_capsule_binding(
     Ok(())
 }
 
-fn apply_ref_edits(
-    base: &RootSnapshot,
-    transaction: &CapsuleTransaction,
-) -> Result<(
-    std::collections::BTreeMap<String, String>,
-    std::collections::BTreeMap<String, String>,
-)> {
-    let mut refs = base.record().root().refs().clone();
-    let mut peeled_refs = base.record().root().peeled_refs().clone();
-    for edit in transaction.edits() {
-        let observed = refs.get(edit.ref_name()).map(String::as_str);
-        if observed != edit.expected_old() {
-            return Err(WriteError::RefChanged {
-                ref_name: edit.ref_name().to_owned(),
-                path: "capsule-protocol root".to_owned(),
-            });
-        }
-        match edit.new_oid() {
-            Some(new_oid) => {
-                refs.insert(edit.ref_name().to_owned(), new_oid.to_owned());
-                match edit.peeled_oid() {
-                    Some(peeled_oid) => {
-                        peeled_refs.insert(edit.ref_name().to_owned(), peeled_oid.to_owned());
-                    }
-                    None => {
-                        peeled_refs.remove(edit.ref_name());
-                    }
-                }
-            }
-            None => {
-                refs.remove(edit.ref_name());
-                peeled_refs.remove(edit.ref_name());
-            }
-        }
-    }
-    Ok((refs, peeled_refs))
-}
-
-async fn reconcile_root_update(
-    router: &StoreLayout<Store>,
-    base: &RootRecord,
-    candidate: RootRecord,
-    transaction: &CapsuleTransaction,
-    source: StorageError,
-) -> Result<RootSnapshot> {
-    let verification = open_root(router).await;
-    match verification {
-        Ok(snapshot) if snapshot.record().digest() == candidate.digest() => Ok(snapshot),
-        Ok(snapshot)
-            if snapshot
-                .record()
-                .root()
-                .contains_transaction(&transaction.id()?) =>
-        {
-            Ok(snapshot)
-        }
-        Ok(snapshot) if snapshot.record().digest() == base.digest() => Err(source.into()),
-        Ok(_) => Err(WriteError::CapsuleCommitUncertain {
-            transaction_id: transaction.id()?,
-            source: Box::new(source),
-            verification: None,
-        }),
-        Err(verification) => Err(WriteError::CapsuleCommitUncertain {
-            transaction_id: transaction.id()?,
-            source: Box::new(source),
-            verification: Some(Box::new(verification)),
-        }),
-    }
-}
-
 async fn reconcile_checkpoint_update(
     router: &StoreLayout<Store>,
     base: &RootRecord,
@@ -429,28 +960,28 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct LostRootReplyStore {
+    struct LostHeadReplyStore {
         inner: Arc<InMemory>,
-        root_path: String,
+        head_path: String,
         lost: AtomicBool,
     }
 
-    impl fmt::Display for LostRootReplyStore {
+    impl fmt::Display for LostHeadReplyStore {
         fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("LostRootReplyStore")
+            formatter.write_str("LostHeadReplyStore")
         }
     }
 
     #[async_trait::async_trait]
-    impl ObjectStore for LostRootReplyStore {
+    impl ObjectStore for LostHeadReplyStore {
         async fn put_opts(
             &self,
             location: &Path,
             payload: PutPayload,
             options: PutOptions,
         ) -> object_store::Result<PutResult> {
-            let lose_reply = location.as_ref() == self.root_path
-                && matches!(options.mode, PutMode::Update(_))
+            let lose_reply = location.as_ref() == self.head_path
+                && !matches!(options.mode, PutMode::Overwrite)
                 && !self.lost.swap(true, Ordering::AcqRel);
             let result = self.inner.put_opts(location, payload, options).await?;
             if lose_reply {
@@ -458,7 +989,7 @@ mod tests {
                     store: "capsule-protocol-root-test",
                     source: Box::new(std::io::Error::new(
                         std::io::ErrorKind::ConnectionReset,
-                        "lost root update reply",
+                        "lost ref-head update reply",
                     )),
                 });
             }
@@ -525,6 +1056,17 @@ mod tests {
         .unwrap()
     }
 
+    fn multi_ref_transaction(base: &RootSnapshot) -> CapsuleTransaction {
+        CapsuleTransaction::new(
+            base.record().digest(),
+            vec![
+                CapsuleRefEdit::new("refs/heads/main", None, Some("2".repeat(40)), None),
+                CapsuleRefEdit::new("refs/heads/feature", None, Some("3".repeat(40)), None),
+            ],
+        )
+        .unwrap()
+    }
+
     fn capsule(transaction: &CapsuleTransaction) -> Capsule {
         Capsule::build(
             transaction,
@@ -564,7 +1106,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(published.record().root().generation(), 1);
+        assert_eq!(published.record().root().generation(), 0);
         let operations = observer
             .observations
             .lock()
@@ -606,7 +1148,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(published.record().root().generation(), 1);
+        assert_eq!(published.record().root().generation(), 0);
         let operations = observer
             .observations
             .lock()
@@ -623,6 +1165,206 @@ mod tests {
                 StorageOperation::Put,
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn multi_ref_publication_commits_one_transaction_record() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        initialize(&router, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let base = open_root(&router).await.unwrap();
+        let transaction = multi_ref_transaction(&base);
+
+        let published = publish(&router, base, &transaction, &capsule(&transaction))
+            .await
+            .unwrap();
+
+        let records = router
+            .store()
+            .list_prefix_bounded(&router.capsule_transactions_prefix(), 2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        let (record, _) = router
+            .store()
+            .get_with_etag_bounded(
+                &records[0].location,
+                crab_metadata::capsule_protocol::MAX_CAPSULE_TRANSACTION_RECORD_BYTES,
+            )
+            .await
+            .unwrap();
+        let record =
+            crab_metadata::capsule_protocol::CapsuleTransactionRecord::decode(&record).unwrap();
+        assert_eq!(
+            record.status(),
+            crab_metadata::capsule_protocol::CapsuleTransactionStatus::Committed
+        );
+        for (ref_name, expected) in [
+            ("refs/heads/main", "2".repeat(40)),
+            ("refs/heads/feature", "3".repeat(40)),
+        ] {
+            let head = read_ref_head(&router, published.record().root(), ref_name)
+                .await
+                .unwrap();
+            assert_eq!(head.visible.oid(), Some(expected.as_str()));
+            assert_eq!(
+                head.head.prepared_activation_id(),
+                Some(record.activation_id())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn planned_single_ref_uses_transaction_marker_and_repairs_its_receipt() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        initialize(&router, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let base = open_root(&router).await.unwrap();
+        let plan_id = "9".repeat(64);
+        let transaction = CapsuleTransaction::for_plan(
+            base.record().digest(),
+            &plan_id,
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+
+        publish(&router, base, &transaction, &capsule(&transaction))
+            .await
+            .unwrap();
+        let receipt = crab_metadata::capsule_protocol::resolve_capsule_plan_receipt(
+            router.store(),
+            &router,
+            &plan_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        router
+            .store()
+            .delete(&router.capsule_plan_receipt_path(&plan_id))
+            .await
+            .unwrap();
+        router
+            .store()
+            .delete(&router.capsule_committed_transaction_path(receipt.activation_id()))
+            .await
+            .unwrap();
+
+        let repaired = crab_metadata::capsule_protocol::resolve_capsule_plan_receipt(
+            router.store(),
+            &router,
+            &plan_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(receipt, repaired);
+        assert_eq!(
+            repaired.transaction().id().unwrap(),
+            transaction.id().unwrap()
+        );
+        router
+            .store()
+            .get_with_etag_bounded(
+                &router.capsule_committed_transaction_path(repaired.activation_id()),
+                crab_metadata::capsule_protocol::MAX_CAPSULE_TRANSACTION_RECORD_BYTES,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn aborting_a_prepared_attempt_prevents_late_multi_ref_commit() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        initialize(&router, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let base = open_root(&router).await.unwrap();
+        let transaction = transaction(&base, None, &"2".repeat(40));
+        let transaction_id = transaction.id().unwrap();
+        let snapshot = read_ref_head(&router, base.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
+        let (prepared, _) = prepare_ref_successor(
+            &router,
+            snapshot,
+            &transaction.edits()[0],
+            &transaction_id,
+            capsule(&transaction),
+        )
+        .await
+        .unwrap();
+        let activation_id = "5".repeat(64);
+        let record = crab_metadata::capsule_protocol::CapsuleTransactionRecord::preparing(
+            activation_id.clone(),
+            transaction_id.clone(),
+        )
+        .unwrap();
+        let record_path = router.capsule_transaction_path(&activation_id);
+        let record_etag = router
+            .store()
+            .create_strict_with_etag(&record_path, record.encode().unwrap())
+            .await
+            .unwrap();
+        let state = prepared
+            .candidate
+            .visible(&std::collections::BTreeSet::new())
+            .clone();
+        let candidate = prepared
+            .original
+            .head
+            .prepare(prepared.original.visible.clone(), activation_id, state)
+            .unwrap();
+        write_ref_head(&router, &prepared.original, &candidate)
+            .await
+            .unwrap();
+
+        let visible = read_ref_head(&router, base.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
+        assert_eq!(visible.visible.oid(), None);
+        let late_commit = router
+            .store()
+            .update(
+                &record_path,
+                record.commit().unwrap().encode().unwrap(),
+                record_etag,
+            )
+            .await;
+        assert!(matches!(
+            late_commit,
+            Err(StorageError::StateConflict { .. })
+        ));
+        let (stored, _) = router
+            .store()
+            .get_with_etag_bounded(
+                &record_path,
+                crab_metadata::capsule_protocol::MAX_CAPSULE_TRANSACTION_RECORD_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            crab_metadata::capsule_protocol::CapsuleTransactionRecord::decode(&stored)
+                .unwrap()
+                .status(),
+            crab_metadata::capsule_protocol::CapsuleTransactionStatus::Aborted
+        );
+
+        publish(&router, base, &transaction, &capsule(&transaction))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -649,8 +1391,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(published.record().root().capsule_frontier().len(), 1);
-        assert_eq!(published.record().root().capsule_frontier()[0].level(), 1);
+        let head = read_ref_head(&router, published.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
+        assert_eq!(head.visible.frontier().len(), 1);
+        assert_eq!(head.visible.frontier()[0].level(), 1);
         let operations = observer
             .observations
             .lock()
@@ -664,14 +1409,16 @@ mod tests {
             vec![
                 StorageOperation::Get,
                 StorageOperation::Get,
+                StorageOperation::Get,
                 StorageOperation::Put,
                 StorageOperation::Put,
+                StorageOperation::Get,
             ]
         );
     }
 
     #[tokio::test]
-    async fn five_hundred_small_pushes_average_fewer_than_four_qualified_requests() {
+    async fn capped_runs_support_more_than_five_hundred_pushes_under_five_requests_average() {
         let inner = Arc::new(InMemory::new());
         let observer = Arc::new(RecordingObserver::default());
         let store = Store::new(inner)
@@ -685,7 +1432,7 @@ mod tests {
 
         let mut previous = None;
         let mut published = None;
-        for sequence in 1..=500_u64 {
+        for sequence in 1..=1_025_u64 {
             let base = open_root(&router).await.unwrap();
             let next = format!("{sequence:040x}");
             let transaction = transaction(&base, previous.as_deref(), &next);
@@ -698,8 +1445,18 @@ mod tests {
         }
 
         let published = published.unwrap();
-        assert_eq!(published.record().root().generation(), 500);
-        assert_eq!(published.record().root().capsule_frontier().len(), 6);
+        assert_eq!(published.record().root().generation(), 0);
+        let head = read_ref_head(&router, published.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
+        assert_eq!(
+            head.visible
+                .frontier()
+                .iter()
+                .map(CapsulePointer::level)
+                .collect::<Vec<_>>(),
+            vec![9, 9, 0]
+        );
         let request_count = observer
             .observations
             .lock()
@@ -707,12 +1464,12 @@ mod tests {
             .iter()
             .filter(|observation| observation.outcome == StorageOutcome::Success)
             .count();
-        assert_eq!(request_count, 1_994);
-        assert!((request_count as f64 / 500.0) < 4.0);
+        assert!(request_count <= 5_125, "request count was {request_count}");
+        assert!((request_count as f64 / 1_025.0) <= 5.0);
     }
 
     #[tokio::test]
-    async fn stale_root_cannot_publish_over_a_winner() {
+    async fn stale_same_ref_cannot_publish_over_a_winner() {
         let store = Store::new(Arc::new(InMemory::new()));
         let router = StoreLayout::new(store.clone(), "repositories/test".to_owned());
         initialize(&router, &"1".repeat(64), "refs/heads/main")
@@ -733,23 +1490,25 @@ mod tests {
 
         let error = publish(
             &router,
-            stale_base,
+            stale_base.clone(),
             &stale_transaction,
             &capsule(&stale_transaction),
         )
         .await
-        .expect_err("stale root CAS must fail");
+        .expect_err("stale ref-head CAS must fail");
 
-        assert!(matches!(error, WriteError::CapsuleRootChanged { .. }));
-        let visible = open_root(&router).await.unwrap();
+        assert!(matches!(error, WriteError::RefChanged { .. }));
+        let visible = read_ref_head(&router, stale_base.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
         assert_eq!(
-            visible.record().root().refs().get("refs/heads/main"),
-            Some(&"2".repeat(40))
+            visible.visible.oid(),
+            Some("2222222222222222222222222222222222222222")
         );
     }
 
     #[tokio::test]
-    async fn lost_root_update_reply_reconciles_as_committed_success() {
+    async fn lost_ref_head_update_reply_reconciles_as_committed_success() {
         let inner = Arc::new(InMemory::new());
         let seed_store = Store::new(inner.clone());
         let seed_router = StoreLayout::new(seed_store.clone(), "repositories/test".to_owned());
@@ -757,9 +1516,13 @@ mod tests {
             .await
             .unwrap();
         let fault_store = Store::with_retry(
-            Arc::new(LostRootReplyStore {
+            Arc::new(LostHeadReplyStore {
                 inner,
-                root_path: seed_router.capsule_root_path().to_string(),
+                head_path: seed_router
+                    .capsule_ref_head_path(&crab_metadata::capsule_protocol::capsule_ref_name_key(
+                        "refs/heads/main",
+                    ))
+                    .to_string(),
                 lost: AtomicBool::new(false),
             }),
             crab_storage::RetryPolicy {
@@ -776,13 +1539,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(published.record().root().generation(), 1);
-        assert!(
-            published
-                .record()
-                .root()
-                .contains_transaction(&transaction.id().unwrap())
-        );
+        let head = read_ref_head(&router, published.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
+        let transaction_id = transaction.id().unwrap();
+        assert_eq!(head.visible.transaction_id(), Some(transaction_id.as_str()));
     }
 
     #[tokio::test]
@@ -802,6 +1563,13 @@ mod tests {
             .expect_err("expected-old mismatch must fail");
 
         assert!(matches!(error, WriteError::RefChanged { .. }));
-        assert!(observer.observations.lock().unwrap().is_empty());
+        assert!(
+            observer
+                .observations
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|observation| observation.operation != StorageOperation::Put)
+        );
     }
 }

@@ -2558,7 +2558,7 @@ pub enum FfOutcome {
 /// clients that don't have the old tip locally hit this path; the
 /// caller should fall back to the commit-graph summary ancestry.
 #[must_use]
-fn is_missing_object_error(stderr: &str) -> bool {
+pub(super) fn is_missing_object_error(stderr: &str) -> bool {
     stderr.contains("Not a valid commit name")
         || stderr.contains("not our ref")
         || stderr.contains("bad revision")

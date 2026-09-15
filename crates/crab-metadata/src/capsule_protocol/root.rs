@@ -211,6 +211,8 @@ pub struct RepositoryRoot {
     head: String,
     checkpoint: Option<CheckpointPointer>,
     capsule_frontier: Vec<CapsulePointer>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    compacted_ref_transactions: BTreeMap<String, String>,
     delta_depth: u32,
     gc_fence: Option<GcFence>,
     capabilities: BTreeSet<String>,
@@ -230,6 +232,7 @@ impl RepositoryRoot {
             head: head.to_owned(),
             checkpoint: None,
             capsule_frontier: Vec::new(),
+            compacted_ref_transactions: BTreeMap::new(),
             delta_depth: 0,
             gc_fence: None,
             capabilities: BTreeSet::new(),
@@ -299,6 +302,7 @@ impl RepositoryRoot {
             head: self.head.clone(),
             checkpoint: self.checkpoint.clone(),
             capsule_frontier,
+            compacted_ref_transactions: self.compacted_ref_transactions.clone(),
             delta_depth: self
                 .delta_depth
                 .checked_add(1)
@@ -339,6 +343,51 @@ impl RepositoryRoot {
             head: self.head.clone(),
             checkpoint: Some(checkpoint),
             capsule_frontier: Vec::new(),
+            compacted_ref_transactions: self.compacted_ref_transactions.clone(),
+            delta_depth: 0,
+            gc_fence: None,
+            capabilities: self.capabilities.clone(),
+        };
+        validate_root(&root)?;
+        Ok(root)
+    }
+
+    /// Install a checkpoint that folds the exact visible per-ref head positions.
+    pub fn install_ref_checkpoint(
+        &self,
+        parent_root_digest: &str,
+        checkpoint: CheckpointPointer,
+        refs: BTreeMap<String, String>,
+        peeled_refs: BTreeMap<String, String>,
+        compacted_ref_transactions: BTreeMap<String, String>,
+    ) -> Result<Self> {
+        if self.gc_fence.is_some() {
+            return Err(contract_error(
+                "checkpoint publication is forbidden while the GC fence is active",
+            ));
+        }
+        if checkpoint.covered_generation != self.generation
+            || checkpoint.covered_root_digest != parent_root_digest
+        {
+            return Err(contract_error(
+                "checkpoint does not cover the exact parent root generation",
+            ));
+        }
+        let root = Self {
+            version: ROOT_VERSION,
+            repository_id: self.repository_id.clone(),
+            generation: self
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| contract_error("root generation overflowed"))?,
+            parent_root_digest: Some(parent_root_digest.to_owned()),
+            latest_transaction_base_digest: None,
+            refs,
+            peeled_refs,
+            head: self.head.clone(),
+            checkpoint: Some(checkpoint),
+            capsule_frontier: Vec::new(),
+            compacted_ref_transactions,
             delta_depth: 0,
             gc_fence: None,
             capabilities: self.capabilities.clone(),
@@ -349,9 +398,9 @@ impl RepositoryRoot {
 
     /// Install an exclusive GC fence without changing logical repository state.
     pub fn begin_gc(&self, parent_root_digest: &str, fence: GcFence) -> Result<Self> {
-        if self.generation == 0 || self.gc_fence.is_some() {
+        if self.gc_fence.is_some() {
             return Err(contract_error(
-                "GC fencing requires a non-empty, unfenced repository root",
+                "GC fencing requires an unfenced repository root",
             ));
         }
         let root = Self {
@@ -365,6 +414,7 @@ impl RepositoryRoot {
             head: self.head.clone(),
             checkpoint: self.checkpoint.clone(),
             capsule_frontier: self.capsule_frontier.clone(),
+            compacted_ref_transactions: self.compacted_ref_transactions.clone(),
             delta_depth: self.delta_depth,
             gc_fence: Some(fence),
             capabilities: self.capabilities.clone(),
@@ -437,6 +487,12 @@ impl RepositoryRoot {
     #[must_use]
     pub fn capsule_frontier(&self) -> &[CapsulePointer] {
         &self.capsule_frontier
+    }
+
+    /// Return journal positions already folded into the checkpoint and root refs.
+    #[must_use]
+    pub fn compacted_ref_transactions(&self) -> &BTreeMap<String, String> {
+        &self.compacted_ref_transactions
     }
 
     /// Return whether retained root evidence contains an exact transaction.
@@ -643,21 +699,35 @@ fn validate_root(root: &RepositoryRoot) -> Result<()> {
             "root contains a peeled target without its ref",
         ));
     }
+    for (name, transaction_id) in &root.compacted_ref_transactions {
+        if !name.starts_with("refs/") || !valid_ref_name(name) {
+            return Err(contract_error(
+                "root contains an invalid compacted ref position",
+            ));
+        }
+        validate_content_hash(
+            transaction_id,
+            "compacted ref transaction id",
+            "capsule-protocol root",
+        )?;
+    }
     if root.capsule_frontier.len() > MAX_CAPSULE_FRONTIER || root.delta_depth > MAX_DELTA_DEPTH {
         return Err(contract_error(
             "root capsule frontier is not bounded by delta depth",
         ));
     }
     if root.generation == 0 {
-        if root.parent_root_digest.is_some()
-            || root.latest_transaction_base_digest.is_some()
+        if root.latest_transaction_base_digest.is_some()
             || root.checkpoint.is_some()
             || !root.capsule_frontier.is_empty()
-            || root.gc_fence.is_some()
+            || !root.compacted_ref_transactions.is_empty()
         {
             return Err(contract_error(
-                "generation-zero root cannot have a parent or frontier",
+                "generation-zero root cannot have publication state",
             ));
+        }
+        if let Some(parent) = root.parent_root_digest.as_deref() {
+            validate_content_hash(parent, "root parent digest", "capsule-protocol root")?;
         }
     } else {
         let parent = root

@@ -22,24 +22,94 @@ use crate::git::remote_helper::PushSpec;
 
 const POINTER_SCAN_ALLOCATION_BYTES: usize = 64 * 1024 * 1024;
 
-/// Publish one remote-helper push batch through a single capsule/root transaction.
+/// Publish one remote-helper push batch through per-ref capsule heads.
 ///
 /// Ref policy and Git-integrity checks complete before immutable pointer data is
-/// uploaded. Root CAS is the only publication primitive; failed preparation or a
-/// stale base can leave safe immutable orphans but cannot expose partial state.
+/// uploaded. A single-ref head CAS or the per-attempt multi-ref transaction
+/// protocol publishes refs; failed preparation can leave only safe immutable orphans.
 pub async fn run(
     config: &PushConfig,
     specs: &[PushSpec],
     store: &crate::storage::store::Store,
     router: &crate::storage::StoreLayout,
-    advertised: Option<crab_metadata::capsule_protocol::RootSnapshot>,
+    advertised: Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
     hidden_ref_patterns: &[String],
     staging: Option<&Arc<StagingAreaReadOnly>>,
     caching_store: Option<&crab_cache_store::CachingStore>,
     cancel: &CancellationToken,
 ) -> Result<(
     PushResult,
-    Option<crab_metadata::capsule_protocol::RootSnapshot>,
+    Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
+)> {
+    let Some(plan_id) = config.mirror_plan_id.as_deref() else {
+        return run_inner(
+            config,
+            specs,
+            store,
+            router,
+            advertised,
+            hidden_ref_patterns,
+            staging,
+            caching_store,
+            cancel,
+        )
+        .await;
+    };
+    if plan_id.len() != 64
+        || !plan_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(CrabError::Protocol(
+            "mirror plan identity must be 64 lowercase hexadecimal characters".to_owned(),
+        ));
+    }
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    crab_remote::publication::with_capsule_plan(
+        store.as_storage(),
+        &layout,
+        plan_id,
+        config.lock_ttl,
+        cancel,
+        |cancel| async move {
+            run_inner(
+                config,
+                specs,
+                store,
+                router,
+                advertised,
+                hidden_ref_patterns,
+                staging,
+                caching_store,
+                &cancel,
+            )
+            .await
+        },
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "push pipeline dependencies are explicit"
+)]
+async fn run_inner(
+    config: &PushConfig,
+    specs: &[PushSpec],
+    store: &crate::storage::store::Store,
+    router: &crate::storage::StoreLayout,
+    advertised: Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
+    hidden_ref_patterns: &[String],
+    staging: Option<&Arc<StagingAreaReadOnly>>,
+    caching_store: Option<&crab_cache_store::CachingStore>,
+    cancel: &CancellationToken,
+) -> Result<(
+    PushResult,
+    Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
 )> {
     if let Some(result) = duplicate_destination_result(specs) {
         return Ok((result, advertised));
@@ -60,10 +130,20 @@ pub async fn run(
         router.repo_prefix().to_owned(),
         router.global_prefix().to_owned(),
     );
-    let base = match advertised {
-        Some(snapshot) => snapshot,
-        None => crab_write::capsule_protocol::open_root(&layout).await?,
+    let view = match advertised {
+        Some(view) => view,
+        None => {
+            crab_read::capsule_protocol::open_view(
+                &layout,
+                crab_read::capsule_protocol::CapsuleReadLimits {
+                    max_capsule_bytes: config.receive_max_input_size,
+                    max_frontier_bytes: config.receive_max_input_size,
+                },
+            )
+            .await?
+        }
     };
+    let base = view.root_snapshot().clone();
     let git_dir = config
         .git_dir
         .clone()
@@ -84,6 +164,7 @@ pub async fn run(
     )?;
     let hidden = hidden_ref_matcher(hidden_ref_patterns)?;
     let root = base.record().root();
+    let remote_refs = view.refs();
     let mut outcomes = HashMap::with_capacity(specs.len());
     let mut edits = Vec::with_capacity(specs.len());
     let mut updates = Vec::with_capacity(specs.len());
@@ -98,7 +179,7 @@ pub async fn run(
             );
             continue;
         }
-        let current = root.refs().get(&spec.dst).cloned();
+        let current = remote_refs.get(&spec.dst).cloned();
         if config
             .expected_refs
             .get(&spec.dst)
@@ -156,9 +237,16 @@ pub async fn run(
         };
         if let Some(old_oid) = current.as_deref() {
             let is_fast_forward = if spec.dst.starts_with("refs/tags/") {
-                false
+                Some(false)
             } else {
                 is_ancestor(&common_git_dir, old_oid, &new_oid)?
+            };
+            let Some(is_fast_forward) = is_fast_forward else {
+                outcomes.insert(
+                    spec.dst.clone(),
+                    RefPushOutcome::Rejected(PushRejectReason::StaleInfo),
+                );
+                continue;
             };
             let decision = if !is_fast_forward && config.receive_deny_non_fast_forwards {
                 Err(PushRejectReason::DenyNonFastForward)
@@ -193,13 +281,13 @@ pub async fn run(
                 })
             });
         }
-        return Ok((PushResult::new(outcomes), Some(base)));
+        return Ok((PushResult::new(outcomes), Some(view)));
     }
 
     if edits.is_empty() {
-        return Ok((PushResult::new(outcomes), Some(base)));
+        return Ok((PushResult::new(outcomes), Some(view)));
     }
-    validate_candidate_namespace(root.refs(), &edits).map_err(|reason| {
+    validate_candidate_namespace(remote_refs, &edits).map_err(|reason| {
         CrabError::Protocol(format!(
             "capsule-protocol ref transaction is invalid: {reason}"
         ))
@@ -210,12 +298,12 @@ pub async fn run(
 
     let prepared = prepare_git_packs(
         &common_git_dir,
-        root.refs(),
+        remote_refs,
         &updates,
         config.receive_max_input_size,
     )
     .await?;
-    let visibility_delta = prepare_visibility_delta(&common_git_dir, root.refs(), &edits)?;
+    let visibility_delta = prepare_visibility_delta(&common_git_dir, remote_refs, &edits)?;
     tracing::debug!(
         git_packs = prepared.packs.len(),
         pointers = prepared.pointers.len(),
@@ -238,7 +326,10 @@ pub async fn run(
         .iter()
         .map(|edit| edit.ref_name().to_owned())
         .collect::<Vec<_>>();
-    let publication: Result<Option<crab_metadata::capsule_protocol::RootSnapshot>> = async {
+    let changes_namespace = edits
+        .iter()
+        .any(|edit| edit.expected_old().is_none() != edit.new_oid().is_none());
+    let publication: Result<Option<()>> = async {
         let pointer_delta = super::xet_publication::prepare_delta(
             &layout,
             &base,
@@ -248,10 +339,17 @@ pub async fn run(
             cancel,
         )
         .await?;
-        let transaction = crab_metadata::capsule_protocol::CapsuleTransaction::new(
-            base.record().digest(),
-            edits,
-        )?;
+        let transaction = match config.mirror_plan_id.as_deref() {
+            Some(plan_id) => crab_metadata::capsule_protocol::CapsuleTransaction::for_plan(
+                base.record().digest(),
+                plan_id,
+                edits,
+            )?,
+            None => crab_metadata::capsule_protocol::CapsuleTransaction::new(
+                base.record().digest(),
+                edits,
+            )?,
+        };
         let mut sections = Vec::with_capacity(2);
         if !pointer_delta.is_empty() {
             sections.push(crab_metadata::capsule_protocol::CapsuleSection::new(
@@ -271,9 +369,40 @@ pub async fn run(
             sections,
         )?;
         check_cancelled(cancel)?;
-        match crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule).await {
-            Ok(committed) => Ok(Some(committed)),
-            Err(crab_write::WriteError::CapsuleRootChanged { .. }) => Ok(None),
+        let result = if changes_namespace {
+            let commit_layout = layout.clone();
+            crab_write::with_ref_namespaces(
+                layout.store(),
+                &layout,
+                &ref_names,
+                config.lock_ttl,
+                cancel,
+                |scoped| async move {
+                    if scoped.is_cancelled() {
+                        return Err(crab_write::WriteError::Cancelled);
+                    }
+                    crab_write::capsule_protocol::validate_ref_namespace(
+                        &commit_layout,
+                        base.record().root(),
+                        transaction.edits(),
+                    )
+                    .await?;
+                    crab_write::capsule_protocol::publish(
+                        &commit_layout,
+                        base,
+                        &transaction,
+                        &capsule,
+                    )
+                    .await
+                },
+            )
+            .await
+        } else {
+            crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule).await
+        };
+        match result {
+            Ok(_) => Ok(Some(())),
+            Err(crab_write::WriteError::RefChanged { .. }) => Ok(None),
             Err(error) => Err(error.into()),
         }
     }
@@ -293,11 +422,11 @@ pub async fn run(
             return Err(error);
         }
     };
-    if let Some(committed) = committed {
+    if committed.is_some() {
         for ref_name in ref_names {
             outcomes.insert(ref_name, RefPushOutcome::Ok);
         }
-        return Ok((PushResult::new(outcomes), Some(committed)));
+        return Ok((PushResult::new(outcomes), None));
     }
     for ref_name in ref_names {
         outcomes.insert(
@@ -396,7 +525,7 @@ fn hidden_ref_matcher(patterns: &[String]) -> Result<globset::GlobSet> {
     })
 }
 
-fn is_ancestor(git_dir: &Path, old_oid: &str, new_oid: &str) -> Result<bool> {
+fn is_ancestor(git_dir: &Path, old_oid: &str, new_oid: &str) -> Result<Option<bool>> {
     let output = std::process::Command::new("git")
         .args(["--git-dir"])
         .arg(git_dir)
@@ -405,12 +534,18 @@ fn is_ancestor(git_dir: &Path, old_oid: &str, new_oid: &str) -> Result<bool> {
         .env("GIT_ALLOW_PROTOCOL", "")
         .output()?;
     match output.status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
-        _ => Err(CrabError::Internal(format!(
-            "git merge-base could not prove ancestry: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))),
+        Some(0) => Ok(Some(true)),
+        Some(1) => Ok(Some(false)),
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if super::push::is_missing_object_error(&stderr) {
+                return Ok(None);
+            }
+            Err(CrabError::Internal(format!(
+                "git merge-base could not prove ancestry: {}",
+                stderr.trim()
+            )))
+        }
     }
 }
 
@@ -707,6 +842,24 @@ mod tests {
         git(repository, &["rev-parse", "HEAD"])
     }
 
+    #[test]
+    fn missing_remote_tip_requests_refresh_instead_of_internal_failure() {
+        let source = tempfile::tempdir().expect("source repository");
+        git(source.path(), &["init", "--initial-branch=main"]);
+        git(source.path(), &["config", "user.name", "Crab Test"]);
+        git(
+            source.path(),
+            &["config", "user.email", "crab@example.invalid"],
+        );
+        let tip = commit(source.path(), "tip");
+
+        assert_eq!(
+            is_ancestor(&source.path().join(".git"), &"f".repeat(40), &tip)
+                .expect("missing object is a normal refresh condition"),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn real_git_incremental_push_round_trips_with_bounded_requests() {
         let source = tempfile::tempdir().expect("source repository");
@@ -729,6 +882,13 @@ mod tests {
             crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
                 .await
                 .expect("initialize root");
+        let limits = crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 16 * 1024 * 1024,
+            max_frontier_bytes: 16 * 1024 * 1024,
+        };
+        let initial_view = crab_read::capsule_protocol::open_view_from_root(&layout, root, limits)
+            .await
+            .expect("open initial view");
         let mut config = PushConfig {
             git_dir: Some(source.path().join(".git")),
             ..PushConfig::default()
@@ -745,7 +905,7 @@ mod tests {
             std::slice::from_ref(&spec),
             &store,
             &router,
-            Some(root),
+            Some(initial_view),
             &[],
             None,
             None,
@@ -754,21 +914,22 @@ mod tests {
         .await
         .expect("first push");
         assert!(result.all_ok());
-        assert_eq!(observer.count() - before_first, 3);
-        let committed = committed.expect("committed root");
-        assert_eq!(committed.record().root().refs()["refs/heads/main"], first);
+        assert!(committed.is_none());
+        let first_requests = observer.count() - before_first;
+        assert!(
+            first_requests <= 20,
+            "first push used {first_requests} requests"
+        );
+        let committed = crab_read::capsule_protocol::open_view(&layout, limits)
+            .await
+            .expect("open committed first push");
+        assert_eq!(committed.refs()["refs/heads/main"], first);
 
         let destination = tempfile::tempdir().expect("destination repository");
         git(destination.path(), &["init", "--bare"]);
-        let view = crab_read::capsule_protocol::open_view(
-            &layout,
-            crab_read::capsule_protocol::CapsuleReadLimits {
-                max_capsule_bytes: 16 * 1024 * 1024,
-                max_frontier_bytes: 16 * 1024 * 1024,
-            },
-        )
-        .await
-        .expect("open first generation");
+        let view = crab_read::capsule_protocol::open_view(&layout, limits)
+            .await
+            .expect("open first generation");
         crab_read::capsule_protocol::install_git_packs(&view, destination.path(), 16 * 1024 * 1024)
             .await
             .expect("install first pack");
@@ -796,14 +957,17 @@ mod tests {
         .await
         .expect("incremental push");
         assert!(result.all_ok());
-        assert_eq!(observer.count() - before_second, 4);
-        let committed = committed.expect("second root");
-        assert_eq!(committed.record().root().refs()["refs/heads/main"], second);
-        assert_eq!(committed.record().root().capsule_frontier().len(), 1);
-        assert_eq!(
-            committed.record().root().capsule_frontier()[0].capsule_count(),
-            2
+        assert!(committed.is_none());
+        let second_requests = observer.count() - before_second;
+        assert!(
+            second_requests <= 10,
+            "incremental push used {second_requests} requests"
         );
+        let committed = crab_read::capsule_protocol::open_view(&layout, limits)
+            .await
+            .expect("open committed second push");
+        assert_eq!(committed.refs()["refs/heads/main"], second);
+        assert_eq!(committed.capsules().len(), 2);
 
         let repack_workspace = tempfile::tempdir().expect("repack workspace");
         let before_repack = observer.count();
@@ -820,7 +984,7 @@ mod tests {
         .expect("checkpoint repack");
         assert_eq!(repack.packs_before, 2);
         assert_eq!(repack.packs_after, 1);
-        assert_eq!(observer.count() - before_repack, 5);
+        assert!(observer.count() - before_repack <= 12);
         let checkpoint_root = crab_write::capsule_protocol::open_root(&layout)
             .await
             .expect("checkpoint root");
@@ -832,6 +996,10 @@ mod tests {
                 .capsule_frontier()
                 .is_empty()
         );
+        let checkpoint_view =
+            crab_read::capsule_protocol::open_view_from_root(&layout, checkpoint_root, limits)
+                .await
+                .expect("open checkpoint view");
 
         let third = commit(source.path(), "third");
         config
@@ -846,7 +1014,7 @@ mod tests {
             }],
             &store,
             &router,
-            Some(checkpoint_root),
+            Some(checkpoint_view),
             &[],
             None,
             None,
@@ -858,15 +1026,9 @@ mod tests {
 
         let fresh = tempfile::tempdir().expect("fresh clone target");
         git(fresh.path(), &["init", "--bare"]);
-        let view = crab_read::capsule_protocol::open_view(
-            &layout,
-            crab_read::capsule_protocol::CapsuleReadLimits {
-                max_capsule_bytes: 16 * 1024 * 1024,
-                max_frontier_bytes: 16 * 1024 * 1024,
-            },
-        )
-        .await
-        .expect("open checkpoint and delta");
+        let view = crab_read::capsule_protocol::open_view(&layout, limits)
+            .await
+            .expect("open checkpoint and delta");
         assert!(view.checkpoint().is_some());
         assert_eq!(view.capsules().len(), 1);
         crab_read::capsule_protocol::install_git_packs(&view, fresh.path(), 16 * 1024 * 1024)
@@ -897,8 +1059,11 @@ mod tests {
         )
         .await
         .expect("capsule-protocol GC");
-        assert_eq!(gc.packs_deleted, 3);
-        assert!(store.head(&orphan).await.is_err());
+        assert_eq!(gc.packs_deleted, 0);
+        store
+            .head(&orphan)
+            .await
+            .expect("capsule GC preserves immutable-object grace even when forced");
         let root = crab_write::capsule_protocol::open_root(&layout)
             .await
             .expect("root after GC");

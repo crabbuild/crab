@@ -46,6 +46,20 @@ pub fn root_ref_advertisement(
     )
 }
 
+/// Builds ref advertisement from one materialized capsule repository view.
+#[must_use]
+pub fn capsule_ref_advertisement(
+    view: &crate::capsule_protocol::CapsuleRepositoryView,
+    hidden_ref_patterns: &[String],
+) -> ManifestRefAdvertisement {
+    advertisement(
+        view.refs(),
+        view.peeled_refs(),
+        view.head(),
+        hidden_ref_patterns,
+    )
+}
+
 fn advertisement(
     refs: &std::collections::BTreeMap<String, String>,
     peeled_refs: &std::collections::BTreeMap<String, String>,

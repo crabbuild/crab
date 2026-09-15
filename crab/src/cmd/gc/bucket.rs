@@ -1083,7 +1083,6 @@ async fn capsule_repository_roots(
             return Err(error);
         }
     };
-    let root_digest = root.record().digest().to_owned();
     let view = crab_read::capsule_protocol::open_view_from_root(
         &router,
         root,
@@ -1093,6 +1092,7 @@ async fn capsule_repository_roots(
         },
     )
     .await?;
+    let root_digest = view.state_digest();
     let catalog = view.pointer_catalog()?;
     Ok(Some(CapsuleRepositoryRoots {
         root_digest,

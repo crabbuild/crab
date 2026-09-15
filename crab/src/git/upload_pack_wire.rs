@@ -629,7 +629,7 @@ where
             let provider = format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container);
             let identity =
                 RepositoryIdentity::new(provider, prefix.to_owned(), 1).map_err(remote_error)?;
-            let visibility = if view.root().root().refs().is_empty() {
+            let visibility = if view.refs().is_empty() {
                 None
             } else {
                 Some(UploadPackVisibilityProof::Materialized(

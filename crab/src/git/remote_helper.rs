@@ -516,10 +516,10 @@ fn finalize_batch(
 struct SessionCache {
     /// Session config, augmented once by replica discovery before the first read operation.
     config: crate::core::config::Config,
-    /// Cached result of the `has_commit_graph_summary` probe.
-    has_commit_graph: Option<bool>,
     /// Primary v2 root retained from `list for-push` as the publication CAS base.
     capsule_root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
+    /// Materialized v2 refs and capsules retained across one Git protocol session.
+    capsule_view: Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
     /// A separately validated canonical-v1 repository uses its existing reader.
     legacy_v1: bool,
     metrics: Arc<Metrics>,
@@ -530,8 +530,8 @@ impl SessionCache {
     fn new(config: crate::core::config::Config) -> Self {
         Self {
             config,
-            has_commit_graph: None,
             capsule_root: None,
+            capsule_view: None,
             legacy_v1: false,
             metrics: Arc::new(Metrics::new()),
             persisted_metrics: MetricsSummary::zeroed(),
@@ -540,12 +540,6 @@ impl SessionCache {
 
     fn config(&self) -> &crate::core::config::Config {
         &self.config
-    }
-
-    /// Clears the cached commit-graph flag so the next access re-probes
-    /// the store. Called after a push that creates or updates the summary.
-    fn invalidate_commit_graph(&mut self) {
-        self.has_commit_graph = None;
     }
 
     fn persist_pending_metrics(&mut self) -> Result<()> {
@@ -1343,11 +1337,10 @@ async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
     _store: &crate::storage::store::Store,
     _router: &StoreLayout,
-    cache: &mut SessionCache,
+    _cache: &mut SessionCache,
     _cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     tracing::debug!("responding to capabilities");
-    cache.has_commit_graph = Some(false);
     // Capsule-aware shallow and terminal upload-pack are advertised only after
     // their v2 readers are wired. The ordinary fetch/push helper path remains
     // complete and capabilities themselves require no storage probe.
@@ -1423,19 +1416,22 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                             may_reuse_primary_root,
                         )
                     };
-                    let (output, root) = match cache.capsule_root.take() {
-                        Some(root) if may_reuse_primary_root => {
-                            (list_output_from_root(&root, &hidden_ref_patterns), root)
+                    let (output, view) = match cache.capsule_view.take() {
+                        Some(view) if may_reuse_primary_root => {
+                            (list_output_from_view(&view, &hidden_ref_patterns), view)
                         }
                         _ => read_remote_refs_with_snapshot(
                             &read_store,
                             &router,
                             &hidden_ref_patterns,
+                            may_reuse_primary_root
+                                .then(|| cache.capsule_root.take())
+                                .flatten(),
                         )
                         .await
                         .map_err(map_missing_capsule_root)?,
                     };
-                    cache.capsule_root = Some(root);
+                    cache.capsule_view = Some(view);
                     output
                 }
             } else {
@@ -1670,7 +1666,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                         &specs,
                         push_store,
                         &router,
-                        cache.capsule_root.take(),
+                        cache.capsule_view.take(),
                         &config.transfer_hide_refs,
                         staging.reader(),
                         caching_store,
@@ -1678,8 +1674,8 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                     )
                     .await
                     {
-                        Ok((r, root)) => {
-                            cache.capsule_root = root;
+                        Ok((r, view)) => {
+                            cache.capsule_view = view;
                             r
                         }
                         // Partial outcomes carry per-ref state the pipeline
@@ -1722,15 +1718,6 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                     warn!(%err, "failed to append push audit event");
                 }
 
-                // A successful push may have attached a new split commit graph,
-                // so invalidate the cached probe result.
-                let any_ref_succeeded = result
-                    .outcomes
-                    .values()
-                    .any(|o| matches!(o, RefPushOutcome::Ok));
-                if any_ref_succeeded {
-                    cache.invalidate_commit_graph();
-                }
                 if let Err(error) = cache.persist_pending_metrics() {
                     warn!(%error, "failed to persist performance counters");
                 }
@@ -2120,35 +2107,6 @@ fn cache_aware_storage_for_selected_read(
     }
 }
 
-/// Check whether the committed manifest pins a split commit graph.
-///
-/// Returns the cached result when available; otherwise probes the store
-/// via a HEAD request and caches the outcome for the rest of the session.
-#[cfg(test)]
-async fn has_commit_graph_summary(
-    store: Option<&crate::storage::store::Store>,
-    _prefix: &str,
-    router: Option<&crate::storage::StoreLayout>,
-    cache: &mut SessionCache,
-) -> bool {
-    if let Some(cached) = cache.has_commit_graph {
-        return cached;
-    }
-
-    let result = if let (Some(store), Some(router)) = (store, router) {
-        // Capability negotiation only needs the committed graph pointer. A full
-        // repository snapshot materializes every ref and catalog entry first.
-        crate::metadata::manifest::read_manifest(store, router)
-            .await
-            .is_ok_and(|(manifest, _)| manifest.commit_graph_hash.is_some())
-    } else {
-        false
-    };
-
-    cache.has_commit_graph = Some(result);
-    result
-}
-
 /// Build the legacy remote-helper capability response.
 ///
 /// Always advertises `fetch`, `push`, `option`, and `check-connectivity`.
@@ -2182,7 +2140,7 @@ async fn read_remote_refs(
     router: &StoreLayout,
     hidden_ref_patterns: &[String],
 ) -> Result<ListOutput> {
-    read_remote_refs_with_snapshot(store, router, hidden_ref_patterns)
+    read_remote_refs_with_snapshot(store, router, hidden_ref_patterns, None)
         .await
         .map(|(output, _)| output)
 }
@@ -2191,25 +2149,35 @@ async fn read_remote_refs_with_snapshot(
     store: &crate::storage::store::Store,
     router: &StoreLayout,
     hidden_ref_patterns: &[String],
-) -> Result<(ListOutput, crab_metadata::capsule_protocol::RootSnapshot)> {
+    root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
+) -> Result<(
+    ListOutput,
+    crab_read::capsule_protocol::CapsuleRepositoryView,
+)> {
     let layout = crab_storage::StoreLayout::with_global_prefix(
         store.as_storage().clone(),
         router.repo_prefix().to_owned(),
         router.global_prefix().to_owned(),
     );
-    let snapshot = crab_write::capsule_protocol::open_root(&layout).await?;
-    Ok((
-        list_output_from_root(&snapshot, hidden_ref_patterns),
-        snapshot,
-    ))
+    let limits = crab_read::capsule_protocol::CapsuleReadLimits {
+        max_capsule_bytes: u64::MAX,
+        max_frontier_bytes: u64::MAX,
+    };
+    let view = match root {
+        Some(root) => {
+            crab_read::capsule_protocol::open_view_from_root(&layout, root, limits).await?
+        }
+        None => crab_read::capsule_protocol::open_view(&layout, limits).await?,
+    };
+    Ok((list_output_from_view(&view, hidden_ref_patterns), view))
 }
 
-fn list_output_from_root(
-    snapshot: &crab_metadata::capsule_protocol::RootSnapshot,
+fn list_output_from_view(
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
     hidden_ref_patterns: &[String],
 ) -> ListOutput {
-    let root = snapshot.record().root();
-    let advertisement = crab_read::root_ref_advertisement(root, hidden_ref_patterns);
+    let root = view.root().root();
+    let advertisement = crab_read::capsule_ref_advertisement(view, hidden_ref_patterns);
 
     let refs = advertisement
         .refs
@@ -2222,7 +2190,7 @@ fn list_output_from_root(
         .collect();
 
     tracing::debug!(
-        ref_count = root.refs().len(),
+        ref_count = view.refs().len(),
         generation = root.generation(),
         head_symref = ?advertisement.head_symref,
         "read remote refs from capsule-protocol root"
@@ -2338,10 +2306,6 @@ impl RemoteFetchStore {
             caching_store,
             pack_list: Arc::new(tokio::sync::Mutex::new(None)),
         }
-    }
-
-    async fn cached_pack_list(&self) -> Option<PackList> {
-        self.pack_list.lock().await.clone()
     }
 
     async fn load_pack_list(&self) -> Result<PackList> {
@@ -2555,7 +2519,7 @@ async fn fetch_packs(
         router,
         entries,
         config,
-        cache.capsule_root.take(),
+        cache.capsule_view.take(),
         check_connectivity,
     )
     .await
@@ -2566,7 +2530,7 @@ async fn fetch_capsule_packs(
     router: &StoreLayout,
     entries: &[FetchEntry],
     config: &crate::core::config::Config,
-    root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
+    cached_view: Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
     check_connectivity: bool,
 ) -> Result<Option<std::path::PathBuf>> {
     let layout = crab_storage::StoreLayout::with_global_prefix(
@@ -2583,14 +2547,11 @@ async fn fetch_capsule_packs(
         max_capsule_bytes: maximum,
         max_frontier_bytes: maximum,
     };
-    let view = match root {
-        Some(root) => {
-            crab_read::capsule_protocol::open_view_from_root(&layout, root, limits).await?
-        }
+    let view = match cached_view {
+        Some(view) => view,
         None => crab_read::capsule_protocol::open_view(&layout, limits).await?,
     };
-    let advertisement =
-        crab_read::root_ref_advertisement(view.root().root(), &config.transfer_hide_refs);
+    let advertisement = crab_read::capsule_ref_advertisement(&view, &config.transfer_hide_refs);
     let visible = advertisement
         .refs
         .iter()
@@ -4378,10 +4339,16 @@ mod tests {
             router.repo_prefix().to_owned(),
             router.global_prefix().to_owned(),
         );
-        let root = crab_write::capsule_protocol::open_root(&layout)
-            .await
-            .expect("capsule-protocol root is readable");
-        assert_eq!(root.record().root().refs().len(), 1);
+        let view = crab_read::capsule_protocol::open_view(
+            &layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 32 * 1024 * 1024,
+                max_frontier_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .await
+        .expect("capsule-protocol repository is readable");
+        assert_eq!(view.refs().len(), 1);
         let catalog = crab_metadata::capsule_protocol::load_pointer_catalog(&layout)
             .await
             .expect("load pointer catalog");
@@ -4488,7 +4455,7 @@ mod tests {
         crab_read::capsule_protocol::install_git_packs(&view, fetched.path(), 64 * 1024 * 1024)
             .await
             .expect("install clone packs");
-        let tip = &view.root().root().refs()["refs/heads/main"];
+        let tip = &view.refs()["refs/heads/main"];
         let fetched_pointer = run_git(fetched.path(), &["show", &format!("{tip}:large.bin")]);
         assert_eq!(fetched_pointer, updated_pointer_bytes);
         run_git(fetched.path(), &["fsck", "--strict", "--no-dangling"]);
@@ -4707,21 +4674,18 @@ mod tests {
             router.repo_prefix().to_owned(),
             router.global_prefix().to_owned(),
         );
-        let root = crab_write::capsule_protocol::open_root(&layout)
-            .await
-            .expect("pushed capsule-protocol root");
-        assert_eq!(
-            root.record().root().refs().get("refs/heads/main"),
-            Some(&commit)
-        );
-        assert_eq!(
-            root.record().root().refs().get("refs/heads/dev"),
-            Some(&commit)
-        );
-        assert_eq!(
-            root.record().root().refs().get("refs/tags/v1"),
-            Some(&tag_oid)
-        );
+        let view = crab_read::capsule_protocol::open_view(
+            &layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 32 * 1024 * 1024,
+                max_frontier_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .await
+        .expect("pushed capsule-protocol view");
+        assert_eq!(view.refs().get("refs/heads/main"), Some(&commit));
+        assert_eq!(view.refs().get("refs/heads/dev"), Some(&commit));
+        assert_eq!(view.refs().get("refs/tags/v1"), Some(&tag_oid));
 
         run_git(&repo, &["update-ref", "-d", "refs/tags/v1"]);
         let loose_tag = git_dir

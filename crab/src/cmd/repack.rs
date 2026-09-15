@@ -228,7 +228,7 @@ async fn run_capsule_repack(
         None => crab_read::capsule_protocol::open_view(&layout, limits).await?,
     };
     let root = view.root().root();
-    if root.refs().is_empty() {
+    if view.refs().is_empty() {
         return Err(CrabError::Protocol(
             "cannot checkpoint an unborn repository".to_owned(),
         ));
@@ -262,11 +262,11 @@ async fn run_capsule_repack(
     .map_err(|error| CrabError::Internal(format!("checkpoint Git init join failed: {error}")))??;
     check_cancelled(cancel)?;
     crab_read::capsule_protocol::install_git_packs(&view, &git_dir, MAX_CHECKPOINT_BYTES).await?;
-    let tips = root.refs().values().cloned().collect::<Vec<_>>();
+    let tips = view.refs().values().cloned().collect::<Vec<_>>();
     crate::git::pack::validate_fetched_ref_tips(&git_dir, &tips).await?;
     let packs = crate::git::capsule_push::prepare_complete_git_packs(
         &git_dir,
-        root.refs(),
+        view.refs(),
         2 * 1024 * 1024 * 1024,
     )
     .await?;
@@ -302,12 +302,24 @@ async fn run_capsule_repack(
             .sum::<u64>();
     if !config.dry_run {
         check_cancelled(cancel)?;
-        crab_write::capsule_protocol::publish_checkpoint(
-            &layout,
-            view.root_snapshot().clone(),
-            &checkpoint,
-        )
-        .await?;
+        if view.visible_ref_transactions().is_empty() {
+            crab_write::capsule_protocol::publish_checkpoint(
+                &layout,
+                view.root_snapshot().clone(),
+                &checkpoint,
+            )
+            .await?;
+        } else {
+            crab_write::capsule_protocol::publish_ref_checkpoint(
+                &layout,
+                view.root_snapshot().clone(),
+                &checkpoint,
+                view.refs().clone(),
+                view.peeled_refs().clone(),
+                view.visible_ref_transactions().clone(),
+            )
+            .await?;
+        }
     }
     Ok(RepackOutcome {
         packs_before,
