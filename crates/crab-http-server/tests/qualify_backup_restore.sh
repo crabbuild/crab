@@ -104,7 +104,9 @@ jq --exit-status \
   'any(.[]; .key == ".crab/http-server/v1/catalog.json")' \
   "${work_dir}/source-manifest.json" >/dev/null
 jq --exit-status \
-  'any(.[]; .key | startswith("demo/hello/app/v1/issues/"))' \
+  'any(.[]; .key == "cells/v1/identity.json") and
+   any(.[]; (.key | startswith("cells/v1/apps/")) and (.key | endswith("/control.json"))) and
+   any(.[]; (.key | startswith("cells/v1/apps/")) and (.key | contains("/objects/")) and (.key | endswith(".root")))' \
   "${work_dir}/source-manifest.json" >/dev/null
 object_count="$(jq 'length' "${work_dir}/source-manifest.json")"
 test "$object_count" -gt 0
