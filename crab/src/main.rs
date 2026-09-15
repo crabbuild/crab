@@ -3751,7 +3751,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 let (repos, shards) = crab::cmd::gc::bucket::repair_ref_registry(&store).await?;
                 if !mode.is_machine() {
                     eprintln!(
-                        "crab gc: ref-registry repaired from {repos} repo manifest(s), {shards} shard root(s)."
+                        "crab gc: ref-registry repaired from {repos} repository root(s), {shards} shard root(s)."
                     );
                 }
                 return Ok(ExitCode::SUCCESS);
@@ -4077,9 +4077,9 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 })?;
             let parsed = crab::git::url::CrabUrl::parse(url)?;
             let prefix = parsed.repo_path.clone();
-            let store = create_cli_store(&parsed.bucket, &config, "fsck", &cancel).await?;
-            let router = crab::storage::StoreLayout::new(store.clone(), prefix.clone());
-            crab::core::remote_layout::open(&store, &router).await?;
+            let (store, root) =
+                crab::auth::build_repository_url_store_with_root(&config, parsed, "fsck", &cancel)
+                    .await?;
 
             let multipart_journal_path =
                 crab::git::discover::resolve_main_worktree_root().map(|root| {
@@ -4102,8 +4102,13 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             .map(|registry| {
                 std::sync::Arc::new(crab::storage::store::MultipartJournal::new(registry))
             });
-            let checker = crab::cmd::fsck_store::StoreChecker::new(store.clone(), prefix.clone())
-                .with_multipart_journal(multipart_journal.clone());
+            let checker = crab::cmd::fsck_store::StoreChecker::for_capsule_repository(
+                store.clone(),
+                prefix.clone(),
+                root,
+            )
+            .await?
+            .with_multipart_journal(multipart_journal.clone());
             let repairer: Box<dyn crab::cmd::fsck::FsckRepairer> = if repair {
                 Box::new(
                     crab::cmd::fsck_store::StoreRepairer::new(store, prefix)

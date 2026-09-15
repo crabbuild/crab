@@ -468,12 +468,20 @@ must not become an implicit correctness dependency.
 Normal bucket GC:
 
 1. pins registry coverage and a provider-backed age cutoff;
-2. enumerates every registered repository root;
-3. traces retained roots through checkpoints and capsule frontiers;
+2. enumerates both capsule roots and legacy manifest roots during registry
+   repair, rejecting a prefix that exposes both authorities;
+3. authenticates each capsule root, checkpoint, and capsule frontier, then
+   materializes its dependency-closed pointer catalog;
 4. marks live shards and their complete xorb closures;
 5. unions monotonic candidate shard roots not yet compacted;
 6. excludes recent objects and incomplete multipart sessions;
 7. revalidates candidate identity immediately before deletion.
+
+The durable GC journal binds its plan to every capsule root digest as well as
+the partitioned registry generations. A root change therefore invalidates a
+paused or resumed plan before deletion. Registry repair replaces a v2 repo's
+candidate roots with the complete authenticated catalog shard set; it must not
+delete a repository merely because that repository has no legacy manifest.
 
 A concurrent push is safe because its base-reachable dependencies are marked
 from the old root and new dependencies are recent. An old dependency reused
@@ -657,11 +665,21 @@ files, one seed publication, and ten independently edited versions:
   chunk boundary, so the terminal xorb and tail are legitimately new;
 - independent consumer and primary clones hydrated byte-identically. The
   primary clone passed cold and warm hydrate/dehydrate cycles for every large
-  and small file, pointer-shape checks, and strict full Git fsck.
+  and small file, pointer-shape checks, and strict full Git fsck;
+- the v2-aware store checker subsequently re-read and verified the complete
+  190-xorb, eleven-shard catalog from the independent clone in 51.5 seconds,
+  with zero errors or informational findings.
+
+The separate `fsck-v2-qualified-20260915d` destructive-GC run used a fresh
+RustFS bucket and 10,000-object fixture. It passed live-object retention,
+unreachable-object deletion, post-GC v2 fsck, byte-identical fresh-clone
+readback, writer-race fencing, both injected crash-resume points, bounded
+memory, and bounded writer pause. Peak RSS was 144,310,272 bytes and measured
+writer pause was 349 ms.
 
 This qualifies the ordinary RustFS whole-object path. Hosted-provider,
-multipart, injected-failure, concurrent-GC, mount-range, replica, tiering, and
-browsing coverage remain release gates; this evidence does not waive them.
+multipart, mount-range, replica, tiering, and browsing coverage remain release
+gates; this evidence does not waive them.
 
 ## 18. Acceptance boundary
 
