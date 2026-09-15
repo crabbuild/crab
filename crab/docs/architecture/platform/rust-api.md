@@ -302,6 +302,15 @@ conditionally publishes the latest monotonic terminal record, while pending work
 is derived from catalog/control state and exposed through the cursor-based
 `cells release migrations` command.
 
+Candidate startup and compatible activation also call
+`Registry::verify_rolling_from` on the immutable descriptor named by
+`release.current`. It rejects removal or narrowing of predecessor module
+code/schema coverage, command/query codec limits, migration digests, Workflow
+definitions and activity types, and requires exact namespace routing equality.
+This conservative online gate intentionally retains even a codec with no known
+pending row; proving that it is safe to delete belongs to explicit maintenance,
+where writers are fenced and the complete persisted-work inventory can be read.
+
 ```rust,ignore
 pub trait WireValue: Sized + Send + 'static {
     fn encode(&self, out: &mut BoundedEncoder) -> Result<(), CodecError>;

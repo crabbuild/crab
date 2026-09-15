@@ -83,7 +83,8 @@ and the `Migrate` control CAS publish the exact root, schema and code together.
 Success installs a fresh admission token and leaves all old `CellHandle` clones
 permanently closed. Any transaction, capture, deadline or publication failure
 fences the local executor and leaves authority at the last published root. The
-release activator still needs bounded catalog-wide progress and retry orchestration.
+server release scheduler performs bounded, resumable catalog-wide orchestration
+and stores monotonic terminal progress for each migration operation.
 
 Fencing is a two-phase boundary. Admission closes immediately, but the runtime
 retains the accepted operation, worker slot and byte permits until synchronous

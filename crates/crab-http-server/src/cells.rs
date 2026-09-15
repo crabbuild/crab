@@ -465,7 +465,13 @@ fn decode_cell_cursor(value: &str) -> Result<CellId> {
         ));
     }
     let mut bytes = [0; 32];
-    for (output, pair) in bytes.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return Err(Error::Config(
+            "release migration cursor must be a lowercase Cell ID",
+        ));
+    }
+    for (output, pair) in bytes.iter_mut().zip(pairs) {
         let high = image_nibble(pair[0]).ok_or(Error::Config(
             "release migration cursor must be a lowercase Cell ID",
         ))?;
@@ -531,6 +537,7 @@ async fn verify_startup_release_at(
             "selected Cell descriptor differs from this binary",
         ));
     }
+    verify_rolling_predecessor(&releases, observed.record(), registry).await?;
     verify_compatible_cells(layout, identity, registry).await?;
     image_digest(observed.record().desired_image())
 }
@@ -599,6 +606,7 @@ pub(crate) async fn activate_release(
             "prepared Cell descriptor differs from this binary",
         ));
     }
+    verify_rolling_predecessor(&releases, observed.record(), &registry).await?;
     let directory = if observed.record().state() == ReleaseState::Ready {
         None
     } else {
@@ -631,6 +639,22 @@ pub(crate) async fn activate_release(
         .await?
         .encode()
         .map_err(Error::from)
+}
+
+async fn verify_rolling_predecessor(
+    releases: &ReleaseStore,
+    release: &crab_cell_runtime::ReleaseRecord,
+    registry: &Registry,
+) -> Result<()> {
+    let Some(current) = release.current() else {
+        return Ok(());
+    };
+    if current == registry.release_digest() {
+        return Ok(());
+    }
+    let predecessor = releases.descriptor(current).await?;
+    registry.verify_rolling_from(&predecessor)?;
+    Ok(())
 }
 
 async fn verify_eligible_nodes(
@@ -1447,6 +1471,64 @@ mod tests {
         verify_startup_release_at(&layout, identity, &registry)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn candidate_startup_rejects_an_unretained_predecessor_contract() {
+        let identity = ApplicationIdentity::new(
+            TenantId::from_bytes([1; 16]),
+            ApplicationId::from_bytes([2; 16]),
+        );
+        let layout = CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            Path::from("release-predecessor-contract"),
+            *identity.application().as_bytes(),
+        );
+        let registry = compiled_registry().unwrap();
+        let mut predecessor: Value = serde_json::from_slice(registry.release_bytes()).unwrap();
+        predecessor["modules"][0]["code"] = Value::String("ab".repeat(32));
+        let predecessor = serde_json::to_vec(&predecessor).unwrap();
+        let predecessor_digest = Digest::from_bytes(*blake3::hash(&predecessor).as_bytes());
+        let releases = ReleaseStore::new(layout.clone(), identity).unwrap();
+        let first_operation = RequestId::from_bytes([7; 16]);
+        let prepared = releases
+            .prepare(
+                &predecessor,
+                predecessor_digest,
+                0,
+                &format!("sha256:{}", "a".repeat(64)),
+                first_operation,
+            )
+            .await
+            .unwrap();
+        let activating = releases
+            .start_activation(prepared.revision(), first_operation)
+            .await
+            .unwrap();
+        let ready = releases
+            .complete_activation(activating.revision(), first_operation)
+            .await
+            .unwrap();
+        releases
+            .prepare(
+                registry.release_bytes(),
+                registry.release_digest(),
+                ready.revision(),
+                &format!("sha256:{}", "b".repeat(64)),
+                RequestId::from_bytes([8; 16]),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            verify_startup_release_at(&layout, identity, &registry)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            releases.load().await.unwrap().unwrap().record().state(),
+            ReleaseState::Prepared
+        );
     }
 
     #[tokio::test]

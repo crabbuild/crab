@@ -201,6 +201,14 @@ codec/schema/definition versions during a rolling release, but every retained
 implementation is still part of the same signed image. Removing an old binding
 requires the inventory and maintenance rules below.
 
+Candidate startup and `--strategy compatible` activation load the immutable
+descriptor selected by `release.current` and compare it with the registry
+compiled into the candidate. The candidate must retain the predecessor module
+code over its complete schema range; cover every command/query codec with no
+narrower schema or byte limits; retain every migration and Workflow digest and
+activity type; and preserve namespace routing exactly. A failed comparison
+keeps the process unready and leaves the release state unchanged.
+
 Rollback also operates at whole-image granularity. A previous image may be
 rolled back only while its compiled registry still supports every authoritative
 code/schema pair and retained command, queue and workflow codec. Otherwise enter

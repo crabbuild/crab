@@ -337,7 +337,12 @@ release; `cells release status` reads that checked state, and `cells release
 migrations [--after CELL_ID] [--limit N]` returns a bounded cursor page of
 pending and failed Cells. `cells release activate
 --strategy compatible --minimum-eligible-nodes K` now verifies the exact compiled
-descriptor, CASes the
+descriptor and the immutable descriptor selected by `current`. Before a candidate
+process serves or activation begins, its registry must retain every predecessor
+module code/schema range, command/query codec and limit, migration digest,
+Workflow definition, activity type and exact namespace routing contract. A
+breaking removal therefore cannot masquerade as a compatible rollout; it must
+use the maintenance path. Activation then CASes the
 operation-bound release through `prepared → activating → ready`, scans all 256
 catalog shards, checks every live control or bootstrap pair against the compiled
 namespace/role/code/schema inventory, rechecks the live quorum immediately before
@@ -525,6 +530,21 @@ direction. Runtime abstractions must have a concrete in-tree Crab caller; do not
 add guest-neutral manifests, public wire APIs, language-host lifecycle, or
 deployment indirection solely to preserve a possible future non-Rust host.
 
+For a new native feature, the complete change is one reviewable vertical slice:
+
+1. Add the Rust command/query or activity types and stable `WireValue` codec.
+2. Add the SQLite migration and its checked digest to the static module descriptor.
+3. Bind the implementation through `RegistryBuilder` in `cells.rs`; no runtime
+   string lookup or module loading is permitted.
+4. Map an authenticated product route to the typed `CellClient`; primitive and
+   peer endpoints remain private.
+5. Add publication, replay/conflict, source-loss restore and route tests.
+6. Build one complete image, inspect/prepare its canonical descriptor, roll that
+   image through the compatible release gate, and migrate every cataloged Cell
+   before the final `ready` CAS.
+
+This is the only supported application programming and deployment model in V1.
+
 ## Source ownership and target files
 
 Keep reusable Cell mechanics in the existing `crab-cell-runtime` crate and keep
@@ -547,7 +567,7 @@ crates/crab-cell-runtime/src/
   activity_pool.rs            joined fixed pool for native blocking activities
   publication.rs              pending cut ownership and reconciliation
   catalog.rs, scheduler.rs     provision proof and transactional due summary (implemented), scanning/Tick
-  registry.rs, api.rs          typed definitions, codecs and capability handles
+  registry.rs                  typed definitions, codecs, compatibility gate and capability handles
   peer.rs                     private codec, client transport and local dispatcher
   sql.rs, kv.rs, queue.rs,
   workflow.rs, effects.rs      primitive mechanics

@@ -8,7 +8,7 @@ use crab_ltx::rusqlite::{Connection, Transaction};
 
 mod descriptor;
 
-use descriptor::encode_release;
+use descriptor::{encode_release, verify_rolling_compatibility};
 
 use crate::{
     ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome, ActivitySupervisor,
@@ -855,6 +855,14 @@ impl Registry {
         digests.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
         digests.dedup();
         digests
+    }
+
+    /// Verifies that this registry can replace one previously selected release online.
+    ///
+    /// Every executable and persisted-work contract from the predecessor must remain
+    /// available. Removing one requires an offline maintenance activation.
+    pub fn verify_rolling_from(&self, previous: &[u8]) -> Result<()> {
+        verify_rolling_compatibility(previous, &self.release_bytes)
     }
 
     /// Reports whether this binary can execute one authoritative Cell pair.

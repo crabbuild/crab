@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{
     BuildDescriptor, MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor,
@@ -26,40 +26,161 @@ pub(super) fn encode_release(
     let release = RawRelease {
         build: RawBuild {
             cargo_lock_digest: encode_hex(build.cargo_lock_digest.as_bytes()),
-            source_revision: &build.source_revision,
+            source_revision: build.source_revision.clone(),
         },
         modules: raw_modules,
         namespaces: raw_namespaces,
         peer_versions: [1],
-        runtime: "crab-http-server",
+        runtime: "crab-http-server".to_owned(),
         version: 1,
     };
     Ok((serde_json::to_vec(&release)?, codes))
 }
 
-#[derive(Serialize)]
-struct RawRelease<'a> {
-    build: RawBuild<'a>,
-    modules: Vec<RawModule<'a>>,
-    namespaces: Vec<RawNamespace<'a>>,
+pub(super) fn verify_rolling_compatibility(previous: &[u8], candidate: &[u8]) -> Result<()> {
+    let previous = decode_compatibility_release(previous)?;
+    let candidate = decode_compatibility_release(candidate)?;
+
+    for old in &previous.modules {
+        let new = candidate
+            .modules
+            .iter()
+            .find(|module| module.name == old.name)
+            .ok_or(crate::Error::Registry(
+                "rolling release removes a compiled module",
+            ))?;
+        if new.schema_min > old.schema_min || new.schema_max < old.schema_max {
+            return Err(crate::Error::Registry(
+                "rolling release narrows a module schema range",
+            ));
+        }
+        if new.code != old.code
+            && !new.retained_codes.iter().any(|retained| {
+                retained.code == old.code
+                    && retained.schema_min <= old.schema_min
+                    && retained.schema_max >= old.schema_max
+            })
+        {
+            return Err(crate::Error::Registry(
+                "rolling release does not retain predecessor module code",
+            ));
+        }
+        verify_operations(
+            &old.commands,
+            &new.commands,
+            "rolling release removes a command codec",
+            "rolling release narrows a command contract",
+        )?;
+        verify_operations(
+            &old.queries,
+            &new.queries,
+            "rolling release removes a query codec",
+            "rolling release narrows a query contract",
+        )?;
+        if !old
+            .migrations
+            .iter()
+            .all(|migration| new.migrations.contains(migration))
+        {
+            return Err(crate::Error::Registry(
+                "rolling release removes a migration digest",
+            ));
+        }
+        if !old
+            .workflows
+            .iter()
+            .all(|workflow| new.workflows.contains(workflow))
+        {
+            return Err(crate::Error::Registry(
+                "rolling release removes a workflow definition",
+            ));
+        }
+        if !old
+            .activities
+            .iter()
+            .all(|activity| new.activities.contains(activity))
+        {
+            return Err(crate::Error::Registry(
+                "rolling release removes an activity type",
+            ));
+        }
+    }
+    if !previous
+        .namespaces
+        .iter()
+        .all(|namespace| candidate.namespaces.contains(namespace))
+    {
+        return Err(crate::Error::Registry(
+            "rolling release changes or removes a namespace contract",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_operations(
+    previous: &[RawOperation],
+    candidate: &[RawOperation],
+    missing: &'static str,
+    narrowed: &'static str,
+) -> Result<()> {
+    for old in previous {
+        let Some(new) = candidate
+            .iter()
+            .find(|operation| operation.id == old.id && operation.codec == old.codec)
+        else {
+            return Err(crate::Error::Registry(missing));
+        };
+        if new.schema_min > old.schema_min
+            || new.schema_max < old.schema_max
+            || new.input_limit < old.input_limit
+            || new.output_limit < old.output_limit
+        {
+            return Err(crate::Error::Registry(narrowed));
+        }
+    }
+    Ok(())
+}
+
+fn decode_compatibility_release(bytes: &[u8]) -> Result<RawRelease> {
+    if bytes.is_empty() || bytes.len() > super::MAX_DESCRIPTOR_BYTES {
+        return Err(crate::Error::Registry("release descriptor size is invalid"));
+    }
+    let release: RawRelease = serde_json::from_slice(bytes)?;
+    if release.version != 1 || release.runtime != "crab-http-server" || release.peer_versions != [1]
+    {
+        return Err(crate::Error::Registry(
+            "release descriptor identity is invalid",
+        ));
+    }
+    Ok(release)
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawRelease {
+    build: RawBuild,
+    modules: Vec<RawModule>,
+    namespaces: Vec<RawNamespace>,
     peer_versions: [u32; 1],
-    runtime: &'static str,
+    runtime: String,
     version: u32,
 }
 
-#[derive(Serialize)]
-struct RawBuild<'a> {
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawBuild {
     cargo_lock_digest: String,
-    source_revision: &'a str,
+    source_revision: String,
 }
 
-#[derive(Serialize)]
-struct RawModule<'a> {
-    activities: Vec<&'a str>,
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawModule {
+    activities: Vec<String>,
     code: String,
     commands: Vec<RawOperation>,
     migrations: Vec<RawMigration>,
-    name: &'a str,
+    name: String,
     queries: Vec<RawOperation>,
     retained_codes: Vec<RawRetainedCode>,
     schema_max: u32,
@@ -68,9 +189,9 @@ struct RawModule<'a> {
     workflows: Vec<String>,
 }
 
-impl<'a> RawModule<'a> {
+impl RawModule {
     fn new(
-        base: RawModuleBase<'a>,
+        base: RawModuleBase<'_>,
         code: Digest,
         retained_codes: &[RetainedCodeDescriptor],
     ) -> Self {
@@ -80,11 +201,11 @@ impl<'a> RawModule<'a> {
             .collect::<Vec<_>>();
         retained_codes.sort();
         Self {
-            activities: base.activities,
+            activities: base.activities.into_iter().map(str::to_owned).collect(),
             code: encode_hex(code.as_bytes()),
             commands: base.commands,
             migrations: base.migrations,
-            name: base.name,
+            name: base.name.to_owned(),
             queries: base.queries,
             retained_codes,
             schema_max: base.schema_max,
@@ -95,7 +216,8 @@ impl<'a> RawModule<'a> {
     }
 }
 
-#[derive(Ord, PartialOrd, Eq, PartialEq, Serialize)]
+#[derive(Deserialize, Ord, PartialOrd, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct RawRetainedCode {
     code: String,
     schema_max: u32,
@@ -118,7 +240,7 @@ struct RawModuleBase<'a> {
     commands: Vec<RawOperation>,
     migrations: Vec<RawMigration>,
     name: &'a str,
-    namespaces: Vec<RawNamespace<'a>>,
+    namespaces: Vec<RawNamespace>,
     queries: Vec<RawOperation>,
     schema_max: u32,
     schema_min: u32,
@@ -175,7 +297,8 @@ impl<'a> From<&'a ModuleDescriptor> for RawModuleBase<'a> {
     }
 }
 
-#[derive(Clone, Ord, PartialOrd, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Ord, PartialOrd, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct RawOperation {
     codec: u32,
     id: u32,
@@ -198,7 +321,8 @@ impl From<&OperationDescriptor> for RawOperation {
     }
 }
 
-#[derive(Clone, Ord, PartialOrd, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Ord, PartialOrd, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct RawMigration {
     digest: String,
     version: u32,
@@ -213,19 +337,20 @@ impl From<&MigrationDescriptor> for RawMigration {
     }
 }
 
-#[derive(Clone, Serialize)]
-struct RawNamespace<'a> {
+#[derive(Clone, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawNamespace {
     dead_letter: Option<String>,
     effect_targets: Vec<String>,
     id: String,
-    module: &'a str,
-    name: &'a str,
-    role: &'static str,
+    module: String,
+    name: String,
+    role: String,
     shards: u32,
 }
 
-impl<'a> RawNamespace<'a> {
-    fn new(module: &'a str, namespace: &'a NamespaceDescriptor) -> Self {
+impl RawNamespace {
+    fn new(module: &str, namespace: &NamespaceDescriptor) -> Self {
         let mut effect_targets = namespace
             .effect_targets
             .iter()
@@ -238,9 +363,9 @@ impl<'a> RawNamespace<'a> {
                 .map(|target| encode_hex(target.as_bytes())),
             effect_targets,
             id: encode_hex(namespace.id.as_bytes()),
-            module,
-            name: namespace.name,
-            role: role_name(namespace.role),
+            module: module.to_owned(),
+            name: namespace.name.to_owned(),
+            role: role_name(namespace.role).to_owned(),
             shards: namespace.shards,
         }
     }
@@ -253,5 +378,104 @@ fn role_name(role: CatalogRole) -> &'static str {
         CatalogRole::Kv => "kv",
         CatalogRole::Queue => "queue",
         CatalogRole::Workflow => "workflow",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::verify_rolling_compatibility;
+
+    fn release(code: &str, retained_codes: Value) -> Value {
+        json!({
+            "build": {
+                "cargo_lock_digest": "11".repeat(32),
+                "source_revision": "test"
+            },
+            "modules": [{
+                "activities": ["send"],
+                "code": code,
+                "commands": [{
+                    "codec": 1,
+                    "id": 1,
+                    "input_limit": 16,
+                    "output_limit": 16,
+                    "schema_max": 1,
+                    "schema_min": 1
+                }],
+                "migrations": [{"digest": "22".repeat(32), "version": 1}],
+                "name": "workflow",
+                "queries": [{
+                    "codec": 1,
+                    "id": 2,
+                    "input_limit": 8,
+                    "output_limit": 16,
+                    "schema_max": 1,
+                    "schema_min": 1
+                }],
+                "retained_codes": retained_codes,
+                "schema_max": 1,
+                "schema_min": 1,
+                "source_digest": "33".repeat(32),
+                "workflows": ["44".repeat(32)]
+            }],
+            "namespaces": [{
+                "dead_letter": null,
+                "effect_targets": [],
+                "id": "55".repeat(16),
+                "module": "workflow",
+                "name": "workflow",
+                "role": "workflow",
+                "shards": 1
+            }],
+            "peer_versions": [1],
+            "runtime": "crab-http-server",
+            "version": 1
+        })
+    }
+
+    fn bytes(value: &Value) -> Vec<u8> {
+        serde_json::to_vec(value).unwrap()
+    }
+
+    #[test]
+    fn rolling_release_retains_executable_and_persisted_work_contracts() {
+        let old_code = "66".repeat(32);
+        let previous = release(&old_code, json!([]));
+        let candidate = release(
+            &"77".repeat(32),
+            json!([{"code": old_code, "schema_max": 1, "schema_min": 1}]),
+        );
+
+        verify_rolling_compatibility(&bytes(&previous), &bytes(&candidate)).unwrap();
+    }
+
+    #[test]
+    fn rolling_release_rejects_removed_runtime_contracts() {
+        let old_code = "66".repeat(32);
+        let previous = release(&old_code, json!([]));
+        let base = release(
+            &"77".repeat(32),
+            json!([{"code": old_code, "schema_max": 1, "schema_min": 1}]),
+        );
+
+        let mut cases = Vec::new();
+        let mut missing_code = base.clone();
+        missing_code["modules"][0]["retained_codes"] = json!([]);
+        cases.push(missing_code);
+        let mut missing_command = base.clone();
+        missing_command["modules"][0]["commands"] = json!([]);
+        cases.push(missing_command);
+        let mut missing_workflow = base.clone();
+        missing_workflow["modules"][0]["workflows"] = json!([]);
+        cases.push(missing_workflow);
+        let mut changed_namespace = base;
+        changed_namespace["namespaces"][0]["shards"] = json!(2);
+        cases.push(changed_namespace);
+
+        for candidate in cases {
+            assert!(verify_rolling_compatibility(&bytes(&previous), &bytes(&candidate)).is_err());
+        }
     }
 }
