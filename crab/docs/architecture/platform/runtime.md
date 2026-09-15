@@ -239,10 +239,22 @@ ledger; effect commands substitute sys_inbox and its longer retention:
    it cannot be treated as proven rollback.
 9. Capture all cuts and transfer them into PendingCommit. Post-commit capture
    failure fences admission; no result escapes as durable success.
-10. Prepare immutable LTX/root objects. Compute due summary from the committed
-    indexed tables, including outstanding lease deadlines.
-11. CAS the control transition. Mark cuts published before emitting the stored
-    reply and allowing verified local pruning.
+10. Before appending, inspect the exact published graph every eight appends or
+    whenever it is within one segment of its admission ceiling. Prepare and CAS
+    bounded eight-input level promotions; under segment or byte pressure prepare
+    a full level-nine replacement. Each representation-only CAS preserves the
+    application sequence, schema, due summary and database endpoint. Owner
+    renewal continues while compaction reads, verifies and writes immutable data.
+    If exact append preparation still reaches the segment/graph-byte limit, force
+    one full replacement and retry that same captured batch once; unrelated limits
+    and a one-segment graph fail without this retry.
+11. Prepare immutable LTX/root objects against the resulting exact predecessor.
+    Compute due summary from the committed indexed tables, including outstanding
+    lease deadlines.
+12. CAS the control transition. Confirm exact root equality on the SQL worker,
+    reverify and delete only that pending batch's local paths, then emit the
+    stored reply. A prune error leaves the result unknown and fences the local
+    activation; it never changes the already published root.
 
 Only durable success and stored business rejection carry receipts. Format,
 authorization and admission failures carry NOT_STARTED/REJECTED without one.

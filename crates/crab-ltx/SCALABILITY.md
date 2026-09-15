@@ -47,6 +47,7 @@ does not imply that all of those bytes must reside on local disk.
 | Initial Cell roots materialized every final locator and encoded directory node | K-way ordered index merge with suffix truncation fences; each 256-page leaf uploads before the next and only radix summaries remain resident | `cell_replica::directory::tests::streamed_tree_matches_canonical_root_without_retaining_objects` matches the canonical 70,000-page root and `cell_roots::initial_streaming_directory_merges_truncation_and_regrowth` restores the newest bytes from a multi-cut initial root |
 | Writable Cell activation and each cut allocated/cloned/scanned one checksum per page | Authenticated directory leaves stream to a local 8-byte/page file in 64 KiB chunks; capture keeps a changed-page overlay, maintains the aggregate incrementally and persists positional updates only after sealing the LTX cut | `cell_roots::exact_cell_root_opens_sparse_writer_and_publishes_incrementally` checks the disk index and successor restore; `host_hooks::cell_checksum_write_failure_fences_after_sealing_the_cut` proves a partial index update cannot keep serving |
 | Partial compaction downloaded unrelated bodies | Verify the original indexed plan; fetch only selected bodies; authenticate regenerated indexes; compare independently reduced page bytes; verify replacement indexed state | `publication::range_compaction_does_not_download_unselected_bodies`: before, 2,026,087 downloaded bytes; after, under 100,000; restored bytes identical |
+| Long-lived Cell writers exhausted local/remote segment admission | Reverify and prune each exact local batch only after authoritative root confirmation; before later appends, schedule a bounded eight-input level promotion or a pressure-triggered full replacement through the owner CAS | `host_hooks::remote::captured_pruning_retries_after_removal_but_failed_parent_sync`, `cell_roots::scheduled_cell_compaction_promotes_fanout_and_preserves_root`, and `actor::dispatcher_compacts_before_segment_admission_is_exhausted` |
 | Independent replicas multiplied remote/recovery work | Shared I/O, CPU-job and large-recovery admission; ordered concurrent input/index reads | `replica::io` tests overlap two cohorts while enforcing one three-request ceiling and preserving input order |
 | Cancelling a waiter could release capacity before its work stopped | CPU/recovery permits travel with dispatched non-cancellable closures; network child tasks abort on cohort drop | `environment` cancellation regression and `replica::io` cancellation regression |
 | Temporary recovery capacity could become attached to returned handles | Strip recovery reservation from returned page maps and resumed writers | `publication::recovery_admission_is_released_before_returning_long_lived_handles` |
@@ -103,8 +104,9 @@ admit 5 GB databases. Raising it requires a separately sized recovery budget.
    claiming the 5 GB/10K target; do not add an implicit fallback reader.
 2. **Streaming large-database operations.** Cell capture checksum updates are
    incremental and disk-backed, but a large truncation still reads its removed
-   checksum suffix. Snapshot and compaction can hold database-sized decoded
-   buffers. Replace those with bounded scratch-backed processing and qualify
+   checksum suffix. Standalone snapshot/compaction paths can hold database-sized
+   decoded buffers; Cell exact-root compaction is scratch-backed and streaming.
+   Replace the remaining resident paths with bounded processing and qualify
    5 GB incompressible data and low-disk failures. Keep cryptographic body/index
    binding and exact output verification.
 3. **Resident lifecycle and SQL scheduling.** The server has bounded activation
@@ -114,11 +116,12 @@ admit 5 GB databases. Raising it requires a separately sized recovery budget.
    explicit warm transitions remain. Fresh exact-root restore is supported;
    reusable crash-safe local warm reopening is not. Every acknowledged root must
    survive eviction.
-4. **Durable publication and retention.** Implement the HTTP owner/head CAS and
-   response gate, reconcile ambiguous publication, pin backups/recovery roots,
-   and reclaim only unreferenced objects outside retention grace. Library epoch
-   CAS is not a lease. Per-repository bundle publication is not node-wide atomic
-   group commit or shared-bundle retention.
+4. **Retention and collection.** The HTTP runtime now owns owner/head CAS,
+   exact-response gating, ambiguous-publication reconciliation and scheduled
+   representation compaction. Implement backup/recovery-root pinning and reclaim
+   only unreferenced objects outside retention grace. Library epoch CAS is not a
+   lease. Per-repository bundle publication is not node-wide atomic group commit
+   or shared-bundle retention.
 5. **Measured node qualification.** Define hardware and service SLOs, then prove
    capacity under realistic database sizes, skew, write amplification, object
    storage latency, simultaneous takeover, compaction and failures. Metrics

@@ -108,11 +108,32 @@ impl ManagedDb {
     /// published. An I/O failure can leave a partially pruned set; retry safely.
     #[cfg(feature = "replica")]
     pub fn prune_published(&mut self, head: &crate::ReplicaHead) -> Result<usize> {
+        self.prune_retained(|segment| head.segments().any(|info| info == segment.info()))
+    }
+
+    /// Deletes this session's exact captured artifacts after their root publishes.
+    ///
+    /// Every selected file is reverified before deletion. An error retains its
+    /// accounting so the owner can retry or discard the complete local session.
+    #[cfg(feature = "replica")]
+    pub fn prune_captured(&mut self, batch: &crate::CaptureBatch) -> Result<usize> {
+        self.prune_retained(|segment| {
+            batch.segments.iter().any(|published| {
+                published.path() == segment.path() && published.info() == segment.info()
+            })
+        })
+    }
+
+    #[cfg(feature = "replica")]
+    fn prune_retained(
+        &mut self,
+        mut selected: impl FnMut(&crate::LocalSegment) -> bool,
+    ) -> Result<usize> {
         let mut removed = 0;
         let mut index = 0;
         while index < self.retained.len() {
             let segment = &self.retained[index];
-            if !head.segments().any(|info| info == segment.info()) {
+            if !selected(segment) {
                 index += 1;
                 continue;
             }
@@ -352,8 +373,9 @@ impl ManagedDb {
     /// Captures committed WAL pages and all cuts made by checkpoint maintenance.
     ///
     /// Any failure fences further use, since some local cuts may already exist.
-    /// Retain returned files until publication; `prune_published` can release
-    /// exact acknowledged artifacts when the replica feature is enabled.
+    /// Retain returned files until publication; `prune_captured` can release
+    /// an exact acknowledged batch and `prune_published` can reconcile a head
+    /// when the replica feature is enabled.
     pub fn capture(&mut self) -> Result<CaptureBatch> {
         self.ensure_active()?;
         let result = self.capture_inner();

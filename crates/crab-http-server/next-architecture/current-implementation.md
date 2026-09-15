@@ -47,6 +47,13 @@ persists them after its matching LTX cut is durable. Cell range/full compaction
 spools authenticated indexes through the injected filesystem, externally merges
 one cursor per segment, range-fetches at most 1 MiB of adjacent frames and
 multipart-uploads the scratch-backed replacement without whole-LTX buffers.
+The runtime publisher invokes that machinery before ordinary appends: it checks
+every eight appends, promotes at least eight contiguous preceding-level inputs,
+and performs a full replacement before segment or graph-byte admission is
+exhausted. Every replacement uses the same owner/control CAS and preserves the
+application sequence, schema, scheduler deadline and exact endpoint. Published
+bootstrap, command and migration batches are reverified and pruned from the
+local managed session before success escapes.
 It does not introduce a second SQLite library. See the
 [parity matrix](../../crab-ltx/PARITY.md) for API and qualification boundaries.
 
@@ -94,8 +101,11 @@ migrates every non-tombstoned Cell supported by the candidate registry, drains
 the runtime, requires exclusive directory ownership, checks the current
 inventory, CASes the same operation to `ready`, and withdraws its exact ETag. The
 offline peer transport fails closed and lease loss prevents publication.
-Persisted-work admission, removed-namespace transforms and
-remaining collaboration-domain imports are not implemented. The
+Breaking-release maintenance now inspects retained runtime requests, inbox
+deliveries, effects, Queue rows/dedup records and Workflow runs after migrating
+each Cell, and refuses Ready while any persisted row still requires removed or
+narrowed executable contracts. Removed-namespace transforms and remaining
+collaboration-domain imports are not implemented. The
 private management route can dispatch or forward registered calls between
 compatible nodes. The repository module additionally registers private Tick and
 effect claim/lease/validation operations. Its server-owned due scanner reads the

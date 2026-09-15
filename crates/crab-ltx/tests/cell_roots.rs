@@ -132,6 +132,83 @@ async fn root_scope_and_commit_sequence_are_fenced() {
     writer.close().unwrap();
 }
 
+#[tokio::test]
+async fn scheduled_cell_compaction_promotes_fanout_and_preserves_root() {
+    let source = tempfile::TempDir::new().unwrap();
+    let database = source.path().join("scheduled.sqlite");
+    let mut writer = ManagedDb::open(&database, Limits::default()).unwrap();
+    let store = Store::new(Arc::new(InMemory::new()));
+    let replica = replica(store, [41; 32], [42; 16]);
+    let mut root = None;
+    for sequence in 1_u64..=8 {
+        writer
+            .transaction(|transaction| {
+                if sequence == 1 {
+                    transaction.execute_batch(
+                        "CREATE TABLE events(sequence INTEGER PRIMARY KEY, value TEXT NOT NULL)",
+                    )?;
+                }
+                transaction.execute(
+                    "INSERT INTO events(sequence, value) VALUES (?1, ?2)",
+                    (sequence, format!("event-{sequence}")),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let batch = writer.capture().unwrap();
+        root = Some(
+            replica
+                .prepare(root.as_ref(), &batch, sequence, 1)
+                .await
+                .unwrap()
+                .root(),
+        );
+    }
+    writer.close().unwrap();
+    let root = root.unwrap();
+    assert_eq!(replica.open_root(&root).await.unwrap().segment_count(), 8);
+
+    let scratch = tempfile::TempDir::new().unwrap();
+    let compacted = replica
+        .prepare_scheduled_compaction(&root, scratch.path())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(compacted.predecessor(), Some(root));
+    assert_eq!(compacted.root().position, root.position);
+    assert_eq!(compacted.root().commit_sequence, root.commit_sequence);
+    assert_eq!(compacted.verified().segment_count(), 1);
+    assert!(
+        replica
+            .prepare_scheduled_compaction(&compacted.root(), scratch.path())
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let restored = tempfile::TempDir::new().unwrap();
+    let before = restored.path().join("before.sqlite");
+    let after = restored.path().join("after.sqlite");
+    replica
+        .open_root(&root)
+        .await
+        .unwrap()
+        .restore(&before)
+        .await
+        .unwrap();
+    replica
+        .open_root(&compacted.root())
+        .await
+        .unwrap()
+        .restore(&after)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(before).unwrap(),
+        std::fs::read(after).unwrap()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn exact_cell_root_opens_sparse_writer_and_publishes_incrementally() {
     let source = tempfile::TempDir::new().unwrap();

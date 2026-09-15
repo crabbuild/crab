@@ -23,6 +23,8 @@ const SEGMENT_PAGE_BYTES: u64 = 64 << 10;
 const MAX_SEGMENTS: usize = 4096;
 const SEGMENTS_PER_PAGE: usize = 96;
 const MAX_SEGMENT_PAGES: usize = 64;
+const COMPACTION_FANOUT: usize = 8;
+const MAX_COMPACTION_INPUTS: usize = 128;
 
 /// An immutable Cell root identity suitable for publication in control state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -415,6 +417,12 @@ impl CellReplica {
         })
     }
 
+    /// Returns the immutable admission limits selected for this replica.
+    #[must_use]
+    pub const fn limits(&self) -> Limits {
+        self.limits
+    }
+
     /// Selects the caller's bounded I/O and blocking execution facilities.
     #[must_use]
     pub fn with_host(mut self, host: Host) -> Self {
@@ -580,6 +588,50 @@ impl CellReplica {
         replica.host = self.host.for_recovery().await?;
         let graph = replica.load_graph(base).await?;
         compaction::prepare(&replica, base, graph, range, level, scratch_directory).await
+    }
+
+    /// Prepares one bounded level promotion, or an emergency full compaction.
+    ///
+    /// Normal promotions require eight contiguous inputs from the preceding
+    /// level. A root near its segment or byte ceiling is compacted completely so
+    /// the next append cannot strand an otherwise healthy writer at admission.
+    pub async fn prepare_scheduled_compaction(
+        &self,
+        base: &RootRef,
+        scratch_directory: &Path,
+    ) -> Result<Option<PreparedRoot>> {
+        let mut replica = self.clone();
+        replica.host = self.host.for_recovery().await?;
+        let graph = replica.load_graph(base).await?;
+        let segment_limit = MAX_SEGMENTS.min(replica.limits.max_segments);
+        let stored_bytes = graph
+            .descriptors
+            .iter()
+            .try_fold(0_u64, |total, descriptor| {
+                total
+                    .checked_add(descriptor.info.size_bytes)
+                    .and_then(|value| value.checked_add(descriptor.index_length))
+                    .ok_or(CrabError::Limit("Cell root bytes"))
+            })?;
+        let byte_pressure = stored_bytes >= replica.limits.max_plan_bytes.saturating_mul(3) / 4;
+        if graph.descriptors.len() > 1
+            && (graph.descriptors.len() >= segment_limit.saturating_sub(1).max(1) || byte_pressure)
+        {
+            let end = graph.descriptors.len();
+            return compaction::prepare(&replica, base, graph, 0..end, 9, scratch_directory)
+                .await
+                .map(Some);
+        }
+        for level in 1..=8 {
+            if let Some(range) =
+                scheduled_compaction_range(&graph.descriptors, level, replica.limits.max_file_bytes)
+            {
+                return compaction::prepare(&replica, base, graph, range, level, scratch_directory)
+                    .await
+                    .map(Some);
+            }
+        }
+        Ok(None)
     }
 
     async fn prepare_append(
@@ -972,6 +1024,38 @@ impl CellReplica {
             .await?;
         Ok(bytes.to_vec())
     }
+}
+
+fn scheduled_compaction_range(
+    descriptors: &[SegmentDescriptor],
+    level: u8,
+    max_file_bytes: u64,
+) -> Option<std::ops::Range<usize>> {
+    let source_level = level.checked_sub(1)?;
+    let mut start = 0;
+    while start < descriptors.len() {
+        if descriptors[start].level() != source_level {
+            start += 1;
+            continue;
+        }
+        let mut end = start;
+        let mut bytes = 0_u64;
+        while end < descriptors.len()
+            && descriptors[end].level() == source_level
+            && end - start < MAX_COMPACTION_INPUTS
+            && bytes
+                .checked_add(descriptors[end].info.size_bytes)
+                .is_some_and(|next| next <= max_file_bytes)
+        {
+            bytes += descriptors[end].info.size_bytes;
+            end += 1;
+        }
+        if end - start >= COMPACTION_FANOUT {
+            return Some(start..end);
+        }
+        start = end.max(start + 1);
+    }
+    None
 }
 
 struct LoadedGraph {

@@ -172,6 +172,24 @@ impl SqlWorkerPool {
         receive(response).await
     }
 
+    pub(crate) async fn confirm_bootstrap_published(
+        &self,
+        cell: CellId,
+        cuts: crab_ltx::CaptureBatch,
+    ) -> Result<()> {
+        let (reply, response) = oneshot::channel();
+        self.send(
+            cell,
+            WorkerCommand::ConfirmBootstrapPublished {
+                cell,
+                cuts: Box::new(cuts),
+                reply,
+            },
+        )
+        .await?;
+        receive(response).await
+    }
+
     /// Opens and verifies one exact immutable root on its assigned SQL worker.
     pub(crate) async fn activate_restored(
         &self,
@@ -686,6 +704,11 @@ enum WorkerCommand {
         root: crab_ltx::RootRef,
         reply: oneshot::Sender<Result<StoredOutcome>>,
     },
+    ConfirmBootstrapPublished {
+        cell: CellId,
+        cuts: Box<crab_ltx::CaptureBatch>,
+        reply: oneshot::Sender<Result<()>>,
+    },
     ConfirmMigrationPublished {
         cell: CellId,
         root: crab_ltx::RootRef,
@@ -988,6 +1011,13 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                     .get_mut(&cell)
                     .ok_or(Error::CellNotActive)
                     .and_then(|cell| cell.executor.confirm_published(&root));
+                let _ = reply.send(result);
+            }
+            WorkerCommand::ConfirmBootstrapPublished { cell, cuts, reply } => {
+                let result = cells
+                    .get_mut(&cell)
+                    .ok_or(Error::CellNotActive)
+                    .and_then(|cell| cell.executor.confirm_bootstrap_published(&cuts));
                 let _ = reply.send(result);
             }
             WorkerCommand::ConfirmMigrationPublished { cell, root, reply } => {

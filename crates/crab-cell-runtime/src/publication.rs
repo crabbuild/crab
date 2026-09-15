@@ -3,6 +3,8 @@ use crate::{
 };
 
 const MAX_RETRY_DELAY_MS: u64 = 1_000;
+const COMPACTION_CHECK_INTERVAL: u8 = 8;
+const MAX_COMPACTION_CASCADE: usize = 9;
 const RENEW_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 const SELF_FENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -15,20 +17,30 @@ pub struct CellPublisher {
     replica: crab_ltx::CellReplica,
     authority: CellAuthority,
     observed: VersionedControl,
+    scratch_directory: std::path::PathBuf,
+    segment_count: Option<usize>,
+    appends_since_compaction_check: u8,
     renew_at: std::time::Instant,
 }
 
 impl CellPublisher {
+    /// Creates an owner-bound publisher with a private compaction scratch directory.
+    ///
+    /// The directory must exist and remain private to this Cell activation.
     #[must_use]
     pub fn new(
         replica: crab_ltx::CellReplica,
         authority: CellAuthority,
         observed: VersionedControl,
+        scratch_directory: std::path::PathBuf,
     ) -> Self {
         Self {
             replica,
             authority,
             observed,
+            scratch_directory,
+            segment_count: None,
+            appends_since_compaction_check: COMPACTION_CHECK_INTERVAL,
             renew_at: std::time::Instant::now() + RENEW_INTERVAL,
         }
     }
@@ -102,9 +114,7 @@ impl CellPublisher {
         &mut self,
         pending: &crate::PendingCommit,
     ) -> Result<crab_ltx::PreparedRoot> {
-        let base = self.observed.value().ltx_root();
-        self.prepare_cuts(
-            base.as_ref(),
+        self.prepare_append(
             pending.cuts(),
             pending.outcome().commit_sequence(),
             self.observed.value().schema,
@@ -119,8 +129,11 @@ impl CellPublisher {
         if self.observed.value().root.is_some() {
             return Err(Error::Control("bootstrap control already has a root"));
         }
-        self.prepare_cuts(None, cuts, 0, self.observed.value().schema)
-            .await
+        let prepared = self
+            .prepare_cuts(None, cuts, 0, self.observed.value().schema)
+            .await?;
+        self.note_append(&prepared);
+        Ok(prepared)
     }
 
     /// Prepares the captured cut under its registry-selected target schema.
@@ -131,14 +144,143 @@ impl CellPublisher {
         if self.observed.value().schema != pending.from_schema() {
             return Err(Error::Fenced);
         }
-        let base = self.observed.value().ltx_root();
-        self.prepare_cuts(
-            base.as_ref(),
+        self.prepare_append(
             pending.cuts(),
             pending.commit_sequence(),
             pending.to_schema(),
         )
         .await
+    }
+
+    async fn prepare_append(
+        &mut self,
+        cuts: &crab_ltx::CaptureBatch,
+        commit_sequence: u64,
+        schema: u32,
+    ) -> Result<crab_ltx::PreparedRoot> {
+        let base = self.compact_before_append().await?;
+        let prepared = match self
+            .prepare_cuts(base.as_ref(), cuts, commit_sequence, schema)
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(Error::Ltx(error)) if error.is_cell_graph_limit() => {
+                let Some(root) = base else {
+                    return Err(error.into());
+                };
+                let Some(compacted) = self.force_full_compaction(&root).await? else {
+                    return Err(error.into());
+                };
+                self.prepare_cuts(Some(&compacted), cuts, commit_sequence, schema)
+                    .await?
+            }
+            Err(error) => return Err(error),
+        };
+        self.note_append(&prepared);
+        Ok(prepared)
+    }
+
+    fn note_append(&mut self, prepared: &crab_ltx::PreparedRoot) {
+        self.segment_count = Some(prepared.verified().segment_count());
+        self.appends_since_compaction_check = self.appends_since_compaction_check.saturating_add(1);
+    }
+
+    async fn compact_before_append(&mut self) -> Result<Option<crab_ltx::RootRef>> {
+        let Some(mut base) = self.observed.value().ltx_root() else {
+            return Ok(None);
+        };
+        let segment_count = match self.segment_count {
+            Some(count) => count,
+            None => {
+                let count = self.replica.open_root(&base).await?.segment_count();
+                self.segment_count = Some(count);
+                count
+            }
+        };
+        let segment_limit = self.replica.limits().max_segments.min(4_096);
+        let under_pressure = segment_count >= segment_limit.saturating_sub(1).max(1);
+        if !under_pressure && self.appends_since_compaction_check < COMPACTION_CHECK_INTERVAL {
+            return Ok(Some(base));
+        }
+
+        for _ in 0..MAX_COMPACTION_CASCADE {
+            let Some(prepared) = self.prepare_scheduled_compaction(&base).await? else {
+                self.appends_since_compaction_check = 0;
+                return Ok(Some(base));
+            };
+            let next_due_ms = self.observed.value().next_due_ms;
+            base = self.publish_prepared(&prepared, next_due_ms).await?;
+            self.segment_count = Some(prepared.verified().segment_count());
+        }
+        Err(Error::Control(
+            "Cell compaction cascade exceeded level limit",
+        ))
+    }
+
+    async fn prepare_scheduled_compaction(
+        &mut self,
+        base: &crab_ltx::RootRef,
+    ) -> Result<Option<crab_ltx::PreparedRoot>> {
+        let mut backoff = PublicationBackoff::default();
+        loop {
+            let replica = self.replica.clone();
+            let scratch_directory = self.scratch_directory.clone();
+            let attempt = replica.prepare_scheduled_compaction(base, &scratch_directory);
+            tokio::pin!(attempt);
+            let result = loop {
+                tokio::select! {
+                    result = &mut attempt => break result,
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(self.renew_at)) => {
+                        self.renew().await?;
+                    }
+                }
+            };
+            match result {
+                Ok(prepared) => return Ok(prepared),
+                Err(error) if retryable_ltx_error(&error) => {
+                    backoff.wait(ltx_retry_hint(&error)).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    async fn force_full_compaction(
+        &mut self,
+        base: &crab_ltx::RootRef,
+    ) -> Result<Option<crab_ltx::RootRef>> {
+        let segment_count = self
+            .segment_count
+            .ok_or(Error::Control("Cell segment count is unavailable"))?;
+        if segment_count <= 1 {
+            return Ok(None);
+        }
+        let mut backoff = PublicationBackoff::default();
+        let prepared = loop {
+            let replica = self.replica.clone();
+            let scratch_directory = self.scratch_directory.clone();
+            let attempt = replica.prepare_compaction(base, 0..segment_count, 9, &scratch_directory);
+            tokio::pin!(attempt);
+            let result = loop {
+                tokio::select! {
+                    result = &mut attempt => break result,
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(self.renew_at)) => {
+                        self.renew().await?;
+                    }
+                }
+            };
+            match result {
+                Ok(prepared) => break prepared,
+                Err(error) if retryable_ltx_error(&error) => {
+                    backoff.wait(ltx_retry_hint(&error)).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        let next_due_ms = self.observed.value().next_due_ms;
+        let root = self.publish_prepared(&prepared, next_due_ms).await?;
+        self.segment_count = Some(prepared.verified().segment_count());
+        Ok(Some(root))
     }
 
     async fn prepare_cuts(

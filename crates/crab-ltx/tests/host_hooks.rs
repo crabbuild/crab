@@ -538,24 +538,19 @@ mod remote {
         assert_eq!(jobs.joined.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn published_pruning_retries_after_removal_but_failed_parent_sync() {
-        let (_directory, faults, host, mut writer) = fixture();
-        let replica = replica(host);
+    #[test]
+    fn captured_pruning_retries_after_removal_but_failed_parent_sync() {
+        let (_directory, faults, _host, mut writer) = fixture();
         let batch = writer.capture().unwrap();
-        let head = replica.replicate(&batch, None).await.unwrap();
         faults.arm(Some("sync_parent"));
-        injected(writer.prune_published(&head));
+        injected(writer.prune_captured(&batch));
         assert!(!batch.segments[0].path().exists());
         faults.arm(None);
-        assert_eq!(writer.prune_published(&head).unwrap(), batch.segments.len());
-        assert_eq!(writer.prune_published(&head).unwrap(), 0);
+        assert_eq!(writer.prune_captured(&batch).unwrap(), batch.segments.len());
+        assert_eq!(writer.prune_captured(&batch).unwrap(), 0);
         writer
             .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(3)"))
             .unwrap();
-        replica
-            .replicate(&writer.capture().unwrap(), Some(&head))
-            .await
-            .unwrap();
+        writer.capture().unwrap();
     }
 }

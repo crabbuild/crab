@@ -8,8 +8,8 @@ does not establish a working runtime.
 
 | Source | Current behavior | Required change |
 | --- | --- | --- |
-| [managed.rs](../../../../crates/crab-ltx/src/managed.rs) | Typed mutation callbacks, capture ownership and a temporary SQLite `query_only` read boundary | Keep raw connection access inside the runtime; typed application SQL authorization is implemented above this layer |
-| [cell_replica.rs](../../../../crates/crab-ltx/src/cell_replica.rs) | Native and canonical Cell-selected bundle cuts prepare immutable roots; initial construction k-way merges ordered index streams, rejects pre-truncation locators, uploads 256-page leaves as produced and retains only radix summaries; exact range/full compaction disk-spools authenticated indexes, externally merges one cursor per segment, uses bounded adjacent-frame reads and multipart-uploads injected-filesystem output; cold reads and sparse writable activation use exact digest-pinned radix paths backed by a process-wide bounded directory cache and coalesce adjacent frames into at most 1 MiB range reads on an I/O worker independent of the fixed SQL pool; writable preparation streams authenticated checksums to local disk and capture updates only its changed-page overlay after sealing each LTX cut; full restore streams verified runs through a recovery reservation and atomically installs a new SQLite file; incremental publication copy-on-writes only changed directory paths and safely prunes truncation | Add measured 5 GB/low-disk qualification |
+| [managed.rs](../../../../crates/crab-ltx/src/managed.rs) | Typed mutation callbacks, capture ownership, exact batch/head pruning with pre-delete revalidation, and a temporary SQLite `query_only` read boundary | Keep raw connection access inside the runtime; typed application SQL authorization is implemented above this layer |
+| [cell_replica.rs](../../../../crates/crab-ltx/src/cell_replica.rs) | Native and canonical Cell-selected bundle cuts prepare immutable roots; initial construction k-way merges ordered index streams, rejects pre-truncation locators, uploads 256-page leaves as produced and retains only radix summaries; exact range/full compaction disk-spools authenticated indexes, externally merges one cursor per segment, uses bounded adjacent-frame reads and multipart-uploads injected-filesystem output; scheduled compaction chooses bounded eight-input level promotions and an admission-pressure full replacement; cold reads and sparse writable activation use exact digest-pinned radix paths backed by a process-wide bounded directory cache and coalesce adjacent frames into at most 1 MiB range reads on an I/O worker independent of the fixed SQL pool; writable preparation streams authenticated checksums to local disk and capture updates only its changed-page overlay after sealing each LTX cut; full restore streams verified runs through a recovery reservation and atomically installs a new SQLite file; incremental publication copy-on-writes only changed directory paths and safely prunes truncation | Add measured 5 GB/low-disk qualification |
 | [replica.rs](../../../../crates/crab-ltx/src/replica.rs) | Standalone immutable manifest plus per-epoch mutable head | Keep existing callers working; Cell runtime uses only `CellReplica` and never treats this head as authority |
 | [append.rs](../../../../crates/crab-ltx/src/replica/append.rs) | Shared native/bundle append verification | Reuse verification under the prepared-root API |
 | [paged.rs](../../../../crates/crab-ltx/src/paged.rs) | Authenticated but resident page map; sparse writable SQL | Bounded directory nodes/cache and capture checksum tracker |
@@ -63,6 +63,9 @@ commits it only after the corresponding cut is durable. Range/full compaction
 now admits before remote reads, spools indexes and output through the injected
 filesystem, recomputes every selected LTX manifest digest, authenticates every
 input frame and streams the replacement into immutable multipart objects.
+`CellReplica::prepare_scheduled_compaction` selects at most 128 contiguous inputs,
+promotes eight or more preceding-level inputs, and falls back to a complete
+level-nine replacement before segment or graph-byte admission is exhausted.
 Complete this package with measured large-database
 and low-disk qualification. Exact
 Cell roots open a sparse writable continuation through the existing VFS.
@@ -108,6 +111,16 @@ worker layer is also implemented: 1-16 OS threads, 256-command bounded shard
 queues, stable Cell-ID routing, a node-wide 10,000-Cell admission ceiling, and
 continued execution after an accepted caller is cancelled. Exact-root lost-response
 reconciliation and renewal-token refresh are implemented without SQL replay.
+The publisher now runs scheduled representation compaction before an append,
+renews ownership during the operation, publishes each replacement through the
+ordinary authority CAS, and preserves the durable due summary. An exact
+segment/graph-byte admission rejection forces one full replacement and one retry
+of the already captured batch; it never reruns SQL. Exact bootstrap,
+command and migration confirmation calls `ManagedDb::prune_captured`; local
+capture accounting is released only after path and manifest equality are
+reverified. `dispatcher_compacts_before_segment_admission_is_exhausted` executes
+ten mutations with a four-segment ceiling and proves both forward progress and
+the exact restored value.
 The node dispatcher now adds 64-request/8-MiB Cell admission, node byte admission,
 single-flight FIFO publication, 100/200/400/1,000-ms storage retry, structured
 unknown outcomes and accepted-work drain without a permanent task per Cell.

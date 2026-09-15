@@ -548,13 +548,24 @@ impl CellRuntime {
         let incarnation = observed.value().incarnation;
         let code = observed.value().code;
         let schema = observed.value().schema;
+        let scratch_directory = match &activation {
+            Activation::Restored(activation) => activation.destination.parent(),
+            Activation::Bootstrap(activation) => activation.destination.parent(),
+        }
+        .ok_or(Error::Control("Cell activation destination has no parent"))?
+        .to_owned();
         let (reply, response) = oneshot::channel();
         self.inner
             .sender
             .send(Message::Activate {
                 cell,
                 activation,
-                publisher: Box::new(CellPublisher::new(replica, authority, observed)),
+                publisher: Box::new(CellPublisher::new(
+                    replica,
+                    authority,
+                    observed,
+                    scratch_directory,
+                )),
                 reply,
             })
             .await
@@ -1178,6 +1189,8 @@ async fn bootstrap_and_publish(
         let prepared = publisher.prepare_initial(&bootstrap.cuts).await?;
         publisher
             .publish_prepared(&prepared, bootstrap.next_due_ms)
+            .await?;
+        pool.confirm_bootstrap_published(cell, bootstrap.cuts)
             .await?;
         Ok(())
     }

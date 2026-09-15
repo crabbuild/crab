@@ -131,6 +131,7 @@ The next Cell runtime uses `CellReplica`, not the standalone epoch head:
 | `prepare(base, cuts, sequence, schema).await` | Admits the complete chain, verifies native LTX/index bytes, writes content-addressed directory/descriptor/root objects and returns an unforgeable `PreparedRoot`; writes no mutable key |
 | `prepare_bundle(base, bundle, sequence, schema).await` | Selects canonical rows for this Cell/incarnation from a shared bundle, verifies their chain, retains the bundle and indexes, and prepares the advancing immutable root without a mutable write |
 | `prepare_compaction(base, range, level, scratch_directory).await` | Admits before remote reads, externally merges authenticated indexes through caller-owned scratch, streams the exact replacement, preserves logical position/sequence/schema, and returns a representation-only prepared root for the normal authority CAS |
+| `prepare_scheduled_compaction(base, scratch_directory).await` | Selects one bounded eight-input level promotion, or a complete level-nine replacement near segment/graph-byte admission; returns `None` when no work is due and never publishes control |
 | `open_root(root).await` | Reopens the exact digest, validates canonical metadata, scope, chain and the authenticated radix root without downloading LTX bodies or every directory leaf |
 | `VerifiedRoot::paged().read_page(page).await` | Walks only the selected hash-pinned radix path, range-reads its LTX frame and verifies frame BLAKE3, decoded page number and page checksum |
 | `VerifiedRoot::paged().prepare_writable(path).await` | Streams authenticated directory checksums to a fresh local file without LTX bodies and returns an exact-root writable activation value bound to `path` |
@@ -391,8 +392,10 @@ records what remains before qualifying 1K–10K active databases per node.
   Directory ownership is local exclusion, not distributed fencing. Paths are
   UTF-8. Destination parent directories must exist; restore rejects SQLite
   sidecars and will not replace an existing destination.
-- Retained artifacts are not removed by drop/close. `prune_published()` releases
-  only this session's exact cuts present in a pinned published head. Prune before
+- Retained artifacts are not removed by drop/close. `prune_captured()` releases
+  one exact acknowledged batch by path and manifest equality; `prune_published()`
+  reconciles exact cuts present in a pinned standalone head. Both reverify bytes
+  before deletion. Prune before
   compacting that head; a replacement snapshot alone cannot prove a local cut's
   publication. Remote retention and retired-directory cleanup remain caller-owned.
 - Artifact writes fsync files and their containing directory. A failed operation

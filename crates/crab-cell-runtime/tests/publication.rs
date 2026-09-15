@@ -291,7 +291,8 @@ async fn publisher_uploads_cas_and_releases_one_result() {
             },
         )
         .unwrap();
-    let mut publisher = CellPublisher::new(replica, authority, observed);
+    let mut publisher =
+        CellPublisher::new(replica, authority, observed, _directory.path().to_owned());
     assert!(matches!(
         publisher
             .publish_pending(&mut executor)
@@ -345,7 +346,7 @@ async fn lost_publication_response_reconciles_without_replaying_sql() {
         .await
         .unwrap();
 
-    let mut publisher = CellPublisher::new(replica, authority, stale);
+    let mut publisher = CellPublisher::new(replica, authority, stale, _directory.path().to_owned());
     assert!(matches!(
         publisher
             .publish_pending(&mut executor)
@@ -416,7 +417,7 @@ async fn published_root_observed_after_takeover_fences_the_old_executor() {
         .await
         .unwrap();
 
-    let mut publisher = CellPublisher::new(replica, authority, stale);
+    let mut publisher = CellPublisher::new(replica, authority, stale, _directory.path().to_owned());
     assert!(matches!(
         publisher.publish_pending(&mut executor).await,
         Err(crab_cell_runtime::Error::Fenced)
@@ -471,7 +472,7 @@ async fn publication_rebases_over_a_pure_lease_renewal_without_sql_replay() {
         .await
         .unwrap();
 
-    let mut publisher = CellPublisher::new(replica, authority, stale);
+    let mut publisher = CellPublisher::new(replica, authority, stale, _directory.path().to_owned());
     assert!(matches!(
         publisher
             .publish_pending(&mut executor)

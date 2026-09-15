@@ -812,6 +812,7 @@ impl CellExecutor {
                 "published root does not match prepared commit",
             ));
         }
+        self.db.prune_captured(&pending.cuts)?;
         self.pending
             .take()
             .map(|pending| pending.outcome)
@@ -832,6 +833,7 @@ impl CellExecutor {
                 "published root does not match prepared migration",
             ));
         }
+        self.db.prune_captured(&pending.cuts)?;
         self.pending_migration
             .take()
             .map(|pending| MigrationOutcome {
@@ -840,6 +842,17 @@ impl CellExecutor {
                 commit_sequence: pending.commit_sequence,
             })
             .ok_or(Error::PendingPublication)
+    }
+
+    pub(crate) fn confirm_bootstrap_published(
+        &mut self,
+        cuts: &crab_ltx::CaptureBatch,
+    ) -> Result<()> {
+        if self.has_pending() || self.fenced || cuts.segments.is_empty() {
+            return Err(Error::PendingPublication);
+        }
+        self.db.prune_captured(cuts)?;
+        Ok(())
     }
 
     /// Closes a drained executor; pending or fenced state requires recovery.

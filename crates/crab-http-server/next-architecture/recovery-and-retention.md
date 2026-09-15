@@ -86,10 +86,23 @@ application revision and end checksum. It does not create a new user mutation.
 5. Publish the replacement graph with a control CAS that preserves logical state.
 6. Retain old inputs until no current restore or retained backup depends on them.
 
-The first scheduler permits bounded compaction per node and per cell. It can
-build outside the application actor, but final publication goes through the same
-control coordinator. If head advancement invalidates the plan, rebase only with
-verified unchanged coverage or retry later.
+The implemented publisher checks every eight appends and immediately when the
+root is within one segment of admission. It selects at most 128 contiguous
+inputs, promotes eight or more inputs from the preceding level, and uses a full
+level-nine replacement under segment or graph-byte pressure. Preparation runs
+outside SQLite while the publisher renews ownership; final publication uses the
+same control coordinator and retains the current application sequence, schema
+and scheduler deadline. The actor is single-flight for the Cell, so an internal
+head advance cannot race that plan; a competing owner/control change makes the
+CAS fail and fences the local activation. If the following append still reaches
+the exact segment/graph-byte limit, the publisher forces one complete replacement
+and retries immutable preparation once without rerunning SQLite.
+
+After a bootstrap, command or migration root is published, the SQL worker
+reverifies each exact local cut against the captured manifest and deletes it
+before returning the stored result. A removal/fsync failure keeps accounting for
+safe retry and turns the caller result into unknown; remote roots and immutable
+inputs are unaffected.
 
 LTX file compatibility needs an explicit capability gate. The inspected Celld
 README describes both frame and block layouts, including a reader-first rollout

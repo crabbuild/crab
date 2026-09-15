@@ -22,6 +22,10 @@ fn fixture() -> Fixture {
 }
 
 fn fixture_for(partition: &[u8]) -> Fixture {
+    fixture_with_limits(partition, Limits::default())
+}
+
+fn fixture_with_limits(partition: &[u8], limits: Limits) -> Fixture {
     let target = CellTarget::new(
         TenantId::from_bytes([1; 16]),
         ApplicationId::from_bytes([3; 16]),
@@ -37,7 +41,7 @@ fn fixture_for(partition: &[u8]) -> Fixture {
         layout.clone(),
         *cell.as_bytes(),
         *incarnation.as_bytes(),
-        Limits::default(),
+        limits,
     )
     .unwrap();
     let directory = tempfile::TempDir::new().unwrap();
@@ -222,6 +226,75 @@ async fn dispatcher_serializes_and_publishes_commands_before_drain() {
             .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))
             .unwrap(),
         2
+    );
+}
+
+#[tokio::test]
+async fn dispatcher_compacts_before_segment_admission_is_exhausted() {
+    let fixture = fixture_with_limits(
+        b"compacting-repository",
+        Limits {
+            max_segments: 4,
+            ..Limits::default()
+        },
+    );
+    let handle = activate(&fixture, 16 * 1024 * 1024).await;
+    for sequence in 1_u8..=10 {
+        assert!(matches!(
+            handle
+                .execute(
+                    identity(sequence),
+                    Digest::from_bytes([sequence.saturating_add(20); 32]),
+                    20,
+                    1_024,
+                    1_024,
+                    |transaction| {
+                        transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                        Ok(HandlerOutcome::Success(Vec::new()))
+                    },
+                )
+                .await
+                .unwrap(),
+            StoredOutcome::Success {
+                commit_sequence,
+                ..
+            } if commit_sequence == u64::from(sequence)
+        ));
+    }
+
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let control = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let root = control.value().ltx_root().unwrap();
+    assert!(
+        fixture
+            .replica
+            .open_root(&root)
+            .await
+            .unwrap()
+            .segment_count()
+            < 4
+    );
+    handle.drain().await.unwrap();
+    let restored_directory = tempfile::TempDir::new().unwrap();
+    let restored = restored_directory.path().join("restored.sqlite");
+    fixture
+        .replica
+        .open_root(&root)
+        .await
+        .unwrap()
+        .restore(&restored)
+        .await
+        .unwrap();
+    let connection = crab_ltx::rusqlite::Connection::open(restored).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        10
     );
 }
 

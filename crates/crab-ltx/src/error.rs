@@ -66,3 +66,24 @@ pub enum CrabError {
     #[error("{0}")]
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
+
+impl CrabError {
+    /// Reports whether compacting an existing Cell graph can admit an append.
+    #[must_use]
+    pub fn is_cell_graph_limit(&self) -> bool {
+        matches!(self, Self::Limit("Cell root segments" | "Cell root bytes"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CrabError;
+
+    #[test]
+    fn only_cell_graph_admission_limits_are_compaction_retryable() {
+        assert!(CrabError::Limit("Cell root segments").is_cell_graph_limit());
+        assert!(CrabError::Limit("Cell root bytes").is_cell_graph_limit());
+        assert!(!CrabError::Limit("LTX file bytes").is_cell_graph_limit());
+        assert!(!CrabError::ChecksumMismatch.is_cell_graph_limit());
+    }
+}

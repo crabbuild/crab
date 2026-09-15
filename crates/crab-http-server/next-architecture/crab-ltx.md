@@ -19,13 +19,13 @@ remain delivery work.
 | Capture | Checksum-bearing sized-block LTX, all cuts returned; SQLite WAL-hook frame boundary checked before checkpointing |
 | Snapshot | Full local snapshot plus ownership of every newly generated capture cut |
 | Restore | Explicit snapshot-plus-deltas plan; exact ranges/digests/checksums; owned verified bytes; new-file installation |
-| Compaction | Full snapshots and selected-body delta ranges; exact reduced bytes and replacement indexed state verified; caller-driven level scheduling |
+| Compaction | Full snapshots and selected-body delta ranges; exact reduced bytes and replacement indexed state verified; bounded eight-input Cell level scheduling plus pressure-triggered full replacement |
 | Remote replication (`replica` feature) | Existing `crab-storage` transport; immutable LTX/index/manifest objects; conditional epoch-head publication |
 | Remote recovery/compaction | Pinned cross-epoch inheritance, exact restore/resume, bundle locations and compaction guarded by head CAS |
 | Paged SQL | Authenticated immutable views and writable sparse activation; incremental hydration, bounded range read-ahead |
-| Failure/retention | Capture failure fences the handle; fresh-directory reactivation; exact published local cuts can be pruned |
+| Failure/retention | Capture failure fences the handle; fresh-directory reactivation; exact batch/head pruning reverifies local bytes before deleting and releasing admission accounting |
 | Host facilities | Injectable filesystem/base VFS/clock/executor; shared page-fault worker/cache and I/O/job/recovery concurrency budgets |
-| Server wiring | Repository issue/comment SQL, owner/control publication, local/remote/idle/stale-owner routing, public HTTP response gating and source-loss restore are wired; remaining collaboration domains are not |
+| Server wiring | Repository issue/comment SQL, owner/control publication, scheduled owner-bound compaction, exact local-cut pruning, local/remote/idle/stale-owner routing, public HTTP response gating and source-loss restore are wired; remaining collaboration domains are not |
 
 Source and usage: [crate README](../../crab-ltx/README.md),
 [public API](../../crab-ltx/src/lib.rs),

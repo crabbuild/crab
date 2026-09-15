@@ -61,7 +61,13 @@ local fixed-width file; capture keeps only changed checksums resident, updates
 the aggregate incrementally and persists them after sealing the LTX cut.
 Cell range/full compaction now externally merges authenticated index streams,
 uses bounded frame reads and uploads scratch-backed output without whole-LTX
-buffers. Sparse activation uses a page-I/O worker independent of the fixed SQL
+buffers. The owner publication path now schedules eight-input level promotions
+and performs an emergency full compaction before segment or graph-byte admission
+would reject the next append. Representation-only roots publish through the same
+owner CAS while preserving application sequence, schema, due summary and exact
+database endpoint. Bootstrap, command and migration confirmation then reverify
+and prune only their exact local captured files, so a long-lived writer does not
+exhaust its local retained-cut budget. Sparse activation uses a page-I/O worker independent of the fixed SQL
 pool; a two-Cell test saturates both SQL workers on delayed authenticated page
 faults and proves both activations complete. Remaining HTTP domain cutovers and capacity qualification remain
 incomplete. The scoped
