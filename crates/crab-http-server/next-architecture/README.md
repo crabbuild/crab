@@ -35,6 +35,12 @@ server; no standalone multi-language platform is planned. For overlapping runtim
 details, use that specification; this folder retains the repository data model,
 Git integration and hard-cutover requirements.
 
+Native application code may be organized in private Rust workspace crates, but
+this server remains the sole registry composition root, executable and deployable
+unit. Kubernetes balances complete Crab nodes; it does not schedule application
+modules independently. Product HTTP/Git routes remain the only public API, while
+Cell and primitive capabilities remain private Rust contracts.
+
 This design replaces collaboration JSON documents with one SQLite database per
 cataloged repository. A Rust subsystem captures SQLite WAL changes into LTX
 files. Object storage holds the authoritative recovery graph. Multiple HTTP

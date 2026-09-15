@@ -231,6 +231,12 @@ Do not keep an abstraction for a hypothetical guest language unless the same
 change gives it a concrete compiled Crab caller and it reduces the canonical
 Rust path's ownership or duplication.
 
+A private workspace crate is acceptable only as source-level decomposition: it
+must compile into `crab-http-server`, expose no runtime registration or network
+surface, and be covered by the same registry, route and image evidence. Reject a
+delivery claim that validates a library crate without also proving its actual
+server composition and product entry point.
+
 Make `crab-http-server/src/cells.rs` the only composition root. Its static module
 descriptors and bindings must produce one canonical registry or fail startup.
 Add the read-only `cells release inspect --json` command and run it in the image

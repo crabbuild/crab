@@ -288,6 +288,24 @@ is rolled out. Repository owners can use the resulting product capability but
 cannot choose code, dependencies, migrations or primitive permissions at
 runtime.
 
+The Rust-first boundary has these concrete consequences:
+
+| Concern | Accepted contract |
+| --- | --- |
+| Service source | Reviewed Rust code in this workspace; a larger domain may use a private Rust library crate, but `crab-http-server` remains its only composition root |
+| Execution | Statically linked handlers run in the owning Crab process; asynchronous side effects run as registered native activities |
+| Public API | Product-specific authenticated HTTP and Git endpoints; SQL, KV, Queue, Workflow and `CellClient` are private Rust capabilities |
+| Persistence | The handler receives only bounded transaction-scoped capabilities; it cannot select a database file, object prefix or storage provider |
+| Release artifact | One signed `crab-http-server` image and the canonical registry descriptor derived from that exact binary |
+| Deployment | Roll the whole Crab fleet to a compatible image; there is no per-service scheduler, sidecar, uploaded bundle or module-only rollback |
+| Extension by another team | Contribute or maintain a Crab source fork, compile its modules into the server, qualify the image and deploy that image to the team's own fleet |
+
+Splitting native domain code into another workspace crate is ordinary Rust
+source organization, not a plugin boundary. Such a crate has no listener,
+deployment manifest, runtime registration endpoint or direct object-store
+authority. The server still owns authentication, target selection, admission,
+registry construction and lifecycle.
+
 This fixes the dependency and request path:
 
 ```mermaid

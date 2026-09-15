@@ -175,6 +175,14 @@ code/schema pair and retained command, queue and workflow codec. Otherwise enter
 maintenance and complete an explicit forward migration; never download an old
 module or switch one repository to a second runtime path.
 
+Teams operating a customized service build a customized complete Crab image and
+deploy it to a fleet they control. Kubernetes schedules Crab nodes, not
+individual Rust modules. All nodes eligible to own one Cell must advertise a
+release whose compiled registry can execute that Cell's authoritative
+code/schema pair. A rolling deployment may temporarily contain two whole-server
+images only when the release compatibility scan proves both inventories; it
+never assigns different service modules to independent Pods.
+
 The build produces a bounded canonical release descriptor embedded in the binary.
 The same bytes may be copied to the object store as metadata. Fields:
 

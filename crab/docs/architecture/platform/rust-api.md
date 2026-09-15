@@ -129,6 +129,14 @@ Repository handlers may call narrow public contracts from existing Git crates,
 but those calls occur in asynchronous activities after a durable SQL intention;
 they do not add server or Git dependencies to `crab-cell-runtime`.
 
+An application domain may be split into a private workspace `rlib` when that
+reduces product-code complexity. Its exported surface is ordinary typed Rust;
+the descriptor, handler bindings, HTTP authorization adapter and lifecycle
+wiring still terminate in `crab-http-server`. Do not use `dylib`, `cdylib`,
+`libloading`, subprocesses or a module discovery registry. A separate crate does
+not gain storage credentials, a listener or a deployable artifact, and cannot
+register itself after `RegistryBuilder::finish`.
+
 ## Contributor change and release procedure
 
 One product capability is delivered as one reviewed vertical slice. Its pull
@@ -154,6 +162,12 @@ request must make these changes together; none is a separately deployable unit:
 7. Build one `crab-http-server` image, run `cells release inspect --json` against
    that binary, prepare the descriptor, and use the normal compatible or
    maintenance fleet rollout. There is no module-only deployment or rollback.
+
+For a separately operated product, the same procedure runs in that product's
+Crab source fork and CI. The operator deploys the resulting complete Crab image
+to its own fleet and object-store namespace. The architecture does not create a
+hosted extension marketplace or accept third-party code into an already running
+fleet.
 
 This procedure deliberately couples application and runtime compatibility to
 the server release. A Cargo feature, repository setting or environment variable
