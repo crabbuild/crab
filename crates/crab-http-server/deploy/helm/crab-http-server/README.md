@@ -409,15 +409,17 @@ export CRAB_HTTP_SERVER_EXPECTED_CHART="$(jq --raw-output .chart.reference crab-
 export CRAB_HTTP_SERVER_RELEASE_TAG="$(jq --raw-output .tag crab-http-server-release.json)"
 export CRAB_HTTP_SERVER_SOURCE_SHA="$(jq --raw-output .source_commit crab-http-server-release.json)"
 export CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true
+export CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true
 
 bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
   eks crab crab-http-server https://git.example.com \
   your_team qualification /secure/crab-eks-qualification.json
 ```
 
-Replace `eks` with `gke` or `aks`. The explicit rollout approval is required
-because this test creates and retains a uniquely named branch in the dedicated
-repository and performs a rolling restart of the Deployment. Never run it
+Replace `eks` with `gke` or `aks`. The two explicit approvals are required
+because this test creates and retains a uniquely named branch, performs a rolling
+restart, locates the current repository Cell owner, and force-deletes that Pod
+without a grace period. Never run it
 against a repository where qualification branches are forbidden by policy.
 The expected image, release tag, and source commit are required for release
 evidence. The script rejects a deployment whose manifest reference differs or
@@ -425,7 +427,7 @@ a source identity that is not a stable server tag and lowercase Git commit.
 
 The test fails unless it can prove all of these boundaries:
 
-- At least two ready replicas run on separate nodes and zones whose provider
+- At least three ready replicas run on separate nodes and at least two zones whose provider
   identities match the declared EKS, GKE, or AKS target
 - Every original and replacement pod has the provider's admitted workload
   identity contract: EKS Pod Identity token injection, GKE's annotated
@@ -445,13 +447,19 @@ The test fails unless it can prove all of these boundaries:
 - Public Git reads remain continuously available during a zero-unavailable
   rolling replacement
 - Every pod is replaced and the committed branch remains byte-identical
+- The durable Cell control identifies one serving owner whose endpoint matches a
+  ready Pod
+- Forced loss of that owner removes its ephemeral SQLite directory; a different
+  session takes over at a higher epoch, restores the committed status, and
+  publishes another status visible through a third replica
 
 The script writes a secret-free JSON evidence receipt containing the provider,
 image and chart digests, release tag and source commit, workload identity
 mechanism and Kubernetes ServiceAccount, repository, qualification branch and
 commit, payload digest, rollout probes and failures, and explicit successful
-checks including the installed chart version and management-network-isolation
-result. It also records completion time.
+checks including the installed chart version, management-network-isolation
+result, deleted owner Pod UID, old/new owner sessions, and takeover epochs. It
+also records completion time.
 Retain it with the release record. The Git token remains only in process memory
 and must still be rotated or revoked after qualification according to team
 policy.
@@ -461,7 +469,7 @@ policy.
 `.github/workflows/http-server-kubernetes-live.yml` runs the same gate from a
 protected GitHub environment. Dispatch it from the release tag, select the
 provider, provide the dedicated repository and HTTPS origin, and explicitly
-approve the write and rolling restart. The job downloads and verifies the
+approve both the write/rollout and abrupt owner-loss fault. The job downloads and verifies the
 tag's signed release record, derives the expected image and chart without
 operator transcription, verifies both registry attestations, rejects a
 different deployed image, signs the verified receipt, and retains the receipt

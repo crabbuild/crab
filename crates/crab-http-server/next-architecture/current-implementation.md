@@ -10,7 +10,7 @@ Paths in this table are relative to `crates/crab-http-server/` unless stated.
 
 | Current surface | Entry and owner | Existing behavior | Next design impact |
 | --- | --- | --- | --- |
-| Process CLI | [main.rs](../src/main.rs) | Serve, healthcheck, storage-probe, repository create/adopt/set-members/list and Cell release lifecycle; there is no application-data import command | Keep the hard cut forward-only and qualify the empty-state reset procedure |
+| Process CLI | [main.rs](../src/main.rs) | Serve, healthcheck, storage-probe, repository create/adopt/set-members/list, durable repository Cell control inspection, and Cell release lifecycle; there is no application-data import command | Keep the hard cut forward-only and qualify the empty-state reset procedure |
 | Server lifecycle | [server.rs](../src/server.rs), [local_disk.rs](../src/local_disk.rs), [cells.rs](../src/cells.rs), [cells/initializer.rs](../src/cells/initializer.rs), [cells/router.rs](../src/cells/router.rs), [cells/scheduler.rs](../src/cells/scheduler.rs), [peer.rs](../src/peer.rs), [peer_tls.rs](../src/peer_tls.rs) | Two listeners, catalog refresh, Git runtime, one compiled-registry-validated Cell runtime/session, mandatory management mTLS, live signed enrollment, local dispatch and owner-selecting outbound peer transport. Startup and every changed catalog version require `cell_ready`, a catalog proof, control and a published root; request routing never bootstraps a Cell. A missing/expired remote session starts the unchanged-control takeover protocol; malformed/foreign records fail closed. A one-second Cell scheduler scans rendezvous-assigned catalog shards, caps each cycle at 128 due Cells, invokes type-erased compiled Tick/activity/effect runners for registered namespaces, uses CPU-derived activity admission capped at 16 and one job per Cell, keeps long activities out of the scanner future, routes work locally or through the authenticated peer path and drains scheduler-only local activations back to Idle. Exact registered operation IDs/codecs select fleet-only peer grants. Readiness waits for the first complete cycle. Completed-cycle progress is signed into heartbeat refreshes; 15 seconds without progress withdraws local readiness and excludes that session from rendezvous assignment until recovery. Scheduler cancellation aborts and joins tracked activities, triggering cooperative cancellation before runtime drain. Cell drain withdraws readiness; scheduler cancellation/join participates in shutdown. Effective-memory and free-volume startup floors protect the Cell budget; the node mailbox receives five percent of that budget; three 64 KiB SQLite caches, 64 KiB native state and eight persistent descriptors per Cell derive the active limit. Capture, hydration, recovery and compaction share CPU/memory-derived 64 MiB dirty-job slots. Full restore, resume, bundle and compaction additionally reserve one-MiB scratch permits for their complete estimate from one third of usable startup disk. The other two thirds are one byte-precise budget shared by managed WAL, retained LTX, newly materialized sparse pages and Git/LFS/Release staging; transfer and full-job admission recheck actual free space before reading bodies. One absolute 110-second deadline covers listener, background, transfer, maintenance, Cell and worker drain | Add multi-node activity failure qualification |
 | Repository identity | [catalog.rs](../src/catalog.rs), [cells/initializer.rs](../src/cells/initializer.rs), `materialize_catalog` in [server.rs](../src/server.rs) | Catalog and runtime repository retain one stable UUID independent of owner/name. Catalog v2 is mandatory and records application state; v1 is rejected. Create and adopt both move `empty_cell_pending → cell_ready` only after publishing, restoring and verifying a new empty SQLite Cell | Preserve the same readiness gate for every repository and fleet cutover report |
 | Application boundary | [app.rs](../src/app.rs) | Repository/principal checks, eight production application slots, 30-second handler deadline | Preserve external contracts; move accepted durable work into tracked cells |
@@ -162,12 +162,15 @@ for recovering deleted collaboration documents.
   and Git-token siblings protect adjacent permission and retry contracts.
 - Browser tests under
   [packages/repository/tests/browser](../../../packages/repository/tests/browser)
-  cover the UI side of workflows.
+  cover the UI side of workflows; browser E2E is outside this delivery gate.
 - The [container workflow](../../../.github/workflows/http-server-container.yml)
   includes packaging, an abrupt native receive and isolated cold-restore checks.
   Existing [Kubernetes qualification tooling](../deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh)
-  exercises replica rollout when run in a dedicated environment. These checks
-  do not establish the proposed SQLite/LTX owner takeover contract.
+  performs a zero-unavailable rollout and then locates and force-deletes the
+  current Cell owner when run in a dedicated environment. Its receipt requires
+  a different successor session, a higher epoch, restored public state, and a
+  new cross-replica publication. The broader partition/timing matrix still
+  requires separate qualification.
 
 The rebased runtime also has startup `storage-probe`, private Prometheus metrics,
 deployment-wide transfer admission and additional LFS locking/range support.

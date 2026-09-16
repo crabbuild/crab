@@ -166,9 +166,13 @@ This does **not** complete phase 2's external golden/interoperability, fuzz,
 filesystem fault and measured-resource qualification. The server now proves
 owner/control CAS, output barriers, local source-loss restore, pending Pull merge
 and Release publication continuation, two-node routing and typed collaboration
-API flows in automated tests. Real RustFS API workflows, process/network fault injection and Kubernetes operations
-remain unqualified. Validate design links/anchors alongside runtime changes; do
-not infer those deployment gates from library tests.
+API flows in automated tests. The Kubernetes qualification tool can identify and
+force-delete the serving owner, require higher-epoch takeover, verify restored
+public state, and continue publication through another replica. A signed receipt
+from each provider environment is still required; network partitions, precise
+commit-window faults, and the full public API workflow remain unqualified.
+Validate design links/anchors alongside runtime changes; do not infer those
+deployment gates from library tests. Browser E2E is outside this delivery gate.
 
 ## Delivery sequence
 

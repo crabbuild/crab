@@ -134,6 +134,7 @@ jobs:
             CRAB_HTTP_SERVER_EXPECTED_CHART="$immutable_chart" \
             CRAB_HTTP_SERVER_EXPECTED_IMAGE=crab-http-server:mutable \
             CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true \
+            CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true \
             bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
               eks crab crab-http-server https://git.example.com \
               qualification repository "${RUNNER_TEMP}/invalid-evidence.json" \
@@ -148,6 +149,7 @@ jobs:
             CRAB_HTTP_SERVER_EXPECTED_CHART=mutable-chart \
             CRAB_HTTP_SERVER_EXPECTED_IMAGE="$immutable_image" \
             CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true \
+            CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true \
             bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
               eks crab crab-http-server https://git.example.com \
               qualification repository "${RUNNER_TEMP}/invalid-evidence.json" \
@@ -163,6 +165,7 @@ jobs:
             CRAB_HTTP_SERVER_RELEASE_TAG=invalid \
             CRAB_HTTP_SERVER_SOURCE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
             CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true \
+            CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true \
             bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
               eks crab crab-http-server https://git.example.com \
               qualification repository "${RUNNER_TEMP}/invalid-evidence.json" \
@@ -178,6 +181,7 @@ jobs:
             CRAB_HTTP_SERVER_RELEASE_TAG=crab-http-server-v0.1.0 \
             CRAB_HTTP_SERVER_SOURCE_SHA=invalid \
             CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true \
+            CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true \
             bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
               eks crab crab-http-server https://git.example.com \
               qualification repository "${RUNNER_TEMP}/invalid-evidence.json" \

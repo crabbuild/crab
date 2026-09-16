@@ -341,6 +341,83 @@ pub(crate) async fn release_status(config: &Config) -> Result<Vec<u8>> {
 }
 
 #[derive(Serialize)]
+struct RepositoryControlStatus {
+    version: u8,
+    repository: Uuid,
+    cell: String,
+    incarnation: String,
+    epoch: u64,
+    revision: u64,
+    progress: u64,
+    state: ControlState,
+    owner: Option<RepositoryControlOwner>,
+    root: Option<RepositoryControlRoot>,
+    code: String,
+    schema: u32,
+    next_due_ms: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct RepositoryControlOwner {
+    session: String,
+    endpoint: String,
+}
+
+#[derive(Serialize)]
+struct RepositoryControlRoot {
+    digest: String,
+    txid: u64,
+    checksum: u64,
+    commit_sequence: u64,
+}
+
+pub(crate) async fn repository_status(config: &Config, owner: &str, name: &str) -> Result<Vec<u8>> {
+    let catalog = crate::catalog::CatalogStore::from_config(config)?;
+    let (document, _) = catalog.load().await?;
+    let repository = document
+        .repositories
+        .into_iter()
+        .find(|repository| repository.owner == owner && repository.name == name)
+        .ok_or(crate::catalog::CatalogError::NotFound)?;
+    let startup = verify_startup_release(config).await?;
+    let target = CellTarget::new(
+        startup.identity.tenant(),
+        startup.identity.application(),
+        REPOSITORY_NAMESPACE,
+        repository.id.as_bytes(),
+    )?;
+    let control = CellAuthority::new(startup.layout)
+        .load(target.cell_id())
+        .await?
+        .ok_or(Error::Config("cataloged repository Cell has no control"))?;
+    let control = control.value();
+    let status = RepositoryControlStatus {
+        version: 1,
+        repository: repository.id,
+        cell: status_hex(control.cell.as_bytes()),
+        incarnation: status_hex(control.incarnation.as_bytes()),
+        epoch: control.epoch,
+        revision: control.revision,
+        progress: control.progress,
+        state: control.state,
+        owner: control.owner.as_ref().map(|owner| RepositoryControlOwner {
+            session: status_hex(owner.session.as_bytes()),
+            endpoint: owner.endpoint.clone(),
+        }),
+        root: control.root.as_ref().map(|root| RepositoryControlRoot {
+            digest: status_hex(root.digest.as_bytes()),
+            txid: root.txid,
+            checksum: root.checksum,
+            commit_sequence: root.commit_sequence,
+        }),
+        code: status_hex(control.code.as_bytes()),
+        schema: control.schema,
+        next_due_ms: control.next_due_ms,
+    };
+    serde_json::to_vec_pretty(&status).map_err(Error::from)
+}
+
+#[derive(Serialize)]
 struct MigrationStatusPage {
     version: u8,
     operation: String,

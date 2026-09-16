@@ -153,6 +153,14 @@ restores the exact root on the ingress runtime and publishes the next command.
 This combines the product network, source-loss and storage boundaries; it does
 not replace the three-Pod kill and partition matrix below.
 
+The shipped Kubernetes qualification script adds one real three-Pod owner-loss
+case. It reads the durable repository Cell control, maps the serving endpoint to
+a ready Pod, force-deletes that Pod without grace, then requires a different
+session at a higher epoch to restore the public status and publish a second
+status visible through another replica. That case is not evidence until its
+signed provider receipt exists, and it does not replace the remaining partition
+and commit-window faults. Browser E2E is intentionally outside this gate.
+
 ## Prove each primitive through recovery
 
 Primitive tests require more than procedure-level SQL assertions.

@@ -95,6 +95,12 @@ pub async fn initialize_repository_cell(config: &Config, repository: uuid::Uuid)
     cells::initialize_repository(config, repository).await
 }
 
+/// Returns the durable control state for one cataloged repository Cell.
+pub async fn repository_cell_status(config: &Config, owner: &str, name: &str) -> Result<Vec<u8>> {
+    config.validate()?;
+    cells::repository_status(config, owner, name).await
+}
+
 /// Startup and server lifecycle errors with their original sources retained.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

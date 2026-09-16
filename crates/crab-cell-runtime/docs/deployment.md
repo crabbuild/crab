@@ -162,7 +162,12 @@ crab-http-server --config config.toml cells release activate \
   --expected-revision 7 --strategy compatible \
   --minimum-eligible-nodes 3
 crab-http-server --config config.toml cells release status
+crab-http-server --config config.toml cells status --owner team --name repository
 ```
+
+The repository status command reads the durable control object without opening
+the Cell or changing ownership. Use its versioned JSON to map a serving endpoint
+to a fleet member during takeover qualification.
 
 Compatible activation follows this state machine:
 

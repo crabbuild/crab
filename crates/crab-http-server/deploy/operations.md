@@ -339,20 +339,23 @@ export CRAB_HTTP_SERVER_EXPECTED_CHART="$(jq --raw-output .chart.reference crab-
 export CRAB_HTTP_SERVER_RELEASE_TAG="$(jq --raw-output .tag crab-http-server-release.json)"
 export CRAB_HTTP_SERVER_SOURCE_SHA="$(jq --raw-output .source_commit crab-http-server-release.json)"
 export CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true
+export CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true
 
 bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
   gke crab crab-http-server https://git.example.com \
   your_team qualification /secure/crab-gke-qualification.json
 ```
 
-The rollout approval is deliberately explicit. The script checks the rendered
+Both mutation approvals are deliberately explicit. The script checks the rendered
 runtime controls, provider-matching placement across nodes and zones, readiness
 on every pod, the provider-native workload identity injection on both original
 and replacement pods, the installed signed chart version, public OIDC
 initiation, effective management-port NetworkPolicy isolation from an ordinary
 peer, direct authenticated Git traffic through two distinct replicas,
-byte-identical LFS transfer, lock-owner publication, and uninterrupted Git
-discovery while Kubernetes replaces every pod. It leaves a unique branch as
+byte-identical LFS transfer, lock-owner publication, uninterrupted Git
+discovery while Kubernetes replaces every pod, and exact repository state after
+force-deleting the serving Cell owner. A successor session must take over at a
+higher epoch and publish a new status visible through another replica. It leaves a unique branch as
 durable evidence and writes a secret-free JSON receipt bound to the supplied
 release tag, source commit, image, and chart. Review and retain that receipt
 with the release record; revoke the qualification token afterward.

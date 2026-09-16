@@ -200,6 +200,8 @@ SERVER="$HOME/Workspace/crabbuild-target/crab-http-server-dev/release/crab-http-
   --members-file /secure/members.toml
 
 "$SERVER" --config /secure/server.toml repository list
+"$SERVER" --config /secure/server.toml cells status \
+  --owner your-team --name your-project
 "$SERVER" --config /secure/server.toml repository set-members \
   --owner your-team --name your-project \
   --members-file /secure/members.toml
@@ -214,6 +216,12 @@ before binding either listener. The unique delete-test object is created below
 `.crab/http-server/v1/auth/preflight/`; normal completion removes it, while the
 provider profile's one-day lifecycle bounds residue after an interrupted
 probe.
+
+`cells status` is a read-only operator view of the durable control record. Its
+versioned JSON includes the Cell and incarnation IDs, lifecycle state, epoch,
+revision, serving session and endpoint, exact LTX root, code/schema pair, and
+next scheduler deadline. It reads object-store authority directly; it does not
+open SQLite, acquire ownership, or extend a lease.
 
 Membership is supplied separately so the shared server configuration stays
 small and secret-independent:

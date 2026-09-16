@@ -50,6 +50,13 @@ enum Command {
 
 #[derive(Subcommand)]
 enum CellsCommand {
+    /// Print the durable control state for one repository Cell.
+    Status {
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        name: String,
+    },
     /// Inspect or administer compiled Cell releases.
     Release {
         #[command(subcommand)]
@@ -228,6 +235,9 @@ async fn cells(
     command: CellsCommand,
 ) -> crab_http_server::Result<()> {
     let bytes = match command {
+        CellsCommand::Status { owner, name } => {
+            crab_http_server::repository_cell_status(config, &owner, &name).await?
+        }
         CellsCommand::Release {
             command: CellReleaseCommand::Inspect { json: true },
         } => crab_http_server::cell_release_descriptor()?,
@@ -547,6 +557,41 @@ mod tests {
                 "cells",
                 "release",
                 "inspect",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn cell_status_requires_one_repository_identity() {
+        let arguments = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "status",
+            "--owner",
+            "team",
+            "--name",
+            "repository",
+        ])
+        .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Some(Command::Cells {
+                command: CellsCommand::Status { owner, name }
+            }) if owner == "team" && name == "repository"
+        ));
+
+        assert!(
+            Arguments::try_parse_from([
+                "crab-http-server",
+                "--config",
+                "server.toml",
+                "cells",
+                "status",
+                "--owner",
+                "team",
             ])
             .is_err()
         );
