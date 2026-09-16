@@ -428,6 +428,27 @@ fn repository_codec_v1_pins_pull_fixtures() {
 }
 
 #[test]
+fn repository_codec_v1_pins_release_fixtures() {
+    assert_fixture(
+        &CreateReleaseInput {
+            submission_id: [6; 16],
+            author: RepositoryAuthor {
+                issuer: "i".into(),
+                subject: "s".into(),
+                name: "n".into(),
+            },
+            tag_name: "v1".into(),
+            target_oid: "0123456789abcdef0123456789abcdef01234567".into(),
+            title: "t".into(),
+            body: "b".into(),
+            prerelease: false,
+            draft: true,
+        },
+        "000000e37b227375626d697373696f6e5f6964223a5b362c362c362c362c362c362c362c362c362c362c362c362c362c362c362c365d2c22617574686f72223a7b22697373756572223a2269222c227375626a656374223a2273222c226e616d65223a226e227d2c227461675f6e616d65223a227631222c227461726765745f6f6964223a2230313233343536373839616263646566303132333435363738396162636465663031323334353637222c227469746c65223a2274222c22626f6479223a2262222c2270726572656c65617365223a66616c73652c226472616674223a747275657d",
+    );
+}
+
+#[test]
 fn maximum_pull_decisions_fit_the_registered_output_bound() {
     let author = RepositoryAuthor {
         issuer: "🦀".repeat(512),
@@ -484,6 +505,47 @@ fn maximum_pull_child_fits_the_registered_record_bound() {
     let mut encoder = BoundedEncoder::new(512 * 1024).unwrap();
     comment.encode(&mut encoder).unwrap();
     assert!(encoder.finish().len() <= 512 * 1024);
+}
+
+#[test]
+fn maximum_release_fits_the_registered_output_bound() {
+    let author = RepositoryAuthor {
+        issuer: "🦀".repeat(512),
+        subject: "🦀".repeat(512),
+        name: "🦀".repeat(160),
+    };
+    let release = ReleaseRecord {
+        number: 1,
+        create_submission_id: [9; 16],
+        author: author.clone(),
+        tag_name: "v1.0.0".into(),
+        tag_oid: Some("0123456789abcdef0123456789abcdef01234567".into()),
+        target_oid: "0123456789abcdef0123456789abcdef01234567".into(),
+        title: "🦀".repeat(256),
+        body: "\u{1}".repeat(64 * 1024),
+        prerelease: false,
+        draft: false,
+        publication_pending: None,
+        version: 97,
+        created_at_ms: 1,
+        published_at_ms: Some(1),
+        updated_at_ms: 97,
+        deleted: false,
+        assets: (0..96)
+            .map(|index| ReleaseAssetRecord {
+                request_id: [index; 16],
+                name: format!("asset-{index:03}"),
+                content_type: "application/octet-stream".into(),
+                size: 512 * 1024 * 1024,
+                digest: "a".repeat(64),
+                uploader: author.clone(),
+                created_at_ms: 1,
+            })
+            .collect(),
+    };
+    let mut encoder = BoundedEncoder::new(1024 * 1024).unwrap();
+    release.encode(&mut encoder).unwrap();
+    assert!(encoder.finish().len() <= 1024 * 1024);
 }
 
 #[test]

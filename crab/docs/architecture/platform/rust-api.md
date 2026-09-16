@@ -769,7 +769,7 @@ Rust cannot prevent hidden clocks, randomness or network calls in trusted code.
 | --- | --- |
 | [server.rs](../../../../crates/crab-http-server/src/server.rs) | Constructs one runtime with the existing resolved Store, starts the catalog-driven Cell scheduler after node publication, invokes compiled maintenance/activity/effect runners, cancels/joins tracked activity work during shutdown and then drains/joins the runtime |
 | [app.rs](../../../../crates/crab-http-server/src/app.rs) | Keep Principal/repository admission before native commands; map durable, rejected and unknown outcomes |
-| [app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Replace collaboration JSON persistence with typed SQL handlers after hard cutover |
+| [releases.rs](../../../../crates/crab-http-server/src/releases.rs) | Keep tag and asset-byte publication external while typed Cell commands own durable Release intent and metadata |
 | [config.rs](../../../../crates/crab-http-server/src/config.rs) | Extend existing config for local Cell data and private peers; do not add a second provider/auth stack |
 | [main.rs](../../../../crates/crab-http-server/src/main.rs) | Keep current serve lifecycle; add release/migration administrative subcommands in the same executable |
 
@@ -792,7 +792,7 @@ SQLite handles, join workers, then stop listeners. `Server` owns the runtime
 join handle; a detached global runtime or handler-created runtime is invalid.
 
 Resolve repository UUID from the durable catalog; renaming owner/name must not
-change its Cell ID. Keep issues/comments/labels/pulls and their related application
+change its Cell ID. Keep issues/comments/labels/pulls/releases and their related application
 tables in that repository Cell so their invariants can share one transaction.
 Fixed primitive namespaces are provisioned only for actual callers, not empty
 shards for every repository.

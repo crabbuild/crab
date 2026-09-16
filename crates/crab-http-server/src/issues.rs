@@ -177,7 +177,7 @@ impl ListParameters {
     fn before(&self) -> Result<Option<u64>> {
         if self
             .before
-            .is_some_and(|value| value == 0 || value > crate::app_storage::MAX_NUMBER)
+            .is_some_and(|value| value == 0 || value > crate::app::MAX_NUMBER)
         {
             return Err(Error::Invalid("Invalid page cursor"));
         }

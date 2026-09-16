@@ -1,7 +1,6 @@
 //! Single-process HTTP composition for object-storage-backed Crab repositories.
 mod api;
 mod app;
-mod app_storage;
 mod archive;
 mod assets;
 mod assignees;

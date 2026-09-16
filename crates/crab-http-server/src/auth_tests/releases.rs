@@ -618,5 +618,20 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(
+        repo.store
+            .list_prefix(&repo.layout.repo_path("app/v1/releases"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        repo.store
+            .list_prefix(&repo.layout.repo_path("release-assets/v1/sha256"))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     h.close().await;
 }

@@ -1138,18 +1138,19 @@ Serving data currently uses these roots:
 
 | Root | Content |
 | --- | --- |
-| Repository Cell/LTX namespace | Issues, issue comments, labels, label deletion tombstones, commit statuses, versioned check runs, branch protections, repository lifecycle, counters, and permanent product submission ledgers |
+| Repository Cell/LTX namespace | Issues, comments, labels, commit statuses, check runs, branch protections, lifecycle, Pulls/reviews, Releases/asset references, counters, publication intent, and permanent submission ledgers |
 | `app/v1/issues` | Retired issue documents; serving ignores them and operators delete them at hard cutover |
-| `app/v1/pulls` | Pulls, comments, reviews, merge state, counters, and reservations |
+| `app/v1/pulls` | Retired Pull documents; serving ignores them and operators delete them at hard cutover |
 | `app/v1/labels` | Retired Label documents; serving ignores them and operators delete them at hard cutover |
-| `app/v1/releases` | Releases, tags, assets, reservations, and tombstones |
+| `app/v1/releases` | Retired Release documents and asset bodies; serving ignores them and operators delete them at hard cutover |
+| `release-assets/v1/sha256` | New immutable content-addressed Release asset bodies referenced by Cell metadata |
 | `app/v1/statuses` | Retired status documents; serving ignores them and operators delete them at hard cutover |
 | `app/v1/check-runs` | Retired check-run documents; serving ignores them and operators delete them at hard cutover |
 | `app/v1/settings` | Retired policy documents; serving ignores them and operators delete them at hard cutover |
 
-Every remaining JSON document uses `schema_version: 1`; unknown versions fail
-closed. Preserve the complete application JSON and Cell/LTX namespaces in
-backups. Restoring visible records without counters, claims, request ledgers,
+There is no remaining collaboration JSON serving backend. Preserve the Cell/LTX
+namespace and immutable asset bodies in backups. Restoring visible records
+without counters, claims, request ledgers,
 control and immutable roots loses numbering, ownership and retry guarantees.
 
 Discussion deletion, moderation, edit history, activity feeds, and notifications remain unimplemented. Backup and restore qualification remains pending.

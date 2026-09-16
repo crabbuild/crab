@@ -29,6 +29,16 @@ pub(crate) use pulls::{
     UpdatePullCommentOutcome, UpdatePullInput, UpdatePullOutcome, UpdatePullReview,
     UpdatePullReviewInput, UpdatePullReviewOutcome,
 };
+pub(crate) use releases::{
+    AttachReleaseAsset, AttachReleaseAssetInput, AttachReleaseAssetOutcome,
+    CompleteReleasePublication, CompleteReleasePublicationInput, CompleteReleasePublicationOutcome,
+    CreateRelease, CreateReleaseInput, CreateReleaseOutcome, DeleteRelease, DeleteReleaseAsset,
+    DeleteReleaseAssetInput, DeleteReleaseAssetOutcome, DeleteReleaseInput, DeleteReleaseOutcome,
+    GetRelease, GetReleaseSubmission, ListReleases, ReleaseAssetRecord, ReleaseAssetReservation,
+    ReleaseListInput, ReleasePage, ReleasePublication, ReleaseRecord, ReleaseSubmissionKey,
+    ReserveReleaseAsset, ReserveReleaseAssetInput, ReserveReleaseAssetOutcome, UpdateRelease,
+    UpdateReleaseInput, UpdateReleaseOutcome,
+};
 pub(crate) use settings::{
     BranchProtectionRecord, BranchProtectionSettings, GetBranchProtections, GetRepositoryLifecycle,
     ReplaceBranchProtections, ReplaceBranchProtectionsInput, ReplaceBranchProtectionsOutcome,
@@ -561,6 +571,8 @@ mod checks_codec;
 mod operations;
 mod pulls;
 mod pulls_codec;
+mod releases;
+mod releases_codec;
 mod settings;
 mod settings_codec;
 
@@ -585,6 +597,13 @@ pub(crate) fn register(registry: &mut RegistryBuilder) -> crab_cell_runtime::Res
     registry.bind_command::<UpdatePullReview>()?;
     registry.bind_command::<ReservePullMerge>()?;
     registry.bind_command::<TransitionPullMerge>()?;
+    registry.bind_command::<CreateRelease>()?;
+    registry.bind_command::<UpdateRelease>()?;
+    registry.bind_command::<CompleteReleasePublication>()?;
+    registry.bind_command::<DeleteRelease>()?;
+    registry.bind_command::<ReserveReleaseAsset>()?;
+    registry.bind_command::<AttachReleaseAsset>()?;
+    registry.bind_command::<DeleteReleaseAsset>()?;
     registry.bind_query::<GetIssue>()?;
     registry.bind_query::<GetComment>()?;
     registry.bind_query::<ListIssues>()?;
@@ -606,7 +625,10 @@ pub(crate) fn register(registry: &mut RegistryBuilder) -> crab_cell_runtime::Res
     registry.bind_query::<GetPullReview>()?;
     registry.bind_query::<ListPullReviews>()?;
     registry.bind_query::<GetPullReviewSubmission>()?;
-    registry.bind_query::<GetPullMergeSubmission>()
+    registry.bind_query::<GetPullMergeSubmission>()?;
+    registry.bind_query::<GetRelease>()?;
+    registry.bind_query::<GetReleaseSubmission>()?;
+    registry.bind_query::<ListReleases>()
 }
 
 fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlStatement {

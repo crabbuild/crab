@@ -77,6 +77,13 @@ const REPOSITORY_COMMANDS: &[OperationDescriptor] = &[
     operation(21, 512 * 1024, 512 * 1024),
     operation(22, 128 * 1024, 128 * 1024),
     operation(23, 128 * 1024, 1024 * 1024),
+    operation(24, 512 * 1024, 1024 * 1024),
+    operation(25, 512 * 1024, 1024 * 1024),
+    operation(26, 4 * 1024, 1024 * 1024),
+    operation(27, 4 * 1024, 32),
+    operation(28, 32 * 1024, 1024 * 1024),
+    operation(29, 32 * 1024, 1024 * 1024),
+    operation(30, 4 * 1024, 1024 * 1024),
 ];
 const REPOSITORY_QUERIES: &[OperationDescriptor] = &[
     operation(1, 8, 80 * 1024),
@@ -102,6 +109,9 @@ const REPOSITORY_QUERIES: &[OperationDescriptor] = &[
     operation(21, 4 * 1024, 1024 * 1024),
     operation(22, 4 * 1024, 512 * 1024),
     operation(23, 4 * 1024, 128 * 1024),
+    operation(24, 8, 1024 * 1024),
+    operation(25, 64, 1024 * 1024),
+    operation(26, 4 * 1024, 1024 * 1024),
 ];
 
 struct RepositoryModule;
@@ -1316,6 +1326,8 @@ fn repository_source_digest() -> Digest {
     hasher.update(include_bytes!("cells/repository/operations.rs"));
     hasher.update(include_bytes!("cells/repository/pulls.rs"));
     hasher.update(include_bytes!("cells/repository/pulls_codec.rs"));
+    hasher.update(include_bytes!("cells/repository/releases.rs"));
+    hasher.update(include_bytes!("cells/repository/releases_codec.rs"));
     hasher.update(include_bytes!("cells/repository/settings.rs"));
     hasher.update(include_bytes!("cells/repository/settings_codec.rs"));
     Digest::from_bytes(*hasher.finalize().as_bytes())
@@ -1453,7 +1465,7 @@ mod tests {
         assert_eq!(descriptor["modules"][0]["name"], "repository");
         assert_eq!(
             descriptor["modules"][0]["code"],
-            "853dd7a242f27d858fca174626a845e1e139c28b1f575789f8b664f9fb02cb6a"
+            "0a569f7c84cae0a027342055c86295c9de601e877f5ebac418a63b5f2526178e"
         );
         assert_eq!(descriptor["modules"][0]["schema_min"], 1);
         assert_eq!(descriptor["modules"][0]["schema_max"], 1);
@@ -1462,14 +1474,14 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            23
+            30
         );
         assert_eq!(
             descriptor["modules"][0]["queries"]
                 .as_array()
                 .unwrap()
                 .len(),
-            23
+            26
         );
         assert_eq!(descriptor["namespaces"][0]["role"], "repository");
         assert_eq!(descriptor["namespaces"][0]["shards"], 1);

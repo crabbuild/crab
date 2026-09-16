@@ -18,6 +18,8 @@ use crate::{
     server::{Repository, Server},
 };
 
+pub(crate) const MAX_NUMBER: u64 = 9_007_199_254_740_991;
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
     #[error("{0}")]
@@ -393,7 +395,7 @@ pub(crate) fn actor(principal: &Principal) -> Result<Identity> {
 }
 
 pub(crate) fn number(value: u64) -> Result<u64> {
-    if value == 0 || value >= crate::app_storage::MAX_NUMBER {
+    if value == 0 || value >= MAX_NUMBER {
         return Err(Error::NotFound);
     }
     Ok(value)

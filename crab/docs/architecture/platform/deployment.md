@@ -600,10 +600,10 @@ Validate browser create/edit/list/search and error flows, plus Git/SQL outbox
 reconciliation, before reopening admission. Existing public product routes and
 React UI stay in place; only explicitly designed outcome/receipt additions change
 their contract. Existing Git/Xet/LFS objects and publication are outside this
-application-data reset. Issue and comment production routes no longer call their
-former JSON path; operators delete that namespace during cutover. Other
-collaboration domains continue to use `app_storage` only until their native route
-adapter is delivered, then their old keys are deleted as part of the same cut.
+application-data reset. Production collaboration routes no longer call their
+former JSON paths; operators delete those namespaces during cutover. Immutable
+Release assets created by the new runtime use the separate
+`release-assets/v1/sha256` content-addressed prefix.
 
 ## Operational metrics
 

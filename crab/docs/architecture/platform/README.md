@@ -69,7 +69,7 @@ database endpoint. Bootstrap, command and migration confirmation then reverify
 and prune only their exact local captured files, so a long-lived writer does not
 exhaust its local retained-cut budget. Sparse activation uses a page-I/O worker independent of the fixed SQL
 pool; a two-Cell test saturates both SQL workers on delayed authenticated page
-faults and proves both activations complete. Remaining HTTP domain cutovers and capacity qualification remain
+faults and proves both activations complete. Production capacity qualification remains
 incomplete. The scoped
 KV primitive now installs
 the normative schema and implements atomic checks/mutations, incarnation/sequence
@@ -255,7 +255,7 @@ the catalog application ready; `repository adopt` performs the same empty-Cell
 publication for an existing canonical Git repository. Serving fails before
 listener bind when any cataloged repository is pending initialization or lacks a published root,
 and request routing never authorizes an empty bootstrap. The complete public
-issue/comment/label/status/check/settings/Pull route group now uses typed Cell commands and queries. The runtime
+issue/comment/label/status/check/settings/Pull/Release route group now uses typed Cell commands and queries. The runtime
 now declares bounded predecessor-code compatibility in the compiled Rust
 registry. It can execute typed local and peer operations for those declared
 code/schema pairs, publish either one verified `N→N+1` SQL migration or one
@@ -266,10 +266,10 @@ routes each transition through local or authenticated peer ownership, caps work
 at 16 concurrent Cells per node, and conditionally stores monotonic terminal
 progress for the activating release. Native task/actor and dirty-job admission
 remain. Label create/edit/delete/list, issue-label validation, commit-status
-create/list, versioned check-run create/update/list, Pull metadata/comments/reviews
-and durable merge intent now use the same Cell; Git ref publication remains the
-canonical external side effect. The hard cut has no legacy importer, while the
-remaining release-domain route cut remains;
+create/list, versioned check-run create/update/list, Pull metadata/comments/reviews,
+durable merge intent, Release metadata/tag claims/publication intent and release-asset
+references now use the same Cell. Git refs and immutable release-asset bodies remain
+canonical external side effects. The hard cut has no legacy importer;
 effective-memory and free-volume startup
 floors, a resource-derived node mailbox and page-cache/file-descriptor-derived
 active-Cell admission are implemented. A single 110-second absolute shutdown

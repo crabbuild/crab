@@ -698,6 +698,9 @@ fn permits_repository_mutation(request: &VerifiedPeerRequest, access: Repository
         "repository.pull.comment",
         "repository.pull.review",
         "repository.pull.merge",
+        "repository.release.create",
+        "repository.release.update",
+        "repository.release.asset",
     ]
     .iter()
     .any(|action| request.permits(action) && access >= required_mutation_access(action))
@@ -731,6 +734,9 @@ const fn required_mutation_action(command_id: u32) -> Option<&'static str> {
         18 | 19 => Some("repository.pull.comment"),
         20 | 21 => Some("repository.pull.review"),
         22 | 23 => Some("repository.pull.merge"),
+        24 => Some("repository.release.create"),
+        25..=27 => Some("repository.release.update"),
+        28..=30 => Some("repository.release.asset"),
         _ => None,
     }
 }
@@ -969,6 +975,13 @@ mod tests {
             (21, "repository.pull.review"),
             (22, "repository.pull.merge"),
             (23, "repository.pull.merge"),
+            (24, "repository.release.create"),
+            (25, "repository.release.update"),
+            (26, "repository.release.update"),
+            (27, "repository.release.update"),
+            (28, "repository.release.asset"),
+            (29, "repository.release.asset"),
+            (30, "repository.release.asset"),
         ] {
             let request = verified(command, vec![action.into()]);
             assert!(
