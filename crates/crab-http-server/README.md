@@ -26,13 +26,14 @@ Browser                    Native Git / Git LFS
 ```
 
 The server owns HTTP policy and application workflows. Shared crates own Git
-reading, validation, publication, Cell execution, and storage mechanics. Issue
-and comment routes use typed Rust commands against one SQLite/LTX Cell per
-repository. The remote-owner path is verified from the public HTTP listener through
-the private mTLS listener to an advanced LTX root; the remaining application
-domains are still being cut over. The server uses
-writable temporary space for pack/index preparation; it creates no Git checkout
-or local Git object database.
+reading, validation, publication, Cell execution, and storage mechanics. Issues,
+comments, Labels, commit statuses, check runs, branch protections, repository
+lifecycle, Pull requests, reviews, and Release metadata use typed Rust commands
+against one SQLite/LTX Cell per repository. The remote-owner path is verified
+from the public HTTP listener through the private mTLS listener to an advanced
+LTX root. No serving route reads or writes the retired collaboration object
+trees. The server uses writable temporary space for pack/index preparation; it
+creates no Git checkout or local Git object database.
 
 ## Build and run
 
@@ -74,6 +75,18 @@ credentials. Then create a cataloged repository and start:
   repository create --owner team --name project --prefix team/project
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
   storage-probe
+"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
+  cells capacity --json
+"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
+  cells backup create --pin 11112222333344445555666677778888
+"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
+  cells backup verify --pin 11112222333344445555666677778888
+"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
+  cells backup restore --pin 11112222333344445555666677778888 \
+  --destination-prefix recovery/team-2026-09-16
+"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
+  cells release activate --expected-revision 8 --strategy maintenance \
+  --retention-grace-hours 168 --retention-max-deletes 10000
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml serve
 ```
 
@@ -92,7 +105,27 @@ The server refuses startup for pending, missing or rootless repository Cells.
 `storage-probe` fails unless the workload can read and list the configured
 root, perform conditional coordination writes, create and delete an object,
 and observe that deletion. `serve` runs the same preflight before binding its
-listeners.
+listeners. `cells capacity --json` reports the resource-derived Cell admission
+envelope without claiming that the node has met a throughput target.
+
+`cells backup create` snapshots all catalog heads, requires one exact control
+per catalog entry, verifies the selected release and every reachable LTX
+dependency, and strict-creates the pin pointer last. Reusing a pin ID verifies
+and returns the existing boundary. Creation advertises a signed zero-capacity
+worker for its complete operation, so maintenance either waits for an in-flight
+pin or fences it before publication. `cells backup verify` independently reopens
+the pin and fails closed on a missing or corrupt dependency. `cells backup
+restore` conditionally copies the verified graph to a canonical isolated prefix
+in the configured bucket, publishes unowned `Idle` controls, then publishes the
+catalog, release, and pin commit points. Repeating an offline restore adopts
+only exact existing state; divergent destination state fails closed.
+
+Maintenance retention is opt-in. Supplying `--retention-grace-hours` verifies
+current controls and every backup pin before streaming the Cell application
+prefix and deleting recognized V1 immutable objects older than the grace.
+`--retention-max-deletes` accepts 1 through 100,000 and defaults to 10,000.
+Reaching the bound leaves the release in `Maintenance`; repeat the same
+activation until it returns `Ready`.
 
 The bucket or container must already exist. `repository adopt` can publish an
 existing canonical repository; it does not convert arbitrary objects into a

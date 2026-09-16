@@ -50,6 +50,15 @@ enum Command {
 
 #[derive(Subcommand)]
 enum CellsCommand {
+    /// Print the resource-derived Cell admission envelope.
+    Capacity {
+        #[arg(long, required = true)]
+        json: bool,
+        #[arg(long, help = "Read the running server's startup envelope")]
+        live: bool,
+    },
+    /// Print the running server's private Prometheus sample.
+    Metrics,
     /// Print the durable control state for one repository Cell.
     Status {
         #[arg(long)]
@@ -57,10 +66,22 @@ enum CellsCommand {
         #[arg(long)]
         name: String,
     },
+    /// Report whether one exact node boot session is currently live.
+    Node {
+        #[arg(long)]
+        session: String,
+        #[arg(long, required = true)]
+        json: bool,
+    },
     /// Inspect or administer compiled Cell releases.
     Release {
         #[command(subcommand)]
         command: CellReleaseCommand,
+    },
+    /// Create or verify immutable application backup pins.
+    Backup {
+        #[command(subcommand)]
+        command: CellBackupCommand,
     },
 }
 
@@ -91,6 +112,16 @@ enum CellReleaseCommand {
         strategy: ActivationStrategy,
         #[arg(long, required_if_eq("strategy", "compatible"))]
         minimum_eligible_nodes: Option<usize>,
+        /// Delete immutable objects older than this many hours during maintenance.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        retention_grace_hours: Option<u64>,
+        /// Bound immutable-object deletions in this maintenance pass.
+        #[arg(
+            long,
+            requires = "retention_grace_hours",
+            value_parser = clap::value_parser!(u64).range(1..=100_000)
+        )]
+        retention_max_deletes: Option<u64>,
     },
     /// Print the canonical durable release selection.
     Status,
@@ -100,6 +131,27 @@ enum CellReleaseCommand {
         after: Option<String>,
         #[arg(long, default_value_t = 100)]
         limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum CellBackupCommand {
+    /// Pin the current release, catalog, controls, and exact LTX roots.
+    Create {
+        #[arg(long)]
+        pin: String,
+    },
+    /// Reopen one pin and verify every immutable dependency.
+    Verify {
+        #[arg(long)]
+        pin: String,
+    },
+    /// Restore one pin into an isolated prefix in the configured bucket.
+    Restore {
+        #[arg(long)]
+        pin: String,
+        #[arg(long)]
+        destination_prefix: String,
     },
 }
 
@@ -235,8 +287,27 @@ async fn cells(
     command: CellsCommand,
 ) -> crab_http_server::Result<()> {
     let bytes = match command {
+        CellsCommand::Capacity {
+            json: true,
+            live: true,
+        } => live_capacity(config).await?,
+        CellsCommand::Capacity {
+            json: true,
+            live: false,
+        } => crab_http_server::cell_capacity(config)?,
+        CellsCommand::Capacity { json: false, .. } => {
+            return Err(crab_http_server::Error::Config("--json is required"));
+        }
+        CellsCommand::Metrics => management_body(config, "/metrics").await?,
         CellsCommand::Status { owner, name } => {
             crab_http_server::repository_cell_status(config, &owner, &name).await?
+        }
+        CellsCommand::Node {
+            session,
+            json: true,
+        } => crab_http_server::cell_node_status(config, &session).await?,
+        CellsCommand::Node { json: false, .. } => {
+            return Err(crab_http_server::Error::Config("--json is required"));
         }
         CellsCommand::Release {
             command: CellReleaseCommand::Inspect { json: true },
@@ -259,9 +330,21 @@ async fn cells(
                 CellReleaseCommand::Activate {
                     expected_revision,
                     strategy: ActivationStrategy::Compatible,
-                    minimum_eligible_nodes: Some(minimum_eligible_nodes),
+                    minimum_eligible_nodes,
+                    retention_grace_hours,
+                    retention_max_deletes,
                 },
         } => {
+            if retention_grace_hours.is_some() || retention_max_deletes.is_some() {
+                return Err(crab_http_server::Error::Config(
+                    "compatible activation does not accept retention options",
+                ));
+            }
+            let Some(minimum_eligible_nodes) = minimum_eligible_nodes else {
+                return Err(crab_http_server::Error::Config(
+                    "compatible activation requires --minimum-eligible-nodes",
+                ));
+            };
             crab_http_server::activate_cell_release(
                 config,
                 expected_revision,
@@ -272,34 +355,32 @@ async fn cells(
         CellsCommand::Release {
             command:
                 CellReleaseCommand::Activate {
-                    expected_revision: _,
-                    strategy: ActivationStrategy::Compatible,
-                    minimum_eligible_nodes: None,
-                },
-        } => {
-            return Err(crab_http_server::Error::Config(
-                "compatible activation requires --minimum-eligible-nodes",
-            ));
-        }
-        CellsCommand::Release {
-            command:
-                CellReleaseCommand::Activate {
                     expected_revision,
                     strategy: ActivationStrategy::Maintenance,
-                    minimum_eligible_nodes: None,
-                },
-        } => crab_http_server::enter_cell_maintenance(config, expected_revision).await?,
-        CellsCommand::Release {
-            command:
-                CellReleaseCommand::Activate {
-                    expected_revision: _,
-                    strategy: ActivationStrategy::Maintenance,
-                    minimum_eligible_nodes: Some(_),
+                    minimum_eligible_nodes,
+                    retention_grace_hours,
+                    retention_max_deletes,
                 },
         } => {
-            return Err(crab_http_server::Error::Config(
-                "maintenance activation does not accept --minimum-eligible-nodes",
-            ));
+            if minimum_eligible_nodes.is_some() {
+                return Err(crab_http_server::Error::Config(
+                    "maintenance activation does not accept --minimum-eligible-nodes",
+                ));
+            }
+            let retention_grace = retention_grace_hours
+                .map(|hours| {
+                    hours.checked_mul(60 * 60).map(Duration::from_secs).ok_or(
+                        crab_http_server::Error::Config("Cell retention grace is too large"),
+                    )
+                })
+                .transpose()?;
+            crab_http_server::enter_cell_maintenance(
+                config,
+                expected_revision,
+                retention_grace,
+                retention_max_deletes,
+            )
+            .await?
         }
         CellsCommand::Release {
             command: CellReleaseCommand::Status,
@@ -307,6 +388,19 @@ async fn cells(
         CellsCommand::Release {
             command: CellReleaseCommand::Migrations { after, limit },
         } => crab_http_server::cell_release_migrations(config, after.as_deref(), limit).await?,
+        CellsCommand::Backup {
+            command: CellBackupCommand::Create { pin },
+        } => crab_http_server::create_cell_backup(config, &pin).await?,
+        CellsCommand::Backup {
+            command: CellBackupCommand::Verify { pin },
+        } => crab_http_server::verify_cell_backup(config, &pin).await?,
+        CellsCommand::Backup {
+            command:
+                CellBackupCommand::Restore {
+                    pin,
+                    destination_prefix,
+                },
+        } => crab_http_server::restore_cell_backup(config, &pin, &destination_prefix).await?,
     };
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(&bytes)?;
@@ -315,13 +409,37 @@ async fn cells(
 }
 
 async fn healthcheck(config: &crab_http_server::Config) -> crab_http_server::Result<()> {
+    management_get(config, "/readyz").await?;
+    Ok(())
+}
+
+async fn live_capacity(config: &crab_http_server::Config) -> crab_http_server::Result<Vec<u8>> {
+    management_body(config, "/capacity").await
+}
+
+async fn management_body(
+    config: &crab_http_server::Config,
+    path: &'static str,
+) -> crab_http_server::Result<Vec<u8>> {
+    Ok(management_get(config, path)
+        .await?
+        .bytes()
+        .await
+        .map_err(|source| crab_http_server::Error::Healthcheck { source })?
+        .to_vec())
+}
+
+async fn management_get(
+    config: &crab_http_server::Config,
+    path: &'static str,
+) -> crab_http_server::Result<reqwest::Response> {
     let mut identity = std::fs::read(&config.cells.peer_certificate)?;
     identity.extend_from_slice(&std::fs::read(&config.cells.peer_private_key)?);
     let identity = reqwest::Identity::from_pem(&identity)
         .map_err(|source| crab_http_server::Error::Healthcheck { source })?;
     let authorities = reqwest::Certificate::from_pem_bundle(&std::fs::read(&config.cells.peer_ca)?)
         .map_err(|source| crab_http_server::Error::Healthcheck { source })?;
-    let (url, resolution) = healthcheck_target(config)?;
+    let (url, resolution) = management_target(config, path)?;
     let mut client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .https_only(true)
@@ -340,12 +458,12 @@ async fn healthcheck(config: &crab_http_server::Config) -> crab_http_server::Res
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
-        .map_err(|source| crab_http_server::Error::Healthcheck { source })?;
-    Ok(())
+        .map_err(|source| crab_http_server::Error::Healthcheck { source })
 }
 
-fn healthcheck_target(
+fn management_target(
     config: &crab_http_server::Config,
+    path: &'static str,
 ) -> crab_http_server::Result<(url::Url, Option<(String, std::net::SocketAddr)>)> {
     let mut url = config.cells.peer_advertise.clone();
     let tls_name = config
@@ -359,7 +477,7 @@ fn healthcheck_target(
         .to_owned();
     url.set_host(Some(&tls_name))
         .map_err(|_| crab_http_server::Error::Config("Cell peer TLS server name is invalid"))?;
-    url.set_path("/readyz");
+    url.set_path(path);
     let resolution = if tls_name.parse::<std::net::IpAddr>().is_err() {
         let listen_ip = config.management_listen.ip();
         let local_ip = if listen_ip.is_unspecified() {
@@ -516,7 +634,7 @@ mod tests {
             auth: None,
         };
 
-        let (url, resolution) = healthcheck_target(&config).unwrap();
+        let (url, resolution) = management_target(&config, "/readyz").unwrap();
 
         assert_eq!(url.as_str(), "https://crab-http-server-peer:8789/readyz");
         assert_eq!(
@@ -526,6 +644,43 @@ mod tests {
                 "127.0.0.1:8789".parse().unwrap()
             ))
         );
+        let (url, resolution) = management_target(&config, "/capacity").unwrap();
+        assert_eq!(url.as_str(), "https://crab-http-server-peer:8789/capacity");
+        assert_eq!(
+            resolution,
+            Some((
+                "crab-http-server-peer".into(),
+                "127.0.0.1:8789".parse().unwrap()
+            ))
+        );
+        let (url, resolution) = management_target(&config, "/metrics").unwrap();
+        assert_eq!(url.as_str(), "https://crab-http-server-peer:8789/metrics");
+        assert_eq!(
+            resolution,
+            Some((
+                "crab-http-server-peer".into(),
+                "127.0.0.1:8789".parse().unwrap()
+            ))
+        );
+    }
+
+    #[test]
+    fn cells_metrics_is_a_private_management_command() {
+        let arguments = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "metrics",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            arguments.command,
+            Some(Command::Cells {
+                command: CellsCommand::Metrics
+            })
+        ));
     }
 
     #[test]
@@ -563,6 +718,59 @@ mod tests {
     }
 
     #[test]
+    fn cell_capacity_requires_the_json_contract() {
+        let arguments = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "capacity",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Some(Command::Cells {
+                command: CellsCommand::Capacity {
+                    json: true,
+                    live: false
+                }
+            })
+        ));
+
+        let live = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "capacity",
+            "--json",
+            "--live",
+        ])
+        .unwrap();
+        assert!(matches!(
+            live.command,
+            Some(Command::Cells {
+                command: CellsCommand::Capacity {
+                    json: true,
+                    live: true
+                }
+            })
+        ));
+
+        assert!(
+            Arguments::try_parse_from([
+                "crab-http-server",
+                "--config",
+                "server.toml",
+                "cells",
+                "capacity",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn cell_status_requires_one_repository_identity() {
         let arguments = Arguments::try_parse_from([
             "crab-http-server",
@@ -592,6 +800,124 @@ mod tests {
                 "status",
                 "--owner",
                 "team",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn cell_node_status_requires_an_exact_session_and_json() {
+        let arguments = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "node",
+            "--session",
+            "11111111111111111111111111111111",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Some(Command::Cells {
+                command: CellsCommand::Node {
+                    session,
+                    json: true
+                }
+            }) if session == "11111111111111111111111111111111"
+        ));
+
+        assert!(
+            Arguments::try_parse_from([
+                "crab-http-server",
+                "--config",
+                "server.toml",
+                "cells",
+                "node",
+                "--session",
+                "11111111111111111111111111111111",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn cell_backup_commands_require_one_pin_and_restore_prefix() {
+        let pin = "11111111111111111111111111111111";
+        let create = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "backup",
+            "create",
+            "--pin",
+            pin,
+        ])
+        .unwrap();
+        assert!(matches!(
+            create.command,
+            Some(Command::Cells {
+                command: CellsCommand::Backup {
+                    command: CellBackupCommand::Create { pin: parsed }
+                }
+            }) if parsed == pin
+        ));
+
+        let verify = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "backup",
+            "verify",
+            "--pin",
+            pin,
+        ])
+        .unwrap();
+        assert!(matches!(
+            verify.command,
+            Some(Command::Cells {
+                command: CellsCommand::Backup {
+                    command: CellBackupCommand::Verify { pin: parsed }
+                }
+            }) if parsed == pin
+        ));
+
+        let restore = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "backup",
+            "restore",
+            "--pin",
+            pin,
+            "--destination-prefix",
+            "qualification/restored-cells",
+        ])
+        .unwrap();
+        assert!(matches!(
+            restore.command,
+            Some(Command::Cells {
+                command: CellsCommand::Backup {
+                    command: CellBackupCommand::Restore {
+                        pin: parsed,
+                        destination_prefix,
+                    }
+                }
+            }) if parsed == pin && destination_prefix == "qualification/restored-cells"
+        ));
+
+        assert!(
+            Arguments::try_parse_from([
+                "crab-http-server",
+                "--config",
+                "server.toml",
+                "cells",
+                "backup",
+                "create",
             ])
             .is_err()
         );
@@ -667,6 +993,8 @@ mod tests {
                         expected_revision: 8,
                         strategy: ActivationStrategy::Compatible,
                         minimum_eligible_nodes: Some(2),
+                        retention_grace_hours: None,
+                        retention_max_deletes: None,
                     }
                 }
             })
@@ -708,10 +1036,97 @@ mod tests {
                         expected_revision: 8,
                         strategy: ActivationStrategy::Maintenance,
                         minimum_eligible_nodes: None,
+                        retention_grace_hours: None,
+                        retention_max_deletes: None,
                     }
                 }
             })
         ));
+
+        let retention = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "release",
+            "activate",
+            "--expected-revision",
+            "8",
+            "--strategy",
+            "maintenance",
+            "--retention-grace-hours",
+            "168",
+            "--retention-max-deletes",
+            "25000",
+        ])
+        .unwrap();
+        assert!(matches!(
+            retention.command,
+            Some(Command::Cells {
+                command: CellsCommand::Release {
+                    command: CellReleaseCommand::Activate {
+                        expected_revision: 8,
+                        strategy: ActivationStrategy::Maintenance,
+                        minimum_eligible_nodes: None,
+                        retention_grace_hours: Some(168),
+                        retention_max_deletes: Some(25_000),
+                    }
+                }
+            })
+        ));
+        assert!(
+            Arguments::try_parse_from([
+                "crab-http-server",
+                "--config",
+                "server.toml",
+                "cells",
+                "release",
+                "activate",
+                "--expected-revision",
+                "8",
+                "--strategy",
+                "maintenance",
+                "--retention-max-deletes",
+                "25000",
+            ])
+            .is_err()
+        );
+        assert!(
+            Arguments::try_parse_from([
+                "crab-http-server",
+                "--config",
+                "server.toml",
+                "cells",
+                "release",
+                "activate",
+                "--expected-revision",
+                "8",
+                "--strategy",
+                "maintenance",
+                "--retention-grace-hours",
+                "0",
+            ])
+            .is_err()
+        );
+        assert!(
+            Arguments::try_parse_from([
+                "crab-http-server",
+                "--config",
+                "server.toml",
+                "cells",
+                "release",
+                "activate",
+                "--expected-revision",
+                "8",
+                "--strategy",
+                "maintenance",
+                "--retention-grace-hours",
+                "168",
+                "--retention-max-deletes",
+                "100001",
+            ])
+            .is_err()
+        );
 
         let status = Arguments::try_parse_from([
             "crab-http-server",

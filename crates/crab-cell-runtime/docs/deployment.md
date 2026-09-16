@@ -10,6 +10,11 @@ Run one `crab-http-server` process per Kubernetes Pod or virtual machine. Nodes 
 
 [Back to the Cell runtime index](README.md)
 
+The current deployment has no follower durability tier. The target node-session
+lease, follower placement, recovery-only startup listener, and warm failover
+ordering are defined in
+[Follower durability and warm failover](failover-and-followers.md).
+
 ## Configure one process per node
 
 The existing HTTP server owns Cell runtime construction. Configuration supplies the authoritative object store, local volume, public listener, management listener, and peer identity.
@@ -155,11 +160,12 @@ The administrative commands operate through the existing server binary:
 
 ```text
 crab-http-server --config config.toml cells release inspect --json
+crab-http-server --config config.toml cells capacity --json --live
 crab-http-server --config config.toml cells release bootstrap --image sha256:1234567890
 crab-http-server --config config.toml cells release prepare \
   --expected-revision 7 --image sha256:1234567890
 crab-http-server --config config.toml cells release activate \
-  --expected-revision 7 --strategy compatible \
+  --expected-revision 8 --strategy compatible \
   --minimum-eligible-nodes 3
 crab-http-server --config config.toml cells release status
 crab-http-server --config config.toml cells status --owner team --name repository
@@ -168,6 +174,42 @@ crab-http-server --config config.toml cells status --owner team --name repositor
 The repository status command reads the durable control object without opening
 the Cell or changing ownership. Use its versioned JSON to map a serving endpoint
 to a fleet member during takeover qualification.
+
+The capacity command with `--live` reads the startup envelope retained by the
+running server: process memory limit, free local disk, file descriptor limit,
+CPU-derived job credits, and the resulting admission budgets. Without `--live`,
+it calculates a preflight envelope for the short-lived command process instead.
+Neither mode claims a throughput result. Capture the live report before every
+capacity run and compare it with the node-wide gauges during the workload.
+
+```json
+{
+  "version": 1,
+  "resources": {
+    "memory_bytes": 2147483648,
+    "free_disk_bytes": 53687091200,
+    "available_file_descriptors": 1048570,
+    "job_credits": 2
+  },
+  "admission": {
+    "active_cells": 2457,
+    "retained_bytes": 80530636,
+    "blocking_jobs": 2,
+    "dirty_jobs": 2,
+    "recovery_jobs": 2,
+    "scratch_bytes": 14316208128,
+    "local_disk_bytes": 28632416256,
+    "disk_reserve_bytes": 10737418240
+  },
+  "reservations": {
+    "active_cell_page_cache_bytes": 196608,
+    "active_cell_native_bytes": 65536,
+    "active_cell_file_descriptors": 8,
+    "dirty_job_memory_bytes": 67108864,
+    "maximum_recovery_jobs": 2
+  }
+}
+```
 
 Compatible activation follows this state machine:
 
@@ -207,6 +249,33 @@ Before final `Ready`, it checks persisted work that may reference removed behavi
 - Workflow runs
 
 Any matching row keeps the release in maintenance. The runtime doesn't guess payload compatibility. Operators must drain retention or compile a purpose-built transform.
+
+The same fence can reclaim unreachable immutable Cell objects after migration:
+
+```bash
+crab-http-server --config config.toml cells release activate \
+  --expected-revision 8 \
+  --strategy maintenance \
+  --retention-grace-hours 168 \
+  --retention-max-deletes 10000
+```
+
+Omit both retention flags to run migration only. `--retention-max-deletes`
+requires a nonzero grace and accepts 1 through 100,000; omitting the limit while
+supplying a grace uses 10,000. The grace is measured from each object's provider
+modification time.
+
+Collection runs only after the executor proves it is the sole advertised
+session and every current control is unowned. It verifies live controls and all
+retained backup pins into a disk-backed mark set before streaming the object
+inventory. Unknown layouts are skipped. The structured completion log records
+listed, candidate, reachable, grace, eligible, and deleted counts.
+
+If eligible objects exceed the selected deletion bound, the command returns an
+incomplete-retention error and deliberately leaves the release in
+`Maintenance`. Repeat the identical activation command and expected revision;
+the operation re-marks authority before deleting the next bounded batch. Start
+the fleet only after the activation returns a `Ready` release.
 
 ## Deploy on Kubernetes
 
@@ -283,9 +352,41 @@ Include:
 - Every immutable object reachable from pinned roots
 - Node-independent application configuration needed to recreate the fleet
 
-Backup traversal pins its start revisions and writes a pin object before copying. It fails if any referenced object is absent or fails digest verification.
+Backup traversal pins its start revisions and strict-creates the pin only after
+every referenced object verifies. Restore verifies that pin before copying.
 
-Restore to a separate storage prefix, verify all reachable objects, and start a fleet with the matching compiled release. Local SQLite files are rebuilt from exact roots.
+Create a nonzero 16-byte pin ID and verify it independently:
+
+```bash
+crab-http-server --config /etc/crab/server.toml cells backup create \
+  --pin 11112222333344445555666677778888
+crab-http-server --config /etc/crab/server.toml cells backup verify \
+  --pin 11112222333344445555666677778888
+crab-http-server --config /etc/crab/server.toml cells backup restore \
+  --pin 11112222333344445555666677778888 \
+  --destination-prefix recovery/restore-2026-09-16
+```
+
+Both commands print versioned JSON with the application and pin IDs, creation
+time, control count, nonempty catalog-shard count, release-snapshot digest, and
+`verified: true`. Creation is idempotent by pin ID. Verification rereads the
+release metadata, catalog pages, canonical controls, and every immutable LTX
+dependency; it does not trust local SQLite files or caches.
+
+Restore accepts only a canonical prefix different from the configured source
+root and only a pin whose selected release was `Ready`. The command verifies
+the source graph, uses same-bucket conditional copies, re-verifies every
+destination root, removes captured owners from restored controls, and publishes
+the destination release and pin pointers last. Run it while the destination is
+offline; an exact interrupted attempt is resumable, but a destination used by a
+fleet has intentionally diverged and is rejected.
+
+Start the restored fleet with the compiled release named by the pin. Its first
+request acquires each `Idle` Cell and rebuilds disposable SQLite files from the
+exact root. Repository catalog configuration, Git/Xet/LFS objects, release
+assets, and other product data outside `cells/v1` are not Cell backup contents;
+restore or reference those through their owning runbooks. Cross-provider
+archive export still requires a separate transport step.
 
 ## Apply the repository hard cut
 

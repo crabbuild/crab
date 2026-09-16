@@ -50,7 +50,8 @@ pub use writable_vfs::Hydration;
 mod schedule;
 #[cfg(feature = "replica")]
 pub use cell_replica::{
-    CellPagedDatabase, CellReplica, CellWritableDatabase, PreparedRoot, RootRef, VerifiedRoot,
+    CellObjectRef, CellPagedDatabase, CellReplica, CellWritableDatabase, PreparedRoot, RootRef,
+    VerifiedRoot,
 };
 #[cfg(feature = "replica")]
 pub use paged::PagedDatabase;

@@ -2,6 +2,9 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{CHECKSUM_FLAG, CrabError, Result, ltx};
 
+#[cfg(feature = "replica")]
+const CHECKSUM_READ_BYTES: usize = 64 * 1024;
+
 #[derive(Clone)]
 enum ChecksumBase {
     Memory(Arc<[u64]>),
@@ -132,6 +135,16 @@ impl PageChecksums {
         pages: &[(u32, Vec<u8>)],
         limit: u64,
     ) -> Result<()> {
+        self.apply_iter(page_size, commit, pages.iter().cloned().map(Ok), limit)
+    }
+
+    pub(crate) fn apply_iter(
+        &mut self,
+        page_size: u32,
+        commit: u32,
+        pages: impl Iterator<Item = Result<(u32, Vec<u8>)>>,
+        limit: u64,
+    ) -> Result<()> {
         if !ltx::is_valid_page_size(page_size) || commit == 0 {
             return Err(CrabError::LTXCorrupted);
         }
@@ -148,6 +161,16 @@ impl PageChecksums {
         #[cfg(not(feature = "replica"))]
         let mut base_file = None;
         if commit < previous_count {
+            #[cfg(feature = "replica")]
+            if matches!(self.base, ChecksumBase::File(_)) {
+                self.remove_file_suffix(commit, previous_count, base_file.as_mut())?;
+            } else {
+                for page in commit + 1..=previous_count {
+                    let old = self.value(page, base_file.as_mut())?;
+                    self.checksum = CHECKSUM_FLAG | (self.checksum ^ old);
+                }
+            }
+            #[cfg(not(feature = "replica"))]
             for page in commit + 1..=previous_count {
                 let old = self.value(page, base_file.as_mut())?;
                 self.checksum = CHECKSUM_FLAG | (self.checksum ^ old);
@@ -158,11 +181,9 @@ impl PageChecksums {
         let lock = ltx::lock_pgno(page_size);
         let mut previous = 0;
         let mut next_required = previous_count.saturating_add(1);
-        for (pgno, data) in pages {
-            if *pgno <= previous
-                || *pgno > commit
-                || *pgno == lock
-                || data.len() != page_size as usize
+        for page in pages {
+            let (pgno, data) = page?;
+            if pgno <= previous || pgno > commit || pgno == lock || data.len() != page_size as usize
             {
                 return Err(CrabError::LTXCorrupted);
             }
@@ -171,23 +192,23 @@ impl PageChecksums {
                     .checked_add(1)
                     .ok_or(CrabError::LTXCorrupted)?;
             }
-            if *pgno > previous_count {
-                if *pgno != next_required {
+            if pgno > previous_count {
+                if pgno != next_required {
                     return Err(CrabError::LTXCorrupted);
                 }
                 next_required = next_required
                     .checked_add(1)
                     .ok_or(CrabError::LTXCorrupted)?;
             }
-            let old = if *pgno <= previous_count {
-                self.value(*pgno, base_file.as_mut())?
+            let old = if pgno <= previous_count {
+                self.value(pgno, base_file.as_mut())?
             } else {
                 0
             };
-            let checksum = ltx::checksum_page(*pgno, data);
+            let checksum = ltx::checksum_page(pgno, &data);
             self.checksum = CHECKSUM_FLAG | (self.checksum ^ old ^ checksum);
-            self.changes.insert(*pgno, checksum);
-            previous = *pgno;
+            self.changes.insert(pgno, checksum);
+            previous = pgno;
         }
         while next_required == lock {
             next_required = next_required
@@ -240,6 +261,42 @@ impl PageChecksums {
 
     pub fn checksum(&self) -> u64 {
         self.checksum
+    }
+
+    #[cfg(feature = "replica")]
+    fn remove_file_suffix(
+        &mut self,
+        commit: u32,
+        previous_count: u32,
+        file: Option<&mut crate::HostFile>,
+    ) -> Result<()> {
+        let file = file.ok_or(CrabError::InvalidState("checksum file not open"))?;
+        let mut page = commit.checked_add(1).ok_or(CrabError::LTXCorrupted)?;
+        let file_end = previous_count.min(self.base_count);
+        while page <= file_end {
+            let count = usize::try_from(file_end - page + 1)
+                .map_err(|_| CrabError::LTXCorrupted)?
+                .min(CHECKSUM_READ_BYTES / 8);
+            let bytes = file.read_exact_at(u64::from(page - 1) * 8, count * 8)?;
+            for checksum in bytes.as_chunks::<8>().0 {
+                let stored = u64::from_be_bytes(*checksum);
+                let old = self.changes.get(&page).copied().unwrap_or(stored);
+                if old != 0 && old & CHECKSUM_FLAG == 0 {
+                    return Err(CrabError::LTXCorrupted);
+                }
+                self.checksum = CHECKSUM_FLAG | (self.checksum ^ old);
+                page = page.checked_add(1).ok_or(CrabError::LTXCorrupted)?;
+            }
+        }
+        while page <= previous_count {
+            let old = self.changes.get(&page).copied().unwrap_or(0);
+            if old != 0 && old & CHECKSUM_FLAG == 0 {
+                return Err(CrabError::LTXCorrupted);
+            }
+            self.checksum = CHECKSUM_FLAG | (self.checksum ^ old);
+            page = page.checked_add(1).ok_or(CrabError::LTXCorrupted)?;
+        }
+        Ok(())
     }
 
     fn value(&self, page: u32, _file: Option<&mut crate::HostFile>) -> Result<u64> {
@@ -321,5 +378,45 @@ mod tests {
         assert_eq!(index.checksum(), checksum(&pages));
         index.persist().unwrap();
         assert_eq!(std::fs::metadata(path).unwrap().len(), 40);
+    }
+
+    #[test]
+    fn file_backed_truncation_reduces_multiple_checksum_chunks_with_overlay_updates() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("checksums");
+        let page_size = 512;
+        let count = 20_000;
+        let pages = (1..=count)
+            .map(|page| (page, vec![page as u8; page_size as usize]))
+            .collect::<Vec<_>>();
+        let initial_checksum = checksum(&pages);
+        let bytes = pages
+            .iter()
+            .flat_map(|(number, bytes)| ltx::checksum_page(*number, bytes).to_be_bytes())
+            .collect::<Vec<_>>();
+        std::fs::write(&path, bytes).unwrap();
+        let host = crate::LtxHost {
+            facilities: crate::Host::default(),
+            max_database_bytes: 32 << 20,
+            max_file_bytes: 32 << 20,
+        };
+        let mut index =
+            PageChecksums::from_file(host, &path, page_size, count, initial_checksum).unwrap();
+        index
+            .apply(
+                page_size,
+                count,
+                &[
+                    (101, vec![91; page_size as usize]),
+                    (9_000, vec![92; page_size as usize]),
+                    (19_999, vec![93; page_size as usize]),
+                ],
+                32 << 20,
+            )
+            .unwrap();
+
+        index.apply(page_size, 100, &[], 32 << 20).unwrap();
+
+        assert_eq!(index.checksum(), checksum(&pages[..100]));
     }
 }

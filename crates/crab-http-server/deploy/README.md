@@ -119,9 +119,33 @@ old collaboration application data is not imported.
 Inspect or stop the stack without deleting repositories:
 
 ```sh
+docker compose --file crates/crab-http-server/deploy/compose.yaml exec server \
+  crab-http-server --config /etc/crab/server.toml cells capacity --json --live
+docker compose --file crates/crab-http-server/deploy/compose.yaml exec server \
+  crab-http-server --config /etc/crab/server.toml cells backup create \
+  --pin 11112222333344445555666677778888
+docker compose --file crates/crab-http-server/deploy/compose.yaml exec server \
+  crab-http-server --config /etc/crab/server.toml cells backup verify \
+  --pin 11112222333344445555666677778888
+docker compose --file crates/crab-http-server/deploy/compose.yaml exec server \
+  crab-http-server --config /etc/crab/server.toml cells backup restore \
+  --pin 11112222333344445555666677778888 \
+  --destination-prefix recovery/compose-restore
 docker compose --file crates/crab-http-server/deploy/compose.yaml logs --follow server proxy
 docker compose --file crates/crab-http-server/deploy/compose.yaml down
 ```
+
+The capacity report is the server's resource-derived admission envelope, not a
+benchmark result. Record it beside live RSS, file-descriptor, latency, local
+disk and RustFS measurements when qualifying a node profile.
+
+The backup commands operate on object-store state, not the disposable Cell
+tmpfs. Reusing the same nonzero lowercase pin ID is idempotent and re-verifies
+the existing release, catalog, controls, and reachable LTX graph. Restore uses
+conditional same-bucket copies and publishes the destination release and pin
+only after the copied graph verifies. Keep the destination offline during the
+operation. Cross-provider export and product data outside `cells/v1` remain
+separate operator work.
 
 `docker compose down --volumes` permanently removes the local RustFS and peer
 identity volumes, including the catalog and every repository. The next start
@@ -145,6 +169,56 @@ CRAB_HTTP_SERVER_IMAGE=ghcr.io/crabbuild/crab-http-server@sha256:qualified_diges
   docker compose --file crates/crab-http-server/deploy/compose.yaml \
     up --detach --no-build --wait
 ```
+
+### Qualify three local Cell processes
+
+The cluster overlay runs three independent server containers and one real
+RustFS origin. Each server has its own Cell tmpfs. They share a Docker network
+namespace so every unauthenticated listener can remain on loopback; this keeps
+the same local-trust boundary as the one-node profile.
+
+```mermaid
+flowchart LR
+    Client[Qualification client] --> LB[Caddy round-robin :18880]
+    LB --> A[Node A\n127.0.0.1:8788]
+    LB --> B[Node B\n127.0.0.1:8888]
+    LB --> C[Node C\n127.0.0.1:8988]
+    A & B & C --> Origin[(RustFS)]
+    B -. SIGKILL .-> Lost[Local SQLite removed]
+    Origin -->|exact LTX root| C
+```
+
+Run the repeatable owner-loss qualification from the repository root:
+
+```sh
+crates/crab-http-server/tests/qualify_compose_cluster.sh
+```
+
+The script builds the current source by default, creates a uniquely named
+Compose project, and then:
+
+1. Records the live admission envelope from all three processes.
+2. Sends a durable issue mutation directly to node B and proves A, C, and the
+   round-robin endpoint route to B over the private mTLS peer protocol.
+3. Sends `SIGKILL` to B, destroying its local SQLite files.
+4. Waits until B's exact signed boot-session advertisement is expired.
+5. Reads through C and requires a higher epoch, a different session, and the
+   same complete LTX root: digest, transaction ID, checksum, and commit sequence.
+6. Writes a second issue through C and requires a different digest plus higher
+   transaction ID and commit sequence.
+7. Restarts B with empty local Cell storage and proves it routes to C.
+
+Success prints a JSON receipt containing the before/after sessions, epochs,
+complete roots before takeover, after restore, and after continuation, plus
+each process's admission envelope. The trap removes only the uniquely named
+qualification project and its volumes. Set
+`CRAB_HTTP_CLUSTER_BUILD=false` to reuse an already-built
+`CRAB_HTTP_SERVER_IMAGE`.
+
+This is real process-loss, source-loss, peer-routing, and recovery evidence. It
+is not the production three-Pod gate because the processes share one network
+namespace and it does not inject a network partition, delayed immutable upload,
+or lost control-CAS response.
 
 ## Deploy for a team
 

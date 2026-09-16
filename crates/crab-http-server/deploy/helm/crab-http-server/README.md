@@ -432,6 +432,8 @@ The test fails unless it can prove all of these boundaries:
 - Every original and replacement pod has the provider's admitted workload
   identity contract: EKS Pod Identity token injection, GKE's annotated
   Kubernetes-to-Google service account link, or AKS Workload ID token injection
+- Every original, rolled, and owner-loss replacement Pod returns a valid live
+  Cell capacity envelope bound to its Kubernetes Pod UID
 - The Deployment uses an immutable digest, a private ClusterIP Service, the
   signed release's chart version, the chart NetworkPolicy, TLS ingress,
   hardened containers, and no automatic Kubernetes API token
@@ -450,16 +452,19 @@ The test fails unless it can prove all of these boundaries:
 - The durable Cell control identifies one serving owner whose endpoint matches a
   ready Pod
 - Forced loss of that owner removes its ephemeral SQLite directory; a different
-  session takes over at a higher epoch, restores the committed status, and
-  publishes another status visible through a third replica
+  session takes over at a higher epoch, restores the exact digest, transaction
+  ID, checksum, and commit sequence, serves the committed status, and publishes
+  another status visible through a third replica
 
 The script writes a secret-free JSON evidence receipt containing the provider,
 image and chart digests, release tag and source commit, workload identity
 mechanism and Kubernetes ServiceAccount, repository, qualification branch and
-commit, payload digest, rollout probes and failures, and explicit successful
-checks including the installed chart version, management-network-isolation
-result, deleted owner Pod UID, old/new owner sessions, and takeover epochs. It
-also records completion time.
+commit, payload digest, per-Pod capacity envelopes before traffic, after the
+rollout, and after owner loss, rollout probes and failures, and explicit
+successful checks including the installed chart version,
+management-network-isolation result, deleted owner Pod UID, old/new owner
+sessions, takeover epochs, the complete root before and after takeover, and the
+strictly newer root after continuation. It also records completion time.
 Retain it with the release record. The Git token remains only in process memory
 and must still be rotated or revoked after qualification according to team
 policy.
@@ -626,6 +631,7 @@ namespace or pods that run your scraper. Its labels must match the Prometheus
 metrics:
   podMonitor:
     enabled: true
+    existingSecret: crab-http-server-metrics
     labels:
       prometheus: platform
     interval: 30s
@@ -637,6 +643,12 @@ networkPolicy:
         matchLabels:
           kubernetes.io/metadata.name: monitoring
 ```
+
+`crab-http-server-metrics` must contain `tls.crt`, `tls.key`, and `ca.crt`.
+Issue an Ed25519 client-auth certificate from the same CA as the Cell peers,
+but use a separate Secret: the peer Secret also carries node identity and must
+not be mounted into Prometheus. The PodMonitor verifies
+`cells.tlsServerName` while scraping the management listener over mTLS.
 
 The application Service and ingress never expose port 8789. Metrics have
 bounded labels and retain request duration through streaming response
@@ -654,6 +666,7 @@ and `pod` target labels used to isolate one Helm release:
 metrics:
   podMonitor:
     enabled: true
+    existingSecret: crab-http-server-metrics
     labels:
       prometheus: platform
   prometheusRule:

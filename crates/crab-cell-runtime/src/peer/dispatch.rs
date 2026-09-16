@@ -693,6 +693,10 @@ fn error_reply(error: Error) -> wire::PeerReply {
         | Error::Catalog(_)
         | Error::Node(_)
         | Error::Release(_)
+        | Error::Backup(_)
+        | Error::Retention(_)
+        | Error::RetentionIo(_)
+        | Error::RetentionWorkerJoin(_)
         | Error::PeerTransport { .. }
         | Error::PeerTransportUnknown { .. }
         | Error::CatalogCollision

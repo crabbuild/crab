@@ -36,6 +36,7 @@ impl<R: Read> Decoder<R> {
             reader: CountingReader {
                 inner: reader,
                 bytes: 0,
+                digest: blake3::Hasher::new(),
             },
             index: Vec::new(),
             state: DecoderState::Header,
@@ -189,6 +190,16 @@ impl<R: Read> Decoder<R> {
         self.state = DecoderState::Closed;
         Ok(())
     }
+
+    pub(crate) fn artifact(&self) -> Result<(u64, [u8; 32])> {
+        if self.state != DecoderState::Closed {
+            return Err(CrabError::InvalidState("LTX decoder is not closed"));
+        }
+        Ok((
+            self.reader.bytes,
+            *self.reader.digest.clone().finalize().as_bytes(),
+        ))
+    }
 }
 
 pub(crate) struct Encoder<W> {
@@ -213,7 +224,6 @@ pub(crate) struct EncodedPage {
     pub(crate) checksum: u64,
 }
 
-#[cfg_attr(all(not(feature = "replica"), not(test)), expect(dead_code))]
 enum EncoderIndex {
     Memory(Vec<u8>),
     File(Box<dyn FileIo>),
@@ -267,7 +277,6 @@ impl<W: Write> Encoder<W> {
         Self::new(writer, EncoderIndex::Memory(Vec::new()))
     }
 
-    #[cfg_attr(all(not(feature = "replica"), not(test)), expect(dead_code))]
     pub(crate) fn new_block_spooled(writer: W, index: Box<dyn FileIo>) -> Self {
         Self::new(writer, EncoderIndex::File(index))
     }
@@ -287,7 +296,6 @@ impl<W: Write> Encoder<W> {
         }
     }
 
-    #[cfg_attr(all(not(feature = "replica"), not(test)), expect(dead_code))]
     pub(crate) fn into_writer(self) -> W {
         self.writer
     }
@@ -456,11 +464,13 @@ fn write_uvarint(bytes: &mut Vec<u8>, mut value: u64) {
 struct CountingReader<R> {
     inner: R,
     bytes: u64,
+    digest: blake3::Hasher,
 }
 impl<R: Read> Read for CountingReader<R> {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
         let n = self.inner.read(bytes)?;
         self.bytes += n as u64;
+        self.digest.update(&bytes[..n]);
         Ok(n)
     }
 }

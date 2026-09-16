@@ -71,6 +71,10 @@ jobs:
              | all(. as $name | $names | index($name)))
           ' crates/crab-http-server/deploy/ecs/task-definition.example.json >/dev/null
           docker compose --file crates/crab-http-server/deploy/compose.yaml config --quiet
+          docker compose \
+            --file crates/crab-http-server/deploy/compose.yaml \
+            --file crates/crab-http-server/deploy/compose.cluster.yaml \
+            config --quiet
           release_manifest="${RUNNER_TEMP}/crab-http-server-release.json"
           release_manifest_generator=crates/crab-http-server/deploy/generate-release-manifest.sh
           source_sha=0123456789abcdef0123456789abcdef01234567
@@ -126,8 +130,11 @@ jobs:
           done
           bash -n \
             crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
+            crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-capacity-envelope.sh \
             crates/crab-http-server/deploy/helm/crab-http-server/qualification/verify-workload-identity.sh \
-            crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-workload-identity.sh
+            crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-workload-identity.sh \
+            crates/crab-http-server/tests/qualify_compose_cluster.sh
+          crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-capacity-envelope.sh
           crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-workload-identity.sh
           immutable_chart=oci://registry.example.com/charts/crab-http-server@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
           if CRAB_HTTP_SERVER_GIT_TOKEN=test-only \
@@ -194,14 +201,21 @@ jobs:
           docker run --rm --volume "$PWD:/src:ro" "$shellcheck_image" \
             /src/crates/crab-http-server/tests/qualify_abrupt_receive_crash.sh \
             /src/crates/crab-http-server/tests/qualify_backup_restore.sh \
+            /src/crates/crab-http-server/tests/hash_backup_restore_objects.sh \
             /src/crates/crab-http-server/deploy/generate-release-manifest.sh \
             /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
+            /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-capacity-envelope.sh \
             /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/verify-workload-identity.sh \
             /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-workload-identity.sh \
             /src/crates/crab-http-server/tests/qualify_lfs_locking.sh \
-            /src/crates/crab-http-server/tests/qualify_lfs_range_resume.sh
+            /src/crates/crab-http-server/tests/qualify_lfs_range_resume.sh \
+            /src/crates/crab-http-server/tests/qualify_compose_cluster.sh
           docker run --rm \
             --volume "$PWD/crates/crab-http-server/deploy/compose.Caddyfile:/etc/caddy/Caddyfile:ro" \
+            caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d \
+            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          docker run --rm \
+            --volume "$PWD/crates/crab-http-server/deploy/compose.cluster.Caddyfile:/etc/caddy/Caddyfile:ro" \
             caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d \
             caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
@@ -278,6 +292,8 @@ jobs:
             grep -F 'name: cell-release-bootstrap' "${rendered}"
             grep -F -- '- bootstrap' "${rendered}"
             grep -F -- '- --peer-advertise-host' "${rendered}"
+            # This is the literal Kubernetes env expansion, not a shell substitution.
+            # shellcheck disable=SC2016
             grep -F -- '- $(CRAB_POD_IP)' "${rendered}"
             grep -F -- 'mountPath: /var/lib/crab' "${rendered}"
             grep -F -- 'path: peer/tls.crt' "${rendered}"
@@ -340,6 +356,10 @@ jobs:
           tar -tzf "$chart_archive" \
             | grep -F 'crab-http-server/qualification/test-workload-identity.sh'
           tar -tzf "$chart_archive" \
+            | grep -F 'crab-http-server/qualification/test-capacity-envelope.sh'
+          tar -tzf "$chart_archive" \
+            | grep -F 'crab-http-server/qualification/validate-capacity-envelope.jq'
+          tar -tzf "$chart_archive" \
             | grep -F 'crab-http-server/qualification/rbac.example.yaml'
 
           profile_values=(
@@ -383,12 +403,16 @@ jobs:
               --namespace crab "${profile_values[@]}" \
               --show-only templates/podmonitor.yaml \
               --set metrics.podMonitor.enabled=true \
+              --set metrics.podMonitor.existingSecret=crab-http-server-metrics \
               --set-json 'metrics.podMonitor.labels={"prometheus":"platform"}' \
               --set-json 'networkPolicy.metricsIngressFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}}}]' \
               > "${monitor_resource}"
           grep -F 'kind: PodMonitor' "${monitor_resource}"
           grep -F 'port: management' "${monitor_resource}"
           grep -F 'path: /metrics' "${monitor_resource}"
+          grep -F 'scheme: https' "${monitor_resource}"
+          grep -F 'name: crab-http-server-metrics' "${monitor_resource}"
+          grep -F 'serverName: "crab-http-server-peer"' "${monitor_resource}"
           grep -F 'prometheus: platform' "${monitor_resource}"
 
           rules_resource="${RUNNER_TEMP}/crab-http-server-prometheus-rule.yaml"
@@ -398,6 +422,7 @@ jobs:
               --namespace crab "${profile_values[@]}" \
               --show-only templates/prometheusrule.yaml \
               --set metrics.podMonitor.enabled=true \
+              --set metrics.podMonitor.existingSecret=crab-http-server-metrics \
               --set metrics.prometheusRule.enabled=true \
               --set-json 'networkPolicy.metricsIngressFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}}}]' \
               > "${rules_resource}"
@@ -509,13 +534,33 @@ jobs:
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
-              --set metrics.podMonitor.enabled=true >/dev/null 2>&1; then
+              --set metrics.podMonitor.enabled=true \
+              --set metrics.podMonitor.existingSecret=crab-http-server-metrics \
+              >/dev/null 2>&1; then
             echo "chart accepted a metrics scraper without an allowed source" >&2
             exit 1
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set metrics.podMonitor.enabled=true \
+              --set-json 'networkPolicy.metricsIngressFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}}}]' \
+              >/dev/null 2>&1; then
+            echo "chart accepted a metrics scraper without a client Secret" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
+              --set metrics.podMonitor.enabled=true \
+              --set metrics.podMonitor.existingSecret=crab-http-server-peer \
+              --set-json 'networkPolicy.metricsIngressFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}}}]' \
+              >/dev/null 2>&1; then
+            echo "chart accepted the Cell peer identity as its metrics client" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
+              --set metrics.podMonitor.enabled=true \
+              --set metrics.podMonitor.existingSecret=crab-http-server-metrics \
               --set-json 'networkPolicy.metricsIngressFrom=[{"ipBlock":{"cidr":"::/0"}}]' \
               >/dev/null 2>&1; then
             echo "chart accepted unrestricted IPv6 metrics ingress" >&2
@@ -530,6 +575,7 @@ jobs:
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set metrics.podMonitor.enabled=true \
+              --set metrics.podMonitor.existingSecret=crab-http-server-metrics \
               --set metrics.prometheusRule.enabled=true \
               --set-json 'metrics.prometheusRule.labels={"app.kubernetes.io/name":"other"}' \
               --set-json 'networkPolicy.metricsIngressFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}}}]' \
@@ -540,6 +586,7 @@ jobs:
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set metrics.podMonitor.enabled=true \
+              --set metrics.podMonitor.existingSecret=crab-http-server-metrics \
               --set-json 'metrics.podMonitor.labels={"app.kubernetes.io/name":"other"}' \
               --set-json 'networkPolicy.metricsIngressFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}}}]' \
               >/dev/null 2>&1; then
@@ -755,3 +802,28 @@ jobs:
           jq --exit-status \
             '.repositories | map(select(.owner == "demo" and .name == "hello")) | length == 1' \
             "${RUNNER_TEMP}/crab-http-server-repositories.json"
+
+          CRAB_HTTP_SERVER_IMAGE=crab-http-server:test \
+            CRAB_HTTP_CLUSTER_BUILD=false \
+            crates/crab-http-server/tests/qualify_compose_cluster.sh \
+            > "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json"
+          jq --exit-status \
+            '.version == 2 and
+             .owner_loss.session_before != .owner_loss.session_after and
+             .owner_loss.epoch_after > .owner_loss.epoch_before and
+             (.owner_loss.root_before | keys | sort) ==
+               ["checksum", "commit_sequence", "digest", "txid"] and
+             (.owner_loss.root_before.digest | test("^[0-9a-f]{64}$")) and
+             .owner_loss.root_before.txid > 0 and
+             (.owner_loss.root_before.checksum | type) == "number" and
+             .owner_loss.root_before.commit_sequence > 0 and
+             .owner_loss.root_after_restore == .owner_loss.root_before and
+             (.owner_loss.root_continued | keys | sort) ==
+               ["checksum", "commit_sequence", "digest", "txid"] and
+             (.owner_loss.root_continued.digest | test("^[0-9a-f]{64}$")) and
+             (.owner_loss.root_continued.checksum | type) == "number" and
+             .owner_loss.root_continued.digest != .owner_loss.root_before.digest and
+             .owner_loss.root_continued.txid > .owner_loss.root_before.txid and
+             .owner_loss.root_continued.commit_sequence >
+               .owner_loss.root_before.commit_sequence' \
+            "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json"

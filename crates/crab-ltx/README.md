@@ -152,11 +152,17 @@ compact v1 and references at most 64 pages of 96 segment descriptors. Its binary
 `CRBDIR01` radix tree has 256-entry leaves/branches, hashes every node and binds
 the live-page count and rolling SQLite checksum. Cold open reads bounded root
 metadata and one directory root; page bodies and descendant directory nodes fault
-on demand. Writable activation walks the authenticated directory once and streams
+on demand. Local WAL capture sends one page at a time through its compressor,
+spools the codec page index, syncs and atomically renames the cut, then validates
+its format and BLAKE3 through bounded filesystem reads. Explicit snapshots use
+the same page pipeline and a synced same-directory scratch file, then install
+without replacing an existing destination. Writable activation
+walks the authenticated directory once and streams
 one big-endian eight-byte checksum per database page to a fresh local sidecar in
 64 KiB chunks. Capture clones only its pending overlay, updates the rolling
 checksum from changed pages and a truncated suffix, then applies positional
-sidecar writes only after the matching LTX cut is synced and renamed. A sidecar
+sidecar writes only after the matching LTX cut is synced and renamed. Removed
+checksum suffixes are reduced through fixed 64 KiB reads. A sidecar
 write or sync failure fences the session. Incremental preparation copy-on-writes only
 changed leaves and ancestors, prunes truncated subtrees by their authenticated
 ranges and reuses every untouched digest; it does not fetch historical indexes or

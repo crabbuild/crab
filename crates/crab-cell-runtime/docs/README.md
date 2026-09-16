@@ -177,6 +177,7 @@ This rule removes compatibility branches from product code. It does not permit d
 | Task | Read |
 | --- | --- |
 | Understand the actor, publication, timeout, or takeover path | [Runtime execution](runtime.md) |
+| Design follower durability, response gating, and warm failover | [Follower durability and warm failover](failover-and-followers.md) |
 | Inspect persistent identities, paths, control JSON, or LTX roots | [Storage and recovery](storage.md) |
 | Implement SQL, KV, Queue, Workflow, or effects | [Primitive contracts](primitives.md) |
 | Add a native product feature | [Rust programming model](rust-api.md) |

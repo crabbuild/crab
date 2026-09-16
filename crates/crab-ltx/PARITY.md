@@ -91,6 +91,12 @@ response gate are outside its LTX crate and outside this change. Crab's combined
 HTTP owner/head CAS still requires server implementation. A library epoch-head
 receipt is not a lease and cannot authorize a successful HTTP response.
 
+The low-level target for closing that surrounding service gap is
+[Follower durability and warm failover](../crab-cell-runtime/docs/failover-and-followers.md).
+It keeps node selection, leases, response gating, and recovery coordination in
+`crab-cell-runtime`, while adding only verified node-frame and recovery-overlay
+mechanics to `crab-ltx`.
+
 ## Format and qualification
 
 The unreleased manifest schema hard-cuts from V1 to V2. New fields identify each

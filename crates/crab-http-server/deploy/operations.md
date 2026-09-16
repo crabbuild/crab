@@ -18,12 +18,12 @@ flowchart TB
     Auth[.crab/http-server/v1/auth/]
     Repositories[Cataloged repository prefixes]
     Git[Git, refs, packs, manifests, LFS]
-    App[app/v1 issues, pulls, releases, settings]
+    Cells[cells/v1 SQLite roots and LTX objects]
     Root --> Catalog
     Root --> Auth
     Root --> Repositories
     Repositories --> Git
-    Repositories --> App
+    Repositories --> Cells
     Pod[Pod scratch] -. disposable .-> Repositories
 ```
 
@@ -159,6 +159,9 @@ kubectl --namespace crab logs deployment/crab-http-server \
   --all-pods=true --since=10m
 kubectl --namespace crab exec deployment/crab-http-server -- \
   crab-http-server --config /etc/crab/http-server/server.toml repository list
+kubectl --namespace crab exec deployment/crab-http-server -- \
+  crab-http-server --config /etc/crab/http-server/server.toml \
+  cells capacity --json --live
 helm test crab-http-server --namespace crab --logs --timeout 3m
 ```
 
@@ -211,17 +214,28 @@ Monitor these platform and application signals:
 | `crab_http_server_catalog_refresh_failures_total` | The counter increases |
 | `crab_http_server_receive_workers` | Workers remain after request traffic settles |
 | `crab_http_server_draining` | A pod reports `1` outside a planned rollout |
+| `crab_http_server_cell_runtime_active_cells` | Usage approaches the resource-derived active-Cell capacity |
+| `crab_http_server_cell_runtime_retained_bytes` | Node-wide retained work approaches its byte capacity |
+| `crab_http_server_cell_runtime_local_disk_reserved_bytes` | Replica reservations approach the shared local-disk capacity |
 | `repository catalog refresh failed` | Running pods stop discovering catalog changes |
 | Publication or LFS transfer failures | A write may need client retry or operator outcome inspection |
 | LFS lock conflicts | Inspect the lock owner and ID; use force unlock only after confirming the holder no longer owns the edit |
 
-Scrape `GET /metrics` on each pod's private management port. The chart can add
-a Prometheus Operator `PodMonitor` and a management-port NetworkPolicy rule for
-an explicit monitoring source. Keep port 8789 absent from public Services and
-ingress. Alert thresholds need a workload baseline; start with catalog health,
+Scrape `GET /metrics` on each pod's private management port over mTLS. The
+chart can add a Prometheus Operator `PodMonitor`, an independent monitoring
+client Secret, and a management-port NetworkPolicy rule for an explicit
+monitoring source. Never reuse the Cell peer Secret for monitoring. Keep port
+8789 absent from public Services and ingress. Alert thresholds need a workload baseline; start with catalog health,
 new catalog-refresh failures, sustained zero local admission permits, repeated
 deployment-wide admission rejections, response-body errors, and unexpected
 drain state.
+
+Before a capacity qualification run, save `cells capacity --json --live` and
+`cells metrics` from every pod. They record the running server's startup memory, disk, descriptor and CPU inputs and
+the resulting active-Cell, retained-byte, blocking-job, dirty-job, recovery-job
+and scratch budgets. Treat it as admission evidence only: latency, throughput,
+RSS, descriptors, local bytes and object-store cost still require a measured
+workload receipt.
 
 ## Roll back a failed release
 
@@ -414,6 +428,29 @@ Crab has no point-in-time restore coordinator. Provider tooling must produce a
 consistent full-prefix view, select the intended object versions, and retain
 provider metadata. A live restore drill must still prove RPO, RTO, shared OIDC
 state, and regional recovery for your workload.
+
+## Reclaim Cell immutable objects
+
+Run retention only through maintenance activation. First create and verify a
+backup pin, record the prepared release revision, and stop normal serving:
+
+```bash
+crab-http-server --config /secure/server.toml cells release activate \
+  --expected-revision 8 --strategy maintenance \
+  --retention-grace-hours 168 --retention-max-deletes 10000
+```
+
+The executor waits for serving nodes and in-flight backup creators to withdraw.
+It then verifies current controls and every retained pin before deletion. Keep
+provider versioning enabled: collection removes current object versions and the
+provider's noncurrent-version policy remains the recovery boundary.
+
+Retain the structured `completed offline Cell retention pass` event with its
+listed, reachable, eligible, grace, deleted, and complete fields. If the command
+reports that the deletion limit was reached, do not start the fleet. Repeat the
+same command and expected revision until activation returns a `Ready` release.
+An owner-present error, missing digest, corrupt graph, listing failure, or
+unknown release change is a failed maintenance pass and requires investigation.
 
 ## Qualify a release
 

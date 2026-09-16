@@ -11,7 +11,7 @@ pub struct CellStorageLayout {
 }
 
 /// Immutable object kinds accepted below one Cell incarnation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CellObjectKind {
     Ltx,
     Index,
@@ -76,6 +76,16 @@ impl CellStorageLayout {
     }
 
     #[must_use]
+    pub fn application_prefix(&self) -> Path {
+        self.application_path("")
+    }
+
+    #[must_use]
+    pub fn pin_prefix(&self) -> Path {
+        self.application_path("pins")
+    }
+
+    #[must_use]
     pub fn release_descriptor_path(&self, digest: &[u8; 32]) -> Path {
         self.application_path(&format!("releases/{}.json", hex(digest)))
     }
@@ -115,6 +125,11 @@ impl CellStorageLayout {
     #[must_use]
     pub fn pin_path(&self, pin: &[u8; 16]) -> Path {
         self.application_path(&format!("pins/{}.json", hex(pin)))
+    }
+
+    #[must_use]
+    pub fn pin_object_path(&self, digest: &[u8; 32]) -> Path {
+        self.application_path(&format!("pins/objects/{}.json", hex(digest)))
     }
 
     #[must_use]
@@ -195,6 +210,18 @@ mod tests {
                 .incarnation_object_path(&[0xcd; 32], &[0xef; 16], &[1; 32], CellObjectKind::Root,)
                 .as_ref(),
             "tenant-root/cells/v1/apps/abababababababababababababababab/cells/cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd/inc/efefefefefefefefefefefefefefefef/objects/0101010101010101010101010101010101010101010101010101010101010101.root"
+        );
+        assert_eq!(
+            layout.pin_object_path(&[2; 32]).as_ref(),
+            "tenant-root/cells/v1/apps/abababababababababababababababab/pins/objects/0202020202020202020202020202020202020202020202020202020202020202.json"
+        );
+        assert_eq!(
+            layout.application_prefix().as_ref(),
+            "tenant-root/cells/v1/apps/abababababababababababababababab"
+        );
+        assert_eq!(
+            layout.pin_prefix().as_ref(),
+            "tenant-root/cells/v1/apps/abababababababababababababababab/pins"
         );
     }
 

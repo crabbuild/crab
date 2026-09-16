@@ -1,0 +1,81 @@
+x-cluster-storage-environment: &cluster-storage-environment
+  AWS_ACCESS_KEY_ID: crab-local-access
+  AWS_SECRET_ACCESS_KEY: crab-local-secret-key
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_ENDPOINT_URL_S3: http://rustfs:9000
+  AWS_ALLOW_HTTP: "true"
+  AWS_VIRTUAL_HOSTED_STYLE_REQUEST: "false"
+  AWS_EC2_METADATA_DISABLED: "true"
+  AWS_CLI_AUTO_PROMPT: "off"
+  AWS_PAGER: ""
+
+x-cluster-server: &cluster-server
+  image: ${CRAB_HTTP_SERVER_IMAGE:-crab-http-server:local}
+  environment: *cluster-storage-environment
+  network_mode: service:server
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /var/lib/crab/tmp:rw,noexec,nosuid,nodev,size=${CRAB_TMP_SIZE:-2g},uid=10001,gid=10001,mode=0700
+    - /var/lib/crab/cells:rw,noexec,nosuid,nodev,size=${CRAB_CELL_SIZE:-32g},uid=10001,gid=10001,mode=0700
+  depends_on:
+    repository-init:
+      condition: service_completed_successfully
+    peer-pki-init:
+      condition: service_completed_successfully
+  stop_grace_period: 10m
+  restart: "no"
+
+services:
+  server:
+    ports:
+      - 127.0.0.1:${CRAB_HTTP_CLUSTER_PORT:-18880}:8090
+      - 127.0.0.1:${CRAB_HTTP_NODE_A_PORT:-18881}:8091
+      - 127.0.0.1:${CRAB_HTTP_NODE_B_PORT:-18882}:8092
+      - 127.0.0.1:${CRAB_HTTP_NODE_C_PORT:-18883}:8093
+
+  server-b:
+    <<: *cluster-server
+    volumes:
+      - ./compose.node-b.toml:/etc/crab/server.toml:ro
+      - peer-identity:/run/secrets/crab-peer:ro
+
+  server-c:
+    <<: *cluster-server
+    volumes:
+      - ./compose.node-c.toml:/etc/crab/server.toml:ro
+      - peer-identity:/run/secrets/crab-peer:ro
+
+  cluster-proxy:
+    image: ${CADDY_IMAGE:-caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d}
+    network_mode: service:server
+    user: "65534:65534"
+    volumes:
+      - ./compose.cluster.Caddyfile:/etc/caddy/Caddyfile:ro
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /config:rw,noexec,nosuid,nodev,size=8m,uid=65534,gid=65534,mode=0700
+      - /data:rw,noexec,nosuid,nodev,size=8m,uid=65534,gid=65534,mode=0700
+    depends_on:
+      server:
+        condition: service_healthy
+      server-b:
+        condition: service_healthy
+      server-c:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8090/livez"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
+    restart: "no"

@@ -76,6 +76,14 @@ impl SegmentInfo {
     }
 
     pub(crate) fn from_decoded(bytes: &[u8], file: &crate::ltx::DecodedFile) -> Self {
+        Self::from_inspected(file, bytes.len() as u64, *blake3::hash(bytes).as_bytes())
+    }
+
+    pub(crate) fn from_inspected(
+        file: &crate::ltx::DecodedFile,
+        size_bytes: u64,
+        blake3: [u8; 32],
+    ) -> Self {
         Self {
             min_txid: file.header.min_txid.0,
             max_txid: file.header.max_txid.0,
@@ -83,8 +91,8 @@ impl SegmentInfo {
             database_pages: file.header.commit,
             pre_checksum: file.header.pre_apply_checksum,
             post_checksum: file.trailer.post_apply_checksum,
-            size_bytes: bytes.len() as u64,
-            blake3: *blake3::hash(bytes).as_bytes(),
+            size_bytes,
+            blake3,
         }
     }
 }

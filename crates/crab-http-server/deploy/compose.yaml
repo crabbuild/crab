@@ -184,7 +184,7 @@ services:
       server:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8080/api/repos"]
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8080/livez"]
       interval: 2s
       timeout: 2s
       retries: 15

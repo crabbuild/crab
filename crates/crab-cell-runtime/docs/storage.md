@@ -10,6 +10,11 @@ Cell storage separates one mutable authority record from immutable SQLite histor
 
 [Back to the Cell runtime index](README.md)
 
+This page describes the implemented `cells/v1` object-store contract. The
+in-place session-record evolution and control-pinned recovery overlay needed
+before follower fsync may release a response are specified in
+[Follower durability and warm failover](failover-and-followers.md).
+
 ## Derive stable identities
 
 Tenant, application, namespace, session, incarnation, and request IDs are 16 bytes. Cell IDs and BLAKE3 digests are 32 bytes.
@@ -48,6 +53,7 @@ cells/v1/apps/<app>/catalog/objects/<digest>.json
 cells/v1/apps/<app>/cells/<cell>/control.json
 cells/v1/apps/<app>/cells/<cell>/inc/<inc>/objects/<digest>.<kind>
 cells/v1/apps/<app>/pins/<pin-id>.json
+cells/v1/apps/<app>/pins/objects/<digest>.json
 cells/v1/nodes/<session>.json
 ```
 
@@ -227,6 +233,104 @@ An entry stores:
 The per-shard ceiling is 65,536 entries. Provisioning uploads the immutable catalog page and CASes its head before creating `control.json`. A crash may leave an unused catalog entry, but never an unproven mutable Cell.
 
 `CellAuthority::create_initial` requires a verified `CatalogProof`. Readers recompute every Cell ID and enforce ordering across page boundaries.
+
+## Pin one exact application backup boundary
+
+A backup pin is an immutable application-wide recovery root. Creation observes
+all 256 catalog heads before traversing their pages, then binds the exact set of
+cataloged Cells to one canonical control per Cell.
+
+```mermaid
+flowchart LR
+    Pin[Pin pointer]
+    Release[Release snapshot]
+    Shards[Catalog shard manifests]
+    Controls[Canonical controls]
+    Roots[Verified LTX graphs]
+
+    Pin --> Release
+    Pin --> Shards
+    Shards --> Controls
+    Controls --> Roots
+```
+
+The pin stores the application identity, creation time, all catalog revisions,
+the release-snapshot digest, control count, and nonempty shard manifests. The
+release snapshot contains the canonical release record and the exact descriptor
+digests selected by it. Control pages and manifests are content addressed under
+`pins/objects/`; the pin pointer is strict-created last.
+
+Creation and verification fail closed when:
+
+- a catalog page, release descriptor, control page, root object, LTX body,
+  index, bundle, or directory node is absent or has the wrong digest;
+- catalog membership and captured controls differ;
+- a control crosses its catalog shard or controls are not globally ordered;
+- the pin ID already identifies a different canonical body.
+
+Repeating creation with an existing pin ID reopens and verifies the existing
+boundary. Restore first verifies the full source pin, then copies immutable
+objects to another prefix in the same bucket with create-if-absent semantics.
+It independently verifies the destination graph before publishing unowned
+`Idle` controls, exact catalog heads, the ready release record, and finally the
+pin pointer.
+
+```mermaid
+flowchart LR
+    Verify[Verify source pin]
+    Copy[Conditionally copy immutable graph]
+    Recheck[Verify destination graph]
+    Authority[Create Idle controls and catalog heads]
+    Commit[Create release and pin pointers]
+
+    Verify --> Copy --> Recheck --> Authority --> Commit
+```
+
+This ordering makes an interrupted offline restore resumable and keeps stale
+source node sessions out of the new authority root. A destination that has
+divergent identity, controls, catalog heads, release selection, or immutable
+bytes fails closed. Cross-provider archive export remains a separate service
+operation.
+
+## Collect unreachable immutable objects behind maintenance
+
+Collection is an explicit maintenance activation, never a background request
+handler. The release first enters `Maintenance`, normal nodes drain, and one
+signed zero-capacity executor becomes the only NodeDirectory member. Backup
+creation also holds a zero-capacity advertisement for its complete operation,
+so maintenance either waits for an in-flight pin or fences a later creator at
+its second `Ready` check.
+
+```mermaid
+flowchart LR
+    Fence[Release = Maintenance]
+    Drain[Drain nodes and backup creators]
+    Mark[Verify and mark live roots]
+    List[Stream application objects]
+    Sweep[Delete old unreachable V1 objects]
+    Ready[Release = Ready]
+
+    Fence --> Drain --> Mark --> List --> Sweep --> Ready
+```
+
+The mark phase fails before deletion unless it can authenticate:
+
+- current and desired release descriptors;
+- every current catalog page and non-tombstoned control root;
+- every retained pin's release, catalog, control pages, and LTX graph; and
+- the absence of an owner on every current control.
+
+Reachable paths live in a temporary SQLite `WITHOUT ROWID` table on bounded
+local scratch storage. Remote inventory is consumed as a stream, and candidate
+lookups use batches of 256 paths. The collector deletes only recognized V1
+content-addressed release, catalog, pin, and Cell-incarnation object paths.
+Mutable authority and unknown future layouts are never candidates.
+
+Deletion also requires the provider object's modification time to be older than
+the configured grace. One pass deletes at most 100,000 objects; the server
+defaults to 10,000 when collection is requested. Reaching the selected bound
+leaves the release in `Maintenance`. Repeating the same activation resumes from
+a new verified mark scan, so writes never reopen between partial passes.
 
 ## Preserve storage verification invariants
 

@@ -89,6 +89,37 @@ impl CellAuthority {
         Ok(Some(VersionedControl { value, token }))
     }
 
+    pub(crate) async fn install_restored(&self, control: Control) -> Result<VersionedControl> {
+        if control.owner.is_some()
+            || !matches!(
+                control.state,
+                crate::ControlState::Idle | crate::ControlState::Tombstoned
+            )
+            || (control.state == crate::ControlState::Idle && control.root.is_none())
+        {
+            return Err(Error::Control("restored control is not safely unowned"));
+        }
+        let path = self.layout.control_path(control.cell.as_bytes());
+        match self
+            .layout
+            .store()
+            .create_strict_with_etag(&path, Bytes::from(control.encode()?))
+            .await
+        {
+            Ok(token) => Ok(VersionedControl {
+                value: control,
+                token,
+            }),
+            Err(create_error) => match self.load(control.cell).await? {
+                Some(current) if current.value == control => Ok(current),
+                Some(_) => Err(Error::Control(
+                    "restored control conflicts with existing authority",
+                )),
+                None => Err(create_error.into()),
+            },
+        }
+    }
+
     /// Applies one complete successor with the exact observed ETag.
     ///
     /// A storage conflict is returned to the coordinator for reload and full

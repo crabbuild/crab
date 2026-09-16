@@ -21,6 +21,7 @@ rusqlite = { workspace = true, features = ["hooks"] }
 rand = "0.9"
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 
@@ -29,5 +30,5 @@ prost-build = "0.13"
 protoc-bin-vendored = "3"
 
 [dev-dependencies]
-tempfile.workspace = true
+async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

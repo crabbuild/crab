@@ -26,6 +26,7 @@ use crab_remote_git::{
     OperationLimits, RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
 };
 use crab_storage::{StorageError, Store, StoreLayout};
+use serde::Serialize;
 use serde_json::json;
 use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
@@ -54,7 +55,8 @@ const MIN_CELL_MEMORY_BYTES: u64 = 2 * GIB;
 const MIN_USABLE_CELL_DISK_BYTES: u64 = 20 * GIB;
 const FILE_DESCRIPTOR_RESERVE_MINIMUM: usize = 128;
 const DIRTY_JOB_MEMORY_BYTES: u64 = 64 * MIB;
-const MAX_REPLICA_JOBS: usize = 16;
+const MAX_BLOCKING_JOBS: usize = 16;
+const MAX_RECOVERY_JOBS: usize = 2;
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(110);
 const RELEASE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -62,10 +64,49 @@ const RELEASE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) struct CellRuntimeBudget {
     node_retained_bytes: usize,
     max_active_cells: usize,
-    replica_jobs: usize,
+    blocking_jobs: usize,
+    dirty_jobs: usize,
+    recovery_jobs: usize,
     scratch_mebibytes: usize,
     local_disk_mebibytes: usize,
     disk_reserve_bytes: u64,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct CellCapacityReport {
+    version: u32,
+    resources: CellCapacityResources,
+    admission: CellCapacityAdmission,
+    reservations: CellCapacityReservations,
+}
+
+#[derive(Clone, Serialize)]
+struct CellCapacityResources {
+    memory_bytes: u64,
+    free_disk_bytes: u64,
+    available_file_descriptors: usize,
+    job_credits: usize,
+}
+
+#[derive(Clone, Serialize)]
+struct CellCapacityAdmission {
+    active_cells: usize,
+    retained_bytes: usize,
+    blocking_jobs: usize,
+    dirty_jobs: usize,
+    recovery_jobs: usize,
+    scratch_bytes: u64,
+    local_disk_bytes: u64,
+    disk_reserve_bytes: u64,
+}
+
+#[derive(Clone, Serialize)]
+struct CellCapacityReservations {
+    active_cell_page_cache_bytes: u64,
+    active_cell_native_bytes: u64,
+    active_cell_file_descriptors: usize,
+    dirty_job_memory_bytes: u64,
+    maximum_recovery_jobs: usize,
 }
 
 impl CellRuntimeBudget {
@@ -107,16 +148,22 @@ impl CellRuntimeBudget {
         let mailbox = usize::try_from(cell_memory / 20)
             .unwrap_or(usize::MAX)
             .min(tokio::sync::Semaphore::MAX_PERMITS);
+        let blocking_jobs = resources.job_credits.min(MAX_BLOCKING_JOBS);
+        if blocking_jobs == 0 {
+            return Err(crate::Error::Config(
+                "Cell runtime has no blocking job capacity",
+            ));
+        }
         let dirty_memory = cell_memory.saturating_mul(25) / 100;
-        let replica_jobs = usize::try_from(dirty_memory / DIRTY_JOB_MEMORY_BYTES)
+        let dirty_jobs = usize::try_from(dirty_memory / DIRTY_JOB_MEMORY_BYTES)
             .unwrap_or(usize::MAX)
-            .min(resources.job_credits)
-            .min(MAX_REPLICA_JOBS);
-        if replica_jobs == 0 {
+            .min(blocking_jobs);
+        if dirty_jobs == 0 {
             return Err(crate::Error::Config(
                 "Cell runtime has no capture and recovery job capacity",
             ));
         }
+        let recovery_jobs = dirty_jobs.min(MAX_RECOVERY_JOBS);
         let scratch_mebibytes = usize::try_from(usable_disk / 3 / MIB)
             .unwrap_or(usize::MAX)
             .min(u32::MAX as usize)
@@ -138,7 +185,9 @@ impl CellRuntimeBudget {
         Ok(Self {
             node_retained_bytes: mailbox,
             max_active_cells,
-            replica_jobs,
+            blocking_jobs,
+            dirty_jobs,
+            recovery_jobs,
             scratch_mebibytes,
             local_disk_mebibytes,
             disk_reserve_bytes: disk_reserve,
@@ -160,13 +209,67 @@ impl CellRuntimeBudget {
             reserve_bytes: self.disk_reserve_bytes,
         });
         ReplicaHost::default()
-            .with_job_slots(Arc::new(Semaphore::new(self.replica_jobs)))
-            .with_recovery_slots(Arc::new(Semaphore::new(self.replica_jobs)))
-            .with_dirty_slots(Arc::new(Semaphore::new(self.replica_jobs)))
+            .with_job_slots(Arc::new(Semaphore::new(self.blocking_jobs)))
+            .with_recovery_slots(Arc::new(Semaphore::new(self.recovery_jobs)))
+            .with_dirty_slots(Arc::new(Semaphore::new(self.dirty_jobs)))
             .with_scratch_slots(Arc::new(Semaphore::new(self.scratch_mebibytes)))
             .with_scratch_monitor(scratch_monitor)
             .with_local_disk_budget(local_disk)
     }
+}
+
+impl CellCapacityReport {
+    fn new(resources: crate::peer::LocalResources, budget: CellRuntimeBudget) -> Self {
+        Self {
+            version: 1,
+            resources: CellCapacityResources {
+                memory_bytes: resources.memory_bytes,
+                free_disk_bytes: resources.free_disk_bytes,
+                available_file_descriptors: resources.available_file_descriptors,
+                job_credits: resources.job_credits,
+            },
+            admission: CellCapacityAdmission {
+                active_cells: budget.max_active_cells,
+                retained_bytes: budget.node_retained_bytes,
+                blocking_jobs: budget.blocking_jobs,
+                dirty_jobs: budget.dirty_jobs,
+                recovery_jobs: budget.recovery_jobs,
+                scratch_bytes: budget.scratch_mebibytes as u64 * MIB,
+                local_disk_bytes: budget.local_disk_mebibytes as u64 * MIB,
+                disk_reserve_bytes: budget.disk_reserve_bytes,
+            },
+            reservations: CellCapacityReservations {
+                active_cell_page_cache_bytes: ACTIVE_CELL_PAGE_CACHE_BYTES,
+                active_cell_native_bytes: ACTIVE_CELL_NATIVE_BYTES,
+                active_cell_file_descriptors: ACTIVE_CELL_FILE_DESCRIPTORS,
+                dirty_job_memory_bytes: DIRTY_JOB_MEMORY_BYTES,
+                maximum_recovery_jobs: MAX_RECOVERY_JOBS,
+            },
+        }
+    }
+}
+
+pub(crate) fn cell_capacity_report(data_dir: &std::path::Path) -> Result<Vec<u8>> {
+    encode_cell_capacity_report(crate::peer::local_resources(data_dir)?)
+}
+
+fn encode_cell_capacity_report(resources: crate::peer::LocalResources) -> Result<Vec<u8>> {
+    let budget = CellRuntimeBudget::from_resources(resources)?;
+    Ok(serde_json::to_vec_pretty(&CellCapacityReport::new(
+        resources, budget,
+    ))?)
+}
+
+#[cfg(test)]
+pub(crate) fn test_cell_capacity_report() -> CellCapacityReport {
+    let resources = crate::peer::LocalResources {
+        memory_bytes: 2 * GIB,
+        free_disk_bytes: 30 * GIB,
+        available_file_descriptors: 10_000,
+        job_credits: 2,
+    };
+    let budget = CellRuntimeBudget::from_resources(resources).unwrap();
+    CellCapacityReport::new(resources, budget)
 }
 
 struct ActualScratchMonitor {
@@ -549,6 +652,7 @@ pub(crate) struct Server {
     catalog_healthy: AtomicBool,
     pub(crate) node_healthy: AtomicBool,
     scheduler_status: crate::cells::SchedulerStatus,
+    cell_capacity: CellCapacityReport,
     metrics: crate::metrics::Metrics,
 }
 
@@ -663,7 +767,9 @@ pub async fn serve(config: Config) -> Result<()> {
         scheduler_status.clone(),
     )?;
     let session_dir = node_publisher.session_dir();
-    let cell_budget = CellRuntimeBudget::from_resources(node_publisher.local_resources()?)?;
+    let local_resources = node_publisher.local_resources()?;
+    let cell_budget = CellRuntimeBudget::from_resources(local_resources)?;
+    let cell_capacity = CellCapacityReport::new(local_resources, cell_budget);
     let local_disk = cell_budget.local_disk();
     let local_staging = crate::local_disk::LocalStaging::new(
         session_dir.join("transfers"),
@@ -759,6 +865,7 @@ pub async fn serve(config: Config) -> Result<()> {
         catalog_healthy: AtomicBool::new(true),
         node_healthy: AtomicBool::new(true),
         scheduler_status,
+        cell_capacity,
         metrics,
     });
     let app = router(Arc::clone(&server));
@@ -1073,6 +1180,7 @@ fn management_router(server: Arc<Server>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/readyz", get(readiness))
+        .route("/capacity", get(render_capacity))
         .route("/metrics", get(render_metrics))
         .route(
             "/internal/cells/v1/forward",
@@ -1083,8 +1191,17 @@ fn management_router(server: Arc<Server>) -> Router {
         .with_state(server)
 }
 
+async fn render_capacity(State(server): State<Arc<Server>>) -> Response {
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(server.cell_capacity.clone()),
+    )
+        .into_response()
+}
+
 async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
     let scheduler_now_ms = crate::cells::unix_now_ms().unwrap_or(0);
+    let cell_runtime = server.cell_runtime.stats();
     let body = server.metrics.render(crate::metrics::RuntimeSnapshot {
         repositories: server.repositories.len(),
         catalog_healthy: server.catalog_healthy.load(Ordering::Acquire),
@@ -1093,6 +1210,12 @@ async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
         scheduler_lag_seconds: server.scheduler_status.lag_ms(scheduler_now_ms) as f64 / 1_000.0,
         draining: server.cancellation.is_cancelled(),
         receive_workers: server.receives.len(),
+        cell_active: cell_runtime.active_cells(),
+        cell_active_capacity: cell_runtime.active_cell_capacity(),
+        cell_retained_bytes: cell_runtime.retained_bytes(),
+        cell_retained_capacity_bytes: cell_runtime.retained_capacity_bytes(),
+        cell_local_disk_reserved_bytes: cell_runtime.local_disk_reserved_bytes(),
+        cell_local_disk_capacity_bytes: cell_runtime.local_disk_capacity_bytes(),
         admission_available: [
             server.admission.available_permits(),
             server.transfer_admission.available_permits(),
@@ -1437,12 +1560,30 @@ mod tests {
             CellRuntimeBudget {
                 node_retained_bytes: (3 * GIB / 2 / 20) as usize,
                 max_active_cells: 1_125,
-                replica_jobs: 6,
+                blocking_jobs: 16,
+                dirty_jobs: 6,
+                recovery_jobs: 2,
                 scratch_mebibytes: 6_826,
                 local_disk_mebibytes: 13_653,
                 disk_reserve_bytes: 10 * GIB,
             }
         );
+    }
+
+    #[test]
+    fn cell_capacity_report_exposes_measured_inputs_and_distinct_job_limits() {
+        let report =
+            encode_cell_capacity_report(local_resources(2 * GIB, 30 * GIB, 10_000)).unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&report).unwrap();
+
+        assert_eq!(report["version"], 1);
+        assert_eq!(report["resources"]["memory_bytes"], 2 * GIB);
+        assert_eq!(report["resources"]["free_disk_bytes"], 30 * GIB);
+        assert_eq!(report["admission"]["active_cells"], 1_125);
+        assert_eq!(report["admission"]["blocking_jobs"], 16);
+        assert_eq!(report["admission"]["dirty_jobs"], 6);
+        assert_eq!(report["admission"]["recovery_jobs"], 2);
+        assert_eq!(report["reservations"]["maximum_recovery_jobs"], 2);
     }
 
     #[test]
@@ -1506,7 +1647,9 @@ mod tests {
             CellRuntimeBudget::from_resources(local_resources(2 * GIB, 30 * GIB, 1_000_000))
                 .unwrap();
         assert_eq!(budget.max_active_cells, 2_457);
-        assert_eq!(budget.replica_jobs, 6);
+        assert_eq!(budget.blocking_jobs, 16);
+        assert_eq!(budget.dirty_jobs, 6);
+        assert_eq!(budget.recovery_jobs, 2);
         assert_eq!(budget.scratch_mebibytes, 6_826);
         assert_eq!(budget.local_disk_mebibytes, 13_653);
         assert_eq!(budget.disk_reserve_bytes, 10 * GIB);
@@ -1517,7 +1660,20 @@ mod tests {
         let mut resources = local_resources(64 * GIB, 1000 * GIB, 1_000_000);
         resources.job_credits = 2;
         let budget = CellRuntimeBudget::from_resources(resources).unwrap();
-        assert_eq!(budget.replica_jobs, 2);
+        assert_eq!(budget.blocking_jobs, 2);
+        assert_eq!(budget.dirty_jobs, 2);
+        assert_eq!(budget.recovery_jobs, 2);
+    }
+
+    #[test]
+    fn cell_runtime_budget_caps_recovery_below_other_replica_jobs() {
+        let budget =
+            CellRuntimeBudget::from_resources(local_resources(64 * GIB, 1000 * GIB, 1_000_000))
+                .unwrap();
+
+        assert_eq!(budget.blocking_jobs, 16);
+        assert_eq!(budget.dirty_jobs, 16);
+        assert_eq!(budget.recovery_jobs, 2);
     }
 
     #[test]
@@ -1650,6 +1806,7 @@ mod tests {
                 crate::cells::unix_now_ms().unwrap(),
             )
             .unwrap(),
+            cell_capacity: test_cell_capacity_report(),
             metrics: crate::metrics::Metrics::new().unwrap(),
         });
         let app = router(Arc::clone(&server));
@@ -1750,6 +1907,29 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), expected, "{path}");
         }
+        let response = management
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/capacity")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let report: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(report["version"], 1);
+        assert_eq!(report["admission"]["active_cells"], 1_125);
+        assert_eq!(report["admission"]["recovery_jobs"], 2);
         let response = management
             .oneshot(
                 Request::builder()

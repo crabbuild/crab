@@ -288,12 +288,25 @@ pub fn decode_file(bytes: &[u8]) -> Result<DecodedFile> {
     decode_file_inner(bytes, false).map(|(file, _)| file)
 }
 
+pub(crate) fn inspect_reader(reader: impl std::io::Read) -> Result<(DecodedFile, u64, [u8; 32])> {
+    let (file, _, size, digest) = decode_reader_inner(reader, false)?;
+    Ok((file, size, digest))
+}
+
 pub(crate) fn decode_file_with_pages(bytes: &[u8]) -> Result<(DecodedFile, DecodedPages)> {
     decode_file_inner(bytes, true)
 }
 
 fn decode_file_inner(bytes: &[u8], retain_pages: bool) -> Result<(DecodedFile, DecodedPages)> {
-    let mut decoder = crate::codec::Decoder::new(std::io::Cursor::new(bytes));
+    let (file, pages, _, _) = decode_reader_inner(std::io::Cursor::new(bytes), retain_pages)?;
+    Ok((file, pages))
+}
+
+fn decode_reader_inner(
+    reader: impl std::io::Read,
+    retain_pages: bool,
+) -> Result<(DecodedFile, DecodedPages, u64, [u8; 32])> {
+    let mut decoder = crate::codec::Decoder::new(reader);
     decoder.decode_header()?;
     let header = decoder.header;
     let mut pages = Vec::new();
@@ -306,41 +319,17 @@ fn decode_file_inner(bytes: &[u8], retain_pages: bool) -> Result<(DecodedFile, D
     }
     decoder.close()?;
 
+    let (size, digest) = decoder.artifact()?;
+
     Ok((
         DecodedFile {
             header,
             trailer: decoder.trailer,
         },
         pages,
+        size,
+        digest,
     ))
-}
-
-pub fn encode_file(
-    header: &Header,
-    pages: &[(u32, Vec<u8>)],
-    post_apply_checksum: Checksum,
-) -> Result<Vec<u8>> {
-    encode_file_inner(header, pages, post_apply_checksum)
-}
-
-fn encode_file_inner(
-    header: &Header,
-    pages: &[(u32, Vec<u8>)],
-    post_apply_checksum: Checksum,
-) -> Result<Vec<u8>> {
-    let mut encoder = crate::codec::Encoder::new_block(Vec::new());
-    encoder.encode_header(*header)?;
-    for (page_number, data) in pages {
-        encoder.encode_page(
-            PageHeader {
-                pgno: *page_number,
-                flags: 0,
-            },
-            data,
-        )?;
-    }
-    encoder.close(post_apply_checksum)?;
-    Ok(encoder.writer)
 }
 
 fn u16_be(b: &[u8]) -> u16 {

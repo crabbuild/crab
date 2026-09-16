@@ -9,6 +9,7 @@ mod activity_pool;
 mod actor;
 mod application;
 mod authority;
+mod backup;
 mod catalog;
 mod client;
 mod codec;
@@ -26,6 +27,7 @@ mod queue;
 mod registry;
 mod release;
 mod release_progress;
+mod retention;
 mod scheduler;
 mod schema;
 mod sql;
@@ -34,10 +36,12 @@ mod workflow;
 
 pub use activity_pool::{BlockingActivityPool, BlockingActivityReservation};
 pub use actor::{
-    ACTIVE_CELL_NATIVE_BYTES, CellHandle, CellRuntime, MigratedCell, NodeByteReservation,
+    ACTIVE_CELL_NATIVE_BYTES, CellHandle, CellRuntime, CellRuntimeStats, MigratedCell,
+    NodeByteReservation,
 };
 pub use application::{ApplicationIdentity, ApplicationIdentityStore};
 pub use authority::{CellAuthority, VersionedControl};
+pub use backup::{BackupPin, BackupPinStore, BackupRestore, PinnedCatalogShard};
 pub use catalog::{
     CatalogEntry, CatalogProof, CatalogRole, CatalogScanPage, CatalogShardScan, CellCatalog,
 };
@@ -106,6 +110,7 @@ pub use release_progress::{
     MigrationFailure, MigrationProgress, MigrationProgressAttempt, MigrationProgressState,
     MigrationProgressStore,
 };
+pub use retention::{CellGarbageCollector, GarbageCollectionPolicy, GarbageCollectionReport};
 pub use scheduler::{
     DueCell, DueCellScan, SchedulerFleet, SchedulerTickOutcome, preferred_scanner,
     scheduler_next_due_ms, scheduler_tick,

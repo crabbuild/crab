@@ -419,6 +419,71 @@ check_pod_health() {
   done < <(jq --raw-output '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name' "$pods_json")
 }
 
+metric_sample() {
+  local file="$1"
+  local name="$2"
+  awk -v name="$name" '
+    $1 == name {
+      count += 1
+      value = $2
+    }
+    END {
+      if (count != 1 || value !~ /^[0-9]+([.][0-9]+)?$/) {
+        exit 1
+      }
+      print value
+    }
+  ' "$file"
+}
+
+capture_capacity_envelopes() {
+  local phase="$1"
+  local output="$2"
+  local entries="${work_dir}/capacity-${phase}.jsonl"
+  local pod
+  local pod_uid
+  local report
+  local metrics_report
+  local metrics
+  : > "$entries"
+
+  while IFS=$'\t' read -r pod pod_uid; do
+    report="${work_dir}/capacity-${phase}-${pod}.json"
+    kubectl --namespace "$namespace" exec "$pod" -- \
+      crab-http-server --config /etc/crab/http-server/server.toml \
+        cells capacity --json --live > "$report"
+    metrics_report="${work_dir}/capacity-${phase}-${pod}.prom"
+    kubectl --namespace "$namespace" exec "$pod" -- \
+      crab-http-server --config /etc/crab/http-server/server.toml \
+        cells metrics > "$metrics_report"
+    metrics="$(jq --null-input --compact-output \
+      --argjson active_cells "$(metric_sample "$metrics_report" crab_http_server_cell_runtime_active_cells)" \
+      --argjson active_cell_capacity "$(metric_sample "$metrics_report" crab_http_server_cell_runtime_active_cell_capacity)" \
+      --argjson retained_bytes "$(metric_sample "$metrics_report" crab_http_server_cell_runtime_retained_bytes)" \
+      --argjson retained_capacity_bytes "$(metric_sample "$metrics_report" crab_http_server_cell_runtime_retained_capacity_bytes)" \
+      --argjson local_disk_reserved_bytes "$(metric_sample "$metrics_report" crab_http_server_cell_runtime_local_disk_reserved_bytes)" \
+      --argjson local_disk_capacity_bytes "$(metric_sample "$metrics_report" crab_http_server_cell_runtime_local_disk_capacity_bytes)" \
+      '{active_cells: $active_cells,
+        active_cell_capacity: $active_cell_capacity,
+        retained_bytes: $retained_bytes,
+        retained_capacity_bytes: $retained_capacity_bytes,
+        local_disk_reserved_bytes: $local_disk_reserved_bytes,
+        local_disk_capacity_bytes: $local_disk_capacity_bytes}')"
+    jq --compact-output \
+      --arg phase "$phase" --arg pod "$pod" --arg pod_uid "$pod_uid" \
+      --argjson metrics "$metrics" \
+      '{phase: $phase, pod: $pod, pod_uid: $pod_uid, envelope: ., metrics: $metrics}' \
+      "$report" >> "$entries"
+  done < <(jq --raw-output '
+    .items[] | select(.metadata.deletionTimestamp == null) |
+    [.metadata.name, .metadata.uid] | @tsv
+  ' "$pods_json")
+
+  jq --slurp . "$entries" > "$output"
+  jq --exit-status --arg phase "$phase" --from-file \
+    "$(dirname -- "$0")/validate-capacity-envelope.jq" "$output" >/dev/null
+}
+
 check_workload_identity() {
   workload_identity_mechanism="$(
     "$(dirname -- "$0")/verify-workload-identity.sh" \
@@ -513,6 +578,10 @@ check_placement
 check_workload_identity
 check_management_isolation
 check_pod_health
+capacity_before_traffic="${work_dir}/capacity-before-traffic.json"
+capacity_after_rollout="${work_dir}/capacity-after-rollout.json"
+capacity_after_owner_loss="${work_dir}/capacity-after-owner-loss.json"
+capture_capacity_envelopes before-traffic "$capacity_before_traffic"
 jq --raw-output '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.uid' \
   "$pods_json" | sort > "${work_dir}/old-uids"
 
@@ -728,6 +797,7 @@ load_ready_pods
 check_placement
 check_workload_identity
 check_pod_health
+capture_capacity_envelopes after-rollout "$capacity_after_rollout"
 jq --raw-output '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.uid' \
   "$pods_json" | sort > "${work_dir}/new-uids"
 test -z "$(comm -12 "${work_dir}/old-uids" "${work_dir}/new-uids")"
@@ -769,7 +839,7 @@ jq --exit-status '
 owner_endpoint="$(jq --raw-output '.owner.endpoint' "$control_before")"
 owner_session_before="$(jq --raw-output '.owner.session' "$control_before")"
 owner_epoch_before="$(jq --raw-output '.epoch' "$control_before")"
-owner_commit_sequence_before="$(jq --raw-output '.root.commit_sequence' "$control_before")"
+owner_root_before="$(jq --compact-output '.root' "$control_before")"
 owner_pod=""
 owner_pod_uid=""
 while IFS=$'\t' read -r pod ip uid; do
@@ -807,9 +877,31 @@ jq --exit-status --arg uid "$owner_pod_uid" '
   [.items[] | select(.metadata.deletionTimestamp == null) | .metadata.uid] |
   index($uid) == null
 ' "$pods_json" >/dev/null
+owner_advertisement_status="${work_dir}/owner-advertisement-expired.json"
+owner_advertisement_expired=false
+inspection_pod="$(jq --raw-output '
+  first(.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name)
+' "$pods_json")"
+for _attempt in $(seq 1 60); do
+  if kubectl --namespace "$namespace" exec "$inspection_pod" -- \
+      crab-http-server --config /etc/crab/http-server/server.toml \
+        cells node --session "$owner_session_before" --json \
+        > "$owner_advertisement_status" &&
+    jq --exit-status \
+      --arg session "$owner_session_before" '
+      .version == 1 and .session == $session and .live == false and
+      .observed_at_ms >= 0
+    ' "$owner_advertisement_status" >/dev/null; then
+    owner_advertisement_expired=true
+    break
+  fi
+  sleep 2
+done
+$owner_advertisement_expired
 check_placement
 check_workload_identity
 check_pod_health
+capture_capacity_envelopes after-owner-loss "$capacity_after_owner_loss"
 
 pods=()
 while IFS= read -r pod; do
@@ -842,10 +934,10 @@ kubectl --namespace "$namespace" exec "${pods[0]}" -- \
 jq --exit-status \
   --arg session "$owner_session_before" \
   --argjson epoch "$owner_epoch_before" \
-  --argjson sequence "$owner_commit_sequence_before" '
+  --argjson root "$owner_root_before" '
   .version == 1 and .state == "serving" and
   .owner.session != $session and .epoch > $epoch and
-  .root.commit_sequence >= $sequence
+  .root == $root
 ' "$control_after" >/dev/null
 
 continuation_context="crab/live-qualification-after-owner-loss"
@@ -876,10 +968,12 @@ kubectl --namespace "$namespace" exec "${pods[0]}" -- \
 jq --exit-status \
   --arg session "$(jq --raw-output '.owner.session' "$control_after")" \
   --argjson epoch "$(jq --raw-output '.epoch' "$control_after")" \
-  --argjson sequence "$(jq --raw-output '.root.commit_sequence' "$control_after")" '
+  --argjson root "$(jq --compact-output '.root' "$control_after")" '
   .version == 1 and .state == "serving" and
   .owner.session == $session and .epoch == $epoch and
-  .root.commit_sequence > $sequence
+  .root.digest != $root.digest and
+  .root.txid > $root.txid and
+  .root.commit_sequence > $root.commit_sequence
 ' "$control_final" >/dev/null
 
 git_public clone --branch "$branch" --single-branch \
@@ -912,13 +1006,13 @@ jq --null-input \
   --arg owner_pod_uid "$owner_pod_uid" \
   --arg owner_session_before "$owner_session_before" \
   --arg owner_session_after "$(jq --raw-output '.owner.session' "$control_after")" \
-  --arg root_digest_before "$(jq --raw-output '.root.digest' "$control_before")" \
-  --arg root_digest_after "$(jq --raw-output '.root.digest' "$control_after")" \
+  --argjson owner_advertisement_observed_at_ms \
+    "$(jq --raw-output '.observed_at_ms' "$owner_advertisement_status")" \
+  --argjson root_before "$owner_root_before" \
+  --argjson root_after "$(jq --compact-output '.root' "$control_after")" \
+  --argjson root_final "$(jq --compact-output '.root' "$control_final")" \
   --argjson owner_epoch_before "$owner_epoch_before" \
   --argjson owner_epoch_after "$(jq --raw-output '.epoch' "$control_after")" \
-  --argjson root_sequence_before "$owner_commit_sequence_before" \
-  --argjson root_sequence_after "$(jq --raw-output '.root.commit_sequence' "$control_after")" \
-  --argjson root_sequence_final "$(jq --raw-output '.root.commit_sequence' "$control_final")" \
   --argjson check_run_id "$check_run_id" \
   --arg completed_at "$completed_at" \
   --argjson rollout_probes "$probes" \
@@ -927,7 +1021,10 @@ jq --null-input \
   --argjson zone_count "$zone_count" \
   --argjson old_pod_uids "$old_uids" \
   --argjson new_pod_uids "$new_uids" \
-  '{schema: 5, provider: $provider, namespace: $namespace, deployment: $deployment,
+  --slurpfile capacity_before_traffic "$capacity_before_traffic" \
+  --slurpfile capacity_after_rollout "$capacity_after_rollout" \
+  --slurpfile capacity_after_owner_loss "$capacity_after_owner_loss" \
+  '{schema: 9, provider: $provider, namespace: $namespace, deployment: $deployment,
     origin: $origin, image: $image, chart: $chart,
     qualification_source: {release_tag: $release_tag, commit: $source_sha},
     workload_identity: {
@@ -942,16 +1039,21 @@ jq --null-input \
       deleted_pod_uid: $owner_pod_uid,
       session_before: $owner_session_before,
       session_after: $owner_session_after,
+      previous_advertisement_expired: true,
+      advertisement_observed_at_ms: $owner_advertisement_observed_at_ms,
       epoch_before: $owner_epoch_before,
       epoch_after: $owner_epoch_after,
-      root_digest_before: $root_digest_before,
-      root_digest_after: $root_digest_after,
-      root_sequence_before: $root_sequence_before,
-      root_sequence_after: $root_sequence_after,
-      root_sequence_final: $root_sequence_final
+      root_before: $root_before,
+      root_after: $root_after,
+      root_final: $root_final
     },
     replica_count: $replica_count, zone_count: $zone_count,
     old_pod_uids: $old_pod_uids, new_pod_uids: $new_pod_uids,
+    capacity: {
+      before_traffic: $capacity_before_traffic[0],
+      after_rollout: $capacity_after_rollout[0],
+      after_owner_loss: $capacity_after_owner_loss[0]
+    },
     rollout_probes: $rollout_probes,
     rollout_probe_failures: $rollout_probe_failures,
     checks: {
@@ -961,6 +1063,7 @@ jq --null-input \
       release_chart_version: true,
       workload_identity_only: true,
       management_network_isolation: true,
+      capacity_envelopes: true,
       cross_replica_git: true,
       cross_replica_lfs: true,
       durable_lfs_lock: true,
@@ -969,6 +1072,7 @@ jq --null-input \
       post_rollout_clone: true,
       post_rollout_cell_restore: true,
       abrupt_owner_loss: true,
+      owner_advertisement_expired: true,
       owner_loss_exact_root_restore: true,
       owner_loss_publication_continues: true
     },

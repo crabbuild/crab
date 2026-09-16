@@ -1817,7 +1817,8 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-storage",
             "crab-write",
             "crab-remote",
-        }
+        },
+        "dev": {"crab-ltx"},
     },
     "crab": {
         "normal": {

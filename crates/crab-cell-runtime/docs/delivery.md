@@ -28,7 +28,14 @@ Each layer has one owner and one primary evidence surface.
 | Effects and activities | `src/effects.rs`, `src/activity_pool.rs` | `tests/effects.rs`, workflow tests |
 | Scheduler | `src/scheduler.rs`, `src/maintenance.rs` | `tests/scheduler.rs` |
 | Release control | `src/release.rs`, `src/release_progress.rs` | release unit tests and server command tests |
+| Backup pins | `src/backup.rs`, `crab-ltx::CellReplica::reachable_objects` | runtime pin tests and server create/verify command tests |
+| Immutable retention | `src/retention.rs`, `crab-storage::Store::list_stream` | mark/sweep tests and server maintenance-fence tests |
 | Product composition | `crab-http-server/src/cells/` | server route, restore, and lifecycle tests |
+
+Celld-style follower durability is a target extension, not part of this
+implemented evidence map. Its phase gates and failure matrix live in
+[Follower durability and warm failover](failover-and-followers.md). Until those
+gates pass, only an exact object-store root publication can release a response.
 
 Use the map during review. A change to one boundary needs caller, callee, sibling, and source-loss evidence where applicable.
 
@@ -108,10 +115,19 @@ Required cases are:
 
 Mock-only tests do not satisfy source-loss or publication proof.
 
+`tests/publication.rs` injects the ambiguous publication window at the object
+store boundary: the backend accepts the control `Update`, then the decorator
+returns a connection-reset error. The publisher must reload the exact root,
+clear the retained cut, and return the recorded outcome without invoking the
+SQL handler again. This proves local reconciliation; the three-Pod gate must
+still inject the same lost response through the deployed network path.
+
 ## Prove storage and LTX behavior
 
 `crab-ltx` evidence must cover:
 
+- Managed capture and explicit snapshots stream pages to atomic local files,
+  then validate format and BLAKE3 without a database-sized resident buffer
 - Pending cuts stay owned until the exact root is confirmed
 - Destination capacity is reserved before full restore downloads
 - Sparse hydration verifies directory, frame, and page checksums
@@ -122,8 +138,22 @@ Mock-only tests do not satisfy source-loss or publication proof.
 - Compaction preserves transaction ID, checksum, sequence, and schema
 - Injected filesystem and executor failures clean owned scratch state
 - Cross-epoch continuation starts from the authoritative root
+- Backup pins bind release metadata, catalog revisions, exact controls, and every reachable immutable root dependency
+- Offline retention verifies current controls and every pin before deleting,
+  rejects owned controls, honors grace and deletion bounds, and preserves
+  unknown object layouts
+- Backup creation remains advertised from before its final `Ready` check until
+  its pin pointer is durable, so maintenance cannot miss an in-flight pin
 
 Repeat remote storage tests against real RustFS. In-memory object storage cannot prove provider ETag and streaming behavior.
+
+The server's real-RustFS backup smoke must create a pin, repeat creation with
+the same ID, verify it independently, remove one isolated test dependency and
+observe fail-closed verification, then republish that content-addressed
+dependency from a second pin. It must then restore the pin twice into a fresh
+prefix, observe identical summaries, inspect unowned `Idle` authority, and use
+a separate process configured only for the destination prefix to verify the
+complete graph with the pinned release.
 
 The ignored qualification tests require one fresh bucket and a unique Cell prefix:
 
@@ -139,6 +169,20 @@ CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX" \
 cargo test -p crab-cell-runtime --test actor \
   rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
   -- --ignored --exact
+
+CRAB_CELL_TEST_BUCKET="$BUCKET" \
+CRAB_CELL_TEST_ENDPOINT="$ENDPOINT" \
+CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX" \
+cargo test -p crab-cell-runtime --lib \
+  retention::tests::rustfs_maintenance_collection_preserves_live_and_pinned_graphs \
+  -- --ignored --exact
+
+CRAB_HTTP_CELL_TEST_BUCKET="$BUCKET" \
+CRAB_HTTP_CELL_TEST_ENDPOINT="$ENDPOINT" \
+CRAB_HTTP_CELL_TEST_PREFIX="$UNIQUE_PREFIX" \
+cargo test -p crab-http-server --lib \
+  server::peer_e2e_tests::rustfs_public_collaboration_reaches_remote_owner_and_publishes_ltx \
+  -- --ignored --exact --nocapture
 ```
 
 The Cell test publishes a command on one session, removes its local database,
@@ -146,19 +190,39 @@ takes over from a second session, resolves the original request from the exact
 root, and publishes the next sequence. CI runs both tests against a pinned
 RustFS image.
 
-The same CI job also runs `crab-http-server` through public HTTP, private mTLS
-forwarding to a remote owner, typed repository commands and LTX publication on
-that RustFS origin. It then stops the owner endpoint, withdraws its advertisement,
-publishes the authoritative fenced takeover, deletes the old local Cell directory,
-restores the exact root on the ingress runtime and publishes the next command.
-This combines the product network, source-loss and storage boundaries; it does
-not replace the three-Pod kill and partition matrix below.
+The same CI job also runs `crab-http-server` through public HTTP and private
+mTLS forwarding to a heartbeat-renewed remote owner. Native Git creates main
+and feature commits; public APIs then publish an issue, comment, label, status,
+check run, pull request and comment, release and Git tag, and branch protection
+through SQLite/LTX on that RustFS origin. The test stops the owner endpoint,
+withdraws its current advertisement, publishes the authoritative fenced
+takeover, deletes the old local Cell directory, and restores the exact root on
+the ingress runtime. It reads every saved product surface again, publishes the
+next sequence, clones the feature branch, resolves the release tag, and asserts
+that no retired `app/v1` collaboration object exists. This combines the product
+network, source-loss, hard-cut, and storage boundaries; it does not replace the
+three-Pod kill and partition matrix below.
+
+The local Compose cluster qualification adds a real three-process owner-loss
+case on one host. It writes through node B, verifies private forwarding from A
+and C, kills B without draining, waits for B's signed session advertisement to
+expire, and requires C to restore the same root at a higher epoch before it can
+publish the next sequence. Restarted B has empty local Cell storage and must
+route to C. The script emits the exact sessions, epochs, root, sequences, and
+live admission envelopes as JSON. Because the processes share one network
+namespace, this proves process and local-disk loss but not Pod networking or
+partition behavior.
 
 The shipped Kubernetes qualification script adds one real three-Pod owner-loss
 case. It reads the durable repository Cell control, maps the serving endpoint to
 a ready Pod, force-deletes that Pod without grace, then requires a different
-session at a higher epoch to restore the public status and publish a second
-status visible through another replica. That case is not evidence until its
+session at a higher epoch to restore the exact digest, transaction ID, checksum,
+and commit sequence and serve the public status before publishing a strictly
+newer root and a second status visible through another replica. Before takeover
+traffic, it queries the
+old boot session through `cells node --session SESSION --json` until the signed
+advertisement is no longer live; Pod deletion alone is not expiry evidence.
+That case is not evidence until its
 signed provider receipt exists, and it does not replace the remaining partition
 and commit-window faults. Browser E2E is intentionally outside this gate.
 
@@ -244,6 +308,67 @@ Qualify each node profile separately:
 | Medium | Mixed repository sizes, sustained command target, sparse takeover |
 | Large | Maximum active-Cell target, 5,000 MB restore, compaction and renewal load |
 
+Before starting traffic, capture the exact resource-derived envelope from every
+node. A profile label or Kubernetes request is not evidence of the resources
+visible to the process.
+
+```bash
+kubectl --namespace crab exec POD -- \
+  crab-http-server --config /etc/crab/http-server/server.toml \
+  cells capacity --json --live > capacity-before.json
+kubectl --namespace crab exec POD -- \
+  crab-http-server --config /etc/crab/http-server/server.toml \
+  cells metrics > metrics-before.prom
+```
+
+Run the bounded HTTP harness from a dedicated load generator. Each read
+`--target` has the form `NAME=CONCURRENCY@/PATH`. A mutation has the form
+`NAME=CONCURRENCY@/PATH|BODY_FILE`; all targets run simultaneously.
+Redirect stdout to retain its versioned JSON receipt. Put private cookies or
+authorization values in a mode-0600 header file, never in command arguments.
+
+Use a disposable repository for mutation qualification because every successful
+request creates durable state. The JSON template must contain the exact
+top-level marker `"request_id":"{{request_id}}"`; the harness replaces it with
+a new UUIDv7 for every request.
+
+```json
+{"request_id":"{{request_id}}","title":"load qualification","body":"durable command"}
+```
+
+```bash
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-load-generator \
+  cargo run -p crab-http-server --release --example qualify_http_load --locked -- \
+  --base-url https://git.example.com \
+  --target 'refs=4@/api/repos/team/project/refs' \
+  --target 'commits=8@/api/repos/team/project/commits?rev=main&limit=20' \
+  --target 'readme=4@/api/repos/team/project/file?rev=main&path_hex=524541444d452e6d64' \
+  --mutation 'issues=16@/api/repos/team/disposable-load/issues|/secure/new-issue.json' \
+  --duration-seconds 300 \
+  --warmup-seconds 15 \
+  --header-file /secure/load-headers \
+  > http-load.json
+```
+
+The harness fully consumes each body and reports the method, 2xx responses, admission
+rejections, unexpected responses, transport/body-limit failures, bytes,
+throughput, and all-response plus successful-response latency percentiles. It
+checks `/livez` before and after traffic. HTTP 429 is an expected overload
+signal; any other non-2xx response, transport failure, oversized body, or
+unhealthy liveness check makes the command fail after writing the receipt.
+
+The report separates CPU-bounded blocking jobs, dirty-memory-bounded jobs, and
+the two-slot full-recovery ceiling. Store the report with the immutable image
+digest, profile, workload parameters, and live measurements. Reject a receipt
+when its observed active-Cell, retained-byte, or local-disk capacity differs
+from the corresponding private metrics sample taken before traffic, or when a
+live usage gauge exceeds its advertised capacity.
+
+The Kubernetes qualification receipt records this report for every original
+Pod, every Pod after the zero-unavailable rollout, and every Pod after forced
+owner loss. Each entry is bound to the Pod UID so a replacement cannot inherit
+another process's startup envelope.
+
 Measure:
 
 - Resident set size per active Cell and per workload class
@@ -271,7 +396,7 @@ Production readiness requires all of these gates:
 - Three-Pod fault qualification passes
 - Every supported node profile has measured admission envelopes
 - Repository API and Git operations pass end to end
-- Backup and isolated-prefix restore pass
+- Backup and same-bucket isolated-prefix restore pass
 - Hard cutover rehearsal confirms no legacy collaboration reads
 
 Until the last gate passes, describe the implementation as functionally complete but not production-qualified.

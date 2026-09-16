@@ -1,7 +1,7 @@
 //! Bounded synchronous filesystem operations; execution scheduling belongs to the caller.
 
 use std::fs::File;
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::time::Duration;
 
@@ -14,6 +14,7 @@ pub(crate) struct LtxHost {
 pub(crate) struct HostFile {
     file: Box<dyn crate::environment::FileIo>,
     limit: u64,
+    read_offset: u64,
 }
 
 impl HostFile {
@@ -60,6 +61,32 @@ impl HostFile {
     }
 }
 
+impl Read for HostFile {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        let remaining = self.file_len()?.saturating_sub(self.read_offset);
+        let length =
+            usize::try_from(remaining.min(bytes.len() as u64)).map_err(io::Error::other)?;
+        if length == 0 {
+            return Ok(0);
+        }
+        let read = self.file.read_exact_at(self.read_offset, length)?;
+        bytes[..length].copy_from_slice(&read);
+        self.read_offset += length as u64;
+        Ok(length)
+    }
+}
+
+impl Write for HostFile {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.write_all(bytes)?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 pub(crate) struct HostMetadata {
     pub len: u64,
 }
@@ -80,6 +107,7 @@ impl LtxHost {
         Ok(HostFile {
             file: self.facilities.filesystem.open(path)?,
             limit: self.max_file_bytes,
+            read_offset: 0,
         })
     }
     #[cfg(feature = "replica")]
@@ -87,12 +115,14 @@ impl LtxHost {
         Ok(HostFile {
             file: self.facilities.filesystem.open_rw(path)?,
             limit: self.max_file_bytes,
+            read_offset: 0,
         })
     }
     pub fn create(&self, path: &Path) -> io::Result<HostFile> {
         Ok(HostFile {
             file: self.facilities.filesystem.create(path)?,
             limit: self.max_file_bytes,
+            read_offset: 0,
         })
     }
     pub fn metadata(&self, path: &Path) -> io::Result<HostMetadata> {

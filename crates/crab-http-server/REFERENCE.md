@@ -202,6 +202,17 @@ SERVER="$HOME/Workspace/crabbuild-target/crab-http-server-dev/release/crab-http-
 "$SERVER" --config /secure/server.toml repository list
 "$SERVER" --config /secure/server.toml cells status \
   --owner your-team --name your-project
+"$SERVER" --config /secure/server.toml cells capacity --json --live
+"$SERVER" --config /secure/server.toml cells backup create \
+  --pin 11112222333344445555666677778888
+"$SERVER" --config /secure/server.toml cells backup verify \
+  --pin 11112222333344445555666677778888
+"$SERVER" --config /secure/server.toml cells backup restore \
+  --pin 11112222333344445555666677778888 \
+  --destination-prefix recovery/restore-2026-09-16
+"$SERVER" --config /secure/server.toml cells release activate \
+  --expected-revision 8 --strategy maintenance \
+  --retention-grace-hours 168 --retention-max-deletes 10000
 "$SERVER" --config /secure/server.toml repository set-members \
   --owner your-team --name your-project \
   --members-file /secure/members.toml
@@ -222,6 +233,44 @@ versioned JSON includes the Cell and incarnation IDs, lifecycle state, epoch,
 revision, serving session and endpoint, exact LTX root, code/schema pair, and
 next scheduler deadline. It reads object-store authority directly; it does not
 open SQLite, acquire ownership, or extend a lease.
+
+`cells capacity --json --live` is a read-only mTLS request to the running
+process. It reports that process's retained startup memory limit, free Cell
+volume bytes, available file descriptors, CPU-derived job credits, and the
+resulting active-Cell, retained-byte, local-disk, scratch, blocking-job,
+dirty-job and full-recovery admission limits. The full-recovery limit stays at
+two even when the node can run more blocking or capture jobs. Omitting `--live`
+calculates a preflight envelope for the command process. Both are qualification
+inputs, not measured performance evidence.
+
+`cells backup create` observes all 256 catalog heads before traversing their
+immutable pages. It binds the selected release record and descriptors, the
+exact catalog revisions, one canonical control per entry, and every verified
+LTX dependency into a strict-created pin. Repeating an existing pin ID verifies
+and returns the original boundary. A signed zero-capacity advertisement covers
+the complete create operation; maintenance drains it before collecting objects,
+while a creator that advertises after the release fence fails its second Ready
+check. `cells backup verify` rereads the complete
+graph and fails closed when any content-addressed dependency is absent or
+corrupt. `cells backup restore` requires a ready pinned release and a canonical
+destination prefix in the configured bucket. It verifies the complete source
+graph before creating the destination identity, uses conditional provider-side
+copies for immutable objects, independently verifies destination descriptors,
+catalog pages and LTX roots, strict-creates unowned `Idle` controls, and writes
+the release and pin pointers only after their dependencies. An exact interrupted
+restore is resumable while an already-used or divergent destination fails
+closed. Cross-provider archive export and server-owned configuration outside
+`cells/v1` remain separate operator work.
+
+Maintenance retention is optional. With `--retention-grace-hours`, the sole
+maintenance executor verifies the exact release, revision-pinned catalog,
+unowned current controls, all retained pins, and their LTX graphs before the
+first delete. It stores reachability in bounded local SQLite scratch, streams
+the application prefix, and considers only recognized V1 immutable paths older
+than the provider-time grace. Unknown layouts and mutable authority are skipped.
+The deletion bound defaults to 10,000 and cannot exceed 100,000. Reaching it
+returns an incomplete-retention error and keeps the release in `Maintenance`;
+repeat the same activation and expected revision until it returns `Ready`.
 
 Membership is supplied separately so the shared server configuration stays
 small and secret-independent:
@@ -1167,7 +1216,7 @@ namespace and immutable asset bodies in backups. Restoring visible records
 without counters, claims, request ledgers,
 control and immutable roots loses numbering, ownership and retry guarantees.
 
-Discussion deletion, moderation, edit history, activity feeds, and notifications remain unimplemented. Backup and restore qualification remains pending.
+Discussion deletion, moderation, edit history, activity feeds, and notifications remain unimplemented. Cell backup pin creation, verification, and same-bucket isolated-prefix restore are implemented; cross-provider export and complete product-root restore qualification remain pending.
 
 ## Commit statuses and required checks
 
@@ -1286,6 +1335,34 @@ python3 crates/crab-http-server/tests/verify_live.py \
 
 For an authenticated server, add `--cookies /path/to/private_cookies.txt` with a private Netscape-format cookie file. Never commit that file.
 
+Run repeatable concurrent HTTP qualification with the Rust load generator:
+
+For durable command throughput, create a JSON template containing a top-level
+`"request_id":"{{request_id}}"`. Run mutations only against a disposable
+repository: the generator assigns a fresh UUIDv7 and creates real state for
+every request.
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-load-generator" \
+  cargo run -p crab-http-server --release --example qualify_http_load --locked -- \
+  --base-url http://127.0.0.1:8788 \
+  --target 'refs=4@/api/repos/team/project/refs' \
+  --target 'commits=8@/api/repos/team/project/commits?rev=main&limit=20' \
+  --mutation 'issues=8@/api/repos/team/disposable-load/issues|/secure/new-issue.json' \
+  --duration-seconds 60 \
+  --warmup-seconds 5 \
+  > http-load.json
+```
+
+Each read or mutation target declares its own concurrency and all targets run together. The
+versioned JSON receipt includes successful responses, HTTP 429 admission
+rejections, unexpected responses, response bytes, throughput, and p50/p95/p99
+latency. The generator fully consumes every body, bounds response bytes, checks
+`/livez` before and after traffic, and exits unsuccessfully on 5xx, unexpected
+non-429 status, transport/body-limit failure, or unhealthy liveness. Use
+`--header-file /secure/load-headers` for one private HTTP header per line; the
+tool neither prints nor stores those values.
+
 ### Read the executable evidence map
 
 | Contract | Primary source | Executable evidence |
@@ -1293,6 +1370,7 @@ For an authenticated server, add `--cookies /path/to/private_cookies.txt` with a
 | Route composition, Host checks, request correlation, readiness, metrics, and shutdown | `src/server.rs`, `src/metrics.rs` | Server, metrics, authentication, and maintenance tests |
 | OIDC, membership, sessions, tokens, and CSRF | `src/auth.rs` | `src/auth_tests.rs` and `src/auth_tests/git_tokens.rs` |
 | Repository reads and raw paths | `src/api.rs` | `tests/verify_live.py` and frontend navigation tests |
+| HTTP capacity and overload behavior | server admission and public routes | `examples/qualify_http_load.rs`, its self-hosted tests, and retained JSON receipts |
 | Git protocol version 2 fetch | `src/git.rs` | `tests/verify_git_transport.py` and protocol CI |
 | Native receive, changed-path validation, and recovery | `src/receive.rs`, `src/receive/publish.rs`, `crab-git::receive_plan` | `src/receive_tests.rs` and `src/receive_fault_tests.rs` |
 | LFS transfer, range-resume, file-lock, and authoritative receive contracts | `src/lfs.rs`, `src/receive/publish.rs` | `src/lfs_tests.rs`, `src/receive_tests.rs`, `src/auth_tests/git_tokens.rs`, `tests/qualify_lfs_range_resume.sh`, and `tests/qualify_lfs_locking.sh` |
@@ -1360,7 +1438,7 @@ The server is complete only when a real account can perform the workflow and obs
 | Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; additional crash phases and coexistence qualification remain |
 | Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; activity, moderation, history, and notifications remain |
 | Repository management | CLI create/adopt/list, archive, settings, search, import, and audited administration | In progress; browser creation/import and audit history remain |
-| Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Kubernetes controls, one RustFS in-flight `SIGKILL` path, one complete-root cold restore, bounded Prometheus metrics, request correlation, and runbook implemented; live qualification remains |
+| Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Kubernetes controls, one RustFS in-flight `SIGKILL` path, one complete-root cold restore, verified Cell backup pins and same-bucket isolated restore, bounded Prometheus metrics, request correlation, and runbook implemented; cross-provider export and broader live qualification remain |
 | Quality gates | API, UI, accessibility, realistic repositories, security, package smoke, and measured performance | In progress |
 
 ### Track known operational gaps
@@ -1373,7 +1451,7 @@ The remaining production gaps include:
 - Production throughput and provider-level admission qualification
 - Browser membership administration, membership audit history, provider back-channel logout, and immediate provider revocation
 - Repository creation and adoption exist in the CLI; browser import remains
-- Version-selected provider backup and restore qualification for Git, shared identity state, and the complete `app/v1` namespace
+- Version-selected complete product-root restore qualification for Git, shared identity state, Cell pins, immutable LTX graphs, and release assets across providers
 - Manual assistive-technology audits and broader workflow coverage
 - Successful EKS, GKE, and AKS live-workflow receipts; rollback, alert-tuning, and disaster-recovery qualification
 - First tagged server image/chart publication and registry-attestation verification

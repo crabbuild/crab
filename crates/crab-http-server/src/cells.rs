@@ -6,14 +6,15 @@ use std::{
 };
 
 use crab_cell_runtime::{
-    ApplicationId, ApplicationIdentity, ApplicationIdentityStore, BuildDescriptor, CatalogRole,
-    CellAuthority, CellCatalog, CellId, CellModule, CellRuntime, CellTarget, ControlState, Digest,
-    EffectModule, MaintenanceModule, MigrationDescriptor, MigrationFailure, MigrationProgressState,
-    MigrationProgressStore, ModuleDescriptor, NamespaceDescriptor, NamespaceId, NodeAdvertisement,
-    NodeCapacity, NodeDirectory, OperationDescriptor, Owner, PeerRoundTrip, PeerSigner, Registry,
-    RegistryBuilder, ReleaseRecord, ReleaseState, ReleaseStore, ReplicaLimits, RequestId,
-    SessionId, SqlWorkerPool, TenantId, VersionedNodeAdvertisement, register_effect_delivery,
-    register_maintenance,
+    ApplicationId, ApplicationIdentity, ApplicationIdentityStore, BackupPin, BackupPinStore,
+    BackupRestore, BuildDescriptor, CatalogRole, CellAuthority, CellCatalog, CellGarbageCollector,
+    CellId, CellModule, CellRuntime, CellTarget, Control, ControlState, Digest, EffectModule,
+    GarbageCollectionPolicy, MaintenanceModule, MigrationDescriptor, MigrationFailure,
+    MigrationProgressState, MigrationProgressStore, ModuleDescriptor, NamespaceDescriptor,
+    NamespaceId, NodeAdvertisement, NodeCapacity, NodeDirectory, OperationDescriptor, Owner,
+    PeerRoundTrip, PeerSigner, PinnedCatalogShard, Registry, RegistryBuilder, ReleaseRecord,
+    ReleaseState, ReleaseStore, ReplicaHost, ReplicaLimits, RequestId, SessionId, SqlWorkerPool,
+    TenantId, VersionedNodeAdvertisement, register_effect_delivery, register_maintenance,
 };
 use crab_storage::CellStorageLayout;
 use ed25519_dalek::SigningKey;
@@ -53,10 +54,16 @@ const MAX_MIGRATION_STATUS_EXAMINED: usize = 1_024;
 const MAINTENANCE_DRAIN_TIMEOUT: Duration = Duration::from_secs(125);
 const MAINTENANCE_DRAIN_POLL: Duration = Duration::from_secs(1);
 const MAINTENANCE_RUNTIME_BYTES: usize = 8 * 1024 * 1024;
-const MAINTENANCE_ADVERTISEMENT_LIFETIME_MS: i64 = 15_000;
-const MAINTENANCE_ADVERTISEMENT_EXPIRY_MARGIN_MS: i64 = 1_000;
-const MAINTENANCE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
-const MAINTENANCE_HEARTBEAT_RETRY: Duration = Duration::from_millis(500);
+const OFFLINE_ADVERTISEMENT_LIFETIME_MS: i64 = 15_000;
+const OFFLINE_ADVERTISEMENT_EXPIRY_MARGIN_MS: i64 = 1_000;
+const OFFLINE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
+const OFFLINE_HEARTBEAT_RETRY: Duration = Duration::from_millis(500);
+
+#[derive(Clone, Copy)]
+pub(crate) struct RetentionRequest {
+    pub(crate) grace: Duration,
+    pub(crate) max_deletes: u64,
+}
 const REPOSITORY_COMMANDS: &[OperationDescriptor] = &[
     operation(1, 80 * 1024, 80 * 1024),
     operation(2, 80 * 1024, 80 * 1024),
@@ -418,6 +425,308 @@ pub(crate) async fn repository_status(config: &Config, owner: &str, name: &str) 
 }
 
 #[derive(Serialize)]
+struct NodeStatus {
+    version: u8,
+    session: String,
+    live: bool,
+    observed_at_ms: i64,
+}
+
+pub(crate) async fn node_status(config: &Config, session: &str) -> Result<Vec<u8>> {
+    let session = decode_session(session)?;
+    let startup = verify_startup_release(config).await?;
+    let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
+    let directory = NodeDirectory::new(
+        startup.layout,
+        peer_tls.fleet(),
+        startup.image,
+        startup.registry.release_digest(),
+    );
+    let observed_at_ms = unix_now_ms()?;
+    let live = directory.is_live(session, observed_at_ms).await?;
+    serde_json::to_vec_pretty(&NodeStatus {
+        version: 1,
+        session: status_hex(session.as_bytes()),
+        live,
+        observed_at_ms,
+    })
+    .map_err(Error::from)
+}
+
+#[derive(Serialize)]
+struct BackupStatus {
+    version: u8,
+    application: String,
+    pin: String,
+    created_at_ms: i64,
+    control_count: u64,
+    nonempty_catalog_shards: usize,
+    release: String,
+    verified: bool,
+}
+
+#[derive(Serialize)]
+struct BackupRestoreStatus {
+    version: u8,
+    application: String,
+    pin: String,
+    destination_prefix: String,
+    control_count: u64,
+    immutable_object_count: u64,
+    nonempty_catalog_shards: u16,
+    verified: bool,
+}
+
+pub(crate) async fn create_backup(config: &Config, pin: &str) -> Result<Vec<u8>> {
+    let pin = decode_backup_pin(pin)?;
+    let startup = verify_startup_release(config).await?;
+    let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
+    let directory = NodeDirectory::new(
+        startup.layout.clone(),
+        peer_tls.fleet(),
+        startup.image,
+        startup.registry.release_digest(),
+    );
+    let lease = OfflineAdvertisement::new(
+        directory,
+        peer_tls.signing_key().clone(),
+        SessionId::from_bytes(Uuid::now_v7().into_bytes()),
+        config.cells.peer_advertise.to_string(),
+        peer_tls.fleet(),
+        peer_tls.certificate(),
+        startup.image,
+        startup.registry.release_digest(),
+        startup.registry.module_digests(),
+        rand::random::<u64>().max(1),
+    );
+    let advertised = lease.publish_initial().await?;
+    let lease_shutdown = CancellationToken::new();
+    let mut heartbeat = tokio::spawn(lease.run(advertised, lease_shutdown.clone()));
+    let operation = async {
+        // Advertising before the second Ready check closes both sides of the
+        // maintenance race: maintenance either sees this lease or this check
+        // sees Maintenance before any pin object can be published.
+        verify_startup_release_at(&startup.layout, startup.identity, &startup.registry).await?;
+        let (pins, _scratch) = backup_store(config, &startup)?;
+        create_backup_at(
+            &pins,
+            &startup.layout,
+            startup.identity,
+            pin,
+            unix_now_ms()?,
+        )
+        .await
+    };
+    tokio::pin!(operation);
+    let completed = tokio::select! {
+        result = &mut operation => result,
+        joined = &mut heartbeat => {
+            let lease_result = match joined {
+                Ok(result) => result,
+                Err(error) => Err(error.into()),
+            };
+            lease_result?;
+            return Err(Error::Config("Cell backup advertisement stopped unexpectedly"));
+        }
+    };
+    lease_shutdown.cancel();
+    let lease_result = match heartbeat.await {
+        Ok(result) => result,
+        Err(error) => Err(error.into()),
+    };
+    match (completed, lease_result) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Ok(completed), Ok(())) => Ok(completed),
+    }
+}
+
+pub(crate) async fn verify_backup(config: &Config, pin: &str) -> Result<Vec<u8>> {
+    let pin = decode_backup_pin(pin)?;
+    let startup = verify_startup_release(config).await?;
+    let (pins, _scratch) = backup_store(config, &startup)?;
+    verify_backup_at(&pins, pin).await
+}
+
+pub(crate) async fn restore_backup(
+    config: &Config,
+    pin: &str,
+    destination_prefix: &str,
+) -> Result<Vec<u8>> {
+    let pin = decode_backup_pin(pin)?;
+    let root = StorageRoot::build(&config.storage)?;
+    let normalized = crab_git::url::normalize_repository_prefix(destination_prefix)
+        .map_err(|_| Error::Config("backup destination prefix is invalid"))?;
+    if normalized != destination_prefix || normalized == root.prefix {
+        return Err(Error::Config(
+            "backup destination must be a canonical isolated prefix",
+        ));
+    }
+    let startup = verify_startup_release(config).await?;
+    let (pins, _scratch) = backup_store(config, &startup)?;
+    restore_backup_at(&pins, pin, &normalized).await
+}
+
+async fn create_backup_at(
+    pins: &BackupPinStore,
+    layout: &CellStorageLayout,
+    identity: ApplicationIdentity,
+    id: RequestId,
+    created_at_ms: i64,
+) -> Result<Vec<u8>> {
+    if let Some(pin) = pins.load(id).await? {
+        let controls = pins.verify(&pin).await?;
+        return encode_backup_status(&pin, controls.len());
+    }
+    let (catalog, controls) = snapshot_backup_inventory(layout, identity).await?;
+    let pin = match pins.create(id, created_at_ms, catalog, controls).await {
+        Ok(pin) => pin,
+        Err(create_error) => match pins.load(id).await? {
+            Some(pin) => pin,
+            None => return Err(create_error.into()),
+        },
+    };
+    let controls = pins.verify(&pin).await?;
+    encode_backup_status(&pin, controls.len())
+}
+
+async fn verify_backup_at(pins: &BackupPinStore, id: RequestId) -> Result<Vec<u8>> {
+    let pin = pins
+        .load(id)
+        .await?
+        .ok_or(Error::Config("Cell backup pin was not found"))?;
+    let controls = pins.verify(&pin).await?;
+    encode_backup_status(&pin, controls.len())
+}
+
+async fn restore_backup_at(
+    pins: &BackupPinStore,
+    id: RequestId,
+    destination_prefix: &str,
+) -> Result<Vec<u8>> {
+    let pin = pins
+        .load(id)
+        .await?
+        .ok_or(Error::Config("Cell backup pin was not found"))?;
+    let restored = pins.restore(&pin, Path::from(destination_prefix)).await?;
+    encode_backup_restore_status(&restored, destination_prefix)
+}
+
+async fn snapshot_backup_inventory(
+    layout: &CellStorageLayout,
+    identity: ApplicationIdentity,
+) -> Result<(Vec<PinnedCatalogShard>, Vec<Control>)> {
+    let catalog = CellCatalog::new(layout.clone(), identity.tenant());
+    let authority = CellAuthority::new(layout.clone());
+    let mut scans = Vec::with_capacity(256);
+    for shard in 0_u8..=u8::MAX {
+        scans.push(catalog.scan_shard(shard).await?);
+    }
+    let pinned = scans
+        .iter()
+        .enumerate()
+        .map(|(shard, scan)| PinnedCatalogShard {
+            shard: shard as u8,
+            revision: scan.revision(),
+            pages: scan.page_digests().to_vec(),
+        })
+        .collect::<Vec<_>>();
+    let mut cells = Vec::new();
+    for scan in &mut scans {
+        while let Some(page) = scan.next_page().await? {
+            cells.extend(page.entries().iter().map(|proof| proof.entry().cell()));
+        }
+    }
+    let mut controls = Vec::with_capacity(cells.len());
+    for cell in cells {
+        controls.push(
+            authority
+                .load(cell)
+                .await?
+                .ok_or(Error::Config("cataloged Cell has no backup control"))?
+                .value()
+                .clone(),
+        );
+    }
+    Ok((pinned, controls))
+}
+
+fn backup_store(
+    config: &Config,
+    startup: &VerifiedStartupCells,
+) -> Result<(BackupPinStore, tempfile::TempDir)> {
+    std::fs::create_dir_all(&config.cells.data_dir)?;
+    let scratch = tempfile::Builder::new()
+        .prefix("backup-")
+        .tempdir_in(&config.cells.data_dir)?;
+    let budget = crate::server::CellRuntimeBudget::from_resources(crate::peer::local_resources(
+        &config.cells.data_dir,
+    )?)?;
+    let local_disk = budget.local_disk();
+    let host = budget.replica_host(local_disk, scratch.path().to_owned());
+    Ok((
+        BackupPinStore::new(
+            startup.layout.clone(),
+            startup.identity,
+            repository_replica_limits(),
+            host,
+        )?,
+        scratch,
+    ))
+}
+
+fn decode_backup_pin(value: &str) -> Result<RequestId> {
+    let bytes = decode_hex(
+        value,
+        "backup pin must be 32 lowercase hexadecimal characters",
+    )?;
+    if bytes == [0; 16] {
+        return Err(Error::Config("backup pin must not be zero"));
+    }
+    Ok(RequestId::from_bytes(bytes))
+}
+
+fn encode_backup_status(pin: &BackupPin, controls: usize) -> Result<Vec<u8>> {
+    if controls as u64 != pin.control_count() {
+        return Err(Error::Config(
+            "verified backup control count differs from its pin",
+        ));
+    }
+    serde_json::to_vec_pretty(&BackupStatus {
+        version: 1,
+        application: status_hex(pin.application().as_bytes()),
+        pin: status_hex(pin.id().as_bytes()),
+        created_at_ms: pin.created_at_ms(),
+        control_count: pin.control_count(),
+        nonempty_catalog_shards: pin
+            .catalog_revisions()
+            .iter()
+            .filter(|revision| **revision != 0)
+            .count(),
+        release: status_hex(&pin.release_digest()),
+        verified: true,
+    })
+    .map_err(Error::from)
+}
+
+fn encode_backup_restore_status(
+    restored: &BackupRestore,
+    destination_prefix: &str,
+) -> Result<Vec<u8>> {
+    serde_json::to_vec_pretty(&BackupRestoreStatus {
+        version: 1,
+        application: status_hex(restored.application().as_bytes()),
+        pin: status_hex(restored.pin().as_bytes()),
+        destination_prefix: destination_prefix.to_owned(),
+        control_count: restored.control_count(),
+        immutable_object_count: restored.immutable_object_count(),
+        nonempty_catalog_shards: restored.nonempty_catalog_shards(),
+        verified: true,
+    })
+    .map_err(Error::from)
+}
+
+#[derive(Serialize)]
 struct MigrationStatusPage {
     version: u8,
     operation: String,
@@ -609,28 +918,39 @@ fn encode_migration_status(
 }
 
 fn decode_cell_cursor(value: &str) -> Result<CellId> {
-    if value.len() != 64 {
-        return Err(Error::Config(
-            "release migration cursor must be a lowercase Cell ID",
-        ));
+    decode_hex(
+        value,
+        "release migration cursor must be a lowercase Cell ID",
+    )
+    .map(CellId::from_bytes)
+}
+
+fn decode_session(value: &str) -> Result<SessionId> {
+    let bytes = decode_hex(
+        value,
+        "node session must be 32 lowercase hexadecimal characters",
+    )?;
+    if bytes == [0; 16] {
+        return Err(Error::Config("node session must not be zero"));
     }
-    let mut bytes = [0; 32];
+    Ok(SessionId::from_bytes(bytes))
+}
+
+fn decode_hex<const N: usize>(value: &str, error: &'static str) -> Result<[u8; N]> {
+    if value.len() != N * 2 {
+        return Err(Error::Config(error));
+    }
+    let mut bytes = [0; N];
     let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
     if !remainder.is_empty() {
-        return Err(Error::Config(
-            "release migration cursor must be a lowercase Cell ID",
-        ));
+        return Err(Error::Config(error));
     }
     for (output, pair) in bytes.iter_mut().zip(pairs) {
-        let high = image_nibble(pair[0]).ok_or(Error::Config(
-            "release migration cursor must be a lowercase Cell ID",
-        ))?;
-        let low = image_nibble(pair[1]).ok_or(Error::Config(
-            "release migration cursor must be a lowercase Cell ID",
-        ))?;
+        let high = image_nibble(pair[0]).ok_or(Error::Config(error))?;
+        let low = image_nibble(pair[1]).ok_or(Error::Config(error))?;
         *output = (high << 4) | low;
     }
-    Ok(CellId::from_bytes(bytes))
+    Ok(bytes)
 }
 
 fn status_hex(bytes: &[u8]) -> String {
@@ -696,21 +1016,7 @@ fn image_digest(image: &str) -> Result<Digest> {
     let value = image
         .strip_prefix("sha256:")
         .ok_or(Error::Config("selected Cell image digest is invalid"))?;
-    if value.len() != 64 {
-        return Err(Error::Config("selected Cell image digest is invalid"));
-    }
-    let mut bytes = [0; 32];
-    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
-    if !remainder.is_empty() {
-        return Err(Error::Config("selected Cell image digest is invalid"));
-    }
-    for (output, pair) in bytes.iter_mut().zip(pairs) {
-        let high =
-            image_nibble(pair[0]).ok_or(Error::Config("selected Cell image digest is invalid"))?;
-        let low =
-            image_nibble(pair[1]).ok_or(Error::Config("selected Cell image digest is invalid"))?;
-        *output = (high << 4) | low;
-    }
+    let bytes = decode_hex(value, "selected Cell image digest is invalid")?;
     if bytes == [0; 32] {
         return Err(Error::Config("selected Cell image digest is zero"));
     }
@@ -791,7 +1097,11 @@ pub(crate) async fn activate_release(
         .map_err(Error::from)
 }
 
-pub(crate) async fn enter_maintenance(config: &Config, expected_revision: u64) -> Result<Vec<u8>> {
+pub(crate) async fn enter_maintenance(
+    config: &Config,
+    expected_revision: u64,
+    retention: Option<RetentionRequest>,
+) -> Result<Vec<u8>> {
     let root = StorageRoot::build(&config.storage)?;
     let identities =
         ApplicationIdentityStore::new(root.store.clone(), Path::from(root.prefix.clone()));
@@ -845,6 +1155,7 @@ pub(crate) async fn enter_maintenance(config: &Config, expected_revision: u64) -
         &config.cells.data_dir,
     )?)?;
     let local_disk = budget.local_disk();
+    let retention_host = budget.replica_host(local_disk.clone(), session_dir.path().to_owned());
     let runtime = CellRuntime::new_with_replica_host(
         SqlWorkerPool::new(1, 1)?,
         MAINTENANCE_RUNTIME_BYTES,
@@ -871,7 +1182,7 @@ pub(crate) async fn enter_maintenance(config: &Config, expected_revision: u64) -
         ),
         session_dir.path().to_owned(),
     )?;
-    let lease = MaintenanceAdvertisement::new(
+    let lease = OfflineAdvertisement::new(
         directory.clone(),
         peer_tls.signing_key().clone(),
         SessionId::from_bytes(*maintenance.operation().as_bytes()),
@@ -902,6 +1213,9 @@ pub(crate) async fn enter_maintenance(config: &Config, expected_revision: u64) -
         advertised,
         maintenance,
         inspect_persisted_work,
+        retention,
+        retention_host,
+        session_dir.path(),
     )
     .await
 }
@@ -918,31 +1232,21 @@ async fn complete_maintenance_inventory(
     directory: &NodeDirectory,
     router: &RepositoryCellRouter,
     runtime: &CellRuntime,
-    lease: MaintenanceAdvertisement,
+    lease: OfflineAdvertisement,
     advertised: VersionedNodeAdvertisement,
     maintenance: ReleaseRecord,
     inspect_persisted_work: bool,
+    retention: Option<RetentionRequest>,
+    retention_host: ReplicaHost,
+    scratch_dir: &std::path::Path,
 ) -> Result<Vec<u8>> {
     let lease_session = lease.session;
     let lease_shutdown = CancellationToken::new();
     let mut heartbeat = tokio::spawn(lease.run(advertised, lease_shutdown.clone()));
-    let migration = migrate_maintenance_inventory(layout, identity, router, inspect_persisted_work);
-    tokio::pin!(migration);
-    let migrated = tokio::select! {
-        result = &mut migration => result,
-        joined = &mut heartbeat => {
-            let lease_result = match joined {
-                Ok(result) => result,
-                Err(error) => Err(error.into()),
-            };
-            let shutdown = runtime.shutdown().await;
-            lease_result?;
-            shutdown?;
-            return Err(Error::Config("Cell maintenance executor stopped unexpectedly"));
-        }
-    };
-    let shutdown = runtime.shutdown().await;
-    let completed = async {
+    let operation = async {
+        let migrated =
+            migrate_maintenance_inventory(layout, identity, router, inspect_persisted_work).await;
+        let shutdown = runtime.shutdown().await;
         migrated?;
         shutdown?;
         let advertised_sessions = directory
@@ -954,13 +1258,58 @@ async fn complete_maintenance_inventory(
             ));
         }
         verify_current_cells(layout, identity, registry).await?;
+        if let Some(retention) = retention {
+            let grace_ms = u64::try_from(retention.grace.as_millis())
+                .map_err(|_| Error::Config("Cell retention grace is too large"))?;
+            let policy =
+                GarbageCollectionPolicy::new(unix_now_ms()?, grace_ms, retention.max_deletes)?;
+            let report = CellGarbageCollector::new(
+                layout.clone(),
+                identity,
+                repository_replica_limits(),
+                retention_host,
+            )?
+            .collect(&maintenance, scratch_dir, policy)
+            .await?;
+            tracing::info!(
+                listed_objects = report.listed_objects(),
+                immutable_candidates = report.immutable_candidates(),
+                reachable_objects = report.reachable_objects(),
+                retained_objects = report.retained_objects(),
+                grace_objects = report.grace_objects(),
+                eligible_objects = report.eligible_objects(),
+                deleted_objects = report.deleted_objects(),
+                current_controls = report.current_controls(),
+                retained_pins = report.retained_pins(),
+                complete = report.complete(),
+                "completed offline Cell retention pass"
+            );
+            if !report.complete() {
+                return Err(Error::Config(
+                    "Cell retention reached its deletion limit; rerun the same maintenance activation",
+                ));
+            }
+        }
         releases
             .complete_maintenance(maintenance.revision(), maintenance.operation())
             .await?
             .encode()
             .map_err(Error::from)
-    }
-    .await;
+    };
+    tokio::pin!(operation);
+    let completed = tokio::select! {
+        result = &mut operation => result,
+        joined = &mut heartbeat => {
+            let lease_result = match joined {
+                Ok(result) => result,
+                Err(error) => Err(error.into()),
+            };
+            let shutdown = runtime.shutdown().await;
+            lease_result?;
+            shutdown?;
+            return Err(Error::Config("Cell maintenance executor stopped unexpectedly"));
+        }
+    };
     lease_shutdown.cancel();
     let lease_result = match heartbeat.await {
         Ok(result) => result,
@@ -1064,7 +1413,7 @@ async fn migrate_maintenance_inventory(
     Ok(())
 }
 
-struct MaintenanceAdvertisement {
+struct OfflineAdvertisement {
     directory: NodeDirectory,
     signing_key: SigningKey,
     session: SessionId,
@@ -1077,7 +1426,7 @@ struct MaintenanceAdvertisement {
     progress: u64,
 }
 
-impl MaintenanceAdvertisement {
+impl OfflineAdvertisement {
     #[expect(
         clippy::too_many_arguments,
         reason = "the signed maintenance executor identity remains explicit"
@@ -1124,7 +1473,7 @@ impl MaintenanceAdvertisement {
         let heartbeat = 'heartbeat: loop {
             tokio::select! {
                 () = shutdown.cancelled() => break Ok(()),
-                () = tokio::time::sleep(MAINTENANCE_HEARTBEAT_INTERVAL) => {}
+                () = tokio::time::sleep(OFFLINE_HEARTBEAT_INTERVAL) => {}
             }
             loop {
                 let now_ms = match unix_now_ms() {
@@ -1144,13 +1493,13 @@ impl MaintenanceAdvertisement {
                         let retry_deadline = observed
                             .advertisement()
                             .expires_at_ms()
-                            .saturating_sub(MAINTENANCE_ADVERTISEMENT_EXPIRY_MARGIN_MS);
+                            .saturating_sub(OFFLINE_ADVERTISEMENT_EXPIRY_MARGIN_MS);
                         if now_ms >= retry_deadline {
                             break 'heartbeat Err(error.into());
                         }
                         let retry_ms = retry_deadline
                             .saturating_sub(now_ms)
-                            .min(MAINTENANCE_HEARTBEAT_RETRY.as_millis() as i64);
+                            .min(OFFLINE_HEARTBEAT_RETRY.as_millis() as i64);
                         tokio::select! {
                             () = shutdown.cancelled() => break 'heartbeat Ok(()),
                             () = tokio::time::sleep(Duration::from_millis(retry_ms as u64)) => {}
@@ -1171,7 +1520,7 @@ impl MaintenanceAdvertisement {
             (Err(error), Err(withdrawal)) => {
                 tracing::warn!(
                     error = %withdrawal,
-                    "failed to withdraw maintenance executor advertisement"
+                    "failed to withdraw offline operation advertisement"
                 );
                 Err(error)
             }
@@ -1191,7 +1540,7 @@ impl MaintenanceAdvertisement {
             &self.signing_key,
             self.progress,
             now_ms,
-            now_ms.saturating_add(MAINTENANCE_ADVERTISEMENT_LIFETIME_MS),
+            now_ms.saturating_add(OFFLINE_ADVERTISEMENT_LIFETIME_MS),
             self.module_digests.clone(),
             vec![1],
             NodeCapacity {
@@ -1457,14 +1806,15 @@ mod tests {
         time::UNIX_EPOCH,
     };
 
+    use bytes::Bytes;
     use crab_cell_runtime::{
         ApplicationIdentity, BuildDescriptor, CatalogEntry, CellAuthority, CellClient, CellModule,
         CellReplica, CellRuntime, CellTarget, IncarnationId, InvocationError, MigrationDescriptor,
         ModuleDescriptor, MutationIdentity, NamespaceDescriptor, NodeAdvertisement, NodeCapacity,
-        Owner, PeerCellResolver, RegistryBuilder, ReplicaLimits, RetainedCodeDescriptor, SessionId,
-        SqlWorkerPool,
+        Owner, PeerCellResolver, RegistryBuilder, ReplicaHost, ReplicaLimits,
+        RetainedCodeDescriptor, SessionId, SqlWorkerPool,
     };
-    use crab_storage::{CellStorageLayout, Store};
+    use crab_storage::{CellStorageLayout, StorageError, Store};
     use ed25519_dalek::SigningKey;
     use object_store::memory::InMemory;
     use serde_json::Value;
@@ -1496,6 +1846,40 @@ mod tests {
     const ROLLOVER_NAMESPACE: NamespaceId = NamespaceId::from_bytes([31; 16]);
     const ROLLOVER_PREDECESSOR: Digest = Digest::from_bytes([32; 32]);
     const ROLLOVER_SQL: &str = "CREATE TABLE rollover(value BLOB NOT NULL)";
+
+    #[test]
+    fn node_session_parser_accepts_only_nonzero_canonical_hex() {
+        assert_eq!(
+            decode_session("11111111111111111111111111111111").unwrap(),
+            SessionId::from_bytes([0x11; 16])
+        );
+        for invalid in [
+            "",
+            "1111111111111111111111111111111",
+            "111111111111111111111111111111111",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "00000000000000000000000000000000",
+        ] {
+            assert!(decode_session(invalid).is_err(), "accepted {invalid}");
+        }
+    }
+
+    #[test]
+    fn backup_pin_parser_accepts_only_nonzero_canonical_hex() {
+        assert_eq!(
+            decode_backup_pin("11111111111111111111111111111111").unwrap(),
+            RequestId::from_bytes([0x11; 16])
+        );
+        for invalid in [
+            "",
+            "1111111111111111111111111111111",
+            "111111111111111111111111111111111",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "00000000000000000000000000000000",
+        ] {
+            assert!(decode_backup_pin(invalid).is_err(), "accepted {invalid}");
+        }
+    }
 
     struct RolloverModule;
 
@@ -1833,7 +2217,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn maintenance_executor_advertisement_is_singleton_per_operation() {
+    async fn offline_operation_advertisement_is_singleton_and_blocks_maintenance() {
         let identity = ApplicationIdentity::new(
             TenantId::from_bytes([58; 16]),
             ApplicationId::from_bytes([59; 16]),
@@ -1846,9 +2230,21 @@ mod tests {
         let registry = compiled_registry().unwrap();
         let fleet = Digest::from_bytes([60; 32]);
         let image = Digest::from_bytes([61; 32]);
+        let releases = ReleaseStore::new(layout.clone(), identity).unwrap();
+        let operation = RequestId::from_bytes([65; 16]);
+        let prepared = releases
+            .prepare(
+                registry.release_bytes(),
+                registry.release_digest(),
+                0,
+                &format!("sha256:{}", "cc".repeat(32)),
+                operation,
+            )
+            .await
+            .unwrap();
         let directory = NodeDirectory::new(layout, fleet, image, registry.release_digest());
         let session = SessionId::from_bytes([62; 16]);
-        let first = MaintenanceAdvertisement::new(
+        let first = OfflineAdvertisement::new(
             directory.clone(),
             SigningKey::from_bytes(&[63; 32]),
             session,
@@ -1861,7 +2257,7 @@ mod tests {
             1,
         );
         let observed = first.publish_initial().await.unwrap();
-        let contender = MaintenanceAdvertisement::new(
+        let contender = OfflineAdvertisement::new(
             directory.clone(),
             SigningKey::from_bytes(&[63; 32]),
             session,
@@ -1875,10 +2271,36 @@ mod tests {
         );
 
         assert!(contender.publish_initial().await.is_err());
+        assert!(matches!(
+            enter_maintenance_at(
+                &releases,
+                &registry,
+                &directory,
+                prepared.revision(),
+                Duration::ZERO,
+            )
+            .await,
+            Err(Error::Config(
+                "Cell maintenance still has advertised node sessions"
+            ))
+        ));
         directory
             .withdraw(&observed, unix_now_ms().unwrap())
             .await
             .unwrap();
+        assert_eq!(
+            enter_maintenance_at(
+                &releases,
+                &registry,
+                &directory,
+                prepared.revision(),
+                Duration::ZERO,
+            )
+            .await
+            .unwrap()
+            .state(),
+            ReleaseState::Maintenance
+        );
     }
 
     #[tokio::test]
@@ -1917,6 +2339,14 @@ mod tests {
         )
         .await
         .unwrap();
+        let orphan_body = b"orphan maintenance descriptor";
+        let orphan_path = layout.release_descriptor_path(blake3::hash(orphan_body).as_bytes());
+        layout
+            .store()
+            .put(&orphan_path, Bytes::from_static(orphan_body))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
         let session = SessionId::from_bytes([65; 16]);
         let runtime = CellRuntime::new(
             SqlWorkerPool::new(1, 1).unwrap(),
@@ -1947,7 +2377,7 @@ mod tests {
             scratch.path().to_owned(),
         )
         .unwrap();
-        let lease = MaintenanceAdvertisement::new(
+        let lease = OfflineAdvertisement::new(
             directory.clone(),
             signing_key,
             SessionId::from_bytes(*operation.as_bytes()),
@@ -1973,11 +2403,21 @@ mod tests {
             advertised,
             maintenance,
             false,
+            Some(RetentionRequest {
+                grace: Duration::from_millis(1),
+                max_deletes: 10,
+            }),
+            ReplicaHost::default(),
+            scratch.path(),
         )
         .await
         .unwrap();
         let encoded: Value = serde_json::from_slice(&completed).unwrap();
         assert_eq!(encoded["state"], "ready");
+        assert!(matches!(
+            layout.store().head(&orphan_path).await,
+            Err(StorageError::NotFound { .. })
+        ));
         assert_eq!(
             enter_maintenance_at(
                 &releases,
@@ -2115,7 +2555,7 @@ mod tests {
             scratch.path().to_owned(),
         )
         .unwrap();
-        let lease = MaintenanceAdvertisement::new(
+        let lease = OfflineAdvertisement::new(
             directory.clone(),
             signing_key,
             SessionId::from_bytes(*operation.as_bytes()),
@@ -2141,6 +2581,9 @@ mod tests {
             advertised,
             maintenance,
             true,
+            None,
+            ReplicaHost::default(),
+            scratch.path(),
         )
         .await
         .unwrap();
@@ -2456,6 +2899,149 @@ mod tests {
         assert_eq!(
             releases.load().await.unwrap().unwrap().record().desired(),
             Some(other_digest)
+        );
+    }
+
+    #[tokio::test]
+    async fn backup_pin_captures_release_catalog_and_control_idempotently() {
+        let identity = ApplicationIdentity::new(
+            TenantId::from_bytes([1; 16]),
+            ApplicationId::from_bytes([2; 16]),
+        );
+        let layout = CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            Path::from("backup-pin"),
+            *identity.application().as_bytes(),
+        );
+        let registry = compiled_registry().unwrap();
+        bootstrap_release_at(
+            &layout,
+            identity,
+            &registry,
+            &format!("sha256:{}", "a".repeat(64)),
+        )
+        .await
+        .unwrap();
+        let target = CellTarget::new(
+            identity.tenant(),
+            identity.application(),
+            REPOSITORY_NAMESPACE,
+            &[3; 16],
+        )
+        .unwrap();
+        let catalog = CellCatalog::new(layout.clone(), identity.tenant());
+        let proof = catalog
+            .provision(
+                CatalogEntry::new(
+                    &target,
+                    CatalogRole::Repository,
+                    registry.module_code(RepositoryModule::NAME).unwrap(),
+                    1,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let authority = CellAuthority::new(layout.clone());
+        let initial = authority
+            .create_initial(
+                &proof,
+                IncarnationId::from_bytes([4; 16]),
+                Owner {
+                    session: SessionId::from_bytes([5; 16]),
+                    endpoint: "https://node.internal:8789".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let replica = crab_ltx::CellReplica::new(
+            layout.clone(),
+            *target.cell_id().as_bytes(),
+            [4; 16],
+            repository_replica_limits(),
+        )
+        .unwrap();
+        let database_dir = tempfile::TempDir::new().unwrap();
+        let mut database = crab_ltx::ManagedDb::open(
+            &database_dir.path().join("repository.sqlite"),
+            repository_replica_limits(),
+        )
+        .unwrap();
+        database
+            .transaction(|transaction| {
+                transaction.execute_batch("CREATE TABLE restored(value INTEGER NOT NULL)")
+            })
+            .unwrap();
+        let prepared = replica
+            .prepare(None, &database.capture().unwrap(), 1, 1)
+            .await
+            .unwrap();
+        database.close().unwrap();
+        let published = initial.value().publish_prepared(&prepared, None).unwrap();
+        authority
+            .transition(
+                &initial,
+                published.clone(),
+                crab_cell_runtime::Transition::Publish,
+            )
+            .await
+            .unwrap();
+        let pins = BackupPinStore::new(
+            layout.clone(),
+            identity,
+            repository_replica_limits(),
+            ReplicaHost::default(),
+        )
+        .unwrap();
+        let id = RequestId::from_bytes([6; 16]);
+
+        let created: Value = serde_json::from_slice(
+            &create_backup_at(&pins, &layout, identity, id, 1_000)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let retry: Value = serde_json::from_slice(
+            &create_backup_at(&pins, &layout, identity, id, 2_000)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let verified: Value =
+            serde_json::from_slice(&verify_backup_at(&pins, id).await.unwrap()).unwrap();
+        let restored: Value = serde_json::from_slice(
+            &restore_backup_at(&pins, id, "backup-restored")
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(created, retry);
+        assert_eq!(created, verified);
+        assert_eq!(created["verified"], true);
+        assert_eq!(created["control_count"], 1);
+        assert_eq!(created["nonempty_catalog_shards"], 1);
+        assert_eq!(created["created_at_ms"], 1_000);
+        assert_eq!(restored["verified"], true);
+        assert_eq!(restored["destination_prefix"], "backup-restored");
+        assert_eq!(restored["control_count"], 1);
+        assert!(restored["immutable_object_count"].as_u64().unwrap() > 0);
+        let restored_identities =
+            ApplicationIdentityStore::new(layout.store().clone(), Path::from("backup-restored"));
+        assert_eq!(restored_identities.load().await.unwrap(), Some(identity));
+        let restored_layout = restored_identities.layout(identity).await.unwrap();
+        let restored_control = CellAuthority::new(restored_layout)
+            .load(target.cell_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored_control.value().state, ControlState::Idle);
+        assert_eq!(restored_control.value().owner, None);
+        assert_eq!(restored_control.value().root, published.root);
+        assert!(
+            verify_backup_at(&pins, RequestId::from_bytes([7; 16]))
+                .await
+                .is_err()
         );
     }
 

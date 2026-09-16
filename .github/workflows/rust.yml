@@ -160,7 +160,9 @@ jobs:
           npm run build --prefix packages/repository
 
       - name: Check HTTP server and local LTX engine
-        run: cargo clippy -p crab-http-server -p crab-ltx --all-targets --locked -- -D warnings
+        run: |
+          cargo clippy -p crab-http-server -p crab-ltx --all-targets --locked -- -D warnings
+          cargo test -p crab-http-server --example qualify_http_load --locked
 
       - name: Check LTX replica feature
         run: |

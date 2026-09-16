@@ -36,6 +36,12 @@ pub use config::{
 };
 pub use server::{probe_storage, serve};
 
+/// Returns the resource-derived Cell admission envelope for this process.
+pub fn cell_capacity(config: &Config) -> Result<Vec<u8>> {
+    config.validate()?;
+    server::cell_capacity_report(&config.cells.data_dir)
+}
+
 /// Returns the canonical release descriptor compiled into this server binary.
 pub fn cell_release_descriptor() -> Result<Vec<u8>> {
     Ok(cells::compiled_registry()?.release_bytes().to_vec())
@@ -83,10 +89,30 @@ pub async fn activate_cell_release(
     cells::activate_release(config, expected_revision, minimum_eligible_nodes).await
 }
 
-/// Enters offline maintenance and waits for every advertised node to withdraw.
-pub async fn enter_cell_maintenance(config: &Config, expected_revision: u64) -> Result<Vec<u8>> {
+/// Enters offline maintenance, optionally collects old immutable objects, and activates.
+pub async fn enter_cell_maintenance(
+    config: &Config,
+    expected_revision: u64,
+    retention_grace: Option<std::time::Duration>,
+    retention_max_deletes: Option<u64>,
+) -> Result<Vec<u8>> {
     config.validate()?;
-    cells::enter_maintenance(config, expected_revision).await
+    let retention = match (retention_grace, retention_max_deletes) {
+        (Some(grace), max_deletes) => {
+            let grace_ms = u64::try_from(grace.as_millis())
+                .map_err(|_| Error::Config("Cell retention grace is too large"))?;
+            let max_deletes = max_deletes.unwrap_or(10_000);
+            crab_cell_runtime::GarbageCollectionPolicy::new(0, grace_ms, max_deletes)?;
+            Some(cells::RetentionRequest { grace, max_deletes })
+        }
+        (None, None) => None,
+        (None, Some(_)) => {
+            return Err(Error::Config(
+                "Cell retention deletion limit requires a retention grace",
+            ));
+        }
+    };
+    cells::enter_maintenance(config, expected_revision, retention).await
 }
 
 /// Initializes the empty application Cell for one newly cataloged repository.
@@ -99,6 +125,34 @@ pub async fn initialize_repository_cell(config: &Config, repository: uuid::Uuid)
 pub async fn repository_cell_status(config: &Config, owner: &str, name: &str) -> Result<Vec<u8>> {
     config.validate()?;
     cells::repository_status(config, owner, name).await
+}
+
+/// Reports whether one exact node boot session has a currently valid advertisement.
+pub async fn cell_node_status(config: &Config, session: &str) -> Result<Vec<u8>> {
+    config.validate()?;
+    cells::node_status(config, session).await
+}
+
+/// Creates or reopens one immutable application backup pin and verifies it.
+pub async fn create_cell_backup(config: &Config, pin: &str) -> Result<Vec<u8>> {
+    config.validate()?;
+    cells::create_backup(config, pin).await
+}
+
+/// Reopens one immutable application backup pin and verifies every dependency.
+pub async fn verify_cell_backup(config: &Config, pin: &str) -> Result<Vec<u8>> {
+    config.validate()?;
+    cells::verify_backup(config, pin).await
+}
+
+/// Restores one verified pin into a separate prefix in the configured bucket.
+pub async fn restore_cell_backup(
+    config: &Config,
+    pin: &str,
+    destination_prefix: &str,
+) -> Result<Vec<u8>> {
+    config.validate()?;
+    cells::restore_backup(config, pin, destination_prefix).await
 }
 
 /// Startup and server lifecycle errors with their original sources retained.

@@ -9,6 +9,7 @@ work_root="${RUNNER_TEMP:?RUNNER_TEMP must name disposable qualification storage
 work_dir="$(mktemp -d "${work_root}/crab-http-server-restore.XXXXXX")"
 chmod 0755 "$work_dir"
 deploy_dir="$(cd "$(dirname "$compose_file")" && pwd)"
+hash_script="$(cd "$(dirname "$0")" && pwd)/hash_backup_restore_objects.sh"
 compose=(docker compose --file "$compose_file")
 server_id="$("${compose[@]}" ps --quiet server)"
 proxy_id="$("${compose[@]}" ps --quiet proxy)"
@@ -110,35 +111,20 @@ jq --exit-status \
   "${work_dir}/source-manifest.json" >/dev/null
 object_count="$(jq 'length' "${work_dir}/source-manifest.json")"
 test "$object_count" -gt 0
-object_digest() {
-  local object_uri="$1"
-  local digest
-  if ! digest="$(
-    "${aws_cli[@]}" s3 cp "$object_uri" - --only-show-errors \
-      | shasum -a 256 | awk '{print $1}'
-  )"; then
-    echo "Could not hash object ${object_uri}." >&2
-    return 1
-  fi
-  if [[ ! "$digest" =~ ^[0-9a-f]{64}$ ]]; then
-    echo "Object hash was invalid for ${object_uri}." >&2
-    return 1
-  fi
-  printf '%s' "$digest"
-}
-verified_objects=0
-while IFS= read -r -d '' key; do
-  source_digest="$(object_digest \
-    "s3://crab-http-server/repositories/${key}")"
-  restored_digest="$(object_digest \
-    "s3://crab-http-server/${restore_prefix}/${key}")"
-  if [ "$source_digest" != "$restored_digest" ]; then
-    echo "Restored object differs from source: ${key}" >&2
-    exit 1
-  fi
-  verified_objects=$((verified_objects + 1))
-done < <(jq --join-output '.[] | .key, "\u0000"' \
-  "${work_dir}/source-manifest.json")
+jq --exit-status \
+  'all(.[]; .key | length > 0 and (contains("\n") or contains("\r") | not))' \
+  "${work_dir}/source-manifest.json" >/dev/null
+jq --raw-output '.[].key' "${work_dir}/source-manifest.json" \
+  > "${work_dir}/object-keys.txt"
+verified_objects="$(
+  "${compose[@]}" run --rm --no-deps \
+    --interactive=false --no-TTY \
+    --entrypoint /bin/bash \
+    --volume "${hash_script}:/qualification/hash-objects.sh:ro" \
+    --volume "${work_dir}:/evidence:ro" \
+    bucket-init /qualification/hash-objects.sh \
+      crab-http-server repositories "$restore_prefix" /evidence/object-keys.txt
+)"
 test "$verified_objects" -eq "$object_count"
 printf 'Verified %s restored object bodies byte-for-byte\n' "$verified_objects"
 
