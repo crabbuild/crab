@@ -89,9 +89,31 @@ fi
 # Compose does not replace a manually killed container. Recreate the Crab and
 # shared-network proxy containers to model an orchestrator starting a fresh pod.
 "${compose[@]}" up --detach --no-build --force-recreate \
-  --wait --wait-timeout 120 server proxy
+  server proxy
 replacement_server_id="$("${compose[@]}" ps --quiet server)"
 test -n "$replacement_server_id"
+
+# Compose's --wait exits as soon as the proxy becomes unhealthy, before the
+# publication lease recovery budget expires. Keep probing the real public data
+# path so a recovering repository can become healthy without weakening the
+# post-crash readiness assertion.
+proxy_ready=false
+for recovery_attempt in $(seq 1 36); do
+  if curl --fail --silent --show-error --max-time 5 \
+    "${origin}/api/repos" >/dev/null; then
+    proxy_ready=true
+    break
+  fi
+  if [ "$recovery_attempt" -lt 36 ]; then
+    sleep 10
+  fi
+done
+if ! $proxy_ready; then
+  "${compose[@]}" ps --all >&2 || true
+  "${compose[@]}" logs --no-color server proxy >&2 || true
+  echo "The recreated public data path did not recover." >&2
+  exit 1
+fi
 
 remote_after_crash="$(git ls-remote "$remote" refs/heads/main | cut -f1)"
 if [ "$remote_after_crash" != "$old_oid" ] && [ "$remote_after_crash" != "$new_oid" ]; then
