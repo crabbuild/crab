@@ -17,6 +17,7 @@ pub struct Position {
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
     pub max_database_bytes: u64,
+    pub max_capture_bytes: u64,
     pub max_file_bytes: u64,
     pub max_plan_bytes: u64,
     pub max_segments: usize,
@@ -26,6 +27,7 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             max_database_bytes: 256 << 20,
+            max_capture_bytes: 64 << 20,
             max_file_bytes: 512 << 20,
             max_plan_bytes: 1 << 30,
             max_segments: 1024,
@@ -36,8 +38,10 @@ impl Default for Limits {
 impl Limits {
     pub(crate) fn validate(self) -> Result<Self> {
         if self.max_database_bytes < 512
+            || self.max_capture_bytes < 128
             || self.max_file_bytes < 128
             || self.max_segments == 0
+            || self.max_capture_bytes > self.max_file_bytes
             || self.max_file_bytes > self.max_plan_bytes
             || self.max_plan_bytes > (usize::MAX / 8) as u64
             || self.max_database_bytes > (usize::MAX / 8) as u64

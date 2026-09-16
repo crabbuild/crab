@@ -2,11 +2,11 @@
 
 Status: target server architecture. Local and optional remote `crab-ltx`
 mechanics are implemented, and the server now has a statically registered
-repository issue/comment/label/status/check/settings module proven through local LTX publication and
-source-loss restore. Label create/edit/delete/list, issue label assignment and
-commit-status create/latest/replay and versioned check-run create/update/replay now share one repository transaction boundary;
-Pull metadata consumes the same Cell label, status and check catalogs while its own
-record remains on legacy storage. The HTTP composition root now starts that native runtime,
+repository issue/comment/label/status/check/settings/Pull/Release module proven
+through local LTX publication and source-loss restore. All collaboration metadata
+shares one repository transaction boundary; Pull merge and Release publication
+intent are durable in SQLite while Git refs and immutable Release-asset bytes
+remain canonical external effects. The HTTP composition root now starts that native runtime,
 withdraws readiness when it drains and joins its SQL workers during ordinary
 server shutdown. The release CLI now provides resumable exact-compatible
 activation and publishes a verified descriptor as current. Private routing now
@@ -25,8 +25,8 @@ back to Idle. Activity jobs use CPU-derived admission capped at 16 and one per
 Cell, so they do not block later scans or race a temporary-activation drain.
 Completed cycles advance signed node progress; a node stalled for 15 seconds
 loses readiness and is excluded so the next rendezvous candidate takes over.
-Durable scheduler retry/fairness and multi-node activity failure qualification
-remain. The shared runtime now supports declared predecessor code/schema pairs,
+The scheduler persists retry state and uses fair revision-pinned shard cursors;
+real multi-node activity failure qualification remains. The shared runtime now supports declared predecessor code/schema pairs,
 serves them through the same typed local/peer bindings, and can publish adjacent
 schema or same-schema code-only transitions. While a release is activating, the
 server scans its rendezvous-assigned catalog shards, runs at most 16 local or
@@ -34,10 +34,10 @@ authenticated peer migrations concurrently, and persists monotonic terminal
 progress under the release operation. The final gate refuses `ready` while any
 retained predecessor remains, and `cells release migrations` exposes a bounded
 cursor view of pending and failed Cells.
-Configured multi-node quorum and the remaining product-domain route cuts are not
-yet integrated. New repository creation and adoption explicitly publish an empty
+Configured multi-node release quorum and all collaboration-domain route cuts are
+integrated. New repository creation and adoption explicitly publish an empty
 Cell and mark the catalog ready. Startup
-rejects every missing or rootless repository Cell. The issue/comment/label/status/check/settings HTTP group
+rejects every missing or rootless repository Cell. The issue/comment/label/status/check/settings/Pull/Release HTTP group
 now uses the release-aware router, which reuses local handles, selects
 authenticated remote owners and restores idle Cells without request-time empty
 bootstrap.

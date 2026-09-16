@@ -7,7 +7,7 @@ use std::sync::{
 
 use bytes::Bytes;
 use crab_ltx::{
-    CaptureBatch, CellReplica, Limits, ManagedDb, RootRef, VerifiedLocalPlan,
+    CaptureBatch, CellReplica, Host, Limits, ManagedDb, RootRef, VerifiedLocalPlan,
     bundle::{Bundle, BundleEntry},
     restore_exact,
 };
@@ -18,6 +18,36 @@ fn checksum_path(database: &std::path::Path) -> std::path::PathBuf {
     let mut path = database.as_os_str().to_owned();
     path.push(".crab-ltx-checksums");
     path.into()
+}
+
+#[tokio::test]
+async fn prepared_cell_handles_release_dirty_admission() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let mut writer =
+        ManagedDb::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
+    writer
+        .transaction(|transaction| transaction.execute_batch("CREATE TABLE values_(v)"))
+        .unwrap();
+    let dirty = Arc::new(tokio::sync::Semaphore::new(1));
+    let host = Host::default().with_dirty_slots(dirty.clone());
+    let replica =
+        replica(Store::new(Arc::new(InMemory::new())), [101; 32], [102; 16]).with_host(host);
+
+    let prepared = replica
+        .prepare(None, &writer.capture().unwrap(), 1, 1)
+        .await
+        .unwrap();
+    assert_eq!(dirty.available_permits(), 1);
+    let writable = prepared
+        .verified()
+        .paged()
+        .prepare_writable(&directory.path().join("active.sqlite"))
+        .await
+        .unwrap();
+    assert_eq!(dirty.available_permits(), 1);
+
+    drop(writable);
+    writer.close().unwrap();
 }
 
 fn replica(store: Store, cell: [u8; 32], incarnation: [u8; 16]) -> CellReplica {

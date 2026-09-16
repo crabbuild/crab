@@ -399,10 +399,10 @@ impl ManagedDb {
         if after.txid.0 > before.txid.0 {
             for txid in before.txid.0 + 1..=after.txid.0 {
                 let path = PathBuf::from(self.db.ltx_path(0, Txid(txid), Txid(txid)));
-                let bytes = self.host.read(&path, self.limits.max_file_bytes)?;
+                let bytes = self.host.read(&path, self.limits.max_capture_bytes)?;
                 let file = ltx::decode_file(&bytes)?;
                 let info = SegmentInfo::from_decoded(&bytes, &file);
-                self.account(&info)?;
+                self.account_capture(&info)?;
                 let segment = LocalSegment::new(path, info);
                 #[cfg(feature = "replica")]
                 self.retained.push(segment.clone());
@@ -520,6 +520,13 @@ impl ManagedDb {
             ));
         }
         Ok(())
+    }
+
+    fn account_capture(&mut self, info: &SegmentInfo) -> Result<()> {
+        if info.size_bytes > self.limits.max_capture_bytes {
+            return Err(CrabError::Limit("captured LTX bytes"));
+        }
+        self.account(info)
     }
 }
 

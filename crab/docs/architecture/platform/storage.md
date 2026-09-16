@@ -253,8 +253,12 @@ SQL or private peer operations.
 ## Streaming and scratch
 
 Use 8 MiB I/O buffers and a 64 MiB memory reservation per capture/recovery/
-compaction job, excluding the shared caches. Oversized encoded/decode units fail
-admission. Snapshot/restore write sequentially to exclusive scratch files and
+compaction job, excluding the shared caches. The server enforces this with one
+shared dirty permit per job; capture has an independent 64 MiB encoded-cut limit,
+so admitting 5 GiB database files does not admit 5 GiB transaction cuts.
+Reservations follow dispatched work after caller cancellation and are stripped
+from returned roots, page maps and writable handles. Oversized encoded/decode
+units fail admission. Snapshot/restore write sequentially to exclusive scratch files and
 sync file then parent before installation. At 5,000 MB, reserve two database
 sizes plus 64 MiB scratch before full recovery/compaction; sparse activation
 reserves only dirty-page/WAL budgets plus bounded metadata.

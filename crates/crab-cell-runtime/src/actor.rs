@@ -32,6 +32,12 @@ const MAX_RENEWALS_IN_FLIGHT: usize = 32;
 const TAKEOVER_OBSERVATION: std::time::Duration = std::time::Duration::from_secs(15);
 const SQL_WALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Conservative per-active-Cell reservation for actor state and native tasks.
+///
+/// This is admission accounting rather than an RSS guarantee. Embedders must
+/// qualify the estimate against their compiled registry and workload.
+pub const ACTIVE_CELL_NATIVE_BYTES: u64 = 64 * 1024;
+
 /// Node-wide dispatcher for bounded per-Cell command mailboxes.
 #[derive(Clone)]
 pub struct CellRuntime {
@@ -56,6 +62,7 @@ pub(super) struct RuntimeInner {
     shutting_down: AtomicBool,
     session: SessionId,
     pool: SqlWorkerPool,
+    replica_host: crab_ltx::Host,
 }
 
 impl CellRuntime {
@@ -64,6 +71,21 @@ impl CellRuntime {
         pool: SqlWorkerPool,
         node_retained_bytes: usize,
         session: SessionId,
+    ) -> crate::Result<Self> {
+        Self::new_with_replica_host(
+            pool,
+            node_retained_bytes,
+            session,
+            crab_ltx::Host::default(),
+        )
+    }
+
+    /// Starts one dispatcher with caller-sized shared replica job admission.
+    pub fn new_with_replica_host(
+        pool: SqlWorkerPool,
+        node_retained_bytes: usize,
+        session: SessionId,
+        replica_host: crab_ltx::Host,
     ) -> crate::Result<Self> {
         if node_retained_bytes == 0 || node_retained_bytes > Semaphore::MAX_PERMITS {
             return Err(Error::Capacity("node retained bytes"));
@@ -78,6 +100,7 @@ impl CellRuntime {
                 shutting_down: AtomicBool::new(false),
                 session,
                 pool,
+                replica_host,
             }),
         })
     }
@@ -450,6 +473,7 @@ impl CellRuntime {
         destination: PathBuf,
         reservation: CellReservation,
     ) -> crate::Result<CellHandle> {
+        let replica = replica.with_host(self.inner.replica_host.clone());
         let cell = self.activation_cell(&catalog, &observed)?;
         let control = observed.value();
         let root = control
@@ -544,6 +568,7 @@ impl CellRuntime {
         authority: CellAuthority,
         observed: VersionedControl,
     ) -> crate::Result<CellHandle> {
+        let replica = replica.with_host(self.inner.replica_host.clone());
         let cell = self.activation_cell(&catalog, &observed)?;
         let incarnation = observed.value().incarnation;
         let code = observed.value().code;

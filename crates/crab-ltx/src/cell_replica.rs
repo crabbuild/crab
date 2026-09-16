@@ -165,9 +165,11 @@ impl CellPagedDatabase {
     /// The destination must be fresh and must later be passed unchanged to
     /// `CellWritableDatabase::open_writable`.
     pub async fn prepare_writable(
-        self,
+        mut self,
         destination: &std::path::Path,
     ) -> Result<CellWritableDatabase> {
+        let host = self.replica.host.for_dirty().await?;
+        self.replica = self.replica.with_host(host);
         let checksums = directory::load_checksums(
             directory::Verification {
                 layout: &self.replica.layout,
@@ -184,6 +186,8 @@ impl CellPagedDatabase {
             self.replica.limits,
         )
         .await?;
+        let host = self.replica.host.clone().without_dirty();
+        self.replica = self.replica.with_host(host);
         Ok(CellWritableDatabase {
             database: self,
             checksums,
@@ -451,9 +455,34 @@ impl CellReplica {
         commit_sequence: u64,
         schema: u32,
     ) -> Result<PreparedRoot> {
+        let mut replica = self.clone();
+        replica.host = self.host.for_dirty().await?;
+        replica
+            .prepare_captured(base, cuts, commit_sequence, schema)
+            .await
+    }
+
+    async fn prepare_captured(
+        &self,
+        base: Option<&RootRef>,
+        cuts: &CaptureBatch,
+        commit_sequence: u64,
+        schema: u32,
+    ) -> Result<PreparedRoot> {
         self.validate_metadata(commit_sequence, schema)?;
         if cuts.segments.is_empty() {
             return Err(CrabError::InvalidState("empty Cell append"));
+        }
+        let captured_bytes = cuts.segments.iter().try_fold(0_u64, |total, segment| {
+            if segment.info().size_bytes > self.limits.max_capture_bytes {
+                return Err(CrabError::Limit("captured Cell LTX bytes"));
+            }
+            total
+                .checked_add(segment.info().size_bytes)
+                .ok_or(CrabError::Limit("captured Cell LTX bytes"))
+        })?;
+        if captured_bytes > self.limits.max_capture_bytes {
+            return Err(CrabError::Limit("captured Cell LTX bytes"));
         }
         let base_graph = match base {
             Some(root) => Some(self.load_graph(root).await?),
@@ -476,13 +505,14 @@ impl CellReplica {
 
         let local = cuts.segments.clone();
         let host = self.host.clone();
+        let limits = self.limits;
         let inputs = self
             .host
             .run(move || {
                 local
                     .into_iter()
                     .map(|segment| {
-                        let bytes = host.read(segment.path(), segment.info().size_bytes)?;
+                        let bytes = host.read(segment.path(), limits.max_capture_bytes)?;
                         Ok(AppendInput {
                             bytes,
                             info: segment.info().clone(),
@@ -516,6 +546,20 @@ impl CellReplica {
         commit_sequence: u64,
         schema: u32,
     ) -> Result<PreparedRoot> {
+        let mut replica = self.clone();
+        replica.host = self.host.for_dirty().await?;
+        replica
+            .prepare_bundle_admitted(base, bundle, commit_sequence, schema)
+            .await
+    }
+
+    async fn prepare_bundle_admitted(
+        &self,
+        base: Option<&RootRef>,
+        bundle: &crate::bundle::Bundle,
+        commit_sequence: u64,
+        schema: u32,
+    ) -> Result<PreparedRoot> {
         self.validate_metadata(commit_sequence, schema)?;
         if bundle.bytes().len() as u64 > self.limits.max_plan_bytes {
             return Err(CrabError::Limit("Cell bundle bytes"));
@@ -529,6 +573,7 @@ impl CellReplica {
         let (repository, epoch) = crate::bundle::cell_identity(&self.cell, &self.incarnation);
         let bundle_digest = *blake3::hash(bundle.bytes()).as_bytes();
         let mut inputs = Vec::new();
+        let mut selected_bytes = 0_u64;
         let mut prospective = base_graph
             .as_ref()
             .map(|graph| graph.descriptors.clone())
@@ -536,6 +581,12 @@ impl CellReplica {
         for (index, row) in bundle.rows().iter().enumerate() {
             if row.repository != repository || row.epoch != epoch {
                 continue;
+            }
+            selected_bytes = selected_bytes
+                .checked_add(row.info.size_bytes)
+                .ok_or(CrabError::Limit("captured Cell bundle bytes"))?;
+            if selected_bytes > self.limits.max_capture_bytes {
+                return Err(CrabError::Limit("captured Cell bundle bytes"));
             }
             prospective.push(SegmentDescriptor::bundled(
                 row.info.clone(),
@@ -847,9 +898,15 @@ impl CellReplica {
             position: target,
             commit_sequence,
         };
+        let host = self.host.clone().without_recovery().without_dirty();
         Ok(PreparedRoot {
             predecessor: base.copied(),
-            verified: VerifiedRoot::from_graph(self.clone(), root, &document, descriptors)?,
+            verified: VerifiedRoot::from_graph(
+                self.clone().with_host(host),
+                root,
+                &document,
+                descriptors,
+            )?,
         })
     }
 

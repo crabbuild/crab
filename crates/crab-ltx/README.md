@@ -406,8 +406,9 @@ records what remains before qualifying 1K–10K active databases per node.
 
 ## Resource bounds and current limits
 
-Defaults: 256 MiB database, 512 MiB per local input/output file (including WAL),
-1 GiB aggregate plan/retained captured bytes and 1,024 segments. Oversized headers
+Defaults: 256 MiB database, 64 MiB per capture, 512 MiB per local input/output
+file and 1 GiB aggregate plan/retained captured bytes, with 1,024 segments.
+Oversized headers
 are rejected before page allocation. The managed writer has `max_page_count`;
 capture checks database/WAL sizes and stops on limits. Capture errors fence the
 handle. A session at its retention limit must be published/rotated by the caller.
@@ -445,12 +446,14 @@ Both seams are needed to simulate local machine faults coherently.
 and blocking pool; `Worker::join` supervises teardown after queue closure. The
 worker still drives a Tokio runtime while idle so pooled provider connections
 continue progressing. Dispatch cancellation never rolls back side effects.
-Default hosts share 32 object-store request slots, up to 16 CPU job slots (capped
-by available CPUs), and two large-recovery slots. `with_io_slots`, `with_job_slots`
-and `with_recovery_slots` accept shared Tokio semaphores for explicit service
-budgets. Recovery admission precedes body downloads for restore, resume, bundle
-and compaction. Cancelled dispatched jobs retain their CPU/recovery reservation
-until the work finishes; returned database handles do not retain that reservation.
+Default hosts share 32 object-store request slots, up to 16 CPU and dirty-job
+slots (each independently capped by available CPUs), and two large-recovery slots.
+`with_io_slots`, `with_job_slots`, `with_dirty_slots` and `with_recovery_slots`
+accept shared Tokio semaphores for explicit service budgets. Dirty admission
+precedes capture preparation; recovery admission is nested inside it before body
+downloads for restore, resume, bundle and compaction. Cancelled dispatched jobs
+retain their CPU/dirty/recovery reservation until the work finishes; returned
+roots, page maps, sparse writers and database handles do not retain it.
 Closed semaphores reject new work. These are concurrency ceilings, not byte-weighted
 memory admission, bounded caller task queues or admission for synchronous local APIs.
 SQL, capture, snapshot, activation and request scheduling still need host policy.

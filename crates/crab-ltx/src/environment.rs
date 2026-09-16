@@ -92,7 +92,11 @@ pub struct Host {
     #[cfg(feature = "replica")]
     recovery_slots: Arc<tokio::sync::Semaphore>,
     #[cfg(feature = "replica")]
+    dirty_slots: Arc<tokio::sync::Semaphore>,
+    #[cfg(feature = "replica")]
     recovery: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    #[cfg(feature = "replica")]
+    dirty: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
 }
 
 impl Host {
@@ -198,9 +202,35 @@ impl Host {
         self
     }
 
+    /// Shares memory admission for capture, recovery and compaction jobs.
+    ///
+    /// One permit represents the embedding service's fixed per-job dirty-memory
+    /// reservation. The permit follows dispatched work after caller cancellation.
+    #[cfg(feature = "replica")]
+    #[must_use]
+    pub fn with_dirty_slots(mut self, slots: Arc<tokio::sync::Semaphore>) -> Self {
+        self.dirty_slots = slots;
+        self
+    }
+
+    #[cfg(feature = "replica")]
+    pub(crate) async fn for_dirty(&self) -> crate::Result<Self> {
+        let mut host = self.clone();
+        if host.dirty.is_none() {
+            host.dirty = Some(Arc::new(
+                self.dirty_slots
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| crate::CrabError::Other(Box::new(e)))?,
+            ));
+        }
+        Ok(host)
+    }
+
     #[cfg(feature = "replica")]
     pub(crate) async fn for_recovery(&self) -> crate::Result<Self> {
-        let mut host = self.clone();
+        let mut host = self.for_dirty().await?;
         if host.recovery.is_none() {
             host.recovery = Some(Arc::new(
                 self.recovery_slots
@@ -216,6 +246,12 @@ impl Host {
     #[cfg(feature = "replica")]
     pub(crate) fn without_recovery(mut self) -> Self {
         self.recovery = None;
+        self
+    }
+
+    #[cfg(feature = "replica")]
+    pub(crate) fn without_dirty(mut self) -> Self {
+        self.dirty = None;
         self
     }
 
@@ -241,6 +277,7 @@ impl Host {
             .map_err(|e| crate::CrabError::Other(Box::new(e)))?;
         let (send, receive) = tokio::sync::oneshot::channel();
         let recovery = self.recovery.clone();
+        let dirty = self.dirty.clone();
         self.executor.dispatch(Box::new(move || {
             // Dispatched work can outlive its future. Keep admission with the
             // job, not the waiter, so cancellation cannot oversubscribe the pool.
@@ -250,6 +287,7 @@ impl Host {
             // admission first so returned long-lived handles cannot appear to
             // retain capacity while this closure is still being torn down.
             drop(recovery);
+            drop(dirty);
             drop(permit);
             let _ = send.send(result);
         }))?;
@@ -268,6 +306,8 @@ impl Default for Host {
         #[cfg(feature = "replica")]
         static RECOVERY: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
             std::sync::OnceLock::new();
+        #[cfg(feature = "replica")]
+        static DIRTY: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
         Self {
             filesystem: Arc::new(DirectFileSystem),
             clock: Arc::new(SystemClock),
@@ -293,7 +333,17 @@ impl Default for Host {
                 .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
                 .clone(),
             #[cfg(feature = "replica")]
+            dirty_slots: DIRTY
+                .get_or_init(|| {
+                    Arc::new(tokio::sync::Semaphore::new(
+                        std::thread::available_parallelism().map_or(1, |n| n.get().min(16)),
+                    ))
+                })
+                .clone(),
+            #[cfg(feature = "replica")]
             recovery: None,
+            #[cfg(feature = "replica")]
+            dirty: None,
         }
     }
 }
@@ -599,9 +649,11 @@ mod tests {
     async fn cancelled_waiters_do_not_release_running_job_or_recovery_admission() {
         let jobs = Arc::new(tokio::sync::Semaphore::new(1));
         let recovery = Arc::new(tokio::sync::Semaphore::new(1));
+        let dirty = Arc::new(tokio::sync::Semaphore::new(1));
         let host = Host::default()
             .with_job_slots(jobs.clone())
-            .with_recovery_slots(recovery.clone());
+            .with_recovery_slots(recovery.clone())
+            .with_dirty_slots(dirty.clone());
         let scope = host.for_recovery().await.unwrap();
         let (started, entered) = tokio::sync::oneshot::channel();
         let (release, blocked) = std::sync::mpsc::channel();
@@ -618,12 +670,17 @@ mod tests {
         assert!(task.await.unwrap_err().is_cancelled());
         assert_eq!(jobs.available_permits(), 0);
         assert_eq!(recovery.available_permits(), 0);
+        assert_eq!(dirty.available_permits(), 0);
         release.send(()).unwrap();
         let _job = tokio::time::timeout(Duration::from_secs(2), jobs.acquire())
             .await
             .unwrap()
             .unwrap();
         let _recovery = tokio::time::timeout(Duration::from_secs(2), recovery.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+        let _dirty = tokio::time::timeout(Duration::from_secs(2), dirty.acquire())
             .await
             .unwrap()
             .unwrap();

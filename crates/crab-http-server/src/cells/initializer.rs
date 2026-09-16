@@ -3,12 +3,14 @@ use std::path::Path;
 use crab_cell_runtime::{
     ApplicationIdentity, CatalogEntry, CatalogProof, CatalogRole, CellAuthority, CellCatalog,
     CellHandle, CellModule, CellReplica, CellRuntime, CellTarget, ControlState, IncarnationId,
-    Owner, Registry, ReleaseState, ReleaseStore, ReplicaLimits, SessionId, SqlWorkerPool,
+    Owner, Registry, ReleaseState, ReleaseStore, SessionId, SqlWorkerPool,
 };
 use crab_storage::CellStorageLayout;
 use uuid::Uuid;
 
-use super::{REPOSITORY_MIGRATION, REPOSITORY_NAMESPACE, RepositoryModule};
+use super::{
+    REPOSITORY_MIGRATION, REPOSITORY_NAMESPACE, RepositoryModule, repository_replica_limits,
+};
 use crate::catalog::RepositoryApplicationState;
 use crate::{Config, Error, Result};
 
@@ -78,12 +80,19 @@ pub(crate) async fn initialize_repository_at(
     let directory = tempfile::Builder::new()
         .prefix("crab-cell-repository-init-")
         .tempdir_in(data_dir)?;
-    let runtime = CellRuntime::new(SqlWorkerPool::new(1, 1)?, INITIALIZE_MAILBOX_BYTES, session)?;
+    let budget =
+        crate::server::CellRuntimeBudget::from_resources(crate::peer::local_resources(data_dir)?)?;
+    let runtime = CellRuntime::new_with_replica_host(
+        SqlWorkerPool::new(1, 1)?,
+        INITIALIZE_MAILBOX_BYTES,
+        session,
+        budget.replica_host(),
+    )?;
     let replica = CellReplica::new(
         layout.clone(),
         *target.cell_id().as_bytes(),
         *observed.value().incarnation.as_bytes(),
-        ReplicaLimits::default(),
+        repository_replica_limits(),
     )
     .map_err(crab_cell_runtime::Error::from)?;
     let destination = directory.path().join(format!("{}.sqlite", Uuid::now_v7()));

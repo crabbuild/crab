@@ -33,7 +33,9 @@ mod worker;
 mod workflow;
 
 pub use activity_pool::{BlockingActivityPool, BlockingActivityReservation};
-pub use actor::{CellHandle, CellRuntime, MigratedCell, NodeByteReservation};
+pub use actor::{
+    ACTIVE_CELL_NATIVE_BYTES, CellHandle, CellRuntime, MigratedCell, NodeByteReservation,
+};
 pub use application::{ApplicationIdentity, ApplicationIdentityStore};
 pub use authority::{CellAuthority, VersionedControl};
 pub use catalog::{
@@ -45,7 +47,7 @@ pub use client::{
 };
 pub use codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 pub use control::{Control, ControlState, Owner, RootRef, Transition};
-pub use crab_ltx::{CellReplica, Limits as ReplicaLimits};
+pub use crab_ltx::{CellReplica, Host as ReplicaHost, Limits as ReplicaLimits};
 pub use effects::{
     EffectAckRequest, EffectBatch, EffectClaim, EffectClaimCommand, EffectClaimRequest,
     EffectCommandIntent, EffectLease, EffectLeaseCommand, EffectLeaseOutcome, EffectLeaseRequest,

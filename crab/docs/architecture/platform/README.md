@@ -208,8 +208,8 @@ its published control and is retried after the cursor completes and reloads the
 latest shard head, so a hot Cell or namespace cannot pin the catalog prefix.
 Cross-session activity recovery is now integration-proven through unchanged-owner
 takeover, source-volume loss, exact-root restore, expired-lease reclaim and
-attempt-two completion. Real multi-Pod process/network fault qualification and
-dirty-job admission remain.
+attempt-two completion. Real multi-Pod process/network fault qualification
+remains.
 `CellRuntime::local_handle` now resolves a due Cell
 only when the dispatcher still owns the exact incarnation/code/schema under the
 current session and the admission is neither fenced nor draining; it never
@@ -264,8 +264,9 @@ after the new LTX root/schema/code control transition is authoritative.
 Fleet-wide catalog migration orchestration now walks rendezvous-assigned shards,
 routes each transition through local or authenticated peer ownership, caps work
 at 16 concurrent Cells per node, and conditionally stores monotonic terminal
-progress for the activating release. Native task/actor and dirty-job admission
-remain. Label create/edit/delete/list, issue-label validation, commit-status
+progress for the activating release. Active-Cell admission reserves fixed native
+actor/task state, while capture, hydration, recovery and compaction share a
+CPU- and memory-derived dirty-job pool. Label create/edit/delete/list, issue-label validation, commit-status
 create/list, versioned check-run create/update/list, Pull metadata/comments/reviews,
 durable merge intent, Release metadata/tag claims/publication intent and release-asset
 references now use the same Cell. Git refs and immutable release-asset bodies remain

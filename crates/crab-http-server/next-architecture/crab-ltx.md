@@ -6,10 +6,10 @@
 WAL-to-LTX mechanics and optional `replica` transport/paged reads. The Cargo member contains a pinned, modified source
 integration of `celld-ltx`, not a Git dependency or separate daemon.
 The HTTP server consumes it through `crab-cell-runtime`: repository issue,
-comment, label, commit-status, check-run and repository-policy commands publish LTX before success, cold activation restores the exact
-published root, and public routes use the owner-aware typed client. Remaining
-domain adapters, fleet-scale takeover and complete operational qualification
-remain delivery work.
+comment, label, commit-status, check-run, repository-policy, Pull and Release
+commands publish LTX before success, cold activation restores the exact
+published root, and public routes use the owner-aware typed client. Fleet-scale
+performance and process/network fault qualification remain delivery work.
 
 ## Implemented state
 
@@ -24,7 +24,7 @@ remain delivery work.
 | Remote recovery/compaction | Pinned cross-epoch inheritance, exact restore/resume, bundle locations and compaction guarded by head CAS |
 | Paged SQL | Authenticated immutable views and writable sparse activation; incremental hydration, bounded range read-ahead |
 | Failure/retention | Capture failure fences the handle; fresh-directory reactivation; exact batch/head pruning reverifies local bytes before deleting and releasing admission accounting |
-| Host facilities | Injectable filesystem/base VFS/clock/executor; shared page-fault worker/cache and I/O/job/recovery concurrency budgets |
+| Host facilities | Injectable filesystem/base VFS/clock/executor; shared page-fault worker/cache and I/O/job/recovery/dirty concurrency budgets; temporary reservations follow cancelled jobs but are removed from returned long-lived handles |
 | Server wiring | All repository collaboration metadata, owner/control publication, scheduled owner-bound compaction, exact local-cut pruning, local/remote/idle/stale-owner routing, public HTTP response gating and source-loss restore are wired; immutable Release asset bodies remain object data by design |
 
 Source and usage: [crate README](../../crab-ltx/README.md),

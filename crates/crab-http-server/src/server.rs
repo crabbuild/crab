@@ -15,8 +15,9 @@ use axum::{
 };
 use bytes::Bytes;
 use crab_cell_runtime::{
-    ACTIVE_CELL_FILE_DESCRIPTORS, ACTIVE_CELL_PAGE_CACHE_BYTES, CellRuntime, Digest, NodeDirectory,
-    Owner, PeerRoundTrip, PeerSigner, ReleaseState, ReleaseStore, SessionId, SqlWorkerPool,
+    ACTIVE_CELL_FILE_DESCRIPTORS, ACTIVE_CELL_NATIVE_BYTES, ACTIVE_CELL_PAGE_CACHE_BYTES,
+    CellRuntime, Digest, NodeDirectory, Owner, PeerRoundTrip, PeerSigner, ReleaseState,
+    ReleaseStore, ReplicaHost, SessionId, SqlWorkerPool,
 };
 use crab_metadata::manifest_store::read_manifest;
 use crab_remote_git::{
@@ -50,17 +51,20 @@ const GIB: u64 = 1024 * MIB;
 const MIN_CELL_MEMORY_BYTES: u64 = 2 * GIB;
 const MIN_USABLE_CELL_DISK_BYTES: u64 = 20 * GIB;
 const FILE_DESCRIPTOR_RESERVE_MINIMUM: usize = 128;
+const DIRTY_JOB_MEMORY_BYTES: u64 = 64 * MIB;
+const MAX_REPLICA_JOBS: usize = 16;
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(110);
 const RELEASE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct CellRuntimeBudget {
+pub(crate) struct CellRuntimeBudget {
     node_retained_bytes: usize,
     max_active_cells: usize,
+    replica_jobs: usize,
 }
 
 impl CellRuntimeBudget {
-    fn from_resources(resources: crate::peer::LocalResources) -> Result<Self> {
+    pub(crate) fn from_resources(resources: crate::peer::LocalResources) -> Result<Self> {
         if resources.memory_bytes < MIN_CELL_MEMORY_BYTES {
             return Err(crate::Error::Config(
                 "Cell runtime requires at least 2 GiB effective memory",
@@ -77,6 +81,8 @@ impl CellRuntimeBudget {
         let cell_memory = resources.memory_bytes - process_reserve;
         let page_cache_memory = cell_memory.saturating_mul(35) / 100;
         let memory_cells = page_cache_memory / ACTIVE_CELL_PAGE_CACHE_BYTES;
+        let native_memory = cell_memory.saturating_mul(10) / 100;
+        let native_cells = native_memory / ACTIVE_CELL_NATIVE_BYTES;
         let descriptor_reserve =
             (resources.available_file_descriptors / 10).max(FILE_DESCRIPTOR_RESERVE_MINIMUM);
         let descriptor_cells = resources
@@ -85,6 +91,7 @@ impl CellRuntimeBudget {
             / ACTIVE_CELL_FILE_DESCRIPTORS;
         let max_active_cells = usize::try_from(memory_cells)
             .unwrap_or(usize::MAX)
+            .min(usize::try_from(native_cells).unwrap_or(usize::MAX))
             .min(descriptor_cells)
             .min(MAX_ACTIVE_CELLS);
         if max_active_cells == 0 {
@@ -95,10 +102,28 @@ impl CellRuntimeBudget {
         let mailbox = usize::try_from(cell_memory / 20)
             .unwrap_or(usize::MAX)
             .min(tokio::sync::Semaphore::MAX_PERMITS);
+        let dirty_memory = cell_memory.saturating_mul(25) / 100;
+        let replica_jobs = usize::try_from(dirty_memory / DIRTY_JOB_MEMORY_BYTES)
+            .unwrap_or(usize::MAX)
+            .min(resources.job_credits)
+            .min(MAX_REPLICA_JOBS);
+        if replica_jobs == 0 {
+            return Err(crate::Error::Config(
+                "Cell runtime has no capture and recovery job capacity",
+            ));
+        }
         Ok(Self {
             node_retained_bytes: mailbox,
             max_active_cells,
+            replica_jobs,
         })
+    }
+
+    pub(crate) fn replica_host(self) -> ReplicaHost {
+        ReplicaHost::default()
+            .with_job_slots(Arc::new(Semaphore::new(self.replica_jobs)))
+            .with_recovery_slots(Arc::new(Semaphore::new(self.replica_jobs)))
+            .with_dirty_slots(Arc::new(Semaphore::new(self.replica_jobs)))
     }
 }
 
@@ -115,10 +140,11 @@ fn transfer_admission(catalog: &CatalogStore) -> TransferAdmission {
 
 fn start_cell_runtime(session: SessionId, budget: CellRuntimeBudget) -> Result<CellRuntime> {
     crate::cells::compiled_registry()?;
-    Ok(CellRuntime::new(
+    Ok(CellRuntime::new_with_replica_host(
         SqlWorkerPool::for_system(budget.max_active_cells)?,
         budget.node_retained_bytes,
         session,
+        budget.replica_host(),
     )?)
 }
 
@@ -1317,6 +1343,7 @@ mod tests {
             memory_bytes,
             free_disk_bytes,
             available_file_descriptors,
+            job_credits: 16,
         }
     }
 
@@ -1329,6 +1356,7 @@ mod tests {
             CellRuntimeBudget {
                 node_retained_bytes: (3 * GIB / 2 / 20) as usize,
                 max_active_cells: 1_125,
+                replica_jobs: 6,
             }
         );
     }
@@ -1377,7 +1405,16 @@ mod tests {
         let budget =
             CellRuntimeBudget::from_resources(local_resources(2 * GIB, 30 * GIB, 1_000_000))
                 .unwrap();
-        assert_eq!(budget.max_active_cells, 2_867);
+        assert_eq!(budget.max_active_cells, 2_457);
+        assert_eq!(budget.replica_jobs, 6);
+    }
+
+    #[test]
+    fn cell_runtime_budget_caps_dirty_jobs_by_cpu_credits() {
+        let mut resources = local_resources(64 * GIB, 1000 * GIB, 1_000_000);
+        resources.job_credits = 2;
+        let budget = CellRuntimeBudget::from_resources(resources).unwrap();
+        assert_eq!(budget.replica_jobs, 2);
     }
 
     #[test]
@@ -1411,6 +1448,7 @@ mod tests {
                 memory_bytes: 2 * GIB,
                 free_disk_bytes: 30 * GIB,
                 available_file_descriptors: FILE_DESCRIPTOR_RESERVE_MINIMUM,
+                job_credits: 16,
             })
             .is_err()
         );

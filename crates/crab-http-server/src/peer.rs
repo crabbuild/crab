@@ -80,6 +80,7 @@ pub(crate) struct LocalResources {
     pub(crate) memory_bytes: u64,
     pub(crate) free_disk_bytes: u64,
     pub(crate) available_file_descriptors: usize,
+    pub(crate) job_credits: usize,
 }
 
 impl NodePublisher {
@@ -534,7 +535,7 @@ fn node_capacity(data_dir: &Path) -> crate::Result<NodeCapacity> {
     })
 }
 
-fn local_resources(data_dir: &Path) -> crate::Result<LocalResources> {
+pub(crate) fn local_resources(data_dir: &Path) -> crate::Result<LocalResources> {
     let mut system = sysinfo::System::new();
     system.refresh_memory();
     let pid = sysinfo::get_current_pid()
@@ -555,6 +556,10 @@ fn local_resources(data_dir: &Path) -> crate::Result<LocalResources> {
         memory_bytes: effective_memory_limit(system.total_memory()),
         free_disk_bytes: fs4::available_space(data_dir)?,
         available_file_descriptors: file_limit.saturating_sub(open_files),
+        job_credits: std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .clamp(1, 16),
     })
 }
 

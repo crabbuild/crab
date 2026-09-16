@@ -50,7 +50,7 @@ does not imply that all of those bytes must reside on local disk.
 | Long-lived Cell writers exhausted local/remote segment admission | Reverify and prune each exact local batch only after authoritative root confirmation; before later appends, schedule a bounded eight-input level promotion or a pressure-triggered full replacement through the owner CAS | `host_hooks::remote::captured_pruning_retries_after_removal_but_failed_parent_sync`, `cell_roots::scheduled_cell_compaction_promotes_fanout_and_preserves_root`, and `actor::dispatcher_compacts_before_segment_admission_is_exhausted` |
 | Independent replicas multiplied remote/recovery work | Shared I/O, CPU-job and large-recovery admission; ordered concurrent input/index reads | `replica::io` tests overlap two cohorts while enforcing one three-request ceiling and preserving input order |
 | Cancelling a waiter could release capacity before its work stopped | CPU/recovery permits travel with dispatched non-cancellable closures; network child tasks abort on cohort drop | `environment` cancellation regression and `replica::io` cancellation regression |
-| Temporary recovery capacity could become attached to returned handles | Strip recovery reservation from returned page maps and resumed writers | `publication::recovery_admission_is_released_before_returning_long_lived_handles` |
+| Temporary recovery capacity could become attached to returned handles | Strip dirty and recovery reservations from prepared roots, page maps, sparse writable handles and resumed writers | `cell_roots::prepared_cell_handles_release_dirty_admission` and `publication::recovery_admission_is_released_before_returning_long_lived_handles` |
 
 Earlier corrections remain covered: snapshot returns ownership of pending cuts;
 native and bundle appends verify only new LTX bodies against pinned predecessor
@@ -71,13 +71,14 @@ Full restore continues to verify every body and intermediate database checksum.
 | --- | --- | --- |
 | Provider operations | 32 shared process-wide permits, including retries | Caller tasks waiting for admission; total retained input bytes |
 | Codec/recovery blocking jobs | Available CPU count capped at 16, process-wide | Synchronous caller-owned SQL/capture/snapshot jobs |
-| Full restore/resume/bundle/remote compaction | Two shared recovery slots, acquired before body downloads | Per-job RSS; retained result buffers |
+| Capture/recovery/compaction dirty work | CPU-capped shared defaults; the HTTP server instead derives 64 MiB slots from 25% of its Cell budget and CPU credits | Dynamic scratch-disk quota; measured allocator overhead |
+| Full restore/resume/bundle/remote compaction | Shared recovery slots acquired before body downloads and nested inside dirty admission | Per-job RSS outside the configured dirty reservation; retained result buffers |
 | Paged fault driver | One shared default worker; 32 concurrent faults and 256 queued requests | SQL worker count; custom independently configured executor hosts |
 | Decoded read-ahead cache | 8 MiB payload per shared driver | SQLite caches, active fetch buffers, metadata and cache bookkeeping |
 | Fault latency | 30-second deadline including queued wait | Arbitrary blocking custom transports/executors that do not yield |
-| Database/input admission | Per-database `Limits`; three retained 64 KiB SQLite page caches; embedding server derives active count from its page-cache pool and available file descriptors | Native task/actor overhead, dirty bytes and local SSD quota |
+| Database/input admission | Per-database `Limits`; three retained 64 KiB SQLite page caches; the HTTP server derives active count from page-cache, fixed 64 KiB native-state and file-descriptor pools | Actual native RSS variance and dynamic local SSD quota |
 
-`Host::{with_io_slots,with_job_slots,with_recovery_slots}` accept shared
+`Host::{with_io_slots,with_job_slots,with_recovery_slots,with_dirty_slots}` accept shared
 `Arc<tokio::sync::Semaphore>` values. Configure a host once and clone it across
 replicas to share a service budget. No new environment variables or provider
 dependencies are introduced. Closing a semaphore rejects admission; it does not
@@ -87,8 +88,10 @@ bounded blocking pool whose SQL calls synchronously wait for page faults.
 
 These are count-based ceilings. They are not a memory reservation system, a
 fair multi-tenant scheduler or a deadline policy for application requests.
-Limits are unchanged: a default 256 MiB database ceiling intentionally does not
-admit 5 GB databases. Raising it requires a separately sized recovery budget.
+The library default 256 MiB database ceiling intentionally does not admit 5 GB
+databases. The HTTP server supplies a repository profile with a 5 GiB database
+ceiling, 64 MiB capture ceiling, 6 GiB object ceiling and 8 GiB plan ceiling;
+its separately derived dirty/recovery slots bound concurrent large operations.
 
 ## Remaining implementation gates
 
@@ -110,12 +113,13 @@ admit 5 GB databases. Raising it requires a separately sized recovery budget.
    5 GB incompressible data and low-disk failures. Keep cryptographic body/index
    binding and exact output verification.
 3. **Resident lifecycle and SQL scheduling.** The server has bounded activation
-   queues, a shared SQL executor, per-database serialization and FD/page-cache-
-   derived active admission. Managed sessions own three 64 KiB-cache SQLite
-   connections each. Native task/actor overhead and dirty-byte reservations plus
-   explicit warm transitions remain. Fresh exact-root restore is supported;
-   reusable crash-safe local warm reopening is not. Every acknowledged root must
-   survive eviction.
+   queues, a shared SQL executor, per-database serialization and FD/page-cache/
+   native-state-derived active admission. Managed sessions own three 64 KiB-cache
+   SQLite connections each. Capture/recovery/compaction share CPU- and memory-
+   derived dirty slots. Qualify the fixed native and dirty estimates, add dynamic
+   scratch-disk admission and implement explicit warm transitions. Fresh exact-
+   root restore is supported; reusable crash-safe local warm reopening is not.
+   Every acknowledged root must survive eviction.
 4. **Retention and collection.** The HTTP runtime now owns owner/head CAS,
    exact-response gating, ambiguous-publication reconciliation and scheduled
    representation compaction. Implement backup/recovery-root pinning and reclaim

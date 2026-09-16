@@ -501,7 +501,9 @@ pub(super) async fn load_checksums(
     };
     crate::pages::PageChecksums::from_file(
         crate::LtxHost {
-            facilities: verification.host.clone(),
+            // The checksum base lives with the active writer. Temporary
+            // hydration admission must end before that handle is returned.
+            facilities: verification.host.clone().without_recovery().without_dirty(),
             max_database_bytes: limits.max_database_bytes,
             max_file_bytes: limits.max_database_bytes,
         },

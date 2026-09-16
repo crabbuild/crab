@@ -151,10 +151,12 @@ async fn inheritance_admits_every_destination_limit_before_io() {
         .unwrap();
     for limits in [
         Limits {
+            max_capture_bytes: 1024,
             max_file_bytes: 1024,
             ..Limits::default()
         },
         Limits {
+            max_capture_bytes: 1024,
             max_file_bytes: 1024,
             max_plan_bytes: 1024,
             ..Limits::default()

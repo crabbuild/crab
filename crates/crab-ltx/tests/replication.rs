@@ -204,7 +204,7 @@ fn capture_failure_fences_writer_and_stale_sessions_are_refused() {
     let mut db = ManagedDb::open(
         &path,
         Limits {
-            max_file_bytes: 32768,
+            max_capture_bytes: 32768,
             ..Limits::default()
         },
     )
@@ -212,7 +212,7 @@ fn capture_failure_fences_writer_and_stale_sessions_are_refused() {
     assert!(ManagedDb::open(&path, Limits::default()).is_err());
     db.transaction(|tx| {
         tx.execute("CREATE TABLE large (body BLOB)", [])?;
-        tx.execute("INSERT INTO large VALUES (zeroblob(65536))", [])?;
+        tx.execute("INSERT INTO large VALUES (randomblob(65536))", [])?;
         Ok(())
     })
     .unwrap();
@@ -234,6 +234,7 @@ fn restore_admission_rejects_database_and_chain_byte_limits() {
     };
     assert!(VerifiedLocalPlan::new(&batch.segments, batch.position, small).is_err());
     let small = Limits {
+        max_capture_bytes: 128,
         max_file_bytes: 128,
         max_plan_bytes: 128,
         ..Limits::default()

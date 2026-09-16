@@ -11,8 +11,8 @@ use crab_cell_runtime::{
     EffectModule, MaintenanceModule, MigrationDescriptor, MigrationFailure, MigrationProgressState,
     MigrationProgressStore, ModuleDescriptor, NamespaceDescriptor, NamespaceId, NodeAdvertisement,
     NodeCapacity, NodeDirectory, OperationDescriptor, Owner, PeerRoundTrip, PeerSigner, Registry,
-    RegistryBuilder, ReleaseRecord, ReleaseState, ReleaseStore, RequestId, SessionId,
-    SqlWorkerPool, TenantId, VersionedNodeAdvertisement, register_effect_delivery,
+    RegistryBuilder, ReleaseRecord, ReleaseState, ReleaseStore, ReplicaLimits, RequestId,
+    SessionId, SqlWorkerPool, TenantId, VersionedNodeAdvertisement, register_effect_delivery,
     register_maintenance,
 };
 use crab_storage::CellStorageLayout;
@@ -38,6 +38,10 @@ pub(crate) use router::{RepositoryCell, RepositoryCellPeer, RepositoryCellRouter
 pub(crate) use scheduler::{RepositoryCellScheduler, SchedulerStatus};
 
 const REPOSITORY_MIGRATION: &str = include_str!("cells/migrations/0001_repository_identity.sql");
+const REPOSITORY_MAX_DATABASE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const REPOSITORY_MAX_CAPTURE_BYTES: u64 = 64 * 1024 * 1024;
+const REPOSITORY_MAX_FILE_BYTES: u64 = 6 * 1024 * 1024 * 1024;
+const REPOSITORY_MAX_PLAN_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub(crate) const REPOSITORY_NAMESPACE: NamespaceId = NamespaceId::from_bytes(*b"crab-repository1");
 pub(crate) const REPOSITORY_TICK_COMMAND_ID: u32 = 5;
 pub(crate) const REPOSITORY_EFFECT_CLAIM_COMMAND_ID: u32 = 6;
@@ -113,6 +117,16 @@ const REPOSITORY_QUERIES: &[OperationDescriptor] = &[
     operation(25, 64, 1024 * 1024),
     operation(26, 4 * 1024, 1024 * 1024),
 ];
+
+pub(super) fn repository_replica_limits() -> ReplicaLimits {
+    ReplicaLimits {
+        max_database_bytes: REPOSITORY_MAX_DATABASE_BYTES,
+        max_capture_bytes: REPOSITORY_MAX_CAPTURE_BYTES,
+        max_file_bytes: REPOSITORY_MAX_FILE_BYTES,
+        max_plan_bytes: REPOSITORY_MAX_PLAN_BYTES,
+        max_segments: 1024,
+    }
+}
 
 struct RepositoryModule;
 
@@ -750,10 +764,14 @@ pub(crate) async fn enter_maintenance(config: &Config, expected_revision: u64) -
         .prefix("maintenance-")
         .tempdir_in(&config.cells.data_dir)?;
     let session = SessionId::from_bytes(Uuid::now_v7().into_bytes());
-    let runtime = CellRuntime::new(
+    let budget = crate::server::CellRuntimeBudget::from_resources(crate::peer::local_resources(
+        &config.cells.data_dir,
+    )?)?;
+    let runtime = CellRuntime::new_with_replica_host(
         SqlWorkerPool::new(1, 1)?,
         MAINTENANCE_RUNTIME_BYTES,
         session,
+        budget.replica_host(),
     )?;
     let router = RepositoryCellRouter::new(
         identity,
@@ -1485,6 +1503,15 @@ mod tests {
         );
         assert_eq!(descriptor["namespaces"][0]["role"], "repository");
         assert_eq!(descriptor["namespaces"][0]["shards"], 1);
+    }
+
+    #[test]
+    fn repository_replica_limits_admit_five_gibibytes_but_bound_each_capture() {
+        let limits = repository_replica_limits();
+        assert_eq!(limits.max_database_bytes, 5 * 1024 * 1024 * 1024);
+        assert_eq!(limits.max_capture_bytes, 64 * 1024 * 1024);
+        assert!(limits.max_file_bytes > limits.max_database_bytes);
+        assert!(limits.max_plan_bytes > limits.max_file_bytes);
     }
 
     #[tokio::test]

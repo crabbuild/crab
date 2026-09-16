@@ -5,13 +5,13 @@ use crab_cell_runtime::{
     CellHandle, CellReplica, CellRuntime, CellTarget, ControlState, EffectPeerClient,
     MAX_ACTIVITY_PAYLOAD_BYTES, MigrationPeerClient, NodeByteReservation, NodeDirectory, Owner,
     PeerPrincipal, PeerRoundTrip, PeerSigner, PersistedWorkInventory, Registry, ReleaseState,
-    ReleaseStore, ReplicaLimits, VersionedControl,
+    ReleaseStore, VersionedControl,
 };
 use crab_storage::CellStorageLayout;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use super::REPOSITORY_NAMESPACE;
+use super::{REPOSITORY_NAMESPACE, repository_replica_limits};
 use crate::auth::Identity;
 
 const ACTIVATION_SHARDS: usize = 4096;
@@ -430,7 +430,7 @@ impl RepositoryCellRouter {
             self.layout.clone(),
             *target.cell_id().as_bytes(),
             *observed.value().incarnation.as_bytes(),
-            ReplicaLimits::default(),
+            repository_replica_limits(),
         )
         .map_err(crab_cell_runtime::Error::from)?;
         let destination = self.activation_path(&target).await?;
@@ -714,7 +714,7 @@ mod tests {
                     layout.clone(),
                     *target.cell_id().as_bytes(),
                     *observed.value().incarnation.as_bytes(),
-                    ReplicaLimits::default(),
+                    crab_cell_runtime::ReplicaLimits::default(),
                 )
                 .unwrap(),
                 authority,

@@ -94,9 +94,12 @@ and gives five percent of the remaining Cell budget to node-retained command
 and activity bytes. It
 rejects less than 2 GiB effective memory or less than 20 GiB disk after the
 larger of 10 GiB or one fifth of current free space is reserved. Active-Cell
-admission also reserves three 64 KiB SQLite caches and eight persistent file
-descriptors per Cell, after retaining ten percent or at least 128 descriptors
-for the process. Native task/actor overhead and dirty-job reservations remain.
+admission reserves three 64 KiB SQLite caches, a conservative 64 KiB native
+actor/task allowance and eight persistent file descriptors per Cell, after
+retaining ten percent or at least 128 descriptors for the process. Capture,
+writable hydration, recovery and compaction acquire one shared dirty slot before
+large work. The slot count is the minimum of 25% of the Cell budget divided by
+64 MiB, available CPU job credits and 16.
 
 ## Resource profiles and capacity targets
 
@@ -544,9 +547,10 @@ the process does not recycle permits or detach a stuck native callback before
 the orchestrator's 120-second termination boundary.
 The initial wiring uses CPU-derived 1..16 workers and a 10,000 active-Cell
 ceiling. It derives the node retained-byte semaphore as five percent of the Cell
-memory budget, derives active-Cell admission from the page-cache and descriptor
-budgets, and enforces the effective-memory and free-volume startup floors above.
-Native task/actor and dirty-job reservations remain delivery work. The configured
+memory budget, derives active-Cell admission from page-cache, native-state and
+descriptor budgets, derives shared 64 MiB dirty-job slots from memory and CPU,
+and enforces the effective-memory and free-volume startup floors above. Dynamic
+per-job scratch-disk reservation and measured capacity qualification remain. The configured
 Cell directory now owns per-process session paths and per-Cell activation files;
 capacity checks use that same volume. Cross-session activity takeover, local-volume
 loss, exact-root restore, expired-lease reclaim and attempt-two completion are
