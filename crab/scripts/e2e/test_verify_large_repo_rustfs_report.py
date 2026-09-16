@@ -241,6 +241,52 @@ class ReplayCheckpointTests(unittest.TestCase):
         with self.assertRaisesRegex(QUALIFICATION.QualificationError, "not contiguous"):
             QUALIFICATION.completed_replay_ordinal([{"ordinal": 0}, {"ordinal": 2}])
 
+    def test_capsule_owner_accepts_checkpoint_convergence(self) -> None:
+        snapshots = [
+            {
+                "protocol": "capsule-v2",
+                "generation": 0,
+                "action": "capsule_checkpoint",
+                "visibility": "embedded",
+                "superseded": True,
+            },
+            {
+                "protocol": "capsule-v2",
+                "generation": 1,
+                "action": "none",
+                "visibility": "embedded",
+                "superseded": False,
+            },
+        ]
+
+        self.assertTrue(QUALIFICATION.capsule_owner_is_current(snapshots))
+
+    def test_capsule_owner_rejects_checkpoint_without_convergence(self) -> None:
+        snapshots = [
+            {
+                "protocol": "capsule-v2",
+                "generation": 0,
+                "action": "capsule_checkpoint",
+                "visibility": "embedded",
+                "superseded": True,
+            }
+        ]
+
+        self.assertFalse(QUALIFICATION.capsule_owner_is_current(snapshots))
+
+    def test_capsule_owner_rejects_external_visibility(self) -> None:
+        snapshots = [
+            {
+                "protocol": "capsule-v2",
+                "generation": 1,
+                "action": "none",
+                "visibility": "published",
+                "superseded": False,
+            }
+        ]
+
+        self.assertFalse(QUALIFICATION.capsule_owner_is_current(snapshots))
+
 
 def valid_report() -> dict[str, Any]:
     replay_count = 3
