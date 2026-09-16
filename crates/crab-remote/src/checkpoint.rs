@@ -7,6 +7,7 @@ use std::process::Command;
 use bytes::Bytes;
 use crab_git::repack::{GeometricRepackedPack, RepackSource};
 use crab_metadata::capsule_protocol::CapsuleGitPack;
+use crab_storage::{Store, StoreLayout};
 use tokio_util::sync::CancellationToken;
 
 /// A verified replacement Git-pack inventory for one checkpoint.
@@ -49,6 +50,8 @@ pub enum CheckpointError {
     Pack(#[from] crab_git::pack::PackError),
     #[error("checkpoint metadata failed")]
     Metadata(#[from] crab_metadata::error::MetadataError),
+    #[error("checkpoint publication failed")]
+    Write(#[from] crab_write::WriteError),
     #[error("checkpoint file I/O failed")]
     Io(#[from] std::io::Error),
     #[error("checkpoint worker failed")]
@@ -110,6 +113,82 @@ pub async fn consolidate_git_packs(
         })
     })
     .await?
+}
+
+/// Compact a capsule repository once its immutable frontier reaches `threshold`.
+///
+/// The root and every ref position remain pinned through consolidation. A
+/// concurrent root replacement is benign: its owner won publication and a
+/// later maintenance pass can retry from that newer authority.
+pub async fn publish_capsule_checkpoint(
+    layout: &StoreLayout<Store>,
+    threshold: u32,
+    maximum_bytes: u64,
+    cancel: &CancellationToken,
+) -> Result<bool, CheckpointError> {
+    check_cancelled(cancel)?;
+    let view = crab_read::capsule_protocol::open_view(
+        layout,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: maximum_bytes,
+            max_frontier_bytes: maximum_bytes,
+        },
+    )
+    .await?;
+    let capsule_count = view
+        .capsule_run_pointers()
+        .iter()
+        .try_fold(0_u32, |total, pointer| {
+            total.checked_add(pointer.capsule_count())
+        })
+        .ok_or_else(|| {
+            crab_metadata::error::MetadataError::Internal(
+                "capsule checkpoint count overflowed".to_owned(),
+            )
+        })?;
+    if capsule_count < threshold {
+        return Ok(false);
+    }
+    let packs = consolidate_git_packs(&view, maximum_bytes, maximum_bytes, cancel)
+        .await?
+        .into_packs();
+    if packs.is_empty() {
+        return Ok(false);
+    }
+    let visibility = crab_metadata::capsule_protocol::CapsuleVisibilitySnapshot::from_index(
+        &view.git_visibility_index()?,
+    )?;
+    let checkpoint = crab_metadata::capsule_protocol::Checkpoint::build_with_catalogs(
+        view.root().root().generation(),
+        view.root().digest(),
+        packs,
+        view.pointer_catalog()?,
+        Some(visibility),
+    )?;
+    check_cancelled(cancel)?;
+    let result = if view.visible_ref_transactions().is_empty() {
+        crab_write::capsule_protocol::publish_checkpoint(
+            layout,
+            view.root_snapshot().clone(),
+            &checkpoint,
+        )
+        .await
+    } else {
+        crab_write::capsule_protocol::publish_ref_checkpoint(
+            layout,
+            view.root_snapshot().clone(),
+            &checkpoint,
+            view.refs().clone(),
+            view.peeled_refs().clone(),
+            view.visible_ref_transactions().clone(),
+        )
+        .await
+    };
+    match result {
+        Ok(_) => Ok(true),
+        Err(crab_write::WriteError::CapsuleRootChanged { .. }) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn repack_sources(installed: Vec<PathBuf>) -> Result<Vec<RepackSource>, CheckpointError> {

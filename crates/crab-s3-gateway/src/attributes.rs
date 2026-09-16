@@ -16,6 +16,7 @@ const VERSION: u32 = 2;
 const LEGACY_VERSION: u32 = 1;
 const MAX_MANIFEST_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_CHECKPOINT_DECODED_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_CAPSULE_READ_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const GZIP_MAGIC: &[u8] = b"\x1f\x8b";
 const MAX_DELTA_DEPTH: usize = 1_000_000;
 const MAX_CHECKPOINT_PUBLISH_ATTEMPTS: usize = 8;
@@ -706,12 +707,33 @@ async fn checkpoint_is_newer(
     if delta_chain_reaches(repository, existing, checkpoint.commit).await? {
         return Ok(false);
     }
-    let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
-        &repository.store,
-        &repository.layout,
-    )
-    .await?;
-    let Some(current) = snapshot.journal.refs.get(&checkpoint.branch) else {
+    let current = match crab_metadata::capsule_protocol::load_root(&repository.layout).await {
+        Ok(root) => crab_read::capsule_protocol::open_view_from_root(
+            &repository.layout,
+            root,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
+                max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
+            },
+        )
+        .await?
+        .refs()
+        .get(&checkpoint.branch)
+        .cloned(),
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        }) => crab_metadata::manifest_store::read_repository_snapshot(
+            &repository.store,
+            &repository.layout,
+        )
+        .await?
+        .journal
+        .refs
+        .get(&checkpoint.branch)
+        .cloned(),
+        Err(error) => return Err(error.into()),
+    };
+    let Some(current) = current else {
         return Ok(false);
     };
     let current = current

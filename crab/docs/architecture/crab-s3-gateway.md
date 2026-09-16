@@ -610,7 +610,15 @@ invalidates its mutable-ref view after publication. HEAD and attributed LIST
 resolve size and ETag from committed attributes without opening blob payloads.
 Committed journal packs and authenticated v2 capsule packs remain readable
 through their respective canonical paths before derived locator/catalog
-publication completes. V2 mutation publication remains a release blocker.
+publication completes. For v2 repositories, gateway mutations embed the
+generated pack sidecars and exact visibility edit in one capsule, upload S3
+attributes before ref visibility, and commit through the per-ref head CAS.
+Multipart completion uses deterministic v2 intent/receipt recovery. Idle
+gateway and HTTP-server maintenance share the same root-pinned, verified
+complete-pack checkpoint implementation. Warm per-ref state tracks frontier
+length and forces a checkpoint at 56 capsules, retaining headroom below the
+hard 64-entry bound even when the write stream never becomes idle. V1 repositories retain their existing
+manifest/journal write path.
 
 GET uses logical content opening for Git, Crab and LFS content. Raw `read_blob`
 is not a substitute. Read symlinks/submodules only according to phase 0; never

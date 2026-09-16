@@ -157,15 +157,18 @@ An empty listing prefix returns the authorized branch prefixes. Reads pin one
 commit for a consistent view. A present capsule-protocol root is the exclusive
 read authority; corrupt v2 state fails closed and never falls back to a legacy
 manifest. Repositories without a v2 root retain the v1 read path. S3 mutations
-of v2 repositories remain a release blocker until they publish capsule ref
-transactions rather than the legacy journal. Each successful state-changing
+of v2 repositories publish the generated Git pack, all four pack components,
+and exact visibility delta as one immutable capsule before the independently
+mutable ref-head CAS. Planned multipart retries resolve the v2 plan receipt,
+and idle maintenance compacts the capsule frontier through the shared verified
+checkpoint path. A busy ref checkpoints synchronously at 56 capsules so it
+cannot reach the hard 64-entry frontier. V1 repositories retain the journal publisher. Each successful state-changing
 PUT, COPY, single DELETE, or completed multipart upload owns one commit. Compatible same-branch
 requests wait up to 10 ms for a bounded batch of at most 32 requests or 32 MiB
 of Git payload. Their conditions are evaluated in FIFO order, their commits form
-one parent chain, and their Git objects share one pack and ref-journal
-publication. One ref worker may retain the global and repository GC-writer
+one parent chain, and their Git objects share one pack and publication. One ref worker may retain the global and repository GC-writer
 fences for at most eight consecutive ordinary batches. Every batch still owns
-its own ref lease, parent revalidation, pack, commit chain, and journal
+its own ref lease, parent revalidation, pack, commit chain, and protocol-native
 transaction; multipart completion releases the shared fences before its
 isolated publication plan executes. The cap amortizes object-store fence
 round trips without allowing a busy branch to exclude GC indefinitely.
