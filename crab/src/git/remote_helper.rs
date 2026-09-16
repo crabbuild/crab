@@ -8,7 +8,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::io::Stderr;
-#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -2496,23 +2495,37 @@ async fn fetch_packs(
     router: &StoreLayout,
     entries: &[FetchEntry],
     fetch_options: &FetchOptions,
-    _filter_requested: bool,
+    filter_requested: bool,
     config: &crate::core::config::Config,
     _writer: &mut (impl tokio::io::AsyncWrite + Unpin),
     _caching_store: Option<&crab_cache_store::CachingStore>,
     cache: &mut SessionCache,
-    _cancel: &tokio_util::sync::CancellationToken,
+    cancel: &tokio_util::sync::CancellationToken,
     check_connectivity: bool,
 ) -> Result<Option<std::path::PathBuf>> {
+    let raw_object_fetch = classify_raw_object_fetch(entries)?;
+    if raw_object_fetch {
+        if fetch_options.depth.is_some() || fetch_options.deepen_relative {
+            return Err(CrabError::Protocol(
+                "raw object fetch cannot carry shallow constraints".to_owned(),
+            ));
+        }
+        fetch_capsule_promisor_objects(
+            store,
+            router,
+            entries,
+            config,
+            filter_requested || fetch_options.filter.is_some(),
+            cache.capsule_view.take(),
+            cancel,
+        )
+        .await?;
+        return Ok(None);
+    }
     if fetch_options.has_constraints() {
         return Err(CrabError::Protocol(
             "shallow and filtered fetch are not yet part of the capsule-protocol protocol"
                 .to_owned(),
-        ));
-    }
-    if classify_raw_object_fetch(entries)? {
-        return Err(CrabError::Protocol(
-            "raw-object fetch is not yet part of the capsule-protocol protocol".to_owned(),
         ));
     }
     fetch_capsule_packs(
@@ -2526,6 +2539,39 @@ async fn fetch_packs(
     .await
 }
 
+fn capsule_fetch_maximum(config: &crate::core::config::Config) -> u64 {
+    if config.uploadpack_max_egress_bytes == 0 {
+        u64::MAX
+    } else {
+        config.uploadpack_max_egress_bytes
+    }
+}
+
+async fn open_capsule_fetch_view(
+    store: &crate::storage::store::Store,
+    router: &StoreLayout,
+    config: &crate::core::config::Config,
+    cached_view: Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
+) -> Result<crab_read::capsule_protocol::CapsuleRepositoryView> {
+    if let Some(view) = cached_view {
+        return Ok(view);
+    }
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    crab_read::capsule_protocol::open_view(
+        &layout,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: capsule_fetch_maximum(config),
+            max_frontier_bytes: capsule_fetch_maximum(config),
+        },
+    )
+    .await
+    .map_err(Into::into)
+}
+
 async fn fetch_capsule_packs(
     store: &crate::storage::store::Store,
     router: &StoreLayout,
@@ -2534,24 +2580,8 @@ async fn fetch_capsule_packs(
     cached_view: Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
     check_connectivity: bool,
 ) -> Result<Option<std::path::PathBuf>> {
-    let layout = crab_storage::StoreLayout::with_global_prefix(
-        store.as_storage().clone(),
-        router.repo_prefix().to_owned(),
-        router.global_prefix().to_owned(),
-    );
-    let maximum = if config.uploadpack_max_egress_bytes == 0 {
-        u64::MAX
-    } else {
-        config.uploadpack_max_egress_bytes
-    };
-    let limits = crab_read::capsule_protocol::CapsuleReadLimits {
-        max_capsule_bytes: maximum,
-        max_frontier_bytes: maximum,
-    };
-    let view = match cached_view {
-        Some(view) => view,
-        None => crab_read::capsule_protocol::open_view(&layout, limits).await?,
-    };
+    let maximum = capsule_fetch_maximum(config);
+    let view = open_capsule_fetch_view(store, router, config, cached_view).await?;
     let advertisement = crab_read::capsule_ref_advertisement(&view, &config.transfer_hide_refs);
     let visible = advertisement
         .refs
@@ -2710,13 +2740,13 @@ async fn try_fetch_exact_shallow_closure(
     Ok(Some(vec![installed.pack_path]))
 }
 
-#[cfg(test)]
-async fn fetch_promisor_objects(
+async fn fetch_capsule_promisor_objects(
     store: &crate::storage::store::Store,
-    prefix: &str,
+    router: &StoreLayout,
     entries: &[FetchEntry],
     config: &crate::core::config::Config,
     filtered_promisor: bool,
+    cached_view: Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     let started = std::time::Instant::now();
@@ -2731,25 +2761,25 @@ async fn fetch_promisor_objects(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let (repository, visibility) =
-        crate::git::upload_pack_wire::open_repository_with_catalog_visibility(
-            store.as_storage(),
-            prefix,
-            cancel,
-        )
-        .await?;
-    let visible_refs = crate::git::upload_pack_wire::visible_ref_names(
-        repository.refs(),
-        &config.transfer_hide_refs,
-    )?;
-    let visible_tips = repository
-        .refs()
-        .entries
+    let view = open_capsule_fetch_view(store, router, config, cached_view).await?;
+    let advertisement = crab_read::capsule_ref_advertisement(&view, &config.transfer_hide_refs);
+    let visible_refs = advertisement
+        .refs
         .iter()
-        .filter(|reference| visible_refs.contains(&reference.name))
-        .flat_map(|reference| [Some(reference.target), reference.peeled])
+        .map(|reference| reference.ref_name.clone())
+        .collect::<Vec<_>>();
+    let visible_tips = advertisement
+        .refs
+        .iter()
+        .flat_map(|reference| [Some(reference.sha.as_str()), reference.peeled.as_deref()])
         .flatten()
-        .collect::<std::collections::HashSet<_>>();
+        .map(|oid| {
+            gix_hash::ObjectId::from_hex(oid.as_bytes()).map_err(|error| CrabError::CorruptObject {
+                path: router.repo_prefix().to_owned(),
+                reason: format!("invalid advertised object ID {oid}: {error}"),
+            })
+        })
+        .collect::<Result<std::collections::HashSet<_>>>()?;
     validate_raw_object_policy(
         &wants,
         &visible_tips,
@@ -2758,19 +2788,31 @@ async fn fetch_promisor_objects(
         config.uploadpack_allow_reachable_sha_in_want,
         filtered_promisor,
     )?;
+    let storage = store.as_storage();
+    let bucket = storage.bucket_identity();
+    let provider = format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container);
+    let identity =
+        crab_remote_git::RepositoryIdentity::new(provider, router.repo_prefix().to_owned(), 1)
+            .map_err(|error| CrabError::Protocol(error.to_string()))?;
+    let repository = view
+        .git_repository(
+            identity,
+            Arc::new(crab_remote_git::RemoteGitRuntime::default()),
+            crab_read::upload_pack_repository_options()
+                .map_err(|error| CrabError::Protocol(error.to_string()))?,
+            capsule_fetch_maximum(config),
+            cancel,
+        )
+        .await?;
+    let visibility = view.git_visibility_index()?;
     let request = crab_read::UploadPackRequest {
         wants,
         filter: crab_read::UploadPackFilter::None,
         ..Default::default()
     };
-    let plan = crab_read::plan_upload_pack_catalog(
-        &repository,
-        &visibility,
-        &visible_refs,
-        &request,
-        cancel,
-    )
-    .await?;
+    let plan =
+        crab_read::plan_upload_pack(&repository, &visibility, &visible_refs, &request, cancel)
+            .await?;
     let pack = repository
         .generate_pack(&plan.object_ids, cancel)
         .await
@@ -2778,7 +2820,8 @@ async fn fetch_promisor_objects(
             CrabError::Protocol(format!("promisor pack generation failed: {error}"))
         })?;
     tracing::info!(
-        protocol_version = 0,
+        storage_protocol_version = 2,
+        transport = "remote-helper-fetch",
         canonical_filter = "none",
         lazy = true,
         requested_objects = entries.len(),
@@ -2786,7 +2829,7 @@ async fn fetch_promisor_objects(
         reconstructed_objects = pack.object_count(),
         transferred_bytes = pack.size(),
         lazy_fetch_latency_ms = started.elapsed().as_millis() as u64,
-        "legacy promisor pack generated"
+        "capsule-protocol promisor pack generated"
     );
     let git_dir = super::discover::discover_git_dir()?;
     let pack_dir = git_dir.join("objects").join("pack");
@@ -2824,7 +2867,6 @@ async fn fetch_promisor_objects(
     Ok(())
 }
 
-#[cfg(test)]
 fn validate_raw_object_policy(
     wants: &[gix_hash::ObjectId],
     visible_tips: &std::collections::HashSet<gix_hash::ObjectId>,
@@ -2847,10 +2889,8 @@ fn validate_raw_object_policy(
     ))
 }
 
-#[cfg(test)]
 static PROMISOR_SIDECAR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-#[cfg(test)]
 async fn install_promisor_sidecar(pack_dir: &std::path::Path, canonical_name: &str) -> Result<()> {
     let sidecar = pack_dir.join(format!("pack-{canonical_name}.promisor"));
     if tokio::fs::try_exists(&sidecar).await? {
@@ -4111,6 +4151,136 @@ mod tests {
                 .await
                 .expect("read remaining entries")
                 .is_none()
+        );
+    }
+
+    async fn capsule_promisor_fixture() -> (crate::storage::store::Store, StoreLayout, String) {
+        let source = TEST_GIT_REPO
+            .git_dir
+            .parent()
+            .expect("test repository worktree");
+        let blob = String::from_utf8(run_git(source, &["rev-parse", "HEAD:file.txt"]))
+            .expect("blob oid is utf8")
+            .trim()
+            .to_owned();
+        let store = crate::storage::store::Store::new(std::sync::Arc::new(
+            object_store::memory::InMemory::new(),
+        ));
+        let router = StoreLayout::new(store.clone(), "org/promisor".to_owned());
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        crab_write::capsule_protocol::initialize(&layout, &"9".repeat(64), "refs/heads/main")
+            .await
+            .expect("initialize capsule repository");
+        {
+            let _guard = GitWorktreeGuard::new();
+            let config = PushConfig {
+                git_dir: Some(TEST_GIT_REPO.git_dir.clone()),
+                ..PushConfig::default()
+            };
+            let spec = PushSpec {
+                force: false,
+                src: "refs/heads/main".to_owned(),
+                dst: "refs/heads/main".to_owned(),
+            };
+            let (result, _) = crate::git::capsule_push::run(
+                &config,
+                &[spec],
+                &store,
+                &router,
+                None,
+                &[],
+                None,
+                None,
+                None,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("publish capsule fixture");
+            assert!(result.all_ok());
+        }
+        (store, router, blob)
+    }
+
+    #[tokio::test]
+    async fn capsule_promisor_fetch_installs_the_authorized_object() {
+        let (store, router, blob) = capsule_promisor_fixture().await;
+        let target = tempfile::tempdir().expect("target repository");
+        run_git(target.path(), &["init", "-q"]);
+        let git_dir = target.path().join(".git");
+        let _guard = GitEnvCwdGuard::set(target.path(), &git_dir, target.path());
+        let context = test_context(
+            store,
+            router.repo_prefix(),
+            target.path().join("push-state"),
+        );
+        let input = format!("option filter blob:none\nfetch {blob} {blob}\n\n");
+
+        let (output, result) =
+            run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
+
+        result.expect("fetch promised object through the helper protocol");
+        assert_eq!(output, "ok\n\n");
+        assert_eq!(
+            run_git(target.path(), &["cat-file", "-p", &blob]),
+            b"test content\n"
+        );
+        let promisor_count = std::fs::read_dir(git_dir.join("objects/pack"))
+            .expect("read installed pack directory")
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext == "promisor")
+            })
+            .count();
+        assert_eq!(promisor_count, 1);
+    }
+
+    #[tokio::test]
+    async fn capsule_promisor_fetch_rejects_hidden_ref_objects_before_installation() {
+        let (store, router, blob) = capsule_promisor_fixture().await;
+        let target = tempfile::tempdir().expect("target repository");
+        run_git(target.path(), &["init", "-q"]);
+        let git_dir = target.path().join(".git");
+        let _guard = GitEnvCwdGuard::set(target.path(), &git_dir, target.path());
+        let mut config = crate::core::config::Config::default();
+        config.transfer_hide_refs = vec!["refs/heads/main".to_owned()];
+        let mut cache = SessionCache::new(config.clone());
+        let entries = vec![FetchEntry {
+            sha: blob.clone(),
+            ref_name: blob,
+        }];
+
+        let error = fetch_packs(
+            &store,
+            &router,
+            &entries,
+            &FetchOptions::default(),
+            true,
+            &config,
+            &mut Vec::new(),
+            None,
+            &mut cache,
+            &tokio_util::sync::CancellationToken::new(),
+            false,
+        )
+        .await
+        .expect_err("hidden-ref object must not be installed");
+
+        assert!(
+            matches!(error, CrabError::Protocol(message) if message == "requested object is outside the visible generation")
+        );
+        assert_eq!(
+            std::fs::read_dir(git_dir.join("objects/pack"))
+                .expect("read target pack directory")
+                .filter_map(std::result::Result::ok)
+                .count(),
+            0
         );
     }
 

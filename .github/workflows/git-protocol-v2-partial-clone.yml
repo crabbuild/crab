@@ -185,6 +185,7 @@ jobs:
             git::push::tests::shared_xorb_non_atomic_replan \
             git::push::tests::ref_lease
           cargo test -p crab --lib git::remote_helper::tests::list_session_does_not_open_a_damaged_staging_index --locked --features gix-transport
+          cargo test -p crab --lib git::remote_helper::tests::capsule_promisor_fetch_ --locked --features gix-transport
           cargo test -p crab-metadata --lib file_index_lookup --locked --features file-index-reader
           cargo test -p crab-metadata --lib git_visibility::tests --locked --features remote-index
           cargo test -p crab-metadata --lib ref_journal::tests --locked --features remote-index

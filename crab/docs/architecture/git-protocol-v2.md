@@ -196,10 +196,13 @@ helper leaves a bounded TTL lease for reclamation. This bounds aggregate
 provider pressure across helpers while retaining the per-process remote-Git
 object and range-read budgets.
 
-Git owns the local promisor lifecycle: the Git version in use records the
-remote's promisor/filter configuration and marks received promisor packs with
-`.promisor` sidecars. Crab's helper does not invent a second local repository
-configuration or pack-installation protocol.
+Git owns the local promisor/filter configuration and installs the initial
+protocol-v2 response. For a later raw-OID request, Git re-enters Crab through
+the line-oriented helper fetch command. Crab pins one authenticated capsule
+view, authorizes the OID against visible-ref closure, generates the selected
+pack, and uses Git's standard pack layout with an atomically installed
+`.promisor` sidecar; it does not invent a second repository configuration or
+object format.
 
 Rollback qualification accepts one of two explicit outcomes from the
 immediately prior Crab binary: it services an authorized promised raw OID with

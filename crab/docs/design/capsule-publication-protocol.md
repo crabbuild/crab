@@ -151,8 +151,9 @@ The protocol MUST:
 4. Remain safe if a client, process, machine, or request fails at any point.
 5. Prevent GC from deleting data required by a committed or in-flight push.
 6. Preserve byte-identical Git and file reconstruction or return an error.
-7. Use three requests for an uncontended small push on a checksum-qualified
-   provider, including advertisement.
+7. Use four requests for an uncontended small push on a checksum-qualified
+   provider, including advertisement and post-publication ref-epoch
+   confirmation; use five when independent capsule readback is required.
 8. Add no foreground `HEAD`, `LIST`, lease, heartbeat, admission, journal, or
    GC-fence requests on that path.
 9. Bound cold-clone metadata amplification through immutable checkpoints.
@@ -160,8 +161,8 @@ The protocol MUST:
     commits, files, refs, or metadata record count. Pointer pushes additionally
     scale with newly required external xorbs and shards.
 11. Continue serving standard Git packfile responses for full clone, fetch,
-    and pull. Unsupported shallow, partial, and lazy-object requests must fail
-    before mutating local or remote state.
+    pull, shallow and partial fetch, and lazy-object recovery. Unsupported
+    selector forms must fail before mutating local or remote state.
 
 ## 4. Non-goals
 
@@ -891,9 +892,11 @@ safe while omitted required bytes violate reconstruction.
 6. **Complete for Git reads:** checkpoint and capsule packs carry authenticated
    indexes, reverse indexes, object locators, and visibility closures; readers
    install them without per-object storage requests.
-7. **Complete for ordinary full, shallow, and filtered clone/fetch/pull:**
-   remove their v1 runtime path. Raw lazy-object recovery remains an explicit
-   fail-closed follow-up work.
+7. **Complete for ordinary full, shallow, and filtered clone/fetch/pull and
+   raw lazy-object recovery:** remove their v1 runtime path. A later promisor
+   request re-enters the line-oriented helper, pins one authenticated capsule
+   view, authorizes the raw OID against its visible closure, and atomically
+   installs only the generated promisor pack.
 8. **Complete in the HTTP server:** append leaf capsules with history-flat
    foreground requests, checkpoint after 32 visible capsules, and force a
    foreground checkpoint at 56. Background, foreground, and manual checkpoints
