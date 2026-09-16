@@ -1676,6 +1676,7 @@ mod tests {
             push_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
             source_manifest_generation: 1,
             source_manifest_etag: "etag-1".to_owned(),
+            source_root_digest: None,
             view_ref_updates: plan.ref_updates.clone(),
             source_ref_updates: plan.ref_updates.clone(),
             view_scope: Some(view_scope),

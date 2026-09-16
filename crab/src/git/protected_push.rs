@@ -283,13 +283,7 @@ async fn protected_push_ref_updates_from_store(
     cancel: &CancellationToken,
 ) -> Result<Vec<PushRefUpdate>> {
     crate::core::error::check_cancelled(cancel)?;
-    let router = StoreLayout::new(read_store.clone(), repository_prefix.to_owned());
-    let remote_refs =
-        match crate::metadata::manifest::read_repository_snapshot(&read_store, &router).await {
-            Ok(snapshot) => snapshot.journal.refs,
-            Err(CrabError::NotFound { .. }) => BTreeMap::default(),
-            Err(e) => return Err(e),
-        };
+    let remote_refs = protected_remote_refs(read_store, repository_prefix).await?;
 
     let mut seen = BTreeSet::new();
     let mut updates = Vec::with_capacity(specs.len());
@@ -321,6 +315,42 @@ async fn protected_push_ref_updates_from_store(
     Ok(updates)
 }
 
+async fn protected_remote_refs(
+    read_store: &Store,
+    repository_prefix: &str,
+) -> Result<BTreeMap<String, String>> {
+    let router = StoreLayout::new(read_store.clone(), repository_prefix.to_owned());
+    match crate::metadata::manifest::read_repository_snapshot(&read_store, &router).await {
+        Ok(snapshot) => Ok(snapshot.journal.refs),
+        Err(CrabError::NotFound { .. }) => {
+            let layout = crab_storage::StoreLayout::new(
+                read_store.as_storage().clone(),
+                repository_prefix.to_owned(),
+            );
+            match crab_read::capsule_protocol::open_view(
+                &layout,
+                crab_read::capsule_protocol::CapsuleReadLimits {
+                    max_capsule_bytes: u64::MAX,
+                    max_frontier_bytes: u64::MAX,
+                },
+            )
+            .await
+            {
+                Ok(view) => Ok(view.refs().clone()),
+                Err(
+                    crab_read::ReadError::NotFound { .. }
+                    | crab_read::ReadError::Storage(crab_storage::StorageError::NotFound { .. })
+                    | crab_read::ReadError::Metadata(crab_metadata::error::MetadataError::Storage {
+                        source: crab_storage::StorageError::NotFound { .. },
+                    }),
+                ) => Ok(BTreeMap::default()),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(e) => return Err(e),
+    }
+}
+
 fn resolve_rev(refspec: &str) -> Option<String> {
     let output = Command::new("git")
         .args(["rev-parse", refspec])
@@ -340,6 +370,7 @@ fn resolve_rev(refspec: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use object_store::memory::InMemory;
 
     #[test]
     fn admission_plan_conservatively_accounts_for_payload_and_object_overhead() {
@@ -347,6 +378,37 @@ mod tests {
 
         assert_eq!(plan.estimated_objects, 58);
         assert_eq!(plan.estimated_bytes, 2_128_928);
+    }
+
+    #[tokio::test]
+    async fn protected_remote_refs_reads_capsule_protocol_heads() {
+        let storage = crab_storage::Store::new(Arc::new(InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(storage.clone(), "org/repo".to_owned());
+        let root =
+            crab_write::capsule_protocol::initialize(&layout, &"a".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+        let transaction = crab_metadata::capsule_protocol::CapsuleTransaction::new(
+            root.record().digest(),
+            vec![crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("1".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule =
+            crab_metadata::capsule_protocol::Capsule::build(&transaction, Vec::new(), Vec::new())
+                .unwrap();
+        crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
+            .await
+            .unwrap();
+        let store = Store::from_storage(storage);
+
+        let refs = protected_remote_refs(&store, "org/repo").await.unwrap();
+
+        assert_eq!(refs.get("refs/heads/main"), Some(&"1".repeat(40)));
     }
 
     #[test]

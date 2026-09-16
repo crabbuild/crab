@@ -7,9 +7,9 @@ use crab_storage::{StorageError, Store, StoreLayout, build_static_env_store};
 use object_store::path::Path as ObjectPath;
 
 use super::{
-    PreparedViewScope, ProtectedPushPlan, PushPrepareRecord, build_prepare_record, invalid,
-    read_verified_staged_object, receive_provider, validate_prepare_record_shape, validate_push_id,
-    validate_staged_object_shapes,
+    PreparedViewScope, ProtectedPushPlan, PushPrepareRecord, build_capsule_prepare_record,
+    build_prepare_record, invalid, read_verified_staged_object, receive_provider,
+    validate_prepare_record_shape, validate_push_id, validate_staged_object_shapes,
 };
 use crate::error::{AuthServerError, Result};
 
@@ -156,14 +156,48 @@ impl ReceiveContext {
         view_ref_updates: Vec<PushRefUpdate>,
         view_scope: Option<PreparedViewScope>,
     ) -> Result<PushPrepareRecord> {
-        let base = self.read_base_state().await?;
-        let record = build_prepare_record(
-            &self.repo_prefix,
-            &self.push_id,
-            (base.manifest(), base.etag()),
-            view_ref_updates,
-            view_scope,
-        )?;
+        let record = match read_manifest(&self.store, &self.router).await {
+            Ok((manifest, etag)) => build_prepare_record(
+                &self.repo_prefix,
+                &self.push_id,
+                (&manifest, &etag),
+                view_ref_updates,
+                view_scope,
+            )?,
+            Err(AuthServerError::NotFound { .. }) => {
+                let view = crab_read::capsule_protocol::open_view(
+                    &self.router,
+                    crab_read::capsule_protocol::CapsuleReadLimits {
+                        max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+                        max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+                    },
+                )
+                .await
+                .map_err(|error| match error {
+                    crab_read::ReadError::NotFound { path }
+                    | crab_read::ReadError::Storage(StorageError::NotFound { path })
+                    | crab_read::ReadError::Metadata(
+                        crab_metadata::error::MetadataError::Storage {
+                            source: StorageError::NotFound { path },
+                        },
+                    ) => AuthServerError::CorruptObject {
+                        path,
+                        reason: "repository has neither a canonical v1 manifest nor a protocol-v2 root; initialize or reset it with `crab init` before protected push".to_owned(),
+                    },
+                    other => other.into(),
+                })?;
+                build_capsule_prepare_record(
+                    &self.repo_prefix,
+                    &self.push_id,
+                    view.root().root().generation(),
+                    view.root().digest(),
+                    view.refs(),
+                    view_ref_updates,
+                    view_scope,
+                )?
+            }
+            Err(error) => return Err(error),
+        };
         let bytes = serde_json::to_vec_pretty(&record)
             .map_err(|e| AuthServerError::Internal(format!("prepare record serialize: {e}")))?;
         self.store
@@ -459,6 +493,36 @@ mod tests {
             Err(AuthServerError::NotFound { .. })
         ));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn prepare_record_captures_capsule_root_identity() -> Result<()> {
+        let ctx = context();
+        let root = crab_metadata::capsule_protocol::RootRecord::encode(
+            crab_metadata::capsule_protocol::RepositoryRoot::initial(
+                &hash('a'),
+                "refs/heads/main",
+            )?,
+        )?;
+        crab_metadata::capsule_protocol::create_root(ctx.router(), root.clone()).await?;
+
+        let record = ctx
+            .write_prepare_record(
+                vec![PushRefUpdate {
+                    ref_name: "refs/heads/main".to_owned(),
+                    old_oid: None,
+                    new_oid: oid('2'),
+                }],
+                None,
+            )
+            .await?;
+
+        assert_eq!(record.schema_version, 2);
+        assert_eq!(record.source_manifest_generation, 0);
+        assert!(record.source_manifest_etag.is_empty());
+        assert_eq!(record.source_root_digest.as_deref(), Some(root.digest()));
+        assert_eq!(record.source_ref_updates[0].old_oid, None);
+        validate_prepare_record_shape(&record, "org/repo", PUSH_ID)
     }
 
     #[tokio::test]

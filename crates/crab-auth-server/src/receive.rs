@@ -124,6 +124,8 @@ pub struct PushPrepareRecord {
     pub push_id: String,
     pub source_manifest_generation: u64,
     pub source_manifest_etag: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_root_digest: Option<String>,
     pub view_ref_updates: Vec<PushRefUpdate>,
     pub source_ref_updates: Vec<PushRefUpdate>,
     pub view_scope: Option<PreparedViewScope>,
@@ -823,6 +825,38 @@ pub fn build_prepare_record(
         push_id: push_id.to_owned(),
         source_manifest_generation: base.0.generation,
         source_manifest_etag: base.1.to_owned(),
+        source_root_digest: None,
+        view_ref_updates,
+        source_ref_updates,
+        view_scope,
+    })
+}
+
+/// Builds a prepared session record from one authenticated capsule view.
+pub fn build_capsule_prepare_record(
+    repo_prefix: &str,
+    push_id: &str,
+    source_generation: u64,
+    source_root_digest: &str,
+    source_refs: &BTreeMap<String, String>,
+    view_ref_updates: Vec<PushRefUpdate>,
+    view_scope: Option<PreparedViewScope>,
+) -> Result<PushPrepareRecord> {
+    validate_prepared_ref_updates(&view_ref_updates)?;
+    validate_hash_component(source_root_digest, "source root digest")?;
+    if let Some(scope) = view_scope.as_ref() {
+        validate_prepared_view_scope(scope, repo_prefix)?;
+    }
+    let source_ref_updates = source_ref_updates_for_refs(source_refs, &view_ref_updates)?;
+    Ok(PushPrepareRecord {
+        schema_version: 2,
+        repo_prefix: repo_prefix.to_owned(),
+        push_id: push_id.to_owned(),
+        // Keep the shipped response field stable while schema v2 identifies
+        // this value as a capsule-root generation, not a v1 manifest.
+        source_manifest_generation: source_generation,
+        source_manifest_etag: String::new(),
+        source_root_digest: Some(source_root_digest.to_owned()),
         view_ref_updates,
         source_ref_updates,
         view_scope,
@@ -835,8 +869,30 @@ pub fn validate_prepare_record_shape(
     repo_prefix: &str,
     push_id: &str,
 ) -> Result<()> {
-    if record.schema_version != 1 {
-        return Err(invalid("unsupported prepare record schema_version"));
+    match record.schema_version {
+        1 if record.source_manifest_etag.trim().is_empty()
+            || record.source_root_digest.is_some() =>
+        {
+            return Err(invalid(
+                "manifest prepare record has invalid source identity",
+            ));
+        }
+        2 => {
+            if !record.source_manifest_etag.is_empty() {
+                return Err(invalid(
+                    "capsule prepare record cannot contain a manifest etag",
+                ));
+            }
+            validate_hash_component(
+                record
+                    .source_root_digest
+                    .as_deref()
+                    .ok_or_else(|| invalid("capsule prepare record is missing its root digest"))?,
+                "source root digest",
+            )?;
+        }
+        1 => {}
+        _ => return Err(invalid("unsupported prepare record schema_version")),
     }
     if record.repo_prefix != repo_prefix {
         return Err(invalid(
@@ -845,9 +901,6 @@ pub fn validate_prepare_record_shape(
     }
     if record.push_id != push_id {
         return Err(invalid("prepare record push_id does not match request"));
-    }
-    if record.source_manifest_etag.trim().is_empty() {
-        return Err(invalid("prepare record source_manifest_etag is empty"));
     }
     validate_prepared_ref_updates(&record.view_ref_updates)?;
     validate_prepared_ref_updates(&record.source_ref_updates)?;
@@ -892,9 +945,16 @@ pub fn source_ref_updates_for(
     base: &Manifest,
     ref_updates: &[PushRefUpdate],
 ) -> Result<Vec<PushRefUpdate>> {
+    source_ref_updates_for_refs(&base.refs, ref_updates)
+}
+
+fn source_ref_updates_for_refs(
+    refs: &BTreeMap<String, String>,
+    ref_updates: &[PushRefUpdate],
+) -> Result<Vec<PushRefUpdate>> {
     let mut updates = Vec::with_capacity(ref_updates.len());
     for update in ref_updates {
-        let current = base.refs.get(&update.ref_name);
+        let current = refs.get(&update.ref_name);
         if let Some(current) = current {
             validate_sha1(current, "source ref oid")?;
         }
