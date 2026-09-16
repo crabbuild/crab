@@ -41,6 +41,14 @@ jq --null-input '[
       dirty_job_memory_bytes: 67108864,
       maximum_recovery_jobs: 2
     }
+  },
+  metrics: {
+    active_cells: 1,
+    active_cell_capacity: 5000,
+    retained_bytes: 1048576,
+    retained_capacity_bytes: 322122547,
+    local_disk_reserved_bytes: 2097152,
+    local_disk_capacity_bytes: 64424509440
   }
 })' > "$valid"
 
@@ -70,3 +78,15 @@ reject "scratch above local disk" \
   '.[0].envelope.admission.scratch_bytes = 70000000000'
 reject "recovery above its reservation" \
   '.[0].envelope.reservations.maximum_recovery_jobs = 1'
+reject "active Cell use above capacity" \
+  '.[0].metrics.active_cells = 5001'
+reject "an active Cell capacity outside the envelope" \
+  '.[0].metrics.active_cell_capacity = 4999'
+reject "retained bytes above capacity" \
+  '.[0].metrics.retained_bytes = 322122548'
+reject "a retained-byte capacity outside the envelope" \
+  '.[0].metrics.retained_capacity_bytes = 322122546'
+reject "local disk reservations above capacity" \
+  '.[0].metrics.local_disk_reserved_bytes = 64424509441'
+reject "a local disk capacity outside the envelope" \
+  '.[0].metrics.local_disk_capacity_bytes = 64424509439'

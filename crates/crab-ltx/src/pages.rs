@@ -278,9 +278,8 @@ impl PageChecksums {
                 .map_err(|_| CrabError::LTXCorrupted)?
                 .min(CHECKSUM_READ_BYTES / 8);
             let bytes = file.read_exact_at(u64::from(page - 1) * 8, count * 8)?;
-            for checksum in bytes.chunks_exact(8) {
-                let stored =
-                    u64::from_be_bytes(checksum.try_into().map_err(|_| CrabError::LTXCorrupted)?);
+            for checksum in bytes.as_chunks::<8>().0 {
+                let stored = u64::from_be_bytes(*checksum);
                 let old = self.changes.get(&page).copied().unwrap_or(stored);
                 if old != 0 && old & CHECKSUM_FLAG == 0 {
                     return Err(CrabError::LTXCorrupted);
