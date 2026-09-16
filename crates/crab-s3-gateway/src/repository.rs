@@ -24,6 +24,7 @@ const CATALOG_MAINTENANCE_EPOCHS: u64 = 64;
 const MAX_CACHED_SNAPSHOTS: usize = 64;
 const MAX_CACHED_MANIFESTS: usize = 16;
 const MAX_CACHED_OBJECT_ATTRIBUTES: usize = 256;
+const MAX_CAPSULE_READ_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReadViewKey {
@@ -296,6 +297,61 @@ impl ReadViewCache {
         if let Some(view) = self.observed_since(requested_at).await {
             return Ok(view);
         }
+        match crab_metadata::capsule_protocol::load_root(&repository.layout).await {
+            Ok(root) => {
+                let capsule = crab_read::capsule_protocol::open_view_from_root(
+                    &repository.layout,
+                    root,
+                    crab_read::capsule_protocol::CapsuleReadLimits {
+                        max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
+                        max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
+                    },
+                )
+                .await?;
+                let observed_at = tokio::time::Instant::now();
+                let key = ReadViewKey {
+                    generation: capsule.root().root().generation(),
+                    snapshot_digest: capsule.state_digest(),
+                };
+                let existing = self
+                    .cached
+                    .read()
+                    .await
+                    .as_ref()
+                    .filter(|cached| cached.view.key == key)
+                    .map(|cached| Arc::clone(&cached.view));
+                let view = match existing {
+                    Some(view) => view,
+                    None => {
+                        let remote = capsule
+                            .git_repository(
+                                repository.identity.clone(),
+                                runtime,
+                                options,
+                                MAX_CAPSULE_READ_BYTES,
+                                cancel,
+                            )
+                            .await?;
+                        Arc::new(ReadView {
+                            key,
+                            remote,
+                            snapshots: Mutex::new(HashMap::new()),
+                            manifests: Mutex::new(HashMap::new()),
+                            objects: Mutex::new(HashMap::new()),
+                        })
+                    }
+                };
+                *self.cached.write().await = Some(CachedReadView {
+                    observed_at,
+                    view: Arc::clone(&view),
+                });
+                return Ok(view);
+            }
+            Err(crab_metadata::error::MetadataError::Storage {
+                source: crab_storage::StorageError::NotFound { .. },
+            }) => {}
+            Err(error) => return Err(error.into()),
+        }
         let mut snapshot = crab_metadata::manifest_store::read_repository_snapshot(
             &repository.store,
             &repository.layout,
@@ -465,6 +521,25 @@ mod tests {
     use super::*;
     use crate::{RepositoryAccess, RepositoryConfig};
 
+    fn repository_config(prefix: &str) -> RepositoryConfig {
+        RepositoryConfig {
+            name: "repo".to_owned(),
+            provider: crab_storage::StorageProviderKind::Local,
+            bucket: "memory".to_owned(),
+            prefix: prefix.to_owned(),
+            default_branch: "main".to_owned(),
+            members: vec![crate::RepositoryMember {
+                principal: "user".to_owned(),
+                access: RepositoryAccess::Read,
+            }],
+            protected_branches: Vec::new(),
+            git_blob_max_bytes: 1024 * 1024,
+            max_active_multipart_uploads: 16,
+            multipart_staging_bytes_per_upload: 50_000_000_000_000,
+            multipart_upload_ttl_seconds: 604_800,
+        }
+    }
+
     #[test]
     fn foreground_write_cancels_only_maintenance_that_has_not_started() {
         let parent = CancellationToken::new();
@@ -530,28 +605,8 @@ mod tests {
         crab_write::initialize::initialize_repository(&store, &layout, "refs/heads/main")
             .await
             .unwrap();
-        let repository = Arc::new(
-            Repository::new(
-                RepositoryConfig {
-                    name: "repo".to_owned(),
-                    provider: crab_storage::StorageProviderKind::Local,
-                    bucket: "memory".to_owned(),
-                    prefix: "read-view-test".to_owned(),
-                    default_branch: "main".to_owned(),
-                    members: vec![crate::RepositoryMember {
-                        principal: "user".to_owned(),
-                        access: RepositoryAccess::Read,
-                    }],
-                    protected_branches: Vec::new(),
-                    git_blob_max_bytes: 1024 * 1024,
-                    max_active_multipart_uploads: 16,
-                    multipart_staging_bytes_per_upload: 50_000_000_000_000,
-                    multipart_upload_ttl_seconds: 604_800,
-                },
-                store,
-            )
-            .unwrap(),
-        );
+        let repository =
+            Arc::new(Repository::new(repository_config("read-view-test"), store).unwrap());
         let runtime = Arc::new(RemoteGitRuntime::default());
         let barrier = Arc::new(tokio::sync::Barrier::new(16));
         let mut reads = tokio::task::JoinSet::new();
@@ -577,6 +632,70 @@ mod tests {
         while let Some(result) = reads.join_next().await {
             assert!(Arc::ptr_eq(&first, &result.unwrap()));
         }
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn capsule_repository_read_view_does_not_create_v1_metadata() {
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(store.clone(), "capsule-read-view".to_owned());
+        crab_write::capsule_protocol::initialize(&layout, &"a".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let repository =
+            Repository::new(repository_config("capsule-read-view"), store.clone()).unwrap();
+        let runtime = Arc::new(RemoteGitRuntime::default());
+
+        let view = repository
+            .read_views
+            .current(
+                &repository,
+                Arc::clone(&runtime),
+                RepositoryOptions::default(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(view.key.generation, 0);
+        assert!(matches!(
+            store.head(&layout.manifest_path()).await,
+            Err(crab_storage::StorageError::NotFound { .. })
+        ));
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn corrupt_capsule_root_never_falls_back_to_v1() {
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(store.clone(), "dual-read-view".to_owned());
+        crab_write::initialize::initialize_repository(&store, &layout, "refs/heads/main")
+            .await
+            .unwrap();
+        store
+            .put_overwrite(
+                &layout.capsule_root_path(),
+                bytes::Bytes::from_static(b"corrupt v2 authority"),
+            )
+            .await
+            .unwrap();
+        let repository = Repository::new(repository_config("dual-read-view"), store).unwrap();
+        let runtime = Arc::new(RemoteGitRuntime::default());
+
+        let result = repository
+            .read_views
+            .current(
+                &repository,
+                Arc::clone(&runtime),
+                RepositoryOptions::default(),
+                &CancellationToken::new(),
+            )
+            .await;
+        let Err(error) = result else {
+            panic!("corrupt capsule authority unexpectedly opened through v1");
+        };
+
+        assert!(matches!(error, crate::Error::Metadata(_)), "{error:?}");
         runtime.shutdown().await;
     }
 }
