@@ -149,6 +149,27 @@ def capsule_owner_is_current(snapshots: list[dict[str, Any]]) -> bool:
     )
 
 
+def normalize_capsule_acceleration_evidence(stages: dict[str, Any]) -> None:
+    for name, acceleration in stages.items():
+        if (
+            not name.startswith("acceleration_")
+            or not isinstance(acceleration, dict)
+            or acceleration.get("protocol") != "capsule-v2"
+            or "duration_ms" in acceleration
+        ):
+            continue
+        owner = stages.get(name.replace("acceleration_", "visibility_owner_", 1))
+        if not isinstance(owner, dict):
+            continue
+        duration_ms = owner.get("duration_ms")
+        if (
+            isinstance(duration_ms, int)
+            and not isinstance(duration_ms, bool)
+            and duration_ms >= 0
+        ):
+            acceleration["duration_ms"] = duration_ms
+
+
 def redact_text(value: str, secrets: Iterable[str]) -> str:
     result = value
     for secret in sorted({secret for secret in secrets if secret}, key=len, reverse=True):
@@ -688,6 +709,7 @@ class LargeRepositoryQualification:
         ]
         self.command_index = max(log_indexes, default=len(report.get("commands", [])))
         self.report = report
+        normalize_capsule_acceleration_evidence(self.report.get("stages", {}))
         prior_error = self.report.get("error")
         self.report["status"] = "running"
         self.report["error"] = None
@@ -1302,6 +1324,7 @@ class LargeRepositoryQualification:
         if owner_snapshots[-1].get("protocol") == "capsule-v2":
             final = owner_snapshots[-1]
             state = {
+                "duration_ms": sum(run["duration_ms"] for run in owner_runs),
                 "protocol": "capsule-v2",
                 "generation": final.get("generation"),
                 "action": final.get("action"),
