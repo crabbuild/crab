@@ -86,7 +86,7 @@ pub(crate) async fn initialize_repository_at(
         SqlWorkerPool::new(1, 1)?,
         INITIALIZE_MAILBOX_BYTES,
         session,
-        budget.replica_host(),
+        budget.replica_host(budget.local_disk()),
     )?;
     let replica = CellReplica::new(
         layout.clone(),

@@ -266,10 +266,18 @@ The Host implements the full-job reservation with shared one-MiB permits.
 Cell compaction adds the exact source-index byte total to the two-image estimate.
 The server sizes this pool to one third of usable startup disk and fails an
 individually oversized request before immutable body downloads.
-The other two thirds bound HTTP Git, LFS and Release upload staging in one-MiB
-units. Those files live below the current Cell session on the same configured
-volume; each reservation also rechecks actual free space plus the node reserve
-before the request body is consumed.
+The other two thirds form one byte-precise `DiskBudget`. `ManagedDb` reserves
+twice the maximum capture size before a write transaction starts, then reconciles
+the reservation to the exact main database, live WAL and retained LTX bytes after capture,
+checkpoint or pruning. The writable sparse VFS grows the same budget once for
+each newly materialized page. HTTP Git, LFS and Release files use that budget at
+their declared maximum byte size and live below the current Cell session on the
+same configured volume. Transfer admission also rechecks actual free space plus
+the node reserve before the request body is consumed. A rejected pre-transaction
+reservation is a retryable capacity result and does not fence the Cell; failures
+after SQLite begins retain conservative admission until the handle is discarded.
+Full local resume reserves the restored database bytes before installing the
+destination, while sparse takeover starts at zero and admits pages as they fault.
 
 Exact Cell-root restore now holds the Host recovery permit, fetches authenticated
 adjacent-frame runs capped at 1 MiB, writes them sequentially through the Host

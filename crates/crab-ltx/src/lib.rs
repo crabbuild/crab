@@ -17,7 +17,7 @@ mod db;
 pub mod environment;
 mod error;
 mod host;
-pub use environment::Host;
+pub use environment::{DiskBudget, DiskReservation, Host};
 mod ltx;
 mod lz4_block;
 mod managed;

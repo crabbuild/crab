@@ -62,7 +62,7 @@ pub(crate) struct CellRuntimeBudget {
     max_active_cells: usize,
     replica_jobs: usize,
     scratch_mebibytes: usize,
-    staging_mebibytes: usize,
+    local_disk_mebibytes: usize,
     disk_reserve_bytes: u64,
 }
 
@@ -124,13 +124,13 @@ impl CellRuntimeBudget {
                 "Cell runtime has no temporary scratch-disk capacity",
             ));
         }
-        let staging_mebibytes = usize::try_from(usable_disk.saturating_mul(2) / 3 / MIB)
+        let local_disk_mebibytes = usize::try_from(usable_disk.saturating_mul(2) / 3 / MIB)
             .unwrap_or(usize::MAX)
             .min(u32::MAX as usize)
             .min(tokio::sync::Semaphore::MAX_PERMITS);
-        if staging_mebibytes == 0 {
+        if local_disk_mebibytes == 0 {
             return Err(crate::Error::Config(
-                "Cell runtime has no local staging-disk capacity",
+                "Cell runtime has no local working-disk capacity",
             ));
         }
         Ok(Self {
@@ -138,17 +138,22 @@ impl CellRuntimeBudget {
             max_active_cells,
             replica_jobs,
             scratch_mebibytes,
-            staging_mebibytes,
+            local_disk_mebibytes,
             disk_reserve_bytes: disk_reserve,
         })
     }
 
-    pub(crate) fn replica_host(self) -> ReplicaHost {
+    pub(crate) fn local_disk(self) -> crab_cell_runtime::DiskBudget {
+        crab_cell_runtime::DiskBudget::new(self.local_disk_mebibytes as u64 * MIB)
+    }
+
+    pub(crate) fn replica_host(self, local_disk: crab_cell_runtime::DiskBudget) -> ReplicaHost {
         ReplicaHost::default()
             .with_job_slots(Arc::new(Semaphore::new(self.replica_jobs)))
             .with_recovery_slots(Arc::new(Semaphore::new(self.replica_jobs)))
             .with_dirty_slots(Arc::new(Semaphore::new(self.replica_jobs)))
             .with_scratch_slots(Arc::new(Semaphore::new(self.scratch_mebibytes)))
+            .with_local_disk_budget(local_disk)
     }
 }
 
@@ -163,13 +168,17 @@ fn transfer_admission(catalog: &CatalogStore) -> TransferAdmission {
     )
 }
 
-fn start_cell_runtime(session: SessionId, budget: CellRuntimeBudget) -> Result<CellRuntime> {
+fn start_cell_runtime(
+    session: SessionId,
+    budget: CellRuntimeBudget,
+    local_disk: crab_cell_runtime::DiskBudget,
+) -> Result<CellRuntime> {
     crate::cells::compiled_registry()?;
     Ok(CellRuntime::new_with_replica_host(
         SqlWorkerPool::for_system(budget.max_active_cells)?,
         budget.node_retained_bytes,
         session,
-        budget.replica_host(),
+        budget.replica_host(local_disk),
     )?)
 }
 
@@ -622,9 +631,10 @@ pub async fn serve(config: Config) -> Result<()> {
     )?;
     let session_dir = node_publisher.session_dir();
     let cell_budget = CellRuntimeBudget::from_resources(node_publisher.local_resources()?)?;
+    let local_disk = cell_budget.local_disk();
     let local_staging = crate::local_disk::LocalStaging::new(
         session_dir.join("transfers"),
-        cell_budget.staging_mebibytes,
+        local_disk.clone(),
         cell_budget.disk_reserve_bytes,
     )
     .map_err(|source| crate::Error::LocalStaging {
@@ -635,7 +645,7 @@ pub async fn serve(config: Config) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
     let metrics = crate::metrics::Metrics::new()?;
-    let cell_runtime = start_cell_runtime(session, cell_budget)?;
+    let cell_runtime = start_cell_runtime(session, cell_budget, local_disk)?;
     let cell_resolver = crate::peer::LocalCellResolver::new(
         startup.layout.clone(),
         startup.identity,
@@ -1393,7 +1403,7 @@ mod tests {
                 max_active_cells: 1_125,
                 replica_jobs: 6,
                 scratch_mebibytes: 6_826,
-                staging_mebibytes: 13_653,
+                local_disk_mebibytes: 13_653,
                 disk_reserve_bytes: 10 * GIB,
             }
         );
@@ -1446,7 +1456,7 @@ mod tests {
         assert_eq!(budget.max_active_cells, 2_457);
         assert_eq!(budget.replica_jobs, 6);
         assert_eq!(budget.scratch_mebibytes, 6_826);
-        assert_eq!(budget.staging_mebibytes, 13_653);
+        assert_eq!(budget.local_disk_mebibytes, 13_653);
         assert_eq!(budget.disk_reserve_bytes, 10 * GIB);
     }
 

@@ -1,7 +1,7 @@
 #![cfg(feature = "replica")]
 
 use crab_ltx::{
-    CaptureBatch, CompactionSchedule, Limits, ManagedDb, Replica,
+    CaptureBatch, CompactionSchedule, DiskBudget, Host, Limits, ManagedDb, Replica,
     bundle::{Bundle, BundleEntry},
 };
 use crab_storage::{Store, StoreLayout};
@@ -13,6 +13,30 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sparse_page_materialization_obeys_shared_local_disk_admission() {
+    let (directory, batches) = captures();
+    let budget = DiskBudget::new(4095);
+    let replica = Replica::new(
+        StoreLayout::new(Store::new(Arc::new(InMemory::new())), "paged-disk".into()),
+        "epoch",
+        Limits::default(),
+    )
+    .unwrap()
+    .with_host(Host::default().with_local_disk_budget(budget.clone()));
+    let head = replica.replicate(&batches[0], None).await.unwrap();
+    let paged = replica.paged(&head).await.unwrap();
+    assert_eq!(paged.page_size(), 4096);
+
+    let result = paged.open_writable(&directory.path().join("disk-limited.sqlite"));
+
+    assert!(matches!(
+        result,
+        Err(crab_ltx::CrabError::Limit("local disk bytes"))
+    ));
+    assert_eq!(budget.used(), 0);
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sparse_sqlite_fault_honors_its_callers_deadline() {

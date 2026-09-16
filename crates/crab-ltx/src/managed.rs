@@ -28,6 +28,8 @@ pub struct ManagedDb {
     fenced: bool,
     retained_bytes: u64,
     retained_segments: usize,
+    local_disk: crate::DiskReservation,
+    sparse: bool,
     #[cfg(feature = "replica")]
     retained: Vec<LocalSegment>,
     path: PathBuf,
@@ -68,8 +70,15 @@ impl ManagedDb {
         let checksums = database.checksums()?;
         let host = database.host();
         let registration = crate::writable_vfs::Registration::new(database, destination)?;
-        let mut db = Self::open_inner(destination, limits, Some(registration.vfs()), host)
-            .map_err(|error| registration.take_error().unwrap_or(error))?;
+        let mut db = Self::open_inner(
+            destination,
+            limits,
+            Some(registration.vfs()),
+            host,
+            true,
+            None,
+        )
+        .map_err(|error| registration.take_error().unwrap_or(error))?;
         db.db
             .seed_continuation(position, checksums, page_size, count)?;
         db.paged = Some(registration);
@@ -153,6 +162,7 @@ impl ManagedDb {
             self.retained_segments -= 1;
             removed += 1;
         }
+        self.reconcile_local_disk()?;
         Ok(removed)
     }
 
@@ -180,8 +190,18 @@ impl ManagedDb {
         if u64::from(count) * u64::from(page_size) > limits.max_database_bytes {
             return Err(CrabError::Limit("database bytes"));
         }
+        let database_bytes = u64::from(count) * u64::from(page_size);
+        let local_disk = host.reserve_local_disk(database_bytes)?;
         host.restore(plan, destination)?;
-        let mut db = Self::open_with_host(destination, limits, host)?;
+        let vfs = host.sqlite_vfs.clone();
+        let mut db = Self::open_inner(
+            destination,
+            limits,
+            vfs.as_deref(),
+            host,
+            false,
+            Some(local_disk),
+        )?;
         db.db
             .seed_continuation(plan.position(), checksums, page_size, count)?;
         Ok(db)
@@ -199,7 +219,7 @@ impl ManagedDb {
     /// Opens a fresh session using the host's filesystem, SQLite VFS and clock.
     pub fn open_with_host(path: &Path, limits: Limits, host: crate::Host) -> Result<Self> {
         let vfs = host.sqlite_vfs.clone();
-        Self::open_inner(path, limits, vfs.as_deref(), host)
+        Self::open_inner(path, limits, vfs.as_deref(), host, false, None)
     }
 
     fn open_inner(
@@ -207,6 +227,8 @@ impl ManagedDb {
         limits: Limits,
         vfs: Option<&str>,
         facilities: crate::Host,
+        sparse: bool,
+        local_disk: Option<crate::DiskReservation>,
     ) -> Result<Self> {
         let limits = limits.validate()?;
         if path.to_str().is_none() || path.file_name().is_none() {
@@ -241,11 +263,21 @@ impl ManagedDb {
             max_database_bytes: limits.max_database_bytes,
             max_file_bytes: limits.max_file_bytes,
         };
-        match facilities.filesystem.file_len(path) {
-            Ok(len) => host.check_database_size(len)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        let database_bytes = match facilities.filesystem.file_len(path) {
+            Ok(len) => {
+                host.check_database_size(len)?;
+                len
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
             Err(error) => return Err(error.into()),
-        }
+        };
+        let local_disk = match local_disk {
+            Some(local_disk) => {
+                local_disk.resize(if sparse { 0 } else { database_bytes })?;
+                local_disk
+            }
+            None => facilities.reserve_local_disk(if sparse { 0 } else { database_bytes })?,
+        };
         // Atomic directory creation fences concurrent handles and stale sessions.
         // Never unlink it on close: an old open file must not acquire a new epoch.
         facilities.filesystem.create_dir(&Db::meta_path_for(path))?;
@@ -271,6 +303,8 @@ impl ManagedDb {
             fenced: false,
             retained_bytes: 0,
             retained_segments: 0,
+            local_disk,
+            sparse,
             #[cfg(feature = "replica")]
             retained: Vec::new(),
             path: path.to_owned(),
@@ -290,6 +324,7 @@ impl ManagedDb {
     ) -> Result<T> {
         self.transaction_with(operation)
             .map_err(|error| match error {
+                crate::TransactionError::Admission(error) => error,
                 crate::TransactionError::Operation(error)
                 | crate::TransactionError::Sqlite(error) => error.into(),
                 crate::TransactionError::Capture(error) => error,
@@ -313,11 +348,24 @@ impl ManagedDb {
             .map_err(crate::TransactionError::Capture)?;
         self.ensure_capacity()
             .map_err(crate::TransactionError::Capture)?;
+        let disk_before = self.local_disk.bytes();
+        let write_bytes = self.limits.max_capture_bytes.checked_mul(2).ok_or(
+            crate::TransactionError::Admission(CrabError::Limit("local disk bytes")),
+        )?;
+        self.local_disk
+            .try_grow(write_bytes)
+            .map_err(crate::TransactionError::Admission)?;
         self.observer.reset();
-        let tx = self
+        let tx = match self
             .writer
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(crate::TransactionError::Sqlite)?;
+        {
+            Ok(tx) => tx,
+            Err(error) => {
+                let _ = self.local_disk.resize(disk_before);
+                return Err(crate::TransactionError::Sqlite(error));
+            }
+        };
         let value = match operation(&tx) {
             Ok(value) => value,
             Err(error) => {
@@ -325,6 +373,7 @@ impl ManagedDb {
                     self.fenced = true;
                     return Err(crate::TransactionError::Sqlite(rollback));
                 }
+                let _ = self.local_disk.resize(disk_before);
                 return Err(crate::TransactionError::Operation(error));
             }
         };
@@ -336,7 +385,9 @@ impl ManagedDb {
         }
         match self.observer.cut(&self.path, &self.host) {
             Ok(Some(cut)) => self.required_cut = Some(cut),
-            Ok(None) => {}
+            Ok(None) => {
+                let _ = self.local_disk.resize(disk_before);
+            }
             Err(error) => {
                 self.fenced = true;
                 return Err(crate::TransactionError::Capture(error));
@@ -390,7 +441,9 @@ impl ManagedDb {
         let before = self.db.pos();
         self.db.sync(self.required_cut)?;
         self.required_cut = None;
-        self.collect_cuts(before)
+        let batch = self.collect_cuts(before)?;
+        self.reconcile_local_disk()?;
+        Ok(batch)
     }
 
     fn collect_cuts(&mut self, before: crate::Pos) -> Result<CaptureBatch> {
@@ -423,11 +476,18 @@ impl ManagedDb {
         self.ensure_active()?;
         let result = (|| {
             let mut batch = self.capture_inner()?;
+            self.local_disk.try_grow(
+                self.limits
+                    .max_capture_bytes
+                    .checked_mul(2)
+                    .ok_or(CrabError::Limit("local disk bytes"))?,
+            )?;
             let before = self.db.pos();
             self.db.checkpoint(mode)?;
             let extra = self.collect_cuts(before)?;
             batch.segments.extend(extra.segments);
             batch.position = extra.position;
+            self.reconcile_local_disk()?;
             Ok(batch)
         })();
         if result.is_err() {
@@ -458,6 +518,7 @@ impl ManagedDb {
 
     fn snapshot_inner(&mut self, destination: &Path) -> Result<(LocalSegment, CaptureBatch)> {
         let batch = self.capture_inner()?;
+        self.local_disk.try_grow(self.limits.max_file_bytes)?;
         let mut bytes = Vec::new();
         let pos: Position = self.db.snapshot_to_writer(&mut bytes)?.into();
         if pos != batch.position {
@@ -470,6 +531,7 @@ impl ManagedDb {
         let segment = LocalSegment::new(destination.to_owned(), info);
         #[cfg(feature = "replica")]
         self.retained.push(segment.clone());
+        self.reconcile_local_disk()?;
         Ok((segment, batch))
     }
 
@@ -528,6 +590,25 @@ impl ManagedDb {
         }
         self.account(info)
     }
+
+    fn reconcile_local_disk(&self) -> Result<()> {
+        let database_bytes = if self.sparse {
+            0
+        } else {
+            self.host.filesystem.file_len(&self.path)?
+        };
+        let wal_bytes = match self.host.filesystem.file_len(&self.db.wal_path()) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error.into()),
+        };
+        let live = database_bytes
+            .checked_add(self.retained_bytes)
+            .ok_or(CrabError::Limit("local disk bytes"))?
+            .checked_add(wal_bytes)
+            .ok_or(CrabError::Limit("local disk bytes"))?;
+        self.local_disk.resize(live)
+    }
 }
 
 pub(crate) fn open_connection(path: &Path, vfs: Option<&str>) -> rusqlite::Result<Connection> {
@@ -584,6 +665,106 @@ mod tests {
             .query_row("PRAGMA cache_size", [], |row| row.get(0))
             .unwrap();
         assert_eq!(cache_kib, -MANAGED_CONNECTION_PAGE_CACHE_KIB);
+    }
+
+    #[test]
+    fn local_disk_admission_rejects_before_running_the_transaction() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let budget = crate::DiskBudget::new(255);
+        let host = crate::Host::default().with_local_disk_budget(budget.clone());
+        let limits = Limits {
+            max_capture_bytes: 128,
+            ..Limits::default()
+        };
+        let mut db =
+            ManagedDb::open_with_host(&temp.path().join("disk.sqlite"), limits, host).unwrap();
+        let ran = std::cell::Cell::new(false);
+
+        let result = db.transaction(|_| {
+            ran.set(true);
+            Ok(())
+        });
+
+        assert!(matches!(result, Err(CrabError::Limit("local disk bytes"))));
+        assert!(!ran.get());
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn existing_database_disk_admission_precedes_session_claim() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("existing.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TABLE t(v)").unwrap();
+        drop(connection);
+        let bytes = std::fs::metadata(&path).unwrap().len();
+        let host = crate::Host::default()
+            .with_local_disk_budget(crate::DiskBudget::new(bytes.saturating_sub(1)));
+
+        let result = ManagedDb::open_with_host(&path, Limits::default(), host);
+
+        assert!(matches!(result, Err(CrabError::Limit("local disk bytes"))));
+        assert!(!Db::meta_path_for(&path).exists());
+    }
+
+    #[test]
+    fn resume_disk_admission_precedes_database_installation() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let source_path = temp.path().join("source.sqlite");
+        let limits = Limits::default();
+        let mut source = ManagedDb::open(&source_path, limits).unwrap();
+        source
+            .transaction(|transaction| {
+                transaction.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES (1)")
+            })
+            .unwrap();
+        let batch = source.capture().unwrap();
+        let plan = crate::VerifiedLocalPlan::new(&batch.segments, batch.position, limits).unwrap();
+        source.close().unwrap();
+        let database_bytes = u64::from(batch.segments[0].info().database_pages)
+            * u64::from(batch.segments[0].info().page_size);
+        let host = crate::Host::default()
+            .with_local_disk_budget(crate::DiskBudget::new(database_bytes.saturating_sub(1)));
+        let destination = temp.path().join("destination.sqlite");
+
+        let result = ManagedDb::resume_with_host(&plan, &destination, limits, host);
+
+        assert!(matches!(result, Err(CrabError::Limit("local disk bytes"))));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn pending_wal_and_captured_segments_reconcile_and_release_disk_admission() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("accounted.sqlite");
+        let budget = crate::DiskBudget::new(4 * 1024 * 1024);
+        let host = crate::Host::default().with_local_disk_budget(budget.clone());
+        let limits = Limits {
+            max_capture_bytes: 1024 * 1024,
+            ..Limits::default()
+        };
+        let mut db = ManagedDb::open_with_host(&path, limits, host).unwrap();
+
+        db.transaction(|transaction| {
+            transaction.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES (1)")
+        })
+        .unwrap();
+        assert_eq!(budget.used(), 2 * limits.max_capture_bytes);
+
+        let batch = db.capture().unwrap();
+        let retained = batch
+            .segments
+            .iter()
+            .map(|segment| segment.info().size_bytes)
+            .sum::<u64>();
+        let wal = std::fs::metadata(format!("{}-wal", path.display()))
+            .unwrap()
+            .len();
+        let database = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(budget.used(), database + retained + wal);
+
+        db.close().unwrap();
+        assert_eq!(budget.used(), 0);
     }
 
     #[test]

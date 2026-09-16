@@ -771,7 +771,7 @@ pub(crate) async fn enter_maintenance(config: &Config, expected_revision: u64) -
         SqlWorkerPool::new(1, 1)?,
         MAINTENANCE_RUNTIME_BYTES,
         session,
-        budget.replica_host(),
+        budget.replica_host(budget.local_disk()),
     )?;
     let router = RepositoryCellRouter::new(
         identity,

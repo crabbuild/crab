@@ -449,7 +449,12 @@ downloaded files and reconstructs a database image in memory. Initially impose
 admission limits for compressed inputs, decoded pages, image buffers and scratch,
 plus a node-wide concurrency budget. The implemented `Limits` defaults are
 256 MiB per database, 512 MiB per local file including WAL, 1 GiB aggregate
-plan/retained artifacts and 1,024 segments. These are not RSS or disk quotas;
+plan/retained artifacts and 1,024 segments. `Host::with_local_disk_budget`
+adds a shared byte-precise disk gate: managed writes reserve WAL plus LTX peak
+space before BEGIN, reconcile to exact database/WAL/retained bytes, and sparse VFS faults
+reserve each newly materialized page. `TransactionError::Admission` proves SQL
+did not start and lets the runtime return capacity without fencing. These are
+not RSS quotas;
 standalone plan verification/compaction retains input buffers, while Cell
 compaction uses bounded memory plus local scratch. Aggregate capture accounting
 can fail after local files have been installed. Reserve headroom.

@@ -3,9 +3,134 @@
 use std::{
     io,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+/// Shared byte-precise admission for local files owned by active database work.
+#[derive(Clone, Debug)]
+pub struct DiskBudget {
+    inner: Arc<DiskBudgetInner>,
+}
+
+#[derive(Debug)]
+struct DiskBudgetInner {
+    capacity: u64,
+    used: AtomicU64,
+}
+
+impl DiskBudget {
+    /// Creates a budget. A zero capacity rejects every non-empty reservation.
+    #[must_use]
+    pub fn new(capacity: u64) -> Self {
+        Self {
+            inner: Arc::new(DiskBudgetInner {
+                capacity,
+                used: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    /// Reserves bytes without waiting or overcommitting the configured capacity.
+    pub fn try_reserve(&self, bytes: u64) -> crate::Result<DiskReservation> {
+        self.add(bytes)?;
+        Ok(DiskReservation {
+            budget: self.clone(),
+            bytes: Mutex::new(bytes),
+        })
+    }
+
+    #[must_use]
+    pub fn capacity(&self) -> u64 {
+        self.inner.capacity
+    }
+
+    #[must_use]
+    pub fn used(&self) -> u64 {
+        self.inner.used.load(Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub fn available(&self) -> u64 {
+        self.capacity().saturating_sub(self.used())
+    }
+
+    fn add(&self, bytes: u64) -> crate::Result<()> {
+        self.inner
+            .used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(bytes)
+                    .filter(|next| *next <= self.inner.capacity)
+            })
+            .map(|_| ())
+            .map_err(|_| crate::CrabError::Limit("local disk bytes"))
+    }
+}
+
+/// Owned local-disk admission released when its owner drops it.
+#[derive(Debug)]
+pub struct DiskReservation {
+    budget: DiskBudget,
+    bytes: Mutex<u64>,
+}
+
+impl DiskReservation {
+    pub(crate) fn try_grow(&self, bytes: u64) -> crate::Result<()> {
+        let mut held = match self.bytes.lock() {
+            Ok(held) => held,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let next = held
+            .checked_add(bytes)
+            .ok_or(crate::CrabError::Limit("local disk bytes"))?;
+        self.budget.add(bytes)?;
+        *held = next;
+        Ok(())
+    }
+
+    pub(crate) fn resize(&self, bytes: u64) -> crate::Result<()> {
+        let mut held = match self.bytes.lock() {
+            Ok(held) => held,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let current = *held;
+        if bytes > current {
+            self.budget.add(bytes - current)?;
+            *held = bytes;
+            return Ok(());
+        }
+        let released = current - bytes;
+        *held = bytes;
+        self.budget.inner.used.fetch_sub(released, Ordering::AcqRel);
+        Ok(())
+    }
+
+    fn release(&self) {
+        let mut held = match self.bytes.lock() {
+            Ok(held) => held,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let released = *held;
+        *held = 0;
+        self.budget.inner.used.fetch_sub(released, Ordering::AcqRel);
+    }
+
+    pub(crate) fn bytes(&self) -> u64 {
+        match self.bytes.lock() {
+            Ok(held) => *held,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
+    }
+}
+
+impl Drop for DiskReservation {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
 
 /// An open local artifact/WAL handle supplied by a host filesystem.
 ///
@@ -81,6 +206,7 @@ pub struct Host {
     pub(crate) filesystem: Arc<dyn FileSystem>,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) sqlite_vfs: Option<String>,
+    pub(crate) local_disk: DiskBudget,
     #[cfg(feature = "replica")]
     pub(crate) executor: Arc<dyn Executor>,
     #[cfg(feature = "replica")]
@@ -146,6 +272,17 @@ impl Host {
     pub fn with_sqlite_vfs(mut self, name: &str) -> Self {
         self.sqlite_vfs = Some(name.to_owned());
         self
+    }
+
+    /// Shares byte-precise admission across WAL, LTX, sparse pages and staging.
+    #[must_use]
+    pub fn with_local_disk_budget(mut self, budget: DiskBudget) -> Self {
+        self.local_disk = budget;
+        self
+    }
+
+    pub(crate) fn reserve_local_disk(&self, bytes: u64) -> crate::Result<DiskReservation> {
+        self.local_disk.try_reserve(bytes)
     }
 
     pub(crate) fn read(&self, path: &Path, limit: u64) -> io::Result<Vec<u8>> {
@@ -366,10 +503,14 @@ impl Default for Host {
         #[cfg(feature = "replica")]
         static SCRATCH: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
             std::sync::OnceLock::new();
+        static LOCAL_DISK: std::sync::OnceLock<DiskBudget> = std::sync::OnceLock::new();
         Self {
             filesystem: Arc::new(DirectFileSystem),
             clock: Arc::new(SystemClock),
             sqlite_vfs: None,
+            local_disk: LOCAL_DISK
+                .get_or_init(|| DiskBudget::new(64 * 1024 * 1024 * 1024))
+                .clone(),
             #[cfg(feature = "replica")]
             executor: Arc::new(TokioExecutor),
             #[cfg(feature = "replica")]
@@ -569,6 +710,25 @@ impl Worker for std::thread::JoinHandle<()> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn disk_budget_reservations_resize_and_release_exact_bytes() {
+        let budget = DiskBudget::new(10);
+        let first = budget.try_reserve(4).unwrap();
+        let second = budget.try_reserve(6).unwrap();
+        assert_eq!(budget.available(), 0);
+        assert!(matches!(
+            budget.try_reserve(1),
+            Err(crate::CrabError::Limit("local disk bytes"))
+        ));
+
+        first.resize(2).unwrap();
+        assert_eq!(budget.available(), 2);
+        drop(second);
+        assert_eq!(budget.available(), 8);
+        drop(first);
+        assert_eq!(budget.available(), 10);
+    }
 
     struct TestClock;
     impl Clock for TestClock {

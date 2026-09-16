@@ -234,6 +234,14 @@ Use weighted admission based on estimated disk requirement for restores and
 snapshots. `emptyDir.sizeLimit` alone does not reserve node disk. Account for
 Kubernetes ephemeral-storage requests/limits and eviction pressure.
 
+The implemented node split assigns one third of usable startup disk to
+one-MiB full-job scratch permits and two thirds to a byte-precise shared budget.
+The latter is injected into the replica `Host` and the HTTP transfer staging
+owner, so WAL/LTX growth, sparse-page materialization and Git/LFS/Release bodies
+cannot each spend the same bytes independently. The hard cut starts these Cell
+databases empty; there is no legacy application-data importer, dual read or
+bucket-to-SQLite migration path.
+
 ### Shutdown ordering
 
 ```mermaid

@@ -31,6 +31,7 @@ cutover and measured capacity qualification still remain. See the
 | `VerifiedLocalPlan::new(files, target, limits)` | Owns verified bytes of an explicitly selected snapshot-plus-deltas chain |
 | `restore_exact(plan, path)` | Installs a new SQLite file at exactly the verified endpoint; never overwrites |
 | `compact_exact(plan, path)` | Compacts that complete chain into a verified standalone snapshot; never deletes inputs |
+| `Host::with_local_disk_budget(DiskBudget)` | Shares byte-precise WAL/LTX/sparse-page admission across cloned hosts; exhausted write admission occurs before SQL begins |
 | `close()` | Releases local connections/read lock; does not upload, publish or release a remote lease |
 
 `SegmentInfo` includes TXID range, page size/count, pre/post rolling checksum,
@@ -413,8 +414,9 @@ are rejected before page allocation. The managed writer has `max_page_count`;
 capture checks database/WAL sizes and stops on limits. Capture errors fence the
 handle. A session at its retention limit must be published/rotated by the caller.
 
-These are admission bounds, **not an RSS or disk quota**. Standalone snapshot
-capture and local plan operations still materialize database-sized buffers.
+These format and per-operation limits are not an RSS quota. A host may add an
+aggregate local-disk quota with `DiskBudget`; standalone snapshot capture and
+local plan operations still materialize database-sized buffers.
 Plans retain compressed input bytes. Cell exact-root restore and compaction use
 bounded frame batches and disk scratch rather than database-sized memory. Cell
 capture keeps its packed checksum index on local disk (about 2 MiB
@@ -423,9 +425,14 @@ large truncations still read the removed suffix to update the exact rolling sum.
 Standalone local capture retains its dense in-memory checksum base. Cell
 compaction retains O(segment count) cursors and a bounded decoded-page batch;
 its scratch requirement includes all authenticated indexes plus the compacted
-LTX, codec index and sidecar. One failed capture
-can leave additional bounded artifacts on disk before aggregate accounting
-rejects its result. The server must reserve headroom and throttle aggregate cells.
+LTX, codec index and sidecar. Managed writes reserve twice `max_capture_bytes`
+before SQLite begins and reconcile to exact main database, live WAL and retained LTX bytes
+after capture, checkpoint and pruning. Sparse activation reserves every newly
+materialized page. A failed post-BEGIN operation retains conservative admission
+until the fenced handle is discarded. The server must still reserve filesystem
+headroom and remeasure actual free space for unrelated consumers.
+`resume_with_host` reserves the complete restored database before installing its
+destination; writable sparse activation instead admits pages as they materialize.
 
 `Host` injects all library-owned local filesystem operations: canonical paths,
 exclusive session claims, committed WAL observation, bounded artifact reads,
@@ -433,6 +440,9 @@ capture, snapshot/restore/compaction installation, sparse creation and local pru
 Use `Host::{verify,restore,compact}` for injected local operations; the free
 functions use the same path with the default host. `resume_with_host` retains
 that host through installation and subsequent capture, even without `replica`.
+`with_local_disk_budget(DiskBudget)` shares byte-precise admission across cloned
+hosts. A failed write reservation returns `TransactionError::Admission` before
+the callback runs, so callers may retry without treating the writer as ambiguous.
 
 `with_sqlite_vfs(name)` selects an already registered SQLite base VFS, including
 for the writable sparse wrapper. The embedding host must keep that registration
@@ -460,7 +470,8 @@ their CPU/dirty/recovery/scratch reservation until the work finishes; returned
 roots, page maps, sparse writers and database handles do not retain it.
 Closed semaphores reject new work. These are concurrency ceilings, not byte-weighted
 memory admission, bounded caller task queues or admission for synchronous local APIs.
-SQL, capture, snapshot, activation and request scheduling still need host policy.
+The disk budget covers managed WAL/LTX and sparse-page growth; request scheduling
+and memory admission remain host policy.
 
 The clock controls capture timestamps and checkpoint ages; compaction receives
 explicit monotonic times from its owner. No default provider or dependency

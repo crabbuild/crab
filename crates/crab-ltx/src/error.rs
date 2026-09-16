@@ -7,10 +7,13 @@ pub type Result<T> = std::result::Result<T, CrabError>;
 ///
 /// `Operation` proves SQLite rolled the transaction back. `Sqlite` includes
 /// begin, rollback, or commit failures; commit failures fence the writer because
-/// their outcome can be ambiguous. `Capture` occurs after a successful commit
-/// while establishing the WAL cut required for later LTX capture.
+/// their outcome can be ambiguous. `Admission` occurs before SQLite starts and
+/// leaves the writer reusable. `Capture` occurs after a successful commit while
+/// establishing the WAL cut required for later LTX capture.
 #[derive(Debug, thiserror::Error)]
 pub enum TransactionError<E: std::error::Error + 'static> {
+    #[error("transaction resource admission failed")]
+    Admission(#[source] CrabError),
     #[error("transaction operation failed")]
     Operation(#[source] E),
     #[error("SQLite transaction failed")]

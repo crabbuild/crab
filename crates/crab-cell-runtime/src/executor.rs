@@ -283,8 +283,8 @@ impl CellExecutor {
                 "restored SQLite position does not match root",
             ));
         }
-        let verification = db.transaction_with(|transaction| {
-            let metadata = transaction.query_row(
+        let verification = db.query_with(|connection| {
+            let metadata = connection.query_row(
                 "SELECT cell_id, incarnation, commit_sequence, logical_time_ms, schema_version FROM sys_meta WHERE singleton = 1",
                 [],
                 |row| {
@@ -297,7 +297,7 @@ impl CellExecutor {
                     ))
                 },
             )?;
-            let latest_ledger = transaction.query_row(
+            let latest_ledger = connection.query_row(
                 "SELECT COALESCE(MAX(commit_sequence), 0) FROM (SELECT commit_sequence FROM sys_requests UNION ALL SELECT commit_sequence FROM sys_inbox)",
                 [],
                 |row| row.get::<_, i64>(0),
@@ -316,7 +316,14 @@ impl CellExecutor {
             Ok(())
         });
         if let Err(error) = verification {
-            let error = transaction_error_with_io(&db, error);
+            let error = db.take_io_error().map_or_else(
+                || match error {
+                    crab_ltx::QueryError::Operation(error) => error,
+                    crab_ltx::QueryError::Sqlite(error) => error.into(),
+                    crab_ltx::QueryError::State(error) => error.into(),
+                },
+                ltx_error,
+            );
             let _ = db.close();
             return Err(error);
         }
@@ -731,6 +738,7 @@ impl CellExecutor {
         let (sequence, next_due_ms) = match transaction {
             Ok(value) => value,
             Err(TransactionError::Operation(error)) => return Err(error),
+            Err(TransactionError::Admission(error)) => return Err(admission_error(error)),
             Err(error) => {
                 self.fenced = true;
                 return Err(transaction_error(error));
@@ -906,6 +914,7 @@ impl CellExecutor {
         let transaction = match transaction {
             Ok(value) => value,
             Err(TransactionError::Operation(error)) => return Err(error),
+            Err(TransactionError::Admission(error)) => return Err(admission_error(error)),
             Err(error) => {
                 self.fenced = true;
                 return Err(transaction_error(error));
@@ -970,9 +979,17 @@ fn runtime_metadata(
 
 fn transaction_error(error: TransactionError<Error>) -> Error {
     match error {
+        TransactionError::Admission(error) => admission_error(error),
         TransactionError::Operation(error) => error,
         TransactionError::Sqlite(error) => error.into(),
         TransactionError::Capture(error) => error.into(),
+    }
+}
+
+fn admission_error(error: crab_ltx::CrabError) -> Error {
+    match error {
+        crab_ltx::CrabError::Limit("local disk bytes") => Error::Capacity("local disk bytes"),
+        error => error.into(),
     }
 }
 
