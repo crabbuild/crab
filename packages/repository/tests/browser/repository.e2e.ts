@@ -1167,17 +1167,102 @@ test("code palette persists and follows light and dark appearance", async ({
 test("supported source files expose browser-parsed current-file symbols", async ({
   page,
 }) => {
+  await page.setViewportSize({ width: 1600, height: 1200 });
   await page.goto(
     `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("src/lib.rs")}&kind=Blob`,
   );
 
+  const treeSidebar = page.locator(".tree-sidebar");
+  const tree = page.locator(".repository-tree");
+  const breadcrumb = page.locator(".code-main > .breadcrumb");
+  const fileHeader = page.locator(".file-panel > .panel-header");
   const symbols = page.getByRole("complementary", { name: "Code symbols" });
+  const symbolsHeader = symbols.locator(".code-symbols-header");
   await expect(symbols).toBeVisible();
+  await expect(symbols).toHaveCSS("position", "sticky");
+  await expect(breadcrumb).toHaveCSS("position", "sticky");
+  await expect(fileHeader).toHaveCSS("position", "sticky");
+  await expect
+    .poll(() =>
+      treeSidebar.evaluate(
+        (node) => node.getBoundingClientRect().height - window.innerHeight,
+      ),
+    )
+    .toBe(0);
+  await expect
+    .poll(async () => {
+      const [sidebarBottom, treeBottom] = await Promise.all([
+        treeSidebar.evaluate((node) => node.getBoundingClientRect().bottom),
+        tree.evaluate((node) => node.getBoundingClientRect().bottom),
+      ]);
+      return Math.abs(sidebarBottom - treeBottom);
+    })
+    .toBeLessThanOrEqual(1);
+  await expect
+    .poll(() =>
+      symbols.evaluate(
+        (node) => window.innerHeight - node.getBoundingClientRect().bottom,
+      ),
+    )
+    .toBeLessThanOrEqual(1);
   await expect(symbols.getByText("impl Crab", { exact: true })).toBeVisible();
   await expect(
     symbols.getByRole("button", { name: /serve function 7/ }),
   ).toBeVisible();
   await expectNoAccessibilityViolations(page);
+
+  await page.locator(".file-source-code").evaluate((node) => {
+    node.style.minHeight = `${window.innerHeight * 3}px`;
+  });
+  await page.evaluate(() => window.scrollTo(0, 900));
+  await expect
+    .poll(async () => {
+      const [breadcrumbBottom, headerTop] = await Promise.all([
+        breadcrumb.evaluate((node) => node.getBoundingClientRect().bottom),
+        fileHeader.evaluate((node) => node.getBoundingClientRect().top),
+      ]);
+      return Math.abs(breadcrumbBottom - headerTop);
+    })
+    .toBeLessThanOrEqual(1);
+  await expect
+    .poll(() =>
+      treeSidebar.evaluate((node) => {
+        const bounds = node.getBoundingClientRect();
+        return [bounds.top, window.innerHeight - bounds.bottom];
+      }),
+    )
+    .toEqual([0, 0]);
+  await expect
+    .poll(() =>
+      page.evaluate(() => ({
+        document: document.scrollingElement?.scrollTop ?? 0,
+        source: document.querySelector(".file-source-code")?.scrollTop ?? 0,
+      })),
+    )
+    .toEqual({ document: 900, source: 0 });
+  await expect
+    .poll(async () => {
+      const [fileHeaderBottom, symbolsBounds, symbolsHeaderTop] =
+        await Promise.all([
+          fileHeader.evaluate((node) => node.getBoundingClientRect().bottom),
+          symbols.evaluate((node) => {
+            const bounds = node.getBoundingClientRect();
+            return {
+              top: bounds.top,
+              bottomGap: window.innerHeight - bounds.bottom,
+            };
+          }),
+          symbolsHeader.evaluate((node) => node.getBoundingClientRect().top),
+        ]);
+      return [
+        Math.abs(fileHeaderBottom - symbolsBounds.top),
+        Math.abs(symbolsBounds.top - symbolsHeaderTop),
+        Math.abs(symbolsBounds.bottomGap),
+      ];
+    })
+    .toEqual([0, 0, 0]);
+  await expect(symbols).toBeVisible();
+  await page.evaluate(() => window.scrollTo(0, 0));
 
   await symbols.getByPlaceholder("Filter symbols").fill("serve");
   await expect(
@@ -1613,10 +1698,19 @@ test("footer groups the Crab mark and tagline into one compact signature", async
   page,
 }) => {
   await page.goto("/");
+  const headerMark = page.locator(".global-header .brand-mark");
   const footer = page.locator(".site-footer");
   const brand = footer.getByRole("link", { name: "Crab repositories" });
+  const footerMark = brand.locator(".footer-brand-mark");
   const tagline = footer.getByText("Git for any file at any scale");
-  await expect(brand.locator(".footer-brand-mark")).toBeVisible();
+  await expect(headerMark).toBeVisible();
+  await expect(footerMark).toBeVisible();
+  expect(
+    await headerMark.evaluate((image: HTMLImageElement) => image.naturalWidth),
+  ).toBeGreaterThan(0);
+  expect(
+    await footerMark.evaluate((image: HTMLImageElement) => image.naturalWidth),
+  ).toBeGreaterThan(0);
   await expect(tagline).toBeVisible();
   const spacing = await footer.evaluate((node) => {
     const brand = node.querySelector(".footer-brand")?.getBoundingClientRect();

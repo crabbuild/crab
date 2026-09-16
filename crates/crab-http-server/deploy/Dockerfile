@@ -3,9 +3,10 @@
 FROM node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS frontend
 
 WORKDIR /build
-COPY packages/repository/package.json packages/repository/package-lock.json packages/repository/
+COPY packages/repository/.npmrc packages/repository/package.json packages/repository/package-lock.json packages/repository/
 RUN npm ci --prefix packages/repository
 COPY packages/repository/index.html packages/repository/tsconfig.json packages/repository/vite.config.ts packages/repository/
+COPY packages/web/crab.optimized.svg packages/web/crab.optimized.svg
 COPY packages/repository/src/ packages/repository/src/
 RUN npm run build --prefix packages/repository
 

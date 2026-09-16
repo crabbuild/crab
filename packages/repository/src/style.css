@@ -97,8 +97,7 @@ main {
   display: block;
   width: 32px;
   height: 32px;
-  background: var(--fgColor-default);
-  mask: url("../../web/public/crab.optimized.svg") center / contain no-repeat;
+  object-fit: contain;
 }
 .brand:hover {
   text-decoration: none;
@@ -796,11 +795,11 @@ main {
   display: block;
   width: 22px;
   height: 22px;
-  background: currentColor;
-  filter: drop-shadow(
-    0 1px 1px color-mix(in srgb, currentColor 22%, transparent)
-  );
-  mask: url("../../web/public/crab.optimized.svg") center / contain no-repeat;
+  object-fit: contain;
+}
+[data-color-mode="dark"] .brand-mark,
+[data-color-mode="dark"] .footer-brand-mark {
+  filter: invert(1);
 }
 .footer-brand strong {
   font-weight: 700;
@@ -3852,16 +3851,24 @@ main {
   grid-template-columns: minmax(0, 1fr);
 }
 .repo-file-workspace .tree-sidebar {
+  display: flex;
+  flex-direction: column;
   position: sticky;
   top: 0;
-  min-height: calc(100vh - 113px);
+  height: 100dvh;
   border-width: 0;
   border-radius: 0;
 }
 .repo-file-workspace .repository-tree {
-  height: min(68vh, 760px);
-  min-height: 360px;
+  flex: 1;
+  height: 0;
+  min-height: 0;
   border-top: 1px solid var(--borderColor-muted);
+}
+.repo-file-workspace .tree-search-results {
+  flex: 1;
+  height: 0;
+  min-height: 0;
 }
 .repo-file-workspace .code-main {
   padding: 20px 20px 32px;
@@ -4082,6 +4089,7 @@ main {
 }
 .file-panel {
   margin-top: 16px;
+  overflow: clip;
 }
 .file-view-controls {
   display: flex;
@@ -4179,6 +4187,19 @@ main {
   min-height: 46px;
   padding: 8px 10px;
 }
+.code-main-file > .breadcrumb {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  min-height: 48px;
+  margin-bottom: 0;
+  background: var(--bgColor-default);
+}
+.code-main-file .file-panel > .panel-header {
+  position: sticky;
+  top: 48px;
+  z-index: 1;
+}
 .file-panel .button-link {
   padding: 4px 12px;
 }
@@ -4194,8 +4215,11 @@ main {
   overflow: auto;
 }
 .code-symbols-panel {
+  position: sticky;
+  top: var(--code-symbols-sticky-top, 0);
+  align-self: start;
   min-width: 0;
-  max-height: min(72vh, 820px);
+  height: var(--code-symbols-available-height, 100dvh);
   overflow: auto;
   color: var(--fgColor-default);
   background: var(--bgColor-default);
@@ -5412,6 +5436,8 @@ main {
     grid-template-columns: minmax(0, 1fr);
   }
   .code-symbols-panel {
+    position: static;
+    height: auto;
     max-height: 360px;
     border-top: 1px solid var(--borderColor-muted);
     border-left: 0;
@@ -5449,6 +5475,7 @@ main {
   }
   .repo-file-workspace .tree-sidebar {
     position: static;
+    height: auto;
     min-height: 0;
     border-width: 1px;
     border-radius: var(--borderRadius-medium);
@@ -5463,6 +5490,10 @@ main {
   }
   .repo-file-workspace .code-main {
     padding: 0;
+  }
+  .code-main-file > .breadcrumb,
+  .code-main-file .file-panel > .panel-header {
+    position: static;
   }
   .repo-file-workspace .breadcrumb {
     overflow-x: auto;
