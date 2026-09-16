@@ -47,19 +47,21 @@ git -C "${work_dir}/source" commit -m "qualify abrupt receive crash"
 
 old_oid="$(git -C "${work_dir}/source" rev-parse HEAD^)"
 new_oid="$(git -C "${work_dir}/source" rev-parse HEAD)"
-pack_root=/data/crab-http-server/repositories/demo/hello/packs
+repository_root=/data/crab-http-server/repositories/demo/hello
+legacy_pack_root="${repository_root}/packs"
+capsule_root="${repository_root}/v2/capsules"
 baseline="$(docker exec "$rustfs_id" sh -c \
-  "find '$pack_root' -type f | wc -l")"
+  "find '$legacy_pack_root' '$capsule_root' -type f 2>/dev/null | wc -l")"
 
 GIT_TERMINAL_PROMPT=0 git -C "${work_dir}/source" push origin main \
   >"${work_dir}/push.log" 2>&1 &
 push_pid=$!
-observed_pack=false
+observed_immutable=false
 for _attempt in $(seq 1 1200); do
   current="$(docker exec "$rustfs_id" sh -c \
-    "find '$pack_root' -type f | wc -l")"
+    "find '$legacy_pack_root' '$capsule_root' -type f 2>/dev/null | wc -l")"
   if [ "$current" -gt "$baseline" ]; then
-    observed_pack=true
+    observed_immutable=true
     break
   fi
   if ! kill -0 "$push_pid" 2>/dev/null; then
@@ -67,9 +69,9 @@ for _attempt in $(seq 1 1200); do
   fi
   sleep 0.05
 done
-if ! $observed_pack; then
+if ! $observed_immutable; then
   sed -n '1,160p' "${work_dir}/push.log"
-  echo "No in-flight immutable pack appeared before the push stopped." >&2
+  echo "No in-flight immutable Git publication appeared before the push stopped." >&2
   exit 1
 fi
 
