@@ -588,6 +588,25 @@ pub async fn open_view(
     open_view_from_root(router, snapshot, limits).await
 }
 
+/// Read the complete transaction-consistent ref map without fetching capsule payloads.
+///
+/// Ref-head bodies and any transaction records that make prepared multi-ref updates
+/// visible are still verified. Callers that consume Git objects must open a full view
+/// before trusting the immutable payloads named by those refs.
+pub async fn read_visible_refs(router: &StoreLayout<Store>) -> Result<BTreeMap<String, String>> {
+    let snapshot = load_root(router).await?;
+    read_visible_refs_from_root(router, &snapshot).await
+}
+
+/// Read current refs from an already verified root without fetching capsule payloads.
+pub async fn read_visible_refs_from_root(
+    router: &StoreLayout<Store>,
+    snapshot: &crab_metadata::capsule_protocol::RootSnapshot,
+) -> Result<BTreeMap<String, String>> {
+    let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
+    Ok(materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?.refs)
+}
+
 /// Load the immutable objects named by one already authenticated root.
 ///
 /// Remote-helper sessions use this entry point to bind advertisement and
@@ -627,66 +646,12 @@ async fn assemble_view(
 ) -> Result<CapsuleRepositoryView> {
     let mut refs = snapshot.record().root().refs().clone();
     let mut peeled_refs = snapshot.record().root().peeled_refs().clone();
-    let mut pointers = snapshot.record().root().capsule_frontier().to_vec();
-    let mut visible_ref_transactions = BTreeMap::new();
-    let mut ref_frontiers = BTreeMap::new();
-    let mut expected_refs = refs.clone();
-    let mut expected_peeled = peeled_refs.clone();
-    for head in &heads {
-        let state = head.visible(&active);
-        if let Some(transaction_id) = state.transaction_id() {
-            visible_ref_transactions.insert(head.ref_name().to_owned(), transaction_id.to_owned());
-        }
-        if state.transaction_id()
-            == snapshot
-                .record()
-                .root()
-                .compacted_ref_transactions()
-                .get(head.ref_name())
-                .map(String::as_str)
-        {
-            continue;
-        }
-        match state.oid() {
-            Some(oid) => {
-                expected_refs.insert(head.ref_name().to_owned(), oid.to_owned());
-                match state.peeled_oid() {
-                    Some(peeled) => {
-                        expected_peeled.insert(head.ref_name().to_owned(), peeled.to_owned());
-                    }
-                    None => {
-                        expected_peeled.remove(head.ref_name());
-                    }
-                }
-            }
-            None => {
-                expected_refs.remove(head.ref_name());
-                expected_peeled.remove(head.ref_name());
-            }
-        }
-        for pointer in state.frontier() {
-            match pointers
-                .iter()
-                .find(|candidate| candidate.hash() == pointer.hash())
-            {
-                Some(candidate) if candidate != pointer => {
-                    return Err(corrupt_path(
-                        "capsule-protocol ref heads",
-                        "capsule run identity has conflicting authenticated metadata",
-                    ));
-                }
-                Some(_) => {}
-                None => pointers.push(pointer.clone()),
-            }
-        }
-        ref_frontiers.insert(
-            head.ref_name().to_owned(),
-            (
-                state.checkpoint_transaction_id().map(str::to_owned),
-                state.frontier().to_vec(),
-            ),
-        );
-    }
+    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?;
+    let expected_refs = visible.refs;
+    let expected_peeled = visible.peeled_refs;
+    let visible_ref_transactions = visible.transactions;
+    let ref_frontiers = visible.frontiers;
+    let pointers = visible.pointers;
     admit_frontier(&pointers, limits)?;
     let checkpoint = async {
         match snapshot.record().root().checkpoint() {
@@ -859,6 +824,86 @@ async fn assemble_view(
         visible_ref_transactions,
         ref_capsule_counts,
         capsule_run_pointers: pointers,
+    })
+}
+
+struct VisibleRefHeads {
+    refs: BTreeMap<String, String>,
+    peeled_refs: BTreeMap<String, String>,
+    transactions: BTreeMap<String, String>,
+    frontiers: BTreeMap<String, (Option<String>, Vec<CapsulePointer>)>,
+    pointers: Vec<CapsulePointer>,
+}
+
+fn materialize_visible_ref_heads(
+    root: &crab_metadata::capsule_protocol::RepositoryRoot,
+    heads: &[crab_metadata::capsule_protocol::CapsuleRefHead],
+    active: &BTreeSet<String>,
+) -> Result<VisibleRefHeads> {
+    let mut refs = root.refs().clone();
+    let mut peeled_refs = root.peeled_refs().clone();
+    let mut transactions = BTreeMap::new();
+    let mut frontiers = BTreeMap::new();
+    let mut pointers = root.capsule_frontier().to_vec();
+    for head in heads {
+        let state = head.visible(active);
+        if let Some(transaction_id) = state.transaction_id() {
+            transactions.insert(head.ref_name().to_owned(), transaction_id.to_owned());
+        }
+        if state.transaction_id()
+            == root
+                .compacted_ref_transactions()
+                .get(head.ref_name())
+                .map(String::as_str)
+        {
+            continue;
+        }
+        match state.oid() {
+            Some(oid) => {
+                refs.insert(head.ref_name().to_owned(), oid.to_owned());
+                match state.peeled_oid() {
+                    Some(peeled) => {
+                        peeled_refs.insert(head.ref_name().to_owned(), peeled.to_owned());
+                    }
+                    None => {
+                        peeled_refs.remove(head.ref_name());
+                    }
+                }
+            }
+            None => {
+                refs.remove(head.ref_name());
+                peeled_refs.remove(head.ref_name());
+            }
+        }
+        for pointer in state.frontier() {
+            match pointers
+                .iter()
+                .find(|candidate| candidate.hash() == pointer.hash())
+            {
+                Some(candidate) if candidate != pointer => {
+                    return Err(corrupt_path(
+                        "capsule-protocol ref heads",
+                        "capsule run identity has conflicting authenticated metadata",
+                    ));
+                }
+                Some(_) => {}
+                None => pointers.push(pointer.clone()),
+            }
+        }
+        frontiers.insert(
+            head.ref_name().to_owned(),
+            (
+                state.checkpoint_transaction_id().map(str::to_owned),
+                state.frontier().to_vec(),
+            ),
+        );
+    }
+    Ok(VisibleRefHeads {
+        refs,
+        peeled_refs,
+        transactions,
+        frontiers,
+        pointers,
     })
 }
 
@@ -1678,6 +1723,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn visible_ref_read_does_not_fetch_capsule_payloads() {
+        let inner = Arc::new(InMemory::new());
+        seed_one_capsule(inner.clone(), None).await;
+        let observer = Arc::new(RecordingObserver::default());
+        let store = Store::new(inner).with_storage_observer(observer.clone());
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+
+        let refs = read_visible_refs(&router).await.unwrap();
+
+        assert_eq!(refs.get("refs/heads/main"), Some(&"2".repeat(40)));
+        let operations = observer
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|observation| observation.outcome == StorageOutcome::Success)
+            .map(|observation| observation.operation)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            operations,
+            vec![
+                StorageOperation::Get,
+                StorageOperation::List,
+                StorageOperation::List,
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn capsule_must_match_every_root_pointer_identity() {
         let inner = Arc::new(InMemory::new());
         seed_one_capsule(inner.clone(), Some("3".repeat(64))).await;
@@ -1721,6 +1795,18 @@ mod tests {
         assert_eq!(new.refs().get("refs/heads/main"), Some(&"2".repeat(40)));
         assert_eq!(new.refs().get("refs/heads/feature"), Some(&"3".repeat(40)));
         assert_eq!(new.capsules().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn visible_ref_read_resolves_committed_multi_ref_updates() {
+        let inner = Arc::new(InMemory::new());
+        seed_prepared_multi_ref(inner.clone(), true, false).await;
+        let router = StoreLayout::new(Store::new(inner), "repositories/test".to_owned());
+
+        let refs = read_visible_refs(&router).await.unwrap();
+
+        assert_eq!(refs.get("refs/heads/main"), Some(&"2".repeat(40)));
+        assert_eq!(refs.get("refs/heads/feature"), Some(&"3".repeat(40)));
     }
 
     #[tokio::test]
