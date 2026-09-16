@@ -56,7 +56,17 @@ if ! git -C "$source_dir" rev-parse --verify HEAD >/dev/null 2>&1; then
   git -C "$source_dir" commit -m "seed restore qualification"
   GIT_TERMINAL_PROMPT=0 git -C "$source_dir" push --set-upstream origin main
 fi
+qualification_tag="backup-restore-${suffix,,}"
+printf 'v2 authority and activation records must survive restore.\n' \
+  > "${source_dir}/${qualification_tag}.txt"
+git -C "$source_dir" add "${qualification_tag}.txt"
+git -C "$source_dir" commit -m "qualify complete v2 restore"
+git -C "$source_dir" tag --annotate "$qualification_tag" \
+  --message "Complete v2 restore qualification"
+GIT_TERMINAL_PROMPT=0 git -C "$source_dir" push --atomic origin \
+  main "refs/tags/${qualification_tag}"
 source_oid="$(git -C "$source_dir" rev-parse HEAD)"
+source_tag_oid="$(git -C "$source_dir" rev-parse "refs/tags/${qualification_tag}")"
 
 issue_request='01931b9e-4b3c-7b2a-b9f0-0123456789ab'
 issue_title='Restore qualification'
@@ -75,6 +85,7 @@ printf 'LFS bytes must survive a complete-root restore.\n' > "${work_dir}/lfs-so
 lfs_oid="$(shasum -a 256 "${work_dir}/lfs-source" | awk '{print $1}')"
 lfs_size="$(wc -c < "${work_dir}/lfs-source" | tr -d '[:space:]')"
 lfs_path="/git/demo/hello.git/info/lfs/objects/${lfs_oid}?size=${lfs_size}"
+lfs_key="repositories/demo/hello/lfs/objects/${lfs_oid:0:2}/${lfs_oid:2:2}/${lfs_oid}"
 curl --fail --silent --show-error --request PUT \
   --data-binary "@${work_dir}/lfs-source" \
   --output /dev/null \
@@ -118,6 +129,16 @@ cmp "${work_dir}/source-manifest.json" "${work_dir}/restored-manifest.json"
 
 jq --exit-status \
   'any(.[]; .key == "repositories/.crab/http-server/v1/catalog.json")' \
+  "${work_dir}/source-manifest.json" >/dev/null
+jq --exit-status --arg lfs_key "$lfs_key" \
+  'any(.[]; .key == "repositories/demo/hello/v2/root") and
+   ([.[] | select(.key | startswith("repositories/demo/hello/v2/refs/heads/"))] | length) >= 2 and
+   any(.[]; .key | startswith("repositories/demo/hello/v2/capsules/")) and
+   any(.[]; .key | startswith("repositories/demo/hello/v2/transactions/records/")) and
+   any(.[]; .key | startswith("repositories/demo/hello/v2/transactions/committed/")) and
+   any(.[]; .key == $lfs_key) and
+   all(.[]; .key != "repositories/demo/hello/manifest" and
+            .key != "repositories/demo/hello/layout")' \
   "${work_dir}/source-manifest.json" >/dev/null
 jq --exit-status \
   'any(.[]; .key == "repositories/cells/v1/identity.json") and
@@ -259,6 +280,9 @@ if [ -z "$restored_repository" ]; then
   exit 1
 fi
 test "$(git -C "$restored_repository" rev-parse HEAD)" = "$source_oid"
+test "$(git -C "$restored_repository" rev-parse "refs/tags/${qualification_tag}")" \
+  = "$source_tag_oid"
+git -C "$restored_repository" fsck --strict
 curl --fail --silent --show-error \
   --output "${work_dir}/restored-issue.json" \
   "${restore_origin}/api/repos/demo/hello/issues/1"
@@ -278,5 +302,5 @@ docker rm --force "$restore_proxy" "$restore_server" >/dev/null
 source_stopped=false
 trap - EXIT
 
-printf 'Complete-root restore qualified objects=%s git=%s issue=1 lfs=%s\n' \
-  "$object_count" "$source_oid" "$lfs_oid"
+printf 'Complete-root v2 restore qualified objects=%s git=%s tag=%s issue=1 lfs=%s\n' \
+  "$object_count" "$source_oid" "$source_tag_oid" "$lfs_oid"
