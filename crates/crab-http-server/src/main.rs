@@ -57,6 +57,8 @@ enum CellsCommand {
         #[arg(long, help = "Read the running server's startup envelope")]
         live: bool,
     },
+    /// Print the running server's private Prometheus sample.
+    Metrics,
     /// Print the durable control state for one repository Cell.
     Status {
         #[arg(long)]
@@ -260,6 +262,7 @@ async fn cells(
         CellsCommand::Capacity { json: false, .. } => {
             return Err(crab_http_server::Error::Config("--json is required"));
         }
+        CellsCommand::Metrics => management_body(config, "/metrics").await?,
         CellsCommand::Status { owner, name } => {
             crab_http_server::repository_cell_status(config, &owner, &name).await?
         }
@@ -352,7 +355,14 @@ async fn healthcheck(config: &crab_http_server::Config) -> crab_http_server::Res
 }
 
 async fn live_capacity(config: &crab_http_server::Config) -> crab_http_server::Result<Vec<u8>> {
-    Ok(management_get(config, "/capacity")
+    management_body(config, "/capacity").await
+}
+
+async fn management_body(
+    config: &crab_http_server::Config,
+    path: &'static str,
+) -> crab_http_server::Result<Vec<u8>> {
+    Ok(management_get(config, path)
         .await?
         .bytes()
         .await
@@ -584,6 +594,34 @@ mod tests {
                 "127.0.0.1:8789".parse().unwrap()
             ))
         );
+        let (url, resolution) = management_target(&config, "/metrics").unwrap();
+        assert_eq!(url.as_str(), "https://crab-http-server-peer:8789/metrics");
+        assert_eq!(
+            resolution,
+            Some((
+                "crab-http-server-peer".into(),
+                "127.0.0.1:8789".parse().unwrap()
+            ))
+        );
+    }
+
+    #[test]
+    fn cells_metrics_is_a_private_management_command() {
+        let arguments = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "metrics",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            arguments.command,
+            Some(Command::Cells {
+                command: CellsCommand::Metrics
+            })
+        ));
     }
 
     #[test]

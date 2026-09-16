@@ -392,12 +392,16 @@ jobs:
               --namespace crab "${profile_values[@]}" \
               --show-only templates/podmonitor.yaml \
               --set metrics.podMonitor.enabled=true \
+              --set metrics.podMonitor.existingSecret=crab-http-server-metrics \
               --set-json 'metrics.podMonitor.labels={"prometheus":"platform"}' \
               --set-json 'networkPolicy.metricsIngressFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}}}]' \
               > "${monitor_resource}"
           grep -F 'kind: PodMonitor' "${monitor_resource}"
           grep -F 'port: management' "${monitor_resource}"
           grep -F 'path: /metrics' "${monitor_resource}"
+          grep -F 'scheme: https' "${monitor_resource}"
+          grep -F 'name: crab-http-server-metrics' "${monitor_resource}"
+          grep -F 'serverName: "crab-http-server-peer"' "${monitor_resource}"
           grep -F 'prometheus: platform' "${monitor_resource}"
 
           rules_resource="${RUNNER_TEMP}/crab-http-server-prometheus-rule.yaml"
@@ -407,6 +411,7 @@ jobs:
               --namespace crab "${profile_values[@]}" \
               --show-only templates/prometheusrule.yaml \
               --set metrics.podMonitor.enabled=true \
+              --set metrics.podMonitor.existingSecret=crab-http-server-metrics \
               --set metrics.prometheusRule.enabled=true \
               --set-json 'networkPolicy.metricsIngressFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}}}]' \
               > "${rules_resource}"
@@ -518,13 +523,33 @@ jobs:
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
-              --set metrics.podMonitor.enabled=true >/dev/null 2>&1; then
+              --set metrics.podMonitor.enabled=true \
+              --set metrics.podMonitor.existingSecret=crab-http-server-metrics \
+              >/dev/null 2>&1; then
             echo "chart accepted a metrics scraper without an allowed source" >&2
             exit 1
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set metrics.podMonitor.enabled=true \
+              --set-json 'networkPolicy.metricsIngressFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}}}]' \
+              >/dev/null 2>&1; then
+            echo "chart accepted a metrics scraper without a client Secret" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
+              --set metrics.podMonitor.enabled=true \
+              --set metrics.podMonitor.existingSecret=crab-http-server-peer \
+              --set-json 'networkPolicy.metricsIngressFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}}}]' \
+              >/dev/null 2>&1; then
+            echo "chart accepted the Cell peer identity as its metrics client" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
+              --set metrics.podMonitor.enabled=true \
+              --set metrics.podMonitor.existingSecret=crab-http-server-metrics \
               --set-json 'networkPolicy.metricsIngressFrom=[{"ipBlock":{"cidr":"::/0"}}]' \
               >/dev/null 2>&1; then
             echo "chart accepted unrestricted IPv6 metrics ingress" >&2
@@ -539,6 +564,7 @@ jobs:
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set metrics.podMonitor.enabled=true \
+              --set metrics.podMonitor.existingSecret=crab-http-server-metrics \
               --set metrics.prometheusRule.enabled=true \
               --set-json 'metrics.prometheusRule.labels={"app.kubernetes.io/name":"other"}' \
               --set-json 'networkPolicy.metricsIngressFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}}}]' \
@@ -549,6 +575,7 @@ jobs:
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set metrics.podMonitor.enabled=true \
+              --set metrics.podMonitor.existingSecret=crab-http-server-metrics \
               --set-json 'metrics.podMonitor.labels={"app.kubernetes.io/name":"other"}' \
               --set-json 'networkPolicy.metricsIngressFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}}}]' \
               >/dev/null 2>&1; then

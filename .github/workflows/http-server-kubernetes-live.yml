@@ -390,7 +390,7 @@ jobs:
             --arg image "$EXPECTED_IMAGE" \
             --arg release_tag "$RELEASE_TAG" \
             --arg source_sha "$SOURCE_SHA" \
-            '.schema == 6 and .provider == $provider and
+            '.schema == 8 and .provider == $provider and
              .namespace == $namespace and .deployment == $deployment and
              .origin == $origin and .repository == $repository and
              .image == $image and .chart == $chart and

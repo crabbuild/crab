@@ -276,13 +276,17 @@ visible to the process.
 kubectl --namespace crab exec POD -- \
   crab-http-server --config /etc/crab/http-server/server.toml \
   cells capacity --json --live > capacity-before.json
+kubectl --namespace crab exec POD -- \
+  crab-http-server --config /etc/crab/http-server/server.toml \
+  cells metrics > metrics-before.prom
 ```
 
 The report separates CPU-bounded blocking jobs, dirty-memory-bounded jobs, and
 the two-slot full-recovery ceiling. Store the report with the immutable image
 digest, profile, workload parameters, and live measurements. Reject a receipt
-when its observed active-Cell capacity or retained-byte capacity differs from
-the corresponding private metrics sample taken before traffic.
+when its observed active-Cell, retained-byte, or local-disk capacity differs
+from the corresponding private metrics sample taken before traffic, or when a
+live usage gauge exceeds its advertised capacity.
 
 The Kubernetes qualification receipt records this report for every original
 Pod, every Pod after the zero-unavailable rollout, and every Pod after forced

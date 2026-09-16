@@ -50,6 +50,55 @@ pub struct NodeByteReservation {
     _permit: OwnedSemaphorePermit,
 }
 
+/// Point-in-time node admission usage for one embedded Cell runtime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellRuntimeStats {
+    active_cells: usize,
+    active_cell_capacity: usize,
+    retained_bytes: usize,
+    retained_capacity_bytes: usize,
+    local_disk_reserved_bytes: u64,
+    local_disk_capacity_bytes: u64,
+}
+
+impl CellRuntimeStats {
+    /// Returns the number of admitted Cell actors.
+    #[must_use]
+    pub const fn active_cells(self) -> usize {
+        self.active_cells
+    }
+
+    /// Returns the maximum number of Cell actors admitted by this runtime.
+    #[must_use]
+    pub const fn active_cell_capacity(self) -> usize {
+        self.active_cell_capacity
+    }
+
+    /// Returns the bytes currently reserved by node-wide native work.
+    #[must_use]
+    pub const fn retained_bytes(self) -> usize {
+        self.retained_bytes
+    }
+
+    /// Returns the node-wide native-work byte capacity.
+    #[must_use]
+    pub const fn retained_capacity_bytes(self) -> usize {
+        self.retained_capacity_bytes
+    }
+
+    /// Returns the bytes currently reserved in the local replica cache.
+    #[must_use]
+    pub const fn local_disk_reserved_bytes(self) -> u64 {
+        self.local_disk_reserved_bytes
+    }
+
+    /// Returns the local replica-cache byte capacity.
+    #[must_use]
+    pub const fn local_disk_capacity_bytes(self) -> u64 {
+        self.local_disk_capacity_bytes
+    }
+}
+
 /// New capability and publication receipt returned by one schema migration.
 pub struct MigratedCell {
     pub handle: CellHandle,
@@ -59,6 +108,7 @@ pub struct MigratedCell {
 pub(super) struct RuntimeInner {
     sender: mpsc::Sender<Message>,
     node_bytes: Arc<Semaphore>,
+    node_retained_bytes: usize,
     shutting_down: AtomicBool,
     session: SessionId,
     pool: SqlWorkerPool,
@@ -97,6 +147,7 @@ impl CellRuntime {
             inner: Arc::new(RuntimeInner {
                 sender,
                 node_bytes: Arc::new(Semaphore::new(node_retained_bytes)),
+                node_retained_bytes,
                 shutting_down: AtomicBool::new(false),
                 session,
                 pool,
@@ -134,6 +185,23 @@ impl CellRuntime {
     #[must_use]
     pub fn is_shutting_down(&self) -> bool {
         self.inner.shutting_down.load(Ordering::Acquire)
+    }
+
+    /// Samples node-wide admission usage without waiting for actor work.
+    #[must_use]
+    pub fn stats(&self) -> CellRuntimeStats {
+        let retained_available = self.inner.node_bytes.available_permits();
+        CellRuntimeStats {
+            active_cells: self.inner.pool.active_cells(),
+            active_cell_capacity: self.inner.pool.active_cell_capacity(),
+            retained_bytes: self
+                .inner
+                .node_retained_bytes
+                .saturating_sub(retained_available),
+            retained_capacity_bytes: self.inner.node_retained_bytes,
+            local_disk_reserved_bytes: self.inner.replica_host.local_disk_used(),
+            local_disk_capacity_bytes: self.inner.replica_host.local_disk_capacity(),
+        }
     }
 
     /// Reserves node-wide bytes for native work retained outside a Cell mailbox.

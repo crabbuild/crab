@@ -303,6 +303,18 @@ impl Host {
         self
     }
 
+    /// Returns the configured byte ceiling shared by local replica artifacts.
+    #[must_use]
+    pub fn local_disk_capacity(&self) -> u64 {
+        self.local_disk.capacity()
+    }
+
+    /// Returns bytes currently reserved by local replica artifacts.
+    #[must_use]
+    pub fn local_disk_used(&self) -> u64 {
+        self.local_disk.used()
+    }
+
     pub(crate) fn reserve_local_disk(&self, bytes: u64) -> crate::Result<DiskReservation> {
         self.local_disk.try_reserve(bytes)
     }

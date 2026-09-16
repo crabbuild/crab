@@ -2,6 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{CHECKSUM_FLAG, CrabError, Result, ltx};
 
+#[cfg(feature = "replica")]
 const CHECKSUM_READ_BYTES: usize = 64 * 1024;
 
 #[derive(Clone)]

@@ -1201,6 +1201,7 @@ async fn render_capacity(State(server): State<Arc<Server>>) -> Response {
 
 async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
     let scheduler_now_ms = crate::cells::unix_now_ms().unwrap_or(0);
+    let cell_runtime = server.cell_runtime.stats();
     let body = server.metrics.render(crate::metrics::RuntimeSnapshot {
         repositories: server.repositories.len(),
         catalog_healthy: server.catalog_healthy.load(Ordering::Acquire),
@@ -1209,6 +1210,12 @@ async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
         scheduler_lag_seconds: server.scheduler_status.lag_ms(scheduler_now_ms) as f64 / 1_000.0,
         draining: server.cancellation.is_cancelled(),
         receive_workers: server.receives.len(),
+        cell_active: cell_runtime.active_cells(),
+        cell_active_capacity: cell_runtime.active_cell_capacity(),
+        cell_retained_bytes: cell_runtime.retained_bytes(),
+        cell_retained_capacity_bytes: cell_runtime.retained_capacity_bytes(),
+        cell_local_disk_reserved_bytes: cell_runtime.local_disk_reserved_bytes(),
+        cell_local_disk_capacity_bytes: cell_runtime.local_disk_capacity_bytes(),
         admission_available: [
             server.admission.available_permits(),
             server.transfer_admission.available_permits(),

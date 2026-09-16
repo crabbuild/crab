@@ -50,6 +50,12 @@ struct MetricsInner {
     scheduler_lag_seconds: Gauge,
     draining: Gauge,
     receive_workers: Gauge,
+    cell_active: Gauge,
+    cell_active_capacity: Gauge,
+    cell_retained_bytes: Gauge,
+    cell_retained_capacity_bytes: Gauge,
+    cell_local_disk_reserved_bytes: Gauge,
+    cell_local_disk_capacity_bytes: Gauge,
     catalog_refresh_failures: Counter,
     transfer_admission_rejections: [Counter; TRANSFER_REJECTION_COUNT],
 }
@@ -75,6 +81,12 @@ pub(crate) struct RuntimeSnapshot {
     pub(crate) scheduler_lag_seconds: f64,
     pub(crate) draining: bool,
     pub(crate) receive_workers: usize,
+    pub(crate) cell_active: usize,
+    pub(crate) cell_active_capacity: usize,
+    pub(crate) cell_retained_bytes: usize,
+    pub(crate) cell_retained_capacity_bytes: usize,
+    pub(crate) cell_local_disk_reserved_bytes: u64,
+    pub(crate) cell_local_disk_capacity_bytes: u64,
     pub(crate) admission_available: [usize; ADMISSION_COUNT],
     pub(crate) admission_capacity: [usize; ADMISSION_COUNT],
 }
@@ -118,6 +130,34 @@ impl Metrics {
                 ),
                 receive_workers: recorder.register_gauge(
                     &Key::from_static_name("crab_http_server_receive_workers"),
+                    &METADATA,
+                ),
+                cell_active: recorder.register_gauge(
+                    &Key::from_static_name("crab_http_server_cell_runtime_active_cells"),
+                    &METADATA,
+                ),
+                cell_active_capacity: recorder.register_gauge(
+                    &Key::from_static_name("crab_http_server_cell_runtime_active_cell_capacity"),
+                    &METADATA,
+                ),
+                cell_retained_bytes: recorder.register_gauge(
+                    &Key::from_static_name("crab_http_server_cell_runtime_retained_bytes"),
+                    &METADATA,
+                ),
+                cell_retained_capacity_bytes: recorder.register_gauge(
+                    &Key::from_static_name("crab_http_server_cell_runtime_retained_capacity_bytes"),
+                    &METADATA,
+                ),
+                cell_local_disk_reserved_bytes: recorder.register_gauge(
+                    &Key::from_static_name(
+                        "crab_http_server_cell_runtime_local_disk_reserved_bytes",
+                    ),
+                    &METADATA,
+                ),
+                cell_local_disk_capacity_bytes: recorder.register_gauge(
+                    &Key::from_static_name(
+                        "crab_http_server_cell_runtime_local_disk_capacity_bytes",
+                    ),
                     &METADATA,
                 ),
                 catalog_refresh_failures: recorder.register_counter(
@@ -175,6 +215,22 @@ impl Metrics {
         self.inner
             .receive_workers
             .set(snapshot.receive_workers as f64);
+        self.inner.cell_active.set(snapshot.cell_active as f64);
+        self.inner
+            .cell_active_capacity
+            .set(snapshot.cell_active_capacity as f64);
+        self.inner
+            .cell_retained_bytes
+            .set(snapshot.cell_retained_bytes as f64);
+        self.inner
+            .cell_retained_capacity_bytes
+            .set(snapshot.cell_retained_capacity_bytes as f64);
+        self.inner
+            .cell_local_disk_reserved_bytes
+            .set(snapshot.cell_local_disk_reserved_bytes as f64);
+        self.inner
+            .cell_local_disk_capacity_bytes
+            .set(snapshot.cell_local_disk_capacity_bytes as f64);
         for (index, admission) in self.inner.admission.iter().enumerate() {
             admission
                 .available
@@ -450,6 +506,36 @@ fn describe_metrics(recorder: &impl Recorder) {
         "crab_http_server_receive_workers",
         "Receive workers retained for publication or cleanup.",
     );
+    describe_gauge(
+        recorder,
+        "crab_http_server_cell_runtime_active_cells",
+        "SQLite Cells currently retained by this process's fixed worker pool.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_http_server_cell_runtime_active_cell_capacity",
+        "Startup admission ceiling for active SQLite Cells in this process.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_http_server_cell_runtime_retained_bytes",
+        "Node-wide bytes currently reserved outside Cell mailboxes.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_http_server_cell_runtime_retained_capacity_bytes",
+        "Startup admission ceiling for node-wide retained bytes.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_http_server_cell_runtime_local_disk_reserved_bytes",
+        "Local database, WAL, LTX, sparse-page, and staging bytes currently reserved.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_http_server_cell_runtime_local_disk_capacity_bytes",
+        "Startup admission ceiling for local Cell working bytes.",
+    );
     describe_counter(
         recorder,
         "crab_http_server_catalog_refresh_failures_total",
@@ -516,6 +602,12 @@ mod tests {
             scheduler_lag_seconds: 0.25,
             draining: false,
             receive_workers: 1,
+            cell_active: 0,
+            cell_active_capacity: 7,
+            cell_retained_bytes: 0,
+            cell_retained_capacity_bytes: 4_096,
+            cell_local_disk_reserved_bytes: 0,
+            cell_local_disk_capacity_bytes: 8_192,
             admission_available: [16, 3, 8, 1],
             admission_capacity: [16, 4, 8, 2],
         }
@@ -546,6 +638,12 @@ mod tests {
         assert!(rendered.contains("crab_http_server_scheduler_progress 3"));
         assert!(rendered.contains("crab_http_server_scheduler_lag_seconds 0.25"));
         assert!(rendered.contains("crab_http_server_repositories 2"));
+        assert!(rendered.contains("crab_http_server_cell_runtime_active_cells 0"));
+        assert!(rendered.contains("crab_http_server_cell_runtime_active_cell_capacity 7"));
+        assert!(rendered.contains("crab_http_server_cell_runtime_retained_bytes 0"));
+        assert!(rendered.contains("crab_http_server_cell_runtime_retained_capacity_bytes 4096"));
+        assert!(rendered.contains("crab_http_server_cell_runtime_local_disk_reserved_bytes 0"));
+        assert!(rendered.contains("crab_http_server_cell_runtime_local_disk_capacity_bytes 8192"));
         assert!(
             rendered
                 .contains("crab_http_server_admission_available_permits{class=\"git_transfer\"} 3")

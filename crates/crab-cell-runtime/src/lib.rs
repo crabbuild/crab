@@ -34,7 +34,8 @@ mod workflow;
 
 pub use activity_pool::{BlockingActivityPool, BlockingActivityReservation};
 pub use actor::{
-    ACTIVE_CELL_NATIVE_BYTES, CellHandle, CellRuntime, MigratedCell, NodeByteReservation,
+    ACTIVE_CELL_NATIVE_BYTES, CellHandle, CellRuntime, CellRuntimeStats, MigratedCell,
+    NodeByteReservation,
 };
 pub use application::{ApplicationIdentity, ApplicationIdentityStore};
 pub use authority::{CellAuthority, VersionedControl};

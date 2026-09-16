@@ -248,13 +248,15 @@ One Helm chart owns the runtime contract:
   termination
 - Storage-aware probes and a fresh-workload full storage-contract test
 - TLS ingress plus mandatory source-restricted NetworkPolicy
-- Optional autoscaling, private `PodMonitor`, and bounded baseline alerts
+- Optional autoscaling, mTLS `PodMonitor` with a dedicated client Secret, and
+  bounded baseline alerts
 - An immutable image digest and typed generated configuration
 
 The chart owns ingress isolation but leaves provider-specific egress to the
 cluster. Every replica must reach DNS, its workload-identity endpoint, object
-storage, and the configured OIDC issuer. Port 8789 remains private for probes
-and metrics; the public route reaches only port 8788 through TLS ingress.
+storage, and the configured OIDC issuer. Port 8789 remains private and requires
+a CA-trusted client certificate for probes and metrics; the public route
+reaches only port 8788 through TLS ingress.
 GKE Standard overlays also select metadata-server-enabled nodes; Autopilot
 overlays omit the Standard-only selector.
 Empty or match-all ingress peers and unrestricted IPv4 or IPv6 CIDRs fail

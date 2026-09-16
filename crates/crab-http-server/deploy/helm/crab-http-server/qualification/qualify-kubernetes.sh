@@ -419,6 +419,23 @@ check_pod_health() {
   done < <(jq --raw-output '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name' "$pods_json")
 }
 
+metric_sample() {
+  local file="$1"
+  local name="$2"
+  awk -v name="$name" '
+    $1 == name {
+      count += 1
+      value = $2
+    }
+    END {
+      if (count != 1 || value !~ /^[0-9]+([.][0-9]+)?$/) {
+        exit 1
+      }
+      print value
+    }
+  ' "$file"
+}
+
 capture_capacity_envelopes() {
   local phase="$1"
   local output="$2"
@@ -426,6 +443,8 @@ capture_capacity_envelopes() {
   local pod
   local pod_uid
   local report
+  local metrics_report
+  local metrics
   : > "$entries"
 
   while IFS=$'\t' read -r pod pod_uid; do
@@ -433,9 +452,27 @@ capture_capacity_envelopes() {
     kubectl --namespace "$namespace" exec "$pod" -- \
       crab-http-server --config /etc/crab/http-server/server.toml \
         cells capacity --json --live > "$report"
+    metrics_report="${work_dir}/capacity-${phase}-${pod}.prom"
+    kubectl --namespace "$namespace" exec "$pod" -- \
+      crab-http-server --config /etc/crab/http-server/server.toml \
+        cells metrics > "$metrics_report"
+    metrics="$(jq --null-input --compact-output \
+      --argjson active_cells "$(metric_sample "$metrics_report" crab_http_server_cell_runtime_active_cells)" \
+      --argjson active_cell_capacity "$(metric_sample "$metrics_report" crab_http_server_cell_runtime_active_cell_capacity)" \
+      --argjson retained_bytes "$(metric_sample "$metrics_report" crab_http_server_cell_runtime_retained_bytes)" \
+      --argjson retained_capacity_bytes "$(metric_sample "$metrics_report" crab_http_server_cell_runtime_retained_capacity_bytes)" \
+      --argjson local_disk_reserved_bytes "$(metric_sample "$metrics_report" crab_http_server_cell_runtime_local_disk_reserved_bytes)" \
+      --argjson local_disk_capacity_bytes "$(metric_sample "$metrics_report" crab_http_server_cell_runtime_local_disk_capacity_bytes)" \
+      '{active_cells: $active_cells,
+        active_cell_capacity: $active_cell_capacity,
+        retained_bytes: $retained_bytes,
+        retained_capacity_bytes: $retained_capacity_bytes,
+        local_disk_reserved_bytes: $local_disk_reserved_bytes,
+        local_disk_capacity_bytes: $local_disk_capacity_bytes}')"
     jq --compact-output \
       --arg phase "$phase" --arg pod "$pod" --arg pod_uid "$pod_uid" \
-      '{phase: $phase, pod: $pod, pod_uid: $pod_uid, envelope: .}' \
+      --argjson metrics "$metrics" \
+      '{phase: $phase, pod: $pod, pod_uid: $pod_uid, envelope: ., metrics: $metrics}' \
       "$report" >> "$entries"
   done < <(jq --raw-output '
     .items[] | select(.metadata.deletionTimestamp == null) |
@@ -987,7 +1024,7 @@ jq --null-input \
   --slurpfile capacity_before_traffic "$capacity_before_traffic" \
   --slurpfile capacity_after_rollout "$capacity_after_rollout" \
   --slurpfile capacity_after_owner_loss "$capacity_after_owner_loss" \
-  '{schema: 7, provider: $provider, namespace: $namespace, deployment: $deployment,
+  '{schema: 8, provider: $provider, namespace: $namespace, deployment: $deployment,
     origin: $origin, image: $image, chart: $chart,
     qualification_source: {release_tag: $release_tag, commit: $source_sha},
     workload_identity: {

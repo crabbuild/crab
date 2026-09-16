@@ -214,20 +214,24 @@ Monitor these platform and application signals:
 | `crab_http_server_catalog_refresh_failures_total` | The counter increases |
 | `crab_http_server_receive_workers` | Workers remain after request traffic settles |
 | `crab_http_server_draining` | A pod reports `1` outside a planned rollout |
+| `crab_http_server_cell_runtime_active_cells` | Usage approaches the resource-derived active-Cell capacity |
+| `crab_http_server_cell_runtime_retained_bytes` | Node-wide retained work approaches its byte capacity |
+| `crab_http_server_cell_runtime_local_disk_reserved_bytes` | Replica reservations approach the shared local-disk capacity |
 | `repository catalog refresh failed` | Running pods stop discovering catalog changes |
 | Publication or LFS transfer failures | A write may need client retry or operator outcome inspection |
 | LFS lock conflicts | Inspect the lock owner and ID; use force unlock only after confirming the holder no longer owns the edit |
 
-Scrape `GET /metrics` on each pod's private management port. The chart can add
-a Prometheus Operator `PodMonitor` and a management-port NetworkPolicy rule for
-an explicit monitoring source. Keep port 8789 absent from public Services and
-ingress. Alert thresholds need a workload baseline; start with catalog health,
+Scrape `GET /metrics` on each pod's private management port over mTLS. The
+chart can add a Prometheus Operator `PodMonitor`, an independent monitoring
+client Secret, and a management-port NetworkPolicy rule for an explicit
+monitoring source. Never reuse the Cell peer Secret for monitoring. Keep port
+8789 absent from public Services and ingress. Alert thresholds need a workload baseline; start with catalog health,
 new catalog-refresh failures, sustained zero local admission permits, repeated
 deployment-wide admission rejections, response-body errors, and unexpected
 drain state.
 
-Before a capacity qualification run, save `cells capacity --json --live` from
-every pod. It records the running server's startup memory, disk, descriptor and CPU inputs and
+Before a capacity qualification run, save `cells capacity --json --live` and
+`cells metrics` from every pod. They record the running server's startup memory, disk, descriptor and CPU inputs and
 the resulting active-Cell, retained-byte, blocking-job, dirty-job, recovery-job
 and scratch budgets. Treat it as admission evidence only: latency, throughput,
 RSS, descriptors, local bytes and object-store cost still require a measured

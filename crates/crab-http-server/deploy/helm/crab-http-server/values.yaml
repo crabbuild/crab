@@ -56,6 +56,10 @@ networkPolicy:
 metrics:
   podMonitor:
     enabled: false
+    existingSecret: ""
+    certificateKey: tls.crt
+    privateKeyKey: tls.key
+    caKey: ca.crt
     labels: {}
     interval: 30s
     scrapeTimeout: 10s

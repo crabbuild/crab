@@ -629,6 +629,7 @@ namespace or pods that run your scraper. Its labels must match the Prometheus
 metrics:
   podMonitor:
     enabled: true
+    existingSecret: crab-http-server-metrics
     labels:
       prometheus: platform
     interval: 30s
@@ -640,6 +641,12 @@ networkPolicy:
         matchLabels:
           kubernetes.io/metadata.name: monitoring
 ```
+
+`crab-http-server-metrics` must contain `tls.crt`, `tls.key`, and `ca.crt`.
+Issue an Ed25519 client-auth certificate from the same CA as the Cell peers,
+but use a separate Secret: the peer Secret also carries node identity and must
+not be mounted into Prometheus. The PodMonitor verifies
+`cells.tlsServerName` while scraping the management listener over mTLS.
 
 The application Service and ingress never expose port 8789. Metrics have
 bounded labels and retain request duration through streaming response
@@ -657,6 +664,7 @@ and `pod` target labels used to isolate one Helm release:
 metrics:
   podMonitor:
     enabled: true
+    existingSecret: crab-http-server-metrics
     labels:
       prometheus: platform
   prometheusRule:

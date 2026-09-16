@@ -2,6 +2,10 @@
 {{- if empty .Values.networkPolicy.metricsIngressFrom }}
 {{- fail "networkPolicy.metricsIngressFrom is required when metrics.podMonitor is enabled" }}
 {{- end }}
+{{- $metricsSecret := required "metrics.podMonitor.existingSecret is required when metrics.podMonitor is enabled" .Values.metrics.podMonitor.existingSecret }}
+{{- if eq $metricsSecret .Values.cells.existingSecret }}
+{{- fail "metrics.podMonitor.existingSecret must not reuse cells.existingSecret" }}
+{{- end }}
 {{- range $key := list "app.kubernetes.io/name" "app.kubernetes.io/instance" "app.kubernetes.io/version" "app.kubernetes.io/managed-by" "helm.sh/chart" }}
 {{- if hasKey $.Values.metrics.podMonitor.labels $key }}
 {{- fail (printf "metrics.podMonitor.labels.%s is owned by the chart" $key) }}
@@ -23,7 +27,20 @@ spec:
   podMetricsEndpoints:
     - port: management
       path: /metrics
-      scheme: http
+      scheme: https
+      tlsConfig:
+        ca:
+          secret:
+            name: {{ $metricsSecret }}
+            key: {{ .Values.metrics.podMonitor.caKey }}
+        cert:
+          secret:
+            name: {{ $metricsSecret }}
+            key: {{ .Values.metrics.podMonitor.certificateKey }}
+        keySecret:
+          name: {{ $metricsSecret }}
+          key: {{ .Values.metrics.podMonitor.privateKeyKey }}
+        serverName: {{ .Values.cells.tlsServerName | quote }}
       interval: {{ .Values.metrics.podMonitor.interval | quote }}
       scrapeTimeout: {{ .Values.metrics.podMonitor.scrapeTimeout | quote }}
       honorLabels: false
