@@ -482,6 +482,13 @@ fn generation_owner_quiescence(interval_secs: u64) -> std::time::Duration {
     std::time::Duration::from_secs(interval_secs).max(GENERATION_OWNER_MIN_QUIESCENCE)
 }
 
+fn capsule_checkpoint_due(once: bool, has_checkpoint: bool, capsule_count: u64) -> bool {
+    if has_checkpoint && capsule_count == 0 {
+        return false;
+    }
+    once || capsule_count >= u64::from(CAPSULE_OWNER_CHECKPOINT_THRESHOLD)
+}
+
 async fn run_generation_owner(
     once: bool,
     interval_secs: u64,
@@ -600,7 +607,11 @@ async fn capsule_generation_owner_sample(
         sample.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         return Ok(sample);
     }
-    if !once && activity.capsule_count() < u64::from(CAPSULE_OWNER_CHECKPOINT_THRESHOLD) {
+    if !capsule_checkpoint_due(
+        once,
+        root.record().root().checkpoint().is_some(),
+        activity.capsule_count(),
+    ) {
         return Ok(capsule_owner_sample(
             identity,
             generation,
@@ -737,7 +748,11 @@ fn map_capsule_owner_error(error: crab_remote::checkpoint::CheckpointError) -> C
         crab_remote::checkpoint::CheckpointError::Repack(source) => source.into(),
         crab_remote::checkpoint::CheckpointError::Pack(source) => source.into(),
         crab_remote::checkpoint::CheckpointError::Metadata(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Write(source) => source.into(),
         crab_remote::checkpoint::CheckpointError::Io(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Worker(source) => {
+            CrabError::Io(std::io::Error::other(source))
+        }
         other => CrabError::Internal(other.to_string()),
     }
 }
@@ -4961,6 +4976,15 @@ mod tests {
             inner.head(&legacy_manifest).await,
             Err(object_store::Error::NotFound { .. })
         ));
+    }
+
+    #[test]
+    fn capsule_owner_one_shot_skips_an_already_checkpointed_empty_suffix() {
+        assert!(capsule_checkpoint_due(true, false, 0));
+        assert!(capsule_checkpoint_due(true, true, 1));
+        assert!(!capsule_checkpoint_due(true, true, 0));
+        assert!(!capsule_checkpoint_due(false, true, 31));
+        assert!(capsule_checkpoint_due(false, true, 32));
     }
 
     #[tokio::test]
