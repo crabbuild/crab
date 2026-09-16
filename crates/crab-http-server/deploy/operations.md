@@ -429,6 +429,29 @@ consistent full-prefix view, select the intended object versions, and retain
 provider metadata. A live restore drill must still prove RPO, RTO, shared OIDC
 state, and regional recovery for your workload.
 
+## Reclaim Cell immutable objects
+
+Run retention only through maintenance activation. First create and verify a
+backup pin, record the prepared release revision, and stop normal serving:
+
+```bash
+crab-http-server --config /secure/server.toml cells release activate \
+  --expected-revision 8 --strategy maintenance \
+  --retention-grace-hours 168 --retention-max-deletes 10000
+```
+
+The executor waits for serving nodes and in-flight backup creators to withdraw.
+It then verifies current controls and every retained pin before deletion. Keep
+provider versioning enabled: collection removes current object versions and the
+provider's noncurrent-version policy remains the recovery boundary.
+
+Retain the structured `completed offline Cell retention pass` event with its
+listed, reachable, eligible, grace, deleted, and complete fields. If the command
+reports that the deletion limit was reached, do not start the fleet. Repeat the
+same command and expected revision until activation returns a `Ready` release.
+An owner-present error, missing digest, corrupt graph, listing failure, or
+unknown release change is a failed maintenance pass and requires investigation.
+
 ## Qualify a release
 
 A team release needs Level 3 or higher evidence: a user action, a real durable side effect, and an independently visible result.

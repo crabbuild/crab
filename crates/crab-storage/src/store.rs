@@ -50,6 +50,9 @@ pub type ETag = object_store::UpdateVersion;
 /// Bounded-memory byte stream returned by object reads.
 pub type StorageByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'static>>;
 
+/// Bounded-memory stream of object metadata below one exact prefix.
+pub type StorageObjectStream = Pin<Box<dyn Stream<Item = Result<ObjectMeta>> + Send + 'static>>;
+
 /// Re-openable bounded source for a retryable multipart upload.
 ///
 /// Each whole-upload retry may read the same ranges again. Implementations must
@@ -1581,15 +1584,26 @@ impl Store {
 
     /// Lists object metadata under `prefix`.
     pub async fn list_prefix(&self, prefix: &Path) -> Result<Vec<ObjectMeta>> {
-        use futures_util::StreamExt;
-
         let mut objects = Vec::new();
-        let read_inner = self.read_inner_for(prefix);
-        let mut stream = read_inner.list(Some(prefix));
+        let mut stream = self.list_stream(prefix);
         while let Some(item) = stream.next().await {
-            objects.push(item.map_err(|e| map_object_store_error(e, prefix.as_ref()))?);
+            objects.push(item?);
         }
         Ok(objects)
+    }
+
+    /// Streams object metadata below `prefix` without retaining the complete listing.
+    ///
+    /// The provider does not guarantee ordering. Callers must consume the stream to
+    /// completion when they need a complete inventory and must not treat a prefix of
+    /// the stream as a stable page.
+    pub fn list_stream(&self, prefix: &Path) -> StorageObjectStream {
+        let error_path = prefix.to_string();
+        Box::pin(
+            self.read_inner_for(prefix)
+                .list(Some(prefix))
+                .map(move |item| item.map_err(|error| map_object_store_error(error, &error_path))),
+        )
     }
 
     /// Lists at most `limit` objects without buffering an unbounded prefix.
@@ -1601,10 +1615,9 @@ impl Store {
         limit: usize,
     ) -> Result<Option<Vec<ObjectMeta>>> {
         let mut objects = Vec::with_capacity(limit.min(1_024));
-        let read_inner = self.read_inner_for(prefix);
-        let mut stream = read_inner.list(Some(prefix));
+        let mut stream = self.list_stream(prefix);
         while let Some(item) = stream.next().await {
-            let item = item.map_err(|error| map_object_store_error(error, prefix.as_ref()))?;
+            let item = item?;
             if objects.len() == limit {
                 return Ok(None);
             }
@@ -4836,6 +4849,26 @@ mod tests {
                 .map(|objects| objects.len()),
             Some(2)
         );
+    }
+
+    #[tokio::test]
+    async fn streaming_listing_returns_only_the_exact_prefix() {
+        let store = memory_store();
+        for key in ["stream/a", "stream/nested/b", "stream-neighbor/c"] {
+            store
+                .put(&Path::from(key), Bytes::from_static(b"x"))
+                .await
+                .unwrap();
+        }
+
+        let mut locations = store
+            .list_stream(&Path::from("stream"))
+            .map_ok(|meta| meta.location.to_string())
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        locations.sort();
+        assert_eq!(locations, ["stream/a", "stream/nested/b"]);
     }
 
     #[tokio::test]

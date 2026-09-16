@@ -284,8 +284,48 @@ flowchart LR
 This ordering makes an interrupted offline restore resumable and keeps stale
 source node sessions out of the new authority root. A destination that has
 divergent identity, controls, catalog heads, release selection, or immutable
-bytes fails closed. Cross-provider archive export and unreachable-object
-collection remain separate service operations.
+bytes fails closed. Cross-provider archive export remains a separate service
+operation.
+
+## Collect unreachable immutable objects behind maintenance
+
+Collection is an explicit maintenance activation, never a background request
+handler. The release first enters `Maintenance`, normal nodes drain, and one
+signed zero-capacity executor becomes the only NodeDirectory member. Backup
+creation also holds a zero-capacity advertisement for its complete operation,
+so maintenance either waits for an in-flight pin or fences a later creator at
+its second `Ready` check.
+
+```mermaid
+flowchart LR
+    Fence[Release = Maintenance]
+    Drain[Drain nodes and backup creators]
+    Mark[Verify and mark live roots]
+    List[Stream application objects]
+    Sweep[Delete old unreachable V1 objects]
+    Ready[Release = Ready]
+
+    Fence --> Drain --> Mark --> List --> Sweep --> Ready
+```
+
+The mark phase fails before deletion unless it can authenticate:
+
+- current and desired release descriptors;
+- every current catalog page and non-tombstoned control root;
+- every retained pin's release, catalog, control pages, and LTX graph; and
+- the absence of an owner on every current control.
+
+Reachable paths live in a temporary SQLite `WITHOUT ROWID` table on bounded
+local scratch storage. Remote inventory is consumed as a stream, and candidate
+lookups use batches of 256 paths. The collector deletes only recognized V1
+content-addressed release, catalog, pin, and Cell-incarnation object paths.
+Mutable authority and unknown future layouts are never candidates.
+
+Deletion also requires the provider object's modification time to be older than
+the configured grace. One pass deletes at most 100,000 objects; the server
+defaults to 10,000 when collection is requested. Reaching the selected bound
+leaves the release in `Maintenance`. Repeating the same activation resumes from
+a new verified mark scan, so writes never reopen between partial passes.
 
 ## Preserve storage verification invariants
 

@@ -135,9 +135,11 @@ its separately derived dirty/recovery slots bound concurrent large operations.
    revision-pinned catalog pages, exact controls and every digest-verified object
    reachable from the captured LTX roots. Same-bucket restore conditionally
    copies and re-verifies those objects before publishing unowned destination
-   controls and commit pointers. Implement cross-provider export, then reclaim
-   only objects unreachable from live controls and retained pins outside
-   retention grace. Library epoch CAS is not a lease. Per-repository
+   controls and commit pointers. Offline maintenance now drains signed node and
+   backup-worker advertisements, verifies live controls and retained pins into
+   a disk-backed mark set, streams the application inventory, and reclaims only
+   recognized old unreachable immutable objects in bounded batches. Implement
+   cross-provider export. Library epoch CAS is not a lease. Per-repository
    bundle publication is not node-wide atomic group commit or shared-bundle
    retention.
 5. **Measured node qualification.** Define hardware and service SLOs, then prove

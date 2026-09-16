@@ -76,6 +76,16 @@ impl CellStorageLayout {
     }
 
     #[must_use]
+    pub fn application_prefix(&self) -> Path {
+        self.application_path("")
+    }
+
+    #[must_use]
+    pub fn pin_prefix(&self) -> Path {
+        self.application_path("pins")
+    }
+
+    #[must_use]
     pub fn release_descriptor_path(&self, digest: &[u8; 32]) -> Path {
         self.application_path(&format!("releases/{}.json", hex(digest)))
     }
@@ -204,6 +214,14 @@ mod tests {
         assert_eq!(
             layout.pin_object_path(&[2; 32]).as_ref(),
             "tenant-root/cells/v1/apps/abababababababababababababababab/pins/objects/0202020202020202020202020202020202020202020202020202020202020202.json"
+        );
+        assert_eq!(
+            layout.application_prefix().as_ref(),
+            "tenant-root/cells/v1/apps/abababababababababababababababab"
+        );
+        assert_eq!(
+            layout.pin_prefix().as_ref(),
+            "tenant-root/cells/v1/apps/abababababababababababababababab/pins"
         );
     }
 

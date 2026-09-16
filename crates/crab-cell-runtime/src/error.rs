@@ -16,6 +16,12 @@ pub enum Error {
     Release(&'static str),
     #[error("invalid Cell backup pin: {0}")]
     Backup(&'static str),
+    #[error("invalid Cell retention operation: {0}")]
+    Retention(&'static str),
+    #[error("Cell retention scratch storage failed")]
+    RetentionIo(#[source] std::io::Error),
+    #[error("failed to join Cell retention scratch worker")]
+    RetentionWorkerJoin(#[source] tokio::task::JoinError),
     #[error("Cell ID collides with a different catalog entry")]
     CatalogCollision,
     #[error("Cell catalog shard reached its 65,536-entry limit")]

@@ -49,12 +49,12 @@ impl BackupRestore {
     }
 }
 
-pub(super) struct BackupManifest {
-    release: ReleaseRecord,
-    release_descriptors: Vec<Digest>,
-    catalog: Vec<PinnedCatalogShard>,
-    pub(super) controls: Vec<Control>,
-    pin_objects: BTreeSet<[u8; 32]>,
+pub(crate) struct BackupManifest {
+    pub(crate) release: ReleaseRecord,
+    pub(crate) release_descriptors: Vec<Digest>,
+    pub(crate) catalog: Vec<PinnedCatalogShard>,
+    pub(crate) controls: Vec<Control>,
+    pub(crate) pin_objects: BTreeSet<[u8; 32]>,
 }
 
 impl BackupPinStore {
@@ -249,7 +249,7 @@ impl BackupPinStore {
         })
     }
 
-    pub(super) async fn manifest(&self, pin: &BackupPin) -> Result<BackupManifest> {
+    pub(crate) async fn manifest(&self, pin: &BackupPin) -> Result<BackupManifest> {
         if pin.application != self.identity.application() {
             return Err(Error::Backup("pin belongs to another application"));
         }

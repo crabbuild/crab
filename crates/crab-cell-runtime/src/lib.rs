@@ -27,6 +27,7 @@ mod queue;
 mod registry;
 mod release;
 mod release_progress;
+mod retention;
 mod scheduler;
 mod schema;
 mod sql;
@@ -109,6 +110,7 @@ pub use release_progress::{
     MigrationFailure, MigrationProgress, MigrationProgressAttempt, MigrationProgressState,
     MigrationProgressStore,
 };
+pub use retention::{CellGarbageCollector, GarbageCollectionPolicy, GarbageCollectionReport};
 pub use scheduler::{
     DueCell, DueCellScan, SchedulerFleet, SchedulerTickOutcome, preferred_scanner,
     scheduler_next_due_ms, scheduler_tick,

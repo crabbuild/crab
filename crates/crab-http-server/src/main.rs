@@ -112,6 +112,16 @@ enum CellReleaseCommand {
         strategy: ActivationStrategy,
         #[arg(long, required_if_eq("strategy", "compatible"))]
         minimum_eligible_nodes: Option<usize>,
+        /// Delete immutable objects older than this many hours during maintenance.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        retention_grace_hours: Option<u64>,
+        /// Bound immutable-object deletions in this maintenance pass.
+        #[arg(
+            long,
+            requires = "retention_grace_hours",
+            value_parser = clap::value_parser!(u64).range(1..=100_000)
+        )]
+        retention_max_deletes: Option<u64>,
     },
     /// Print the canonical durable release selection.
     Status,
@@ -320,9 +330,21 @@ async fn cells(
                 CellReleaseCommand::Activate {
                     expected_revision,
                     strategy: ActivationStrategy::Compatible,
-                    minimum_eligible_nodes: Some(minimum_eligible_nodes),
+                    minimum_eligible_nodes,
+                    retention_grace_hours,
+                    retention_max_deletes,
                 },
         } => {
+            if retention_grace_hours.is_some() || retention_max_deletes.is_some() {
+                return Err(crab_http_server::Error::Config(
+                    "compatible activation does not accept retention options",
+                ));
+            }
+            let Some(minimum_eligible_nodes) = minimum_eligible_nodes else {
+                return Err(crab_http_server::Error::Config(
+                    "compatible activation requires --minimum-eligible-nodes",
+                ));
+            };
             crab_http_server::activate_cell_release(
                 config,
                 expected_revision,
@@ -333,34 +355,32 @@ async fn cells(
         CellsCommand::Release {
             command:
                 CellReleaseCommand::Activate {
-                    expected_revision: _,
-                    strategy: ActivationStrategy::Compatible,
-                    minimum_eligible_nodes: None,
-                },
-        } => {
-            return Err(crab_http_server::Error::Config(
-                "compatible activation requires --minimum-eligible-nodes",
-            ));
-        }
-        CellsCommand::Release {
-            command:
-                CellReleaseCommand::Activate {
                     expected_revision,
                     strategy: ActivationStrategy::Maintenance,
-                    minimum_eligible_nodes: None,
-                },
-        } => crab_http_server::enter_cell_maintenance(config, expected_revision).await?,
-        CellsCommand::Release {
-            command:
-                CellReleaseCommand::Activate {
-                    expected_revision: _,
-                    strategy: ActivationStrategy::Maintenance,
-                    minimum_eligible_nodes: Some(_),
+                    minimum_eligible_nodes,
+                    retention_grace_hours,
+                    retention_max_deletes,
                 },
         } => {
-            return Err(crab_http_server::Error::Config(
-                "maintenance activation does not accept --minimum-eligible-nodes",
-            ));
+            if minimum_eligible_nodes.is_some() {
+                return Err(crab_http_server::Error::Config(
+                    "maintenance activation does not accept --minimum-eligible-nodes",
+                ));
+            }
+            let retention_grace = retention_grace_hours
+                .map(|hours| {
+                    hours.checked_mul(60 * 60).map(Duration::from_secs).ok_or(
+                        crab_http_server::Error::Config("Cell retention grace is too large"),
+                    )
+                })
+                .transpose()?;
+            crab_http_server::enter_cell_maintenance(
+                config,
+                expected_revision,
+                retention_grace,
+                retention_max_deletes,
+            )
+            .await?
         }
         CellsCommand::Release {
             command: CellReleaseCommand::Status,
@@ -973,6 +993,8 @@ mod tests {
                         expected_revision: 8,
                         strategy: ActivationStrategy::Compatible,
                         minimum_eligible_nodes: Some(2),
+                        retention_grace_hours: None,
+                        retention_max_deletes: None,
                     }
                 }
             })
@@ -1014,10 +1036,97 @@ mod tests {
                         expected_revision: 8,
                         strategy: ActivationStrategy::Maintenance,
                         minimum_eligible_nodes: None,
+                        retention_grace_hours: None,
+                        retention_max_deletes: None,
                     }
                 }
             })
         ));
+
+        let retention = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "release",
+            "activate",
+            "--expected-revision",
+            "8",
+            "--strategy",
+            "maintenance",
+            "--retention-grace-hours",
+            "168",
+            "--retention-max-deletes",
+            "25000",
+        ])
+        .unwrap();
+        assert!(matches!(
+            retention.command,
+            Some(Command::Cells {
+                command: CellsCommand::Release {
+                    command: CellReleaseCommand::Activate {
+                        expected_revision: 8,
+                        strategy: ActivationStrategy::Maintenance,
+                        minimum_eligible_nodes: None,
+                        retention_grace_hours: Some(168),
+                        retention_max_deletes: Some(25_000),
+                    }
+                }
+            })
+        ));
+        assert!(
+            Arguments::try_parse_from([
+                "crab-http-server",
+                "--config",
+                "server.toml",
+                "cells",
+                "release",
+                "activate",
+                "--expected-revision",
+                "8",
+                "--strategy",
+                "maintenance",
+                "--retention-max-deletes",
+                "25000",
+            ])
+            .is_err()
+        );
+        assert!(
+            Arguments::try_parse_from([
+                "crab-http-server",
+                "--config",
+                "server.toml",
+                "cells",
+                "release",
+                "activate",
+                "--expected-revision",
+                "8",
+                "--strategy",
+                "maintenance",
+                "--retention-grace-hours",
+                "0",
+            ])
+            .is_err()
+        );
+        assert!(
+            Arguments::try_parse_from([
+                "crab-http-server",
+                "--config",
+                "server.toml",
+                "cells",
+                "release",
+                "activate",
+                "--expected-revision",
+                "8",
+                "--strategy",
+                "maintenance",
+                "--retention-grace-hours",
+                "168",
+                "--retention-max-deletes",
+                "100001",
+            ])
+            .is_err()
+        );
 
         let status = Arguments::try_parse_from([
             "crab-http-server",

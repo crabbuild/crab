@@ -89,10 +89,30 @@ pub async fn activate_cell_release(
     cells::activate_release(config, expected_revision, minimum_eligible_nodes).await
 }
 
-/// Enters offline maintenance and waits for every advertised node to withdraw.
-pub async fn enter_cell_maintenance(config: &Config, expected_revision: u64) -> Result<Vec<u8>> {
+/// Enters offline maintenance, optionally collects old immutable objects, and activates.
+pub async fn enter_cell_maintenance(
+    config: &Config,
+    expected_revision: u64,
+    retention_grace: Option<std::time::Duration>,
+    retention_max_deletes: Option<u64>,
+) -> Result<Vec<u8>> {
     config.validate()?;
-    cells::enter_maintenance(config, expected_revision).await
+    let retention = match (retention_grace, retention_max_deletes) {
+        (Some(grace), max_deletes) => {
+            let grace_ms = u64::try_from(grace.as_millis())
+                .map_err(|_| Error::Config("Cell retention grace is too large"))?;
+            let max_deletes = max_deletes.unwrap_or(10_000);
+            crab_cell_runtime::GarbageCollectionPolicy::new(0, grace_ms, max_deletes)?;
+            Some(cells::RetentionRequest { grace, max_deletes })
+        }
+        (None, None) => None,
+        (None, Some(_)) => {
+            return Err(Error::Config(
+                "Cell retention deletion limit requires a retention grace",
+            ));
+        }
+    };
+    cells::enter_maintenance(config, expected_revision, retention).await
 }
 
 /// Initializes the empty application Cell for one newly cataloged repository.

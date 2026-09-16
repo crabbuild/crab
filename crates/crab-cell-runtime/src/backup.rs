@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::identity::{decode_hex, encode_hex};
 use crate::{
-    ApplicationIdentity, CellCatalog, Control, Digest, Error, ReleaseRecord, ReleaseStore,
-    ReplicaHost, ReplicaLimits, RequestId, Result,
+    ApplicationIdentity, CellCatalog, Control, Digest, Error, ReleaseRecord, ReleaseState,
+    ReleaseStore, ReplicaHost, ReplicaLimits, RequestId, Result,
 };
 
 mod restore;
@@ -154,6 +154,10 @@ impl BackupPinStore {
     }
 
     /// Verifies exact roots, uploads immutable pages, and strict-creates one pin.
+    ///
+    /// The caller must remain enrolled in the application's maintenance drain
+    /// from before its final Ready check until this future returns. This method
+    /// validates Ready state but cannot atomically fence a separate collector.
     pub async fn create(
         &self,
         id: RequestId,
@@ -322,6 +326,9 @@ impl BackupPinStore {
             .ok_or(Error::Backup("release is absent from backup scope"))?
             .record()
             .clone();
+        if record.state() != ReleaseState::Ready {
+            return Err(Error::Backup("backup release is not ready"));
+        }
         let descriptors = release_descriptors(&record);
         for digest in &descriptors {
             releases.descriptor(*digest).await?;
@@ -657,12 +664,11 @@ fn unhex(value: &str) -> Result<Vec<u8>> {
     {
         return Err(Error::Backup("pin control encoding is invalid"));
     }
-    value
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let high = nibble(pair[0])?;
-            let low = nibble(pair[1])?;
+    (0..value.len())
+        .step_by(2)
+        .map(|offset| {
+            let high = nibble(value.as_bytes()[offset])?;
+            let low = nibble(value.as_bytes()[offset + 1])?;
             Ok((high << 4) | low)
         })
         .collect()

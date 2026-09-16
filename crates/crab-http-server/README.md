@@ -84,6 +84,9 @@ credentials. Then create a cataloged repository and start:
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
   cells backup restore --pin 11112222333344445555666677778888 \
   --destination-prefix recovery/team-2026-09-16
+"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
+  cells release activate --expected-revision 8 --strategy maintenance \
+  --retention-grace-hours 168 --retention-max-deletes 10000
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml serve
 ```
 
@@ -108,12 +111,21 @@ envelope without claiming that the node has met a throughput target.
 `cells backup create` snapshots all catalog heads, requires one exact control
 per catalog entry, verifies the selected release and every reachable LTX
 dependency, and strict-creates the pin pointer last. Reusing a pin ID verifies
-and returns the existing boundary. `cells backup verify` independently reopens
+and returns the existing boundary. Creation advertises a signed zero-capacity
+worker for its complete operation, so maintenance either waits for an in-flight
+pin or fences it before publication. `cells backup verify` independently reopens
 the pin and fails closed on a missing or corrupt dependency. `cells backup
 restore` conditionally copies the verified graph to a canonical isolated prefix
 in the configured bucket, publishes unowned `Idle` controls, then publishes the
 catalog, release, and pin commit points. Repeating an offline restore adopts
 only exact existing state; divergent destination state fails closed.
+
+Maintenance retention is opt-in. Supplying `--retention-grace-hours` verifies
+current controls and every backup pin before streaming the Cell application
+prefix and deleting recognized V1 immutable objects older than the grace.
+`--retention-max-deletes` accepts 1 through 100,000 and defaults to 10,000.
+Reaching the bound leaves the release in `Maintenance`; repeat the same
+activation until it returns `Ready`.
 
 The bucket or container must already exist. `repository adopt` can publish an
 existing canonical repository; it does not convert arbitrary objects into a

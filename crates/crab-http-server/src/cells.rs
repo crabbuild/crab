@@ -7,14 +7,14 @@ use std::{
 
 use crab_cell_runtime::{
     ApplicationId, ApplicationIdentity, ApplicationIdentityStore, BackupPin, BackupPinStore,
-    BackupRestore, BuildDescriptor, CatalogRole, CellAuthority, CellCatalog, CellId, CellModule,
-    CellRuntime, CellTarget, Control, ControlState, Digest, EffectModule, MaintenanceModule,
-    MigrationDescriptor, MigrationFailure, MigrationProgressState, MigrationProgressStore,
-    ModuleDescriptor, NamespaceDescriptor, NamespaceId, NodeAdvertisement, NodeCapacity,
-    NodeDirectory, OperationDescriptor, Owner, PeerRoundTrip, PeerSigner, PinnedCatalogShard,
-    Registry, RegistryBuilder, ReleaseRecord, ReleaseState, ReleaseStore, ReplicaLimits, RequestId,
-    SessionId, SqlWorkerPool, TenantId, VersionedNodeAdvertisement, register_effect_delivery,
-    register_maintenance,
+    BackupRestore, BuildDescriptor, CatalogRole, CellAuthority, CellCatalog, CellGarbageCollector,
+    CellId, CellModule, CellRuntime, CellTarget, Control, ControlState, Digest, EffectModule,
+    GarbageCollectionPolicy, MaintenanceModule, MigrationDescriptor, MigrationFailure,
+    MigrationProgressState, MigrationProgressStore, ModuleDescriptor, NamespaceDescriptor,
+    NamespaceId, NodeAdvertisement, NodeCapacity, NodeDirectory, OperationDescriptor, Owner,
+    PeerRoundTrip, PeerSigner, PinnedCatalogShard, Registry, RegistryBuilder, ReleaseRecord,
+    ReleaseState, ReleaseStore, ReplicaHost, ReplicaLimits, RequestId, SessionId, SqlWorkerPool,
+    TenantId, VersionedNodeAdvertisement, register_effect_delivery, register_maintenance,
 };
 use crab_storage::CellStorageLayout;
 use ed25519_dalek::SigningKey;
@@ -54,10 +54,16 @@ const MAX_MIGRATION_STATUS_EXAMINED: usize = 1_024;
 const MAINTENANCE_DRAIN_TIMEOUT: Duration = Duration::from_secs(125);
 const MAINTENANCE_DRAIN_POLL: Duration = Duration::from_secs(1);
 const MAINTENANCE_RUNTIME_BYTES: usize = 8 * 1024 * 1024;
-const MAINTENANCE_ADVERTISEMENT_LIFETIME_MS: i64 = 15_000;
-const MAINTENANCE_ADVERTISEMENT_EXPIRY_MARGIN_MS: i64 = 1_000;
-const MAINTENANCE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
-const MAINTENANCE_HEARTBEAT_RETRY: Duration = Duration::from_millis(500);
+const OFFLINE_ADVERTISEMENT_LIFETIME_MS: i64 = 15_000;
+const OFFLINE_ADVERTISEMENT_EXPIRY_MARGIN_MS: i64 = 1_000;
+const OFFLINE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
+const OFFLINE_HEARTBEAT_RETRY: Duration = Duration::from_millis(500);
+
+#[derive(Clone, Copy)]
+pub(crate) struct RetentionRequest {
+    pub(crate) grace: Duration,
+    pub(crate) max_deletes: u64,
+}
 const REPOSITORY_COMMANDS: &[OperationDescriptor] = &[
     operation(1, 80 * 1024, 80 * 1024),
     operation(2, 80 * 1024, 80 * 1024),
@@ -474,15 +480,65 @@ struct BackupRestoreStatus {
 pub(crate) async fn create_backup(config: &Config, pin: &str) -> Result<Vec<u8>> {
     let pin = decode_backup_pin(pin)?;
     let startup = verify_startup_release(config).await?;
-    let (pins, _scratch) = backup_store(config, &startup)?;
-    create_backup_at(
-        &pins,
-        &startup.layout,
-        startup.identity,
-        pin,
-        unix_now_ms()?,
-    )
-    .await
+    let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
+    let directory = NodeDirectory::new(
+        startup.layout.clone(),
+        peer_tls.fleet(),
+        startup.image,
+        startup.registry.release_digest(),
+    );
+    let lease = OfflineAdvertisement::new(
+        directory,
+        peer_tls.signing_key().clone(),
+        SessionId::from_bytes(Uuid::now_v7().into_bytes()),
+        config.cells.peer_advertise.to_string(),
+        peer_tls.fleet(),
+        peer_tls.certificate(),
+        startup.image,
+        startup.registry.release_digest(),
+        startup.registry.module_digests(),
+        rand::random::<u64>().max(1),
+    );
+    let advertised = lease.publish_initial().await?;
+    let lease_shutdown = CancellationToken::new();
+    let mut heartbeat = tokio::spawn(lease.run(advertised, lease_shutdown.clone()));
+    let operation = async {
+        // Advertising before the second Ready check closes both sides of the
+        // maintenance race: maintenance either sees this lease or this check
+        // sees Maintenance before any pin object can be published.
+        verify_startup_release_at(&startup.layout, startup.identity, &startup.registry).await?;
+        let (pins, _scratch) = backup_store(config, &startup)?;
+        create_backup_at(
+            &pins,
+            &startup.layout,
+            startup.identity,
+            pin,
+            unix_now_ms()?,
+        )
+        .await
+    };
+    tokio::pin!(operation);
+    let completed = tokio::select! {
+        result = &mut operation => result,
+        joined = &mut heartbeat => {
+            let lease_result = match joined {
+                Ok(result) => result,
+                Err(error) => Err(error.into()),
+            };
+            lease_result?;
+            return Err(Error::Config("Cell backup advertisement stopped unexpectedly"));
+        }
+    };
+    lease_shutdown.cancel();
+    let lease_result = match heartbeat.await {
+        Ok(result) => result,
+        Err(error) => Err(error.into()),
+    };
+    match (completed, lease_result) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Ok(completed), Ok(())) => Ok(completed),
+    }
 }
 
 pub(crate) async fn verify_backup(config: &Config, pin: &str) -> Result<Vec<u8>> {
@@ -1041,7 +1097,11 @@ pub(crate) async fn activate_release(
         .map_err(Error::from)
 }
 
-pub(crate) async fn enter_maintenance(config: &Config, expected_revision: u64) -> Result<Vec<u8>> {
+pub(crate) async fn enter_maintenance(
+    config: &Config,
+    expected_revision: u64,
+    retention: Option<RetentionRequest>,
+) -> Result<Vec<u8>> {
     let root = StorageRoot::build(&config.storage)?;
     let identities =
         ApplicationIdentityStore::new(root.store.clone(), Path::from(root.prefix.clone()));
@@ -1095,6 +1155,7 @@ pub(crate) async fn enter_maintenance(config: &Config, expected_revision: u64) -
         &config.cells.data_dir,
     )?)?;
     let local_disk = budget.local_disk();
+    let retention_host = budget.replica_host(local_disk.clone(), session_dir.path().to_owned());
     let runtime = CellRuntime::new_with_replica_host(
         SqlWorkerPool::new(1, 1)?,
         MAINTENANCE_RUNTIME_BYTES,
@@ -1121,7 +1182,7 @@ pub(crate) async fn enter_maintenance(config: &Config, expected_revision: u64) -
         ),
         session_dir.path().to_owned(),
     )?;
-    let lease = MaintenanceAdvertisement::new(
+    let lease = OfflineAdvertisement::new(
         directory.clone(),
         peer_tls.signing_key().clone(),
         SessionId::from_bytes(*maintenance.operation().as_bytes()),
@@ -1152,6 +1213,9 @@ pub(crate) async fn enter_maintenance(config: &Config, expected_revision: u64) -
         advertised,
         maintenance,
         inspect_persisted_work,
+        retention,
+        retention_host,
+        session_dir.path(),
     )
     .await
 }
@@ -1168,31 +1232,21 @@ async fn complete_maintenance_inventory(
     directory: &NodeDirectory,
     router: &RepositoryCellRouter,
     runtime: &CellRuntime,
-    lease: MaintenanceAdvertisement,
+    lease: OfflineAdvertisement,
     advertised: VersionedNodeAdvertisement,
     maintenance: ReleaseRecord,
     inspect_persisted_work: bool,
+    retention: Option<RetentionRequest>,
+    retention_host: ReplicaHost,
+    scratch_dir: &std::path::Path,
 ) -> Result<Vec<u8>> {
     let lease_session = lease.session;
     let lease_shutdown = CancellationToken::new();
     let mut heartbeat = tokio::spawn(lease.run(advertised, lease_shutdown.clone()));
-    let migration = migrate_maintenance_inventory(layout, identity, router, inspect_persisted_work);
-    tokio::pin!(migration);
-    let migrated = tokio::select! {
-        result = &mut migration => result,
-        joined = &mut heartbeat => {
-            let lease_result = match joined {
-                Ok(result) => result,
-                Err(error) => Err(error.into()),
-            };
-            let shutdown = runtime.shutdown().await;
-            lease_result?;
-            shutdown?;
-            return Err(Error::Config("Cell maintenance executor stopped unexpectedly"));
-        }
-    };
-    let shutdown = runtime.shutdown().await;
-    let completed = async {
+    let operation = async {
+        let migrated =
+            migrate_maintenance_inventory(layout, identity, router, inspect_persisted_work).await;
+        let shutdown = runtime.shutdown().await;
         migrated?;
         shutdown?;
         let advertised_sessions = directory
@@ -1204,13 +1258,58 @@ async fn complete_maintenance_inventory(
             ));
         }
         verify_current_cells(layout, identity, registry).await?;
+        if let Some(retention) = retention {
+            let grace_ms = u64::try_from(retention.grace.as_millis())
+                .map_err(|_| Error::Config("Cell retention grace is too large"))?;
+            let policy =
+                GarbageCollectionPolicy::new(unix_now_ms()?, grace_ms, retention.max_deletes)?;
+            let report = CellGarbageCollector::new(
+                layout.clone(),
+                identity,
+                repository_replica_limits(),
+                retention_host,
+            )?
+            .collect(&maintenance, scratch_dir, policy)
+            .await?;
+            tracing::info!(
+                listed_objects = report.listed_objects(),
+                immutable_candidates = report.immutable_candidates(),
+                reachable_objects = report.reachable_objects(),
+                retained_objects = report.retained_objects(),
+                grace_objects = report.grace_objects(),
+                eligible_objects = report.eligible_objects(),
+                deleted_objects = report.deleted_objects(),
+                current_controls = report.current_controls(),
+                retained_pins = report.retained_pins(),
+                complete = report.complete(),
+                "completed offline Cell retention pass"
+            );
+            if !report.complete() {
+                return Err(Error::Config(
+                    "Cell retention reached its deletion limit; rerun the same maintenance activation",
+                ));
+            }
+        }
         releases
             .complete_maintenance(maintenance.revision(), maintenance.operation())
             .await?
             .encode()
             .map_err(Error::from)
-    }
-    .await;
+    };
+    tokio::pin!(operation);
+    let completed = tokio::select! {
+        result = &mut operation => result,
+        joined = &mut heartbeat => {
+            let lease_result = match joined {
+                Ok(result) => result,
+                Err(error) => Err(error.into()),
+            };
+            let shutdown = runtime.shutdown().await;
+            lease_result?;
+            shutdown?;
+            return Err(Error::Config("Cell maintenance executor stopped unexpectedly"));
+        }
+    };
     lease_shutdown.cancel();
     let lease_result = match heartbeat.await {
         Ok(result) => result,
@@ -1314,7 +1413,7 @@ async fn migrate_maintenance_inventory(
     Ok(())
 }
 
-struct MaintenanceAdvertisement {
+struct OfflineAdvertisement {
     directory: NodeDirectory,
     signing_key: SigningKey,
     session: SessionId,
@@ -1327,7 +1426,7 @@ struct MaintenanceAdvertisement {
     progress: u64,
 }
 
-impl MaintenanceAdvertisement {
+impl OfflineAdvertisement {
     #[expect(
         clippy::too_many_arguments,
         reason = "the signed maintenance executor identity remains explicit"
@@ -1374,7 +1473,7 @@ impl MaintenanceAdvertisement {
         let heartbeat = 'heartbeat: loop {
             tokio::select! {
                 () = shutdown.cancelled() => break Ok(()),
-                () = tokio::time::sleep(MAINTENANCE_HEARTBEAT_INTERVAL) => {}
+                () = tokio::time::sleep(OFFLINE_HEARTBEAT_INTERVAL) => {}
             }
             loop {
                 let now_ms = match unix_now_ms() {
@@ -1394,13 +1493,13 @@ impl MaintenanceAdvertisement {
                         let retry_deadline = observed
                             .advertisement()
                             .expires_at_ms()
-                            .saturating_sub(MAINTENANCE_ADVERTISEMENT_EXPIRY_MARGIN_MS);
+                            .saturating_sub(OFFLINE_ADVERTISEMENT_EXPIRY_MARGIN_MS);
                         if now_ms >= retry_deadline {
                             break 'heartbeat Err(error.into());
                         }
                         let retry_ms = retry_deadline
                             .saturating_sub(now_ms)
-                            .min(MAINTENANCE_HEARTBEAT_RETRY.as_millis() as i64);
+                            .min(OFFLINE_HEARTBEAT_RETRY.as_millis() as i64);
                         tokio::select! {
                             () = shutdown.cancelled() => break 'heartbeat Ok(()),
                             () = tokio::time::sleep(Duration::from_millis(retry_ms as u64)) => {}
@@ -1421,7 +1520,7 @@ impl MaintenanceAdvertisement {
             (Err(error), Err(withdrawal)) => {
                 tracing::warn!(
                     error = %withdrawal,
-                    "failed to withdraw maintenance executor advertisement"
+                    "failed to withdraw offline operation advertisement"
                 );
                 Err(error)
             }
@@ -1441,7 +1540,7 @@ impl MaintenanceAdvertisement {
             &self.signing_key,
             self.progress,
             now_ms,
-            now_ms.saturating_add(MAINTENANCE_ADVERTISEMENT_LIFETIME_MS),
+            now_ms.saturating_add(OFFLINE_ADVERTISEMENT_LIFETIME_MS),
             self.module_digests.clone(),
             vec![1],
             NodeCapacity {
@@ -1707,6 +1806,7 @@ mod tests {
         time::UNIX_EPOCH,
     };
 
+    use bytes::Bytes;
     use crab_cell_runtime::{
         ApplicationIdentity, BuildDescriptor, CatalogEntry, CellAuthority, CellClient, CellModule,
         CellReplica, CellRuntime, CellTarget, IncarnationId, InvocationError, MigrationDescriptor,
@@ -1714,7 +1814,7 @@ mod tests {
         Owner, PeerCellResolver, RegistryBuilder, ReplicaHost, ReplicaLimits,
         RetainedCodeDescriptor, SessionId, SqlWorkerPool,
     };
-    use crab_storage::{CellStorageLayout, Store};
+    use crab_storage::{CellStorageLayout, StorageError, Store};
     use ed25519_dalek::SigningKey;
     use object_store::memory::InMemory;
     use serde_json::Value;
@@ -2117,7 +2217,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn maintenance_executor_advertisement_is_singleton_per_operation() {
+    async fn offline_operation_advertisement_is_singleton_and_blocks_maintenance() {
         let identity = ApplicationIdentity::new(
             TenantId::from_bytes([58; 16]),
             ApplicationId::from_bytes([59; 16]),
@@ -2130,9 +2230,21 @@ mod tests {
         let registry = compiled_registry().unwrap();
         let fleet = Digest::from_bytes([60; 32]);
         let image = Digest::from_bytes([61; 32]);
+        let releases = ReleaseStore::new(layout.clone(), identity).unwrap();
+        let operation = RequestId::from_bytes([65; 16]);
+        let prepared = releases
+            .prepare(
+                registry.release_bytes(),
+                registry.release_digest(),
+                0,
+                &format!("sha256:{}", "cc".repeat(32)),
+                operation,
+            )
+            .await
+            .unwrap();
         let directory = NodeDirectory::new(layout, fleet, image, registry.release_digest());
         let session = SessionId::from_bytes([62; 16]);
-        let first = MaintenanceAdvertisement::new(
+        let first = OfflineAdvertisement::new(
             directory.clone(),
             SigningKey::from_bytes(&[63; 32]),
             session,
@@ -2145,7 +2257,7 @@ mod tests {
             1,
         );
         let observed = first.publish_initial().await.unwrap();
-        let contender = MaintenanceAdvertisement::new(
+        let contender = OfflineAdvertisement::new(
             directory.clone(),
             SigningKey::from_bytes(&[63; 32]),
             session,
@@ -2159,10 +2271,36 @@ mod tests {
         );
 
         assert!(contender.publish_initial().await.is_err());
+        assert!(matches!(
+            enter_maintenance_at(
+                &releases,
+                &registry,
+                &directory,
+                prepared.revision(),
+                Duration::ZERO,
+            )
+            .await,
+            Err(Error::Config(
+                "Cell maintenance still has advertised node sessions"
+            ))
+        ));
         directory
             .withdraw(&observed, unix_now_ms().unwrap())
             .await
             .unwrap();
+        assert_eq!(
+            enter_maintenance_at(
+                &releases,
+                &registry,
+                &directory,
+                prepared.revision(),
+                Duration::ZERO,
+            )
+            .await
+            .unwrap()
+            .state(),
+            ReleaseState::Maintenance
+        );
     }
 
     #[tokio::test]
@@ -2201,6 +2339,14 @@ mod tests {
         )
         .await
         .unwrap();
+        let orphan_body = b"orphan maintenance descriptor";
+        let orphan_path = layout.release_descriptor_path(blake3::hash(orphan_body).as_bytes());
+        layout
+            .store()
+            .put(&orphan_path, Bytes::from_static(orphan_body))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
         let session = SessionId::from_bytes([65; 16]);
         let runtime = CellRuntime::new(
             SqlWorkerPool::new(1, 1).unwrap(),
@@ -2231,7 +2377,7 @@ mod tests {
             scratch.path().to_owned(),
         )
         .unwrap();
-        let lease = MaintenanceAdvertisement::new(
+        let lease = OfflineAdvertisement::new(
             directory.clone(),
             signing_key,
             SessionId::from_bytes(*operation.as_bytes()),
@@ -2257,11 +2403,21 @@ mod tests {
             advertised,
             maintenance,
             false,
+            Some(RetentionRequest {
+                grace: Duration::from_millis(1),
+                max_deletes: 10,
+            }),
+            ReplicaHost::default(),
+            scratch.path(),
         )
         .await
         .unwrap();
         let encoded: Value = serde_json::from_slice(&completed).unwrap();
         assert_eq!(encoded["state"], "ready");
+        assert!(matches!(
+            layout.store().head(&orphan_path).await,
+            Err(StorageError::NotFound { .. })
+        ));
         assert_eq!(
             enter_maintenance_at(
                 &releases,
@@ -2399,7 +2555,7 @@ mod tests {
             scratch.path().to_owned(),
         )
         .unwrap();
-        let lease = MaintenanceAdvertisement::new(
+        let lease = OfflineAdvertisement::new(
             directory.clone(),
             signing_key,
             SessionId::from_bytes(*operation.as_bytes()),
@@ -2425,6 +2581,9 @@ mod tests {
             advertised,
             maintenance,
             true,
+            None,
+            ReplicaHost::default(),
+            scratch.path(),
         )
         .await
         .unwrap();

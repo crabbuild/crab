@@ -60,4 +60,6 @@ pub use provider_store::{
     static_env_target_selection_for_provider, validate_static_env_url_provider,
 };
 pub use retry::{RetryClass, RetryPolicy, retry, retry_class};
-pub use store::{ETag, MultipartUploadSource, StagedWrite, StorageReadKind, Store};
+pub use store::{
+    ETag, MultipartUploadSource, StagedWrite, StorageObjectStream, StorageReadKind, Store,
+};

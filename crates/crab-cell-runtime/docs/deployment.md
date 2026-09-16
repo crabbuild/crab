@@ -160,7 +160,7 @@ crab-http-server --config config.toml cells release bootstrap --image sha256:123
 crab-http-server --config config.toml cells release prepare \
   --expected-revision 7 --image sha256:1234567890
 crab-http-server --config config.toml cells release activate \
-  --expected-revision 7 --strategy compatible \
+  --expected-revision 8 --strategy compatible \
   --minimum-eligible-nodes 3
 crab-http-server --config config.toml cells release status
 crab-http-server --config config.toml cells status --owner team --name repository
@@ -244,6 +244,33 @@ Before final `Ready`, it checks persisted work that may reference removed behavi
 - Workflow runs
 
 Any matching row keeps the release in maintenance. The runtime doesn't guess payload compatibility. Operators must drain retention or compile a purpose-built transform.
+
+The same fence can reclaim unreachable immutable Cell objects after migration:
+
+```bash
+crab-http-server --config config.toml cells release activate \
+  --expected-revision 8 \
+  --strategy maintenance \
+  --retention-grace-hours 168 \
+  --retention-max-deletes 10000
+```
+
+Omit both retention flags to run migration only. `--retention-max-deletes`
+requires a nonzero grace and accepts 1 through 100,000; omitting the limit while
+supplying a grace uses 10,000. The grace is measured from each object's provider
+modification time.
+
+Collection runs only after the executor proves it is the sole advertised
+session and every current control is unowned. It verifies live controls and all
+retained backup pins into a disk-backed mark set before streaming the object
+inventory. Unknown layouts are skipped. The structured completion log records
+listed, candidate, reachable, grace, eligible, and deleted counts.
+
+If eligible objects exceed the selected deletion bound, the command returns an
+incomplete-retention error and deliberately leaves the release in
+`Maintenance`. Repeat the identical activation command and expected revision;
+the operation re-marks authority before deleting the next bounded batch. Start
+the fleet only after the activation returns a `Ready` release.
 
 ## Deploy on Kubernetes
 

@@ -210,6 +210,9 @@ SERVER="$HOME/Workspace/crabbuild-target/crab-http-server-dev/release/crab-http-
 "$SERVER" --config /secure/server.toml cells backup restore \
   --pin 11112222333344445555666677778888 \
   --destination-prefix recovery/restore-2026-09-16
+"$SERVER" --config /secure/server.toml cells release activate \
+  --expected-revision 8 --strategy maintenance \
+  --retention-grace-hours 168 --retention-max-deletes 10000
 "$SERVER" --config /secure/server.toml repository set-members \
   --owner your-team --name your-project \
   --members-file /secure/members.toml
@@ -244,7 +247,10 @@ inputs, not measured performance evidence.
 immutable pages. It binds the selected release record and descriptors, the
 exact catalog revisions, one canonical control per entry, and every verified
 LTX dependency into a strict-created pin. Repeating an existing pin ID verifies
-and returns the original boundary. `cells backup verify` rereads the complete
+and returns the original boundary. A signed zero-capacity advertisement covers
+the complete create operation; maintenance drains it before collecting objects,
+while a creator that advertises after the release fence fails its second Ready
+check. `cells backup verify` rereads the complete
 graph and fails closed when any content-addressed dependency is absent or
 corrupt. `cells backup restore` requires a ready pinned release and a canonical
 destination prefix in the configured bucket. It verifies the complete source
@@ -255,6 +261,16 @@ the release and pin pointers only after their dependencies. An exact interrupted
 restore is resumable while an already-used or divergent destination fails
 closed. Cross-provider archive export and server-owned configuration outside
 `cells/v1` remain separate operator work.
+
+Maintenance retention is optional. With `--retention-grace-hours`, the sole
+maintenance executor verifies the exact release, revision-pinned catalog,
+unowned current controls, all retained pins, and their LTX graphs before the
+first delete. It stores reachability in bounded local SQLite scratch, streams
+the application prefix, and considers only recognized V1 immutable paths older
+than the provider-time grace. Unknown layouts and mutable authority are skipped.
+The deletion bound defaults to 10,000 and cannot exceed 100,000. Reaching it
+returns an incomplete-retention error and keeps the release in `Maintenance`;
+repeat the same activation and expected revision until it returns `Ready`.
 
 Membership is supplied separately so the shared server configuration stays
 small and secret-independent:

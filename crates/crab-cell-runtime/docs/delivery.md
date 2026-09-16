@@ -29,6 +29,7 @@ Each layer has one owner and one primary evidence surface.
 | Scheduler | `src/scheduler.rs`, `src/maintenance.rs` | `tests/scheduler.rs` |
 | Release control | `src/release.rs`, `src/release_progress.rs` | release unit tests and server command tests |
 | Backup pins | `src/backup.rs`, `crab-ltx::CellReplica::reachable_objects` | runtime pin tests and server create/verify command tests |
+| Immutable retention | `src/retention.rs`, `crab-storage::Store::list_stream` | mark/sweep tests and server maintenance-fence tests |
 | Product composition | `crab-http-server/src/cells/` | server route, restore, and lifecycle tests |
 
 Use the map during review. A change to one boundary needs caller, callee, sibling, and source-loss evidence where applicable.
@@ -133,6 +134,11 @@ still inject the same lost response through the deployed network path.
 - Injected filesystem and executor failures clean owned scratch state
 - Cross-epoch continuation starts from the authoritative root
 - Backup pins bind release metadata, catalog revisions, exact controls, and every reachable immutable root dependency
+- Offline retention verifies current controls and every pin before deleting,
+  rejects owned controls, honors grace and deletion bounds, and preserves
+  unknown object layouts
+- Backup creation remains advertised from before its final `Ready` check until
+  its pin pointer is durable, so maintenance cannot miss an in-flight pin
 
 Repeat remote storage tests against real RustFS. In-memory object storage cannot prove provider ETag and streaming behavior.
 
