@@ -420,8 +420,23 @@ pub async fn install_git_packs(
     git_dir: &Path,
     max_input_bytes: u64,
 ) -> Result<Vec<PathBuf>> {
+    install_git_packs_with_candidates(view, &[], git_dir, max_input_bytes).await
+}
+
+/// Install the pinned view plus additional verified candidate capsules.
+///
+/// The caller must separately bind each candidate transaction to the pinned
+/// root. Pack intake and the aggregate byte limit cover both base and candidate
+/// data before anything becomes visible in the destination object database.
+pub async fn install_git_packs_with_candidates(
+    view: &CapsuleRepositoryView,
+    candidates: &[Capsule],
+    git_dir: &Path,
+    max_input_bytes: u64,
+) -> Result<Vec<PathBuf>> {
     let checkpoint = view.checkpoint.clone();
     let capsules = view.capsules.clone();
+    let candidates = candidates.to_vec();
     let git_dir = git_dir.to_owned();
     tokio::task::spawn_blocking(move || {
         let pack_dir = git_dir.join("objects").join("pack");
@@ -431,7 +446,8 @@ pub async fn install_git_packs(
         let containers = checkpoint
             .into_iter()
             .map(GitPackContainer::Checkpoint)
-            .chain(capsules.into_iter().map(GitPackContainer::Capsule));
+            .chain(capsules.into_iter().map(GitPackContainer::Capsule))
+            .chain(candidates.into_iter().map(GitPackContainer::Capsule));
         for container in containers {
             for descriptor in container.git_packs() {
                 let pack_bytes = container.section_bytes(descriptor.pack_section())?;
@@ -1765,6 +1781,53 @@ mod tests {
                 StorageOperation::List,
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn candidate_git_packs_share_the_base_intake_limit() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        let initial = RootRecord::encode(
+            RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
+        )
+        .unwrap();
+        crab_metadata::capsule_protocol::create_root(&router, initial.clone())
+            .await
+            .unwrap();
+        let view = open_view(&router, TEST_LIMITS).await.unwrap();
+        let transaction = CapsuleTransaction::new(
+            initial.digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let candidate = Capsule::build(
+            &transaction,
+            vec![
+                CapsuleGitPack::new(
+                    Bytes::from_static(b"PACK candidate"),
+                    Bytes::from_static(b"index"),
+                    Bytes::from_static(b"reverse"),
+                    Bytes::from_static(b"locator"),
+                    "4".repeat(40),
+                    1,
+                )
+                .unwrap(),
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+        let git_dir = tempfile::tempdir().unwrap();
+
+        let error = install_git_packs_with_candidates(&view, &[candidate], git_dir.path(), 1)
+            .await
+            .expect_err("candidate pack must count against the shared intake limit");
+
+        assert!(matches!(error, ReadError::CapsuleReadLimit { .. }));
     }
 
     #[test]
