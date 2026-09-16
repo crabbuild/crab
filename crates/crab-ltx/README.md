@@ -161,7 +161,8 @@ walks the authenticated directory once and streams
 one big-endian eight-byte checksum per database page to a fresh local sidecar in
 64 KiB chunks. Capture clones only its pending overlay, updates the rolling
 checksum from changed pages and a truncated suffix, then applies positional
-sidecar writes only after the matching LTX cut is synced and renamed. A sidecar
+sidecar writes only after the matching LTX cut is synced and renamed. Removed
+checksum suffixes are reduced through fixed 64 KiB reads. A sidecar
 write or sync failure fences the session. Incremental preparation copy-on-writes only
 changed leaves and ancestors, prunes truncated subtrees by their authenticated
 ranges and reuses every untouched digest; it does not fetch historical indexes or
