@@ -607,6 +607,24 @@ pub async fn read_visible_refs_from_root(
     Ok(materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?.refs)
 }
 
+/// Read only requested current refs from an already verified root.
+///
+/// Missing and deleted refs are omitted. The result is authoritative only for
+/// `ref_names` and never includes compacted values for unchecked sibling refs.
+pub async fn read_visible_refs_from_root_for_refs(
+    router: &StoreLayout<Store>,
+    snapshot: &crab_metadata::capsule_protocol::RootSnapshot,
+    ref_names: &BTreeSet<String>,
+) -> Result<BTreeMap<String, String>> {
+    let (heads, active) =
+        capture_selected_ref_heads(router, snapshot.record().root(), ref_names).await?;
+    let refs = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?.refs;
+    Ok(refs
+        .into_iter()
+        .filter(|(ref_name, _)| ref_names.contains(ref_name))
+        .collect())
+}
+
 /// Load the immutable objects named by one already authenticated root.
 ///
 /// Remote-helper sessions use this entry point to bind advertisement and
@@ -1840,6 +1858,46 @@ mod tests {
             operations,
             vec![
                 StorageOperation::Get,
+                StorageOperation::Get,
+                StorageOperation::Get,
+                StorageOperation::Get,
+                StorageOperation::Get,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn selected_visible_ref_read_avoids_repository_wide_objects() {
+        let inner = Arc::new(InMemory::new());
+        seed_prepared_multi_ref(inner.clone(), true, false).await;
+        let observer = Arc::new(RecordingObserver::default());
+        let store = Store::new(inner).with_storage_observer(observer.clone());
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        let root = load_root(&router).await.unwrap();
+
+        let refs = read_visible_refs_from_root_for_refs(
+            &router,
+            &root,
+            &BTreeSet::from(["refs/heads/feature".to_owned()]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            refs,
+            BTreeMap::from([("refs/heads/feature".to_owned(), "3".repeat(40))])
+        );
+        let operations = observer
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|observation| observation.outcome == StorageOutcome::Success)
+            .map(|observation| observation.operation)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            operations,
+            vec![
                 StorageOperation::Get,
                 StorageOperation::Get,
                 StorageOperation::Get,

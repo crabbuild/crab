@@ -223,6 +223,10 @@ It double-reads only the requested deterministic head keys and loads their
 authenticated run frontiers, avoiding repository-wide LIST and unrelated-head
 GET requests. Its non-selected ref values are not authoritative; complete
 advertisement and cross-ref pointer catalogs must continue to use `open_view`.
+Protected-push admission uses the narrower
+`read_visible_refs_from_root_for_refs`, which retains the same stable-head and
+atomic-activation checks but returns only requested refs and fetches no capsule
+or checkpoint payloads.
 
 - [`crab-metadata`](../crab-metadata/README.md) defines manifests, file
   indexes, and shard metadata; this crate consumes them.

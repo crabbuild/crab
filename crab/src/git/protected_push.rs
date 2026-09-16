@@ -412,7 +412,11 @@ async fn protected_push_ref_updates_from_store(
     cancel: &CancellationToken,
 ) -> Result<Vec<PushRefUpdate>> {
     crate::core::error::check_cancelled(cancel)?;
-    let remote_refs = protected_remote_refs(read_store, repository_prefix).await?;
+    let requested_refs = specs
+        .iter()
+        .map(|spec| spec.dst.clone())
+        .collect::<BTreeSet<_>>();
+    let remote_refs = protected_remote_refs(read_store, repository_prefix, &requested_refs).await?;
 
     let mut seen = BTreeSet::new();
     let mut updates = Vec::with_capacity(specs.len());
@@ -447,36 +451,37 @@ async fn protected_push_ref_updates_from_store(
 async fn protected_remote_refs(
     read_store: &Store,
     repository_prefix: &str,
+    ref_names: &BTreeSet<String>,
 ) -> Result<BTreeMap<String, String>> {
     let router = StoreLayout::new(read_store.clone(), repository_prefix.to_owned());
-    match crate::metadata::manifest::read_repository_snapshot(&read_store, &router).await {
-        Ok(snapshot) => Ok(snapshot.journal.refs),
-        Err(CrabError::NotFound { .. }) => {
-            let layout = crab_storage::StoreLayout::new(
-                read_store.as_storage().clone(),
-                repository_prefix.to_owned(),
-            );
-            match crab_read::capsule_protocol::open_view(
-                &layout,
-                crab_read::capsule_protocol::CapsuleReadLimits {
-                    max_capsule_bytes: u64::MAX,
-                    max_frontier_bytes: u64::MAX,
-                },
+    let layout = crab_storage::StoreLayout::new(
+        read_store.as_storage().clone(),
+        repository_prefix.to_owned(),
+    );
+    match crab_metadata::capsule_protocol::load_root(&layout).await {
+        Ok(root) => {
+            return crab_read::capsule_protocol::read_visible_refs_from_root_for_refs(
+                &layout, &root, ref_names,
             )
             .await
-            {
-                Ok(view) => Ok(view.refs().clone()),
-                Err(
-                    crab_read::ReadError::NotFound { .. }
-                    | crab_read::ReadError::Storage(crab_storage::StorageError::NotFound { .. })
-                    | crab_read::ReadError::Metadata(crab_metadata::error::MetadataError::Storage {
-                        source: crab_storage::StorageError::NotFound { .. },
-                    }),
-                ) => Ok(BTreeMap::default()),
-                Err(error) => return Err(error.into()),
-            }
+            .map_err(CrabError::from);
         }
-        Err(e) => return Err(e),
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        }) => {}
+        Err(error) => return Err(error.into()),
+    }
+    match crate::metadata::manifest::read_repository_snapshot(read_store, &router).await {
+        Ok(snapshot) => Ok(snapshot
+            .journal
+            .refs
+            .into_iter()
+            .filter(|(ref_name, _)| ref_names.contains(ref_name))
+            .collect()),
+        Err(CrabError::NotFound { path }) if path == router.manifest_path().as_ref() => {
+            Ok(BTreeMap::default())
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -499,7 +504,53 @@ fn resolve_rev(refspec: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use object_store::memory::InMemory;
+
+    async fn create_v1_manifest(store: &Store, prefix: &str, oid: &str) {
+        let router = StoreLayout::new(store.clone(), prefix.to_owned());
+        crate::core::remote_layout::initialize(store, &router)
+            .await
+            .unwrap();
+        let mut manifest = crate::metadata::manifest::Manifest::default_for_repo("refs/heads/main");
+        manifest
+            .refs
+            .insert("refs/heads/main".to_owned(), oid.to_owned());
+        manifest.seal_git_validation();
+        crate::metadata::manifest::create_manifest(store, &router, &manifest)
+            .await
+            .unwrap();
+    }
+
+    async fn publish_v2_ref(
+        storage: &crab_storage::Store,
+        prefix: &str,
+        oid: &str,
+    ) -> object_store::path::Path {
+        let layout = crab_storage::StoreLayout::new(storage.clone(), prefix.to_owned());
+        let root =
+            crab_write::capsule_protocol::initialize(&layout, &"a".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+        let transaction = crab_metadata::capsule_protocol::CapsuleTransaction::new(
+            root.record().digest(),
+            vec![crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some(oid.to_owned()),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule =
+            crab_metadata::capsule_protocol::Capsule::build(&transaction, Vec::new(), Vec::new())
+                .unwrap();
+        let run = crab_metadata::capsule_protocol::CapsuleRun::leaf(capsule.clone()).unwrap();
+        crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
+            .await
+            .unwrap();
+        layout.capsule_path(run.hash())
+    }
 
     #[test]
     fn admission_plan_conservatively_accounts_for_payload_and_object_overhead() {
@@ -558,32 +609,95 @@ mod tests {
     #[tokio::test]
     async fn protected_remote_refs_reads_capsule_protocol_heads() {
         let storage = crab_storage::Store::new(Arc::new(InMemory::new()));
-        let layout = crab_storage::StoreLayout::new(storage.clone(), "org/repo".to_owned());
-        let root =
-            crab_write::capsule_protocol::initialize(&layout, &"a".repeat(64), "refs/heads/main")
-                .await
-                .unwrap();
-        let transaction = crab_metadata::capsule_protocol::CapsuleTransaction::new(
-            root.record().digest(),
-            vec![crab_metadata::capsule_protocol::CapsuleRefEdit::new(
-                "refs/heads/main",
-                None,
-                Some("1".repeat(40)),
-                None,
-            )],
-        )
-        .unwrap();
-        let capsule =
-            crab_metadata::capsule_protocol::Capsule::build(&transaction, Vec::new(), Vec::new())
-                .unwrap();
-        crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
-            .await
-            .unwrap();
+        publish_v2_ref(&storage, "org/repo", &"1".repeat(40)).await;
         let store = Store::from_storage(storage);
 
-        let refs = protected_remote_refs(&store, "org/repo").await.unwrap();
+        let refs = protected_remote_refs(
+            &store,
+            "org/repo",
+            &BTreeSet::from(["refs/heads/main".to_owned()]),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(refs.get("refs/heads/main"), Some(&"1".repeat(40)));
+    }
+
+    #[tokio::test]
+    async fn protected_remote_refs_falls_back_only_when_v2_root_is_absent() {
+        let storage = crab_storage::Store::new(Arc::new(InMemory::new()));
+        let store = Store::from_storage(storage);
+        create_v1_manifest(&store, "org/repo", &"2".repeat(40)).await;
+
+        let refs = protected_remote_refs(
+            &store,
+            "org/repo",
+            &BTreeSet::from(["refs/heads/main".to_owned()]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(refs.get("refs/heads/main"), Some(&"2".repeat(40)));
+    }
+
+    #[tokio::test]
+    async fn protected_remote_refs_prefers_v2_and_skips_capsule_payloads() {
+        let counted = Arc::new(crab_storage::test_support::CountingObjectStore::new(
+            Arc::new(InMemory::new()),
+        ));
+        let storage =
+            crab_storage::Store::new(Arc::clone(&counted) as Arc<dyn object_store::ObjectStore>);
+        let store = Store::from_storage(storage.clone());
+        let capsule_path = publish_v2_ref(&storage, "org/repo", &"1".repeat(40)).await;
+        create_v1_manifest(&store, "org/repo", &"2".repeat(40)).await;
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        counted.reset();
+
+        let refs = protected_remote_refs(
+            &store,
+            "org/repo",
+            &BTreeSet::from(["refs/heads/main".to_owned()]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(refs.get("refs/heads/main"), Some(&"1".repeat(40)));
+        let requests = counted.requests();
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.location != router.manifest_path().as_ref())
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.location != capsule_path.as_ref())
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_remote_refs_does_not_fall_back_from_corrupt_v2() {
+        let storage = crab_storage::Store::new(Arc::new(InMemory::new()));
+        let store = Store::from_storage(storage.clone());
+        create_v1_manifest(&store, "org/repo", &"2".repeat(40)).await;
+        let layout = crab_storage::StoreLayout::new(storage.clone(), "org/repo".to_owned());
+        storage
+            .put(
+                &layout.capsule_root_path(),
+                Bytes::from_static(b"not a capsule root"),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            protected_remote_refs(
+                &store,
+                "org/repo",
+                &BTreeSet::from(["refs/heads/main".to_owned()]),
+            )
+            .await,
+            Err(CrabError::CorruptObject { .. })
+        ));
     }
 
     #[test]
