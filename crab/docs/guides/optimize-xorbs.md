@@ -87,6 +87,12 @@ Archive-class source xorbs are restored before processing when included:
 
 - `--include-cold=false`: skip archive xorbs.
 - `--restore-tier=<tier>`: restore tier for archive sources.
+- `--output-class=<class>`: provider-native class for newly created destinations.
+
+Crab validates and canonicalizes the output class before starting the run. An
+already present content-addressed destination is verified and reused without
+changing its storage class; local stores ignore this cloud-only placement
+setting.
 
 ## Structured Output
 

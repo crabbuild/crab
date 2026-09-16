@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-use bytes::Bytes;
+use object_store::{Attribute, Attributes};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -80,7 +80,6 @@ pub struct ExecutorOutcome {
 }
 
 /// Execute one bounded xorb optimization run.
-#[expect(clippy::too_many_arguments, reason = "bounded pipeline context")]
 pub async fn execute(
     journal: &OptimizeXorbsJournal,
     run_id: &str,
@@ -373,7 +372,15 @@ async fn process_batch(
             let _ = builder.push(&chunk, source_run)?;
             while let Some(destination) = builder.take_completed() {
                 outcome.bytes_written = outcome.bytes_written.saturating_add(
-                    upload_destination(store, router, destination, &mut placements, cancel).await?,
+                    upload_destination(
+                        store,
+                        router,
+                        destination,
+                        &config.output_class,
+                        &mut placements,
+                        cancel,
+                    )
+                    .await?,
                 );
             }
         }
@@ -385,7 +392,15 @@ async fn process_batch(
 
     for destination in builder.finalize()? {
         outcome.bytes_written = outcome.bytes_written.saturating_add(
-            upload_destination(store, router, destination, &mut placements, cancel).await?,
+            upload_destination(
+                store,
+                router,
+                destination,
+                &config.output_class,
+                &mut placements,
+                cancel,
+            )
+            .await?,
         );
     }
     check_cancelled(cancel)?;
@@ -419,6 +434,7 @@ async fn upload_destination(
     store: &Store,
     router: &StoreLayout,
     destination: XorbResult,
+    output_class: &str,
     placements: &mut HashMap<MerkleHash, String>,
     cancel: &CancellationToken,
 ) -> Result<u64> {
@@ -439,11 +455,16 @@ async fn upload_destination(
     }
 
     check_cancelled(cancel)?;
+    let mut attributes = Attributes::new();
+    if store.bucket_identity().cloud != crab_types::storage::StorageProviderKind::Local {
+        attributes.insert(Attribute::StorageClass, output_class.to_owned().into());
+    }
     let publication = tokio::select! {
-        result = store.as_storage().create_or_read_immutable(
+        result = store.as_storage().create_or_read_immutable_with_attributes(
             &path,
-            Bytes::from(destination.bytes.clone()),
+            destination.bytes.clone(),
             MAX_TARGET_XORB_BYTES as u64,
+            attributes,
         ) => result?,
         () = cancel.cancelled() => return Err(CrabError::Cancelled),
     };
@@ -534,6 +555,7 @@ pub fn check_gc_not_running(crab_dir: &std::path::Path) -> Result<()> {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use object_store::ObjectStoreExt as _;
     use object_store::memory::InMemory;
     use std::sync::Arc;
 
@@ -620,14 +642,19 @@ mod tests {
     async fn destination_upload_uses_scoped_global_layout() {
         use crab_xet::xorb::format::Chunk;
 
-        let store = Store::new(Arc::new(InMemory::new())).with_storage_scope(
-            crab_types::storage::StorageScope {
+        let inner = Arc::new(InMemory::new());
+        let store = Store::new(inner.clone())
+            .with_bucket_identity(crab_types::storage::BucketIdentity::new(
+                crab_types::storage::StorageProviderKind::S3,
+                "bucket",
+                "bucket",
+            ))
+            .with_storage_scope(crab_types::storage::StorageScope {
                 repo_prefix: "scoped/repo".to_owned(),
                 global_prefix: "scoped/repo/.crab".to_owned(),
                 source_repo: "org/repo".to_owned(),
                 scope_hash: "a".repeat(64),
-            },
-        );
+            });
         let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
         let chunk = Chunk::new(Bytes::from_static(b"scoped xorb"));
         let mut builder = XorbBuilder::new();
@@ -639,6 +666,7 @@ mod tests {
             &store,
             &router,
             destination,
+            "STANDARD_IA",
             &mut HashMap::new(),
             &CancellationToken::new(),
         )
@@ -646,6 +674,15 @@ mod tests {
         .unwrap();
 
         assert!(store.head(&router.xorb_path(&hash)).await.is_ok());
+        assert_eq!(
+            inner
+                .get(&router.xorb_path(&hash))
+                .await
+                .unwrap()
+                .attributes
+                .get(&Attribute::StorageClass),
+            Some(&"STANDARD_IA".to_owned().into())
+        );
         assert!(matches!(
             store
                 .head(&crab_storage::canonical_global_content_path(
@@ -655,5 +692,40 @@ mod tests {
                 .await,
             Err(CrabError::NotFound { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn destination_upload_omits_storage_class_for_local_store() {
+        use crab_xet::xorb::format::Chunk;
+
+        let inner = Arc::new(InMemory::new());
+        let store = Store::new(inner.clone());
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let mut builder = XorbBuilder::new();
+        builder
+            .push(&Chunk::new(Bytes::from_static(b"local xorb")), RunId(0))
+            .unwrap();
+        let destination = builder.finalize().unwrap().remove(0);
+        let hash = destination.hash;
+
+        upload_destination(
+            &store,
+            &router,
+            destination,
+            "STANDARD_IA",
+            &mut HashMap::new(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            inner
+                .get(&router.xorb_path(&hash))
+                .await
+                .unwrap()
+                .attributes
+                .is_empty()
+        );
     }
 }

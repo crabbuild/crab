@@ -27,8 +27,8 @@ use futures_util::Stream;
 use futures_util::StreamExt as _;
 use object_store::path::Path;
 use object_store::{
-    GetOptions, GetRange, MultipartUpload, ObjectMeta, ObjectStore, ObjectStoreExt, PutMode,
-    PutOptions,
+    Attributes, GetOptions, GetRange, MultipartUpload, ObjectMeta, ObjectStore, ObjectStoreExt,
+    PutMode, PutOptions,
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -658,6 +658,26 @@ impl Store {
         bytes: Bytes,
         max_existing_bytes: u64,
     ) -> Result<ImmutableCreateOutcome> {
+        self.create_or_read_immutable_with_attributes(
+            path,
+            bytes,
+            max_existing_bytes,
+            Attributes::default(),
+        )
+        .await
+    }
+
+    /// Creates immutable bytes with object attributes, or returns the occupied key's body.
+    ///
+    /// Attributes apply only when this call creates the object. An existing content address is
+    /// never mutated; the caller must authenticate the returned body before referencing it.
+    pub async fn create_or_read_immutable_with_attributes(
+        &self,
+        path: &Path,
+        bytes: Bytes,
+        max_existing_bytes: u64,
+        attributes: Attributes,
+    ) -> Result<ImmutableCreateOutcome> {
         if self.staging_writes.is_some() {
             return Err(StorageError::Internal(
                 "logical immutable create is unavailable for staged writes".to_owned(),
@@ -667,12 +687,14 @@ impl Store {
         let created = retry(&self.retry, || {
             let path = path.clone();
             let bytes = bytes.clone();
+            let attributes = attributes.clone();
             async move {
-                match self
-                    .inner
-                    .put_opts(&path, bytes.into(), PutOptions::from(PutMode::Create))
-                    .await
-                {
+                let options = PutOptions {
+                    mode: PutMode::Create,
+                    attributes,
+                    ..PutOptions::default()
+                };
+                match self.inner.put_opts(&path, bytes.into(), options).await {
                     Ok(_) => Ok(true),
                     Err(error) => {
                         let mapped = map_object_store_error(error, path.as_ref());
@@ -2980,8 +3002,8 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::multipart::{MultipartStore, PartId};
     use object_store::{
-        CopyOptions, GetOptions, GetResult, ListResult, MultipartId, PutMultipartOptions,
-        PutOptions, PutPayload, PutResult,
+        Attribute, CopyOptions, GetOptions, GetResult, ListResult, MultipartId,
+        PutMultipartOptions, PutOptions, PutPayload, PutResult,
     };
     use std::fmt;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -3651,6 +3673,69 @@ mod tests {
             .expect_err("existing bodies remain bounded");
 
         assert!(matches!(error, StorageError::CorruptObject { .. }));
+    }
+
+    #[tokio::test]
+    async fn logical_immutable_create_applies_attributes_on_create() {
+        let inner = Arc::new(InMemory::new());
+        let store = Store::new(inner.clone());
+        let path = Path::from("blobs/classed-logical-content-address");
+        let mut attributes = Attributes::new();
+        attributes.insert(Attribute::StorageClass, "STANDARD_IA".to_owned().into());
+
+        let outcome = store
+            .create_or_read_immutable_with_attributes(
+                &path,
+                Bytes::from_static(b"candidate"),
+                1024,
+                attributes,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, ImmutableCreateOutcome::Created);
+        let result = inner.get(&path).await.unwrap();
+        assert_eq!(
+            result.attributes.get(&Attribute::StorageClass),
+            Some(&"STANDARD_IA".to_owned().into())
+        );
+    }
+
+    #[tokio::test]
+    async fn logical_immutable_reuse_does_not_mutate_attributes() {
+        let inner = Arc::new(InMemory::new());
+        let store = Store::new(inner.clone());
+        let path = Path::from("blobs/reused-classed-logical-content-address");
+        let mut original = Attributes::new();
+        original.insert(Attribute::StorageClass, "STANDARD_IA".to_owned().into());
+        store
+            .create_or_read_immutable_with_attributes(
+                &path,
+                Bytes::from_static(b"candidate"),
+                1024,
+                original,
+            )
+            .await
+            .unwrap();
+        let mut replacement = Attributes::new();
+        replacement.insert(Attribute::StorageClass, "DEEP_ARCHIVE".to_owned().into());
+
+        let outcome = store
+            .create_or_read_immutable_with_attributes(
+                &path,
+                Bytes::from_static(b"candidate"),
+                1024,
+                replacement,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, ImmutableCreateOutcome::Existing(_)));
+        let result = inner.get(&path).await.unwrap();
+        assert_eq!(
+            result.attributes.get(&Attribute::StorageClass),
+            Some(&"STANDARD_IA".to_owned().into())
+        );
     }
 
     #[tokio::test]

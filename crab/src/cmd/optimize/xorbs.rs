@@ -395,7 +395,7 @@ async fn enumerate_capsule_sources(
     let selected_shards = catalog
         .files()
         .values()
-        .map(|file| file.shard_hash())
+        .map(crab_metadata::capsule_protocol::FileCatalogEntry::shard_hash)
         .collect::<BTreeSet<_>>();
     let selected_xorbs = selected_shards
         .into_iter()
@@ -536,6 +536,14 @@ async fn run_apply(
     cancel: &CancellationToken,
 ) -> Result<()> {
     let start = Instant::now();
+    let requested_output_class = args
+        .output_class
+        .as_deref()
+        .unwrap_or(&cfg.tier.optimize_xorbs_output_class);
+    let output_class = normalize_output_class(
+        crate::tier::runtime::resolve_provider(cfg)?,
+        requested_output_class,
+    )?;
 
     // Check for concurrent GC.
     let crab_dir = crab_dir_from_journal_path(journal_path)?;
@@ -608,10 +616,7 @@ async fn run_apply(
             .restore_tier
             .clone()
             .unwrap_or_else(|| cfg.tier.restore_tier.clone()),
-        output_class: args
-            .output_class
-            .clone()
-            .unwrap_or_else(|| cfg.tier.optimize_xorbs_output_class.clone()),
+        output_class,
         ..ExecutorConfig::default()
     };
 
@@ -764,9 +769,46 @@ fn profile_label(profile: &Profile) -> String {
     }
 }
 
+fn normalize_output_class(provider: crate::tier::provider::Provider, raw: &str) -> Result<String> {
+    use crate::tier::StorageClass;
+    use crate::tier::provider::Provider;
+
+    let class = if provider == Provider::Azure && raw.eq_ignore_ascii_case("standard") {
+        StorageClass::AzureHot
+    } else {
+        StorageClass::from_provider_str(&provider, raw.trim())
+    };
+    let value = match (provider, class) {
+        (Provider::S3, StorageClass::S3Standard) | (Provider::Gcs, StorageClass::GcsStandard) => {
+            "STANDARD"
+        }
+        (Provider::S3, StorageClass::S3IntelligentTiering) => "INTELLIGENT_TIERING",
+        (Provider::S3, StorageClass::S3StandardIa) => "STANDARD_IA",
+        (Provider::S3, StorageClass::S3OneZoneIa) => "ONEZONE_IA",
+        (Provider::S3, StorageClass::S3GlacierInstantRetrieval) => "GLACIER_IR",
+        (Provider::S3, StorageClass::S3GlacierFlexibleRetrieval) => "GLACIER",
+        (Provider::S3, StorageClass::S3GlacierDeepArchive) => "DEEP_ARCHIVE",
+        (Provider::Gcs, StorageClass::GcsNearline) => "NEARLINE",
+        (Provider::Gcs, StorageClass::GcsColdline) => "COLDLINE",
+        (Provider::Gcs, StorageClass::GcsArchive) => "ARCHIVE",
+        (Provider::Azure, StorageClass::AzureHot) => "Hot",
+        (Provider::Azure, StorageClass::AzureCool) => "Cool",
+        (Provider::Azure, StorageClass::AzureCold) => "Cold",
+        (Provider::Azure, StorageClass::AzureArchive) => "Archive",
+        _ => {
+            return Err(CrabError::Configuration {
+                key: "--output-class".to_owned(),
+                origin: format!("'{raw}' is not a valid {provider:?} storage class"),
+            });
+        }
+    };
+    Ok(value.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{crab_dir_from_journal_path, enumerate_sources};
+    use super::{crab_dir_from_journal_path, enumerate_sources, normalize_output_class};
+    use crate::core::error::CrabError;
     use crate::storage::{Store, StoreLayout};
     use bytes::Bytes;
     use object_store::memory::InMemory;
@@ -781,6 +823,32 @@ mod tests {
             crab_dir_from_journal_path(path).unwrap(),
             std::path::Path::new("/repo/.crab")
         );
+    }
+
+    #[test]
+    fn output_classes_are_canonicalized_for_each_provider() {
+        use crate::tier::provider::Provider;
+
+        assert_eq!(
+            normalize_output_class(Provider::S3, "standard-ia").unwrap(),
+            "STANDARD_IA"
+        );
+        assert_eq!(
+            normalize_output_class(Provider::Gcs, "nearline").unwrap(),
+            "NEARLINE"
+        );
+        assert_eq!(
+            normalize_output_class(Provider::Azure, "standard").unwrap(),
+            "Hot"
+        );
+    }
+
+    #[test]
+    fn output_class_rejects_cross_provider_values() {
+        let error = normalize_output_class(crate::tier::provider::Provider::Gcs, "STANDARD_IA")
+            .unwrap_err();
+
+        assert!(matches!(error, CrabError::Configuration { .. }));
     }
 
     #[tokio::test]

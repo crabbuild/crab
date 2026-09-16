@@ -1067,7 +1067,6 @@ pub async fn finalize(
     .await
 }
 
-#[expect(clippy::too_many_arguments, reason = "publication boundary state")]
 async fn finalize_capsule(
     store: &Store,
     router: &StoreLayout,
@@ -1177,10 +1176,6 @@ async fn finalize_capsule(
     })
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "legacy publication boundary state"
-)]
 async fn finalize_legacy(
     store: &Store,
     router: &StoreLayout,

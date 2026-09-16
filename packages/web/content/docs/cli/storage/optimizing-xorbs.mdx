@@ -100,6 +100,12 @@ crab optimize xorbs --profile ml --apply --restore-tier=bulk
 crab optimize xorbs --profile ml --apply --output-class=STANDARD_IA
 ```
 
+`--output-class` is validated for the configured provider and applies to newly
+created destination xorbs. If an identical content-addressed xorb already
+exists, Crab verifies and reuses it without changing its class. The default
+`standard` means `STANDARD` on S3/GCS and `Hot` on Azure; local stores do not
+attach cloud storage-class metadata.
+
 ## Concurrency
 
 | Combination | Result |
