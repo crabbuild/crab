@@ -4216,7 +4216,7 @@ main {
 }
 .code-symbols-panel {
   position: sticky;
-  top: 0;
+  top: var(--code-symbols-sticky-top, 0);
   align-self: start;
   min-width: 0;
   height: var(--code-symbols-available-height, 100dvh);

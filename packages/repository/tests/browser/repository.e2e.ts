@@ -1177,6 +1177,7 @@ test("supported source files expose browser-parsed current-file symbols", async 
   const breadcrumb = page.locator(".code-main > .breadcrumb");
   const fileHeader = page.locator(".file-panel > .panel-header");
   const symbols = page.getByRole("complementary", { name: "Code symbols" });
+  const symbolsHeader = symbols.locator(".code-symbols-header");
   await expect(symbols).toBeVisible();
   await expect(symbols).toHaveCSS("position", "sticky");
   await expect(breadcrumb).toHaveCSS("position", "sticky");
@@ -1240,8 +1241,26 @@ test("supported source files expose browser-parsed current-file symbols", async 
     )
     .toEqual({ document: 900, source: 0 });
   await expect
-    .poll(() => symbols.evaluate((node) => node.getBoundingClientRect().top))
-    .toBe(0);
+    .poll(async () => {
+      const [fileHeaderBottom, symbolsBounds, symbolsHeaderTop] =
+        await Promise.all([
+          fileHeader.evaluate((node) => node.getBoundingClientRect().bottom),
+          symbols.evaluate((node) => {
+            const bounds = node.getBoundingClientRect();
+            return {
+              top: bounds.top,
+              bottomGap: window.innerHeight - bounds.bottom,
+            };
+          }),
+          symbolsHeader.evaluate((node) => node.getBoundingClientRect().top),
+        ]);
+      return [
+        Math.abs(fileHeaderBottom - symbolsBounds.top),
+        Math.abs(symbolsBounds.top - symbolsHeaderTop),
+        Math.abs(symbolsBounds.bottomGap),
+      ];
+    })
+    .toEqual([0, 0, 0]);
   await expect(symbols).toBeVisible();
   await page.evaluate(() => window.scrollTo(0, 0));
 

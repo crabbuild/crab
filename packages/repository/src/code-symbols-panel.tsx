@@ -83,6 +83,16 @@ export function CodeSymbolsPanel({
       frame = requestAnimationFrame(() => {
         const node = panel.current;
         if (!node) return;
+        const fileHeader = node
+          .closest(".file-panel")
+          ?.querySelector<HTMLElement>(":scope > .panel-header");
+        // The file navigation stays above this pane while the document scrolls.
+        // Reserve its measured edge so the Symbols header remains reachable.
+        const stickyTop = Math.max(
+          0,
+          fileHeader?.getBoundingClientRect().bottom ?? 0,
+        );
+        node.style.setProperty("--code-symbols-sticky-top", `${stickyTop}px`);
         // The pane grows as it becomes sticky; a fixed viewport fraction either
         // truncates tall screens or overflows below the fold before it sticks.
         const top = Math.max(0, node.getBoundingClientRect().top);
