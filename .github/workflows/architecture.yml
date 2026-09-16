@@ -187,7 +187,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install AWS CLI
-        run: pipx install awscli
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y pipx
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - uses: Swatinem/rust-cache@v2
         with:
