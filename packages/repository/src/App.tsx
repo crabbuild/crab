@@ -1052,7 +1052,7 @@ function RepositoryPage({
                           )}
                           <div
                             id="repository-file-content"
-                            className="code-main"
+                            className={`code-main${kind === "Blob" ? " code-main-file" : ""}`}
                           >
                             {!showTree && !overview && (
                               <FileNavigation

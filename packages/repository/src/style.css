@@ -3855,7 +3855,7 @@ main {
   flex-direction: column;
   position: sticky;
   top: 0;
-  height: calc(100dvh - 113px);
+  height: 100dvh;
   border-width: 0;
   border-radius: 0;
 }
@@ -4186,6 +4186,19 @@ main {
 .file-panel > .panel-header {
   min-height: 46px;
   padding: 8px 10px;
+}
+.code-main-file > .breadcrumb {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  min-height: 48px;
+  margin-bottom: 0;
+  background: var(--bgColor-default);
+}
+.code-main-file .file-panel > .panel-header {
+  position: sticky;
+  top: 48px;
+  z-index: 1;
 }
 .file-panel .button-link {
   padding: 4px 12px;
@@ -5477,6 +5490,10 @@ main {
   }
   .repo-file-workspace .code-main {
     padding: 0;
+  }
+  .code-main-file > .breadcrumb,
+  .code-main-file .file-panel > .panel-header {
+    position: static;
   }
   .repo-file-workspace .breadcrumb {
     overflow-x: auto;

@@ -1174,9 +1174,20 @@ test("supported source files expose browser-parsed current-file symbols", async 
 
   const treeSidebar = page.locator(".tree-sidebar");
   const tree = page.locator(".repository-tree");
+  const breadcrumb = page.locator(".code-main > .breadcrumb");
+  const fileHeader = page.locator(".file-panel > .panel-header");
   const symbols = page.getByRole("complementary", { name: "Code symbols" });
   await expect(symbols).toBeVisible();
   await expect(symbols).toHaveCSS("position", "sticky");
+  await expect(breadcrumb).toHaveCSS("position", "sticky");
+  await expect(fileHeader).toHaveCSS("position", "sticky");
+  await expect
+    .poll(() =>
+      treeSidebar.evaluate(
+        (node) => node.getBoundingClientRect().height - window.innerHeight,
+      ),
+    )
+    .toBe(0);
   await expect
     .poll(async () => {
       const [sidebarBottom, treeBottom] = await Promise.all([
@@ -1203,6 +1214,31 @@ test("supported source files expose browser-parsed current-file symbols", async 
     node.style.minHeight = `${window.innerHeight * 3}px`;
   });
   await page.evaluate(() => window.scrollTo(0, 900));
+  await expect
+    .poll(async () => {
+      const [breadcrumbBottom, headerTop] = await Promise.all([
+        breadcrumb.evaluate((node) => node.getBoundingClientRect().bottom),
+        fileHeader.evaluate((node) => node.getBoundingClientRect().top),
+      ]);
+      return Math.abs(breadcrumbBottom - headerTop);
+    })
+    .toBeLessThanOrEqual(1);
+  await expect
+    .poll(() =>
+      treeSidebar.evaluate((node) => {
+        const bounds = node.getBoundingClientRect();
+        return [bounds.top, window.innerHeight - bounds.bottom];
+      }),
+    )
+    .toEqual([0, 0]);
+  await expect
+    .poll(() =>
+      page.evaluate(() => ({
+        document: document.scrollingElement?.scrollTop ?? 0,
+        source: document.querySelector(".file-source-code")?.scrollTop ?? 0,
+      })),
+    )
+    .toEqual({ document: 900, source: 0 });
   await expect
     .poll(() => symbols.evaluate((node) => node.getBoundingClientRect().top))
     .toBe(0);
