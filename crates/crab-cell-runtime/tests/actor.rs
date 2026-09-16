@@ -6,7 +6,9 @@ use crab_cell_runtime::{
     RequestId, Resolution, SessionId, SqlWorkerPool, StoredOutcome, TenantId, Transition,
 };
 use crab_ltx::{CellReplica, Limits};
-use crab_storage::{CellObjectKind, CellStorageLayout, Store};
+use crab_storage::{
+    CellObjectKind, CellStorageLayout, ObjectStoreCredentials, Store, build_explicit_store,
+};
 use object_store::{memory::InMemory, path::Path};
 
 struct Fixture {
@@ -1680,6 +1682,37 @@ async fn panicking_bootstrap_keeps_worker_alive_and_releases_cell_capacity() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn source_loss_takeover_restores_exact_root_and_continues_publication() {
+    source_loss_takeover(
+        Store::new(Arc::new(InMemory::new())),
+        Path::from("cold-runtime"),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires an isolated pre-created RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_source_loss_takeover_restores_exact_root_and_continues_publication() {
+    let required = |name| std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
+    let store = build_explicit_store(
+        &required("CRAB_CELL_TEST_BUCKET"),
+        ObjectStoreCredentials::Aws {
+            access_key_id: required("AWS_ACCESS_KEY_ID"),
+            secret_access_key: required("AWS_SECRET_ACCESS_KEY"),
+            session_token: None,
+            region: "us-east-1".into(),
+        },
+        Some(&required("CRAB_CELL_TEST_ENDPOINT")),
+        true,
+    )
+    .unwrap();
+    let prefix = Path::from(format!(
+        "{}/cold-runtime",
+        required("CRAB_CELL_TEST_PREFIX")
+    ));
+    source_loss_takeover(store, prefix).await;
+}
+
+async fn source_loss_takeover(store: Store, prefix: Path) {
     let target = CellTarget::new(
         TenantId::from_bytes([41; 16]),
         ApplicationId::from_bytes([42; 16]),
@@ -1689,8 +1722,7 @@ async fn source_loss_takeover_restores_exact_root_and_continues_publication() {
     .unwrap();
     let cell = target.cell_id();
     let incarnation = IncarnationId::from_bytes([44; 16]);
-    let store = Store::new(Arc::new(InMemory::new()));
-    let layout = CellStorageLayout::new(store, Path::from("cold-runtime"), [42; 16]);
+    let layout = CellStorageLayout::new(store, prefix, [42; 16]);
     let replica = CellReplica::new(
         layout.clone(),
         *cell.as_bytes(),

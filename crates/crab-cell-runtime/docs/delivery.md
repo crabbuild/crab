@@ -124,6 +124,27 @@ Mock-only tests do not satisfy source-loss or publication proof.
 
 Repeat remote storage tests against real RustFS. In-memory object storage cannot prove provider ETag and streaming behavior.
 
+The ignored qualification tests require one fresh bucket and a unique Cell prefix:
+
+```bash
+CRAB_LTX_TEST_BUCKET="$BUCKET" \
+CRAB_LTX_TEST_ENDPOINT="$ENDPOINT" \
+cargo test -p crab-ltx --features replica --test remote \
+  rustfs_roundtrip -- --ignored --exact
+
+CRAB_CELL_TEST_BUCKET="$BUCKET" \
+CRAB_CELL_TEST_ENDPOINT="$ENDPOINT" \
+CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX" \
+cargo test -p crab-cell-runtime --test actor \
+  rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
+  -- --ignored --exact
+```
+
+The Cell test publishes a command on one session, removes its local database,
+takes over from a second session, resolves the original request from the exact
+root, and publishes the next sequence. CI runs both tests against a pinned
+RustFS image.
+
 ## Prove each primitive through recovery
 
 Primitive tests require more than procedure-level SQL assertions.

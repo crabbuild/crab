@@ -62,8 +62,10 @@ It does not introduce a second SQLite library. See the
 Local tests cover commit/rollback, checkpoint/shrink/regrowth, source-directory
 loss, process kill, independent CRC/format vectors and byte-identical
 snapshot/compaction recovery. Remote tests additionally cover concurrent/stale
-CAS, malformed indexes/heads, range corruption and paged SQLite. A real RustFS
-round trip covers publication, source loss, SQL readback and remote compaction.
+CAS, malformed indexes/heads, range corruption and paged SQLite. Pinned RustFS
+CI covers LTX publication, source loss, SQL readback and remote compaction. It
+also runs the Cell actor through first-owner publication, local database loss,
+second-session exact-root takeover, replay resolution and continued publication.
 The server's static repository module now calls the managed runtime indirectly
 through typed `CellClient` commands and queries. Its schema owns repository
 identity, issue/comment/label/status/check/settings/Pull/Release sequences and rows; integration tests prove replay,
