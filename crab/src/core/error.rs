@@ -1979,6 +1979,10 @@ impl From<crab_write::WriteError> for CrabError {
                 path,
                 expected_etag: None,
             },
+            crab_write::WriteError::CapsuleRefEpochChanged { path, .. } => Self::CasConflict {
+                path,
+                expected_etag: None,
+            },
             crab_write::WriteError::CapsuleGcFenced {
                 fence_id,
                 expires_at_unix,

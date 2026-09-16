@@ -966,6 +966,10 @@ async fn capture_ref_heads(
         let Some(heads) = load_ref_heads(router, &before).await? else {
             continue;
         };
+        let heads = heads
+            .into_iter()
+            .filter(|head| head.ref_epoch() == root.ref_epoch())
+            .collect::<Vec<_>>();
         let active = resolve_referenced_activations(router, &heads).await?;
         let after = list_ref_head_objects(router).await?;
         if before != after {
@@ -1001,6 +1005,7 @@ async fn capture_selected_ref_heads(
         let heads = before
             .iter()
             .filter_map(|entry| entry.as_ref().map(|(head, _)| head.clone()))
+            .filter(|head| head.ref_epoch() == root.ref_epoch())
             .collect::<Vec<_>>();
         let active = resolve_referenced_activations(router, &heads).await?;
         let after = load_selected_ref_heads(router, ref_names).await?;
@@ -1651,6 +1656,7 @@ mod tests {
         for edit in transaction.edits() {
             let head = crab_metadata::capsule_protocol::CapsuleRefHead::from_root(
                 edit.ref_name(),
+                initial.root().ref_epoch().to_owned(),
                 None,
                 None,
             )
@@ -1707,6 +1713,62 @@ mod tests {
                 .await
                 .unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn stale_ref_epoch_is_invisible_to_ref_reads() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "repositories/test".to_owned());
+        let root = RootRecord::encode(
+            RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
+        )
+        .unwrap();
+        store
+            .create_strict(&router.capsule_root_path(), root.bytes().clone())
+            .await
+            .unwrap();
+        let transaction_id = "2".repeat(64);
+        let pointer = CapsulePointer::new(
+            "3".repeat(64),
+            1,
+            0,
+            vec![transaction_id.clone()],
+            root.digest(),
+        )
+        .unwrap();
+        let old = crab_metadata::capsule_protocol::CapsuleRefHead::from_root(
+            "refs/heads/main",
+            "9".repeat(64),
+            None,
+            None,
+        )
+        .unwrap();
+        let state = old
+            .successor_state(
+                &BTreeSet::new(),
+                Some("4".repeat(40)),
+                None,
+                transaction_id,
+                vec![pointer],
+            )
+            .unwrap();
+        let stale = old.commit(state).unwrap();
+        store
+            .create_strict(
+                &router.capsule_ref_head_path(
+                    &crab_metadata::capsule_protocol::capsule_ref_name_key("refs/heads/main"),
+                ),
+                stale.encode().unwrap(),
+            )
+            .await
+            .unwrap();
+        let snapshot = load_root(&router).await.unwrap();
+
+        let refs = read_visible_refs_from_root(&router, &snapshot)
+            .await
+            .unwrap();
+
+        assert!(refs.is_empty());
     }
 
     #[tokio::test]

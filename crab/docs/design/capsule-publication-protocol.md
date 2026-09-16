@@ -31,15 +31,19 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
 - foreground per-ref publication appends one leaf capsule without reading or
   rewriting history; server maintenance checkpoints after 32 visible capsules
   and writers discard the exact checkpointed prefix;
-- executable writer tests prove three successful checksum-qualified operations
-  for first-ref creation and four for an existing ref, with one additional
-  capsule readback on unqualified stores; end-to-end counters must also include
-  not-found attempts, ref discovery, leases, and namespace gates;
+- executable writer tests prove four successful checksum-qualified operations
+  for first-ref creation and five for an existing ref, with one additional
+  capsule readback on unqualified stores; the final root GET proves the ref
+  authority epoch did not change around the ref-head CAS; end-to-end counters
+  must also include not-found attempts, ref discovery, leases, and namespace
+  gates;
 - the companion xorb/shard path is live-qualified on RustFS with ten 512 MiB
   files across a seed and ten edits, independent clone/hydration, and 9.30%
   retained xorb bytes versus logical history;
-- the checksum-qualified AWS S3 test proves exactly three operations, while
-  custom S3 endpoints and other providers retain mandatory readback;
+- the earlier checksum-qualified AWS S3 test proved the superseded
+  three-operation path; the four-operation authority-confirming path requires
+  hosted requalification, while custom S3 endpoints and other providers retain
+  mandatory readback;
 - the executable one-capsule read test proves exactly two object-store
   operations: root GET and capsule-run GET;
 - the RustFS protocol-v2 partial-clone smoke passes 92 checks; hidden,
@@ -86,14 +90,16 @@ pointer-free small-push budget after a root/view is already captured is:
 
 | Capability | Complete push | After Git advertisement |
 | --- | ---: | ---: |
-| Provider validates a qualified cryptographic upload checksum | **3 requests** | **3 requests** |
-| Crab must independently stream the uploaded capsule back | **4 requests** | **4 requests** |
+| Provider validates a qualified cryptographic upload checksum | **4 requests** | **4 requests** |
+| Crab must independently stream the uploaded capsule back | **5 requests** | **5 requests** |
 
-The three-request path is:
+The four-request path is:
 
 1. `GET {repo}/v2/refs/heads/{ref-key}` for the selected ref and CAS version.
 2. Conditional `PUT {repo}/v2/capsules/{fanout}/{capsule-hash}`.
 3. Conditional `PUT {repo}/v2/refs/heads/{ref-key}` against that version.
+4. `GET {repo}/v2/root` to prove the ref authority epoch did not rotate across
+   the ref-head commit.
 
 Advertisement separately captures the root and visible ref heads. The writer
 rechecks the selected head at commitment so it has the exact CAS token. Commit
@@ -190,11 +196,11 @@ report those operations separately.
 | --- | ---: | ---: | --- |
 | No-op after advertisement | 0 | 0 | The advertised root already proves the result |
 | No-op including advertisement | 1 | 1 | Root GET only |
-| Ref-only update | 3 | 4 | A small capsule preserves transaction history and recovery evidence |
-| New small capsule after root/view capture | 3 | 4 | Ref-head GET, leaf PUT, optional leaf readback, ref-head CAS |
-| Incremental capsule at any frontier depth | 3 | 4 | Foreground publication never reads or rewrites prior capsules |
-| Existing verified capsule | 4 | 4 | Create conflict requires body verification before reuse |
-| New multipart capsule with `P` parts | `P + 4` | `P + 5` | Ref-head GET, initiate, parts, complete, optional GET, ref-head CAS |
+| Ref-only update | 4 | 5 | A small capsule preserves transaction history and recovery evidence, then confirms the root epoch |
+| New small capsule after root/view capture | 4 | 5 | Ref-head GET, leaf PUT, optional leaf readback, ref-head CAS, root-epoch GET |
+| Incremental capsule at any frontier depth | 4 | 5 | Foreground publication never reads or rewrites prior capsules |
+| Existing verified capsule | 5 | 5 | Create conflict requires body verification before reuse |
+| New multipart capsule with `P` parts | `P + 5` | `P + 6` | Ref-head GET, initiate, parts, complete, optional GET, ref-head CAS, root-epoch GET |
 | Ref-head CAS conflict | `+2` per retry | `+2` per retry | Refresh head, revalidate, retry CAS |
 | Uncertain ref-head CAS response | `+1` | `+1` | Read the head and classify the exact attempted transition |
 
@@ -660,7 +666,7 @@ run or required contiguous pack range, the theoretical minima are:
 At the 32-capsule maintenance threshold, a healthy checkpointed repository
 normally needs two origin reads for a full authorized clone and at most 34
 while checkpoint publication is pending. The tradeoff is deliberate: simple
-incremental push remains three qualified or four readback-required operations
+incremental push remains four qualified or five readback-required operations
 at every depth, while bounded concurrent reads and background checkpointing
 absorb history. Checkpoint construction now installs and validates the pinned
 pack inventory, verifies the current ref graph with strict Git fsck, and emits
@@ -772,8 +778,8 @@ object keys, credentials, or repository secrets in labels.
 
 The release must include deterministic tests proving:
 
-- exact three-request clean push on a checksum-qualified fake provider;
-- exact four-request clean push on a readback-required provider;
+- exact four-request clean push on a checksum-qualified fake provider;
+- exact five-request clean push on a readback-required provider;
 - no HEAD, LIST, lock, admission, heartbeat, journal, or fence operation on a
   pointer-free clean push;
 - one capsule for a multi-commit, multi-ref transaction;
@@ -810,8 +816,8 @@ provider then runs isolated-prefix qualification with:
 - concurrent normal GC and exclusive forced GC;
 - request, latency, throughput, byte, and integrity reports.
 
-A provider may advertise the three-request path only when its checksum gate
-passes. Otherwise it advertises and enforces the four-request path.
+A provider may advertise the four-request path only when its checksum gate
+passes. Otherwise it advertises and enforces the five-request path.
 
 ## 15. Hard cutover
 
@@ -915,7 +921,7 @@ paths after the cutover.
 The implementation may proceed behind an unreachable development module, but
 production wiring and format freeze require these decisions to be closed:
 
-- **Decided:** independent readback is the safe baseline; the three-request
+- **Decided:** independent readback is the safe baseline; the four-request
   path is enabled only for a provider/endpoint that passes cryptographic
   verified-PUT qualification;
 - **Partly decided:** roots are capped at 8 MiB. Repositories whose complete

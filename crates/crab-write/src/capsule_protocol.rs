@@ -238,7 +238,7 @@ async fn publish_prepared(
             .next()
             .ok_or_else(|| WriteError::Internal("single-ref publication disappeared".to_owned()))?;
         commit_single_ref(router, prepared).await?;
-        return Ok(base);
+        return verify_ref_epoch(router, &base).await;
     }
 
     let activation_id = activation_id(&transaction_id);
@@ -263,7 +263,7 @@ async fn publish_prepared(
         )
         .await?;
     }
-    Ok(base)
+    verify_ref_epoch(router, &base).await
 }
 
 /// Prepared v2 publication whose immutable bytes and optional plan intent are durable.
@@ -373,7 +373,7 @@ pub async fn materialize_coordinated_publication(
         )
         .await?;
     }
-    Ok(base)
+    verify_ref_epoch(router, &base).await
 }
 
 /// Replay one coordinator-authorized v2 publication from immutable regional bytes.
@@ -395,8 +395,9 @@ pub async fn materialize_coordinated_repair(
         ref_state_contains_transaction(&snapshot.visible, &descriptor.transaction_id)
     }) {
         let activation_id = visible_transaction_activation(router, &snapshots, descriptor).await?;
+        let root = verify_ref_epoch(router, &base).await?;
         return Ok(CoordinatedRepairOutcome {
-            root: base,
+            root,
             activation_id,
         });
     }
@@ -430,10 +431,32 @@ pub async fn materialize_coordinated_repair(
     let refs = prepared.into_iter().map(|(prepared, _)| prepared).collect();
     let activation_id = activation_id(&descriptor.transaction_id);
     commit_multi_ref(router, &descriptor.transaction_id, &activation_id, refs).await?;
+    let root = verify_ref_epoch(router, &base).await?;
     Ok(CoordinatedRepairOutcome {
-        root: base,
+        root,
         activation_id,
     })
+}
+
+async fn verify_ref_epoch(
+    router: &StoreLayout<Store>,
+    base: &RootSnapshot,
+) -> Result<RootSnapshot> {
+    let observed = open_root(router).await?;
+    if observed.record().root().repository_id() != base.record().root().repository_id() {
+        return Err(WriteError::CorruptObject {
+            path: router.capsule_root_path().to_string(),
+            reason: "repository identity changed during ref publication".to_owned(),
+        });
+    }
+    if observed.record().root().ref_epoch() != base.record().root().ref_epoch() {
+        return Err(WriteError::CapsuleRefEpochChanged {
+            path: router.capsule_root_path().to_string(),
+            expected_epoch: base.record().root().ref_epoch().to_owned(),
+            actual_epoch: observed.record().root().ref_epoch().to_owned(),
+        });
+    }
+    Ok(observed)
 }
 
 async fn visible_transaction_activation(
@@ -701,11 +724,24 @@ async fn read_ref_head(
                     reason: "capsule ref-head key does not match its ref name".to_owned(),
                 });
             }
-            (head, Some(etag))
+            if head.ref_epoch() == root.ref_epoch() {
+                (head, Some(etag))
+            } else {
+                (
+                    crab_metadata::capsule_protocol::CapsuleRefHead::from_root(
+                        ref_name,
+                        root.ref_epoch().to_owned(),
+                        root.refs().get(ref_name).cloned(),
+                        root.peeled_refs().get(ref_name).cloned(),
+                    )?,
+                    Some(etag),
+                )
+            }
         }
         Err(StorageError::NotFound { .. }) => (
             crab_metadata::capsule_protocol::CapsuleRefHead::from_root(
                 ref_name,
+                root.ref_epoch().to_owned(),
                 root.refs().get(ref_name).cloned(),
                 root.peeled_refs().get(ref_name).cloned(),
             )?,
@@ -1375,6 +1411,162 @@ pub async fn begin_gc(
     update_maintenance_root(router, base, RootRecord::encode(next)?, &fence_id).await
 }
 
+/// Fence a restore and atomically invalidate every prior ref-head authority.
+pub async fn begin_restore(
+    router: &StoreLayout<Store>,
+    base: RootSnapshot,
+    fence: crab_metadata::capsule_protocol::GcFence,
+    ref_epoch: String,
+) -> Result<RootSnapshot> {
+    let fence_id = fence.id().to_owned();
+    let next = base
+        .record()
+        .root()
+        .begin_restore(base.record().digest(), fence, ref_epoch)?;
+    let candidate = RootRecord::encode(next)?;
+    let root_path = router.capsule_root_path();
+    match router
+        .store()
+        .update(&root_path, candidate.bytes().clone(), base.etag().clone())
+        .await
+    {
+        Ok(etag) => Ok(base.committed_restore_fence(candidate, etag)?),
+        Err(StorageError::StateConflict { .. }) => Err(WriteError::CapsuleRootChanged {
+            path: root_path.to_string(),
+        }),
+        Err(source) => {
+            let verification = open_root(router).await;
+            match verification {
+                Ok(snapshot) if snapshot.record().digest() == candidate.digest() => Ok(snapshot),
+                Ok(snapshot) if snapshot.record().digest() == base.record().digest() => {
+                    Err(source.into())
+                }
+                Ok(_) => Err(WriteError::CapsuleMaintenanceCommitUncertain {
+                    fence_id,
+                    source: Box::new(source),
+                    verification: None,
+                }),
+                Err(verification) => Err(WriteError::CapsuleMaintenanceCommitUncertain {
+                    fence_id,
+                    source: Box::new(source),
+                    verification: Some(Box::new(verification)),
+                }),
+            }
+        }
+    }
+}
+
+/// Publish one verified historical checkpoint as the new fenced repository state.
+pub async fn restore_checkpoint(
+    router: &StoreLayout<Store>,
+    base: RootSnapshot,
+    checkpoint: &Checkpoint,
+    refs: std::collections::BTreeMap<String, String>,
+    peeled_refs: std::collections::BTreeMap<String, String>,
+    head: String,
+) -> Result<RootSnapshot> {
+    if base.record().root().gc_fence().is_none() {
+        return Err(WriteError::Internal(
+            "checkpoint restore requires a GC fence".to_owned(),
+        ));
+    }
+    if checkpoint.covered_generation() != base.record().root().generation()
+        || checkpoint.covered_root_digest() != base.record().digest()
+    {
+        return Err(WriteError::CorruptObject {
+            path: "capsule-protocol restore checkpoint".to_owned(),
+            reason: "restore checkpoint does not cover the exact fenced root".to_owned(),
+        });
+    }
+    let visibility =
+        checkpoint
+            .visibility_snapshot()?
+            .ok_or_else(|| WriteError::CorruptObject {
+                path: checkpoint.hash().to_owned(),
+                reason: "restore checkpoint has no complete Git visibility snapshot".to_owned(),
+            })?;
+    if visibility
+        .refs()
+        .keys()
+        .collect::<std::collections::BTreeSet<_>>()
+        != refs.keys().collect::<std::collections::BTreeSet<_>>()
+        || refs.iter().any(|(name, oid)| {
+            visibility
+                .refs()
+                .get(name)
+                .is_none_or(|objects| objects.binary_search(oid).is_err())
+        })
+    {
+        return Err(WriteError::CorruptObject {
+            path: checkpoint.hash().to_owned(),
+            reason: "restore checkpoint visibility does not authenticate its ref tips".to_owned(),
+        });
+    }
+    let object_count = checkpoint
+        .git_packs()
+        .iter()
+        .try_fold(0_u64, |total, pack| {
+            total.checked_add(pack.object_count()).ok_or_else(|| {
+                WriteError::Internal("restore checkpoint object count overflowed".to_owned())
+            })
+        })?;
+    let pack_count = u32::try_from(checkpoint.git_packs().len())
+        .map_err(|_| WriteError::Internal("restore checkpoint pack count overflowed".to_owned()))?;
+    let pointer = CheckpointPointer::new(
+        checkpoint.hash(),
+        checkpoint.bytes().len() as u64,
+        checkpoint.covered_generation(),
+        checkpoint.covered_root_digest(),
+        pack_count,
+        object_count,
+    )?;
+    router
+        .store()
+        .put_if_absent_verified(
+            &router.capsule_checkpoint_path(checkpoint.hash()),
+            checkpoint.bytes().clone(),
+        )
+        .await?;
+    let next = base.record().root().restore_checkpoint(
+        base.record().digest(),
+        pointer,
+        refs,
+        peeled_refs,
+        head,
+    )?;
+    let candidate = RootRecord::encode(next)?;
+    let root_path = router.capsule_root_path();
+    match router
+        .store()
+        .update(&root_path, candidate.bytes().clone(), base.etag().clone())
+        .await
+    {
+        Ok(etag) => Ok(base.committed_restore(candidate, etag)?),
+        Err(StorageError::StateConflict { .. }) => Err(WriteError::CapsuleRootChanged {
+            path: root_path.to_string(),
+        }),
+        Err(source) => {
+            let verification = open_root(router).await;
+            match verification {
+                Ok(snapshot) if snapshot.record().digest() == candidate.digest() => Ok(snapshot),
+                Ok(snapshot) if snapshot.record().digest() == base.record().digest() => {
+                    Err(source.into())
+                }
+                Ok(_) => Err(WriteError::CapsuleCheckpointCommitUncertain {
+                    checkpoint_hash: checkpoint.hash().to_owned(),
+                    source: Box::new(source),
+                    verification: None,
+                }),
+                Err(verification) => Err(WriteError::CapsuleCheckpointCommitUncertain {
+                    checkpoint_hash: checkpoint.hash().to_owned(),
+                    source: Box::new(source),
+                    verification: Some(Box::new(verification)),
+                }),
+            }
+        }
+    }
+}
+
 /// Atomically clear the exact GC fence after a sweep.
 pub async fn end_gc(
     router: &StoreLayout<Store>,
@@ -1721,7 +1913,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clean_publication_uses_four_requests_including_root_open() {
+    async fn clean_publication_uses_five_requests_including_epoch_confirmation() {
         let inner = Arc::new(InMemory::new());
         let seed_store = Store::new(inner.clone());
         let seed_router = StoreLayout::new(seed_store.clone(), "repositories/test".to_owned());
@@ -1756,12 +1948,13 @@ mod tests {
                 StorageOperation::Put,
                 StorageOperation::Get,
                 StorageOperation::Put,
+                StorageOperation::Get,
             ]
         );
     }
 
     #[tokio::test]
-    async fn checksum_qualified_publication_uses_three_requests_including_root_open() {
+    async fn checksum_qualified_publication_uses_four_requests_including_epoch_confirmation() {
         let inner = Arc::new(InMemory::new());
         let seed_store = Store::new(inner.clone());
         let seed_router = StoreLayout::new(seed_store, "repositories/test".to_owned());
@@ -1797,6 +1990,7 @@ mod tests {
                 StorageOperation::Get,
                 StorageOperation::Put,
                 StorageOperation::Put,
+                StorageOperation::Get,
             ]
         );
     }
@@ -2301,6 +2495,7 @@ mod tests {
                 StorageOperation::Put,
                 StorageOperation::Put,
                 StorageOperation::Get,
+                StorageOperation::Get,
             ]
         );
     }
@@ -2352,8 +2547,131 @@ mod tests {
             .iter()
             .filter(|observation| observation.outcome == StorageOutcome::Success)
             .count();
-        assert!(request_count <= 256, "request count was {request_count}");
-        assert!((request_count as f64 / 64.0) <= 4.0);
+        assert!(request_count <= 320, "request count was {request_count}");
+        assert!((request_count as f64 / 64.0) <= 5.0);
+    }
+
+    #[tokio::test]
+    async fn restore_epoch_makes_a_late_old_epoch_publication_invisible() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        let base = initialize(&router, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let first = transaction(&base, None, &"2".repeat(40));
+        let base = publish(&router, base, &first, &capsule(&first))
+            .await
+            .unwrap();
+        let late = transaction(&base, Some(&"2".repeat(40)), &"3".repeat(40));
+        let prepared = prepare_publication(&router, base.clone(), &late, &capsule(&late))
+            .await
+            .unwrap();
+        let visible = read_ref_head(&router, base.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
+        let checkpoint = Checkpoint::build(
+            base.record().root().generation(),
+            base.record().digest(),
+            vec![
+                CapsuleGitPack::new(
+                    Bytes::from_static(b"PACK"),
+                    Bytes::from_static(b"index"),
+                    Bytes::from_static(b"reverse"),
+                    Bytes::from_static(b"locator"),
+                    "3".repeat(40),
+                    1,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let checkpointed = publish_ref_checkpoint(
+            &router,
+            base,
+            &checkpoint,
+            std::collections::BTreeMap::from([("refs/heads/main".to_owned(), "2".repeat(40))]),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::from([("refs/heads/main".to_owned(), first.id().unwrap())]),
+            visible.visible.frontier().to_vec(),
+        )
+        .await
+        .unwrap();
+        let fenced = begin_restore(
+            &router,
+            checkpointed,
+            crab_metadata::capsule_protocol::GcFence::new("f".repeat(64), 1).unwrap(),
+            "e".repeat(64),
+        )
+        .await
+        .unwrap();
+
+        let error = publish_prepared(&router, prepared).await.unwrap_err();
+        assert!(matches!(error, WriteError::CapsuleRefEpochChanged { .. }));
+        let visible = read_ref_head(&router, fenced.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
+        let expected = "2".repeat(40);
+        assert_eq!(visible.visible.oid(), Some(expected.as_str()));
+        assert_eq!(visible.head.ref_epoch(), fenced.record().root().ref_epoch());
+
+        let restored_oid = "4".repeat(40);
+        let visibility_index = crab_metadata::git_visibility::GitVisibilityIndex::new(
+            fenced.record().root().generation(),
+            "6".repeat(64),
+            "7".repeat(64),
+            std::collections::BTreeMap::from([(
+                "refs/heads/recovered".to_owned(),
+                vec![restored_oid.clone()],
+            )]),
+        )
+        .unwrap();
+        let visibility = crab_metadata::capsule_protocol::CapsuleVisibilitySnapshot::from_index(
+            &visibility_index,
+        )
+        .unwrap();
+        let restore_checkpoint_body = Checkpoint::build_with_catalogs(
+            fenced.record().root().generation(),
+            fenced.record().digest(),
+            vec![
+                CapsuleGitPack::new(
+                    Bytes::from_static(b"RESTORED PACK"),
+                    Bytes::from_static(b"restored index"),
+                    Bytes::from_static(b"restored reverse"),
+                    Bytes::from_static(b"restored locator"),
+                    "5".repeat(40),
+                    1,
+                )
+                .unwrap(),
+            ],
+            crab_metadata::capsule_protocol::PointerCatalog::new(),
+            Some(visibility),
+        )
+        .unwrap();
+        let restored = restore_checkpoint(
+            &router,
+            fenced.clone(),
+            &restore_checkpoint_body,
+            std::collections::BTreeMap::from([("refs/heads/recovered".to_owned(), restored_oid)]),
+            std::collections::BTreeMap::new(),
+            "refs/heads/recovered".to_owned(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            restored.record().root().generation(),
+            fenced.record().root().generation() + 1
+        );
+        assert_eq!(
+            restored.record().root().ref_epoch(),
+            fenced.record().root().ref_epoch()
+        );
+        assert_eq!(restored.record().root().head(), "refs/heads/recovered");
+        assert_eq!(
+            restored.record().root().history(),
+            fenced.record().root().history()
+        );
+        let released = end_gc(&router, restored, &"f".repeat(64)).await.unwrap();
+        assert!(released.record().root().gc_fence().is_none());
     }
 
     #[tokio::test]

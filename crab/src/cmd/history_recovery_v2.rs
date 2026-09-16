@@ -23,10 +23,12 @@ use crate::storage::StoreLayout;
 use crate::storage::store::Store;
 
 const UNRECORDED_TIME: &str = "not-recorded";
-const HISTORY_FENCE_TTL: Duration = Duration::from_secs(60 * 60);
+const HISTORY_FENCE_TTL: Duration = Duration::from_hours(1);
+const RESTORE_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 struct VerifiedCapsuleHistory {
     segment: HistorySegment,
+    checkpoint: Checkpoint,
     verification: HistoryVerificationPayload,
     _workspace: tempfile::TempDir,
 }
@@ -70,13 +72,11 @@ pub(super) async fn run(
             emit_prune(&payload, command.output_mode())
         }
         HistoryCmd::Restore(args) => {
-            let payload = restore_preview(&layout, &root, args, cancel).await?;
-            if args.apply {
-                return Err(CrabError::Protocol(
-                    "protocol-v2 history restore requires restore-as-new capsule publication"
-                        .to_owned(),
-                ));
-            }
+            let payload = if args.apply {
+                restore_history(store, router, &layout, args, cancel).await?
+            } else {
+                restore_preview(&layout, &root, args, cancel).await?
+            };
             emit_restore(&payload, command.output_mode())
         }
     }
@@ -268,6 +268,7 @@ async fn verify_history(
     };
     Ok(VerifiedCapsuleHistory {
         segment,
+        checkpoint,
         verification,
         _workspace: workspace,
     })
@@ -602,6 +603,165 @@ async fn restore_preview(
         acceleration_rebuilt: false,
         verification: verified.verification,
     })
+}
+
+async fn restore_history(
+    store: &Store,
+    router: &StoreLayout,
+    layout: &CapsuleStoreLayout<crab_storage::Store>,
+    args: &HistoryRestoreArgs,
+    cancel: &CancellationToken,
+) -> Result<HistoryRestorePayload> {
+    let lease =
+        crate::maintenance::GcSweepLease::acquire(store, router.repo_prefix(), cancel).await?;
+    let operation = async {
+        check_cancelled(cancel)?;
+        let base = crab_write::capsule_protocol::open_root(layout).await?;
+        let verified = verify_history(
+            layout,
+            &base,
+            args.generation,
+            args.digest.as_deref(),
+            cancel,
+        )
+        .await?;
+        let view = crab_read::capsule_protocol::open_view_from_root(
+            layout,
+            base,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: RESTORE_CHECKPOINT_BYTES,
+                max_frontier_bytes: RESTORE_CHECKPOINT_BYTES,
+            },
+        )
+        .await?;
+        let previous_generation = view.root().root().generation();
+        let (refs_added, refs_updated, refs_deleted) =
+            ref_change_counts(view.refs(), verified.segment.refs());
+        let current_catalog = view.pointer_catalog()?;
+        let current_visibility =
+            crab_metadata::capsule_protocol::CapsuleVisibilitySnapshot::from_index(
+                &view.git_visibility_index()?,
+            )?;
+        let current_packs = crab_remote::checkpoint::consolidate_git_packs(
+            &view,
+            RESTORE_CHECKPOINT_BYTES,
+            RESTORE_CHECKPOINT_BYTES,
+            cancel,
+        )
+        .await
+        .map_err(map_checkpoint_error)?
+        .into_packs();
+        let current_checkpoint = Checkpoint::build_with_catalogs(
+            view.root().root().generation(),
+            view.root().digest(),
+            current_packs,
+            current_catalog.clone(),
+            Some(current_visibility),
+        )?;
+        let checkpointed = crab_write::capsule_protocol::publish_ref_checkpoint(
+            layout,
+            view.root_snapshot().clone(),
+            &current_checkpoint,
+            view.refs().clone(),
+            view.peeled_refs().clone(),
+            view.visible_ref_transactions().clone(),
+            view.capsule_run_pointers().to_vec(),
+        )
+        .await?;
+        check_cancelled(cancel)?;
+
+        let fence_id = blake3::hash(uuid::Uuid::now_v7().as_bytes())
+            .to_hex()
+            .to_string();
+        let ref_epoch = {
+            let mut hasher = blake3::Hasher::new_derive_key("crab capsule ref epoch v2");
+            hasher.update(checkpointed.record().digest().as_bytes());
+            hasher.update(fence_id.as_bytes());
+            hasher.finalize().to_hex().to_string()
+        };
+        let expires_at_unix = SystemTime::now()
+            .checked_add(HISTORY_FENCE_TTL)
+            .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .ok_or_else(|| {
+                CrabError::Internal("history fence expiry cannot be represented".to_owned())
+            })?;
+        let fenced = crab_write::capsule_protocol::begin_restore(
+            layout,
+            checkpointed,
+            crab_metadata::capsule_protocol::GcFence::new(&fence_id, expires_at_unix)?,
+            ref_epoch,
+        )
+        .await?;
+
+        let restore = async {
+            let visibility = verified.checkpoint.visibility_snapshot()?.ok_or_else(|| {
+                CrabError::CorruptObject {
+                    path: verified.checkpoint.hash().to_owned(),
+                    reason: "historical checkpoint has no complete Git visibility snapshot"
+                        .to_owned(),
+                }
+            })?;
+            let checkpoint = Checkpoint::build_with_catalogs(
+                fenced.record().root().generation(),
+                fenced.record().digest(),
+                checkpoint_git_packs(&verified.checkpoint)?,
+                current_catalog,
+                Some(visibility),
+            )?;
+            check_cancelled(cancel)?;
+            crab_write::capsule_protocol::restore_checkpoint(
+                layout,
+                fenced.clone(),
+                &checkpoint,
+                verified.segment.refs().clone(),
+                verified.segment.peeled_refs().clone(),
+                verified.segment.head().to_owned(),
+            )
+            .await
+            .map_err(CrabError::from)
+        }
+        .await;
+        let (primary, release_base) = match restore {
+            Ok(root) => (None, root),
+            Err(error) => (Some(error), fenced),
+        };
+        let release = crab_write::capsule_protocol::end_gc(layout, release_base, &fence_id).await;
+        match (primary, release) {
+            (None, Ok(root)) => Ok(HistoryRestorePayload {
+                applied: true,
+                source_generation: verified.segment.checkpoint().covered_generation(),
+                source_digest: verified.segment.hash().to_owned(),
+                previous_generation,
+                restored_generation: Some(root.record().root().generation()),
+                refs_added,
+                refs_updated,
+                refs_deleted,
+                acceleration_rebuilt: true,
+                verification: verified.verification,
+            }),
+            (Some(error), _) => Err(error),
+            (None, Err(error)) => Err(error.into()),
+        }
+    }
+    .await;
+    let release = lease.release().await;
+    match (operation, release) {
+        (Ok(payload), Ok(())) => Ok(payload),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+fn map_checkpoint_error(error: crab_remote::checkpoint::CheckpointError) -> CrabError {
+    match error {
+        crab_remote::checkpoint::CheckpointError::Cancelled => CrabError::Cancelled,
+        crab_remote::checkpoint::CheckpointError::Read(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Repack(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Pack(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Metadata(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Io(source) => source.into(),
+        other => CrabError::Internal(other.to_string()),
+    }
 }
 
 fn ref_change_counts(

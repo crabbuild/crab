@@ -9,7 +9,7 @@ use crate::validation::{validate_content_hash, validate_sha1};
 use super::{HistorySegmentPointer, valid_ref_name, valid_ref_namespace};
 
 const ROOT_MAGIC: &[u8; 8] = b"CRBROOT2";
-const ROOT_VERSION: u32 = 2;
+const ROOT_VERSION: u32 = 3;
 const ROOT_HEADER_BYTES: usize = ROOT_MAGIC.len() + 4 + 8;
 const ROOT_DIGEST_BYTES: usize = 32;
 /// Maximum encoded repository-root size accepted by readers and writers.
@@ -203,6 +203,7 @@ impl CheckpointPointer {
 pub struct RepositoryRoot {
     version: u32,
     repository_id: String,
+    ref_epoch: String,
     generation: u64,
     parent_root_digest: Option<String>,
     latest_transaction_base_digest: Option<String>,
@@ -226,6 +227,7 @@ impl RepositoryRoot {
         let root = Self {
             version: ROOT_VERSION,
             repository_id: repository_id.to_owned(),
+            ref_epoch: repository_id.to_owned(),
             generation: 0,
             parent_root_digest: None,
             latest_transaction_base_digest: None,
@@ -294,6 +296,7 @@ impl RepositoryRoot {
         let root = Self {
             version: ROOT_VERSION,
             repository_id: self.repository_id.clone(),
+            ref_epoch: self.ref_epoch.clone(),
             generation: self
                 .generation
                 .checked_add(1)
@@ -345,6 +348,7 @@ impl RepositoryRoot {
         let root = Self {
             version: ROOT_VERSION,
             repository_id: self.repository_id.clone(),
+            ref_epoch: self.ref_epoch.clone(),
             generation: self.generation,
             parent_root_digest: Some(parent_root_digest.to_owned()),
             latest_transaction_base_digest: None,
@@ -389,6 +393,7 @@ impl RepositoryRoot {
         let root = Self {
             version: ROOT_VERSION,
             repository_id: self.repository_id.clone(),
+            ref_epoch: self.ref_epoch.clone(),
             generation: self
                 .generation
                 .checked_add(1)
@@ -442,6 +447,7 @@ impl RepositoryRoot {
         let root = Self {
             version: ROOT_VERSION,
             repository_id: self.repository_id.clone(),
+            ref_epoch: self.ref_epoch.clone(),
             generation: self.generation,
             parent_root_digest: Some(parent_root_digest.to_owned()),
             latest_transaction_base_digest: self.latest_transaction_base_digest.clone(),
@@ -453,6 +459,48 @@ impl RepositoryRoot {
             capsule_frontier: self.capsule_frontier.clone(),
             compacted_ref_transactions: self.compacted_ref_transactions.clone(),
             delta_depth: self.delta_depth,
+            gc_fence: Some(fence),
+            capabilities: self.capabilities.clone(),
+        };
+        validate_root(&root)?;
+        Ok(root)
+    }
+
+    /// Fence restore work and atomically retire every prior ref-head authority.
+    pub fn begin_restore(
+        &self,
+        parent_root_digest: &str,
+        fence: GcFence,
+        ref_epoch: String,
+    ) -> Result<Self> {
+        if self.gc_fence.is_some() {
+            return Err(contract_error(
+                "restore fencing requires an unfenced repository root",
+            ));
+        }
+        if self.checkpoint.is_none()
+            || !self.capsule_frontier.is_empty()
+            || ref_epoch == self.ref_epoch
+        {
+            return Err(contract_error(
+                "restore fencing requires a checkpointed root and a new ref epoch",
+            ));
+        }
+        let root = Self {
+            version: ROOT_VERSION,
+            repository_id: self.repository_id.clone(),
+            ref_epoch,
+            generation: self.generation,
+            parent_root_digest: Some(parent_root_digest.to_owned()),
+            latest_transaction_base_digest: None,
+            refs: self.refs.clone(),
+            peeled_refs: self.peeled_refs.clone(),
+            head: self.head.clone(),
+            checkpoint: self.checkpoint.clone(),
+            history: self.history.clone(),
+            capsule_frontier: Vec::new(),
+            compacted_ref_transactions: BTreeMap::new(),
+            delta_depth: 0,
             gc_fence: Some(fence),
             capabilities: self.capabilities.clone(),
         };
@@ -501,10 +549,62 @@ impl RepositoryRoot {
         Ok(root)
     }
 
+    /// Atomically restore refs, HEAD, and checkpoint under a new ref authority epoch.
+    pub fn restore_checkpoint(
+        &self,
+        parent_root_digest: &str,
+        checkpoint: CheckpointPointer,
+        refs: BTreeMap<String, String>,
+        peeled_refs: BTreeMap<String, String>,
+        head: String,
+    ) -> Result<Self> {
+        if self.gc_fence.is_none() {
+            return Err(contract_error(
+                "checkpoint restore requires an active GC fence",
+            ));
+        }
+        if checkpoint.covered_generation != self.generation
+            || checkpoint.covered_root_digest != parent_root_digest
+        {
+            return Err(contract_error(
+                "restore checkpoint does not cover the exact fenced root",
+            ));
+        }
+        let root = Self {
+            version: ROOT_VERSION,
+            repository_id: self.repository_id.clone(),
+            ref_epoch: self.ref_epoch.clone(),
+            generation: self
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| contract_error("root generation overflowed"))?,
+            parent_root_digest: Some(parent_root_digest.to_owned()),
+            latest_transaction_base_digest: None,
+            refs,
+            peeled_refs,
+            head,
+            checkpoint: Some(checkpoint),
+            history: self.history.clone(),
+            capsule_frontier: Vec::new(),
+            compacted_ref_transactions: BTreeMap::new(),
+            delta_depth: 0,
+            gc_fence: self.gc_fence.clone(),
+            capabilities: self.capabilities.clone(),
+        };
+        validate_root(&root)?;
+        Ok(root)
+    }
+
     /// Return the repository identity bound into every generation.
     #[must_use]
     pub fn repository_id(&self) -> &str {
         &self.repository_id
+    }
+
+    /// Return the authority epoch required for independently mutable ref heads.
+    #[must_use]
+    pub fn ref_epoch(&self) -> &str {
+        &self.ref_epoch
     }
 
     /// Return the monotonically increasing repository generation.
@@ -778,6 +878,7 @@ fn validate_root(root: &RepositoryRoot) -> Result<()> {
         "root repository id",
         "capsule-protocol root",
     )?;
+    validate_content_hash(&root.ref_epoch, "root ref epoch", "capsule-protocol root")?;
     if !root.head.starts_with("refs/heads/") || !valid_ref_name(&root.head) {
         return Err(contract_error("root HEAD must name a branch"));
     }

@@ -27,6 +27,14 @@ pub enum WriteError {
     RefChanged { ref_name: String, path: String },
     #[error("capsule-protocol root changed at {path}")]
     CapsuleRootChanged { path: String },
+    #[error(
+        "capsule-protocol ref authority changed from {expected_epoch} to {actual_epoch} at {path}; the publication is not visible and must be retried"
+    )]
+    CapsuleRefEpochChanged {
+        path: String,
+        expected_epoch: String,
+        actual_epoch: String,
+    },
     #[error("capsule-protocol root is fenced for GC by {fence_id}")]
     CapsuleGcFenced {
         fence_id: String,

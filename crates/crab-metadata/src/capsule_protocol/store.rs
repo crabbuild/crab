@@ -42,6 +42,7 @@ impl RootSnapshot {
             .ok_or_else(|| contract_error("root generation overflowed"))?;
         if record.root().generation() != generation
             || record.root().parent_root_digest() != Some(self.record.digest())
+            || record.root().ref_epoch() != self.record.root().ref_epoch()
         {
             return Err(contract_error(
                 "committed root does not directly extend its CAS snapshot",
@@ -55,6 +56,7 @@ impl RootSnapshot {
         if record.root().generation() != self.record.root().generation()
             || record.root().parent_root_digest() != Some(self.record.digest())
             || record.root().repository_id() != self.record.root().repository_id()
+            || record.root().ref_epoch() != self.record.root().ref_epoch()
             || record.root().refs() != self.record.root().refs()
             || record.root().peeled_refs() != self.record.root().peeled_refs()
             || record.root().head() != self.record.root().head()
@@ -79,6 +81,7 @@ impl RootSnapshot {
         if record.root().generation() != generation
             || record.root().parent_root_digest() != Some(self.record.digest())
             || record.root().repository_id() != self.record.root().repository_id()
+            || record.root().ref_epoch() != self.record.root().ref_epoch()
             || record.root().head() != self.record.root().head()
             || !record.root().capsule_frontier().is_empty()
             || record.root().checkpoint().is_none()
@@ -95,6 +98,7 @@ impl RootSnapshot {
         if record.root().generation() != self.record.root().generation()
             || record.root().parent_root_digest() != Some(self.record.digest())
             || record.root().repository_id() != self.record.root().repository_id()
+            || record.root().ref_epoch() != self.record.root().ref_epoch()
             || record.root().refs() != self.record.root().refs()
             || record.root().peeled_refs() != self.record.root().peeled_refs()
             || record.root().checkpoint() != self.record.root().checkpoint()
@@ -116,6 +120,7 @@ impl RootSnapshot {
         if record.root().generation() != self.record.root().generation()
             || record.root().parent_root_digest() != Some(self.record.digest())
             || record.root().repository_id() != self.record.root().repository_id()
+            || record.root().ref_epoch() != self.record.root().ref_epoch()
             || record.root().refs() != self.record.root().refs()
             || record.root().peeled_refs() != self.record.root().peeled_refs()
             || record.root().head() != self.record.root().head()
@@ -138,6 +143,7 @@ impl RootSnapshot {
             || record.root().generation() != self.record.root().generation()
             || record.root().parent_root_digest() != Some(self.record.digest())
             || record.root().repository_id() != self.record.root().repository_id()
+            || record.root().ref_epoch() != self.record.root().ref_epoch()
             || record.root().refs() != self.record.root().refs()
             || record.root().peeled_refs() != self.record.root().peeled_refs()
             || record.root().head() != self.record.root().head()
@@ -150,6 +156,54 @@ impl RootSnapshot {
         {
             return Err(contract_error(
                 "committed history root changed non-history repository state",
+            ));
+        }
+        Ok(Self { record, etag })
+    }
+
+    /// Bind a restore fence that preserves state while retiring old ref heads.
+    pub fn committed_restore_fence(&self, record: RootRecord, etag: ETag) -> Result<Self> {
+        if record.root().generation() != self.record.root().generation()
+            || record.root().parent_root_digest() != Some(self.record.digest())
+            || record.root().repository_id() != self.record.root().repository_id()
+            || record.root().ref_epoch() == self.record.root().ref_epoch()
+            || record.root().refs() != self.record.root().refs()
+            || record.root().peeled_refs() != self.record.root().peeled_refs()
+            || record.root().head() != self.record.root().head()
+            || record.root().checkpoint() != self.record.root().checkpoint()
+            || record.root().history() != self.record.root().history()
+            || !record.root().capsule_frontier().is_empty()
+            || !record.root().compacted_ref_transactions().is_empty()
+            || record.root().gc_fence().is_none()
+        {
+            return Err(contract_error(
+                "committed restore fence changed repository state",
+            ));
+        }
+        Ok(Self { record, etag })
+    }
+
+    /// Bind an atomic historical restore to its fenced CAS predecessor.
+    pub fn committed_restore(&self, record: RootRecord, etag: ETag) -> Result<Self> {
+        let generation = self
+            .record
+            .root()
+            .generation()
+            .checked_add(1)
+            .ok_or_else(|| contract_error("root generation overflowed"))?;
+        if self.record.root().gc_fence().is_none()
+            || record.root().generation() != generation
+            || record.root().parent_root_digest() != Some(self.record.digest())
+            || record.root().repository_id() != self.record.root().repository_id()
+            || record.root().ref_epoch() != self.record.root().ref_epoch()
+            || record.root().checkpoint().is_none()
+            || record.root().history() != self.record.root().history()
+            || !record.root().capsule_frontier().is_empty()
+            || !record.root().compacted_ref_transactions().is_empty()
+            || record.root().gc_fence() != self.record.root().gc_fence()
+        {
+            return Err(contract_error(
+                "committed restore does not replace its exact fenced snapshot",
             ));
         }
         Ok(Self { record, etag })

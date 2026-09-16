@@ -44,6 +44,7 @@ crab recover history prune --keep-last 20 --apply
 crab recover history verify 41
 crab recover history verify 41 --digest <64-character-blake3>
 crab recover history restore 41
+crab recover history restore 41 --apply
 ```
 
 `list`, `verify`, and `restore` also accept `--json`. A generation with more
@@ -54,11 +55,14 @@ snapshot, embedded pack/index/reverse-index/locator agreement, every shard and
 xorb dependency, and Git connectivity with strict `git fsck`. The result
 reports deterministic dependency object and byte counts.
 
-`restore --apply` currently fails closed. V2 restore must publish the selected
-state as a new atomic authority epoch so stale or in-flight per-ref heads cannot
-override the restored refs, while retaining the displaced state as a reversible
-checkpoint. That publication boundary remains a release blocker; Crab does not
-fall back to the v1 manifest-restoration path.
+`restore --apply` publishes the selected checkpoint as a new generation. Crab
+first verifies every dependency and Git connectivity, checkpoints the displaced
+current state into authenticated history, then rotates the ref authority epoch
+while acquiring the maintenance fence. Stale or in-flight old-epoch ref heads
+cannot override the restore. A single root CAS installs the restored refs,
+symbolic HEAD, visibility, and packs while preserving the current append-only
+xorb/shard catalog, so historical large files remain GC-protected. Failure
+clears the owned fence without falling back to the v1 manifest-restoration path.
 
 Status: release-manifest large-file and workflow-output inventory, Crab pointer
 metadata inventory, staged import journal inventory, hashed workflow journal

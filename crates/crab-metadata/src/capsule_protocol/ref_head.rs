@@ -6,7 +6,7 @@ use crate::validation::{validate_content_hash, validate_sha1};
 
 use super::{CapsulePointer, valid_ref_name};
 
-const REF_HEAD_VERSION: u32 = 3;
+const REF_HEAD_VERSION: u32 = 4;
 /// Maximum number of independently mutable ref heads accepted for one repository.
 pub const MAX_CAPSULE_REF_HEADS: usize = 1_000_000;
 /// Maximum immutable run segments retained by one independently mutable ref.
@@ -100,6 +100,7 @@ impl CapsuleRefState {
 pub struct CapsuleRefHead {
     version: u32,
     ref_name: String,
+    ref_epoch: String,
     committed: CapsuleRefState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     prepared: Option<CapsulePreparedRefState>,
@@ -116,12 +117,14 @@ impl CapsuleRefHead {
     /// Build an empty journal head over one value already compacted into the root.
     pub fn from_root(
         ref_name: &str,
+        ref_epoch: String,
         oid: Option<String>,
         peeled_oid: Option<String>,
     ) -> Result<Self> {
         let head = Self {
             version: REF_HEAD_VERSION,
             ref_name: ref_name.to_owned(),
+            ref_epoch,
             committed: CapsuleRefState {
                 oid,
                 peeled_oid,
@@ -163,6 +166,12 @@ impl CapsuleRefHead {
         &self.ref_name
     }
 
+    /// Return the root authority epoch under which this head is visible.
+    #[must_use]
+    pub fn ref_epoch(&self) -> &str {
+        &self.ref_epoch
+    }
+
     /// Resolve the state visible at a committed-transaction snapshot.
     #[must_use]
     pub fn visible<'a>(
@@ -189,6 +198,7 @@ impl CapsuleRefHead {
         let head = Self {
             version: REF_HEAD_VERSION,
             ref_name: self.ref_name.clone(),
+            ref_epoch: self.ref_epoch.clone(),
             committed: state,
             prepared: None,
         };
@@ -206,6 +216,7 @@ impl CapsuleRefHead {
         let head = Self {
             version: REF_HEAD_VERSION,
             ref_name: self.ref_name.clone(),
+            ref_epoch: self.ref_epoch.clone(),
             committed: visible,
             prepared: Some(CapsulePreparedRefState {
                 activation_id,
@@ -275,6 +286,11 @@ fn validate_head(head: &CapsuleRefHead) -> Result<()> {
     {
         return Err(contract_error("ref head identity is invalid"));
     }
+    validate_content_hash(
+        &head.ref_epoch,
+        "ref-head authority epoch",
+        "capsule-protocol ref head",
+    )?;
     validate_state(&head.committed)?;
     if let Some(prepared) = &head.prepared {
         validate_content_hash(
@@ -395,7 +411,8 @@ mod tests {
 
     #[test]
     fn committed_transaction_snapshot_selects_prepared_state_atomically() {
-        let head = CapsuleRefHead::from_root("refs/heads/main", None, None).unwrap();
+        let head =
+            CapsuleRefHead::from_root("refs/heads/main", "9".repeat(64), None, None).unwrap();
         let transaction_id = "1".repeat(64);
         let state = head
             .successor_state(
@@ -424,9 +441,13 @@ mod tests {
 
     #[test]
     fn ref_head_round_trips_canonically() {
-        let head =
-            CapsuleRefHead::from_root("refs/tags/v1", Some("2".repeat(40)), Some("3".repeat(40)))
-                .unwrap();
+        let head = CapsuleRefHead::from_root(
+            "refs/tags/v1",
+            "9".repeat(64),
+            Some("2".repeat(40)),
+            Some("3".repeat(40)),
+        )
+        .unwrap();
 
         assert_eq!(
             CapsuleRefHead::decode(&head.encode().unwrap()).unwrap(),

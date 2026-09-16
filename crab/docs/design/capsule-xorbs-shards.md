@@ -52,8 +52,8 @@ The implementation MUST:
    repositories.
 5. Avoid foreground existence probes for dependencies already proven by the
    pinned base generation.
-6. Keep a pointer-free small push on the existing three-request qualified or
-   four-request readback path.
+6. Keep a pointer-free small push on the four-request qualified or
+   five-request readback path, including post-commit ref-epoch confirmation.
 7. Scale pointer-push requests with newly created immutable payload objects,
    not files, chunks, recipes, metadata rows, or total repository history.
 8. Support independent xorb caching, range-free hydration, storage-class
@@ -487,12 +487,13 @@ Let:
 - `G` be exceptional GC-publication-guard transport attempts.
 
 With an already captured remote-helper view, the pointer-free single-ref commit
-path is one ref-head GET, one immutable leaf PUT, and one conditional ref-head
-PUT: three successful requests on a checksum-qualified store and four when
+path is one ref-head GET, one immutable leaf PUT, one conditional ref-head
+PUT, and one root GET confirming that restore did not rotate ref authority:
+four successful requests on a checksum-qualified store and five when
 independent leaf readback is required. A cold explicit push uses one root GET
 and direct GETs for the destination state instead of listing unrelated refs,
-for five successful single-ref requests. Creating a ref also uses two
-namespace-gate writes, for seven; these gates are partitioned by the
+for six successful single-ref requests. Creating a ref also uses two
+namespace-gate writes, for eight; these gates are partitioned by the
 first component below `refs/<kind>/`. A full clone, fetch, or advertisement
 instead adds two ref-head LISTs, one GET per visible ref head, one GET per
 distinct prepared multi-ref activation, and the bounded run/checkpoint reads.
@@ -510,8 +511,8 @@ With repository-local payloads and no bucket registry, a single-PUT pointer
 push needs at least:
 
 ```text
-qualified: 3 + B + Xw + Sw + P
-readback:  4 + B + 2Xw + 2Sw + P
+qualified: 4 + B + Xw + Sw + P
+readback:  5 + B + 2Xw + 2Sw + P
 ```
 
 Canonical bucket-global xorbs and shards additionally require registry
@@ -519,8 +520,8 @@ protection, and cross-repository reuse outside the pinned base requires a GC
 publication guard. Their complete request formulas are:
 
 ```text
-qualified global: 3 + B + Xw + Sw + V + P + R + G
-readback global:  4 + B + 2Xw + 2Sw + V + P + R + G
+qualified global: 4 + B + Xw + Sw + V + P + R + G
+readback global:  5 + B + 2Xw + 2Sw + V + P + R + G
 ```
 
 An uncontended registry GET plus CAS normally makes `R = 2`. In the current
@@ -655,9 +656,14 @@ History operations follow the same authority rules as normal reads and writes:
    visible value to the selected historical value. It never rewinds a mutable
    head, overwrites an old root, or creates v1 metadata.
 4. A whole-repository restore selects an authenticated checkpoint recovery
-   point. Independent per-ref publications have no truthful global order, so a
-   transaction on one ref must not be presented as an atomic snapshot of every
-   other ref.
+   point, first checkpoints the displaced current state, and rotates the ref
+   authority epoch in the same CAS that acquires the maintenance fence. Old
+   ref heads remain immutable evidence but are invisible; writers confirm the
+   epoch after their CAS and fail retriably if restore won the race. One later
+   root CAS installs the historical refs, HEAD, visibility, packs, and current
+   append-only xorb/shard catalog as a new generation. Independent per-ref
+   publications have no truthful global order, so a transaction on one ref
+   must not be presented as an atomic snapshot of every other ref.
 5. GC retains every segment, referenced capsule, Git pack, shard, and xorb in
    the configured recovery window. Pruning publishes a new authenticated
    segment frontier before any newly unreachable immutable object is eligible
@@ -809,7 +815,7 @@ explicit `not yet part of the capsule protocol` error is a parity blocker.
 | Repack, repository GC, bucket GC, and fsck | V2 checkpoint publication writes one authenticated history segment in parallel with the checkpoint; repository GC walks the bounded segment chain and retains every referenced checkpoint and capsule run; fsck authenticates the chain and all immutable dependencies before reporting the repository clean. History pruning rebuilds the retained immutable chain under the repository GC fence, atomically swaps only the authenticated root frontier, and leaves physical deletion to grace-period GC. Current pointer catalogs are append-only for shard/xorb identities, so bucket GC retains historical external-data dependencies through the current authenticated catalog | Complete crash/fault, multi-segment prune, and forced-GC concurrency qualification | Injection at each publication and prune boundary; resurrection, restart, no reachable deletion, and bounded writer pause |
 | Replica selection, readiness, repair, and active-active reconciliation | Read selection requires an exact authenticated v2 state digest and verified shard/xorb bodies. Capsule-backed coordinator gaps replay by monotonic commit sequence, verify the exact run/ref transaction plus the resulting pointer catalog before per-ref visibility, and remain idempotent; v1 transactions retain manifest repair | Complete managed-provider failover/failback and fault qualification | Lag, partial replication, corrupt replica, failover/failback, ordered/idempotent repair, and concurrent publication matrix |
 | Tiering and archive restore | Canonical xorb identity is reusable, but v2 reachability integration is unqualified | Drive lifecycle and restore decisions from v2 reachability while keeping restore state non-authoritative | Transition/restore/hydrate/mount/GC race tests for every supported storage class |
-| Doctor, history inspection/restore, and v1-to-v2 cutover | Remote doctor selects and verifies a present v2 root before considering the validated v1 layout, identifies the v2 generation, accepts v2-only repositories, and fails closed on corrupt v2 authority. Checkpoint maintenance publishes a deterministic authenticated history-segment chain without adding a foreground push request. `recover history` now selects that v2 authority for list, strict dependency/Git verification, restore preview, and fenced retention apply; it never reads a v1 manifest after v2 selection | Implement atomic restore-as-new root/ref-epoch publication, transaction/ref selectors beyond checkpoint recovery points, complete doctor reporting, and the offline verified one-way migration command | Migrate a populated v1 repository, reject dual authority, list and verify retained checkpoints, prune without reachable deletion, restore as a new generation, then fresh-clone/hydrate/fsck |
+| Doctor, history inspection/restore, and v1-to-v2 cutover | Remote doctor selects and verifies a present v2 root before considering the validated v1 layout, identifies the v2 generation, accepts v2-only repositories, and fails closed on corrupt v2 authority. Checkpoint maintenance publishes a deterministic authenticated history-segment chain without adding a foreground push request. `recover history` selects that v2 authority for list, strict dependency/Git verification, restore preview, fenced retention apply, and atomic restore-as-new publication. Restore checkpoints the displaced state, rotates ref authority at fence acquisition, preserves the append-only xorb/shard catalog, installs refs and HEAD in one root CAS, and never reads a v1 manifest after v2 selection | Add transaction/ref selectors beyond checkpoint recovery points, complete doctor reporting, the offline verified one-way migration command, and live crash/concurrency qualification of restore | Migrate a populated v1 repository, reject dual authority, list and verify retained checkpoints, prune without reachable deletion, race restore with writers, restore as a new generation, then fresh-clone/hydrate/fsck |
 | Mirror plans and reconciliation | V2 intent/terminal receipts, marker repair, hook delivery, interruption, cache exclusion, deletion approval, and metadata-staleness behavior are qualified on RustFS | Complete authorization and hosted-provider behavior | Repeated crash-resume and duplicate-delivery runs with exact final refs and no partial transaction |
 | Git LFS and backup/restore | Canonical v2 push publishes and verifies reachable LFS dependencies before ref visibility. Direct LFS pre-push selects v2 authority first and reads transaction-consistent remote tips from the root and ref heads without downloading capsule payloads; a corrupt v2 root fails closed, while v1 fallback occurs only when the v2 root is absent. Mirror-hook push plus fresh hydrated clone are qualified on RustFS | Qualify direct LFS endpoint modes and make repository-prefix backup/restore discover all v2 authority and dependencies | LFS push/clone plus backup/delete/restore/fresh-clone/fsck/hydrate on a v2-only repository |
 | Repository lifecycle, locks, releases, workflows, ship, and app mutations | Several paths publish through the canonical v2 server transaction, but the complete shipped command/route set is not yet audited | Bind every mutation to a v2 view and transaction; remove or explicitly retire every manifest/journal path | Create/update/delete, archive/freeze, lock races, release lifecycle, workflow restart, and ship E2E against a v2-only repository |
