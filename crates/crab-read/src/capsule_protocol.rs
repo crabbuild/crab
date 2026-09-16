@@ -368,6 +368,22 @@ impl CapsuleRepositoryView {
         .map_err(Into::into)
     }
 
+    /// Materialize visibility after one candidate capsule without publishing it.
+    pub fn candidate_git_visibility(
+        &self,
+        candidate: &Capsule,
+    ) -> Result<BTreeMap<String, Vec<String>>> {
+        let mut refs = self.git_visibility_index()?.ref_closures();
+        if !capsule_is_ready(candidate, &self.refs, &refs)? {
+            return Err(corrupt_path(
+                "candidate capsule Git visibility",
+                "candidate does not extend the pinned repository view",
+            ));
+        }
+        apply_capsule_visibility(candidate, &mut refs)?;
+        Ok(refs)
+    }
+
     fn git_pack_manifest_entries(
         &self,
     ) -> Result<Vec<crab_metadata::manifests::PackManifestEntry>> {
@@ -1828,6 +1844,53 @@ mod tests {
             .expect_err("candidate pack must count against the shared intake limit");
 
         assert!(matches!(error, ReadError::CapsuleReadLimit { .. }));
+    }
+
+    #[tokio::test]
+    async fn candidate_visibility_materializes_without_publication() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        let initial = RootRecord::encode(
+            RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
+        )
+        .unwrap();
+        crab_metadata::capsule_protocol::create_root(&router, initial.clone())
+            .await
+            .unwrap();
+        let view = open_view(&router, TEST_LIMITS).await.unwrap();
+        let tip = "2".repeat(40);
+        let transaction = CapsuleTransaction::new(
+            initial.digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some(tip.clone()),
+                None,
+            )],
+        )
+        .unwrap();
+        let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            "refs/heads/main".to_owned(),
+            GitVisibilityEdit::from_replacement_objects(None, tip.clone(), vec![tip.clone()]),
+        )]))
+        .unwrap();
+        let candidate = Capsule::build(
+            &transaction,
+            Vec::new(),
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::VisibilityDelta,
+                visibility.encode().unwrap(),
+            )],
+        )
+        .unwrap();
+
+        let actual = view.candidate_git_visibility(&candidate).unwrap();
+
+        assert_eq!(
+            actual,
+            BTreeMap::from([("refs/heads/main".to_owned(), vec![tip])])
+        );
+        assert!(view.refs().is_empty());
     }
 
     #[test]

@@ -1,16 +1,12 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crab_git::{
-    PointerKind, classify,
-    lfs_pointer::{LfsPointer, MAX_LFS_POINTER_SIZE},
-};
-use crab_types::pointer::Pointer;
-
 use crate::error::{AuthServerError, Result};
+#[cfg(test)]
+use crate::git_pointer_scan::scan_reachable_pointers;
 use crate::view::ViewS3Credentials;
 
 pub(super) struct ViewGitWorkspace {
@@ -86,12 +82,6 @@ impl ViewGitWorkspace {
             None,
         )
     }
-}
-
-#[derive(Debug, Default)]
-pub(super) struct ReachablePointerScan {
-    pub(super) crab_pointers: Vec<Pointer>,
-    pub(super) lfs_pointers: Vec<LfsPointer>,
 }
 
 pub(super) fn clone_bare(
@@ -250,66 +240,6 @@ pub(super) fn resolve_view_head(
         .ok_or_else(|| {
             AuthServerError::Internal("view refs disappeared while resolving HEAD".to_owned())
         })
-}
-
-pub(super) fn scan_reachable_pointers(git_dir: &Path) -> Result<ReachablePointerScan> {
-    let output = run_git_capture(
-        [
-            "--git-dir",
-            path_str(git_dir)?,
-            "rev-list",
-            "--objects",
-            "--all",
-        ],
-        None,
-    )?;
-    let mut seen_objects = HashSet::new();
-    let mut seen_lfs_oids = HashSet::new();
-    let mut scan = ReachablePointerScan::default();
-
-    for line in output.lines() {
-        let Some(oid) = line.split_whitespace().next() else {
-            continue;
-        };
-        if !seen_objects.insert(oid.to_owned()) {
-            continue;
-        }
-
-        let kind = run_git_capture(
-            ["--git-dir", path_str(git_dir)?, "cat-file", "-t", oid],
-            None,
-        )?;
-        if kind.trim() != "blob" {
-            continue;
-        }
-
-        let size = run_git_capture(
-            ["--git-dir", path_str(git_dir)?, "cat-file", "-s", oid],
-            None,
-        )?
-        .trim()
-        .parse::<usize>()
-        .map_err(|e| AuthServerError::Internal(format!("git cat-file returned bad size: {e}")))?;
-        if size > MAX_LFS_POINTER_SIZE {
-            continue;
-        }
-
-        let bytes = run_git_capture_bytes(
-            ["--git-dir", path_str(git_dir)?, "cat-file", "blob", oid],
-            None,
-        )?;
-        match classify(&bytes) {
-            PointerKind::Crab(pointer) => scan.crab_pointers.push(pointer),
-            PointerKind::Lfs(pointer) if pointer.size > 0 => {
-                if seen_lfs_oids.insert(pointer.oid) {
-                    scan.lfs_pointers.push(pointer);
-                }
-            }
-            PointerKind::Lfs(_) | PointerKind::NotAPointer => {}
-        }
-    }
-
-    Ok(scan)
 }
 
 fn export_filtered_history(

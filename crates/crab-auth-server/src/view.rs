@@ -23,6 +23,7 @@ use crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES;
 use serde::Serialize;
 
 use crate::error::{AuthServerError, Result};
+use crate::git_pointer_scan::scan_reachable_pointers;
 
 mod git_workspace;
 mod objects;
@@ -30,7 +31,7 @@ mod repack;
 
 use git_workspace::{
     GeneratedViewPack, ViewGitWorkspace, clone_bare, count_pack_objects, generate_view_pack,
-    list_view_refs, resolve_view_head, scan_reachable_pointers,
+    list_view_refs, resolve_view_head,
 };
 use objects::{commit_view_metadb, upload_view_crab_objects};
 use repack::{ViewCrabObjects, ViewCrabRepacker, materialize_crab_pointers_in_fast_export};

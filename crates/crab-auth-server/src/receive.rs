@@ -47,6 +47,7 @@ pub use crab_remote::protected::{ProtectedCapsulePushPlan, ProtectedPushPlan};
 
 use crate::error::{AuthServerError, Result};
 
+mod capsule;
 mod finalize;
 mod git_workspace;
 mod session;
@@ -429,8 +430,8 @@ pub fn validate_protected_capsule_plan_shape(
     }
     validate_hash_component(&plan.base_root_digest, "base root digest")?;
     validate_hash_component(&plan.transaction_id, "transaction id")?;
-    validate_hash_component(&plan.capsule_hash, "capsule hash")?;
-    if plan.capsule_size == 0 {
+    validate_hash_component(&plan.run_hash, "capsule run hash")?;
+    if plan.run_size == 0 {
         return Err(invalid("capsule push-plan declares an empty capsule"));
     }
     if plan.ref_updates.is_empty() {
@@ -445,17 +446,17 @@ pub fn validate_protected_capsule_plan_shape(
     validate_push_ref_updates(&plan.ref_updates).map_err(|error| invalid(error.to_string()))?;
     validate_staged_write_shapes(&plan.staged_objects, repo_prefix, push_id)?;
 
-    let partition = &plan.capsule_hash[..2];
+    let partition = &plan.run_hash[..2];
     let capsule_key = format!(
         "{}/v2/capsules/{partition}/{}",
         repo_prefix.trim_matches('/'),
-        plan.capsule_hash
+        plan.run_hash
     );
     if let Some(capsule) = plan
         .staged_objects
         .iter()
         .find(|object| object.canonical_key == capsule_key)
-        && (capsule.blake3 != plan.capsule_hash || capsule.size != plan.capsule_size)
+        && (capsule.blake3 != plan.run_hash || capsule.size != plan.run_size)
     {
         return Err(invalid(
             "staged capsule metadata differs from the push-plan capsule",
@@ -2652,6 +2653,12 @@ pub fn validate_staged_xorb(
             )));
         }
     }
+    parser
+        .verify_payload_digest()
+        .map_err(|error| AuthServerError::CorruptObject {
+            path: canonical_key.to_owned(),
+            reason: format!("staged xorb payload digest is invalid: {error}"),
+        })?;
     Ok(())
 }
 
@@ -2911,7 +2918,7 @@ mod tests {
     }
 
     fn capsule_push_plan() -> ProtectedCapsulePushPlan {
-        let capsule_hash = hash('a');
+        let run_hash = hash('a');
         ProtectedCapsulePushPlan {
             schema_version: crab_remote::protected::PROTECTED_CAPSULE_PUSH_PLAN_SCHEMA_VERSION,
             repo_prefix: "org/repo".to_owned(),
@@ -2919,15 +2926,15 @@ mod tests {
             upload_prefix: "org/repo/staging/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/".to_owned(),
             base_root_digest: hash('c'),
             transaction_id: hash('d'),
-            capsule_hash: capsule_hash.clone(),
-            capsule_size: 7,
+            run_hash: run_hash.clone(),
+            run_size: 7,
             ref_updates: vec![ref_update(Some(oid('1')), oid('2'))],
             staged_objects: vec![StagedWrite {
-                canonical_key: format!("org/repo/v2/capsules/aa/{capsule_hash}"),
+                canonical_key: format!("org/repo/v2/capsules/aa/{run_hash}"),
                 staged_key: format!(
-                    "org/repo/staging/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/objects/org/repo/v2/capsules/aa/{capsule_hash}"
+                    "org/repo/staging/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/objects/org/repo/v2/capsules/aa/{run_hash}"
                 ),
-                blake3: capsule_hash,
+                blake3: run_hash,
                 size: 7,
             }],
         }

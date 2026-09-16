@@ -9,6 +9,7 @@ use std::process::{Command, Stdio};
 use crab_auth::{PushRefUpdate, normalize_optional_oid};
 use crab_git::pack::canonical_pack_id_from_object_filename;
 use crab_metadata::{
+    capsule_protocol::Capsule,
     manifest_store,
     manifests::{Manifest, PackManifestEntry, validate_pack_manifest_entry},
     pack_metadata::PackMetadata,
@@ -17,6 +18,7 @@ use crab_storage::{Store, StoreLayout};
 use object_store::path::Path as ObjectPath;
 
 use crate::error::{AuthServerError, Result};
+use crate::git_pointer_scan::{ReachablePointerScan, scan_reachable_pointers_from_refs};
 
 use super::{
     MaterializedSourcePush, ProtectedPushPlan, PushPrepareRecord,
@@ -76,6 +78,71 @@ pub(super) async fn install_base_packs(
     GitReceiveWorkspace::new(store, router, router.repo_prefix())
         .install_base_packs(git_dir)
         .await
+}
+
+pub(super) async fn verify_capsule_git_candidate(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    candidate: &Capsule,
+    ref_updates: &[PushRefUpdate],
+    max_input_bytes: u64,
+) -> Result<(Vec<String>, ReachablePointerScan)> {
+    let temp = tempfile::tempdir()?;
+    let git_dir = temp.path().join("source.git");
+    run_git(["init", "--bare", path_str(&git_dir)?], None)?;
+    crab_read::capsule_protocol::install_git_packs_with_candidates(
+        view,
+        std::slice::from_ref(candidate),
+        &git_dir,
+        max_input_bytes,
+    )
+    .await?;
+    let workspace = GitReceiveWorkspace::new(store, router, router.repo_prefix());
+    let paths =
+        workspace.compute_changed_paths_in(&git_dir, ref_updates, &BTreeMap::new(), false)?;
+
+    let transaction = candidate.transaction()?;
+    let mut refs = view.refs().clone();
+    let mut peeled = view.peeled_refs().clone();
+    for edit in transaction.edits() {
+        match edit.new_oid() {
+            Some(oid) => {
+                refs.insert(edit.ref_name().to_owned(), oid.to_owned());
+            }
+            None => {
+                refs.remove(edit.ref_name());
+            }
+        }
+        match edit.peeled_oid() {
+            Some(oid) => {
+                peeled.insert(edit.ref_name().to_owned(), oid.to_owned());
+            }
+            None => {
+                peeled.remove(edit.ref_name());
+            }
+        }
+    }
+    let refs = refs.into_iter().collect::<Vec<_>>();
+    let closures = crab_git::walk_reachable_by_ref_bounded(
+        &git_dir,
+        &refs,
+        &peeled,
+        usize::try_from(crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS)
+            .map_err(|_| invalid("Git visibility object limit does not fit usize"))?,
+    )
+    .map_err(|source| AuthServerError::GitVisibilityWalk { source })?
+    .into_iter()
+    .map(|(name, reachable)| (name, reachable_object_ids(&reachable)))
+    .collect::<BTreeMap<_, _>>();
+    let declared = view.candidate_git_visibility(candidate)?;
+    if closures != declared {
+        return Err(invalid(
+            "candidate capsule Git visibility differs from its reachable object closure",
+        ));
+    }
+    let pointers = scan_reachable_pointers_from_refs(&git_dir, &refs)?;
+    Ok((paths, pointers))
 }
 
 struct CommitIdentity {
@@ -942,6 +1009,27 @@ fn validate_git_publication(git_dir: &Path, updates: &[PushRefUpdate]) -> Result
         return Ok(());
     }
     Err(invalid(String::from_utf8_lossy(&output.stderr).trim()))
+}
+
+fn reachable_object_ids(reachable: &crab_git::walk::ReachableSet) -> Vec<String> {
+    let mut objects = reachable
+        .commits
+        .iter()
+        .chain(&reachable.trees)
+        .chain(&reachable.blobs)
+        .chain(&reachable.tags)
+        .map(|oid| {
+            let mut encoded = String::with_capacity(40);
+            for byte in oid {
+                use std::fmt::Write as _;
+                let _ = write!(encoded, "{byte:02x}");
+            }
+            encoded
+        })
+        .collect::<Vec<_>>();
+    objects.sort_unstable();
+    objects.dedup();
+    objects
 }
 
 async fn read_manifest(store: &Store, router: &StoreLayout<Store>) -> Result<(Manifest, String)> {

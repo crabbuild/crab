@@ -531,8 +531,8 @@ mod tests {
             upload_prefix: format!("org/repo/staging/{PUSH_ID}/"),
             base_root_digest: hash('1'),
             transaction_id: hash('2'),
-            capsule_hash: hash('3'),
-            capsule_size: 42,
+            run_hash: hash('3'),
+            run_size: 42,
             ref_updates: vec![PushRefUpdate {
                 ref_name: "refs/heads/main".to_owned(),
                 old_oid: Some(oid('1')),

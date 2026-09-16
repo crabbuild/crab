@@ -48,8 +48,8 @@ pub struct ProtectedCapsulePushPlan {
     pub upload_prefix: String,
     pub base_root_digest: String,
     pub transaction_id: String,
-    pub capsule_hash: String,
-    pub capsule_size: u64,
+    pub run_hash: String,
+    pub run_size: u64,
     pub ref_updates: Vec<PushRefUpdate>,
     pub staged_objects: Vec<StagedWrite>,
 }

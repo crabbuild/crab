@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use super::GitVisibilityPublication;
+use super::capsule::verify_capsule_candidate;
 use super::git_workspace::verify_source_push;
+use super::session::ProtectedReceivePlan;
 use super::{
     MaterializedSourcePush, PreparedViewScope, ReceiveContext, ReceiveManifestCommit,
     build_service_candidate_manifest, commit_receive_manifest,
@@ -100,6 +102,20 @@ struct VerifiedReceiveEvidence {
     materialized: MaterializedSourcePush,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct VerifiedCapsuleReceiveEvidence {
+    schema_version: u32,
+    repo_prefix: String,
+    push_id: String,
+    source_plan_digest: String,
+    prepare_digest: String,
+    base_root_digest: String,
+    transaction_id: String,
+    run_hash: String,
+    changed_paths: Vec<String>,
+}
+
 /// Prepared protected-push receive state returned to the helper.
 pub struct PreparedReceive {
     pub source_generation: u64,
@@ -135,6 +151,39 @@ async fn write_verified_receive_evidence(
     };
     let body = serde_json::to_vec(&evidence)
         .map_err(|error| invalid(format!("verified receive serialize failed: {error}")))?;
+    let digest = blake3::hash(&body).to_hex().to_string();
+    ctx.write_verified_receive(bytes::Bytes::from(body)).await?;
+    Ok(digest)
+}
+
+async fn write_verified_capsule_receive_evidence(
+    ctx: &ReceiveContext,
+    plan: &super::ProtectedCapsulePushPlan,
+    prepare: &super::PushPrepareRecord,
+    changed_paths: Vec<String>,
+) -> Result<String> {
+    let source_plan_digest = blake3::hash(
+        &serde_json::to_vec(plan)
+            .map_err(|error| invalid(format!("capsule push-plan serialize failed: {error}")))?,
+    )
+    .to_hex()
+    .to_string();
+    let evidence = VerifiedCapsuleReceiveEvidence {
+        schema_version: 2,
+        repo_prefix: ctx.repo_prefix().to_owned(),
+        push_id: ctx.push_id().to_owned(),
+        source_plan_digest,
+        prepare_digest: prepare_digest(prepare)?,
+        base_root_digest: plan.base_root_digest.clone(),
+        transaction_id: plan.transaction_id.clone(),
+        run_hash: plan.run_hash.clone(),
+        changed_paths,
+    };
+    let body = serde_json::to_vec(&evidence).map_err(|error| {
+        invalid(format!(
+            "verified capsule receive serialize failed: {error}"
+        ))
+    })?;
     let digest = blake3::hash(&body).to_hex().to_string();
     ctx.write_verified_receive(bytes::Bytes::from(body)).await?;
     Ok(digest)
@@ -189,7 +238,31 @@ pub async fn prepare_receive(
 /// Verifies a staged protected-push receive plan.
 pub async fn verify_receive(ctx: &ReceiveContext) -> Result<VerifiedReceive> {
     ctx.validate_layout().await?;
-    let plan = ctx.read_plan().await?;
+    match ctx.read_plan_document().await? {
+        ProtectedReceivePlan::Manifest(plan) => verify_manifest_receive(ctx, *plan).await,
+        ProtectedReceivePlan::Capsule(plan) => {
+            let verified = verify_capsule_candidate(ctx, &plan).await?;
+            let digest = write_verified_capsule_receive_evidence(
+                ctx,
+                &plan,
+                &verified.prepare,
+                verified.changed_paths.clone(),
+            )
+            .await?;
+            Ok(VerifiedReceive {
+                ref_updates: plan.ref_updates,
+                verified_changed_paths: verified.changed_paths,
+                plan_digest: digest,
+                verified_staged_bytes: verified.staged_bytes,
+            })
+        }
+    }
+}
+
+async fn verify_manifest_receive(
+    ctx: &ReceiveContext,
+    plan: super::ProtectedPushPlan,
+) -> Result<VerifiedReceive> {
     validate_push_plan_shape(&plan, ctx.repo_prefix(), ctx.push_id())?;
     validate_protected_dependency_receipt(&plan)?;
     let base = ctx.read_base_state().await?;
@@ -461,6 +534,12 @@ mod tests {
 
     use bytes::Bytes;
     use crab_metadata::{
+        capsule_protocol::{
+            Capsule, CapsuleGitPack, CapsuleRefEdit, CapsuleRun, CapsuleSection,
+            CapsuleSectionKind, CapsuleTransaction, CapsuleVisibilityDelta, RepositoryRoot,
+            RootRecord,
+        },
+        git_visibility::GitVisibilityEdit,
         manifest_store,
         manifests::{Manifest, PackManifestEntry},
         pack_metadata::PackMetadata,
@@ -494,6 +573,23 @@ mod tests {
             &Manifest::default_for_repo("refs/heads/main"),
         )
         .await?;
+        Ok(context)
+    }
+
+    async fn capsule_context() -> Result<ReceiveContext> {
+        let context = ReceiveContext::from_store(
+            Store::new(Arc::new(InMemory::new())),
+            "org/repo".to_owned(),
+            PUSH_ID.to_owned(),
+        );
+        crab_metadata::layout_descriptor::ensure_canonical_layout(
+            context.store(),
+            context.router(),
+        )
+        .await?;
+        let root =
+            RootRecord::encode(RepositoryRoot::initial(&"a".repeat(64), "refs/heads/main")?)?;
+        crab_metadata::capsule_protocol::create_root(context.router(), root).await?;
         Ok(context)
     }
 
@@ -586,7 +682,7 @@ mod tests {
         }
     }
 
-    async fn write_plan(ctx: &ReceiveContext, plan: &ProtectedPushPlan) -> Result<()> {
+    async fn write_plan(ctx: &ReceiveContext, plan: &impl Serialize) -> Result<()> {
         let bytes = serde_json::to_vec_pretty(plan)
             .map_err(|e| AuthServerError::Internal(format!("push-plan serialize: {e}")))?;
         ctx.store()
@@ -708,6 +804,58 @@ mod tests {
             }
         }
         Ok(objects.len() as u64)
+    }
+
+    fn capsule_git_pack(
+        source_git_dir: &Path,
+        pack_bytes: &[u8],
+        object_count: u64,
+    ) -> Result<CapsuleGitPack> {
+        let temp = tempfile::tempdir()?;
+        let source = temp.path().join("source.pack");
+        std::fs::write(&source, pack_bytes)?;
+        let pack_id = blake3_hex(pack_bytes);
+        let installed = crab_git::pack::install_pack_file_from_path(
+            &temp.path().join("objects/pack"),
+            &source,
+            &pack_id,
+            0,
+            true,
+        )?;
+        let mut locations = crab_git::pack_locator::PackLocationIter::open(
+            &installed.idx_path,
+            &installed.rev_path,
+            pack_bytes.len() as u64,
+        )
+        .map_err(crab_git::pack::PackError::from)?;
+        let object_ids = locations
+            .by_ref()
+            .map(|location| location.map(|location| location.oid))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(crab_git::pack::PackError::from)?;
+        let kinds = crab_git::object_kinds_from_git_dir(source_git_dir, &object_ids)?;
+        let ordered_kinds = object_ids
+            .iter()
+            .map(|oid| {
+                kinds
+                    .get(oid)
+                    .copied()
+                    .ok_or_else(|| invalid("test capsule pack omitted an object kind"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let locator = crab_git::pack_locator::encode_pack_kind_metadata(
+            locations.pack_checksum(),
+            &ordered_kinds,
+        )
+        .map_err(crab_git::pack::PackError::from)?;
+        Ok(CapsuleGitPack::new(
+            Bytes::copy_from_slice(pack_bytes),
+            Bytes::from(std::fs::read(installed.idx_path)?),
+            Bytes::from(std::fs::read(installed.rev_path)?),
+            Bytes::from(locator),
+            locations.pack_checksum().to_string(),
+            object_count,
+        )?)
     }
 
     async fn put_pack_index(
@@ -915,6 +1063,95 @@ mod tests {
         let record = ctx.read_prepare_record().await?;
         assert_eq!(record.source_manifest_generation, 0);
         assert_eq!(record.source_ref_updates[0].old_oid, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn verify_receive_accepts_exact_capsule_candidate() -> Result<()> {
+        let ctx = capsule_context().await?;
+        let source = tempfile::tempdir()?;
+        run_git(["init", "--initial-branch=main"], Some(source.path()))?;
+        run_git(
+            ["config", "user.email", "alice@example.com"],
+            Some(source.path()),
+        )?;
+        run_git(["config", "user.name", "Alice"], Some(source.path()))?;
+        std::fs::write(source.path().join("tracked.txt"), b"protected capsule\n")?;
+        run_git(["add", "tracked.txt"], Some(source.path()))?;
+        run_git(["commit", "-m", "capsule candidate"], Some(source.path()))?;
+        let tip = run_git_capture(["-C", path_str(source.path())?, "rev-parse", "HEAD"])?
+            .trim()
+            .to_owned();
+        let pack_bytes = git_capture_with_input(
+            ["pack-objects", "--stdout", "--revs"],
+            source.path(),
+            format!("{tip}\n").as_bytes(),
+        )?;
+        let object_count = git_object_count(source.path(), &format!("{tip}\n"))?;
+        let pack = capsule_git_pack(&source.path().join(".git"), &pack_bytes, object_count)?;
+        let root = crab_metadata::capsule_protocol::load_root(ctx.router()).await?;
+        let update = PushRefUpdate {
+            ref_name: "refs/heads/main".to_owned(),
+            old_oid: None,
+            new_oid: tip.clone(),
+        };
+        prepare_receive(&ctx, vec![update.clone()], None).await?;
+        let transaction = CapsuleTransaction::new(
+            root.record().digest(),
+            vec![CapsuleRefEdit::new(
+                update.ref_name.clone(),
+                None,
+                Some(tip.clone()),
+                None,
+            )],
+        )?;
+        let object_ids = git_capture_with_input(
+            ["rev-list", "--objects", "--stdin"],
+            source.path(),
+            format!("{tip}\n").as_bytes(),
+        )?;
+        let mut object_ids = String::from_utf8(object_ids)
+            .map_err(|_| invalid("test Git object list was not UTF-8"))?
+            .lines()
+            .filter_map(|line| line.split_whitespace().next().map(str::to_owned))
+            .collect::<Vec<_>>();
+        object_ids.sort_unstable();
+        object_ids.dedup();
+        let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            update.ref_name.clone(),
+            GitVisibilityEdit::from_replacement_objects(None, tip, object_ids),
+        )]))?;
+        let capsule = Capsule::build(
+            &transaction,
+            vec![pack],
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::VisibilityDelta,
+                visibility.encode()?,
+            )],
+        )?;
+        let run = CapsuleRun::leaf(capsule)?;
+        let run_key = ctx.router().capsule_path(run.hash()).to_string();
+        let run_object = staged_object(run_key, run.bytes());
+        put_staged(&ctx, &run_object, run.bytes().to_vec()).await?;
+        let plan = super::super::ProtectedCapsulePushPlan {
+            schema_version: crab_remote::protected::PROTECTED_CAPSULE_PUSH_PLAN_SCHEMA_VERSION,
+            repo_prefix: ctx.repo_prefix().to_owned(),
+            push_id: ctx.push_id().to_owned(),
+            upload_prefix: format!("{}/staging/{PUSH_ID}/", ctx.repo_prefix()),
+            base_root_digest: root.record().digest().to_owned(),
+            transaction_id: transaction.id()?,
+            run_hash: run.hash().to_owned(),
+            run_size: run.bytes().len() as u64,
+            ref_updates: vec![update],
+            staged_objects: vec![run_object],
+        };
+        write_plan(&ctx, &plan).await?;
+
+        let verified = verify_receive(&ctx).await?;
+
+        assert_eq!(verified.ref_updates, plan.ref_updates);
+        assert_eq!(verified.verified_changed_paths, vec!["tracked.txt"]);
+        assert_eq!(verified.verified_staged_bytes, plan.run_size);
         Ok(())
     }
 
