@@ -2294,13 +2294,24 @@ fn render_db_diagnosis(d: &DbDiagnosis) {
 
 #[derive(Debug, Serialize)]
 struct RebuildPayload {
+    protocol: &'static str,
     repo_prefix: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoint_published: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    catalog_files_verified: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    catalog_shards_verified: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    catalog_xorbs_verified: Option<u64>,
     file_index_entries_written: u64,
     chunk_index_entries_written: u64,
     shards_processed: u64,
     shards_failed: u64,
     git_packs_processed: u64,
     git_packs_failed: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_objects_verified: Option<u64>,
     git_objects_written: u64,
     elapsed_ms: u64,
     notes: Vec<String>,
@@ -2561,23 +2572,39 @@ async fn run_rebuild(db: DbSelector, mode: OutputMode, cancel: &CancellationToke
     )?;
     let storage = crate::storage::Store::new(Arc::clone(&store))
         .with_bucket_identity(bucket_identity.clone());
+    let router = crate::storage::StoreLayout::new(storage.clone(), repo_prefix.clone());
+    let capsule_layout = crab_storage::StoreLayout::with_global_prefix(
+        storage.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
     let lease = crate::maintenance::RepositoryMaintenanceLease::acquire(
         &storage,
-        crab_storage::GLOBAL_PREFIX,
+        router.global_prefix(),
         &repo_prefix,
         cancel,
     )
     .await?;
-    let operation = run_rebuild_in(
-        store,
-        repo_prefix,
-        &bucket_identity,
-        db,
-        mode,
-        &config,
-        cancel,
-    )
-    .await;
+    // Select authority inside the maintenance operation so queued maintenance
+    // cannot act on a root snapshot captured before it acquired the fence.
+    let operation = match capsule_owner_root(&capsule_layout).await {
+        Err(error) => Err(error),
+        Ok(Some(root)) => {
+            run_capsule_rebuild_in(&capsule_layout, root, &repo_prefix, db, mode, cancel).await
+        }
+        Ok(None) => {
+            run_rebuild_in(
+                store,
+                repo_prefix,
+                &bucket_identity,
+                db,
+                mode,
+                &config,
+                cancel,
+            )
+            .await
+        }
+    };
     let release = lease.release().await;
     match (operation, release) {
         (Ok(()), Ok(())) => Ok(()),
@@ -2587,6 +2614,122 @@ async fn run_rebuild(db: DbSelector, mode: OutputMode, cancel: &CancellationToke
             Err(error)
         }
     }
+}
+
+async fn run_capsule_rebuild_in(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    root: crab_metadata::capsule_protocol::RootSnapshot,
+    repo_prefix: &str,
+    db: DbSelector,
+    mode: OutputMode,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let started = std::time::Instant::now();
+    let view = crab_read::capsule_protocol::open_view_from_root(
+        layout,
+        root,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+            max_frontier_bytes: CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+        },
+    )
+    .await?;
+    let catalog = view.pointer_catalog()?;
+    view.git_visibility_index()?;
+    tokio::select! {
+        () = cancel.cancelled() => return Err(CrabError::Cancelled),
+        result = crab_read::verify_capsule_pointer_catalog_objects(layout, &catalog) => {
+            result?;
+        }
+    }
+    let git_packs = diagnosis_count(view.git_pack_count(), "capsule Git pack")?;
+    let git_objects = view.git_object_count()?;
+    let visible_capsules = view.capsule_count()?;
+    let checkpoint_published = if git_packs == 0 {
+        if !view.refs().is_empty() {
+            crab_remote::checkpoint::consolidate_git_packs(
+                &view,
+                CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+                CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+                cancel,
+            )
+            .await
+            .map_err(map_capsule_owner_error)?;
+        }
+        false
+    } else if visible_capsules == 0 {
+        crab_remote::checkpoint::consolidate_git_packs(
+            &view,
+            CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+            CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+            cancel,
+        )
+        .await
+        .map_err(map_capsule_owner_error)?;
+        false
+    } else {
+        let published = crab_remote::checkpoint::publish_capsule_checkpoint_from_view(
+            layout,
+            &view,
+            0,
+            CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+            cancel,
+        )
+        .await
+        .map_err(map_capsule_owner_error)?;
+        if !published {
+            return Err(CrabError::CasConflict {
+                path: layout.capsule_root_path().to_string(),
+                expected_etag: None,
+            });
+        }
+        true
+    };
+    let mut notes = vec![
+        "v2 catalogs are one authenticated checkpoint unit; rebuild verified the complete file, shard, xorb, visibility, and Git closure".to_owned(),
+    ];
+    if !matches!(db, DbSelector::Both) {
+        notes.push(
+            "--db does not permit a partial v2 checkpoint; the complete catalog was verified"
+                .to_owned(),
+        );
+    }
+    if git_packs == 0 {
+        notes.push("repository has no Git packs; no checkpoint was published".to_owned());
+    } else if visible_capsules == 0 {
+        notes.push(
+            "the current checkpoint already covers the capsule frontier; no checkpoint was published"
+                .to_owned(),
+        );
+    }
+    let payload = RebuildPayload {
+        protocol: "capsule-v2",
+        repo_prefix: repo_prefix.to_owned(),
+        checkpoint_published: Some(checkpoint_published),
+        catalog_files_verified: Some(diagnosis_count(
+            catalog.files().len(),
+            "capsule file entry",
+        )?),
+        catalog_shards_verified: Some(diagnosis_count(
+            catalog.shards().len(),
+            "capsule shard entry",
+        )?),
+        catalog_xorbs_verified: Some(diagnosis_count(
+            catalog.xorbs().len(),
+            "capsule xorb entry",
+        )?),
+        file_index_entries_written: 0,
+        chunk_index_entries_written: 0,
+        shards_processed: diagnosis_count(catalog.shards().len(), "capsule shard entry")?,
+        shards_failed: 0,
+        git_packs_processed: git_packs,
+        git_packs_failed: 0,
+        git_objects_verified: Some(git_objects),
+        git_objects_written: 0,
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        notes,
+    };
+    render_rebuild_payload(&payload, mode)
 }
 
 /// Core rebuild entry point parameterised on the object store and
@@ -3132,13 +3275,19 @@ async fn rebuild_with_guard(
     }
 
     let payload = RebuildPayload {
+        protocol: "manifest-v1",
         repo_prefix: String::from(repo_prefix),
+        checkpoint_published: None,
+        catalog_files_verified: None,
+        catalog_shards_verified: None,
+        catalog_xorbs_verified: None,
         file_index_entries_written: file_entries_written,
         chunk_index_entries_written: chunk_entries_written,
         shards_processed,
         shards_failed,
         git_packs_processed,
         git_packs_failed,
+        git_objects_verified: None,
         git_objects_written,
         elapsed_ms: start.elapsed().as_millis() as u64,
         notes,
@@ -3640,7 +3789,20 @@ fn render_rebuild_payload(payload: &RebuildPayload, mode: OutputMode) -> Result<
         emit_json("metadb.rebuild", "1.0", payload)?;
     } else {
         println!("\ncrab metadb rebuild\n");
+        println!("  protocol:                    {}", payload.protocol);
         println!("  repo_prefix:                 {}", payload.repo_prefix);
+        if let Some(published) = payload.checkpoint_published {
+            println!("  checkpoint_published:        {published}");
+        }
+        if let Some(count) = payload.catalog_files_verified {
+            println!("  catalog_files_verified:      {count}");
+        }
+        if let Some(count) = payload.catalog_shards_verified {
+            println!("  catalog_shards_verified:     {count}");
+        }
+        if let Some(count) = payload.catalog_xorbs_verified {
+            println!("  catalog_xorbs_verified:      {count}");
+        }
         println!(
             "  shards_processed:            {}",
             payload.shards_processed
@@ -3654,6 +3816,9 @@ fn render_rebuild_payload(payload: &RebuildPayload, mode: OutputMode) -> Result<
             "  git_packs_failed:            {}",
             payload.git_packs_failed
         );
+        if let Some(count) = payload.git_objects_verified {
+            println!("  git_objects_verified:        {count}");
+        }
         println!(
             "  git_objects_written:         {}",
             payload.git_objects_written
@@ -3676,12 +3841,15 @@ fn render_rebuild_payload(payload: &RebuildPayload, mode: OutputMode) -> Result<
     }
 
     info!(
+        protocol = payload.protocol,
+        checkpoint_published = payload.checkpoint_published,
         shards_processed = payload.shards_processed,
         shards_failed = payload.shards_failed,
         file_entries_written = payload.file_index_entries_written,
         chunk_entries_written = payload.chunk_index_entries_written,
         git_packs_processed = payload.git_packs_processed,
         git_packs_failed = payload.git_packs_failed,
+        git_objects_verified = payload.git_objects_verified,
         git_objects_written = payload.git_objects_written,
         elapsed_ms = payload.elapsed_ms,
         "metadb rebuild complete"
@@ -4849,6 +5017,40 @@ mod tests {
         assert_eq!(deep.pointer_objects_read, 0);
         let legacy_objects = inner
             .list(Some(&ObjectPath::from("org/v2-diagnose/file_index_db")))
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("list legacy metadata prefix");
+        assert!(legacy_objects.is_empty());
+    }
+
+    #[tokio::test]
+    async fn capsule_rebuild_verifies_empty_repository_without_legacy_metadata() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let storage = crab_storage::Store::new(Arc::clone(&inner));
+        let layout = crab_storage::StoreLayout::new(storage, "org/v2-rebuild".to_owned());
+        let root =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .expect("initialize capsule root");
+        let digest = root.record().digest().to_owned();
+
+        run_capsule_rebuild_in(
+            &layout,
+            root,
+            "org/v2-rebuild",
+            DbSelector::Both,
+            OutputMode::Text,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("rebuild empty capsule repository");
+
+        let current = crab_metadata::capsule_protocol::load_root(&layout)
+            .await
+            .expect("load capsule root");
+        assert_eq!(current.record().digest(), digest);
+        let legacy_objects = inner
+            .list(Some(&ObjectPath::from("org/v2-rebuild/file_index_db")))
             .try_collect::<Vec<_>>()
             .await
             .expect("list legacy metadata prefix");

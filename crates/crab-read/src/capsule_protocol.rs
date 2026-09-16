@@ -174,6 +174,22 @@ impl CapsuleRepositoryView {
             })
     }
 
+    /// Return the total Git objects declared by the authenticated pack inventory.
+    pub fn git_object_count(&self) -> Result<u64> {
+        self.checkpoint
+            .iter()
+            .cloned()
+            .map(GitPackContainer::Checkpoint)
+            .chain(self.capsules.iter().cloned().map(GitPackContainer::Capsule))
+            .try_fold(0_u64, |total, container| {
+                container.git_packs().iter().try_fold(total, |total, pack| {
+                    total
+                        .checked_add(pack.object_count())
+                        .ok_or_else(|| ReadError::internal("capsule Git object count overflowed"))
+                })
+            })
+    }
+
     /// Return a digest that changes with the root or any visible per-ref position.
     #[must_use]
     pub fn state_digest(&self) -> String {
@@ -1963,6 +1979,7 @@ mod tests {
         assert_eq!(activity.state_digest(), view.state_digest());
         assert_eq!(activity.capsule_count(), view.capsule_count().unwrap());
         assert_eq!(activity.ref_count(), view.refs().len() as u64);
+        assert_eq!(view.git_object_count().unwrap(), 1);
     }
 
     #[tokio::test]

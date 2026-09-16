@@ -80,8 +80,22 @@ remote `gc_generation` used by the local cache.
 
 ### `crab metadb rebuild`
 
-Disaster-recovery tool. Rebuilds acceleration records from only the shards and
-Git packs named by the current manifest's segmented indexes. It writes
+Authority-selected metadata reconstruction and verification. For v2, rebuild
+opens one authenticated root/ref view, validates its complete pointer and Git
+visibility catalogs, fully reads and verifies every canonical shard and xorb,
+strictly reconstructs the Git closure, and publishes a complete checkpoint
+from that exact view. Checkpoint publication uses the root CAS; a competing
+maintenance root causes the command to fail retriably, while concurrent ref
+pushes remain as an authenticated suffix. The command never creates a v1
+manifest or SlateDB database after selecting v2.
+
+V2 catalogs are a single correctness unit, so `--db file_index` and
+`--db chunk_index` still verify and checkpoint the complete catalog. Structured
+output identifies `protocol: capsule-v2`, whether a checkpoint was published,
+and the verified file, shard, xorb, pack, and Git-object counts.
+
+For v1, rebuild reconstructs acceleration records from only the shards and Git
+packs named by the current manifest's segmented indexes. It writes
 generation-pinned file records, candidate chunk records, exact Git object locators,
 and a generation-index receipt tied to the committed pack/shard index hashes.
 
@@ -91,19 +105,23 @@ crab metadb rebuild --db file_index
 crab metadb rebuild --db both
 ```
 
-Rebuild is idempotent: repeated runs produce the same receipt history and
-point-readable heads, and an
-interrupted run can be restarted without any special cleanup.
-It validates every manifest-named shard, xorb placement, and Git pack before
-publishing generation evidence. Any validation failure or cancellation exits
-non-zero, retains legacy rows, and leaves the generation receipt unpublished.
+Rebuild is idempotent and restartable. V2 retries reuse content-addressed
+checkpoint/history objects and publish only through an exact root CAS. V1
+repeated runs produce the same receipt history and point-readable heads. Any
+validation failure or cancellation exits non-zero without publishing new
+authority.
+
+The following shard-replay details apply to v1. It validates every
+manifest-named shard, xorb placement, and Git pack before publishing generation
+evidence. A failure retains legacy rows and leaves the generation receipt
+unpublished.
 
 Shard validation is disk-backed. Rebuild downloads one manifest-named shard at
 a time into the maintenance cache, verifies its Xet hash, and parses its
 file/chunk sections from the temporary file. `--db file_index` and
 `--db chunk_index` avoid decoding the other index's entries.
 
-Rebuild is also the repair path after a crash between manifest CAS and
+For v1, rebuild is also the repair path after a crash between manifest CAS and
 post-CAS acceleration indexing. It never scans or advertises orphan shards
 outside the current manifest. See
 [When to use `rebuild`](#when-to-use-rebuild) below for the specific
@@ -285,8 +303,11 @@ generation cursor are preserved so live process-shared handles remain valid.
 
 ## When to use `rebuild`
 
-Use rebuild when an index is corrupt, incomplete, or missed its repairable
-post-CAS update. Typical triggers:
+Use rebuild when authenticated metadata is healthy enough to enumerate its
+durable closure but derived or checkpoint state needs reconstruction. For v2,
+missing or corrupt authoritative capsules/checkpoints require retained history,
+a verified replica, or backup recovery; rebuild never invents catalog entries
+by scanning unrelated bucket objects. Typical v1 triggers include:
 
 - `crab metadb diagnose` reports a manifest or WAL read failure.
 - `crab push` reports that refs committed but post-CAS MetaDB indexing needs
