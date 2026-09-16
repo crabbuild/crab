@@ -1,11 +1,13 @@
 # crab metadb
 
-Inspect, repair, and manage crab's SlateDB metadata subsystem.
+Inspect, repair, and manage Crab's repository metadata.
 
 ## Overview
 
-The metadb subsystem is two SlateDB instances that accelerate Crab's committed
-manifest state. A per-repo `file_index_db` at
+Protocol v2 carries its authenticated Git and Xet catalogs in checkpoints and
+capsules selected by `v2/root`; it does not use SlateDB as repository authority.
+Protocol v1 uses two SlateDB instances that accelerate committed manifest
+state. A per-repo `file_index_db` at
 `{repo_prefix}/file_index_db/` holds generation-pinned file-to-shard records.
 A globally shared `chunk_index_db` at `.crab/chunk_index_db/` holds immutable
 committed chunk receipts plus a rebuildable point-readable head per chunk. A
@@ -35,10 +37,16 @@ crab metadb cache    clear
 
 ### `crab metadb diagnose`
 
-Read-only health snapshot of one or both databases. Reads the
-`sys:*` keys (format version, epoch, created_at, and — for
-`chunk_index_db` — `gc_generation`) and reports the open state and
-path.
+Read-only health snapshot selected by repository authority. A present v2 root
+is exclusive: the default probe authenticates the root and transaction-consistent
+ref heads without downloading stable capsule, checkpoint, or Git-pack bodies.
+It reports generation, root and state digests, visible refs and capsules, and
+checkpoint presence. A corrupt v2 root fails closed instead of falling back to
+SlateDB.
+
+For a repository without a v2 root, diagnose reads the v1 `sys:*` keys (format
+version, epoch, created_at, and — for `chunk_index_db` — `gc_generation`) and
+reports each database's open state and path.
 
 ```bash
 crab metadb diagnose
@@ -46,20 +54,25 @@ crab metadb diagnose --db chunk_index
 crab metadb diagnose --db file_index --json
 ```
 
-Safe to run concurrently with a push: `diagnose` opens each SlateDB
-in read-only mode, so it does not fence an in-flight writer.
+Safe to run concurrently with a push: v2 captures a stable ref-head view, while
+v1 opens each SlateDB in read-only mode. Neither path fences an in-flight writer.
 `--json` emits a `DiagnosePayload` structure suitable for scripting.
 
-Pass `--deep` to scan every key/value row and enumerate the backing object
-store. The deep verdict also flags malformed compacted-SST names (SlateDB
+For v2, `--deep` authenticates the complete checkpoint and capsule frontier,
+pointer catalog, visibility proof, and embedded Git packs from one captured
+view. The `--db` selector limits whether file- and xorb-entry counts are
+reported; shards are always checked because they join those catalogs.
+
+For v1, `--deep` scans every key/value row and enumerates the backing object
+store. The verdict also flags malformed compacted-SST names (SlateDB
 requires 26-character ULIDs), so an orphaned or legacy object is reported as
 a warning instead of being mistaken for a clean database. Diagnosis never
 deletes remote objects; use the provider's retention/GC procedure after
 reviewing the reported path.
 
-Use `diagnose` when you want to confirm a database opens cleanly,
-check its epoch against the manifest, or verify the remote
-`gc_generation` the local cache is being compared against.
+Use `diagnose` to verify the selected repository authority and its derived
+catalogs. On v1 it also checks an index epoch against the manifest and the
+remote `gc_generation` used by the local cache.
 
 ### `crab metadb rebuild`
 

@@ -1,15 +1,11 @@
-//! CLI surface for `crab metadb` — operator tooling for the two
-//! SlateDB metadata databases.
+//! CLI surface for `crab metadb` — operator tooling for v2 capsule metadata
+//! and the two legacy SlateDB metadata databases.
 //!
 //! Subcommands:
 //!
-//! - `diagnose` — read-only health snapshot of the system keys
-//!   (`sys:format_version`, `sys:epoch`, `sys:created_at`,
-//!   `sys:gc_generation`). Optional `--db` filter narrows to a single
-//!   instance. Deeper integrity checks (WAL replay, bloom validity)
-//!   would live here too, but the public `slatedb` crate does not
-//!   expose those surfaces yet; the diagnose output records the gap
-//!   rather than claiming a check ran.
+//! - `diagnose` — read-only v2 authority/catalog diagnosis or a v1 health
+//!   snapshot of the SlateDB system keys (`sys:format_version`, `sys:epoch`,
+//!   `sys:created_at`, `sys:gc_generation`).
 //! - `rebuild` — disaster-recovery reconstruction of one or both
 //!   databases from the durable shards under `.crab/shards/`. The
 //!   MVP implementation is append-only: every entry is
@@ -133,8 +129,36 @@ pub enum MetadbCommand {
 /// Structured payload for `crab metadb diagnose --json`.
 #[derive(Debug, Serialize)]
 pub struct DiagnosePayload {
+    pub protocol: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capsule: Option<CapsuleDiagnosis>,
     pub file_index: Option<DbDiagnosis>,
     pub chunk_index: Option<DbDiagnosis>,
+}
+
+/// Protocol-v2 authority and optional full-catalog diagnosis.
+#[derive(Debug, Serialize)]
+pub struct CapsuleDiagnosis {
+    pub root_path: String,
+    pub generation: u64,
+    pub root_digest: String,
+    pub state_digest: String,
+    pub visible_refs: u64,
+    pub visible_capsules: u64,
+    pub checkpoint_present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deep_integrity: Option<CapsuleDeepIntegrity>,
+}
+
+/// Results of authenticating every v2 metadata and Git-pack container.
+#[derive(Debug, Serialize)]
+pub struct CapsuleDeepIntegrity {
+    pub git_packs: u64,
+    pub git_pack_bytes: u64,
+    pub file_entries: Option<u64>,
+    pub shard_entries: u64,
+    pub xorb_entries: Option<u64>,
+    pub verdict: &'static str,
 }
 
 /// Per-database system-key summary.
@@ -1609,6 +1633,25 @@ async fn run_diagnose(
 ) -> Result<()> {
     check_cancelled(cancel)?;
     let (store, repo_prefix, bucket_identity, config) = resolve_repo_store(cancel).await?;
+    let storage = crate::storage::store::Store::new(Arc::clone(&store))
+        .with_bucket_identity(bucket_identity.clone());
+    let router = crate::storage::StoreLayout::new(storage.clone(), repo_prefix.clone());
+    let capsule_layout = crab_storage::StoreLayout::with_global_prefix(
+        storage.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    if let Some(root) = capsule_owner_root(&capsule_layout).await? {
+        let payload = DiagnosePayload {
+            protocol: "capsule-v2",
+            capsule: Some(diagnose_capsule(&capsule_layout, root, db, deep).await?),
+            file_index: None,
+            chunk_index: None,
+        };
+        check_cancelled(cancel)?;
+        render_diagnose(&payload, mode)?;
+        return Ok(());
+    }
     let metadb_config = config.build_metadb_config(&repo_prefix);
     // Diagnose only reads sys:* keys — open read-only so a
     // concurrent push is not fenced.
@@ -1633,6 +1676,8 @@ async fn run_diagnose(
     };
 
     let payload = DiagnosePayload {
+        protocol: "manifest-v1",
+        capsule: None,
         file_index,
         chunk_index,
     };
@@ -1641,6 +1686,70 @@ async fn run_diagnose(
     check_cancelled(cancel)?;
     render_diagnose(&payload, mode)?;
     Ok(())
+}
+
+async fn diagnose_capsule(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    root: crab_metadata::capsule_protocol::RootSnapshot,
+    db: DbSelector,
+    deep: bool,
+) -> Result<CapsuleDiagnosis> {
+    let (state_digest, visible_refs, visible_capsules, deep_integrity) = if deep {
+        let view = crab_read::capsule_protocol::open_view_from_root(
+            layout,
+            root.clone(),
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+                max_frontier_bytes: CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+            },
+        )
+        .await?;
+        let catalog = view.pointer_catalog()?;
+        view.git_visibility_index()?;
+        (
+            view.state_digest(),
+            diagnosis_count(view.refs().len(), "capsule ref")?,
+            view.capsule_count()?,
+            Some(CapsuleDeepIntegrity {
+                git_packs: u64::try_from(view.git_pack_count()).map_err(|_| {
+                    CrabError::Internal("capsule Git pack count overflowed".to_owned())
+                })?,
+                git_pack_bytes: view.git_pack_bytes()?,
+                file_entries: db
+                    .includes_file_index()
+                    .then(|| diagnosis_count(catalog.files().len(), "capsule file entry"))
+                    .transpose()?,
+                shard_entries: diagnosis_count(catalog.shards().len(), "capsule shard entry")?,
+                xorb_entries: db
+                    .includes_chunk_index()
+                    .then(|| diagnosis_count(catalog.xorbs().len(), "capsule xorb entry"))
+                    .transpose()?,
+                verdict: "OK — root, ref heads, capsules, checkpoint, catalogs, visibility, and Git packs authenticated",
+            }),
+        )
+    } else {
+        let activity = crab_read::capsule_protocol::read_activity_from_root(layout, &root).await?;
+        (
+            activity.state_digest().to_owned(),
+            activity.ref_count(),
+            activity.capsule_count(),
+            None,
+        )
+    };
+    Ok(CapsuleDiagnosis {
+        root_path: layout.capsule_root_path().to_string(),
+        generation: root.record().root().generation(),
+        root_digest: root.record().digest().to_owned(),
+        state_digest,
+        visible_refs,
+        visible_capsules,
+        checkpoint_present: root.record().root().checkpoint().is_some(),
+        deep_integrity,
+    })
+}
+
+fn diagnosis_count(count: usize, label: &str) -> Result<u64> {
+    u64::try_from(count).map_err(|_| CrabError::Internal(format!("{label} count overflowed")))
 }
 
 async fn diagnose_file_index(
@@ -2049,6 +2158,10 @@ fn render_diagnose(payload: &DiagnosePayload, mode: OutputMode) -> Result<()> {
     }
 
     println!("crab metadb diagnose\n");
+    println!("protocol: {}\n", payload.protocol);
+    if let Some(capsule) = &payload.capsule {
+        render_capsule_diagnosis(capsule);
+    }
     for db in [payload.file_index.as_ref(), payload.chunk_index.as_ref()]
         .into_iter()
         .flatten()
@@ -2056,6 +2169,34 @@ fn render_diagnose(payload: &DiagnosePayload, mode: OutputMode) -> Result<()> {
         render_db_diagnosis(db);
     }
     Ok(())
+}
+
+fn render_capsule_diagnosis(diagnosis: &CapsuleDiagnosis) {
+    println!("[capsule_repository]  path={}", diagnosis.root_path);
+    println!("  status: open");
+    println!("  generation: {}", diagnosis.generation);
+    println!("  root_digest: {}", diagnosis.root_digest);
+    println!("  state_digest: {}", diagnosis.state_digest);
+    println!("  visible_refs: {}", diagnosis.visible_refs);
+    println!("  visible_capsules: {}", diagnosis.visible_capsules);
+    println!("  checkpoint_present: {}", diagnosis.checkpoint_present);
+    match &diagnosis.deep_integrity {
+        Some(deep) => {
+            println!("  deep_integrity:");
+            println!("    verdict: {}", deep.verdict);
+            println!("    git_packs: {}", deep.git_packs);
+            println!("    git_pack_bytes: {}", deep.git_pack_bytes);
+            if let Some(file_entries) = deep.file_entries {
+                println!("    file_entries: {file_entries}");
+            }
+            println!("    shard_entries: {}", deep.shard_entries);
+            if let Some(xorb_entries) = deep.xorb_entries {
+                println!("    xorb_entries: {xorb_entries}");
+            }
+        }
+        None => println!("  deep_integrity: not requested (use --deep to enable)"),
+    }
+    println!();
 }
 
 fn render_db_diagnosis(d: &DbDiagnosis) {
@@ -4640,6 +4781,38 @@ mod tests {
             capsule_owner_root(&layout).await,
             Err(CrabError::CorruptObject { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn capsule_diagnose_verifies_v2_without_legacy_metadata() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let storage = crab_storage::Store::new(Arc::clone(&inner));
+        let layout = crab_storage::StoreLayout::new(storage, "org/v2-diagnose".to_owned());
+        let root =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .expect("initialize capsule root");
+
+        let diagnosis = diagnose_capsule(&layout, root, DbSelector::Both, true)
+            .await
+            .expect("diagnose capsule repository");
+
+        assert_eq!(diagnosis.generation, 0);
+        assert_eq!(diagnosis.visible_refs, 0);
+        assert_eq!(diagnosis.visible_capsules, 0);
+        assert!(!diagnosis.checkpoint_present);
+        let deep = diagnosis.deep_integrity.expect("deep diagnosis");
+        assert_eq!(deep.git_packs, 0);
+        assert_eq!(deep.git_pack_bytes, 0);
+        assert_eq!(deep.file_entries, Some(0));
+        assert_eq!(deep.shard_entries, 0);
+        assert_eq!(deep.xorb_entries, Some(0));
+        let legacy_objects = inner
+            .list(Some(&ObjectPath::from("org/v2-diagnose/file_index_db")))
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("list legacy metadata prefix");
+        assert!(legacy_objects.is_empty());
     }
 
     #[test]

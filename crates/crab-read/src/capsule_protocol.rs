@@ -43,6 +43,7 @@ pub struct CapsuleRepositoryView {
 pub struct CapsuleRepositoryActivity {
     state_digest: String,
     capsule_count: u64,
+    ref_count: u64,
 }
 
 impl CapsuleRepositoryActivity {
@@ -56,6 +57,12 @@ impl CapsuleRepositoryActivity {
     #[must_use]
     pub const fn capsule_count(&self) -> u64 {
         self.capsule_count
+    }
+
+    /// Return the number of refs in the transaction-consistent view.
+    #[must_use]
+    pub const fn ref_count(&self) -> u64 {
+        self.ref_count
     }
 }
 
@@ -682,6 +689,8 @@ pub async fn read_activity_from_root(
     Ok(CapsuleRepositoryActivity {
         state_digest: state_digest(snapshot.record(), &visible.transactions),
         capsule_count,
+        ref_count: u64::try_from(visible.refs.len())
+            .map_err(|_| ReadError::internal("capsule ref count overflowed"))?,
     })
 }
 
@@ -1953,6 +1962,7 @@ mod tests {
             .unwrap();
         assert_eq!(activity.state_digest(), view.state_digest());
         assert_eq!(activity.capsule_count(), view.capsule_count().unwrap());
+        assert_eq!(activity.ref_count(), view.refs().len() as u64);
     }
 
     #[tokio::test]
