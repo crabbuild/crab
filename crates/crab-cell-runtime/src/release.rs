@@ -82,7 +82,7 @@ impl ReleaseRecord {
         Ok(bytes)
     }
 
-    fn decode(bytes: &[u8], identity: ApplicationIdentity) -> Result<Self> {
+    pub(crate) fn decode(bytes: &[u8], identity: ApplicationIdentity) -> Result<Self> {
         let raw: RawRelease = serde_json::from_slice(bytes)?;
         if raw.version != 1 {
             return Err(Error::Release("unsupported release version"));
@@ -195,6 +195,26 @@ impl ReleaseStore {
             record: ReleaseRecord::decode(&bytes, self.identity)?,
             token,
         }))
+    }
+
+    pub(crate) async fn install_restored(&self, record: ReleaseRecord) -> Result<ReleaseRecord> {
+        record.validate(self.identity)?;
+        let path = self.layout.release_path();
+        match self
+            .layout
+            .store()
+            .create_strict_with_etag(&path, Bytes::from(record.encode()?))
+            .await
+        {
+            Ok(_) => Ok(record),
+            Err(create_error) => match self.load().await? {
+                Some(current) if current.record == record => Ok(current.record),
+                Some(_) => Err(Error::Release(
+                    "restored release conflicts with existing selection",
+                )),
+                None => Err(create_error.into()),
+            },
+        }
     }
 
     /// Uploads one compiled descriptor and conditionally selects it as prepared.

@@ -48,6 +48,7 @@ cells/v1/apps/<app>/catalog/objects/<digest>.json
 cells/v1/apps/<app>/cells/<cell>/control.json
 cells/v1/apps/<app>/cells/<cell>/inc/<inc>/objects/<digest>.<kind>
 cells/v1/apps/<app>/pins/<pin-id>.json
+cells/v1/apps/<app>/pins/objects/<digest>.json
 cells/v1/nodes/<session>.json
 ```
 
@@ -227,6 +228,64 @@ An entry stores:
 The per-shard ceiling is 65,536 entries. Provisioning uploads the immutable catalog page and CASes its head before creating `control.json`. A crash may leave an unused catalog entry, but never an unproven mutable Cell.
 
 `CellAuthority::create_initial` requires a verified `CatalogProof`. Readers recompute every Cell ID and enforce ordering across page boundaries.
+
+## Pin one exact application backup boundary
+
+A backup pin is an immutable application-wide recovery root. Creation observes
+all 256 catalog heads before traversing their pages, then binds the exact set of
+cataloged Cells to one canonical control per Cell.
+
+```mermaid
+flowchart LR
+    Pin[Pin pointer]
+    Release[Release snapshot]
+    Shards[Catalog shard manifests]
+    Controls[Canonical controls]
+    Roots[Verified LTX graphs]
+
+    Pin --> Release
+    Pin --> Shards
+    Shards --> Controls
+    Controls --> Roots
+```
+
+The pin stores the application identity, creation time, all catalog revisions,
+the release-snapshot digest, control count, and nonempty shard manifests. The
+release snapshot contains the canonical release record and the exact descriptor
+digests selected by it. Control pages and manifests are content addressed under
+`pins/objects/`; the pin pointer is strict-created last.
+
+Creation and verification fail closed when:
+
+- a catalog page, release descriptor, control page, root object, LTX body,
+  index, bundle, or directory node is absent or has the wrong digest;
+- catalog membership and captured controls differ;
+- a control crosses its catalog shard or controls are not globally ordered;
+- the pin ID already identifies a different canonical body.
+
+Repeating creation with an existing pin ID reopens and verifies the existing
+boundary. Restore first verifies the full source pin, then copies immutable
+objects to another prefix in the same bucket with create-if-absent semantics.
+It independently verifies the destination graph before publishing unowned
+`Idle` controls, exact catalog heads, the ready release record, and finally the
+pin pointer.
+
+```mermaid
+flowchart LR
+    Verify[Verify source pin]
+    Copy[Conditionally copy immutable graph]
+    Recheck[Verify destination graph]
+    Authority[Create Idle controls and catalog heads]
+    Commit[Create release and pin pointers]
+
+    Verify --> Copy --> Recheck --> Authority --> Commit
+```
+
+This ordering makes an interrupted offline restore resumable and keeps stale
+source node sessions out of the new authority root. A destination that has
+divergent identity, controls, catalog heads, release selection, or immutable
+bytes fails closed. Cross-provider archive export and unreachable-object
+collection remain separate service operations.
 
 ## Preserve storage verification invariants
 

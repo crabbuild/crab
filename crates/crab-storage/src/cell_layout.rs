@@ -11,7 +11,7 @@ pub struct CellStorageLayout {
 }
 
 /// Immutable object kinds accepted below one Cell incarnation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CellObjectKind {
     Ltx,
     Index,
@@ -118,6 +118,11 @@ impl CellStorageLayout {
     }
 
     #[must_use]
+    pub fn pin_object_path(&self, digest: &[u8; 32]) -> Path {
+        self.application_path(&format!("pins/objects/{}.json", hex(digest)))
+    }
+
+    #[must_use]
     pub fn migration_path(&self, cell: &[u8; 32], operation: &[u8; 16], suffix: &str) -> Path {
         self.application_path(&format!(
             "cells/{}/migration/{}/{}",
@@ -195,6 +200,10 @@ mod tests {
                 .incarnation_object_path(&[0xcd; 32], &[0xef; 16], &[1; 32], CellObjectKind::Root,)
                 .as_ref(),
             "tenant-root/cells/v1/apps/abababababababababababababababab/cells/cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd/inc/efefefefefefefefefefefefefefefef/objects/0101010101010101010101010101010101010101010101010101010101010101.root"
+        );
+        assert_eq!(
+            layout.pin_object_path(&[2; 32]).as_ref(),
+            "tenant-root/cells/v1/apps/abababababababababababababababab/pins/objects/0202020202020202020202020202020202020202020202020202020202020202.json"
         );
     }
 

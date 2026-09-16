@@ -113,6 +113,28 @@ pub async fn cell_node_status(config: &Config, session: &str) -> Result<Vec<u8>>
     cells::node_status(config, session).await
 }
 
+/// Creates or reopens one immutable application backup pin and verifies it.
+pub async fn create_cell_backup(config: &Config, pin: &str) -> Result<Vec<u8>> {
+    config.validate()?;
+    cells::create_backup(config, pin).await
+}
+
+/// Reopens one immutable application backup pin and verifies every dependency.
+pub async fn verify_cell_backup(config: &Config, pin: &str) -> Result<Vec<u8>> {
+    config.validate()?;
+    cells::verify_backup(config, pin).await
+}
+
+/// Restores one verified pin into a separate prefix in the configured bucket.
+pub async fn restore_cell_backup(
+    config: &Config,
+    pin: &str,
+    destination_prefix: &str,
+) -> Result<Vec<u8>> {
+    config.validate()?;
+    cells::restore_backup(config, pin, destination_prefix).await
+}
+
 /// Startup and server lifecycle errors with their original sources retained.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

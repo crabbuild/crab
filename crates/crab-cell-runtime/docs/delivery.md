@@ -28,6 +28,7 @@ Each layer has one owner and one primary evidence surface.
 | Effects and activities | `src/effects.rs`, `src/activity_pool.rs` | `tests/effects.rs`, workflow tests |
 | Scheduler | `src/scheduler.rs`, `src/maintenance.rs` | `tests/scheduler.rs` |
 | Release control | `src/release.rs`, `src/release_progress.rs` | release unit tests and server command tests |
+| Backup pins | `src/backup.rs`, `crab-ltx::CellReplica::reachable_objects` | runtime pin tests and server create/verify command tests |
 | Product composition | `crab-http-server/src/cells/` | server route, restore, and lifecycle tests |
 
 Use the map during review. A change to one boundary needs caller, callee, sibling, and source-loss evidence where applicable.
@@ -131,8 +132,17 @@ still inject the same lost response through the deployed network path.
 - Compaction preserves transaction ID, checksum, sequence, and schema
 - Injected filesystem and executor failures clean owned scratch state
 - Cross-epoch continuation starts from the authoritative root
+- Backup pins bind release metadata, catalog revisions, exact controls, and every reachable immutable root dependency
 
 Repeat remote storage tests against real RustFS. In-memory object storage cannot prove provider ETag and streaming behavior.
+
+The server's real-RustFS backup smoke must create a pin, repeat creation with
+the same ID, verify it independently, remove one isolated test dependency and
+observe fail-closed verification, then republish that content-addressed
+dependency from a second pin. It must then restore the pin twice into a fresh
+prefix, observe identical summaries, inspect unowned `Idle` authority, and use
+a separate process configured only for the destination prefix to verify the
+complete graph with the pinned release.
 
 The ignored qualification tests require one fresh bucket and a unique Cell prefix:
 
@@ -332,7 +342,7 @@ Production readiness requires all of these gates:
 - Three-Pod fault qualification passes
 - Every supported node profile has measured admission envelopes
 - Repository API and Git operations pass end to end
-- Backup and isolated-prefix restore pass
+- Backup and same-bucket isolated-prefix restore pass
 - Hard cutover rehearsal confirms no legacy collaboration reads
 
 Until the last gate passes, describe the implementation as functionally complete but not production-qualified.

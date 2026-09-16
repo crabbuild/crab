@@ -14,6 +14,8 @@ pub enum Error {
     Registry(&'static str),
     #[error("invalid Cell application release: {0}")]
     Release(&'static str),
+    #[error("invalid Cell backup pin: {0}")]
+    Backup(&'static str),
     #[error("Cell ID collides with a different catalog entry")]
     CatalogCollision,
     #[error("Cell catalog shard reached its 65,536-entry limit")]

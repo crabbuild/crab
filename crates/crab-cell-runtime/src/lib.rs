@@ -9,6 +9,7 @@ mod activity_pool;
 mod actor;
 mod application;
 mod authority;
+mod backup;
 mod catalog;
 mod client;
 mod codec;
@@ -39,6 +40,7 @@ pub use actor::{
 };
 pub use application::{ApplicationIdentity, ApplicationIdentityStore};
 pub use authority::{CellAuthority, VersionedControl};
+pub use backup::{BackupPin, BackupPinStore, BackupRestore, PinnedCatalogShard};
 pub use catalog::{
     CatalogEntry, CatalogProof, CatalogRole, CatalogScanPage, CatalogShardScan, CellCatalog,
 };

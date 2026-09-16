@@ -4,6 +4,7 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use bytes::Bytes;
 use crab_storage::{CellObjectKind, CellStorageLayout};
+use futures_util::TryStreamExt as _;
 
 use crate::{CaptureBatch, CrabError, Host, Limits, Position, Result};
 
@@ -34,6 +35,13 @@ pub struct RootRef {
     pub digest: [u8; 32],
     pub position: Position,
     pub commit_sequence: u64,
+}
+
+/// One immutable object authenticated as part of an exact Cell root.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CellObjectRef {
+    pub digest: [u8; 32],
+    pub kind: CellObjectKind,
 }
 
 /// A fully uploaded immutable root proposal.
@@ -944,6 +952,116 @@ impl CellReplica {
     pub async fn open_root(&self, root: &RootRef) -> Result<VerifiedRoot> {
         let graph = self.load_graph(root).await?;
         VerifiedRoot::from_graph(self.clone(), *root, &graph.document, graph.descriptors)
+    }
+
+    /// Verifies and returns the complete immutable dependency set for an exact root.
+    ///
+    /// Callers may use this bounded inventory for backup pinning and reachability
+    /// collection. A missing or corrupt dependency fails the traversal closed.
+    pub async fn reachable_objects(&self, root: &RootRef) -> Result<Vec<CellObjectRef>> {
+        let graph = self.load_graph(root).await?;
+        let extents = object_extents(&graph.descriptors)?;
+        let verification = directory::Verification {
+            layout: &self.layout,
+            cell: &self.cell,
+            incarnation: &self.incarnation,
+            page_size: graph.document.page_size,
+            database_pages: graph.document.database_pages,
+            extents: &extents,
+            host: &self.host,
+        };
+        let directory = directory::reachable_digests(
+            verification,
+            graph.document.directory_digest,
+            graph.document.directory_height,
+            graph.aggregate,
+        )
+        .await?;
+
+        let mut objects = std::collections::BTreeSet::new();
+        let mut streamed = std::collections::BTreeMap::new();
+        objects.insert(CellObjectRef {
+            digest: root.digest,
+            kind: CellObjectKind::Root,
+        });
+        objects.extend(
+            graph
+                .document
+                .segment_pages
+                .iter()
+                .map(|digest| CellObjectRef {
+                    digest: *digest,
+                    kind: CellObjectKind::Root,
+                }),
+        );
+        for descriptor in &graph.descriptors {
+            let body = CellObjectRef {
+                digest: descriptor.object_digest(),
+                kind: descriptor.object_kind(),
+            };
+            let body_limit = match body.kind {
+                CellObjectKind::Bundle => self.limits.max_plan_bytes,
+                CellObjectKind::Ltx => self.limits.max_file_bytes,
+                _ => return Err(CrabError::LTXCorrupted),
+            };
+            let body_length =
+                (body.kind == CellObjectKind::Ltx).then_some(descriptor.info.size_bytes);
+            if streamed
+                .insert(body, (body_limit, body_length))
+                .is_some_and(|previous| previous != (body_limit, body_length))
+            {
+                return Err(CrabError::LTXCorrupted);
+            }
+            let index = CellObjectRef {
+                digest: descriptor.index_digest,
+                kind: CellObjectKind::Index,
+            };
+            if streamed
+                .insert(
+                    index,
+                    (self.limits.max_plan_bytes, Some(descriptor.index_length)),
+                )
+                .is_some_and(|(_, length)| length != Some(descriptor.index_length))
+            {
+                return Err(CrabError::LTXCorrupted);
+            }
+        }
+        for (object, (limit, length)) in &streamed {
+            self.verify_remote_object(*object, *limit, *length).await?;
+        }
+        objects.extend(streamed.into_keys());
+        objects.extend(directory.into_iter().map(|digest| CellObjectRef {
+            digest,
+            kind: CellObjectKind::Directory,
+        }));
+        Ok(objects.into_iter().collect())
+    }
+
+    async fn verify_remote_object(
+        &self,
+        object: CellObjectRef,
+        max_bytes: u64,
+        expected_bytes: Option<u64>,
+    ) -> Result<()> {
+        let path = self.layout.incarnation_object_path(
+            &self.cell,
+            &self.incarnation,
+            &object.digest,
+            object.kind,
+        );
+        let _permit = self.host.io_permit().await?;
+        let (metadata, _, mut stream) = self.layout.store().get_stream(&path, None).await?;
+        if metadata.size > max_bytes || expected_bytes.is_some_and(|size| size != metadata.size) {
+            return Err(CrabError::LTXCorrupted);
+        }
+        let mut digest = blake3::Hasher::new();
+        while let Some(chunk) = stream.try_next().await? {
+            digest.update(&chunk);
+        }
+        if digest.finalize().as_bytes() != &object.digest {
+            return Err(CrabError::ChecksumMismatch);
+        }
+        Ok(())
     }
 
     async fn load_graph(&self, root: &RootRef) -> Result<LoadedGraph> {

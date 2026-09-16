@@ -140,6 +140,12 @@ impl CatalogShardScan {
         self.revision
     }
 
+    /// Returns the immutable pages pinned by this shard-head observation.
+    #[must_use]
+    pub fn page_digests(&self) -> &[Digest] {
+        &self.pages
+    }
+
     /// Loads and verifies at most one 256-entry immutable page.
     pub async fn next_page(&mut self) -> Result<Option<CatalogScanPage>> {
         let Some(digest) = self.pages.get(self.next_page).copied() else {
@@ -310,6 +316,86 @@ impl CellCatalog {
             next_page: 0,
             previous: None,
         })
+    }
+
+    pub(crate) async fn pinned_cells(
+        &self,
+        shard: u8,
+        revision: u64,
+        pages: &[Digest],
+    ) -> Result<Vec<CellId>> {
+        if pages.len() > MAX_PAGES || (revision == 0) != pages.is_empty() {
+            return Err(Error::Catalog("invalid pinned catalog head"));
+        }
+        let mut unique = std::collections::HashSet::with_capacity(pages.len());
+        if pages
+            .iter()
+            .any(|digest| !unique.insert(*digest.as_bytes()))
+        {
+            return Err(Error::Catalog("duplicate pinned catalog page"));
+        }
+        let mut cells = Vec::new();
+        for digest in pages {
+            for entry in self.load_page(*digest).await? {
+                entry.validate(self.tenant, self.application)?;
+                if entry.cell.as_bytes()[0] != shard
+                    || cells.last().is_some_and(|previous: &CellId| {
+                        previous.as_bytes() >= entry.cell.as_bytes()
+                    })
+                {
+                    return Err(Error::Catalog("invalid pinned catalog ordering or shard"));
+                }
+                cells.push(entry.cell);
+            }
+        }
+        if cells.len() > MAX_ENTRIES {
+            return Err(Error::Catalog("pinned catalog exceeds entry limit"));
+        }
+        Ok(cells)
+    }
+
+    pub(crate) async fn install_pinned_shard(
+        &self,
+        shard: u8,
+        revision: u64,
+        pages: &[Digest],
+    ) -> Result<()> {
+        self.pinned_cells(shard, revision, pages).await?;
+        let observed = self.load_head(shard).await?;
+        if revision == 0 {
+            return if observed.is_none() {
+                Ok(())
+            } else {
+                Err(Error::Catalog(
+                    "empty restored shard conflicts with an existing head",
+                ))
+            };
+        }
+        let head = CatalogHead {
+            revision,
+            pages: pages.to_vec(),
+        };
+        let encoded = head.encode()?;
+        let path = self.layout.catalog_head_path(shard);
+        match self
+            .layout
+            .store()
+            .create_strict_with_etag(&path, Bytes::from(encoded))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(create_error) => match self.load_head(shard).await? {
+                Some(current)
+                    if current.head.revision == revision && current.head.pages == pages =>
+                {
+                    Ok(())
+                }
+                Some(_) => Err(Error::Catalog(
+                    "restored shard conflicts with an existing head",
+                )),
+                None => Err(create_error.into()),
+            },
+        }
     }
 
     async fn lookup_after_failed_publish(

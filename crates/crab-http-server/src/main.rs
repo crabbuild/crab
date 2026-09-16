@@ -78,6 +78,11 @@ enum CellsCommand {
         #[command(subcommand)]
         command: CellReleaseCommand,
     },
+    /// Create or verify immutable application backup pins.
+    Backup {
+        #[command(subcommand)]
+        command: CellBackupCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -116,6 +121,27 @@ enum CellReleaseCommand {
         after: Option<String>,
         #[arg(long, default_value_t = 100)]
         limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum CellBackupCommand {
+    /// Pin the current release, catalog, controls, and exact LTX roots.
+    Create {
+        #[arg(long)]
+        pin: String,
+    },
+    /// Reopen one pin and verify every immutable dependency.
+    Verify {
+        #[arg(long)]
+        pin: String,
+    },
+    /// Restore one pin into an isolated prefix in the configured bucket.
+    Restore {
+        #[arg(long)]
+        pin: String,
+        #[arg(long)]
+        destination_prefix: String,
     },
 }
 
@@ -342,6 +368,19 @@ async fn cells(
         CellsCommand::Release {
             command: CellReleaseCommand::Migrations { after, limit },
         } => crab_http_server::cell_release_migrations(config, after.as_deref(), limit).await?,
+        CellsCommand::Backup {
+            command: CellBackupCommand::Create { pin },
+        } => crab_http_server::create_cell_backup(config, &pin).await?,
+        CellsCommand::Backup {
+            command: CellBackupCommand::Verify { pin },
+        } => crab_http_server::verify_cell_backup(config, &pin).await?,
+        CellsCommand::Backup {
+            command:
+                CellBackupCommand::Restore {
+                    pin,
+                    destination_prefix,
+                },
+        } => crab_http_server::restore_cell_backup(config, &pin, &destination_prefix).await?,
     };
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(&bytes)?;
@@ -778,6 +817,87 @@ mod tests {
                 "node",
                 "--session",
                 "11111111111111111111111111111111",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn cell_backup_commands_require_one_pin_and_restore_prefix() {
+        let pin = "11111111111111111111111111111111";
+        let create = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "backup",
+            "create",
+            "--pin",
+            pin,
+        ])
+        .unwrap();
+        assert!(matches!(
+            create.command,
+            Some(Command::Cells {
+                command: CellsCommand::Backup {
+                    command: CellBackupCommand::Create { pin: parsed }
+                }
+            }) if parsed == pin
+        ));
+
+        let verify = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "backup",
+            "verify",
+            "--pin",
+            pin,
+        ])
+        .unwrap();
+        assert!(matches!(
+            verify.command,
+            Some(Command::Cells {
+                command: CellsCommand::Backup {
+                    command: CellBackupCommand::Verify { pin: parsed }
+                }
+            }) if parsed == pin
+        ));
+
+        let restore = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "backup",
+            "restore",
+            "--pin",
+            pin,
+            "--destination-prefix",
+            "qualification/restored-cells",
+        ])
+        .unwrap();
+        assert!(matches!(
+            restore.command,
+            Some(Command::Cells {
+                command: CellsCommand::Backup {
+                    command: CellBackupCommand::Restore {
+                        pin: parsed,
+                        destination_prefix,
+                    }
+                }
+            }) if parsed == pin && destination_prefix == "qualification/restored-cells"
+        ));
+
+        assert!(
+            Arguments::try_parse_from([
+                "crab-http-server",
+                "--config",
+                "server.toml",
+                "cells",
+                "backup",
+                "create",
             ])
             .is_err()
         );

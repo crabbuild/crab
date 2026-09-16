@@ -320,9 +320,41 @@ Include:
 - Every immutable object reachable from pinned roots
 - Node-independent application configuration needed to recreate the fleet
 
-Backup traversal pins its start revisions and writes a pin object before copying. It fails if any referenced object is absent or fails digest verification.
+Backup traversal pins its start revisions and strict-creates the pin only after
+every referenced object verifies. Restore verifies that pin before copying.
 
-Restore to a separate storage prefix, verify all reachable objects, and start a fleet with the matching compiled release. Local SQLite files are rebuilt from exact roots.
+Create a nonzero 16-byte pin ID and verify it independently:
+
+```bash
+crab-http-server --config /etc/crab/server.toml cells backup create \
+  --pin 11112222333344445555666677778888
+crab-http-server --config /etc/crab/server.toml cells backup verify \
+  --pin 11112222333344445555666677778888
+crab-http-server --config /etc/crab/server.toml cells backup restore \
+  --pin 11112222333344445555666677778888 \
+  --destination-prefix recovery/restore-2026-09-16
+```
+
+Both commands print versioned JSON with the application and pin IDs, creation
+time, control count, nonempty catalog-shard count, release-snapshot digest, and
+`verified: true`. Creation is idempotent by pin ID. Verification rereads the
+release metadata, catalog pages, canonical controls, and every immutable LTX
+dependency; it does not trust local SQLite files or caches.
+
+Restore accepts only a canonical prefix different from the configured source
+root and only a pin whose selected release was `Ready`. The command verifies
+the source graph, uses same-bucket conditional copies, re-verifies every
+destination root, removes captured owners from restored controls, and publishes
+the destination release and pin pointers last. Run it while the destination is
+offline; an exact interrupted attempt is resumable, but a destination used by a
+fleet has intentionally diverged and is rejected.
+
+Start the restored fleet with the compiled release named by the pin. Its first
+request acquires each `Idle` Cell and rebuilds disposable SQLite files from the
+exact root. Repository catalog configuration, Git/Xet/LFS objects, release
+assets, and other product data outside `cells/v1` are not Cell backup contents;
+restore or reference those through their owning runbooks. Cross-provider
+archive export still requires a separate transport step.
 
 ## Apply the repository hard cut
 

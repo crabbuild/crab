@@ -77,6 +77,13 @@ credentials. Then create a cataloged repository and start:
   storage-probe
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
   cells capacity --json
+"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
+  cells backup create --pin 11112222333344445555666677778888
+"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
+  cells backup verify --pin 11112222333344445555666677778888
+"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
+  cells backup restore --pin 11112222333344445555666677778888 \
+  --destination-prefix recovery/team-2026-09-16
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml serve
 ```
 
@@ -97,6 +104,16 @@ root, perform conditional coordination writes, create and delete an object,
 and observe that deletion. `serve` runs the same preflight before binding its
 listeners. `cells capacity --json` reports the resource-derived Cell admission
 envelope without claiming that the node has met a throughput target.
+
+`cells backup create` snapshots all catalog heads, requires one exact control
+per catalog entry, verifies the selected release and every reachable LTX
+dependency, and strict-creates the pin pointer last. Reusing a pin ID verifies
+and returns the existing boundary. `cells backup verify` independently reopens
+the pin and fails closed on a missing or corrupt dependency. `cells backup
+restore` conditionally copies the verified graph to a canonical isolated prefix
+in the configured bucket, publishes unowned `Idle` controls, then publishes the
+catalog, release, and pin commit points. Repeating an offline restore adopts
+only exact existing state; divergent destination state fails closed.
 
 The bucket or container must already exist. `repository adopt` can publish an
 existing canonical repository; it does not convert arbitrary objects into a

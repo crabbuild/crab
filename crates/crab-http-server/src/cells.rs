@@ -6,12 +6,13 @@ use std::{
 };
 
 use crab_cell_runtime::{
-    ApplicationId, ApplicationIdentity, ApplicationIdentityStore, BuildDescriptor, CatalogRole,
-    CellAuthority, CellCatalog, CellId, CellModule, CellRuntime, CellTarget, ControlState, Digest,
-    EffectModule, MaintenanceModule, MigrationDescriptor, MigrationFailure, MigrationProgressState,
-    MigrationProgressStore, ModuleDescriptor, NamespaceDescriptor, NamespaceId, NodeAdvertisement,
-    NodeCapacity, NodeDirectory, OperationDescriptor, Owner, PeerRoundTrip, PeerSigner, Registry,
-    RegistryBuilder, ReleaseRecord, ReleaseState, ReleaseStore, ReplicaLimits, RequestId,
+    ApplicationId, ApplicationIdentity, ApplicationIdentityStore, BackupPin, BackupPinStore,
+    BackupRestore, BuildDescriptor, CatalogRole, CellAuthority, CellCatalog, CellId, CellModule,
+    CellRuntime, CellTarget, Control, ControlState, Digest, EffectModule, MaintenanceModule,
+    MigrationDescriptor, MigrationFailure, MigrationProgressState, MigrationProgressStore,
+    ModuleDescriptor, NamespaceDescriptor, NamespaceId, NodeAdvertisement, NodeCapacity,
+    NodeDirectory, OperationDescriptor, Owner, PeerRoundTrip, PeerSigner, PinnedCatalogShard,
+    Registry, RegistryBuilder, ReleaseRecord, ReleaseState, ReleaseStore, ReplicaLimits, RequestId,
     SessionId, SqlWorkerPool, TenantId, VersionedNodeAdvertisement, register_effect_delivery,
     register_maintenance,
 };
@@ -442,6 +443,229 @@ pub(crate) async fn node_status(config: &Config, session: &str) -> Result<Vec<u8
         session: status_hex(session.as_bytes()),
         live,
         observed_at_ms,
+    })
+    .map_err(Error::from)
+}
+
+#[derive(Serialize)]
+struct BackupStatus {
+    version: u8,
+    application: String,
+    pin: String,
+    created_at_ms: i64,
+    control_count: u64,
+    nonempty_catalog_shards: usize,
+    release: String,
+    verified: bool,
+}
+
+#[derive(Serialize)]
+struct BackupRestoreStatus {
+    version: u8,
+    application: String,
+    pin: String,
+    destination_prefix: String,
+    control_count: u64,
+    immutable_object_count: u64,
+    nonempty_catalog_shards: u16,
+    verified: bool,
+}
+
+pub(crate) async fn create_backup(config: &Config, pin: &str) -> Result<Vec<u8>> {
+    let pin = decode_backup_pin(pin)?;
+    let startup = verify_startup_release(config).await?;
+    let (pins, _scratch) = backup_store(config, &startup)?;
+    create_backup_at(
+        &pins,
+        &startup.layout,
+        startup.identity,
+        pin,
+        unix_now_ms()?,
+    )
+    .await
+}
+
+pub(crate) async fn verify_backup(config: &Config, pin: &str) -> Result<Vec<u8>> {
+    let pin = decode_backup_pin(pin)?;
+    let startup = verify_startup_release(config).await?;
+    let (pins, _scratch) = backup_store(config, &startup)?;
+    verify_backup_at(&pins, pin).await
+}
+
+pub(crate) async fn restore_backup(
+    config: &Config,
+    pin: &str,
+    destination_prefix: &str,
+) -> Result<Vec<u8>> {
+    let pin = decode_backup_pin(pin)?;
+    let root = StorageRoot::build(&config.storage)?;
+    let normalized = crab_git::url::normalize_repository_prefix(destination_prefix)
+        .map_err(|_| Error::Config("backup destination prefix is invalid"))?;
+    if normalized != destination_prefix || normalized == root.prefix {
+        return Err(Error::Config(
+            "backup destination must be a canonical isolated prefix",
+        ));
+    }
+    let startup = verify_startup_release(config).await?;
+    let (pins, _scratch) = backup_store(config, &startup)?;
+    restore_backup_at(&pins, pin, &normalized).await
+}
+
+async fn create_backup_at(
+    pins: &BackupPinStore,
+    layout: &CellStorageLayout,
+    identity: ApplicationIdentity,
+    id: RequestId,
+    created_at_ms: i64,
+) -> Result<Vec<u8>> {
+    if let Some(pin) = pins.load(id).await? {
+        let controls = pins.verify(&pin).await?;
+        return encode_backup_status(&pin, controls.len());
+    }
+    let (catalog, controls) = snapshot_backup_inventory(layout, identity).await?;
+    let pin = match pins.create(id, created_at_ms, catalog, controls).await {
+        Ok(pin) => pin,
+        Err(create_error) => match pins.load(id).await? {
+            Some(pin) => pin,
+            None => return Err(create_error.into()),
+        },
+    };
+    let controls = pins.verify(&pin).await?;
+    encode_backup_status(&pin, controls.len())
+}
+
+async fn verify_backup_at(pins: &BackupPinStore, id: RequestId) -> Result<Vec<u8>> {
+    let pin = pins
+        .load(id)
+        .await?
+        .ok_or(Error::Config("Cell backup pin was not found"))?;
+    let controls = pins.verify(&pin).await?;
+    encode_backup_status(&pin, controls.len())
+}
+
+async fn restore_backup_at(
+    pins: &BackupPinStore,
+    id: RequestId,
+    destination_prefix: &str,
+) -> Result<Vec<u8>> {
+    let pin = pins
+        .load(id)
+        .await?
+        .ok_or(Error::Config("Cell backup pin was not found"))?;
+    let restored = pins.restore(&pin, Path::from(destination_prefix)).await?;
+    encode_backup_restore_status(&restored, destination_prefix)
+}
+
+async fn snapshot_backup_inventory(
+    layout: &CellStorageLayout,
+    identity: ApplicationIdentity,
+) -> Result<(Vec<PinnedCatalogShard>, Vec<Control>)> {
+    let catalog = CellCatalog::new(layout.clone(), identity.tenant());
+    let authority = CellAuthority::new(layout.clone());
+    let mut scans = Vec::with_capacity(256);
+    for shard in 0_u8..=u8::MAX {
+        scans.push(catalog.scan_shard(shard).await?);
+    }
+    let pinned = scans
+        .iter()
+        .enumerate()
+        .map(|(shard, scan)| PinnedCatalogShard {
+            shard: shard as u8,
+            revision: scan.revision(),
+            pages: scan.page_digests().to_vec(),
+        })
+        .collect::<Vec<_>>();
+    let mut cells = Vec::new();
+    for scan in &mut scans {
+        while let Some(page) = scan.next_page().await? {
+            cells.extend(page.entries().iter().map(|proof| proof.entry().cell()));
+        }
+    }
+    let mut controls = Vec::with_capacity(cells.len());
+    for cell in cells {
+        controls.push(
+            authority
+                .load(cell)
+                .await?
+                .ok_or(Error::Config("cataloged Cell has no backup control"))?
+                .value()
+                .clone(),
+        );
+    }
+    Ok((pinned, controls))
+}
+
+fn backup_store(
+    config: &Config,
+    startup: &VerifiedStartupCells,
+) -> Result<(BackupPinStore, tempfile::TempDir)> {
+    std::fs::create_dir_all(&config.cells.data_dir)?;
+    let scratch = tempfile::Builder::new()
+        .prefix("backup-")
+        .tempdir_in(&config.cells.data_dir)?;
+    let budget = crate::server::CellRuntimeBudget::from_resources(crate::peer::local_resources(
+        &config.cells.data_dir,
+    )?)?;
+    let local_disk = budget.local_disk();
+    let host = budget.replica_host(local_disk, scratch.path().to_owned());
+    Ok((
+        BackupPinStore::new(
+            startup.layout.clone(),
+            startup.identity,
+            repository_replica_limits(),
+            host,
+        )?,
+        scratch,
+    ))
+}
+
+fn decode_backup_pin(value: &str) -> Result<RequestId> {
+    let bytes = decode_hex(
+        value,
+        "backup pin must be 32 lowercase hexadecimal characters",
+    )?;
+    if bytes == [0; 16] {
+        return Err(Error::Config("backup pin must not be zero"));
+    }
+    Ok(RequestId::from_bytes(bytes))
+}
+
+fn encode_backup_status(pin: &BackupPin, controls: usize) -> Result<Vec<u8>> {
+    if controls as u64 != pin.control_count() {
+        return Err(Error::Config(
+            "verified backup control count differs from its pin",
+        ));
+    }
+    serde_json::to_vec_pretty(&BackupStatus {
+        version: 1,
+        application: status_hex(pin.application().as_bytes()),
+        pin: status_hex(pin.id().as_bytes()),
+        created_at_ms: pin.created_at_ms(),
+        control_count: pin.control_count(),
+        nonempty_catalog_shards: pin
+            .catalog_revisions()
+            .iter()
+            .filter(|revision| **revision != 0)
+            .count(),
+        release: status_hex(&pin.release_digest()),
+        verified: true,
+    })
+    .map_err(Error::from)
+}
+
+fn encode_backup_restore_status(
+    restored: &BackupRestore,
+    destination_prefix: &str,
+) -> Result<Vec<u8>> {
+    serde_json::to_vec_pretty(&BackupRestoreStatus {
+        version: 1,
+        application: status_hex(restored.application().as_bytes()),
+        pin: status_hex(restored.pin().as_bytes()),
+        destination_prefix: destination_prefix.to_owned(),
+        control_count: restored.control_count(),
+        immutable_object_count: restored.immutable_object_count(),
+        nonempty_catalog_shards: restored.nonempty_catalog_shards(),
+        verified: true,
     })
     .map_err(Error::from)
 }
@@ -1487,8 +1711,8 @@ mod tests {
         ApplicationIdentity, BuildDescriptor, CatalogEntry, CellAuthority, CellClient, CellModule,
         CellReplica, CellRuntime, CellTarget, IncarnationId, InvocationError, MigrationDescriptor,
         ModuleDescriptor, MutationIdentity, NamespaceDescriptor, NodeAdvertisement, NodeCapacity,
-        Owner, PeerCellResolver, RegistryBuilder, ReplicaLimits, RetainedCodeDescriptor, SessionId,
-        SqlWorkerPool,
+        Owner, PeerCellResolver, RegistryBuilder, ReplicaHost, ReplicaLimits,
+        RetainedCodeDescriptor, SessionId, SqlWorkerPool,
     };
     use crab_storage::{CellStorageLayout, Store};
     use ed25519_dalek::SigningKey;
@@ -1537,6 +1761,23 @@ mod tests {
             "00000000000000000000000000000000",
         ] {
             assert!(decode_session(invalid).is_err(), "accepted {invalid}");
+        }
+    }
+
+    #[test]
+    fn backup_pin_parser_accepts_only_nonzero_canonical_hex() {
+        assert_eq!(
+            decode_backup_pin("11111111111111111111111111111111").unwrap(),
+            RequestId::from_bytes([0x11; 16])
+        );
+        for invalid in [
+            "",
+            "1111111111111111111111111111111",
+            "111111111111111111111111111111111",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "00000000000000000000000000000000",
+        ] {
+            assert!(decode_backup_pin(invalid).is_err(), "accepted {invalid}");
         }
     }
 
@@ -2499,6 +2740,149 @@ mod tests {
         assert_eq!(
             releases.load().await.unwrap().unwrap().record().desired(),
             Some(other_digest)
+        );
+    }
+
+    #[tokio::test]
+    async fn backup_pin_captures_release_catalog_and_control_idempotently() {
+        let identity = ApplicationIdentity::new(
+            TenantId::from_bytes([1; 16]),
+            ApplicationId::from_bytes([2; 16]),
+        );
+        let layout = CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            Path::from("backup-pin"),
+            *identity.application().as_bytes(),
+        );
+        let registry = compiled_registry().unwrap();
+        bootstrap_release_at(
+            &layout,
+            identity,
+            &registry,
+            &format!("sha256:{}", "a".repeat(64)),
+        )
+        .await
+        .unwrap();
+        let target = CellTarget::new(
+            identity.tenant(),
+            identity.application(),
+            REPOSITORY_NAMESPACE,
+            &[3; 16],
+        )
+        .unwrap();
+        let catalog = CellCatalog::new(layout.clone(), identity.tenant());
+        let proof = catalog
+            .provision(
+                CatalogEntry::new(
+                    &target,
+                    CatalogRole::Repository,
+                    registry.module_code(RepositoryModule::NAME).unwrap(),
+                    1,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let authority = CellAuthority::new(layout.clone());
+        let initial = authority
+            .create_initial(
+                &proof,
+                IncarnationId::from_bytes([4; 16]),
+                Owner {
+                    session: SessionId::from_bytes([5; 16]),
+                    endpoint: "https://node.internal:8789".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let replica = crab_ltx::CellReplica::new(
+            layout.clone(),
+            *target.cell_id().as_bytes(),
+            [4; 16],
+            repository_replica_limits(),
+        )
+        .unwrap();
+        let database_dir = tempfile::TempDir::new().unwrap();
+        let mut database = crab_ltx::ManagedDb::open(
+            &database_dir.path().join("repository.sqlite"),
+            repository_replica_limits(),
+        )
+        .unwrap();
+        database
+            .transaction(|transaction| {
+                transaction.execute_batch("CREATE TABLE restored(value INTEGER NOT NULL)")
+            })
+            .unwrap();
+        let prepared = replica
+            .prepare(None, &database.capture().unwrap(), 1, 1)
+            .await
+            .unwrap();
+        database.close().unwrap();
+        let published = initial.value().publish_prepared(&prepared, None).unwrap();
+        authority
+            .transition(
+                &initial,
+                published.clone(),
+                crab_cell_runtime::Transition::Publish,
+            )
+            .await
+            .unwrap();
+        let pins = BackupPinStore::new(
+            layout.clone(),
+            identity,
+            repository_replica_limits(),
+            ReplicaHost::default(),
+        )
+        .unwrap();
+        let id = RequestId::from_bytes([6; 16]);
+
+        let created: Value = serde_json::from_slice(
+            &create_backup_at(&pins, &layout, identity, id, 1_000)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let retry: Value = serde_json::from_slice(
+            &create_backup_at(&pins, &layout, identity, id, 2_000)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let verified: Value =
+            serde_json::from_slice(&verify_backup_at(&pins, id).await.unwrap()).unwrap();
+        let restored: Value = serde_json::from_slice(
+            &restore_backup_at(&pins, id, "backup-restored")
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(created, retry);
+        assert_eq!(created, verified);
+        assert_eq!(created["verified"], true);
+        assert_eq!(created["control_count"], 1);
+        assert_eq!(created["nonempty_catalog_shards"], 1);
+        assert_eq!(created["created_at_ms"], 1_000);
+        assert_eq!(restored["verified"], true);
+        assert_eq!(restored["destination_prefix"], "backup-restored");
+        assert_eq!(restored["control_count"], 1);
+        assert!(restored["immutable_object_count"].as_u64().unwrap() > 0);
+        let restored_identities =
+            ApplicationIdentityStore::new(layout.store().clone(), Path::from("backup-restored"));
+        assert_eq!(restored_identities.load().await.unwrap(), Some(identity));
+        let restored_layout = restored_identities.layout(identity).await.unwrap();
+        let restored_control = CellAuthority::new(restored_layout)
+            .load(target.cell_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored_control.value().state, ControlState::Idle);
+        assert_eq!(restored_control.value().owner, None);
+        assert_eq!(restored_control.value().root, published.root);
+        assert!(
+            verify_backup_at(&pins, RequestId::from_bytes([7; 16]))
+                .await
+                .is_err()
         );
     }
 

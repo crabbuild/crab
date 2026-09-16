@@ -121,6 +121,16 @@ Inspect or stop the stack without deleting repositories:
 ```sh
 docker compose --file crates/crab-http-server/deploy/compose.yaml exec server \
   crab-http-server --config /etc/crab/server.toml cells capacity --json --live
+docker compose --file crates/crab-http-server/deploy/compose.yaml exec server \
+  crab-http-server --config /etc/crab/server.toml cells backup create \
+  --pin 11112222333344445555666677778888
+docker compose --file crates/crab-http-server/deploy/compose.yaml exec server \
+  crab-http-server --config /etc/crab/server.toml cells backup verify \
+  --pin 11112222333344445555666677778888
+docker compose --file crates/crab-http-server/deploy/compose.yaml exec server \
+  crab-http-server --config /etc/crab/server.toml cells backup restore \
+  --pin 11112222333344445555666677778888 \
+  --destination-prefix recovery/compose-restore
 docker compose --file crates/crab-http-server/deploy/compose.yaml logs --follow server proxy
 docker compose --file crates/crab-http-server/deploy/compose.yaml down
 ```
@@ -128,6 +138,14 @@ docker compose --file crates/crab-http-server/deploy/compose.yaml down
 The capacity report is the server's resource-derived admission envelope, not a
 benchmark result. Record it beside live RSS, file-descriptor, latency, local
 disk and RustFS measurements when qualifying a node profile.
+
+The backup commands operate on object-store state, not the disposable Cell
+tmpfs. Reusing the same nonzero lowercase pin ID is idempotent and re-verifies
+the existing release, catalog, controls, and reachable LTX graph. Restore uses
+conditional same-bucket copies and publishes the destination release and pin
+only after the copied graph verifies. Keep the destination offline during the
+operation. Cross-provider export and product data outside `cells/v1` remain
+separate operator work.
 
 `docker compose down --volumes` permanently removes the local RustFS and peer
 identity volumes, including the catalog and every repository. The next start

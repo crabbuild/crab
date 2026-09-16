@@ -11,7 +11,7 @@ use crab_ltx::{
     bundle::{Bundle, BundleEntry},
     restore_exact,
 };
-use crab_storage::{CellStorageLayout, StorageReadKind, Store};
+use crab_storage::{CellObjectKind, CellStorageLayout, StorageReadKind, Store};
 use object_store::{ObjectStoreExt as _, memory::InMemory, path::Path};
 
 fn checksum_path(database: &std::path::Path) -> std::path::PathBuf {
@@ -156,6 +156,57 @@ async fn prepared_root_reopens_without_a_mutable_head() {
     assert_eq!(scratch.available_permits(), 64);
     assert_eq!(read_bytes.load(Ordering::SeqCst), 0);
     assert!(!rejected_path.exists());
+}
+
+#[tokio::test]
+async fn exact_root_inventory_verifies_every_remote_dependency() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let mut writer =
+        ManagedDb::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE payload(value BLOB NOT NULL);\
+                 INSERT INTO payload VALUES(randomblob(2000000))",
+            )
+        })
+        .unwrap();
+    let backend = Arc::new(InMemory::new());
+    let store = Store::new(backend.clone());
+    let cell = [31; 32];
+    let incarnation = [32; 16];
+    let layout = CellStorageLayout::new(store.clone(), Path::from("runtime"), [3; 16]);
+    let replica = CellReplica::new(layout.clone(), cell, incarnation, Limits::default()).unwrap();
+    let root = replica
+        .prepare(None, &writer.capture().unwrap(), 1, 1)
+        .await
+        .unwrap()
+        .root();
+    writer.close().unwrap();
+
+    let objects = replica.reachable_objects(&root).await.unwrap();
+    assert!(objects.windows(2).all(|pair| pair[0] < pair[1]));
+    for kind in [
+        CellObjectKind::Ltx,
+        CellObjectKind::Index,
+        CellObjectKind::Directory,
+        CellObjectKind::Root,
+    ] {
+        assert!(objects.iter().any(|object| object.kind == kind));
+    }
+    for object in &objects {
+        let path = layout.incarnation_object_path(&cell, &incarnation, &object.digest, object.kind);
+        store.head(&path).await.unwrap();
+    }
+
+    let missing = objects
+        .iter()
+        .find(|object| object.kind == CellObjectKind::Directory)
+        .unwrap();
+    let missing_path =
+        layout.incarnation_object_path(&cell, &incarnation, &missing.digest, missing.kind);
+    backend.delete(&missing_path).await.unwrap();
+    assert!(replica.reachable_objects(&root).await.is_err());
 }
 
 #[tokio::test]

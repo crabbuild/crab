@@ -332,6 +332,97 @@ pub(super) async fn verify_root(
     Ok(root_aggregate)
 }
 
+pub(super) async fn reachable_digests(
+    verification: Verification<'_>,
+    root: [u8; 32],
+    height: u32,
+    expected_root: Aggregate,
+) -> Result<Vec<[u8; 32]>> {
+    if height > 3 || verification.database_pages == 0 {
+        return Err(CrabError::LTXCorrupted);
+    }
+    let mut pending = vec![(root, height, Some(expected_root))];
+    let mut digests = Vec::new();
+    let mut previous_page = 0u32;
+    let mut seen = 0u64;
+    let mut checksum = crate::CHECKSUM_FLAG;
+    while let Some((digest, remaining, expected)) = pending.pop() {
+        // Backup/collection inventory must prove the origin still contains
+        // every dependency; a process cache cannot establish remote presence.
+        let bytes = read_node_uncached(&verification, digest).await?;
+        let header = Header::parse(&bytes)?;
+        if (remaining == 0) != (header.kind == 0) {
+            return Err(CrabError::LTXCorrupted);
+        }
+        digests.push(digest);
+        if header.kind == 0 {
+            let (aggregate, entries) = verify_leaf(
+                &bytes,
+                &header,
+                verification.page_size,
+                verification.database_pages,
+                verification.extents,
+            )?;
+            if expected.is_some_and(|value| value != aggregate) {
+                return Err(CrabError::ChecksumMismatch);
+            }
+            for entry in entries {
+                let expected_page = previous_page
+                    .checked_add(1)
+                    .ok_or(CrabError::LTXCorrupted)?;
+                let lock = crate::ltx::lock_pgno(verification.page_size);
+                if expected_page == lock {
+                    previous_page = lock;
+                }
+                if entry.page
+                    != previous_page
+                        .checked_add(1)
+                        .ok_or(CrabError::LTXCorrupted)?
+                {
+                    return Err(CrabError::LTXCorrupted);
+                }
+                checksum = crate::CHECKSUM_FLAG | (checksum ^ entry.checksum);
+                previous_page = entry.page;
+                seen += 1;
+            }
+            continue;
+        }
+        let (aggregate, children) = verify_branch(&bytes, &header)?;
+        if expected.is_some_and(|value| value != aggregate) {
+            return Err(CrabError::ChecksumMismatch);
+        }
+        let next = remaining.checked_sub(1).ok_or(CrabError::LTXCorrupted)?;
+        pending.extend(
+            children
+                .into_iter()
+                .rev()
+                .map(|child| (child.digest, next, Some(child.aggregate))),
+        );
+    }
+    let lock = crate::ltx::lock_pgno(verification.page_size);
+    if previous_page < verification.database_pages {
+        if previous_page
+            .checked_add(1)
+            .ok_or(CrabError::LTXCorrupted)?
+            != lock
+            || lock != verification.database_pages
+        {
+            return Err(CrabError::LTXCorrupted);
+        }
+        previous_page = lock;
+    }
+    let expected_pages =
+        u64::from(verification.database_pages) - u64::from(lock <= verification.database_pages);
+    if previous_page != verification.database_pages
+        || seen != expected_pages
+        || seen != expected_root.live_pages
+        || checksum != expected_root.checksum
+    {
+        return Err(CrabError::ChecksumMismatch);
+    }
+    Ok(digests)
+}
+
 pub(super) async fn lookup(
     verification: Verification<'_>,
     root: [u8; 32],
@@ -577,6 +668,28 @@ async fn read_node(verification: &Verification<'_>, digest: [u8; 32]) -> Result<
         .lock()
         .map_err(|_| CrabError::InvalidState("Cell directory cache poisoned"))?
         .insert(key, bytes))
+}
+
+async fn read_node_uncached(
+    verification: &Verification<'_>,
+    digest: [u8; 32],
+) -> Result<Arc<[u8]>> {
+    let path = verification.layout.incarnation_object_path(
+        verification.cell,
+        verification.incarnation,
+        &digest,
+        CellObjectKind::Directory,
+    );
+    let _permit = verification.host.io_permit().await?;
+    let (bytes, _) = verification
+        .layout
+        .store()
+        .get_with_etag_bounded(&path, MAX_NODE_BYTES)
+        .await?;
+    if *blake3::hash(&bytes).as_bytes() != digest {
+        return Err(CrabError::ChecksumMismatch);
+    }
+    Ok(bytes.to_vec().into())
 }
 
 fn encode_leaf(entries: &[DirectoryEntry]) -> Result<Vec<u8>> {

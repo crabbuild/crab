@@ -131,10 +131,15 @@ its separately derived dirty/recovery slots bound concurrent large operations.
    Every acknowledged root must survive eviction.
 4. **Retention and collection.** The HTTP runtime now owns owner/head CAS,
    exact-response gating, ambiguous-publication reconciliation and scheduled
-   representation compaction. Implement backup/recovery-root pinning and reclaim
-   only unreferenced objects outside retention grace. Library epoch CAS is not a
-   lease. Per-repository bundle publication is not node-wide atomic group commit
-   or shared-bundle retention.
+   representation compaction. Application backup pins now bind release metadata,
+   revision-pinned catalog pages, exact controls and every digest-verified object
+   reachable from the captured LTX roots. Same-bucket restore conditionally
+   copies and re-verifies those objects before publishing unowned destination
+   controls and commit pointers. Implement cross-provider export, then reclaim
+   only objects unreachable from live controls and retained pins outside
+   retention grace. Library epoch CAS is not a lease. Per-repository
+   bundle publication is not node-wide atomic group commit or shared-bundle
+   retention.
 5. **Measured node qualification.** Define hardware and service SLOs, then prove
    capacity under realistic database sizes, skew, write amplification, object
    storage latency, simultaneous takeover, compaction and failures. Metrics

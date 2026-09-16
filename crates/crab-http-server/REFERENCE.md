@@ -203,6 +203,13 @@ SERVER="$HOME/Workspace/crabbuild-target/crab-http-server-dev/release/crab-http-
 "$SERVER" --config /secure/server.toml cells status \
   --owner your-team --name your-project
 "$SERVER" --config /secure/server.toml cells capacity --json --live
+"$SERVER" --config /secure/server.toml cells backup create \
+  --pin 11112222333344445555666677778888
+"$SERVER" --config /secure/server.toml cells backup verify \
+  --pin 11112222333344445555666677778888
+"$SERVER" --config /secure/server.toml cells backup restore \
+  --pin 11112222333344445555666677778888 \
+  --destination-prefix recovery/restore-2026-09-16
 "$SERVER" --config /secure/server.toml repository set-members \
   --owner your-team --name your-project \
   --members-file /secure/members.toml
@@ -232,6 +239,22 @@ dirty-job and full-recovery admission limits. The full-recovery limit stays at
 two even when the node can run more blocking or capture jobs. Omitting `--live`
 calculates a preflight envelope for the command process. Both are qualification
 inputs, not measured performance evidence.
+
+`cells backup create` observes all 256 catalog heads before traversing their
+immutable pages. It binds the selected release record and descriptors, the
+exact catalog revisions, one canonical control per entry, and every verified
+LTX dependency into a strict-created pin. Repeating an existing pin ID verifies
+and returns the original boundary. `cells backup verify` rereads the complete
+graph and fails closed when any content-addressed dependency is absent or
+corrupt. `cells backup restore` requires a ready pinned release and a canonical
+destination prefix in the configured bucket. It verifies the complete source
+graph before creating the destination identity, uses conditional provider-side
+copies for immutable objects, independently verifies destination descriptors,
+catalog pages and LTX roots, strict-creates unowned `Idle` controls, and writes
+the release and pin pointers only after their dependencies. An exact interrupted
+restore is resumable while an already-used or divergent destination fails
+closed. Cross-provider archive export and server-owned configuration outside
+`cells/v1` remain separate operator work.
 
 Membership is supplied separately so the shared server configuration stays
 small and secret-independent:
@@ -1177,7 +1200,7 @@ namespace and immutable asset bodies in backups. Restoring visible records
 without counters, claims, request ledgers,
 control and immutable roots loses numbering, ownership and retry guarantees.
 
-Discussion deletion, moderation, edit history, activity feeds, and notifications remain unimplemented. Backup and restore qualification remains pending.
+Discussion deletion, moderation, edit history, activity feeds, and notifications remain unimplemented. Cell backup pin creation, verification, and same-bucket isolated-prefix restore are implemented; cross-provider export and complete product-root restore qualification remain pending.
 
 ## Commit statuses and required checks
 
@@ -1370,7 +1393,7 @@ The server is complete only when a real account can perform the workflow and obs
 | Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; additional crash phases and coexistence qualification remain |
 | Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; activity, moderation, history, and notifications remain |
 | Repository management | CLI create/adopt/list, archive, settings, search, import, and audited administration | In progress; browser creation/import and audit history remain |
-| Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Kubernetes controls, one RustFS in-flight `SIGKILL` path, one complete-root cold restore, bounded Prometheus metrics, request correlation, and runbook implemented; live qualification remains |
+| Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Kubernetes controls, one RustFS in-flight `SIGKILL` path, one complete-root cold restore, verified Cell backup pins and same-bucket isolated restore, bounded Prometheus metrics, request correlation, and runbook implemented; cross-provider export and broader live qualification remain |
 | Quality gates | API, UI, accessibility, realistic repositories, security, package smoke, and measured performance | In progress |
 
 ### Track known operational gaps
@@ -1383,7 +1406,7 @@ The remaining production gaps include:
 - Production throughput and provider-level admission qualification
 - Browser membership administration, membership audit history, provider back-channel logout, and immediate provider revocation
 - Repository creation and adoption exist in the CLI; browser import remains
-- Version-selected provider backup and restore qualification for Git, shared identity state, and the complete `app/v1` namespace
+- Version-selected complete product-root restore qualification for Git, shared identity state, Cell pins, immutable LTX graphs, and release assets across providers
 - Manual assistive-technology audits and broader workflow coverage
 - Successful EKS, GKE, and AKS live-workflow receipts; rollback, alert-tuning, and disaster-recovery qualification
 - First tagged server image/chart publication and registry-attestation verification
