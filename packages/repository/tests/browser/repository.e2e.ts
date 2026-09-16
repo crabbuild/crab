@@ -1173,11 +1173,22 @@ test("supported source files expose browser-parsed current-file symbols", async 
 
   const symbols = page.getByRole("complementary", { name: "Code symbols" });
   await expect(symbols).toBeVisible();
+  await expect(symbols).toHaveCSS("position", "sticky");
   await expect(symbols.getByText("impl Crab", { exact: true })).toBeVisible();
   await expect(
     symbols.getByRole("button", { name: /serve function 7/ }),
   ).toBeVisible();
   await expectNoAccessibilityViolations(page);
+
+  await page.locator(".file-source-code").evaluate((node) => {
+    node.style.minHeight = "1600px";
+  });
+  await page.evaluate(() => window.scrollTo(0, 900));
+  await expect
+    .poll(() => symbols.evaluate((node) => node.getBoundingClientRect().top))
+    .toBe(0);
+  await expect(symbols).toBeVisible();
+  await page.evaluate(() => window.scrollTo(0, 0));
 
   await symbols.getByPlaceholder("Filter symbols").fill("serve");
   await expect(

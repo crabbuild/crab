@@ -4082,6 +4082,7 @@ main {
 }
 .file-panel {
   margin-top: 16px;
+  overflow: clip;
 }
 .file-view-controls {
   display: flex;
@@ -4194,6 +4195,9 @@ main {
   overflow: auto;
 }
 .code-symbols-panel {
+  position: sticky;
+  top: 0;
+  align-self: start;
   min-width: 0;
   max-height: min(72vh, 820px);
   overflow: auto;
@@ -5412,6 +5416,7 @@ main {
     grid-template-columns: minmax(0, 1fr);
   }
   .code-symbols-panel {
+    position: static;
     max-height: 360px;
     border-top: 1px solid var(--borderColor-muted);
     border-left: 0;
