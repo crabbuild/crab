@@ -112,22 +112,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn javascript_modules_receive_an_executable_media_type() {
-        let path = ASSETS
-            .iter()
-            .map(|(name, _)| *name)
-            .find(|name| name.ends_with(".mjs"))
-            .expect("the repository bundle includes an ES module asset");
-        let response = serve(
-            Request::builder()
-                .uri(format!("/{path}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(
-            response.headers()["content-type"],
-            "text/javascript; charset=utf-8"
-        );
+    async fn executable_assets_receive_browser_media_types() {
+        for (extension, content_type) in [
+            (".mjs", "text/javascript; charset=utf-8"),
+            (".wasm", "application/wasm"),
+        ] {
+            let path = ASSETS
+                .iter()
+                .map(|(name, _)| *name)
+                .find(|name| name.ends_with(extension))
+                .expect("the repository bundle includes this executable asset");
+            let response = serve(
+                Request::builder()
+                    .uri(format!("/{path}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(response.headers()["content-type"], content_type);
+        }
     }
 }
