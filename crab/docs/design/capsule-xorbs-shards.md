@@ -624,6 +624,49 @@ stale checkpoint.
 - Active-active writers still require an external consensus authority; one
   regional object-store root is not cross-region consensus.
 
+### 12.1 Native history and recovery without a foreground history write
+
+V2 must not recreate the v1 global manifest as a history index. Doing so would
+add a contended conditional write to every otherwise independent ref update.
+The immutable leaf capsule already records the transaction identity, exact
+base digest, ref edits, Git pack, and catalog delta needed for per-ref history.
+It is therefore the foreground history record and requires no additional
+object-store request.
+
+Checkpoint maintenance must preserve that history before removing a compacted
+capsule frontier. It writes one immutable, content-addressed history segment
+containing the ordered transaction descriptors, predecessor segment hash,
+affected refs, and the capsule hashes that retain Git and pointer dependencies.
+The new checkpoint authenticates the segment tip, and the existing checkpoint
+root CAS installs both together. This adds one immutable PUT per checkpoint,
+not per push, and does not introduce a repository-wide foreground mutex.
+
+History operations follow the same authority rules as normal reads and writes:
+
+1. `list` pins one root plus ref-head collection, then walks the authenticated
+   current capsule suffix and history segments. Orphan capsules and uncommitted
+   prepared transactions are excluded.
+2. `verify` reconstructs the selected transaction's Git and pointer dependency
+   closure and hash-verifies every pack, shard, and xorb before reporting it as
+   recoverable.
+3. Per-ref `restore` publishes a new ordinary v2 transaction from the current
+   visible value to the selected historical value. It never rewinds a mutable
+   head, overwrites an old root, or creates v1 metadata.
+4. A whole-repository restore selects an authenticated checkpoint recovery
+   point. Independent per-ref publications have no truthful global order, so a
+   transaction on one ref must not be presented as an atomic snapshot of every
+   other ref.
+5. GC retains every segment, referenced capsule, Git pack, shard, and xorb in
+   the configured recovery window. Pruning publishes a new authenticated
+   segment frontier before any newly unreachable immutable object is eligible
+   for normal grace-period collection.
+
+The v1 generation-only CLI cannot identify concurrent per-ref history without
+inventing an order. The v2 hard cutover therefore needs transaction/ref
+selectors for per-ref recovery and checkpoint identifiers for full-repository
+recovery. Migration must translate retained v1 manifest roots into checkpoint
+recovery points before v1 authority is removed.
+
 ## 13. Security and authorization
 
 Git visibility and file visibility are exact-view-bound. Authorization to read
@@ -764,11 +807,11 @@ explicit `not yet part of the capsule protocol` error is a parity blocker.
 | Repack, repository GC, bucket GC, and fsck | V2 paths implemented | Complete crash/fault and forced-GC concurrency qualification | Injection at each publication boundary; resurrection, restart, no reachable deletion, and bounded writer pause |
 | Replica selection, readiness, repair, and active-active reconciliation | Read selection requires an exact authenticated v2 state digest and verified shard/xorb bodies. Capsule-backed coordinator gaps replay by monotonic commit sequence, verify the exact run/ref transaction plus the resulting pointer catalog before per-ref visibility, and remain idempotent; v1 transactions retain manifest repair | Complete managed-provider failover/failback and fault qualification | Lag, partial replication, corrupt replica, failover/failback, ordered/idempotent repair, and concurrent publication matrix |
 | Tiering and archive restore | Canonical xorb identity is reusable, but v2 reachability integration is unqualified | Drive lifecycle and restore decisions from v2 reachability while keeping restore state non-authoritative | Transition/restore/hydrate/mount/GC race tests for every supported storage class |
-| Doctor, history inspection/restore, and v1-to-v2 cutover | Remote doctor selects and verifies a present v2 root before considering the validated v1 layout, identifies the v2 generation, accepts v2-only repositories, and fails closed on corrupt v2 authority. History recovery remains v1-shaped; the cutover procedure is designed but not implemented | Add v2-native history inspection/recovery plus an offline, verified, one-way migration command | Migrate a populated v1 repository, reject dual authority, recover retained v2 history, then clone/hydrate/fsck |
+| Doctor, history inspection/restore, and v1-to-v2 cutover | Remote doctor selects and verifies a present v2 root before considering the validated v1 layout, identifies the v2 generation, accepts v2-only repositories, and fails closed on corrupt v2 authority. The request-neutral v2 history/recovery contract is specified in section 12.1, but its history segments, selectors, GC roots, and migration remain unimplemented | Implement authenticated checkpoint history segments, per-ref transaction recovery, whole-repository checkpoint recovery, retention/pruning, and the offline verified one-way migration command | Migrate a populated v1 repository, reject dual authority, recover retained per-ref and checkpoint history, prune without reachable deletion, then clone/hydrate/fsck |
 | Mirror plans and reconciliation | V2 intent/terminal receipts, marker repair, hook delivery, interruption, cache exclusion, deletion approval, and metadata-staleness behavior are qualified on RustFS | Complete authorization and hosted-provider behavior | Repeated crash-resume and duplicate-delivery runs with exact final refs and no partial transaction |
 | Git LFS and backup/restore | Canonical v2 push publishes and verifies reachable LFS dependencies before ref visibility. Direct LFS pre-push selects v2 authority first and reads transaction-consistent remote tips from the root and ref heads without downloading capsule payloads; a corrupt v2 root fails closed, while v1 fallback occurs only when the v2 root is absent. Mirror-hook push plus fresh hydrated clone are qualified on RustFS | Qualify direct LFS endpoint modes and make repository-prefix backup/restore discover all v2 authority and dependencies | LFS push/clone plus backup/delete/restore/fresh-clone/fsck/hydrate on a v2-only repository |
 | Repository lifecycle, locks, releases, workflows, ship, and app mutations | Several paths publish through the canonical v2 server transaction, but the complete shipped command/route set is not yet audited | Bind every mutation to a v2 view and transaction; remove or explicitly retire every manifest/journal path | Create/update/delete, archive/freeze, lock races, release lifecycle, workflow restart, and ship E2E against a v2-only repository |
-| Diagnostics, accounting, and administration | V2 fsck/GC have canonical paths, and the ordinary doctor remote check diagnoses v2 authority without requiring v1 metadata. Cost inventory now counts the complete configured repository prefix, including v2 roots, ref heads, transactions, capsules, checkpoints, releases, and workflow objects, alongside shared xorb/shard storage without attributing sibling repositories. History, metadb, compact, optimize, audit, status/logs/why/stat/du, DAG/data inspection, and related admin commands still have mixed or unproven authority | Define every remaining answer from the pinned v2 root/ref/checkpoint/capsule closure or retire the command; never synthesize a v1 manifest | Command-by-command golden outputs, corruption injection, cancellation, bounded-memory scans, and proof that no v1 metadata is read or recreated |
+| Diagnostics, accounting, and administration | V2 fsck/GC have canonical paths, and the ordinary doctor remote check diagnoses v2 authority without requiring v1 metadata. Cost inventory counts the complete configured repository prefix, including v2 roots, ref heads, transactions, capsules, checkpoints, releases, and workflow objects, alongside shared xorb/shard storage without attributing sibling repositories. Plain hydration `status`, local logs/audit/stat, and local cache/staging usage are format-neutral; `du --remote` already walks the configured repository prefix plus shared content. History, remote metadb ownership/rebuild, shard compaction, optimize, workflow/DAG inspection, and related remote administration still have mixed or unproven authority | Define every remaining remote answer from the pinned v2 root/ref/checkpoint/capsule closure or retire the command; never synthesize a v1 manifest. Add command-level proof for the format-neutral surfaces instead of treating them as protocol adapters | Command-by-command golden outputs, corruption injection, cancellation, bounded-memory scans, and proof that no v1 metadata is read or recreated |
 | Local cache, worktree, hydrate/dehydrate, and pointer tooling | Core reconstruction uses the shared v2 file index. Post-clone/fetch shard warming selects v2 authority first, derives the complete shard set from the authenticated pointer catalog without a duplicate root read, and fails closed on corrupt v2 metadata; v1 fallback occurs only when the v2 root is absent. Many remaining operations are local and format-neutral | Audit remote refresh, cache invalidation, prune, multi-worktree, and recovery edges against v2 view identity. Measure catalog-read byte amplification: the current authenticated reader verifies complete checkpoint and capsule objects, so introduce a root-authenticated catalog index only if qualification shows that embedded Git-pack bytes materially hurt fetch latency | Cold/warm/missing/corrupt cache, multiple worktrees, interrupted hydrate/dehydrate, prune, pointer conversion matrix, and catalog request/byte counts over long histories |
 
 This table is a capability inventory, not permission to leave unlisted entry
