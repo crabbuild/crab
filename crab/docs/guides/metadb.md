@@ -60,8 +60,12 @@ v1 opens each SlateDB in read-only mode. Neither path fences an in-flight writer
 
 For v2, `--deep` authenticates the complete checkpoint and capsule frontier,
 pointer catalog, visibility proof, and embedded Git packs from one captured
-view. The `--db` selector limits whether file- and xorb-entry counts are
-reported; shards are always checked because they join those catalogs.
+view. It also fully reads and verifies every catalogued shard and xorb, installs
+the Git packs in a temporary repository, and proves the complete current Git
+closure with strict fsck/repack validation. A final payload-free activity probe
+rejects a diagnosis if the repository changed during those checks. The `--db`
+selector limits whether file- and xorb-entry counts are reported; shards are
+always checked because they join those catalogs.
 
 For v1, `--deep` scans every key/value row and enumerates the backing object
 store. The verdict also flags malformed compacted-SST names (SlateDB

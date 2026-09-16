@@ -155,9 +155,11 @@ pub struct CapsuleDiagnosis {
 pub struct CapsuleDeepIntegrity {
     pub git_packs: u64,
     pub git_pack_bytes: u64,
+    pub git_closure_verified: bool,
     pub file_entries: Option<u64>,
     pub shard_entries: u64,
     pub xorb_entries: Option<u64>,
+    pub pointer_objects_read: u64,
     pub verdict: &'static str,
 }
 
@@ -1644,7 +1646,7 @@ async fn run_diagnose(
     if let Some(root) = capsule_owner_root(&capsule_layout).await? {
         let payload = DiagnosePayload {
             protocol: "capsule-v2",
-            capsule: Some(diagnose_capsule(&capsule_layout, root, db, deep).await?),
+            capsule: Some(diagnose_capsule(&capsule_layout, root, db, deep, cancel).await?),
             file_index: None,
             chunk_index: None,
         };
@@ -1693,6 +1695,7 @@ async fn diagnose_capsule(
     root: crab_metadata::capsule_protocol::RootSnapshot,
     db: DbSelector,
     deep: bool,
+    cancel: &CancellationToken,
 ) -> Result<CapsuleDiagnosis> {
     let (state_digest, visible_refs, visible_capsules, deep_integrity) = if deep {
         let view = crab_read::capsule_protocol::open_view_from_root(
@@ -1706,15 +1709,41 @@ async fn diagnose_capsule(
         .await?;
         let catalog = view.pointer_catalog()?;
         view.git_visibility_index()?;
+        let pointer_stats = tokio::select! {
+            () = cancel.cancelled() => return Err(CrabError::Cancelled),
+            result = crab_read::verify_capsule_pointer_catalog_objects(layout, &catalog) => result?,
+        };
+        let git_pack_count = view.git_pack_count();
+        if git_pack_count > 0 {
+            crab_remote::checkpoint::consolidate_git_packs(
+                &view,
+                CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+                CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+                cancel,
+            )
+            .await
+            .map_err(map_capsule_owner_error)?;
+        }
+        check_cancelled(cancel)?;
+        let current_root = crab_metadata::capsule_protocol::load_root(layout).await?;
+        let current_activity =
+            crab_read::capsule_protocol::read_activity_from_root(layout, &current_root).await?;
+        if current_activity.state_digest() != view.state_digest() {
+            return Err(CrabError::Protocol(
+                "repository state changed during deep metadata diagnosis; retry against one stable view"
+                    .to_owned(),
+            ));
+        }
         (
             view.state_digest(),
             diagnosis_count(view.refs().len(), "capsule ref")?,
             view.capsule_count()?,
             Some(CapsuleDeepIntegrity {
-                git_packs: u64::try_from(view.git_pack_count()).map_err(|_| {
+                git_packs: u64::try_from(git_pack_count).map_err(|_| {
                     CrabError::Internal("capsule Git pack count overflowed".to_owned())
                 })?,
                 git_pack_bytes: view.git_pack_bytes()?,
+                git_closure_verified: true,
                 file_entries: db
                     .includes_file_index()
                     .then(|| diagnosis_count(catalog.files().len(), "capsule file entry"))
@@ -1724,6 +1753,7 @@ async fn diagnose_capsule(
                     .includes_chunk_index()
                     .then(|| diagnosis_count(catalog.xorbs().len(), "capsule xorb entry"))
                     .transpose()?,
+                pointer_objects_read: pointer_stats.object_read_count,
                 verdict: "OK — root, ref heads, capsules, checkpoint, catalogs, visibility, and Git packs authenticated",
             }),
         )
@@ -2186,6 +2216,7 @@ fn render_capsule_diagnosis(diagnosis: &CapsuleDiagnosis) {
             println!("    verdict: {}", deep.verdict);
             println!("    git_packs: {}", deep.git_packs);
             println!("    git_pack_bytes: {}", deep.git_pack_bytes);
+            println!("    git_closure_verified: {}", deep.git_closure_verified);
             if let Some(file_entries) = deep.file_entries {
                 println!("    file_entries: {file_entries}");
             }
@@ -2193,6 +2224,7 @@ fn render_capsule_diagnosis(diagnosis: &CapsuleDiagnosis) {
             if let Some(xorb_entries) = deep.xorb_entries {
                 println!("    xorb_entries: {xorb_entries}");
             }
+            println!("    pointer_objects_read: {}", deep.pointer_objects_read);
         }
         None => println!("  deep_integrity: not requested (use --deep to enable)"),
     }
@@ -4793,9 +4825,15 @@ mod tests {
                 .await
                 .expect("initialize capsule root");
 
-        let diagnosis = diagnose_capsule(&layout, root, DbSelector::Both, true)
-            .await
-            .expect("diagnose capsule repository");
+        let diagnosis = diagnose_capsule(
+            &layout,
+            root,
+            DbSelector::Both,
+            true,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("diagnose capsule repository");
 
         assert_eq!(diagnosis.generation, 0);
         assert_eq!(diagnosis.visible_refs, 0);
@@ -4804,9 +4842,11 @@ mod tests {
         let deep = diagnosis.deep_integrity.expect("deep diagnosis");
         assert_eq!(deep.git_packs, 0);
         assert_eq!(deep.git_pack_bytes, 0);
+        assert!(deep.git_closure_verified);
         assert_eq!(deep.file_entries, Some(0));
         assert_eq!(deep.shard_entries, 0);
         assert_eq!(deep.xorb_entries, Some(0));
+        assert_eq!(deep.pointer_objects_read, 0);
         let legacy_objects = inner
             .list(Some(&ObjectPath::from("org/v2-diagnose/file_index_db")))
             .try_collect::<Vec<_>>()
