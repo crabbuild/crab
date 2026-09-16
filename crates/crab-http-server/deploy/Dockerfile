@@ -6,6 +6,7 @@ WORKDIR /build
 COPY packages/repository/.npmrc packages/repository/package.json packages/repository/package-lock.json packages/repository/
 RUN npm ci --prefix packages/repository
 COPY packages/repository/index.html packages/repository/tsconfig.json packages/repository/vite.config.ts packages/repository/
+COPY packages/web/crab.optimized.svg packages/web/crab.optimized.svg
 COPY packages/repository/src/ packages/repository/src/
 RUN npm run build --prefix packages/repository
 

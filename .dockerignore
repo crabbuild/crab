@@ -24,6 +24,9 @@ packages/*
 !packages/repository/vite.config.ts
 !packages/repository/src/
 !packages/repository/src/**
+!packages/web/
+packages/web/*
+!packages/web/crab.optimized.svg
 !deploy/
 !deploy/crab-service/
 !deploy/crab-service/compose/

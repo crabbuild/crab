@@ -1624,10 +1624,19 @@ test("footer groups the Crab mark and tagline into one compact signature", async
   page,
 }) => {
   await page.goto("/");
+  const headerMark = page.locator(".global-header .brand-mark");
   const footer = page.locator(".site-footer");
   const brand = footer.getByRole("link", { name: "Crab repositories" });
+  const footerMark = brand.locator(".footer-brand-mark");
   const tagline = footer.getByText("Git for any file at any scale");
-  await expect(brand.locator(".footer-brand-mark")).toBeVisible();
+  await expect(headerMark).toBeVisible();
+  await expect(footerMark).toBeVisible();
+  expect(
+    await headerMark.evaluate((image: HTMLImageElement) => image.naturalWidth),
+  ).toBeGreaterThan(0);
+  expect(
+    await footerMark.evaluate((image: HTMLImageElement) => image.naturalWidth),
+  ).toBeGreaterThan(0);
   await expect(tagline).toBeVisible();
   const spacing = await footer.evaluate((node) => {
     const brand = node.querySelector(".footer-brand")?.getBoundingClientRect();

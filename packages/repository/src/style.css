@@ -97,8 +97,7 @@ main {
   display: block;
   width: 32px;
   height: 32px;
-  background: var(--fgColor-default);
-  mask: url("../../web/public/crab.optimized.svg") center / contain no-repeat;
+  object-fit: contain;
 }
 .brand:hover {
   text-decoration: none;
@@ -796,11 +795,11 @@ main {
   display: block;
   width: 22px;
   height: 22px;
-  background: currentColor;
-  filter: drop-shadow(
-    0 1px 1px color-mix(in srgb, currentColor 22%, transparent)
-  );
-  mask: url("../../web/public/crab.optimized.svg") center / contain no-repeat;
+  object-fit: contain;
+}
+[data-color-mode="dark"] .brand-mark,
+[data-color-mode="dark"] .footer-brand-mark {
+  filter: invert(1);
 }
 .footer-brand strong {
   font-weight: 700;

@@ -70,6 +70,7 @@ import {
   RepositoryToolbar,
   revisionLabel,
 } from "./repository-toolbar";
+import crabMark from "../../web/crab.optimized.svg";
 const RepositoryTree = lazy(() =>
   import("./tree").then((module) => ({ default: module.RepositoryTree })),
 );
@@ -216,7 +217,7 @@ export function App() {
         </a>
         <header className="global-header">
           <Link className="brand" href="/" aria-label="Crab repositories">
-            <span className="brand-mark" aria-hidden="true" />
+            <img className="brand-mark" src={crabMark} alt="" />
           </Link>
           {repo ? (
             <div className="global-repository">
@@ -368,7 +369,7 @@ export function App() {
             href="/"
             aria-label="Crab repositories"
           >
-            <span className="footer-brand-mark" aria-hidden="true" />
+            <img className="footer-brand-mark" src={crabMark} alt="" />
             <strong>Crab</strong>
           </Link>
           <span className="footer-divider" aria-hidden="true">
