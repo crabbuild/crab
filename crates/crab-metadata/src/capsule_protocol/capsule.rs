@@ -649,12 +649,13 @@ mod tests {
 
     #[test]
     fn capsule_round_trip_authenticates_every_section() {
-        let capsule = Capsule::build(&transaction(), vec![git_pack()], Vec::new()).unwrap();
+        let transaction = transaction();
+        let capsule = Capsule::build(&transaction, vec![git_pack()], Vec::new()).unwrap();
 
         let decoded = Capsule::decode(capsule.bytes().clone()).unwrap();
 
         assert_eq!(decoded.hash(), capsule.hash());
-        assert_eq!(decoded.transaction_id(), transaction().id().unwrap());
+        assert_eq!(decoded.transaction_id(), transaction.id().unwrap());
         assert_eq!(decoded.sections().len(), 5);
         assert_eq!(decoded.git_packs().len(), 1);
         assert_eq!(
@@ -710,16 +711,19 @@ mod tests {
             ("refs/heads/a", "2".repeat(40)),
             ("refs/heads/b", "3".repeat(40)),
         ]);
-        let forward = CapsuleTransaction::new(
+        let publication_id = "9".repeat(64);
+        let forward = CapsuleTransaction::for_plan(
             &"1".repeat(64),
+            &publication_id,
             edits
                 .iter()
                 .map(|(name, oid)| CapsuleRefEdit::new(*name, None, Some(oid.clone()), None))
                 .collect(),
         )
         .unwrap();
-        let reverse = CapsuleTransaction::new(
+        let reverse = CapsuleTransaction::for_plan(
             &"1".repeat(64),
+            &publication_id,
             edits
                 .iter()
                 .rev()

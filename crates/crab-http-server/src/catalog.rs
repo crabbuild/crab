@@ -209,7 +209,7 @@ impl CatalogStore {
         let layout = StoreLayout::new(self.root.store.clone(), runtime.prefix.clone());
         crab_write::capsule_protocol::initialize(
             &layout,
-            &blake3::hash(record.id.as_bytes()).to_hex().to_string(),
+            blake3::hash(record.id.as_bytes()).to_hex().as_ref(),
             &format!("refs/heads/{default_branch}"),
         )
         .await?;

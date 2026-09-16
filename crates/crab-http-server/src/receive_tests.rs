@@ -166,7 +166,7 @@ async fn native_http_push_rustfs() {
     let layout = StoreLayout::new(store.clone(), prefix.clone());
     crab_write::capsule_protocol::initialize(
         &layout,
-        &blake3::hash(prefix.as_bytes()).to_hex().to_string(),
+        blake3::hash(prefix.as_bytes()).to_hex().as_ref(),
         "refs/heads/main",
     )
     .await

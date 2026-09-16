@@ -132,12 +132,14 @@ pub async fn publish(
         }
     }
 
-    let prepared = try_join_all(transaction.edits().iter().zip(snapshots).map(
-        |(edit, snapshot)| {
-            prepare_ref_successor(router, snapshot, edit, &transaction_id, capsule.clone())
-        },
-    ))
-    .await?;
+    let prepared = transaction
+        .edits()
+        .iter()
+        .zip(snapshots)
+        .map(|(edit, snapshot)| {
+            prepare_ref_successor(snapshot, edit, &transaction_id, capsule.clone())
+        })
+        .collect::<Result<Vec<_>>>()?;
     let mut runs = std::collections::BTreeMap::new();
     for (_, run) in &prepared {
         match runs.get(run.hash()) {
@@ -273,7 +275,6 @@ pub async fn validate_ref_namespace(
 struct RefHeadSnapshot {
     head: crab_metadata::capsule_protocol::CapsuleRefHead,
     visible: crab_metadata::capsule_protocol::CapsuleRefState,
-    active: std::collections::BTreeSet<String>,
     etag: Option<ETag>,
 }
 
@@ -319,10 +320,62 @@ async fn read_ref_head(
         active.insert(activation_id.to_owned());
     }
     let visible = head.visible(&active).clone();
+    let visible = match root.compacted_ref_transactions().get(ref_name) {
+        Some(compacted) => {
+            let position = visible
+                .frontier()
+                .iter()
+                .position(|pointer| pointer.transaction_ids().iter().any(|id| id == compacted));
+            let frontier = match position {
+                Some(position) => {
+                    let compacted_pointer = &visible.frontier()[position];
+                    if compacted_pointer.transaction_ids().last() != Some(compacted) {
+                        return Err(WriteError::CorruptObject {
+                            path: path.to_string(),
+                            reason: "checkpoint splits an indivisible capsule run".to_owned(),
+                        });
+                    }
+                    visible.frontier()[position + 1..].to_vec()
+                }
+                None if visible.checkpoint_transaction_id() == Some(compacted.as_str()) => {
+                    visible.frontier().to_vec()
+                }
+                None => {
+                    return Err(WriteError::CorruptObject {
+                        path: path.to_string(),
+                        reason: "ref head does not extend its checkpoint transaction".to_owned(),
+                    });
+                }
+            };
+            let transaction_id = frontier
+                .last()
+                .and_then(|pointer| pointer.transaction_ids().last())
+                .cloned();
+            if transaction_id.as_deref().or(Some(compacted.as_str())) != visible.transaction_id() {
+                return Err(WriteError::CorruptObject {
+                    path: path.to_string(),
+                    reason: "ref head suffix does not reach its visible transaction".to_owned(),
+                });
+            }
+            crab_metadata::capsule_protocol::CapsuleRefState::from_checkpoint(
+                compacted.to_owned(),
+                visible.oid().map(str::to_owned),
+                visible.peeled_oid().map(str::to_owned),
+                transaction_id,
+                frontier,
+            )?
+        }
+        None if visible.checkpoint_transaction_id().is_none() => visible,
+        None => {
+            return Err(WriteError::CorruptObject {
+                path: path.to_string(),
+                reason: "ref head names a checkpoint absent from the repository root".to_owned(),
+            });
+        }
+    };
     Ok(RefHeadSnapshot {
         head,
         visible,
-        active,
         etag,
     })
 }
@@ -443,25 +496,14 @@ async fn resolve_prepared_activation(
     }
 }
 
-async fn prepare_ref_successor(
-    router: &StoreLayout<Store>,
+fn prepare_ref_successor(
     snapshot: RefHeadSnapshot,
     edit: &crab_metadata::capsule_protocol::CapsuleRefEdit,
     transaction_id: &str,
     capsule: Capsule,
 ) -> Result<(PreparedRefHead, CapsuleRun)> {
-    let mut run = CapsuleRun::leaf(capsule)?;
+    let run = CapsuleRun::leaf(capsule)?;
     let mut frontier = snapshot.visible.frontier().to_vec();
-    while frontier.last().is_some_and(|pointer| {
-        pointer.level() == run.level()
-            && run.capsules().len() < crab_metadata::capsule_protocol::MAX_CAPSULES_PER_RUN
-    }) {
-        let pointer = frontier
-            .pop()
-            .ok_or_else(|| WriteError::Internal("capsule ref frontier became empty".to_owned()))?;
-        let older = load_run(router, &pointer).await?;
-        run = older.merge(&run)?;
-    }
     frontier.push(CapsulePointer::new(
         run.hash(),
         run.bytes().len() as u64,
@@ -469,8 +511,7 @@ async fn prepare_ref_successor(
         run.transaction_ids(),
         run.newest_base_root_digest(),
     )?);
-    let state = snapshot.head.successor_state(
-        &snapshot.active,
+    let state = snapshot.visible.successor(
         edit.new_oid().map(str::to_owned),
         edit.peeled_oid().map(str::to_owned),
         transaction_id.to_owned(),
@@ -895,29 +936,6 @@ async fn update_maintenance_root(
             }
         }
     }
-}
-
-async fn load_run(router: &StoreLayout<Store>, pointer: &CapsulePointer) -> Result<CapsuleRun> {
-    let path = router.capsule_path(pointer.hash());
-    let (bytes, _) = router
-        .store()
-        .get_with_etag_bounded(&path, pointer.size())
-        .await?;
-    let actual_size = u64::try_from(bytes.len())
-        .map_err(|_| WriteError::Internal("capsule run size cannot be represented".to_owned()))?;
-    let run = CapsuleRun::decode(bytes)?;
-    if actual_size != pointer.size()
-        || run.hash() != pointer.hash()
-        || run.level() != pointer.level()
-        || run.transaction_ids() != pointer.transaction_ids()
-        || run.newest_base_root_digest() != pointer.newest_base_root_digest()
-    {
-        return Err(WriteError::CorruptObject {
-            path: path.to_string(),
-            reason: "capsule run does not match its authenticated root pointer".to_owned(),
-        });
-    }
-    Ok(run)
 }
 
 fn validate_capsule_binding(
@@ -1371,13 +1389,11 @@ mod tests {
             .await
             .unwrap();
         let (prepared, _) = prepare_ref_successor(
-            &router,
             snapshot,
             &transaction.edits()[0],
             &transaction_id,
             capsule(&transaction),
         )
-        .await
         .unwrap();
         let activation_id = "5".repeat(64);
         let record = crab_metadata::capsule_protocol::CapsuleTransactionRecord::preparing(
@@ -1441,7 +1457,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn binary_carry_adds_one_get_without_an_intermediate_put() {
+    async fn incremental_append_does_not_read_or_rewrite_history() {
         let inner = Arc::new(InMemory::new());
         let observer = Arc::new(RecordingObserver::default());
         let store = Store::new(inner)
@@ -1467,8 +1483,13 @@ mod tests {
         let head = read_ref_head(&router, published.record().root(), "refs/heads/main")
             .await
             .unwrap();
-        assert_eq!(head.visible.frontier().len(), 1);
-        assert_eq!(head.visible.frontier()[0].level(), 1);
+        assert_eq!(head.visible.frontier().len(), 2);
+        assert!(
+            head.visible
+                .frontier()
+                .iter()
+                .all(|pointer| pointer.level() == 0)
+        );
         let operations = observer
             .observations
             .lock()
@@ -1482,7 +1503,6 @@ mod tests {
             vec![
                 StorageOperation::Get,
                 StorageOperation::Get,
-                StorageOperation::Get,
                 StorageOperation::Put,
                 StorageOperation::Put,
                 StorageOperation::Get,
@@ -1491,7 +1511,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capped_runs_support_more_than_five_hundred_pushes_under_five_requests_average() {
+    async fn leaf_publication_stays_flat_until_checkpoint_boundary() {
         let inner = Arc::new(InMemory::new());
         let observer = Arc::new(RecordingObserver::default());
         let store = Store::new(inner)
@@ -1505,7 +1525,7 @@ mod tests {
 
         let mut previous = None;
         let mut published = None;
-        for sequence in 1..=1_025_u64 {
+        for sequence in 1..=64_u64 {
             let base = open_root(&router).await.unwrap();
             let next = format!("{sequence:040x}");
             let transaction = transaction(&base, previous.as_deref(), &next);
@@ -1528,7 +1548,7 @@ mod tests {
                 .iter()
                 .map(CapsulePointer::level)
                 .collect::<Vec<_>>(),
-            vec![9, 9, 0]
+            vec![0; 64]
         );
         let request_count = observer
             .observations
@@ -1537,8 +1557,8 @@ mod tests {
             .iter()
             .filter(|observation| observation.outcome == StorageOutcome::Success)
             .count();
-        assert!(request_count <= 5_125, "request count was {request_count}");
-        assert!((request_count as f64 / 1_025.0) <= 5.0);
+        assert!(request_count <= 256, "request count was {request_count}");
+        assert!((request_count as f64 / 64.0) <= 4.0);
     }
 
     #[tokio::test]

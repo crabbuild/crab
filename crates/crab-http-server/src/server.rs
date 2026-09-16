@@ -561,6 +561,39 @@ impl Repository {
         *self.pinned.lock().await = None;
     }
 
+    pub(crate) async fn schedule_maintenance(&self, server: &Server) {
+        let mut task = self.maintenance.lock().await;
+        if task.as_ref().is_some_and(|task| !task.is_finished()) {
+            return;
+        }
+        if let Some(completed) = task.take() {
+            match completed.await {
+                Ok(Ok(())) | Ok(Err(crab_write::WriteError::Cancelled)) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "repository checkpoint failed"),
+                Err(error) => tracing::warn!(%error, "repository checkpoint task failed"),
+            }
+        }
+        *task = Some(tokio::spawn(crate::maintenance::run(
+            self.layout.clone(),
+            Arc::clone(&server.maintenance_admission),
+            server.cancellation.clone(),
+        )));
+    }
+
+    pub(crate) async fn checkpoint_now(
+        &self,
+        server: &Server,
+        cancellation: &CancellationToken,
+    ) -> Result<()> {
+        crate::maintenance::run(
+            self.layout.clone(),
+            Arc::clone(&server.maintenance_admission),
+            cancellation.clone(),
+        )
+        .await
+        .map_err(Into::into)
+    }
+
     pub(crate) async fn open_view(
         &self,
     ) -> Result<crab_read::capsule_protocol::CapsuleRepositoryView> {

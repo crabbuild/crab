@@ -242,7 +242,13 @@ async fn load_visible_ref_capsules(
                 }
             }
         }
-        sequences.insert(head.ref_name().to_owned(), state.frontier().to_vec());
+        sequences.insert(
+            head.ref_name().to_owned(),
+            (
+                state.checkpoint_transaction_id().map(str::to_owned),
+                state.frontier().to_vec(),
+            ),
+        );
     }
 
     let run_router = router.clone();
@@ -258,7 +264,7 @@ async fn load_visible_ref_capsules(
     .try_collect::<BTreeMap<_, _>>()
     .await?;
     let mut required = BTreeSet::new();
-    for (ref_name, frontier) in sequences {
+    for (ref_name, (checkpoint_transaction_id, frontier)) in sequences {
         let transaction_ids = frontier
             .iter()
             .flat_map(|pointer| {
@@ -268,16 +274,24 @@ async fn load_visible_ref_capsules(
             })
             .collect::<Vec<_>>();
         let start = match root.compacted_ref_transactions().get(&ref_name) {
-            Some(compacted) => transaction_ids
+            Some(compacted) => match transaction_ids
                 .iter()
                 .position(|transaction_id| *transaction_id == compacted)
-                .map(|index| index + 1)
-                .ok_or_else(|| {
-                    contract_error(format!(
+            {
+                Some(index) => index + 1,
+                None if checkpoint_transaction_id.as_deref() == Some(compacted.as_str()) => 0,
+                None => {
+                    return Err(contract_error(format!(
                         "ref {ref_name} does not extend its compacted transaction"
-                    ))
-                })?,
-            None => 0,
+                    )));
+                }
+            },
+            None if checkpoint_transaction_id.is_none() => 0,
+            None => {
+                return Err(contract_error(format!(
+                    "ref {ref_name} names a checkpoint absent from the repository root"
+                )));
+            }
         };
         required.extend(
             transaction_ids[start..]

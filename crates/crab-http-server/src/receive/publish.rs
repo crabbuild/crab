@@ -361,7 +361,24 @@ async fn publish_attempt(
     if !principal.can_write(&entry.config) {
         return Err(ReceiveError::Forbidden);
     }
-    let view = entry.open_view().await?;
+    let mut view = entry.open_view().await?;
+    for _ in 0..2 {
+        if request.updates.iter().all(|update| {
+            view.ref_capsule_count(&update.name) < crate::maintenance::FOREGROUND_CAPSULE_THRESHOLD
+        }) {
+            break;
+        }
+        entry.checkpoint_now(server, cancel).await?;
+        view = entry.open_view().await?;
+    }
+    if request.updates.iter().any(|update| {
+        view.ref_capsule_count(&update.name) >= crate::maintenance::FOREGROUND_CAPSULE_THRESHOLD
+    }) {
+        return Err(crab_write::WriteError::Internal(
+            "repository checkpoint could not bound the selected ref frontier".to_owned(),
+        )
+        .into());
+    }
     let refs = view.refs().clone();
     let visibility = view.git_visibility_index()?;
     let repository = view
@@ -526,6 +543,7 @@ async fn publish_attempt(
         // A later admin update can repair an unavailable control-plane root.
         tracing::error!(%head, %error, "first branch committed but HEAD retargeting failed");
     }
+    entry.schedule_maintenance(server).await;
     // Acknowledge known ref commitment even if read indexes remain pending.
     // A lost acknowledgement is indeterminate; matching refs cannot prove it.
     let _readiness = crab_remote::publication::finish_committed(async {
@@ -587,6 +605,7 @@ async fn recover_native_plan(
         tracing::error!(%plan_id, "native receive plan receipt does not match the wire request");
         return Err(original);
     }
+    entry.schedule_maintenance(server).await;
     // The receipt proves the ref visibility boundary. Index readiness remains
     // best-effort and cannot turn a recovered commit into a rejection.
     let _readiness = crab_remote::publication::finish_committed(async {

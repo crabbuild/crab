@@ -34,6 +34,7 @@ pub struct CapsuleRepositoryView {
     refs: BTreeMap<String, String>,
     peeled_refs: BTreeMap<String, String>,
     visible_ref_transactions: BTreeMap<String, String>,
+    ref_capsule_counts: BTreeMap<String, u32>,
     capsule_run_pointers: Vec<CapsulePointer>,
 }
 
@@ -86,6 +87,15 @@ impl CapsuleRepositoryView {
         &self.visible_ref_transactions
     }
 
+    /// Return the post-checkpoint capsule count for one independently mutable ref.
+    #[must_use]
+    pub fn ref_capsule_count(&self, ref_name: &str) -> u32 {
+        self.ref_capsule_counts
+            .get(ref_name)
+            .copied()
+            .unwrap_or_default()
+    }
+
     /// Return every immutable capsule run reachable from this exact view.
     #[must_use]
     pub fn capsule_run_pointers(&self) -> &[CapsulePointer] {
@@ -120,6 +130,32 @@ impl CapsuleRepositoryView {
             }
         }
         Ok(catalog)
+    }
+
+    /// Return complete verified packs suitable for a checkpoint over this view.
+    pub fn checkpoint_git_packs(
+        &self,
+    ) -> Result<Vec<crab_metadata::capsule_protocol::CapsuleGitPack>> {
+        self.checkpoint
+            .iter()
+            .cloned()
+            .map(GitPackContainer::Checkpoint)
+            .chain(self.capsules.iter().cloned().map(GitPackContainer::Capsule))
+            .flat_map(|container| {
+                let descriptors = container.git_packs().to_vec();
+                descriptors.into_iter().map(move |descriptor| {
+                    crab_metadata::capsule_protocol::CapsuleGitPack::new(
+                        container.section_bytes(descriptor.pack_section())?,
+                        container.section_bytes(descriptor.index_section())?,
+                        container.section_bytes(descriptor.reverse_index_section())?,
+                        container.section_bytes(descriptor.locator_section())?,
+                        descriptor.git_checksum(),
+                        descriptor.object_count(),
+                    )
+                    .map_err(Into::into)
+                })
+            })
+            .collect()
     }
 
     /// Open the authenticated embedded Git packs as a filesystem-free repository.
@@ -611,7 +647,13 @@ async fn assemble_view(
                 None => pointers.push(pointer.clone()),
             }
         }
-        ref_frontiers.insert(head.ref_name().to_owned(), state.frontier().to_vec());
+        ref_frontiers.insert(
+            head.ref_name().to_owned(),
+            (
+                state.checkpoint_transaction_id().map(str::to_owned),
+                state.frontier().to_vec(),
+            ),
+        );
     }
     admit_frontier(&pointers, limits)?;
     let checkpoint = async {
@@ -635,7 +677,8 @@ async fn assemble_view(
         .collect::<BTreeMap<_, _>>();
     let mut required_transactions = BTreeSet::new();
     let mut transaction_predecessors = BTreeMap::<String, BTreeSet<String>>::new();
-    for (ref_name, frontier) in &ref_frontiers {
+    let mut ref_capsule_counts = BTreeMap::new();
+    for (ref_name, (checkpoint_transaction_id, frontier)) in &ref_frontiers {
         let transaction_ids = frontier
             .iter()
             .map(|pointer| {
@@ -652,19 +695,33 @@ async fn assemble_view(
             .compacted_ref_transactions()
             .get(ref_name)
         {
-            Some(compacted) => transaction_ids
+            Some(compacted) => match transaction_ids
                 .iter()
                 .position(|transaction_id| *transaction_id == compacted)
-                .map(|index| index + 1)
-                .ok_or_else(|| {
-                    corrupt_path(
+            {
+                Some(index) => index + 1,
+                None if checkpoint_transaction_id.as_deref() == Some(compacted.as_str()) => 0,
+                None => {
+                    return Err(corrupt_path(
                         "capsule-protocol ref heads",
                         format!("ref {ref_name} does not extend its compacted transaction"),
-                    )
-                })?,
-            None => 0,
+                    ));
+                }
+            },
+            None if checkpoint_transaction_id.is_none() => 0,
+            None => {
+                return Err(corrupt_path(
+                    "capsule-protocol ref heads",
+                    format!("ref {ref_name} names a checkpoint absent from the repository root"),
+                ));
+            }
         };
         let required = &transaction_ids[start..];
+        ref_capsule_counts.insert(
+            ref_name.clone(),
+            u32::try_from(required.len())
+                .map_err(|_| ReadError::internal("ref capsule count overflowed"))?,
+        );
         required_transactions.extend(
             required
                 .iter()
@@ -768,6 +825,7 @@ async fn assemble_view(
         refs,
         peeled_refs,
         visible_ref_transactions,
+        ref_capsule_counts,
         capsule_run_pointers: pointers,
     })
 }

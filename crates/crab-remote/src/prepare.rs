@@ -1325,8 +1325,7 @@ pub async fn prepare(
         visibility_bases,
         cancel,
         options,
-        None,
-        true,
+        VisibilityBinding::RepositoryCatalog,
     )
     .await
 }
@@ -1355,10 +1354,14 @@ pub async fn prepare_capsule(
         visibility_bases,
         cancel,
         options,
-        Some(visibility),
-        false,
+        VisibilityBinding::Capsule(Box::new(visibility)),
     )
     .await
+}
+
+enum VisibilityBinding {
+    RepositoryCatalog,
+    Capsule(Box<GitVisibilityIndex>),
 }
 
 async fn prepare_with_layout_binding<P>(
@@ -1369,13 +1372,14 @@ async fn prepare_with_layout_binding<P>(
     visibility_bases: BTreeMap<String, (String, ObjectId)>,
     cancel: &CancellationToken,
     options: Options<P>,
-    capsule_visibility: Option<GitVisibilityIndex>,
-    require_layout_match: bool,
+    visibility_binding: VisibilityBinding,
 ) -> Result<Prepared>
 where
     P: Fn(&str) -> RefPolicy + Send + 'static,
 {
-    if require_layout_match && !repository.matches_store_layout(&options.layout) {
+    if matches!(&visibility_binding, VisibilityBinding::RepositoryCatalog)
+        && !repository.matches_store_layout(&options.layout)
+    {
         return Err(Error::Request(
             "Preparation layout differs from the validated repository",
         ));
@@ -1388,12 +1392,13 @@ where
         .collect();
     let proof = if base.is_empty() {
         None
-    } else if let Some(visibility) = capsule_visibility {
-        Some(VisibilityProof::Materialized(visibility))
     } else {
-        Some(VisibilityProof::Catalog(
-            repository.catalog_visibility_index(cancel).await?,
-        ))
+        Some(match visibility_binding {
+            VisibilityBinding::RepositoryCatalog => {
+                VisibilityProof::Catalog(repository.catalog_visibility_index(cancel).await?)
+            }
+            VisibilityBinding::Capsule(visibility) => VisibilityProof::Materialized(*visibility),
+        })
     };
     let operation = repository
         .operation(OperationKind::Repository, cancel)

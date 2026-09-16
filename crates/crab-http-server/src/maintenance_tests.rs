@@ -1,5 +1,11 @@
 use super::*;
 use axum::body::Body;
+use bytes::Bytes;
+use crab_metadata::capsule_protocol::{
+    Capsule, CapsuleGitPack, CapsuleRefEdit, CapsuleSection, CapsuleSectionKind,
+    CapsuleTransaction, CapsuleVisibilityDelta,
+};
+use crab_metadata::git_visibility::GitVisibilityEdit;
 use tower::ServiceExt;
 
 const TTL: Duration = Duration::from_secs(60);
@@ -442,6 +448,134 @@ async fn another_generation_owner_keeps_publication_authority() {
     close(&server).await;
 }
 
+fn capsule(transaction: &CapsuleTransaction, old: Option<String>, new: String) -> Capsule {
+    let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+        "refs/heads/main".to_owned(),
+        GitVisibilityEdit::from_replacement_objects(old, new.clone(), vec![new]),
+    )]))
+    .unwrap();
+    Capsule::build(
+        transaction,
+        vec![
+            CapsuleGitPack::new(
+                Bytes::from_static(b"pack"),
+                Bytes::from_static(b"index"),
+                Bytes::from_static(b"reverse"),
+                Bytes::from_static(b"locator"),
+                "4".repeat(40),
+                1,
+            )
+            .unwrap(),
+        ],
+        vec![CapsuleSection::new(
+            CapsuleSectionKind::VisibilityDelta,
+            visibility.encode().unwrap(),
+        )],
+    )
+    .unwrap()
+}
+
+async fn publish_next(
+    repo: &Repository,
+    base: crab_write::capsule_protocol::RootSnapshot,
+    old: Option<String>,
+    sequence: u64,
+) -> (crab_write::capsule_protocol::RootSnapshot, String) {
+    let new = format!("{sequence:040x}");
+    let transaction = CapsuleTransaction::new(
+        base.record().digest(),
+        vec![CapsuleRefEdit::new(
+            "refs/heads/main",
+            old.clone(),
+            Some(new.clone()),
+            None,
+        )],
+    )
+    .unwrap();
+    let base = crab_write::capsule_protocol::publish(
+        &repo.layout,
+        base,
+        &transaction,
+        &capsule(&transaction, old, new.clone()),
+    )
+    .await
+    .unwrap();
+    (base, new)
+}
+
+#[tokio::test]
+async fn checkpoint_bounds_ref_frontier_and_next_push_starts_fresh() {
+    let server = fixture().await;
+    let repo = repository(&server);
+    let mut base = crab_write::capsule_protocol::open_root(&repo.layout)
+        .await
+        .unwrap();
+    let mut old = None;
+    for sequence in 1_u64..=32 {
+        let result = publish_next(&repo, base, old, sequence).await;
+        base = result.0;
+        let new = result.1;
+        old = Some(new);
+    }
+
+    crate::maintenance::run(
+        repo.layout.clone(),
+        Arc::clone(&server.maintenance_admission),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    let checkpoint = crab_write::capsule_protocol::open_root(&repo.layout)
+        .await
+        .unwrap();
+    assert!(checkpoint.record().root().checkpoint().is_some());
+    assert_eq!(
+        checkpoint
+            .record()
+            .root()
+            .compacted_ref_transactions()
+            .len(),
+        1
+    );
+    let new = format!("{:040x}", 33);
+    let transaction = CapsuleTransaction::new(
+        checkpoint.record().digest(),
+        vec![CapsuleRefEdit::new(
+            "refs/heads/main",
+            old.clone(),
+            Some(new.clone()),
+            None,
+        )],
+    )
+    .unwrap();
+    crab_write::capsule_protocol::publish(
+        &repo.layout,
+        checkpoint,
+        &transaction,
+        &capsule(&transaction, old, new),
+    )
+    .await
+    .unwrap();
+
+    let path =
+        repo.layout
+            .capsule_ref_head_path(&crab_metadata::capsule_protocol::capsule_ref_name_key(
+                "refs/heads/main",
+            ));
+    let (body, _) = repo.store.get_with_etag(&path).await.unwrap();
+    let head = crab_metadata::capsule_protocol::CapsuleRefHead::decode(&body).unwrap();
+    assert_eq!(
+        head.visible(&std::collections::BTreeSet::new())
+            .frontier()
+            .iter()
+            .map(crab_metadata::capsule_protocol::CapsulePointer::capsule_count)
+            .sum::<u32>(),
+        1
+    );
+    close(&server).await;
+}
+
 #[tokio::test]
 async fn gc_sweep_blocks_publication_and_releases_preceding_leases() {
     for global in [true, false] {
@@ -549,4 +683,114 @@ async fn disconnected_reader_retains_publication_until_retry_or_shutdown_drains_
         assert_released(&repo).await;
         lease.release().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn lagging_checkpoint_preserves_concurrent_ref_suffix() {
+    let server = fixture().await;
+    let repo = repository(&server);
+    let mut base = crab_write::capsule_protocol::open_root(&repo.layout)
+        .await
+        .unwrap();
+    let mut old = None;
+    for sequence in 1_u64..=32 {
+        let result = publish_next(&repo, base, old, sequence).await;
+        base = result.0;
+        old = Some(result.1);
+    }
+
+    let captured = crab_read::capsule_protocol::open_view(
+        &repo.layout,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+            max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+        },
+    )
+    .await
+    .unwrap();
+    let checkpoint = crab_metadata::capsule_protocol::Checkpoint::build_with_catalogs(
+        captured.root().root().generation(),
+        captured.root().digest(),
+        captured.checkpoint_git_packs().unwrap(),
+        captured.pointer_catalog().unwrap(),
+        Some(
+            crab_metadata::capsule_protocol::CapsuleVisibilitySnapshot::from_index(
+                &captured.git_visibility_index().unwrap(),
+            )
+            .unwrap(),
+        ),
+    )
+    .unwrap();
+
+    for sequence in 33_u64..=34 {
+        let result = publish_next(&repo, base, old, sequence).await;
+        base = result.0;
+        old = Some(result.1);
+    }
+    base = crab_write::capsule_protocol::publish_ref_checkpoint(
+        &repo.layout,
+        captured.root_snapshot().clone(),
+        &checkpoint,
+        captured.refs().clone(),
+        captured.peeled_refs().clone(),
+        captured.visible_ref_transactions().clone(),
+    )
+    .await
+    .unwrap();
+
+    let result = publish_next(&repo, base, old, 35).await;
+    assert_eq!(result.1, format!("{:040x}", 35));
+    let view = crab_read::capsule_protocol::open_view(
+        &repo.layout,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+            max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        view.refs().get("refs/heads/main"),
+        Some(&format!("{:040x}", 35))
+    );
+    assert_eq!(
+        view.capsule_run_pointers()
+            .iter()
+            .map(crab_metadata::capsule_protocol::CapsulePointer::capsule_count)
+            .sum::<u32>(),
+        3
+    );
+    assert_eq!(view.ref_capsule_count("refs/heads/main"), 3);
+    close(&server).await;
+}
+
+#[tokio::test]
+async fn foreground_checkpoint_preserves_headroom_before_the_hard_bound() {
+    let server = fixture().await;
+    let repo = repository(&server);
+    let mut base = crab_write::capsule_protocol::open_root(&repo.layout)
+        .await
+        .unwrap();
+    let mut old = None;
+    for sequence in 1_u64..=u64::from(crate::maintenance::FOREGROUND_CAPSULE_THRESHOLD) {
+        let result = publish_next(&repo, base, old, sequence).await;
+        base = result.0;
+        old = Some(result.1);
+    }
+    let before = repo.open_view().await.unwrap();
+    assert_eq!(
+        before.ref_capsule_count("refs/heads/main"),
+        crate::maintenance::FOREGROUND_CAPSULE_THRESHOLD
+    );
+
+    repo.checkpoint_now(&server, &CancellationToken::new())
+        .await
+        .unwrap();
+    let checkpoint = repo.open_view().await.unwrap();
+    assert_eq!(checkpoint.ref_capsule_count("refs/heads/main"), 0);
+    let result = publish_next(&repo, checkpoint.root_snapshot().clone(), old, 57).await;
+    let after = repo.open_view().await.unwrap();
+    assert_eq!(after.refs().get("refs/heads/main"), Some(&result.1));
+    assert_eq!(after.ref_capsule_count("refs/heads/main"), 1);
+    close(&server).await;
 }

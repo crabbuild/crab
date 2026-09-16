@@ -6,7 +6,7 @@
 | --- | --- |
 | Project | Crab |
 | Scope | Pointer push, clone, fetch, hydrate, mount, recovery, and GC |
-| Status | Protocol core, terminal Git, large-file, and mirror RustFS qualification complete; v1 product parity and hosted-provider qualification open |
+| Status | Protocol core and major terminal/server paths implemented; complete v1 product parity and current-format production qualification remain open |
 | Priority | Correctness, large-file efficiency, then request latency and throughput |
 | Companion | [Capsule Publication Protocol](capsule-publication-protocol.md), [Push Pipeline Deep Dive](push.md), [Canonical Object Storage Layout V1](../architecture/object-storage-layout.md) |
 
@@ -224,11 +224,12 @@ through the combined view.
 
 Each ref head contains committed state and, only for a multi-ref transaction,
 one prepared state. A state binds the ref OID, peeled OID, newest transaction,
-and a bounded frontier of immutable capsule runs. Runs merge geometrically up
-to 512 capsules; additional history is retained as another capped segment so
-carry work and object size stay bounded. Sixty-four segments admit at least
-32,768 pushes to one ref between administrative resets, including the required
-5,000-commit qualification.
+and a bounded frontier of immutable leaf capsules. Foreground publication does
+not read or rewrite older capsules. Background checkpoint maintenance folds a
+complete authenticated view after 32 visible capsules; the next writer drops
+the exact checkpointed prefix and preserves any concurrently published suffix.
+The 64-entry hard bound leaves maintenance headroom without making an
+unbounded read contract.
 
 The v2 root contains the compacted ref baseline, exact per-ref checkpoint
 positions, generation, parent digest, checkpoint, capabilities, GC fence, and
@@ -481,17 +482,17 @@ Let:
   outside the pinned base;
 - `B` be checkpoint/frontier reads needed to materialize an uncached base
   file/xorb catalog;
-- `C` be binary capsule-run carry reads;
 - `P` be additional multipart operations beyond one single-object PUT;
 - `R` be ref-registry transport attempts;
 - `G` be exceptional GC-publication-guard transport attempts.
 
 With an already captured remote-helper view, the pointer-free single-ref commit
-path is one ref-head GET, `C` carry GETs, one immutable run PUT, and one
-conditional ref-head PUT: `3 + C` successful requests. A cold explicit push
-uses one root GET and two direct GETs per destination head instead of listing
-unrelated refs, for `5 + C` successful single-ref requests. Creating a ref also
-uses two namespace-gate writes, for `7 + C`; these gates are partitioned by the
+path is one ref-head GET, one immutable leaf PUT, and one conditional ref-head
+PUT: three successful requests on a checksum-qualified store and four when
+independent leaf readback is required. A cold explicit push uses one root GET
+and direct GETs for the destination state instead of listing unrelated refs,
+for five successful single-ref requests. Creating a ref also uses two
+namespace-gate writes, for seven; these gates are partitioned by the
 first component below `refs/<kind>/`. A full clone, fetch, or advertisement
 instead adds two ref-head LISTs, one GET per visible ref head, one GET per
 distinct prepared multi-ref activation, and the bounded run/checkpoint reads.
@@ -509,8 +510,8 @@ With repository-local payloads and no bucket registry, a single-PUT pointer
 push needs at least:
 
 ```text
-qualified: 3 + B + Xw + Sw + C + P
-readback:  4 + B + 2Xw + 2Sw + C + P
+qualified: 3 + B + Xw + Sw + P
+readback:  4 + B + 2Xw + 2Sw + P
 ```
 
 Canonical bucket-global xorbs and shards additionally require registry
@@ -518,8 +519,8 @@ protection, and cross-repository reuse outside the pinned base requires a GC
 publication guard. Their complete request formulas are:
 
 ```text
-qualified global: 3 + B + Xw + Sw + V + C + P + R + G
-readback global:  4 + B + 2Xw + 2Sw + V + C + P + R + G
+qualified global: 3 + B + Xw + Sw + V + P + R + G
+readback global:  4 + B + 2Xw + 2Sw + V + P + R + G
 ```
 
 An uncontended registry GET plus CAS normally makes `R = 2`. In the current
@@ -728,9 +729,11 @@ Implemented:
    payloads, records exact compacted positions for every ref, and readers
    discard the whole compacted history prefix rather than only its last
    transaction.
-9. Immutable runs cap at 512 capsules and per-ref frontiers retain up to 64
-   segments, keeping carry latency bounded while supporting more than the
-   5,000-push qualification interval.
+9. Foreground ref publication appends one immutable leaf capsule and never
+   performs history-dependent carry reads. Server maintenance checkpoints at
+   32 visible capsules. A foreground checkpoint is forced at 56 capsules if
+   maintenance falls behind; per-ref frontiers reject more than 64 entries if
+   maintenance still cannot preserve the bounded-read contract.
 10. Readers retain authenticated predecessor edges from every per-ref
     frontier while ordering capsules. Expected-old OIDs remain a consistency
     check, but do not define causality by themselves: a force-push sequence
@@ -756,7 +759,7 @@ explicit `not yet part of the capsule protocol` error is a parity blocker.
 | FUSE/NFS mount | Shared v2 file-index and hydrator wiring implemented | Qualify range reads, cold/warm cache, eviction, cancellation, unmount, and restored-tier objects | Mount/read/stat/range/concurrent-reader suite on every supported mount platform and provider |
 | `download`, `export`, and remote `run` inputs | Remote snapshot materialization now resolves refs and installs Git packs from one authenticated v2 view; direct RustFS file equality is proven | Complete every revision form, selector shape, pointer payload, missing/corrupt-pack, and cancellation case | Output equality against a local clone for `download`, `export`, and workflow `--pull` |
 | Import publication | Canonical staging recipes now publish through the one v2 capsule publisher; imports commit portable Crab configuration, account newly created xorb bytes, preserve empty files, and create no v1 manifest or file-index metadata | Complete hosted-provider, interrupted-resume, cancellation, and cross-import dedup qualification | Large-file import, resume, cancellation, dedup, clone, hydrate, and fsck without a v1 manifest |
-| HTTP server, repository browser, smart Git receive, and server maintenance | Catalog and receive paths still read and mutate the v1 manifest | Introduce a v2 repository-view adapter and route receive through the canonical v2 transaction publisher | Browser and smart-HTTP read/write/auth/maintenance suites against a v2-only repository |
+| HTTP server, repository browser, smart Git receive, and server maintenance | V2-only catalog initialization, browser reads, smart receive, protected/app publication, replay receipts, HEAD updates, and background checkpoints are implemented; the full server suite passes without a v1 manifest | Qualify checkpoint byte growth, consolidate accumulated Git packs, and complete hosted-provider/load qualification | Browser and smart-HTTP read/write/auth/fault/maintenance suites plus long-run clone/fetch and request/byte measurements against a v2-only repository |
 | S3 gateway read and mutation | Git snapshot and mutation publication still depend on the v1 manifest/journal | Resolve trees from v2 packs/refs and publish gateway mutations through v2 ref transactions | S3 read/list/write/delete/multipart semantics, concurrent mutations, restart, and clone/fsck verification |
 | Repack, repository GC, bucket GC, and fsck | V2 paths implemented | Complete crash/fault and forced-GC concurrency qualification | Injection at each publication boundary; resurrection, restart, no reachable deletion, and bounded writer pause |
 | Replica selection, readiness, repair, and active-active reconciliation | Root validation exists, but readiness and repair still use v1 manifest state | Define readiness from authenticated v2 root/ref/checkpoint/capsule closure and repair immutable dependencies before authority | Lag, partial replication, corrupt replica, failover/failback, repair, and concurrent publication matrix |
@@ -764,6 +767,16 @@ explicit `not yet part of the capsule protocol` error is a parity blocker.
 | Doctor, history inspection/restore, and v1-to-v2 cutover | Remote doctor and history recovery remain v1-shaped; the cutover procedure is designed but not implemented | Add v2-native diagnosis/recovery plus an offline, verified, one-way migration command | Migrate a populated v1 repository, reject dual authority, recover retained v2 history, then clone/hydrate/fsck |
 | Mirror plans and reconciliation | V2 intent/terminal receipts, marker repair, hook delivery, interruption, cache exclusion, deletion approval, and metadata-staleness behavior are qualified on RustFS | Complete authorization and hosted-provider behavior | Repeated crash-resume and duplicate-delivery runs with exact final refs and no partial transaction |
 | Git LFS and backup/restore | Canonical v2 push now publishes and verifies reachable LFS dependencies before ref visibility; mirror-hook push plus fresh hydrated clone are qualified on RustFS | Qualify direct LFS endpoint modes and make repository-prefix backup/restore discover all v2 authority and dependencies | LFS push/clone plus backup/delete/restore/fresh-clone/fsck/hydrate on a v2-only repository |
+| Repository lifecycle, locks, releases, workflows, ship, and app mutations | Several paths publish through the canonical v2 server transaction, but the complete shipped command/route set is not yet audited | Bind every mutation to a v2 view and transaction; remove or explicitly retire every manifest/journal path | Create/update/delete, archive/freeze, lock races, release lifecycle, workflow restart, and ship E2E against a v2-only repository |
+| Diagnostics, accounting, and administration | V2 fsck/GC have canonical paths; doctor, history, metadb, compact, optimize, audit, status/logs/why/stat/du, DAG/data inspection, and related admin commands have mixed or unproven authority | Define every answer from the pinned v2 root/ref/checkpoint/capsule closure or retire the command; never synthesize a v1 manifest | Command-by-command golden outputs, corruption injection, cancellation, bounded-memory scans, and proof that no v1 metadata is read or recreated |
+| Local cache, worktree, hydrate/dehydrate, and pointer tooling | Core reconstruction uses the shared v2 file index; many operations are local and format-neutral | Audit remote refresh, cache invalidation, prune, multi-worktree, and recovery edges against v2 view identity | Cold/warm/missing/corrupt cache, multiple worktrees, interrupted hydrate/dehydrate, prune, and pointer conversion matrix |
+
+This table is a capability inventory, not permission to leave unlisted entry
+points behind. Before release, a generated or reviewed ledger MUST map every
+shipped CLI subcommand, remote-helper verb, HTTP route, S3-gateway operation,
+background worker, and administrative task to exactly one row and one of:
+`v2 proven`, `intentionally removed`, or `release blocker`. Adding a new entry
+point without a ledger owner fails the parity gate.
 
 ### 16.2 Parity closure order
 
@@ -773,8 +786,9 @@ Parity closes in dependency order:
    view, then close tag-option, managed/protected authorization, released-shape,
    older-Git, and active-active consensus gates.
 2. **Remove v1 product adapters:** remote snapshot commands, import, HTTP
-   server/browser, and S3 gateway must use the same v2 read and publication
-   contracts. No second publisher is permitted.
+   server/browser, S3 gateway, lifecycle commands, workflows, releases, and
+   diagnostics must use the same v2 read and publication contracts. No second
+   publisher is permitted.
 3. **Complete operations:** replica readiness/repair, tiering, doctor, history
    recovery, migration, LFS, backup/restore, and mirror restart behavior must
    understand v2 authority and reachability.
@@ -782,6 +796,8 @@ Parity closes in dependency order:
    injection, concurrent normal and forced GC, mounts, caches, storage classes,
    replicas, and production-scale workloads must pass on every supported
    provider.
+5. **Close the inventory:** map every shipped command, route, worker, and
+   maintenance task to a passing parity row or an explicit product removal.
 
 Release requires every row above to have Level 3 end-to-end proof or stronger.
 Correctness rows involving publication, authorization, recovery, replication,
@@ -790,6 +806,42 @@ requires simple incremental pushes to remain under ten object-store requests
 on average with latency flat over history, and full-view operations to remain
 bounded and measured as refs and immutable history grow. A passing protocol
 core does not waive a missing product adapter or qualification row.
+
+### 16.3 Cross-surface parity contracts
+
+The remaining replica, tiering, mount, and browser work is one integrated read
+contract, not four independent checklists:
+
+1. **Replica readiness:** a replica is selectable only after the exact root,
+   captured ref heads, activation records, checkpoint, capsule suffixes, Git
+   packs, shards, and xorbs for that view are present and hash-verified. Copying
+   the mutable root first never makes a replica ready.
+2. **Repair and failover:** repair copies immutable content from a verified
+   source, verifies it at the destination, and only then advances derived
+   readiness. Failover/failback cannot invent a second ref authority or make a
+   partially replicated transaction visible.
+3. **Tiering:** archive/restore state remains operational metadata. A restored
+   xorb or shard becomes readable only after content verification; lifecycle
+   transitions cannot change canonical identity or v2 reachability, and GC
+   cannot delete the last readable copy while restore is pending.
+4. **Mount:** lookup, stat, readdir, full read, and range read pin one v2 view.
+   Concurrent publication may affect the next lookup but cannot mix recipes,
+   shards, xorbs, or Git trees within an open read. Cancellation, cache eviction,
+   unmount, failover, and archive restore must release resources without
+   returning partial bytes as success.
+5. **Browser and HTTP:** tree, blob, history, blame, archive/download, and
+   large-file rendering use the same authorized pinned view as clone. Browser
+   metadata never proves xorb availability; content endpoints resolve the
+   catalog closure and verify reconstructed bytes before success.
+
+Qualification MUST cover supported provider × primary/replica × hot/restored
+storage × cold/warm cache boundaries. It need not run every Cartesian product,
+but every pairwise boundary and these high-risk combined cases are mandatory:
+replica failover during mount range reads, restore racing hydrate and GC,
+browser download during checkpoint publication, corrupt primary repaired from
+a lagging replica, and concurrent disjoint-ref pushes while clone and browser
+sessions remain pinned. Each run finishes with an independent clone, strict Git
+fsck, and byte-digest comparison for every exercised large file.
 
 ## 17. Verification gates
 
@@ -904,11 +956,12 @@ and hydrate cycle restored all 101,844,789 bytes in 1.238 seconds. Store
 inspection found the v2 root, ref head, capsule, xorbs, and shard, with no v1
 manifest, refs, metadata, or file-index objects.
 
-This qualifies the ordinary RustFS whole-object path. Hosted-provider,
-multipart, replica, tiering, mount-range, browser/HTTP, S3-gateway, import
-fault/resume/provider coverage, migration/recovery, managed publication, and
-backup/restore coverage remain explicit release gates; this evidence does not
-waive them.
+This qualifies the earlier ordinary RustFS whole-object path. The current
+leaf/checkpoint implementation still requires a fresh 5,000-push replay.
+Hosted-provider, multipart, replica, tiering, mount-range, browser/HTTP
+hosted-load, S3-gateway, import fault/resume/provider, migration/recovery,
+managed publication, command-surface inventory, and backup/restore coverage
+remain explicit release gates; this evidence does not waive them.
 
 ## 18. Acceptance boundary
 

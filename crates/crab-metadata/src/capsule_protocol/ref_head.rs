@@ -6,7 +6,7 @@ use crate::validation::{validate_content_hash, validate_sha1};
 
 use super::{CapsulePointer, valid_ref_name};
 
-const REF_HEAD_VERSION: u32 = 2;
+const REF_HEAD_VERSION: u32 = 3;
 /// Maximum number of independently mutable ref heads accepted for one repository.
 pub const MAX_CAPSULE_REF_HEADS: usize = 1_000_000;
 /// Maximum immutable run segments retained by one independently mutable ref.
@@ -18,11 +18,32 @@ pub const MAX_CAPSULE_REF_FRONTIER: usize = 64;
 pub struct CapsuleRefState {
     oid: Option<String>,
     peeled_oid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checkpoint_transaction_id: Option<String>,
     transaction_id: Option<String>,
     frontier: Vec<CapsulePointer>,
 }
 
 impl CapsuleRefState {
+    /// Rebase a ref onto a checkpoint plus its uncheckpointed capsule suffix.
+    pub fn from_checkpoint(
+        checkpoint_transaction_id: String,
+        oid: Option<String>,
+        peeled_oid: Option<String>,
+        transaction_id: Option<String>,
+        frontier: Vec<CapsulePointer>,
+    ) -> Result<Self> {
+        let state = Self {
+            oid,
+            peeled_oid,
+            checkpoint_transaction_id: Some(checkpoint_transaction_id),
+            transaction_id,
+            frontier,
+        };
+        validate_state(&state)?;
+        Ok(state)
+    }
+
     /// Return the ref object ID, or `None` for an unborn or deleted ref.
     #[must_use]
     pub fn oid(&self) -> Option<&str> {
@@ -41,13 +62,20 @@ impl CapsuleRefState {
         self.transaction_id.as_deref()
     }
 
+    /// Return the checkpoint transaction immediately preceding this frontier.
+    #[must_use]
+    pub fn checkpoint_transaction_id(&self) -> Option<&str> {
+        self.checkpoint_transaction_id.as_deref()
+    }
+
     /// Return the bounded immutable capsule runs needed by this ref.
     #[must_use]
     pub fn frontier(&self) -> &[CapsulePointer] {
         &self.frontier
     }
 
-    pub(crate) fn successor(
+    /// Build the next state while preserving this state's checkpoint base.
+    pub fn successor(
         &self,
         oid: Option<String>,
         peeled_oid: Option<String>,
@@ -57,6 +85,7 @@ impl CapsuleRefState {
         let state = Self {
             oid,
             peeled_oid,
+            checkpoint_transaction_id: self.checkpoint_transaction_id.clone(),
             transaction_id: Some(transaction_id),
             frontier,
         };
@@ -96,6 +125,7 @@ impl CapsuleRefHead {
             committed: CapsuleRefState {
                 oid,
                 peeled_oid,
+                checkpoint_transaction_id: None,
                 transaction_id: None,
                 frontier: Vec::new(),
             },
@@ -277,6 +307,13 @@ fn validate_state(state: &CapsuleRefState) -> Result<()> {
         validate_content_hash(
             transaction_id,
             "ref-head transaction id",
+            "capsule-protocol ref head",
+        )?;
+    }
+    if let Some(transaction_id) = &state.checkpoint_transaction_id {
+        validate_content_hash(
+            transaction_id,
+            "ref-head checkpoint transaction id",
             "capsule-protocol ref head",
         )?;
     }

@@ -455,9 +455,9 @@ async fn receive_faults_rustfs() {
         repo.identity = RepositoryIdentity::new(format!("s3:{bucket}"), prefix, 1).unwrap();
         crab_write::capsule_protocol::initialize(
             &repo.layout,
-            &blake3::hash(repo.config.prefix.as_bytes())
+            blake3::hash(repo.config.prefix.as_bytes())
                 .to_hex()
-                .to_string(),
+                .as_ref(),
             "refs/heads/main",
         )
         .await

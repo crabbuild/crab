@@ -6,7 +6,7 @@
 | --- | --- |
 | Project | Crab |
 | Scope | Push, clone/read, recovery, and garbage collection |
-| Status | Protocol-v2 ordinary Git path implemented and live-qualified; extended workflows fail closed |
+| Status | Protocol-v2 ordinary Git/server paths implemented; full v1 parity and current-format qualification open |
 | Priority | Correctness, then request latency, throughput, and transferred bytes |
 | Replaces | The v1 multi-object publication layout after an explicit cutover |
 | Companion | [Protocol v2 Xorb and Shard Integration](capsule-xorbs-shards.md), [Push Pipeline Deep Dive](push.md), [Canonical Object Storage Layout V1](../architecture/object-storage-layout.md) |
@@ -19,7 +19,7 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
   repository-root, capsule, ref-transaction, and checkpoint-pointer contracts;
 - `crab-write::capsule_protocol` initializes and opens a repository root,
   uploads and independently verifies a capsule, and publishes through one root
-  CAS;
+  or ref-head CAS according to the authority being changed;
 - `crab-read::capsule_protocol` loads the root and its bounded capsule frontier
   concurrently, verifying every size, content, transaction, and base binding;
 - `crab init`, native and remote-helper push, full and filtered
@@ -28,10 +28,13 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
 - capsule and checkpoint records persist ref-keyed Git visibility closures;
   upload-pack authenticates those closures before reading embedded packs and
   uses embedded locator metadata for exact filtered-object selection;
-- equal-size capsule runs merge as a binary counter, so a 500-push checkpoint
-  window has no more than eight run objects and contains six after push 500;
-- the executable clean-path test proves exactly four object-store operations,
-  including advertisement: root GET, capsule-run PUT, run GET, and root PUT;
+- foreground per-ref publication appends one leaf capsule without reading or
+  rewriting history; server maintenance checkpoints after 32 visible capsules
+  and writers discard the exact checkpointed prefix;
+- executable writer tests prove three successful checksum-qualified operations
+  for first-ref creation and four for an existing ref, with one additional
+  capsule readback on unqualified stores; end-to-end counters must also include
+  not-found attempts, ref discovery, leases, and namespace gates;
 - the companion xorb/shard path is live-qualified on RustFS with ten 512 MiB
   files across a seed and ten edits, independent clone/hydration, and 9.30%
   retained xorb bytes versus logical history;
@@ -42,55 +45,61 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
 - the RustFS protocol-v2 partial-clone smoke passes 92 checks; hidden,
   dangling, and unknown wants read zero pack bytes, while full and filtered
   clones complete from the same authenticated capsule view;
-- a 500-push executable model proves 1,994 qualified object-store operations,
-  or 3.988 per push including advertisement and binary carry compaction;
+- the former 500-push binary-run model proved 1,994 qualified object-store
+  operations, but it predates leaf publication and is retained only as a
+  superseded baseline;
 - CAS-loser, expected-old mismatch, payload corruption, and lost-root-response
   tests fail closed or reconcile through exact transaction identity;
-- the release-mode Kubernetes qualification replayed 5,000 first-parent
+- the earlier release-mode Kubernetes qualification replayed 5,000 first-parent
   commits with a fetch and checkpoint every 500 pushes. All fetches, the final
   independent clone, and full `git fsck` passed. RustFS measured 24,940
   requests, or 4.988 per incremental push: p50 4, p95 8, p99 10, maximum 12
   at binary carry boundaries. Incremental latency was p50 273 ms, p95 545 ms,
-  and p99 927 ms.
+  and p99 927 ms. Those results do not qualify the current leaf/checkpoint
+  implementation; the same workload must be rerun before release.
 
 The hard cutover never falls back after a v2 root is selected. The remote
 helper still recognizes a separately initialized canonical-v1 repository at
 admission for current SDK read interoperability; it does not combine formats
-or redirect v1 writes into v2. Raw promisor recovery, managed protected push,
-active-active publication, and prepared mirror/recovery push currently fail
-closed until their protocol-v2 contracts are implemented. Those failures do
-not reinterpret a v2 repository as v1 or publish partial state.
+or redirect v1 writes into v2. Major terminal Git, HTTP, protected/app, mirror,
+import, and large-file paths now use v2. Active-active external consensus, S3
+gateway, migration/history recovery, and the remaining parity inventory in the
+companion design stay release blockers. No unsupported operation may
+reinterpret a v2 repository as v1 or publish partial state.
 
 ## 1. Decision summary
 
 Crab should introduce a hard-cutover protocol that publishes one immutable,
 self-contained **capsule** for an ordinary Git transaction and then atomically
-points one mutable repository **root** at it. Pointer pushes keep xorb and shard
-payloads in their canonical external objects and use the capsule to authenticate
-their dependency closure, as specified by the companion xorb/shard design. The
-clean pointer-free small-push budget is:
+advances the affected per-ref heads. The repository root remains bounded
+checkpoint, HEAD, GC, and maintenance authority rather than a foreground
+same-repository mutex. Pointer pushes keep xorb and shard payloads in their
+canonical external objects and use the capsule to authenticate their dependency
+closure, as specified by the companion xorb/shard design. The writer-core
+pointer-free small-push budget after a root/view is already captured is:
 
 | Capability | Complete push | After Git advertisement |
 | --- | ---: | ---: |
-| Provider validates a qualified cryptographic upload checksum | **3 requests** | **2 requests** |
-| Crab must independently stream the uploaded capsule back | **4 requests** | **3 requests** |
+| Provider validates a qualified cryptographic upload checksum | **3 requests** | **3 requests** |
+| Crab must independently stream the uploaded capsule back | **4 requests** | **4 requests** |
 
 The three-request path is:
 
-1. `GET {repo}/v2/root` for advertised refs and its CAS version.
+1. `GET {repo}/v2/refs/heads/{ref-key}` for the selected ref and CAS version.
 2. Conditional `PUT {repo}/v2/capsules/{fanout}/{capsule-hash}`.
-3. Conditional `PUT {repo}/v2/root` against the version from step 1.
+3. Conditional `PUT {repo}/v2/refs/heads/{ref-key}` against that version.
 
-The first request normally already belongs to Git advertisement. The push
-therefore adds one data request and one publication request. Commit count does
-not affect the request count; every commit included in one push shares the
-same capsule and root transition.
+Advertisement separately captures the root and visible ref heads. The writer
+rechecks the selected head at commitment so it has the exact CAS token. Commit
+count does not affect the request count; every commit included in one push
+shares the same capsule and ref transition.
 
 This is the minimum production design for ordinary S3, GCS, and Azure object
 semantics. A single mutable object could theoretically combine data and
 publication, but it would require portable access to historical object
 versions, rewrite or strand repository data, and turn every repository into
-one unbounded hot object. This design rejects that optimization.
+one unbounded hot object. Per-ref heads avoid both that repository-wide hot key
+and cross-branch writer contention.
 
 ## 2. Motivation
 
@@ -176,12 +185,12 @@ report those operations separately.
 | No-op after advertisement | 0 | 0 | The advertised root already proves the result |
 | No-op including advertisement | 1 | 1 | Root GET only |
 | Ref-only update | 3 | 4 | A small capsule preserves transaction history and recovery evidence |
-| New small capsule, no carry | 3 | 4 | Root GET, run PUT, optional run GET, root CAS |
-| Binary carry across `C` occupied levels | `3 + C` | `4 + C` | Each carried level adds one run GET; only the final merged run is PUT |
+| New small capsule after root/view capture | 3 | 4 | Ref-head GET, leaf PUT, optional leaf readback, ref-head CAS |
+| Incremental capsule at any frontier depth | 3 | 4 | Foreground publication never reads or rewrites prior capsules |
 | Existing verified capsule | 4 | 4 | Create conflict requires body verification before reuse |
-| New multipart capsule with `P` parts | `P + 4` | `P + 5` | Root GET, initiate, parts, complete, optional GET, root CAS |
-| Root CAS conflict | `+2` per retry | `+2` per retry | Refresh root, revalidate/merge, retry CAS |
-| Uncertain root CAS response | `+1` | `+1` | Read root and classify the exact attempted transition |
+| New multipart capsule with `P` parts | `P + 4` | `P + 5` | Ref-head GET, initiate, parts, complete, optional GET, ref-head CAS |
+| Ref-head CAS conflict | `+2` per retry | `+2` per retry | Refresh head, revalidate, retry CAS |
+| Uncertain ref-head CAS response | `+1` | `+1` | Read the head and classify the exact attempted transition |
 
 The budget is per push, not per commit. A push containing one thousand commits
 still uses one capsule upload if it fits the selected upload mechanism.
@@ -192,22 +201,23 @@ The checksum-qualified clean path has three ordered waves:
 
 ```text
 client                         object store
-  |---- GET root ------------------->|  advertisement and CAS base
-  |<--- refs + version --------------|
+  |---- GET selected ref head ------>|  exact ref value and CAS base
+  |<--- state + version --------------|
   |---- PUT capsule, create-only --->|  durable verified bytes
   |<--- checksum/version ------------|
-  |---- PUT root, if-match --------->|  sole publication point
+  |---- PUT ref head, if-match ----->|  single-ref publication point
   |<--- new version -----------------|
 ```
 
 Local capsule construction may overlap advertisement. The data PUT cannot be
-skipped, and the root CAS cannot start until capsule durability is proven.
-Those dependencies define the minimum critical path on an object store with
-no multi-object transaction.
+skipped, and the ref-head CAS cannot start until capsule durability is proven. Those
+dependencies define the minimum critical path on an object store with no
+multi-object transaction.
 
 ## 6. Storage layout
 
-Protocol v2 has one mutable foreground object and immutable capsules:
+Protocol v2 partitions foreground authority by ref and keeps payload objects
+immutable:
 
 ```text
 {global_prefix}/
@@ -217,14 +227,18 @@ Protocol v2 has one mutable foreground object and immutable capsules:
 
 {repo_prefix}/v2/
 ├── root
+├── refs/heads/{encoded-ref}.json
+├── transactions/{activation-id}.json
+├── transactions/committed/{activation-id}.json
 ├── capsules/{first-two-hex}/{blake3}
 ├── checkpoints/{first-two-hex}/{blake3}
 └── gc/runs/{run-id}/...
 ```
 
-`root` is the only mutable publication authority. Capsules and checkpoints
-are immutable and use create-only writes. GC state is maintenance-only and
-MUST NOT be touched by a normal push.
+Per-ref heads are the ordinary mutable publication authorities. The root is
+mutable only for checkpoint, symbolic HEAD, GC, and maintenance transitions.
+Capsules, committed markers, and checkpoints are immutable and use create-only
+writes. GC state is maintenance-only and MUST NOT be touched by a normal push.
 
 Pointer-free pushes have no foreground dependency on bucket-global xorbs,
 shards, indexes, or a ref registry. Pointer pushes retain canonical external
@@ -241,8 +255,9 @@ format_version
 repository_id
 generation
 parent_generation_digest
-refs[]                    // name, object ID, peeled ID when applicable
-capsule_frontier[]        // hash, size, checksum, transaction identity
+refs[]                    // checkpointed name, object ID, peeled ID baseline
+compacted_ref_positions[] // last transaction folded into each ref
+capsule_frontier[]        // legacy/root-owned maintenance transactions only
 checkpoint                // hash, size, covered generation
 checkpoint_pack           // capsule, byte range, Git checksum, object count
 delta_depth
@@ -250,10 +265,10 @@ capabilities
 root_digest
 ```
 
-The complete advertised ref map is inline so advertisement requires one GET.
-Implementations MUST define a maximum encoded root size. A repository that
-cannot fit its refs under that bound requires a separately qualified sharded
-ref protocol and does not claim the three-request budget.
+The root carries the compacted ref baseline. Advertisement overlays the
+independently mutable ref heads captured by a stable double collection, so
+large branch populations do not rewrite or contend on the root. Implementations
+MUST bound the root, number and size of ref heads, and captured frontier bytes.
 
 The root's object-store ETag and version are CAS tokens, not content hashes.
 The encoded `root_digest` detects body corruption independently of provider
@@ -327,11 +342,11 @@ the sole proof that data may be omitted.
 
 ### 6.3 Checkpoints
 
-Capsules form an immutable generation DAG. The root carries a deterministic
-frontier so disjoint CAS losers can merge their already-uploaded capsules
-without rewriting either capsule. Reading an unbounded frontier would move
-request amplification from push to clone, so a checkpoint periodically
-materializes a complete repository view:
+Capsules form immutable per-ref histories. Each ref head carries its bounded
+post-checkpoint frontier, so disjoint branch writers never update one shared
+mutable object. Reading unbounded frontiers would move request amplification
+from push to clone, so a checkpoint periodically materializes a complete
+repository view:
 
 - one ordinary, non-thin, self-contained Git pack covering the checkpoint's
   complete Git object catalog;
@@ -352,13 +367,16 @@ equals its complete catalog. Hidden refs, partial-clone filters, shallow
 boundaries, or any smaller selection require Crab to generate a pack containing
 only the authorized selected objects.
 
-The root points to one checkpoint and a bounded binary frontier of later
-capsule runs. Level `L` contains exactly `2^L` complete capsules. Appending a
-leaf merges equal-level suffixes like a binary counter; only the final merged
-run is uploaded. With a hard checkpoint interval of 500 pushes, at most nine
-runs are addressable and generation 500 has six. The amortized number of carry
-GETs is less than one per push, while a reader fetches one object per set bit
-in the post-checkpoint transaction count.
+Each ref head points to a bounded frontier of post-checkpoint leaf capsules.
+Appending a leaf never reads or rewrites its predecessors, so foreground
+request count and uploaded capsule bytes do not grow with history. Server
+maintenance captures a complete view after 32 visible capsules and publishes
+one checkpoint root CAS. A later writer rebases the head onto that checkpoint,
+drops the exact compacted prefix, and retains capsules committed after the
+maintenance snapshot. The hard 64-entry frontier fails closed if maintenance
+cannot keep reads bounded. Server receive forces a synchronous checkpoint at
+56 entries, leaving eight entries of headroom when background maintenance
+falls behind.
 
 Checkpoint construction is background maintenance and is not part of the
 clean push budget. A checkpoint becomes visible through the same root CAS and
@@ -388,16 +406,17 @@ Local failures produce no remote state.
 
 ### 7.2 Read the publication base
 
-The remote helper GETs `v2/root` once and retains its body plus ETag/version
-through advertisement and push. Before upload it verifies:
+The remote helper captures `v2/root` and the selected ref heads. Before upload
+it verifies:
 
 - root format, identity, bounds, and digest;
-- every expected-old ref value;
+- every expected-old ref value from the stable view;
 - fast-forward policy;
 - that every omitted dependency is reachable from this root.
 
-The push MUST NOT issue another root GET merely because local preparation took
-time. The final CAS detects a stale base.
+The writer re-GETs only the selected ref heads to obtain current CAS tokens.
+The final head CAS detects a same-ref stale base without serializing unrelated
+branches.
 
 ### 7.3 Upload the capsule
 
@@ -416,31 +435,34 @@ If create reports that the key already exists, Crab streams and verifies the
 existing capsule before referencing it. A hash-shaped key alone is not proof
 that the stored bytes are correct.
 
-### 7.4 Publish the root
+### 7.4 Publish ref state
 
-After capsule durability is proven, the client constructs a root containing
-the new refs and capsule identity. It conditionally updates `v2/root` using
-both ETag and version from advertisement.
+After capsule durability is proven, a single-ref push constructs the successor
+head and conditionally updates that ref-head object. A multi-ref push first
+writes prepared two-version heads, then commits one transaction record and
+immutable committed marker referenced by those heads.
 
-This CAS is the only linearization point:
+The single-ref CAS or multi-ref transaction-record CAS is the linearization
+point:
 
-- success makes every ref edit and all capsule metadata visible together;
+- success makes the selected ref edit, or all edits in one multi-ref batch,
+  visible together;
 - precondition failure makes none of this attempt visible;
 - readers can observe the old root or the new root, never an intermediate
   combination.
 
-No ref lock is required. A same-ref loser refreshes the root and fails the
-normal expected-old or fast-forward check. Disjoint ref edits may be merged
-onto the refreshed root and retry the CAS without re-uploading the capsule.
+The product may retain same-ref leases for policy and work admission, but
+correctness comes from conditional heads and activation records. A same-ref
+loser refreshes that head and fails the expected-old check. Disjoint refs have
+no common mutable foreground object.
 
 ### 7.5 Reconcile uncertainty
 
-If the root CAS response is lost or indeterminate, the client GETs the root
-once and compares the attempted generation, parent digest, capsule identity,
-and ref edits:
+If a ref-head or transaction-record CAS response is lost or indeterminate, the
+client reads the exact head, activation record, committed marker, or durable
+plan receipt named by that attempt:
 
-- an exact match is committed success;
-- a descendant that contains the exact transaction is committed success;
+- an exact transaction identity is committed success;
 - the unchanged base is safe to retry;
 - any other state is an indeterminate error requiring explicit recovery.
 
@@ -451,29 +473,31 @@ produced the same ref values.
 
 ### 8.1 Durable-before-visible
 
-The root cannot reference a capsule or its external dependencies until every
+A ref head cannot reference a capsule or its external dependencies until every
 required PUT, verification, and GC-protection operation completes. A crash
-before root CAS leaves only unreachable immutable data and conservative
-protection metadata. A crash after a successful CAS leaves a fully verified
-reachable dependency closure.
+before the publication CAS leaves only unreachable immutable data and
+conservative protection metadata. A crash after a successful CAS leaves a
+fully verified reachable dependency closure.
 
 ### 8.2 Atomic ref updates
 
-Every ref is encoded in one root. One conditional object update publishes a
-multi-ref push atomically. There is no interval in which only part of a batch
-is visible.
+Single-ref pushes commit through one conditional head update. Multi-ref pushes
+prepare each affected head while retaining its old visible state, then one
+activation-record CAS changes every prepared head from old to new visibility.
+There is no authorized view in which only part of a batch is visible.
 
 ### 8.3 Lost-update prevention
 
-Every mutation is conditional on the exact root version read during
-advertisement or conflict recovery. At most one writer can replace a given
-version. Losers re-evaluate semantic ref rules against the winner.
+Every ref mutation is conditional on the exact head version read during
+commit preparation. At most one writer can replace a given head version.
+Losers re-evaluate semantic ref rules against the winner.
 
 ### 8.4 Snapshot reads
 
-A reader validates one root and pins its digest for the operation. All
-capsules and checkpoints referenced by that root are immutable. A later root
-CAS cannot change the pinned view.
+A reader validates one root, double-collects ref-head versions, resolves only
+activation records named by those heads, and pins that complete view. All
+capsules and checkpoints referenced by it are immutable. Later root or head
+CAS operations cannot change the pinned view.
 
 ### 8.5 Reconstruction integrity
 
@@ -503,7 +527,7 @@ A concurrent push can reference old data without new protection only when that
 data was reachable from its base root; GC's snapshot therefore marks it. Data
 that was not reachable from the base must be uploaded or independently
 verified while holding the external-dependency GC publication guard, then
-entered into the monotonic pre-publication registry before root CAS. New
+entered into the monotonic pre-publication registry before ref publication. New
 objects are protected by age grace. A concurrent force-push may make old roots
 unreachable, but that only causes conservative retention in the active GC run.
 
@@ -517,9 +541,9 @@ an exceptional maintenance cost, not a normal push request.
 | --- | --- | --- |
 | Before capsule PUT | No change | Return error |
 | During single or multipart upload | No change | Abort if possible; lifecycle cleanup otherwise |
-| After capsule PUT, before root CAS | Orphan capsule only | Reuse on retry or collect after grace |
-| Root CAS conflict | No change from loser | GET root, revalidate, retry or reject |
-| Root CAS succeeded, response lost | New root may be visible | One exact reconciliation GET |
+| After capsule PUT, before ref-head CAS | Orphan capsule only | Reuse on retry or collect after grace |
+| Ref-head CAS conflict | No change from loser | GET that head, revalidate, retry or reject |
+| Publication CAS succeeded, response lost | New transaction may be visible | Resolve exact head/activation/receipt identity |
 | Reader sees corrupt root | No usable snapshot | Fail closed; recover from retained root/capsule evidence |
 | Reader sees missing/corrupt capsule | Root is damaged | Fail closed; repair from replica or retained source |
 | Client dies after success | Complete new generation | No lease expiry or cleanup required |
@@ -543,14 +567,17 @@ Every clone, fetch, pull, shallow fetch, partial clone, and lazy object request
 first opens one immutable repository view:
 
 1. GET and validate `v2/root` once;
-2. pin its generation, digest, refs, checkpoint, and capsule frontier;
-3. load checkpoint metadata and at most the bounded post-checkpoint metadata;
-4. validate that the combined locator, catalog, and visibility proof cover the
+2. double-collect the ref-head listing and object versions, resolving only
+   activation records still named by captured heads;
+3. pin the root generation, compacted refs, visible heads, checkpoint, and
+   bounded per-ref frontiers;
+4. load checkpoint metadata and bounded post-checkpoint metadata;
+5. validate that the combined locator, catalog, and visibility proof cover the
    exact pinned generation;
-5. advertise refs from the pinned root, applying hidden-ref policy.
+6. advertise refs from the pinned view, applying hidden-ref policy.
 
-No later root is mixed into the operation. A root CAS after step 1 creates a
-new generation for another operation; it cannot change the pinned view.
+No later root or ref head is mixed into the operation. Later publication
+creates another view; it cannot change the pinned one.
 
 ### 10.2 Fresh full clone
 
@@ -611,8 +638,7 @@ protocol decision is closed.
 
 ### 10.6 Read request budgets
 
-Let `D` be the number of post-checkpoint transactions, `popcount(D)` the
-number of binary capsule runs, and `R` the number of coalesced ranges needed
+Let `D` be the number of post-checkpoint leaf capsules and `R` the number of coalesced ranges needed
 for an incremental selection. Assuming the
 root contains the checkpoint pack descriptor and one GET can return a complete
 run or required contiguous pack range, the theoretical minima are:
@@ -621,16 +647,17 @@ run or required contiguous pack range, the theoretical minima are:
 | --- | ---: | --- |
 | Ref advertisement | **1** | Root GET |
 | Full authorized clone at checkpoint generation | **2** | Root GET plus checkpoint pack range |
-| Full clone ahead of checkpoint | **2 + popcount(D)** | Root, checkpoint pack, and each frontier run |
+| Full clone ahead of checkpoint | **2 + D** | Root, checkpoint pack, and each leaf capsule; leaf reads are concurrent |
 | Incremental fetch or pull | **1 + R** | Root plus selected coalesced ranges |
 | Lazy object fetch | **2** | Root plus one range only when object and bases co-locate |
 
-At the fixed 500-transaction checkpoint interval, `popcount(D) <= 8`, so an
-unfiltered clone requires at most ten object reads and requires eight at the
-500-transaction boundary. Over one complete 500-push window, binary carries
-add `500 - popcount(500) = 494` GETs. The qualified single-PUT path therefore
-uses `4N - popcount(N) = 1,994` total operations, or 3.988 per push; mandatory
-readback uses 2,494, or 4.988 per push.
+At the 32-capsule maintenance threshold, a healthy checkpointed repository
+normally needs two origin reads for a full authorized clone and at most 34
+while checkpoint publication is pending. The tradeoff is deliberate: simple
+incremental push remains three qualified or four readback-required operations
+at every depth, while bounded concurrent reads and background checkpointing
+absorb history. Checkpoint bytes and accumulated embedded Git packs remain a
+measured consolidation gate before release.
 
 These are origin-request minima, not universal guarantees. A selected object
 and its delta bases may span multiple runs; authorization or filtering may
@@ -656,25 +683,21 @@ pack, object, chunk, or file validation.
 
 ## 11. Throughput and contention
 
-The single root is intentionally a repository-level serialization point. It
-does not serialize local preparation or capsule transfer; only the final small
-CAS is serialized.
+Per-ref heads partition foreground serialization. Same-ref writers serialize
+at one small CAS; different-ref writers share no mutable publication key.
+Multi-ref batches coordinate only their selected heads through a unique
+activation record. The implementation must measure:
 
-At low and moderate contention this maximizes throughput by eliminating lease
-and journal traffic. At high contention, different-ref writers can cause CAS
-retries. Each retry costs one root GET and one root CAS. The implementation
-must measure:
-
-- root CAS attempts and conflicts per committed push;
+- ref-head and activation-record CAS attempts and conflicts per committed push;
 - uploaded bytes from losing writers;
 - time from capsule durability to root commitment;
-- root object size and per-key throttling;
+- root, ref-head, and activation-record size and per-key throttling;
 - delta depth and checkpoint publication rate.
 
-If production evidence shows sustained root contention, the next design must
-choose explicitly between a coordinator that batches root transitions and a
-partitioned ref protocol with a transaction marker. Neither is added as a
-fallback because both change the authority model and request accounting.
+If one branch is legitimately hot, its ref head remains intentionally
+serialized. A coordinator may batch same-ref transitions only as a separately
+specified authority; the protocol does not reintroduce a repository-wide
+fallback mutex.
 
 ## 12. Byte/request tradeoff
 
@@ -695,8 +718,8 @@ cannot create missing data.
 Checkpointing, repacking, and background dedup may recover storage efficiency
 without becoming pointer-free publication dependencies. Pointer-aware
 checkpoints compact file, shard, and xorb catalogs but do not rewrite canonical
-xorb or shard payloads. Derived state is published only through a root CAS and
-old capsules remain until normal GC proves them unreachable.
+xorb or shard payloads. Derived checkpoint state is published only through a
+root CAS, and old capsules remain until normal GC proves them unreachable.
 
 ## 13. Provider contract
 
@@ -749,7 +772,8 @@ The release must include deterministic tests proving:
 - disjoint ref edits merge without re-uploading their capsules;
 - every crash point leaves either the old complete root or the new complete
   root;
-- uncertain root CAS is classified from exact transaction identity;
+- uncertain ref-head or activation-record CAS is classified from exact
+  transaction identity;
 - concurrent normal GC cannot delete base-reachable or recent capsule data;
 - force-push resurrection uploads or independently verifies and protects every
   dependency absent from the base root;
@@ -848,15 +872,17 @@ safe while omitted required bytes violate reconstruction.
 4. **Complete:** qualify official AWS S3 checksum responses explicitly; custom
    S3 endpoints and unqualified providers retain mandatory readback.
 5. **Complete:** publish ordinary native and remote-helper pushes with capsule
-   upload plus root CAS.
+   upload plus per-ref heads and activation records.
 6. **Complete for Git reads:** checkpoint and capsule packs carry authenticated
    indexes, reverse indexes, object locators, and visibility closures; readers
    install them without per-object storage requests.
 7. **Complete for ordinary full, shallow, and filtered clone/fetch/pull:**
    remove their v1 runtime path. Raw lazy-object recovery remains an explicit
    fail-closed follow-up work.
-8. **Complete:** enforce bounded binary-run traversal and checkpoint after each
-   500-push qualification window.
+8. **Complete in the HTTP server:** append leaf capsules with history-flat
+   foreground requests, checkpoint after 32 visible capsules, and force a
+   foreground checkpoint at 56. Shared pack consolidation and long-run hosted
+   qualification remain open.
 9. **Complete:** fence repository GC with one root transition, recheck object
    identity before delete, and release through another root transition.
 10. **Complete on RustFS:** live-qualify a fresh Kubernetes source with 5,000
@@ -885,10 +911,11 @@ production wiring and format freeze require these decisions to be closed:
 - **Partly decided:** roots are capped at 8 MiB. Repositories whose complete
   ref map cannot fit require a separately designed protocol and cannot use v2;
 - the maximum capsule size before multipart and the multipart part policy;
-- **Decided:** checkpoint windows contain at most 500 ref transactions and use
-  power-of-two capsule runs. The frontier has no more than eight populated
-  levels in that interval, keeping root + checkpoint + frontier reads at ten
-  or fewer while amortized qualified push operations remain below four;
+- **Decided for foreground publication:** per-ref heads append leaf capsules,
+  maintenance starts at 32 visible capsules, receive forces a checkpoint at
+  56, and the hard frontier limit is 64. This keeps incremental writes
+  history-flat; checkpoint pack
+  consolidation and the final clone-read bound remain release decisions;
 - whether native LFS bodies are capsule sections or retain a separately
   counted protocol;
 - the exact active-active boundary, which cannot use one object-store root as
