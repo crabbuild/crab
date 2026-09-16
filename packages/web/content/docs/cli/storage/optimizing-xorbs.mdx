@@ -34,8 +34,10 @@ Built-in profiles retain their public Zstd level descriptions; the current
 Xet xorb encoder maps that config to its supported LZ4 chunk scheme. Custom
 profiles may select `zstd:N`, `lz4`, or `none`.
 
-When you omit `--profile`, Crab scans the canonical file index and selects a
-target from the median file size:
+When you omit `--profile`, Crab scans the repository's canonical Xorb inventory
+and selects a target from the median encoded Xorb size. A v2 repository uses
+only Xorbs reachable from its authenticated file/shard catalog, so shared
+objects owned only by another repository are not included:
 
 - p50 > 100 MiB: `ml`
 - p50 >= 1 MiB: `dataset`
@@ -59,11 +61,13 @@ Apply the rewrite:
 crab optimize xorbs --profile ml --apply
 ```
 
-Apply consolidates bounded batches of source xorbs, verifies every source and
-destination size/hash, rebuilds affected Xet shards, publishes candidate
-indexes, and advances the canonical manifest with compare-and-swap. A
-repository maintenance lease prevents overlapping destructive maintenance;
-old xorbs remain immutable until a later GC proves them unreferenced.
+Apply consolidates bounded batches of source xorbs and verifies every source
+and destination size/hash. For v2 it rebuilds affected Xet shards, verifies the
+complete replacement catalog, and publishes an authenticated checkpoint with
+exact-root compare-and-swap; it does not create a legacy manifest or file
+index. V1 repositories retain manifest-CAS publication. A repository
+maintenance lease prevents overlapping destructive maintenance; old xorbs
+remain immutable until a later GC proves them unreferenced.
 
 Resume or abort an interrupted run:
 
@@ -103,7 +107,7 @@ crab optimize xorbs --profile ml --apply --output-class=STANDARD_IA
 | Two `crab optimize xorbs` runs | Second fails with `CRAB-E0332` |
 | `crab gc` + `crab optimize xorbs` | Repository maintenance lease admits only one operation |
 | `crab push` + `crab optimize xorbs --dry-run` | Safe; dry-run performs no writes |
-| `crab push` + `crab optimize xorbs --apply` | Manifest CAS reconciliation preserves current push roots |
+| `crab push` + `crab optimize xorbs --apply` | Exact authority CAS reconciliation retries from the winning push and preserves its roots |
 
 Old source xorbs become orphans and are reclaimed by the next `crab gc`.
 

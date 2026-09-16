@@ -16,6 +16,7 @@
 //! - `--output-class` — storage class for destination xorbs.
 //! - `--json` / `--jsonl` — structured output.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::core::config::Config;
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::{JsonlStream, OutputMode, emit_json};
 use crate::optimize::xorbs::executor::{self, ExecutorConfig};
 use crate::optimize::xorbs::inference::{self, RepoStats};
@@ -37,12 +38,13 @@ use crate::storage::StoreLayout;
 use crate::storage::head_class::head_with_class;
 use crate::storage::store::Store;
 use crate::tier::audit_shim::{self, AuditOp};
-use crab_storage::{GLOBAL_PREFIX, content_hash_from_path, global_content_prefix};
+use crab_storage::{content_hash_from_path, global_content_prefix};
 
 const OPTIMIZE_XORBS_AUTH_OPERATION: &str = "optimize-xorbs";
 const OPTIMIZE_XORBS_OPERATION: &str = "optimize xorbs";
 const OPTIMIZE_XORBS_PLAN_SCHEMA: &str = "optimize.xorbs.plan";
 const OPTIMIZE_XORBS_EVENT_SCHEMA: &str = "optimize.xorbs.event";
+const MAX_CAPSULE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Read the remote URL from `crab.toml` and build a Store.
 ///
@@ -222,8 +224,9 @@ pub async fn run(args: &OptimizeXorbsArgs, cfg: &Config, cancel: &CancellationTo
 
     // Handle --dry-run.
     if args.dry_run {
-        let (store, _) = try_build_store(cfg, cancel).await?;
-        let sources = enumerate_sources(&store, cancel).await?;
+        let (store, parsed) = try_build_store(cfg, cancel).await?;
+        let router = StoreLayout::new(store.clone(), parsed.repo_path);
+        let sources = enumerate_sources(&store, &router, cancel).await?;
         let (profile_name, profile) = resolve_profile(args, cfg, Some(&sources))?;
         info!(profile = %profile_name, "resolved xorb optimization profile");
         run_dry_run(
@@ -325,13 +328,35 @@ fn resolve_profile(
 /// Snapshot source xorbs and their storage classes before a plan or run.
 async fn enumerate_sources(
     store: &Store,
+    router: &StoreLayout,
     cancel: &CancellationToken,
 ) -> Result<Vec<SourceXorbMeta>> {
     if cancel.is_cancelled() {
         return Err(CrabError::Cancelled);
     }
 
-    let prefix = global_content_prefix(GLOBAL_PREFIX, "xorbs");
+    let capsule_layout =
+        crab_storage::StoreLayout::new(store.as_storage().clone(), router.repo_prefix().to_owned());
+    match crab_metadata::capsule_protocol::load_root(&capsule_layout).await {
+        Ok(root) => {
+            let view = crab_read::capsule_protocol::open_view_from_root(
+                &capsule_layout,
+                root,
+                crab_read::capsule_protocol::CapsuleReadLimits {
+                    max_capsule_bytes: MAX_CAPSULE_BYTES,
+                    max_frontier_bytes: MAX_CAPSULE_BYTES,
+                },
+            )
+            .await?;
+            return enumerate_capsule_sources(store, &capsule_layout, &view, cancel).await;
+        }
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        }) => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    let prefix = global_content_prefix(router.global_prefix(), "xorbs");
     let objects = store.list_prefix(&prefix).await?;
     let mut sources = Vec::with_capacity(objects.len());
 
@@ -357,6 +382,72 @@ async fn enumerate_sources(
     }
 
     sources.sort_unstable_by(|left, right| left.hash.cmp(&right.hash));
+    Ok(sources)
+}
+
+async fn enumerate_capsule_sources(
+    store: &Store,
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    cancel: &CancellationToken,
+) -> Result<Vec<SourceXorbMeta>> {
+    let catalog = view.pointer_catalog()?;
+    let selected_shards = catalog
+        .files()
+        .values()
+        .map(|file| file.shard_hash())
+        .collect::<BTreeSet<_>>();
+    let selected_xorbs = selected_shards
+        .into_iter()
+        .map(|hash| {
+            catalog
+                .shards()
+                .get(hash)
+                .ok_or_else(|| CrabError::CorruptObject {
+                    path: "capsule-protocol pointer catalog".to_owned(),
+                    reason: format!("file catalog references absent shard {hash}"),
+                })
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flat_map(|shard| shard.xorb_hashes().iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let mut sources = Vec::with_capacity(selected_xorbs.len());
+    for hash in selected_xorbs {
+        check_cancelled(cancel)?;
+        let entry = catalog
+            .xorbs()
+            .get(&hash)
+            .ok_or_else(|| CrabError::CorruptObject {
+                path: "capsule-protocol pointer catalog".to_owned(),
+                reason: format!("shard catalog references absent xorb {hash}"),
+            })?;
+        let hash_value = crab_xet::hash::MerkleHash::from_hex(&hash).map_err(|error| {
+            CrabError::CorruptObject {
+                path: "capsule-protocol pointer catalog".to_owned(),
+                reason: format!("invalid xorb hash {hash}: {error}"),
+            }
+        })?;
+        let path = layout.xorb_path(&hash_value);
+        let object = store.head(&path).await?;
+        if object.size != entry.encoded_size() {
+            return Err(CrabError::CorruptObject {
+                path: path.to_string(),
+                reason: format!(
+                    "xorb size is {}, authenticated catalog declares {}",
+                    object.size,
+                    entry.encoded_size()
+                ),
+            });
+        }
+        let head = head_with_class(store, &path).await?;
+        sources.push(SourceXorbMeta {
+            hash,
+            size_bytes: object.size,
+            storage_class: head.class.to_string(),
+            is_archive: head.class.is_archive_class(),
+        });
+    }
     Ok(sources)
 }
 
@@ -477,7 +568,7 @@ async fn run_apply(
     .await?;
     let operation = async {
         let sources = if recorded_run.is_none() {
-        enumerate_sources(&store, cancel).await?
+        enumerate_sources(&store, &router, cancel).await?
     } else {
         Vec::new()
     };
@@ -560,6 +651,7 @@ async fn run_apply(
         &exec_cfg,
         cancel,
         Some(&store),
+        Some(&router),
         restore_orchestrator.as_deref(),
     )
     .await?;
@@ -674,7 +766,12 @@ fn profile_label(profile: &Profile) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::crab_dir_from_journal_path;
+    use super::{crab_dir_from_journal_path, enumerate_sources};
+    use crate::storage::{Store, StoreLayout};
+    use bytes::Bytes;
+    use object_store::memory::InMemory;
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn nested_journal_path_resolves_crab_directory() {
@@ -684,5 +781,142 @@ mod tests {
             crab_dir_from_journal_path(path).unwrap(),
             std::path::Path::new("/repo/.crab")
         );
+    }
+
+    #[tokio::test]
+    async fn capsule_source_enumeration_ignores_foreign_global_xorbs() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let layout = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        let root =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+        let selected = crab_xet::hash::MerkleHash::from([2_u64; 4]);
+        let foreign = crab_xet::hash::MerkleHash::from([3_u64; 4]);
+        let shard = crab_xet::hash::MerkleHash::from([4_u64; 4]);
+        let file = crab_xet::hash::MerkleHash::from([5_u64; 4]);
+        store
+            .put(
+                &layout.xorb_path(&selected),
+                Bytes::from_static(b"selected"),
+            )
+            .await
+            .unwrap();
+        store
+            .put(&layout.xorb_path(&foreign), Bytes::from_static(b"foreign"))
+            .await
+            .unwrap();
+        let mut catalog = crab_metadata::capsule_protocol::PointerCatalog::new();
+        catalog
+            .insert_xorb(
+                selected.hex(),
+                crab_metadata::capsule_protocol::XorbCatalogEntry::new(
+                    8,
+                    "6".repeat(64),
+                    vec![crab_metadata::capsule_protocol::XorbChunkEntry::new(
+                        "7".repeat(64),
+                        8,
+                    )],
+                ),
+            )
+            .unwrap();
+        catalog
+            .insert_shard(
+                shard.hex(),
+                crab_metadata::capsule_protocol::ShardCatalogEntry::new(1, vec![selected.hex()]),
+            )
+            .unwrap();
+        catalog
+            .insert_file(
+                file.hex(),
+                crab_metadata::capsule_protocol::FileCatalogEntry::new(8, shard.hex()),
+            )
+            .unwrap();
+        let pack = crab_metadata::capsule_protocol::CapsuleGitPack::new(
+            Bytes::from_static(b"pack"),
+            Bytes::from_static(b"index"),
+            Bytes::from_static(b"reverse"),
+            Bytes::from_static(b"locator"),
+            "8".repeat(40),
+            1,
+        )
+        .unwrap();
+        let tip = "9".repeat(40);
+        let transaction = crab_metadata::capsule_protocol::CapsuleTransaction::new(
+            root.record().digest(),
+            vec![crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some(tip.clone()),
+                None,
+            )],
+        )
+        .unwrap();
+        let visibility = crab_metadata::capsule_protocol::CapsuleVisibilityDelta::new(
+            std::collections::BTreeMap::from([(
+                "refs/heads/main".to_owned(),
+                crab_metadata::git_visibility::GitVisibilityEdit::from_replacement_objects(
+                    None,
+                    tip.clone(),
+                    vec![tip],
+                ),
+            )]),
+        )
+        .unwrap();
+        let capsule = crab_metadata::capsule_protocol::Capsule::build(
+            &transaction,
+            vec![pack],
+            vec![
+                crab_metadata::capsule_protocol::CapsuleSection::new(
+                    crab_metadata::capsule_protocol::CapsuleSectionKind::CatalogDelta,
+                    catalog.encode_delta().unwrap(),
+                ),
+                crab_metadata::capsule_protocol::CapsuleSection::new(
+                    crab_metadata::capsule_protocol::CapsuleSectionKind::VisibilityDelta,
+                    visibility.encode().unwrap(),
+                ),
+            ],
+        )
+        .unwrap();
+        crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
+            .await
+            .unwrap();
+
+        let sources = enumerate_sources(&store, &router, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].hash, selected.hex());
+    }
+
+    #[tokio::test]
+    async fn corrupt_capsule_root_never_falls_back_to_global_xorb_listing() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/corrupt".to_owned());
+        let layout = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        store
+            .put(
+                &layout.capsule_root_path(),
+                Bytes::from_static(b"corrupt root"),
+            )
+            .await
+            .unwrap();
+        let foreign = crab_xet::hash::MerkleHash::from([10_u64; 4]);
+        store
+            .put(&layout.xorb_path(&foreign), Bytes::from_static(b"foreign"))
+            .await
+            .unwrap();
+
+        let result = enumerate_sources(&store, &router, &CancellationToken::new()).await;
+
+        assert!(result.is_err());
     }
 }
