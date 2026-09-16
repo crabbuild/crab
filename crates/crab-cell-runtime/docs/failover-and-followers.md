@@ -179,15 +179,21 @@ Each Cell still has its own contiguous LTX transaction chain and commit
 sequence. The node sequence supplies follower replay, truncation, and recovery
 coverage across interleaved Cells.
 
-## Hard-cut the control formats
+## Evolve the unshipped formats in place
 
-This design is intentionally incompatible with the current unreleased Cell
-control and node advertisement. Crab has no Cell data to migrate, so the
-implementation uses `cells/v2` and deletes the old reader and writer together.
-There is no dual write, fallback reader, or mixed V1/V2 fleet.
+The Cell storage contract is still under active development and has no released
+data to preserve. The implementation therefore keeps the existing `cells/v1`
+prefix and evolves the current control, session, and reader/writer structures
+together. It does not create a `cells/v2` namespace merely because fields or
+state transitions change.
+
+There is one canonical format at every commit. Development environments may be
+discarded and recreated when that format changes. There is no dual write,
+fallback reader, compatibility branch, or data migration until Crab ships a
+persistent Cell format that explicitly requires those guarantees.
 
 ```text
-<root>/cells/v2/
+<root>/cells/v1/
   identity.json
   sessions/<session-id>.json
   node-logs/<leader-session>/
@@ -213,12 +219,12 @@ Fleet proofs require a node-session lease that a recoverer can atomically move
 out of `live`; otherwise a paused owner could continue obtaining follower acks
 while takeover reads its Cells.
 
-The V2 session object separates signed immutable identity from CAS-protected
-mutable authority:
+The evolved session object separates signed immutable identity from
+CAS-protected mutable authority:
 
 ```json
 {
-  "version": 2,
+  "version": 1,
   "identity": {
     "fleet": "32-byte-hex",
     "session": "16-byte-hex",
@@ -227,7 +233,7 @@ mutable authority:
     "public_key": "32-byte-hex",
     "image": "32-byte-hex",
     "release": "32-byte-hex",
-    "peer_versions": [2],
+    "peer_versions": [1],
     "signature": "64-byte-hex"
   },
   "lease": {
@@ -271,7 +277,7 @@ default. The session watchdog closes all Cell admission and terminates the
 process when it cannot prove a valid lease before expiry. A late renewal cannot
 revive a fenced process. Kubernetes or another supervisor starts a new session.
 
-Per-Cell `progress` remains a monotonic publication field, but V2 takeover no
+Per-Cell `progress` remains a monotonic publication field, but takeover no
 longer infers owner death from a quiet Cell. A quiet repository can be healthy
 for months. Only the exact owner session's lease, or a graceful release, permits
 takeover.
@@ -329,7 +335,7 @@ struct RecoveryOverlayRef {
     final_commit_sequence: u64,
 }
 
-struct ControlV2 {
+struct Control {
     // Existing Cell, incarnation, epoch, revision, owner, root, code,
     // schema, state, and next_due fields remain.
     recovery: Option<RecoveryOverlayRef>,
@@ -353,7 +359,7 @@ This extra pointer solves two problems at once: retention can see recovered
 bytes before activation, and exact-root restore never depends on listing an
 epoch prefix.
 
-The V2 transition table is explicit:
+The target transition table is explicit:
 
 | Transition | Required predecessor | Protected effect |
 | --- | --- | --- |
@@ -471,7 +477,7 @@ The existing private mTLS listener gains three node-log operations:
 
 The peer descriptor remains message-only; no public service is generated. The
 HTTP server maps messages onto private routes such as
-`/internal/cells/v2/node-log/stream`, `/seal`, and `/tail`.
+`/internal/cells/v1/node-log/stream`, `/seal`, and `/tail`.
 
 Initial protocol bounds are compile-time contracts:
 
@@ -852,7 +858,7 @@ Startup order is:
 2. Start the private mTLS listener in **recovery-only** mode
 3. Serve `SealFragment` and `ReadTail` for surviving peer fragments
 4. Probe object-store conditional writes and range reads
-5. Strict-create a fresh V2 session record
+5. Strict-create a fresh session record
 6. Start the lease watchdog and renewal task
 7. Start node-log recovery sweeps, shipper, actors, and schedulers
 8. Advertise application readiness
@@ -1086,7 +1092,7 @@ until the recovery gate is complete.
 
 | Phase | Implementation | Exit proof |
 | --- | --- | --- |
-| 1 | V2 session lease, watchdog, terminal self-fence, Cell takeover based on session state | Pause/partition owner; no response or renewal after expiry |
+| 1 | Session lease, watchdog, terminal self-fence, Cell takeover based on session state | Pause/partition owner; no response or renewal after expiry |
 | 2 | `crab-ltx` verified frame and recovered-overlay API | Golden, corruption, cross-epoch, and exact-root tests |
 | 3 | Follower disk format and private append/seal/tail protocol | Crash matrix proves fsync and torn-tail behavior |
 | 4 | Node-log recovery claim, bundles, Cell overlay attachment, retention roots | Kill recovery at every boundary and converge |
