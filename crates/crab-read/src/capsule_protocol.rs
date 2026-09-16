@@ -131,7 +131,6 @@ impl CapsuleRepositoryView {
     }
 
     /// Return the total immutable capsule count represented by the visible frontier.
-    #[must_use]
     pub fn capsule_count(&self) -> Result<u64> {
         self.capsule_run_pointers
             .iter()

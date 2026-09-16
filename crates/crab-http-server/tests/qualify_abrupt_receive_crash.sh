@@ -8,18 +8,17 @@ work_root="${RUNNER_TEMP:?RUNNER_TEMP must name disposable qualification storage
 work_dir="$(mktemp -d "${work_root}/crab-http-server-crash.XXXXXX")"
 compose=(docker compose --file "$compose_file")
 server_id="$("${compose[@]}" ps --quiet server)"
-rustfs_id="$("${compose[@]}" ps --quiet rustfs)"
 push_pid=""
-rustfs_paused=false
+server_paused=false
 
-if [ -z "$server_id" ] || [ -z "$rustfs_id" ]; then
-  echo "The Compose server and RustFS services must be running." >&2
+if [ -z "$server_id" ]; then
+  echo "The Compose server service must be running." >&2
   exit 1
 fi
 
 cleanup() {
-  if $rustfs_paused; then
-    docker unpause "$rustfs_id" >/dev/null 2>&1 || true
+  if $server_paused; then
+    docker unpause "$server_id" >/dev/null 2>&1 || true
   fi
   if [ -n "$push_pid" ] && kill -0 "$push_pid" 2>/dev/null; then
     kill "$push_pid" >/dev/null 2>&1 || true
@@ -39,7 +38,7 @@ if ! git -C "${work_dir}/source" rev-parse --verify HEAD >/dev/null 2>&1; then
 fi
 for file_number in $(seq -w 1 16); do
   dd if=/dev/urandom \
-    of="${work_dir}/source/crash-payload-${file_number}.bin" \
+    of="${work_dir}/source/crash-payload-${file_number}.raw" \
     bs=1048576 count=8 status=none
 done
 git -C "${work_dir}/source" add .
@@ -47,21 +46,15 @@ git -C "${work_dir}/source" commit -m "qualify abrupt receive crash"
 
 old_oid="$(git -C "${work_dir}/source" rev-parse HEAD^)"
 new_oid="$(git -C "${work_dir}/source" rev-parse HEAD)"
-repository_root=/data/crab-http-server/repositories/demo/hello
-legacy_pack_root="${repository_root}/packs"
-capsule_root="${repository_root}/v2/capsules"
-baseline="$(docker exec "$rustfs_id" sh -c \
-  "find '$legacy_pack_root' '$capsule_root' -type f 2>/dev/null | wc -l")"
-
 GIT_TERMINAL_PROMPT=0 git -C "${work_dir}/source" push origin main \
   >"${work_dir}/push.log" 2>&1 &
 push_pid=$!
-observed_immutable=false
+observed_staging=false
 for _attempt in $(seq 1 1200); do
-  current="$(docker exec "$rustfs_id" sh -c \
-    "find '$legacy_pack_root' '$capsule_root' -type f 2>/dev/null | wc -l")"
-  if [ "$current" -gt "$baseline" ]; then
-    observed_immutable=true
+  if docker exec "$server_id" sh -c \
+    "find /var/lib/crab/cells -path '*/transfers/transfer-*/*' -type f -size +1M -print -quit" \
+    | grep -q .; then
+    observed_staging=true
     break
   fi
   if ! kill -0 "$push_pid" 2>/dev/null; then
@@ -69,29 +62,19 @@ for _attempt in $(seq 1 1200); do
   fi
   sleep 0.05
 done
-if ! $observed_immutable; then
+if ! $observed_staging; then
   sed -n '1,160p' "${work_dir}/push.log"
-  echo "No in-flight immutable Git publication appeared before the push stopped." >&2
+  echo "No in-flight staged Git pack appeared before the push stopped." >&2
   exit 1
 fi
 
-# Stop storage at an observed publication boundary, then remove the process
+# Freeze the process while the receive pack is still incomplete, then remove it
 # without allowing Crab's cooperative cancellation or drain path to run.
-docker pause "$rustfs_id" >/dev/null
-rustfs_paused=true
+docker pause "$server_id" >/dev/null
+server_paused=true
 docker kill --signal KILL "$server_id" >/dev/null
+server_paused=false
 test "$(docker inspect "$server_id" --format '{{.State.ExitCode}}')" = 137
-docker unpause "$rustfs_id" >/dev/null
-rustfs_paused=false
-for _attempt in $(seq 1 60); do
-  health="$(docker inspect "$rustfs_id" \
-    --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}')"
-  if [ "$health" = healthy ]; then
-    break
-  fi
-  sleep 1
-done
-test "$(docker inspect "$rustfs_id" --format '{{.State.Health.Status}}')" = healthy
 
 set +e
 wait "$push_pid"
@@ -148,8 +131,8 @@ if [ -z "$verify_dir" ]; then
 fi
 test "$(git -C "$verify_dir" rev-parse HEAD)" = "$new_oid"
 for file_number in $(seq -w 1 16); do
-  cmp "${work_dir}/source/crash-payload-${file_number}.bin" \
-    "${verify_dir}/crash-payload-${file_number}.bin"
+  cmp "${work_dir}/source/crash-payload-${file_number}.raw" \
+    "${verify_dir}/crash-payload-${file_number}.raw"
 done
 test "$(docker inspect "$replacement_server_id" --format '{{.RestartCount}}')" = 0
 test "$(docker inspect "$replacement_server_id" --format '{{.State.Running}}')" = true

@@ -2955,7 +2955,7 @@ class ProtocolV2PartialCloneSmoke:
         root = bytearray(original.read_bytes())
         if len(root) < 12 or root[:8] != b"CRBROOT2":
             raise SmokeError("mirror root fixture is not a v2 root envelope")
-        root[8:12] = (3).to_bytes(4, "big")
+        root[8:12] = (0xFFFFFFFF).to_bytes(4, "big")
         invalid = self.artifacts / "mirror-root-unsupported.bin"
         invalid.write_bytes(root)
         updated = self.run_aws(
