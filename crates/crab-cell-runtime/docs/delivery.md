@@ -316,10 +316,20 @@ kubectl --namespace crab exec POD -- \
   cells metrics > metrics-before.prom
 ```
 
-Run the bounded HTTP harness from a dedicated load generator. Each `--target`
-has the form `NAME=CONCURRENCY@/PATH`; repeated targets run simultaneously.
+Run the bounded HTTP harness from a dedicated load generator. Each read
+`--target` has the form `NAME=CONCURRENCY@/PATH`. A mutation has the form
+`NAME=CONCURRENCY@/PATH|BODY_FILE`; all targets run simultaneously.
 Redirect stdout to retain its versioned JSON receipt. Put private cookies or
 authorization values in a mode-0600 header file, never in command arguments.
+
+Use a disposable repository for mutation qualification because every successful
+request creates durable state. The JSON template must contain the exact
+top-level marker `"request_id":"{{request_id}}"`; the harness replaces it with
+a new UUIDv7 for every request.
+
+```json
+{"request_id":"{{request_id}}","title":"load qualification","body":"durable command"}
+```
 
 ```bash
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-load-generator \
@@ -328,13 +338,14 @@ CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-load-generator \
   --target 'refs=4@/api/repos/team/project/refs' \
   --target 'commits=8@/api/repos/team/project/commits?rev=main&limit=20' \
   --target 'readme=4@/api/repos/team/project/file?rev=main&path_hex=524541444d452e6d64' \
+  --mutation 'issues=16@/api/repos/team/disposable-load/issues|/secure/new-issue.json' \
   --duration-seconds 300 \
   --warmup-seconds 15 \
   --header-file /secure/load-headers \
   > http-load.json
 ```
 
-The harness fully consumes each body and reports 2xx responses, admission
+The harness fully consumes each body and reports the method, 2xx responses, admission
 rejections, unexpected responses, transport/body-limit failures, bytes,
 throughput, and all-response plus successful-response latency percentiles. It
 checks `/livez` before and after traffic. HTTP 429 is an expected overload

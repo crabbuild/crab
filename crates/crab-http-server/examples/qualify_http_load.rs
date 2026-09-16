@@ -1,29 +1,29 @@
 use std::{
-    collections::{BTreeMap, HashSet},
-    fs,
+    collections::BTreeMap,
     io::{self, Write as _},
-    path::{Path, PathBuf},
-    str::FromStr,
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use clap::Parser;
 use futures_util::StreamExt as _;
-use reqwest::{
-    Client, StatusCode,
-    header::{CONTENT_LENGTH, HOST, HeaderMap, HeaderName, HeaderValue, TRANSFER_ENCODING},
-};
+use reqwest::{Client, Method, StatusCode, header::CONTENT_TYPE};
 use serde::Serialize;
 use tokio::{sync::Barrier, task::JoinSet};
 use url::Url;
+use uuid::Uuid;
 
 const REPORT_SCHEMA: u32 = 1;
-const MAX_HEADERS: usize = 64;
-const MAX_HEADER_FILE_BYTES: u64 = 64 * 1024;
-const MAX_TARGETS: usize = 64;
-const MAX_TOTAL_CONCURRENCY: usize = 4_096;
 const MAX_LATENCY_MS: u64 = 60_000;
+
+#[path = "qualify_http_load/config.rs"]
+mod config;
+
+use config::{
+    MutationSpec, TargetSpec, load_headers, load_mutation_template, validate_origin, validate_path,
+    validate_targets,
+};
 
 #[derive(Debug, thiserror::Error)]
 enum Error {
@@ -33,6 +33,10 @@ enum Error {
     HeaderFile(#[source] io::Error),
     #[error("invalid HTTP header in load qualification header file")]
     Header,
+    #[error("failed to read load qualification mutation template")]
+    MutationFile(#[source] io::Error),
+    #[error("invalid load qualification mutation template: {0}")]
+    MutationTemplate(&'static str),
     #[error("invalid load qualification URL")]
     Url(#[source] url::ParseError),
     #[error("load qualification HTTP request failed")]
@@ -59,12 +63,12 @@ struct Arguments {
     base_url: Url,
 
     /// Repeated NAME=CONCURRENCY@/PATH targets run concurrently.
-    #[arg(
-        long = "target",
-        required = true,
-        value_name = "NAME=CONCURRENCY@/PATH"
-    )]
+    #[arg(long = "target", value_name = "NAME=CONCURRENCY@/PATH")]
     targets: Vec<TargetSpec>,
+
+    /// Repeated NAME=CONCURRENCY@/PATH|BODY_FILE POST targets with dynamic request IDs.
+    #[arg(long = "mutation", value_name = "NAME=CONCURRENCY@/PATH|BODY_FILE")]
+    mutations: Vec<MutationSpec>,
 
     /// Measured duration after all workers finish warmup.
     #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=3_600))]
@@ -91,51 +95,18 @@ struct Arguments {
     max_response_bytes: u64,
 }
 
-#[derive(Clone, Debug)]
-struct TargetSpec {
-    name: String,
-    concurrency: usize,
-    path: String,
+#[derive(Clone, Copy)]
+enum LoadMethod {
+    Get,
+    Post,
 }
 
-impl FromStr for TargetSpec {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let (name, request) = value
-            .split_once('=')
-            .ok_or_else(|| "target must contain '='".to_owned())?;
-        let (concurrency, path) = request
-            .split_once('@')
-            .ok_or_else(|| "target must contain '@'".to_owned())?;
-        if name.is_empty()
-            || name.len() > 64
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        {
-            return Err("target name must be 1-64 ASCII letters, digits, '-' or '_'".to_owned());
+impl LoadMethod {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
         }
-        let concurrency = concurrency
-            .parse::<usize>()
-            .map_err(|_| "target concurrency is not an integer".to_owned())?;
-        if !(1..=1_024).contains(&concurrency) {
-            return Err("target concurrency must be between 1 and 1024".to_owned());
-        }
-        if !path.starts_with('/')
-            || path.starts_with("//")
-            || path.contains('#')
-            || path.chars().any(char::is_control)
-        {
-            return Err(
-                "target path must be one absolute-origin path without a fragment".to_owned(),
-            );
-        }
-        Ok(Self {
-            name: name.to_owned(),
-            concurrency,
-            path: path.to_owned(),
-        })
     }
 }
 
@@ -143,6 +114,8 @@ impl FromStr for TargetSpec {
 struct ResolvedTarget {
     spec: TargetSpec,
     url: Url,
+    method: LoadMethod,
+    body_template: Option<Arc<str>>,
 }
 
 #[derive(Default)]
@@ -325,6 +298,7 @@ struct HealthReport {
 #[derive(Serialize)]
 struct TargetReport {
     name: String,
+    method: &'static str,
     path: String,
     concurrency: usize,
     #[serde(flatten)]
@@ -397,10 +371,15 @@ async fn main() -> Result<(), Error> {
     let arguments = Arguments::parse();
     validate_origin(&arguments.base_url)?;
     validate_path(&arguments.health_path)?;
-    validate_targets(&arguments.targets)?;
-    let headers = load_headers(arguments.header_file.as_deref())?;
-    let total_concurrency = arguments
+    let configured_targets = arguments
         .targets
+        .iter()
+        .chain(arguments.mutations.iter().map(|mutation| &mutation.target))
+        .cloned()
+        .collect::<Vec<_>>();
+    validate_targets(&configured_targets)?;
+    let headers = load_headers(arguments.header_file.as_deref())?;
+    let total_concurrency = configured_targets
         .iter()
         .map(|target| target.concurrency)
         .sum::<usize>();
@@ -415,15 +394,31 @@ async fn main() -> Result<(), Error> {
         .base_url
         .join(&arguments.health_path)
         .map_err(Error::Url)?;
-    let targets = arguments
+    let mut targets = arguments
         .targets
         .iter()
         .cloned()
         .map(|spec| {
             let url = arguments.base_url.join(&spec.path).map_err(Error::Url)?;
-            Ok(ResolvedTarget { spec, url })
+            Ok(ResolvedTarget {
+                spec,
+                url,
+                method: LoadMethod::Get,
+                body_template: None,
+            })
         })
         .collect::<Result<Vec<_>, Error>>()?;
+    for mutation in &arguments.mutations {
+        targets.push(ResolvedTarget {
+            spec: mutation.target.clone(),
+            url: arguments
+                .base_url
+                .join(&mutation.target.path)
+                .map_err(Error::Url)?,
+            method: LoadMethod::Post,
+            body_template: Some(load_mutation_template(&mutation.body_file)?),
+        });
+    }
     let started_at_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| Error::Clock)?
@@ -449,6 +444,7 @@ async fn main() -> Result<(), Error> {
             aggregate.merge(target_stats);
             TargetReport {
                 name: target.spec.name,
+                method: target.method.label(),
                 path: target.spec.path,
                 concurrency: target.spec.concurrency,
                 traffic,
@@ -479,84 +475,6 @@ async fn main() -> Result<(), Error> {
         return Err(Error::Qualification);
     }
     Ok(())
-}
-
-fn validate_origin(url: &Url) -> Result<(), Error> {
-    if !matches!(url.scheme(), "http" | "https")
-        || url.cannot_be_a_base()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.path() != "/"
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(Error::Configuration(
-            "base URL must be one HTTP(S) origin without credentials, path, query, or fragment",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_path(path: &str) -> Result<(), Error> {
-    if !path.starts_with('/')
-        || path.starts_with("//")
-        || path.contains('#')
-        || path.chars().any(char::is_control)
-    {
-        return Err(Error::Configuration(
-            "health path must be one absolute-origin path without a fragment",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_targets(targets: &[TargetSpec]) -> Result<(), Error> {
-    if targets.is_empty() || targets.len() > MAX_TARGETS {
-        return Err(Error::Configuration("target count is outside its bound"));
-    }
-    let mut names = HashSet::with_capacity(targets.len());
-    let mut total = 0usize;
-    for target in targets {
-        if !names.insert(target.name.as_str()) {
-            return Err(Error::Configuration("target names must be unique"));
-        }
-        total = total
-            .checked_add(target.concurrency)
-            .ok_or(Error::Configuration("total concurrency overflow"))?;
-    }
-    if total > MAX_TOTAL_CONCURRENCY {
-        return Err(Error::Configuration(
-            "total target concurrency exceeds 4096",
-        ));
-    }
-    Ok(())
-}
-
-fn load_headers(path: Option<&Path>) -> Result<HeaderMap, Error> {
-    let Some(path) = path else {
-        return Ok(HeaderMap::new());
-    };
-    let metadata = fs::metadata(path).map_err(Error::HeaderFile)?;
-    if metadata.len() > MAX_HEADER_FILE_BYTES {
-        return Err(Error::Configuration("header file exceeds 64 KiB"));
-    }
-    let body = fs::read_to_string(path).map_err(Error::HeaderFile)?;
-    let mut headers = HeaderMap::new();
-    for line in body.lines().filter(|line| !line.trim().is_empty()) {
-        if headers.len() == MAX_HEADERS {
-            return Err(Error::Configuration("header file exceeds 64 headers"));
-        }
-        let (name, value) = line.split_once(':').ok_or(Error::Header)?;
-        let name = HeaderName::from_bytes(name.trim().as_bytes()).map_err(|_| Error::Header)?;
-        if matches!(name, HOST | CONTENT_LENGTH | TRANSFER_ENCODING) {
-            return Err(Error::Configuration(
-                "header file cannot override HTTP framing or authority",
-            ));
-        }
-        let value = HeaderValue::from_str(value.trim()).map_err(|_| Error::Header)?;
-        headers.append(name, value);
-    }
-    Ok(headers)
 }
 
 async fn check_health(client: &Client, url: &Url, max_bytes: u64) -> Result<HealthReport, Error> {
@@ -591,7 +509,7 @@ async fn run_load(
             tasks.spawn(run_worker(
                 index,
                 client.clone(),
-                target.url.clone(),
+                target.clone(),
                 Arc::clone(&barrier),
                 warmup,
                 duration,
@@ -612,7 +530,7 @@ async fn run_load(
 async fn run_worker(
     index: usize,
     client: Client,
-    url: Url,
+    target: ResolvedTarget,
     barrier: Arc<Barrier>,
     warmup: Duration,
     duration: Duration,
@@ -621,22 +539,30 @@ async fn run_worker(
     barrier.wait().await;
     let warmup_deadline = Instant::now() + warmup;
     while Instant::now() < warmup_deadline {
-        let _ = request(&client, &url, max_bytes).await;
+        let _ = request(&client, &target, max_bytes).await;
     }
     barrier.wait().await;
     let started = Instant::now();
     let deadline = started + duration;
     let mut stats = WorkerStats::default();
     while Instant::now() < deadline {
-        stats.record(request(&client, &url, max_bytes).await);
+        stats.record(request(&client, &target, max_bytes).await);
     }
     stats.elapsed = started.elapsed();
     (index, stats)
 }
 
-async fn request(client: &Client, url: &Url, max_bytes: u64) -> RequestOutcome {
+async fn request(client: &Client, target: &ResolvedTarget, max_bytes: u64) -> RequestOutcome {
     let started = Instant::now();
-    let response = match client.get(url.clone()).send().await {
+    let request = match (target.method, target.body_template.as_deref()) {
+        (LoadMethod::Get, _) => client.get(target.url.clone()),
+        (LoadMethod::Post, Some(template)) => client
+            .request(Method::POST, target.url.clone())
+            .header(CONTENT_TYPE, "application/json")
+            .body(template.replace("{{request_id}}", &Uuid::now_v7().to_string())),
+        (LoadMethod::Post, None) => return RequestOutcome::Transport,
+    };
+    let response = match request.send().await {
         Ok(response) => response,
         Err(_) => return RequestOutcome::Transport,
     };

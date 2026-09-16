@@ -1337,18 +1337,24 @@ For an authenticated server, add `--cookies /path/to/private_cookies.txt` with a
 
 Run repeatable concurrent HTTP qualification with the Rust load generator:
 
+For durable command throughput, create a JSON template containing a top-level
+`"request_id":"{{request_id}}"`. Run mutations only against a disposable
+repository: the generator assigns a fresh UUIDv7 and creates real state for
+every request.
+
 ```sh
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-load-generator" \
   cargo run -p crab-http-server --release --example qualify_http_load --locked -- \
   --base-url http://127.0.0.1:8788 \
   --target 'refs=4@/api/repos/team/project/refs' \
   --target 'commits=8@/api/repos/team/project/commits?rev=main&limit=20' \
+  --mutation 'issues=8@/api/repos/team/disposable-load/issues|/secure/new-issue.json' \
   --duration-seconds 60 \
   --warmup-seconds 5 \
   > http-load.json
 ```
 
-Each target declares its own concurrency and all targets run together. The
+Each read or mutation target declares its own concurrency and all targets run together. The
 versioned JSON receipt includes successful responses, HTTP 429 admission
 rejections, unexpected responses, response bytes, throughput, and p50/p95/p99
 latency. The generator fully consumes every body, bounds response bytes, checks
