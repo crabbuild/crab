@@ -1167,13 +1167,32 @@ test("code palette persists and follows light and dark appearance", async ({
 test("supported source files expose browser-parsed current-file symbols", async ({
   page,
 }) => {
+  await page.setViewportSize({ width: 1600, height: 1200 });
   await page.goto(
     `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("src/lib.rs")}&kind=Blob`,
   );
 
+  const treeSidebar = page.locator(".tree-sidebar");
+  const tree = page.locator(".repository-tree");
   const symbols = page.getByRole("complementary", { name: "Code symbols" });
   await expect(symbols).toBeVisible();
   await expect(symbols).toHaveCSS("position", "sticky");
+  await expect
+    .poll(async () => {
+      const [sidebarBottom, treeBottom] = await Promise.all([
+        treeSidebar.evaluate((node) => node.getBoundingClientRect().bottom),
+        tree.evaluate((node) => node.getBoundingClientRect().bottom),
+      ]);
+      return Math.abs(sidebarBottom - treeBottom);
+    })
+    .toBeLessThanOrEqual(1);
+  await expect
+    .poll(() =>
+      symbols.evaluate(
+        (node) => window.innerHeight - node.getBoundingClientRect().bottom,
+      ),
+    )
+    .toBeLessThanOrEqual(1);
   await expect(symbols.getByText("impl Crab", { exact: true })).toBeVisible();
   await expect(
     symbols.getByRole("button", { name: /serve function 7/ }),
@@ -1181,7 +1200,7 @@ test("supported source files expose browser-parsed current-file symbols", async 
   await expectNoAccessibilityViolations(page);
 
   await page.locator(".file-source-code").evaluate((node) => {
-    node.style.minHeight = "1600px";
+    node.style.minHeight = `${window.innerHeight * 3}px`;
   });
   await page.evaluate(() => window.scrollTo(0, 900));
   await expect

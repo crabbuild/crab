@@ -1,4 +1,4 @@
-import { useDeferredValue, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { IconButton, Spinner } from "@primer/react";
 import {
   ChevronLeftIcon,
@@ -45,6 +45,7 @@ export function CodeSymbolsPanel({
   onClearActive,
   onClose,
 }: Props) {
+  const panel = useRef<HTMLElement>(null);
   const [filter, setFilter] = useState("");
   const deferredFilter = useDeferredValue(filter.trim().toLowerCase());
   const definitions = useMemo(
@@ -75,8 +76,34 @@ export function CodeSymbolsPanel({
     return [...grouped];
   }, [definitions]);
 
+  useEffect(() => {
+    let frame = 0;
+    const fitToViewport = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const node = panel.current;
+        if (!node) return;
+        // The pane grows as it becomes sticky; a fixed viewport fraction either
+        // truncates tall screens or overflows below the fold before it sticks.
+        const top = Math.max(0, node.getBoundingClientRect().top);
+        node.style.setProperty(
+          "--code-symbols-available-height",
+          `${window.innerHeight - top}px`,
+        );
+      });
+    };
+    fitToViewport();
+    window.addEventListener("resize", fitToViewport);
+    window.addEventListener("scroll", fitToViewport, { passive: true });
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("resize", fitToViewport);
+      window.removeEventListener("scroll", fitToViewport);
+    };
+  }, []);
+
   return (
-    <aside className="code-symbols-panel" aria-label="Code symbols">
+    <aside ref={panel} className="code-symbols-panel" aria-label="Code symbols">
       <header className="code-symbols-header">
         <div>
           <strong>Symbols</strong>

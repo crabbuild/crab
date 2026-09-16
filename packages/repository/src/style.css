@@ -3851,16 +3851,24 @@ main {
   grid-template-columns: minmax(0, 1fr);
 }
 .repo-file-workspace .tree-sidebar {
+  display: flex;
+  flex-direction: column;
   position: sticky;
   top: 0;
-  min-height: calc(100vh - 113px);
+  height: calc(100dvh - 113px);
   border-width: 0;
   border-radius: 0;
 }
 .repo-file-workspace .repository-tree {
-  height: min(68vh, 760px);
-  min-height: 360px;
+  flex: 1;
+  height: 0;
+  min-height: 0;
   border-top: 1px solid var(--borderColor-muted);
+}
+.repo-file-workspace .tree-search-results {
+  flex: 1;
+  height: 0;
+  min-height: 0;
 }
 .repo-file-workspace .code-main {
   padding: 20px 20px 32px;
@@ -4198,7 +4206,7 @@ main {
   top: 0;
   align-self: start;
   min-width: 0;
-  max-height: min(72vh, 820px);
+  height: var(--code-symbols-available-height, 100dvh);
   overflow: auto;
   color: var(--fgColor-default);
   background: var(--bgColor-default);
@@ -5416,6 +5424,7 @@ main {
   }
   .code-symbols-panel {
     position: static;
+    height: auto;
     max-height: 360px;
     border-top: 1px solid var(--borderColor-muted);
     border-left: 0;
@@ -5453,6 +5462,7 @@ main {
   }
   .repo-file-workspace .tree-sidebar {
     position: static;
+    height: auto;
     min-height: 0;
     border-width: 1px;
     border-radius: var(--borderRadius-medium);
