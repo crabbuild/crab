@@ -228,9 +228,14 @@ fn repository(
     Ok(entry)
 }
 
-async fn ensure_active(repository: &Repository) -> Result<()> {
+async fn ensure_active(
+    server: &Server,
+    principal: &Principal,
+    repository: &Repository,
+) -> Result<()> {
+    let actor = principal.identity().ok_or(Error::Forbidden)?;
     if repository
-        .lifecycle()
+        .lifecycle(server, &actor)
         .await
         .map_err(|error| Error::Settings(Box::new(error)))?
         .archived
@@ -256,7 +261,7 @@ pub(crate) async fn batch(
     let upload = matches!(batch.operation, Operation::Upload);
     let entry = repository(&server, &principal, &owner, &name, upload)?;
     if upload {
-        ensure_active(&entry).await?;
+        ensure_active(&server, &principal, &entry).await?;
     }
     if batch.objects.len() > 200 {
         return Err(Error::TooLarge);
@@ -485,7 +490,12 @@ pub(crate) async fn upload(
     headers: HeaderMap,
     request: Request,
 ) -> Result<Response> {
-    ensure_active(repository(&server, &principal, &owner, &name, true)?.as_ref()).await?;
+    ensure_active(
+        &server,
+        &principal,
+        repository(&server, &principal, &owner, &name, true)?.as_ref(),
+    )
+    .await?;
     let pointer = pointer(&oid, size.size)?;
     if headers
         .get(header::CONTENT_ENCODING)
@@ -532,7 +542,7 @@ pub(crate) async fn upload(
                 return Err(Error::Cancelled);
             }
             let entry = repository(&worker_server, &principal, &owner, &name, true)?;
-            ensure_active(&entry).await?;
+            ensure_active(&worker_server, &principal, &entry).await?;
             let lfs = LfsObjectStore::new(entry.store.clone(), &entry.config.prefix);
             // Once multipart publication starts, drain it through completion/abort.
             // Dropping this future on disconnect could strand uploaded parts.

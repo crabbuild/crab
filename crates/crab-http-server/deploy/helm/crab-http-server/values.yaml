@@ -76,14 +76,14 @@ resources:
   requests:
     cpu: 500m
     memory: 1Gi
-    ephemeral-storage: 2Gi
+    ephemeral-storage: 20Gi
   limits:
     cpu: "2"
     memory: 4Gi
-    ephemeral-storage: 20Gi
+    ephemeral-storage: 50Gi
 
 scratch:
-  sizeLimit: 16Gi
+  sizeLimit: 32Gi
 
 startupProbe:
   periodSeconds: 5

@@ -23,6 +23,7 @@ are in [UPSTREAM.md](UPSTREAM.md); executable usage is in [README.md](README.md)
 | Incremental hydration | `ManagedDb::{hydration,hydrate_step}` | Bounded owner-paced work; writes/truncations supersede old cut pages; failed fetches remain retryable |
 | Prefetch/read-ahead | Coalesced verified runs plus shared FIFO cache | Up to 64 pages/1 MiB per run, 8 MiB cached decoded payload; no Celld B-tree prediction |
 | Shared resource admission | Shared worker, I/O/job/recovery semaphores on `Host` | Bounded concurrent ordered reads; cancellation retains permits with dispatched jobs, not long-lived handles |
+| Managed SQLite cache | Three retained connections with 64 KiB page-cache targets | Exported aggregate permits embedding runtimes to derive active-database admission instead of inheriting SQLite defaults |
 | Local restart / release | Exact-root local resume (also without `replica`) and `prune_published` | Fresh directory; no promotion of unacknowledged leftovers; pruning retries ambiguous directory sync |
 | Host facilities | `Host`, `FileSystem`, `FileIo`, `Clock`, `Executor`, `Worker`, named SQLite base VFS | Injectable claims/install/sparse allocation, capture and WAL observation; worker startup/join and blocking dispatch; scope below |
 
@@ -132,7 +133,14 @@ the bounded plan. Range compaction downloads only selected bodies, authenticates
 their generated indexes, compares independently reduced page bytes, and validates
 the full replacement indexed plan. Sparse takeover is index/metadata-only until SQL
 faults pages. Copy-on-write metadata blocks and rolling checksums remove whole-map
-copying/scanning on each remote append, but all live-page locators remain resident.
+copying/scanning on each standalone remote append, but its live-page locators
+remain resident. Cell roots instead use an authenticated radix directory whose
+incremental publisher reads only changed leaves/ancestors. Initial construction
+k-way merges ordered index streams and uploads each leaf without retaining a
+complete locator map or directory body set; writable checksum seeding and
+capture now stream through a disposable local fixed-width checksum file with an
+O(changed-pages) resident overlay. Persistent cache rebuild and 5 GB measured
+qualification remain scalability gates.
 See [SCALABILITY.md](SCALABILITY.md) for the 1K–10K database target and remaining gates.
 The feature set is not yet a production-ready HTTP backend,
 nor a claim of complete Celld performance, simulator or operational parity.

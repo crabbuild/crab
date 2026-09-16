@@ -108,7 +108,7 @@ impl LocalSegment {
 }
 
 /// All cuts produced by one capture, including checkpoint-boundary cuts.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CaptureBatch {
     pub segments: Vec<LocalSegment>,
     pub position: Position,

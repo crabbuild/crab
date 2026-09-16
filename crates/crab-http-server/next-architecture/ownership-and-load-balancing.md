@@ -1,6 +1,6 @@
 # Ownership, placement, and load balancing
 
-[Design index](README.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Target contract; implemented subset tracked in current implementation.
 
 ## Balancing responsibilities
 

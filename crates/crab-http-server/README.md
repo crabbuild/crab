@@ -15,14 +15,22 @@ Browser                    Native Git / Git LFS
                   ▼
           crab-http-server
        auth · routes · lifecycle
-                  │
-       remote-git / read / write
-                  │
-             object storage
+              ┌───┴────────────────┐
+              ▼                    ▼
+     repository Cell router   remote-git/read/write
+              │                    │
+        SQLite + crab-ltx           │
+              └─────────┬──────────┘
+                        ▼
+                   object storage
 ```
 
 The server owns HTTP policy and application workflows. Shared crates own Git
-reading, validation, publication, and storage mechanics. The server uses
+reading, validation, publication, Cell execution, and storage mechanics. Issue
+and comment routes use typed Rust commands against one SQLite/LTX Cell per
+repository. The remote-owner path is verified from the public HTTP listener through
+the private mTLS listener to an advanced LTX root; the remaining application
+domains are still being cut over. The server uses
 writable temporary space for pack/index preparation; it creates no Git checkout
 or local Git object database.
 
@@ -61,12 +69,26 @@ credentials. Then create a cataloged repository and start:
 
 ```sh
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
+  cells release bootstrap --image sha256:IMAGE_MANIFEST_DIGEST
+"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
   repository create --owner team --name project --prefix team/project
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
   storage-probe
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml serve
 ```
 
+`cells release bootstrap` converges concurrent first-install callers on one
+exact descriptor/image and resumes only the activation operation it created.
+For an operator-prepared upgrade it validates and admits the candidate without
+completing activation; it refuses to replace another desired release. `serve`
+rejects startup before binding either listener unless the compiled descriptor is
+the selected ready release or the selected compatible rollout candidate.
+`repository create` also publishes the repository's initial SQLite/LTX Cell and
+does not return until its catalog state is ready. `repository adopt` records an
+existing canonical Git repository, publishes a new empty application Cell and
+does not return until that Cell is ready. It does not preserve old collaboration
+application data.
+The server refuses startup for pending, missing or rootless repository Cells.
 `storage-probe` fails unless the workload can read and list the configured
 root, perform conditional coordination writes, create and delete an object,
 and observe that deletion. `serve` runs the same preflight before binding its
@@ -115,10 +137,11 @@ Read these sources in order:
 | Source | Responsibility |
 | --- | --- |
 | [server.rs](src/server.rs) | Route composition, host/session checks, and mutation protection |
-| [issues.rs](src/issues.rs) | Route body limit, request extraction, and issue handler |
+| [issues.rs](src/issues.rs) | Route body limit, request extraction, HTTP contract, and typed command/query invocation |
 | [app.rs](src/app.rs) | Admission timeout, repository access, input validation, and HTTP error mapping |
-| [issues/storage.rs](src/issues/storage.rs) | Submission reservation and visible issue creation |
-| [app_storage.rs](src/app_storage.rs) | Storage reads, conditional creation, and number allocation |
+| [cells/router.rs](src/cells/router.rs) | Published-root validation plus local-owner restore or authenticated peer dispatch |
+| [cells/repository.rs](src/cells/repository.rs) | SQLite transaction, submission reservation, number allocation, and typed outcome |
+| [crab-ltx](../crab-ltx/README.md) | Verified immutable publication and exact source-loss restore |
 
 Example JSON body, subject to the server's authentication and mutation checks:
 
@@ -134,11 +157,11 @@ Generate a fresh submission ID for a new issue. If the response is lost, retry
 with the same ID and original title/body: the reservation preserves the issue
 number. Reusing that ID with different content or another author is a conflict.
 
-The handler also loads presentation data after issue creation. A failed response
-therefore does not prove that the write failed; keep retry behavior aligned with
-the storage reservation contract. JSON extractor rejections retain their HTTP
-status through `app::Error`, while internal storage failures use a separate
-response classification.
+The Cell command commits and publishes before the handler loads label and
+assignee presentation data. A lost or failed HTTP response therefore does not
+prove that the write failed. Retry with the same submission ID and payload; a
+new ID represents a new mutation. Unknown Cell outcomes remain distinguishable
+from unavailable routing and contract failures in the HTTP error mapping.
 
 ## Admission ownership
 

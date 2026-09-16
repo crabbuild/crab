@@ -213,7 +213,7 @@ pub(crate) async fn create_lock(
 ) -> Result<Response> {
     validate_path(&input.path)?;
     let entry = repository(&server, &principal, &owner, &name, true)?;
-    ensure_active(&entry).await?;
+    ensure_active(&server, &principal, &entry).await?;
     let identity = principal.identity().ok_or(Error::Forbidden)?;
     let manager = LfsLockManager::lfs(entry.store.clone(), &entry.config.prefix);
     let path = input.path;

@@ -22,12 +22,16 @@
       "linuxParameters": { "capabilities": { "drop": ["ALL"] } },
       "entryPoint": ["/bin/sh", "-ec"],
       "command": [
-        "umask 077; printf '%s' \"$CRAB_HTTP_CONFIG\" > /var/lib/crab/tmp/server.toml; printf '%s' \"$CRAB_OIDC_CLIENT_SECRET\" > /var/lib/crab/tmp/oidc-client-secret; printf '%s' \"$CRAB_STATE_KEY\" > /var/lib/crab/tmp/state-key; unset CRAB_HTTP_CONFIG CRAB_OIDC_CLIENT_SECRET CRAB_STATE_KEY; exec /usr/local/bin/crab-http-server --config /var/lib/crab/tmp/server.toml"
+        "umask 077; printf '%s' \"$CRAB_HTTP_CONFIG\" > /var/lib/crab/tmp/server.toml; printf '%s' \"$CRAB_OIDC_CLIENT_SECRET\" > /var/lib/crab/tmp/oidc-client-secret; printf '%s' \"$CRAB_STATE_KEY\" > /var/lib/crab/tmp/state-key; unset CRAB_HTTP_CONFIG CRAB_OIDC_CLIENT_SECRET CRAB_STATE_KEY; /usr/local/bin/crab-http-server --config /var/lib/crab/tmp/server.toml cells release bootstrap --image \"$CRAB_HTTP_SERVER_RELEASE_IMAGE\"; unset CRAB_HTTP_SERVER_RELEASE_IMAGE; exec /usr/local/bin/crab-http-server --config /var/lib/crab/tmp/server.toml"
       ],
       "environment": [
         { "name": "AWS_REGION", "value": "us-west-2" },
         { "name": "AWS_DEFAULT_REGION", "value": "us-west-2" },
-        { "name": "TMPDIR", "value": "/var/lib/crab/tmp" }
+        { "name": "TMPDIR", "value": "/var/lib/crab/tmp" },
+        {
+          "name": "CRAB_HTTP_SERVER_RELEASE_IMAGE",
+          "value": "sha256:replace-with-qualified-image-digest"
+        }
       ],
       "secrets": [
         {

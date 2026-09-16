@@ -85,11 +85,15 @@ flowchart LR
 The proxy shares the server's network namespace. It is the only process bound
 to Docker's published port; Crab still binds to loopback and keeps its
 unauthenticated local-trust invariant. The management listener and RustFS are
-not published to the host. Compose waits until the catalog is valid and every
-repository can open its current Git view. This profile is for local development
-and evaluation, not remote or multi-user service. Caddy preserves the validated
-external loopback authority, so Git LFS action URLs also follow a custom
-`CRAB_HTTP_SERVER_PORT`.
+not published to the host. A one-shot `release-init` service converges concurrent
+first-install callers on the exact Cell descriptor and image before repository
+initialization or server startup. It resumes only its own bootstrap operation,
+admits an operator-prepared candidate without activating it, and never replaces
+a different desired release.
+Compose then waits until the catalog is valid and every repository can open its
+current Git view. This profile is for local development and evaluation, not
+remote or multi-user service. Caddy preserves the validated external loopback
+authority, so Git LFS action URLs also follow a custom `CRAB_HTTP_SERVER_PORT`.
 
 ### Operate the local stack
 
@@ -103,6 +107,11 @@ docker compose --file crates/crab-http-server/deploy/compose.yaml run --rm \
 docker compose --file crates/crab-http-server/deploy/compose.yaml run --rm \
   repository-init --config /etc/crab/server.toml repository list
 ```
+
+Create returns only after the initial repository SQLite/LTX root has been
+published, restored, identity-checked and marked `cell_ready`. Adopted
+repositories follow the same empty-Cell initialization and readiness transition;
+old collaboration application data is not imported.
 
 Inspect or stop the stack without deleting repositories:
 
@@ -118,6 +127,7 @@ volume, including the catalog and every repository. The defaults need no
 | Variable | Default | Purpose |
 |---|---|---|
 | `CRAB_HTTP_SERVER_PORT` | `8788` | Localhost port published by Docker |
+| `CRAB_HTTP_SERVER_RELEASE_IMAGE` | `sha256:` plus 64 `1` digits | Synthetic nonzero image identity recorded by local release bootstrap |
 | `CRAB_TMP_SIZE` | `2g` | Bounded receive-pack and index scratch space |
 | `CRAB_HTTP_SERVER_IMAGE` | `crab-http-server:local` | Server image name or prebuilt image reference |
 
@@ -209,13 +219,16 @@ input, which is useful with `kubectl exec --stdin`. Authenticated deployments
 require at least one `admin` member when creating or adopting a repository;
 unauthenticated loopback deployments may omit membership.
 
-`create` initializes canonical Crab layout and manifest objects before its CAS
-catalog publish. `adopt` requires those objects to exist already. `set-members`
-uses one conditional catalog update and reports a conflict instead of replaying
-a stale decision over a concurrent change. Every running replica checks the
-catalog every five seconds and swaps routing after the new document
-materializes successfully; in-flight requests retain the previous repository
-handle.
+`create` initializes canonical Crab layout and manifest objects, CAS-publishes
+`empty_cell_pending`, provisions and verifies the initial SQLite/LTX root, then
+CASes `cell_ready`. Exact retries retain the catalog UUID and restore the
+published root before completing. `adopt` requires canonical Git objects,
+publishes `empty_cell_pending`, initializes a new empty application Cell and
+then publishes `cell_ready`. `set-members` uses one conditional catalog update and reports a
+conflict instead of replaying a stale decision over a concurrent change. Every
+running replica checks the catalog every five seconds and swaps routing only
+after all records pass Cell readiness validation; in-flight requests retain the
+previous repository handle.
 
 ## Why Lambda is excluded
 

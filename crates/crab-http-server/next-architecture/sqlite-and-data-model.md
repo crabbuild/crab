@@ -1,6 +1,6 @@
 # SQLite runtime and application data model
 
-[Design index](README.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Repository issue/comment/label/status/check/settings schema implemented; remaining domains proposed.
 
 The SQL transaction and WAL boundaries here feed the
 [publication coordinator](storage-protocol.md#commit-publication-and-response-gating).
@@ -8,11 +8,13 @@ The [crab-ltx implementation](crab-ltx.md#implemented-state) supplies local capt
 snapshot and exact restore, plus optional remote transport, immutable views and
 writable sparse SQL with checksum-seeded continuation. Full restoration remains
 the initial server activation policy; sparse support is a library capability,
-not yet a wired AppCell workflow. The domain schema, executor and HTTP publication wiring
-in this document are still proposed.
+not yet a wired AppCell workflow. The fixed SQL worker executor, repository
+identity, issue/comment/label/status/check/settings schema, typed operations, publication barrier and public
+HTTP adapter are implemented. Pulls, releases, outbox/workflow
+tables and their route cuts remain proposed.
 Restore and takeover follow [recovery rules](recovery-and-retention.md);
-the [offline importer](hard-cutover.md) must preserve domain identities and retry
-semantics when constructing these tables.
+the [hard cut](hard-cutover.md) creates these tables empty and deletes old
+application documents instead of importing them.
 
 ## SQLite runtime and WAL capture
 
@@ -190,126 +192,49 @@ range. All mutations use parameterized SQL and explicit transactions. Persist
 UTC timestamps using the current millisecond convention; use monotonic clocks
 for local deadlines. Timestamps do not establish transaction ordering.
 
-### Core schema example
+### Implemented schema v1
 
-This executable SQL illustrates the core transaction model. It is not a complete
-production migration: the domain inventory below defines additional tables and
-the implementation must supply their constraints and fixtures.
+The exact migration is
+[`0001_repository_identity.sql`](../src/cells/migrations/0001_repository_identity.sql);
+the registry hashes those bytes into the repository module digest. Do not copy a
+second executable schema into this design. Schema v1 currently contains:
 
-```sql
-CREATE TABLE schema_migrations (
-    version INTEGER PRIMARY KEY,
-    checksum TEXT NOT NULL,
-    applied_at_ms INTEGER NOT NULL
-) STRICT;
+| Table | Key | Purpose |
+| --- | --- | --- |
+| `repository_identity` | singleton `1` | 16-byte catalog repository UUID and checked application revision |
+| `repository_sequences` | kind | issue- and label-number allocators, initially zero |
+| `repository_label_submissions` | 16-byte submission ID | permanent payload digest, allocated label number, original display name and creation time |
+| `repository_labels` | number | normalized unique name, display fields, version, timestamps and deletion-version tombstone |
+| `repository_issue_submissions` | 16-byte submission ID | permanent payload digest, allocated issue number, original display name and creation time |
+| `repository_issues` | number | author snapshot, title/body, state, version and timestamps |
+| `repository_comment_sequences` | issue number | independent checked comment allocator per issue |
+| `repository_comment_submissions` | issue number, 16-byte submission ID | permanent payload digest, allocated comment number, original display name and creation time |
+| `repository_issue_comments` | issue number, comment number | author snapshot, body, version and timestamps |
+| `repository_status_sequences` | exact commit OID | Checked per-commit allocator capped at 1,000 submissions |
+| `repository_commit_statuses` | exact commit OID, 16-byte submission ID | Permanent payload digest, immutable event, case-insensitive context key, visibility and creation snapshot |
 
-CREATE TABLE repository_identity (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    repository_uuid TEXT NOT NULL UNIQUE,
-    app_revision INTEGER NOT NULL DEFAULT 0
-        CHECK (app_revision BETWEEN 0 AND 9007199254740991)
-) STRICT;
+All tables are `STRICT`. JavaScript-visible counters are checked against
+9,007,199,254,740,991. The foreign keys from comment state to issues use cascade
+deletion, although command handlers also verify parent existence explicitly so
+their business rejection does not depend on connection pragma state.
 
-CREATE TABLE sequences (
-    scope TEXT PRIMARY KEY,
-    last_value INTEGER NOT NULL
-        CHECK (last_value BETWEEN 0 AND 9007199254740991)
-) STRICT;
+Retry identity has two deliberately different lifetimes. Runtime-owned
+`sys_requests` is the bounded execution-attempt ledger: `CellClient` binds one
+`MutationIdentity` to the module, command, codec and exact input digest, and the
+actor temporarily retains that attempt's typed success or business rejection.
+The repository submission tables are the permanent product ledger for browser
+create operations. They bind the stable submission UUID to a domain payload
+digest and allocated number without retaining encoded HTTP responses.
 
-CREATE TABLE requests (
-    scope TEXT NOT NULL,
-    request_id TEXT NOT NULL,
-    actor_issuer TEXT NOT NULL,
-    actor_subject TEXT NOT NULL,
-    request_hash BLOB NOT NULL CHECK (length(request_hash) = 32),
-    state TEXT NOT NULL CHECK (state IN ('pending', 'complete', 'conflict')),
-    response_status INTEGER,
-    response_json TEXT,
-    app_revision INTEGER NOT NULL,
-    created_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (scope, request_id),
-    CHECK (
-        (state = 'pending' AND response_status IS NULL AND response_json IS NULL)
-        OR
-        (state IN ('complete', 'conflict')
-         AND response_status IS NOT NULL AND response_json IS NOT NULL)
-    )
-) STRICT;
-
-CREATE TABLE issues (
-    number INTEGER PRIMARY KEY
-        CHECK (number BETWEEN 1 AND 9007199254740990),
-    request_id TEXT NOT NULL UNIQUE,
-    author_issuer TEXT NOT NULL,
-    author_subject TEXT NOT NULL,
-    author_name TEXT NOT NULL,
-    title TEXT NOT NULL,
-    body TEXT NOT NULL,
-    state TEXT NOT NULL CHECK (state IN ('open', 'closed')),
-    version INTEGER NOT NULL CHECK (version > 0),
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL
-) STRICT;
-
-CREATE TABLE issue_comments (
-    issue_number INTEGER NOT NULL REFERENCES issues(number),
-    number INTEGER NOT NULL CHECK (number > 0),
-    request_id TEXT NOT NULL,
-    author_issuer TEXT NOT NULL,
-    author_subject TEXT NOT NULL,
-    author_name TEXT NOT NULL,
-    body TEXT NOT NULL,
-    version INTEGER NOT NULL CHECK (version > 0),
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (issue_number, number),
-    UNIQUE (issue_number, request_id)
-) STRICT;
-
-CREATE TABLE labels (
-    id INTEGER PRIMARY KEY CHECK (id > 0),
-    name TEXT NOT NULL,
-    normalized_name TEXT NOT NULL,
-    color TEXT NOT NULL,
-    description TEXT NOT NULL,
-    version INTEGER NOT NULL CHECK (version > 0),
-    deleted_at_ms INTEGER
-) STRICT;
-
-CREATE UNIQUE INDEX labels_live_name
-    ON labels(normalized_name) WHERE deleted_at_ms IS NULL;
-
-CREATE TABLE issue_labels (
-    issue_number INTEGER NOT NULL REFERENCES issues(number),
-    label_id INTEGER NOT NULL REFERENCES labels(id),
-    PRIMARY KEY (issue_number, label_id)
-) STRICT;
-
-CREATE TABLE publication_outbox (
-    operation_id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL CHECK (kind IN ('pull_merge', 'release_tag')),
-    request_scope TEXT NOT NULL,
-    request_id TEXT NOT NULL,
-    state TEXT NOT NULL CHECK (
-        state IN ('prepared', 'publishing', 'reconciling', 'complete', 'conflict')
-    ),
-    ref_name TEXT NOT NULL,
-    expected_old_oid TEXT,
-    intended_new_oid TEXT NOT NULL,
-    intent_json TEXT NOT NULL,
-    receipt_json TEXT,
-    version INTEGER NOT NULL CHECK (version > 0),
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
-    UNIQUE (request_scope, request_id),
-    FOREIGN KEY (request_scope, request_id)
-        REFERENCES requests(scope, request_id)
-) STRICT;
-
-CREATE INDEX issues_state_number ON issues(state, number);
-CREATE INDEX issue_labels_label ON issue_labels(label_id, issue_number);
-CREATE INDEX outbox_work ON publication_outbox(state, created_at_ms, operation_id);
-```
+The public adapter creates a fresh runtime `MutationIdentity` for each HTTP
+attempt while preserving the browser's submission UUID in the typed command.
+An exact transport retry is resolved by `sys_requests`; a later product retry,
+including one after runtime retention expires, resolves through the repository
+submission row and returns the current visible record. Reusing a submission UUID
+with a different issuer, subject or content is a durable request conflict.
+Display name is intentionally excluded from the domain digest to preserve the
+existing identity rule. The original display name and timestamp remain in the
+atomically created visible row returned by every later replay.
 
 ### Remaining domain tables
 
@@ -317,11 +242,10 @@ CREATE INDEX outbox_work ON publication_outbox(state, created_at_ms, operation_i
 | --- | --- | --- |
 | PRs | `pulls`, `pull_comments`, `pull_reviews`, review comments if supported | Base/head refs, recorded OIDs, method, state, version, immutable merge intent |
 | Assignments | `issue_assignees`, `pull_assignees` | Distinct stable subjects; resolve against current membership |
-| Labels | `pull_labels`, allocation history and reservation records | Preserve existing lifetime allocation and tombstone rules |
-| Statuses | `commit_statuses` | Immutable status events, exact commit OID and context, deterministic latest selection |
+| Pull labels | relational pull-to-label selection | Validate active label IDs transactionally when Pull records move into SQLite |
 | Checks | `check_runs`, `check_outputs`, supported annotation rows | Existing state transitions, revision checks, bounded output and request replay |
 | Releases | `releases`, `release_assets`, tag/name claims and upload reservations | Tag identity, asset integrity, metadata tombstones, uniqueness rules |
-| Retry state | Imported reservation/claim representation plus `requests` | Preserve actor/content conflicts and allocated IDs even for incomplete operations |
+| Retry state | Domain-specific permanent submission/claim tables; `sys_requests` remains runtime-owned and bounded | Preserve actor/content conflicts and allocated IDs even for incomplete operations |
 | Replication metadata | Managed capture control tables | Reserved names; never mistaken for user/domain tables |
 
 Separate issue and PR comment tables keep foreign keys concrete. Do not add
@@ -334,26 +258,38 @@ relational domain model.
 
 Within `BEGIN IMMEDIATE`:
 
-1. Look up `(scope = 'issues.create', request_id)`.
-2. If found, compare the actor and canonical request hash. Return the established
-   result or conflict; do not allocate again.
-3. Increment the issue sequence with a checked upper bound.
-4. Insert the issue, labels/assignments if accepted by that endpoint, and version.
-5. Increment `repository_identity.app_revision` once for the logical mutation.
-6. Insert the stable request result at that revision.
-7. Commit locally, capture, upload and publish through the barrier.
+1. Before invoking the handler, the actor looks up the runtime request ID plus
+   canonical command digest in `sys_requests`. A matching retained outcome
+   returns immediately; a different digest is an execution request conflict.
+2. Open the application savepoint and validate actor/title/body inside the
+   compiled handler. Compute the domain-separated submission digest.
+3. Look up the stable submission UUID. A different domain digest returns a
+   durable product request conflict. A matching submission returns its current
+   issue row; a submission without that row is database corruption because both
+   records commit in one application savepoint.
+4. For a new submission, increment `repository_sequences.last` for kind `issue`
+   with a checked upper bound, then insert the permanent submission row and issue
+   version 1 in the same application savepoint.
+5. Increment `repository_identity.app_revision` exactly once for a newly visible
+   issue. Encode the typed result within the registered 80 KiB bound; release the
+   application savepoint and insert the bounded `sys_requests` outcome and runtime
+   sequence.
+6. Commit locally, capture, upload and publish through the barrier. Return the
+   typed output and receipt only after control names that exact root.
 
-The canonical hash covers command kind, normalized validated payload, expected
-version where applicable and relevant domain identifiers. The row separately
-stores actor identity so another author reusing the same scope/ID gets a conflict.
-Do not include transient timestamps generated during a retry.
+The runtime digest covers Cell/incarnation identity, module, command ID, codec
+version, issued/expiry times and exact bounded input bytes. The permanent
+submission digest separately covers stable author identity and domain content,
+not the runtime timestamps or display name. Handler-generated timestamps are
+not regenerated for exact runtime replay; permanent retry reads the current
+visible record and its stored time.
 
 ### Versioned edits and durable retries
 
 Optimistic edits use a predicate such as:
 
 ```sql
-UPDATE issues
+UPDATE repository_issues
 SET title = :title, body = :body, version = version + 1,
     updated_at_ms = :updated_at_ms
 WHERE number = :number AND version = :expected_version;
@@ -379,5 +315,4 @@ return an old serialized permission flag or user display value as current truth.
 Do not silently expire old creation request IDs and permit them to allocate
 again. Keep compact durable deduplication records for the supported lifetime.
 If response payload retention is later bounded, retain identity, content hash,
-resource result and a documented replay policy. Imported reservations may need
-their original validation fields to preserve exact conflict behavior.
+resource result and a documented replay policy.

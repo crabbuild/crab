@@ -29,9 +29,13 @@ mod wal;
 #[cfg(feature = "replica")]
 pub mod bundle;
 #[cfg(feature = "replica")]
+mod cell_replica;
+#[cfg(feature = "replica")]
 mod paged;
 #[cfg(feature = "replica")]
 mod paged_io;
+#[cfg(feature = "replica")]
+pub use paged_io::with_paged_io_deadline;
 #[cfg(feature = "replica")]
 mod paged_vfs;
 #[cfg(feature = "replica")]
@@ -42,6 +46,10 @@ mod writable_vfs;
 pub use writable_vfs::Hydration;
 #[cfg(feature = "replica")]
 mod schedule;
+#[cfg(feature = "replica")]
+pub use cell_replica::{
+    CellPagedDatabase, CellReplica, CellWritableDatabase, PreparedRoot, RootRef, VerifiedRoot,
+};
 #[cfg(feature = "replica")]
 pub use paged::PagedDatabase;
 #[cfg(feature = "replica")]
@@ -55,8 +63,8 @@ pub use schedule::CompactionSchedule;
 mod format_tests;
 
 pub use db::CheckpointMode;
-pub use error::{CrabError, Result};
-pub use managed::ManagedDb;
+pub use error::{CrabError, QueryError, Result, TransactionError};
+pub use managed::{MANAGED_CONNECTION_PAGE_CACHE_BYTES, MANAGED_SQLITE_CONNECTIONS, ManagedDb};
 pub use recovery::{VerifiedLocalPlan, compact_exact, restore_exact};
 pub use rusqlite;
 pub use types::{CaptureBatch, Limits, LocalSegment, Position, SegmentInfo};

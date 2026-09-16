@@ -690,7 +690,8 @@ async fn upload_asset(
     if !principal.can_write(&repo.config) {
         return Err(Error::ReleasePermission);
     }
-    if repo.lifecycle().await?.archived {
+    let actor = app::actor(&principal)?;
+    if repo.lifecycle(&server, &actor).await?.archived {
         return Err(Error::Archived);
     }
     let number = app::number(number)?;
@@ -780,7 +781,10 @@ async fn upload_asset(
             let expected_hash = *blake3.finalize().as_bytes();
             let repo = app::repository(&worker_server, &principal, &key)?;
             let repo = repo.as_ref();
-            if repo.lifecycle().await?.archived || !principal.can_write(&repo.config) {
+            let actor = app::actor(&principal)?;
+            if repo.lifecycle(&worker_server, &actor).await?.archived
+                || !principal.can_write(&repo.config)
+            {
                 return Err(Error::Archived);
             }
             repo.store
@@ -858,7 +862,8 @@ async fn remove_asset(
     if !principal.can_write(&repo.config) {
         return Err(Error::ReleasePermission);
     }
-    if repo.lifecycle().await?.archived {
+    let actor = app::actor(&principal)?;
+    if repo.lifecycle(&server, &actor).await?.archived {
         return Err(Error::Archived);
     }
     let Json(input) = input?;

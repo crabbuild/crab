@@ -264,6 +264,10 @@ pub(crate) struct Authentication {
 }
 
 impl Authentication {
+    pub(crate) fn peer_issuer(&self) -> String {
+        self.config.issuer.url().as_str().to_owned()
+    }
+
     #[cfg(test)]
     pub async fn new(config: OidcConfig) -> Result<Self, AuthError> {
         Self::build(config, None).await

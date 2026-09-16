@@ -1,7 +1,8 @@
 //! Shared, bounded bridge between blocking SQLite calls and asynchronous stores.
 
-use crate::{CrabError, PagedDatabase, Result};
+use crate::{CellWritableDatabase, CrabError, PagedDatabase, Result};
 use std::{
+    cell::Cell,
     collections::{HashMap, VecDeque},
     sync::{Arc, Mutex, Weak, mpsc},
     time::{Duration, Instant},
@@ -9,9 +10,99 @@ use std::{
 
 type Pages = Vec<(u32, Vec<u8>)>;
 pub(crate) type DriverSlot = Arc<Mutex<Weak<Driver>>>;
+const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
+
+thread_local! {
+    static DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+struct DeadlineGuard(Option<Instant>);
+
+impl Drop for DeadlineGuard {
+    fn drop(&mut self) {
+        DEADLINE.set(self.0);
+    }
+}
+
+/// Applies one absolute deadline to sparse page faults on the current thread.
+///
+/// Call this around SQLite work on its owning thread. Nested scopes retain the
+/// earliest deadline. The deadline stops the synchronous VFS wait but does not
+/// cancel a provider request that has already been accepted by the I/O driver.
+pub fn with_paged_io_deadline<T>(deadline: Instant, operation: impl FnOnce() -> T) -> T {
+    let previous = DEADLINE.get();
+    DEADLINE.set(Some(
+        previous.map_or(deadline, |current| current.min(deadline)),
+    ));
+    let _guard = DeadlineGuard(previous);
+    operation()
+}
+
+fn deadline() -> Instant {
+    DEADLINE
+        .get()
+        .unwrap_or_else(|| Instant::now() + DEFAULT_DEADLINE)
+}
+
+#[derive(Clone)]
+pub(crate) enum Database {
+    Replica(PagedDatabase),
+    Cell(CellWritableDatabase),
+}
+
+impl Database {
+    pub(crate) fn host(&self) -> crate::Host {
+        match self {
+            Self::Replica(database) => database.host(),
+            Self::Cell(database) => database.host(),
+        }
+    }
+
+    pub(crate) fn limits(&self) -> crate::Limits {
+        match self {
+            Self::Replica(database) => database.limits(),
+            Self::Cell(database) => database.limits(),
+        }
+    }
+
+    pub(crate) fn page_size(&self) -> u32 {
+        match self {
+            Self::Replica(database) => database.page_size(),
+            Self::Cell(database) => database.page_size(),
+        }
+    }
+
+    pub(crate) fn page_count(&self) -> u32 {
+        match self {
+            Self::Replica(database) => database.page_count(),
+            Self::Cell(database) => database.page_count(),
+        }
+    }
+
+    pub(crate) fn position(&self) -> crate::Position {
+        match self {
+            Self::Replica(database) => database.position(),
+            Self::Cell(database) => database.position(),
+        }
+    }
+
+    pub(crate) fn checksums(&self) -> Result<crate::pages::PageChecksums> {
+        match self {
+            Self::Replica(database) => database.checksums(),
+            Self::Cell(database) => Ok(database.checksums()),
+        }
+    }
+
+    async fn read_run(&self, first: u32, max_pages: u32) -> Result<Pages> {
+        match self {
+            Self::Replica(database) => database.read_run(first, max_pages).await,
+            Self::Cell(database) => database.read_run(first, max_pages).await,
+        }
+    }
+}
 
 struct Request {
-    database: PagedDatabase,
+    database: Database,
     view: u64,
     page: u32,
     deadline: Instant,
@@ -113,7 +204,7 @@ async fn fetch(request: &Request, cache: &Mutex<Cache>) -> Result<Vec<u8>> {
     let deadline = tokio::time::Instant::from_std(request.deadline);
     let pages = tokio::time::timeout_at(deadline, request.database.read_run(request.page, 64))
         .await
-        .map_err(|e| CrabError::Other(Box::new(e)))??;
+        .map_err(|_| CrabError::Deadline)??;
     let mut cache = cache
         .lock()
         .map_err(|_| CrabError::InvalidState("paged cache poisoned"))?;
@@ -136,13 +227,13 @@ impl Drop for Driver {
 
 pub(crate) struct Io {
     driver: Arc<Driver>,
-    database: PagedDatabase,
+    database: Database,
     view: u64,
     gate: Mutex<()>,
 }
 
 impl Io {
-    pub(crate) fn new(database: PagedDatabase) -> Result<Self> {
+    pub(crate) fn new(database: Database) -> Result<Self> {
         let host = database.host();
         let mut slot = host
             .paged_driver
@@ -182,11 +273,12 @@ impl Io {
             return Ok(bytes);
         }
         let (reply, response) = mpsc::sync_channel(1);
+        let deadline = deadline();
         let request = Request {
             database: self.database.clone(),
             view: self.view,
             page,
-            deadline: Instant::now() + Duration::from_secs(30),
+            deadline,
             reply,
         };
         self.driver
@@ -202,7 +294,15 @@ impl Io {
                     CrabError::InvalidState("paged I/O closed")
                 }
             })?;
-        response.recv().map_err(|e| CrabError::Other(Box::new(e)))?
+        receive(response, deadline)
+    }
+}
+
+fn receive(response: mpsc::Receiver<Result<Vec<u8>>>, deadline: Instant) -> Result<Vec<u8>> {
+    match response.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(CrabError::Deadline),
+        Err(error @ mpsc::RecvTimeoutError::Disconnected) => Err(CrabError::Other(Box::new(error))),
     }
 }
 
@@ -215,6 +315,30 @@ pub(crate) fn default_slot() -> DriverSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scoped_deadline_keeps_earliest_value_and_restores_the_thread() {
+        let outer = Instant::now() + Duration::from_secs(2);
+        let later = outer + Duration::from_secs(1);
+        let earlier = outer - Duration::from_secs(1);
+        with_paged_io_deadline(outer, || {
+            assert_eq!(deadline(), outer);
+            with_paged_io_deadline(later, || assert_eq!(deadline(), outer));
+            with_paged_io_deadline(earlier, || assert_eq!(deadline(), earlier));
+            assert_eq!(deadline(), outer);
+        });
+        assert!(deadline() >= Instant::now() + Duration::from_secs(29));
+    }
+
+    #[test]
+    fn blocking_page_wait_stops_at_its_deadline() {
+        let (reply, response) = mpsc::sync_channel(1);
+        let started = Instant::now();
+        let result = receive(response, started + Duration::from_millis(20));
+        drop(reply);
+        assert!(matches!(result, Err(CrabError::Deadline)));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 
     #[test]
     fn cache_bounds_payload_and_isolates_pinned_views() {

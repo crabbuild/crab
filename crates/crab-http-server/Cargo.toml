@@ -12,6 +12,7 @@ bytes = { workspace = true }
 blake3 = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 crab-read = { workspace = true }
+crab-cell-runtime = { workspace = true }
 crab-lfs = { workspace = true }
 crab-git = { workspace = true }
 gix-hash = { workspace = true }
@@ -25,28 +26,36 @@ crab-write = { workspace = true }
 crab-remote = { workspace = true, features = ["publication"] }
 base64 = "0.22"
 futures-util = { workspace = true }
+fs4 = "0.13.1"
 flate2 = { workspace = true }
 http-body = "1"
 crab-remote-git = { workspace = true }
 crab-storage = { workspace = true }
+ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 rand = "0.9"
+rusqlite.workspace = true
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
 object_store = { workspace = true }
-reqwest = { workspace = true, features = ["rustls-tls"] }
+reqwest = { workspace = true, features = ["rustls-tls", "stream"] }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
+rustls = "0.23"
+rustls-pemfile = "2"
 url = { version = "2", features = ["serde"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
+sysinfo = "0.35.2"
 thiserror = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = "0.26"
 tokio-util = { workspace = true, features = ["io", "rt"] }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { workspace = true }
+x509-cert = "0.2.5"
 zip = { version = "6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]

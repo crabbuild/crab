@@ -1,5 +1,12 @@
 listen = "127.0.0.1:8788"
 management_listen = "127.0.0.1:8789"
 
+[cells]
+data_dir = "/var/lib/crab/cells"
+peer_advertise = "https://localhost:8789"
+peer_certificate = "/run/secrets/crab-peer/peer.crt"
+peer_private_key = "/run/secrets/crab-peer/peer.key"
+peer_ca = "/run/secrets/crab-peer/ca.crt"
+
 [storage]
 url = "s3://crab-http-server/repositories"

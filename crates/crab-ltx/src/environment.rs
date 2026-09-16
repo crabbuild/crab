@@ -8,8 +8,12 @@ use std::{
 };
 
 /// An open local artifact/WAL handle supplied by a host filesystem.
+///
+/// Positional reads and writes use their explicit offsets. A handle returned by
+/// `FileSystem::open_rw` supports both operations.
 pub trait FileIo: Send {
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()>;
+    fn write_all_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()>;
     fn read_exact_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>>;
     fn sync_all(&mut self) -> io::Result<()>;
     fn file_len(&self) -> io::Result<u64>;
@@ -18,13 +22,17 @@ pub trait FileIo: Send {
 
 /// Local filesystem boundary; SQLite pager I/O remains under its selected VFS.
 ///
-/// `create` must exclusively create a new file. `rename` must sync the destination
-/// parent before succeeding. Implementations must preserve underlying I/O errors.
+/// `create` must exclusively create a new file. `open_rw` must not create.
+/// `rename` must sync the destination parent before succeeding. Implementations
+/// must preserve underlying I/O errors.
 /// `exists` must detect dangling symlinks. `create_dir` is an exclusive claim.
 /// `persist_new` atomically installs fully synced bytes without replacing any
-/// destination and syncs its parent; an error after installation is ambiguous.
+/// destination and syncs its parent; `persist_file_new` does the same for an
+/// already synced same-directory scratch file. An error after installation is
+/// ambiguous.
 pub trait FileSystem: Send + Sync {
     fn open(&self, path: &Path) -> io::Result<Box<dyn FileIo>>;
+    fn open_rw(&self, path: &Path) -> io::Result<Box<dyn FileIo>>;
     fn create(&self, path: &Path) -> io::Result<Box<dyn FileIo>>;
     fn file_len(&self, path: &Path) -> io::Result<u64>;
     fn create_dir_all(&self, path: &Path) -> io::Result<()>;
@@ -35,6 +43,7 @@ pub trait FileSystem: Send + Sync {
     fn create_dir(&self, path: &Path) -> io::Result<()>;
     fn sync_parent(&self, path: &Path) -> io::Result<()>;
     fn persist_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
+    fn persist_file_new(&self, source: &Path, destination: &Path) -> io::Result<()>;
 }
 
 /// Wall-clock observations used in LTX timestamps and checkpoint eligibility.
@@ -297,6 +306,10 @@ impl FileIo for std::fs::File {
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
         io::Write::write_all(self, bytes)
     }
+    fn write_all_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()> {
+        io::Seek::seek(self, io::SeekFrom::Start(offset))?;
+        io::Write::write_all(self, bytes)
+    }
     fn read_exact_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
         io::Seek::seek(self, io::SeekFrom::Start(offset))?;
         let mut bytes = vec![0; len];
@@ -317,6 +330,14 @@ impl FileIo for std::fs::File {
 impl FileSystem for DirectFileSystem {
     fn open(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
         Ok(Box::new(std::fs::File::open(path)?))
+    }
+    fn open_rw(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
+        Ok(Box::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)?,
+        ))
     }
     fn create(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
         let mut options = std::fs::OpenOptions::new();
@@ -367,6 +388,18 @@ impl FileSystem for DirectFileSystem {
         file.as_file().sync_all()?;
         file.persist_noclobber(path).map_err(|error| error.error)?;
         self.sync_parent(path)
+    }
+    fn persist_file_new(&self, source: &Path, destination: &Path) -> io::Result<()> {
+        if source.parent() != destination.parent() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "scratch and destination must share a directory",
+            ));
+        }
+        std::fs::hard_link(source, destination)?;
+        self.sync_parent(destination)?;
+        std::fs::remove_file(source)?;
+        self.sync_parent(destination)
     }
 }
 
@@ -436,6 +469,9 @@ mod tests {
         fn open(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
             DirectFileSystem.open(path)
         }
+        fn open_rw(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
+            DirectFileSystem.open_rw(path)
+        }
         fn create(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
             if self.0.load(Ordering::SeqCst) {
                 return Err(io::Error::new(
@@ -472,6 +508,9 @@ mod tests {
         fn persist_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
             DirectFileSystem.persist_new(path, bytes)
         }
+        fn persist_file_new(&self, source: &Path, destination: &Path) -> io::Result<()> {
+            DirectFileSystem.persist_file_new(source, destination)
+        }
     }
 
     #[test]
@@ -505,6 +544,37 @@ mod tests {
             db.transaction(|_| Ok(())),
             Err(crate::CrabError::Fenced)
         ));
+    }
+
+    #[test]
+    fn synced_scratch_install_never_replaces_a_destination() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let destination = directory.path().join("database.sqlite");
+        let first = directory.path().join("first.scratch");
+        let mut file = DirectFileSystem.create(&first).unwrap();
+        file.write_all(b"first").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        DirectFileSystem
+            .persist_file_new(&first, &destination)
+            .unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"first");
+        assert!(!first.exists());
+
+        let second = directory.path().join("second.scratch");
+        let mut file = DirectFileSystem.create(&second).unwrap();
+        file.write_all(b"second").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        assert_eq!(
+            DirectFileSystem
+                .persist_file_new(&second, &destination)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(destination).unwrap(), b"first");
+        assert_eq!(std::fs::read(second).unwrap(), b"second");
     }
 
     #[cfg(feature = "replica")]

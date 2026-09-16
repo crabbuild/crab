@@ -92,6 +92,14 @@ pub(crate) enum Error {
         "This submission ID was already used for different content; check the existing discussion before submitting again"
     )]
     RequestConflict,
+    #[error("Collaboration Cell routing is unavailable")]
+    CellUnavailable,
+    #[error("Collaboration write outcome requires resolution")]
+    CellPending,
+    #[error("Collaboration Cell contract failed: {0}")]
+    CellContract(&'static str),
+    #[error("Collaboration Cell operation failed")]
+    Cell(#[source] crab_cell_runtime::Error),
     #[error("Collaboration storage failed")]
     Storage(#[from] StorageError),
     #[error("Collaboration data encoding failed")]
@@ -124,6 +132,8 @@ impl IntoResponse for Error {
                     | Self::ReleaseAssetIo(_)
                     | Self::ReleaseAssetWorker(_)
                     | Self::ReleaseAssetCoordination(_)
+                    | Self::CellContract(_)
+                    | Self::Cell(_)
             )
         {
             tracing::error!(error = ?self, "collaboration request failed");
@@ -260,6 +270,39 @@ impl IntoResponse for Error {
                 StatusCode::CONFLICT,
                 "submission_conflict",
                 "This submission ID was already used for different content; check the existing discussion before submitting again",
+            ),
+            Self::Cell(crab_cell_runtime::Error::Capacity(_)) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "busy",
+                "Collaboration requests are busy; retry the same submission shortly",
+            ),
+            Self::CellPending => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "outcome_unknown",
+                "The write may have completed; retry the same submission to resolve it",
+            ),
+            Self::CellUnavailable
+            | Self::Cell(
+                crab_cell_runtime::Error::CellNotActive
+                | crab_cell_runtime::Error::CellDraining
+                | crab_cell_runtime::Error::RuntimeClosed
+                | crab_cell_runtime::Error::Fenced
+                | crab_cell_runtime::Error::PendingPublication
+                | crab_cell_runtime::Error::Deadline,
+            ) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "cell_unavailable",
+                "Repository collaboration is temporarily unavailable; retry the same submission shortly",
+            ),
+            Self::Cell(crab_cell_runtime::Error::PeerAuthorization(_)) => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Repository collaboration authorization was denied",
+            ),
+            Self::CellContract(_) | Self::Cell(_) => (
+                StatusCode::BAD_GATEWAY,
+                "cell_error",
+                "Repository collaboration runtime failed; retry the same submission after checking service health",
             ),
             Self::Body(error) => (
                 error.status(),

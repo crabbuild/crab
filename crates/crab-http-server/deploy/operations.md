@@ -92,6 +92,13 @@ helm template crab-http-server \
 
 Review the rendered image digest, Service ports, ServiceAccount, NetworkPolicy, Secret name, storage URL, and ingress host. Keep the rendered file private because inline server configuration appears in it.
 
+The chart runs the immutable server image as a `cell-release-bootstrap` init
+container. A fresh root is initialized once even when several pods start
+concurrently. Before upgrading an existing release, run `cells release prepare`
+from the verified new image against the same configuration and expected release
+revision. The init container admits that exact candidate without taking over its
+activation operation; a different desired descriptor or image fails closed.
+
 For an official image, verify GitHub provenance against the pinned digest and
 the dedicated server release workflow:
 

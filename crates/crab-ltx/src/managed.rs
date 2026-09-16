@@ -5,6 +5,14 @@ use rusqlite::{Connection, Transaction};
 use crate::{CaptureBatch, CrabError, Limits, LocalSegment, Position, Result, SegmentInfo};
 use crate::{db::Db, host::LtxHost, ltx, types::Txid};
 
+/// Number of SQLite connections retained by one open managed database.
+pub const MANAGED_SQLITE_CONNECTIONS: u64 = 3;
+
+/// Page-cache byte target budgeted for each retained SQLite connection.
+pub const MANAGED_CONNECTION_PAGE_CACHE_BYTES: u64 = 64 * 1024;
+
+const MANAGED_CONNECTION_PAGE_CACHE_KIB: i64 = 64;
+
 /// One exclusive local capture session with a serialized SQLite writer.
 ///
 /// The caller owns the database and its directory: no external writers, direct
@@ -29,8 +37,30 @@ pub struct ManagedDb {
 }
 
 impl ManagedDb {
+    /// Returns a thread-safe handle for interrupting the current SQLite operation.
+    ///
+    /// The handle becomes inert after the database closes. Calling it does not
+    /// prove rollback or cancellation; the owner must still await the operation.
+    #[must_use]
+    pub fn interrupt_handle(&self) -> rusqlite::InterruptHandle {
+        self.writer.get_interrupt_handle()
+    }
+
     #[cfg(feature = "replica")]
     pub(crate) fn open_paged(database: crate::PagedDatabase, destination: &Path) -> Result<Self> {
+        Self::open_sparse(crate::paged_io::Database::Replica(database), destination)
+    }
+
+    #[cfg(feature = "replica")]
+    pub(crate) fn open_cell_paged(
+        database: crate::CellWritableDatabase,
+        destination: &Path,
+    ) -> Result<Self> {
+        Self::open_sparse(crate::paged_io::Database::Cell(database), destination)
+    }
+
+    #[cfg(feature = "replica")]
+    fn open_sparse(database: crate::paged_io::Database, destination: &Path) -> Result<Self> {
         let limits = database.limits();
         let position = database.position();
         let page_size = database.page_size();
@@ -78,11 +108,32 @@ impl ManagedDb {
     /// published. An I/O failure can leave a partially pruned set; retry safely.
     #[cfg(feature = "replica")]
     pub fn prune_published(&mut self, head: &crate::ReplicaHead) -> Result<usize> {
+        self.prune_retained(|segment| head.segments().any(|info| info == segment.info()))
+    }
+
+    /// Deletes this session's exact captured artifacts after their root publishes.
+    ///
+    /// Every selected file is reverified before deletion. An error retains its
+    /// accounting so the owner can retry or discard the complete local session.
+    #[cfg(feature = "replica")]
+    pub fn prune_captured(&mut self, batch: &crate::CaptureBatch) -> Result<usize> {
+        self.prune_retained(|segment| {
+            batch.segments.iter().any(|published| {
+                published.path() == segment.path() && published.info() == segment.info()
+            })
+        })
+    }
+
+    #[cfg(feature = "replica")]
+    fn prune_retained(
+        &mut self,
+        mut selected: impl FnMut(&crate::LocalSegment) -> bool,
+    ) -> Result<usize> {
         let mut removed = 0;
         let mut index = 0;
         while index < self.retained.len() {
             let segment = &self.retained[index];
-            if !head.segments().any(|info| info == segment.info()) {
+            if !selected(segment) {
                 index += 1;
                 continue;
             }
@@ -237,42 +288,94 @@ impl ManagedDb {
         &mut self,
         operation: impl FnOnce(&Transaction<'_>) -> rusqlite::Result<T>,
     ) -> Result<T> {
-        self.ensure_active()?;
-        self.ensure_capacity()?;
+        self.transaction_with(operation)
+            .map_err(|error| match error {
+                crate::TransactionError::Operation(error)
+                | crate::TransactionError::Sqlite(error) => error.into(),
+                crate::TransactionError::Capture(error) => error,
+            })
+    }
+
+    /// Commits one transaction while preserving application-domain failures.
+    ///
+    /// An `Operation` result guarantees the transaction was rolled back and the
+    /// writer remains reusable. SQLite commit/rollback ambiguity fences the
+    /// writer. A successful return is still local-only until capture and remote
+    /// publication complete.
+    pub fn transaction_with<T, E>(
+        &mut self,
+        operation: impl FnOnce(&Transaction<'_>) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, crate::TransactionError<E>>
+    where
+        E: std::error::Error + 'static,
+    {
+        self.ensure_active()
+            .map_err(crate::TransactionError::Capture)?;
+        self.ensure_capacity()
+            .map_err(crate::TransactionError::Capture)?;
         self.observer.reset();
-        let result: rusqlite::Result<T> = (|| {
-            let tx = self
-                .writer
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let result = operation(&tx)?;
-            if let Err(error) = tx.commit() {
-                // Commit failure is potentially ambiguous even if SQLite did
-                // not invoke the WAL hook. Never accept another mutation here.
-                self.fenced = true;
-                return Err(error);
+        let tx = self
+            .writer
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(crate::TransactionError::Sqlite)?;
+        let value = match operation(&tx) {
+            Ok(value) => value,
+            Err(error) => {
+                if let Err(rollback) = tx.rollback() {
+                    self.fenced = true;
+                    return Err(crate::TransactionError::Sqlite(rollback));
+                }
+                return Err(crate::TransactionError::Operation(error));
             }
-            Ok(result)
-        })();
-        if result.is_err() && (self.observer.frames() != 0 || !self.writer.is_autocommit()) {
+        };
+        if let Err(error) = tx.commit() {
+            // Commit failure is potentially ambiguous even if SQLite did not
+            // invoke the WAL hook. Never accept another mutation here.
             self.fenced = true;
+            return Err(crate::TransactionError::Sqlite(error));
         }
-        let value = result?;
         match self.observer.cut(&self.path, &self.host) {
             Ok(Some(cut)) => self.required_cut = Some(cut),
             Ok(None) => {}
             Err(error) => {
                 self.fenced = true;
-                return Err(error);
+                return Err(crate::TransactionError::Capture(error));
             }
         }
         Ok(value)
     }
 
+    /// Runs one synchronous callback with SQLite writes disabled.
+    ///
+    /// The callback must not change connection pragmas or retain borrowed SQLite
+    /// values. Establishing or removing the read-only boundary failure fences
+    /// this capture session; an application error leaves it reusable.
+    pub fn query_with<T, E>(
+        &mut self,
+        operation: impl FnOnce(&Connection) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, crate::QueryError<E>>
+    where
+        E: std::error::Error + 'static,
+    {
+        self.ensure_active().map_err(crate::QueryError::State)?;
+        if let Err(error) = self.writer.pragma_update(None, "query_only", true) {
+            self.fenced = true;
+            return Err(crate::QueryError::Sqlite(error));
+        }
+        let result = operation(&self.writer);
+        if let Err(error) = self.writer.pragma_update(None, "query_only", false) {
+            self.fenced = true;
+            return Err(crate::QueryError::Sqlite(error));
+        }
+        result.map_err(crate::QueryError::Operation)
+    }
+
     /// Captures committed WAL pages and all cuts made by checkpoint maintenance.
     ///
     /// Any failure fences further use, since some local cuts may already exist.
-    /// Retain returned files until publication; `prune_published` can release
-    /// exact acknowledged artifacts when the replica feature is enabled.
+    /// Retain returned files until publication; `prune_captured` can release
+    /// an exact acknowledged batch and `prune_published` can reconcile a head
+    /// when the replica feature is enabled.
     pub fn capture(&mut self) -> Result<CaptureBatch> {
         self.ensure_active()?;
         let result = self.capture_inner();
@@ -421,10 +524,12 @@ impl ManagedDb {
 }
 
 pub(crate) fn open_connection(path: &Path, vfs: Option<&str>) -> rusqlite::Result<Connection> {
-    match vfs {
+    let connection = match vfs {
         Some(vfs) => Connection::open_with_flags_and_vfs(path, rusqlite::OpenFlags::default(), vfs),
         None => Connection::open(path),
-    }
+    }?;
+    connection.pragma_update(None, "cache_size", -MANAGED_CONNECTION_PAGE_CACHE_KIB)?;
+    Ok(connection)
 }
 
 pub(crate) fn read_main(connection: &Connection, offset: u64, size: usize) -> Result<Vec<u8>> {
@@ -459,6 +564,51 @@ pub(crate) fn read_main(connection: &Connection, offset: u64, size: usize) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("inventory rejected the command")]
+    struct Rejected;
+
+    #[test]
+    fn managed_connections_set_the_budgeted_page_cache() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let connection = open_connection(&temp.path().join("cache.sqlite"), None).unwrap();
+        let cache_kib: i64 = connection
+            .query_row("PRAGMA cache_size", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(cache_kib, -MANAGED_CONNECTION_PAGE_CACHE_KIB);
+    }
+
+    #[test]
+    fn typed_operation_error_rolls_back_and_keeps_writer_usable() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut db = ManagedDb::open(&temp.path().join("typed.sqlite"), Limits::default()).unwrap();
+        db.transaction(|tx| tx.execute_batch("CREATE TABLE inventory(value INTEGER NOT NULL)"))
+            .unwrap();
+
+        let rejected = db.transaction_with(|tx| {
+            tx.execute("INSERT INTO inventory VALUES (1)", [])
+                .map_err(|_| Rejected)?;
+            Err::<(), _>(Rejected)
+        });
+        assert!(matches!(
+            rejected,
+            Err(crate::TransactionError::Operation(Rejected))
+        ));
+
+        db.transaction(|tx| {
+            tx.execute("INSERT INTO inventory VALUES (2)", [])
+                .map(|_| ())
+        })
+        .unwrap();
+        let count = db
+            .writer
+            .query_row("SELECT count(*) FROM inventory", [], |row| {
+                row.get::<_, u32>(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+    }
 
     #[test]
     fn truncate_checkpoint_and_auto_vacuum_preserve_every_cut() {

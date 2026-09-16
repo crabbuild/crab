@@ -253,7 +253,7 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     server.receives.close();
     server.receives.wait().await;
     server.finish_maintenance().await.unwrap();
-    server.runtime.shutdown().await;
+    server.shutdown_runtimes().await.unwrap();
 }
 
 #[tokio::test]
@@ -299,7 +299,7 @@ async fn pull_creation_rejects_invalid_branch_pairs_before_writing_app_state() {
             .is_empty()
     );
     server.cancellation.cancel();
-    server.runtime.shutdown().await;
+    server.shutdown_runtimes().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -312,13 +312,11 @@ async fn pull_request_merge_methods_use_canonical_ref_publication() {
         .repositories
         .get_mut(&("team".into(), "repo".into()))
         .unwrap();
-    let protected_branches = vec![crate::BranchProtection {
+    repository.config.protected_branches = vec![crate::BranchProtection {
         branch: "main".into(),
         required_approvals: 0,
         required_checks: vec![],
     }];
-    repository.config.protected_branches = protected_branches.clone();
-    repository.protections = RwLock::new(BranchProtections::configured(&protected_branches));
     let stop = CancellationToken::new();
     let stopped = stop.clone();
     let app = router(Arc::clone(&server));
@@ -692,5 +690,5 @@ async fn pull_request_merge_methods_use_canonical_ref_publication() {
     server.receives.close();
     server.receives.wait().await;
     server.finish_maintenance().await.unwrap();
-    server.runtime.shutdown().await;
+    server.shutdown_runtimes().await.unwrap();
 }

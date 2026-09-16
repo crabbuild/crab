@@ -1,7 +1,13 @@
+#[cfg(feature = "replica")]
+use crab_ltx::CellReplica;
 use crab_ltx::{
     CheckpointMode, CrabError, Host, Limits, ManagedDb,
     environment::{DirectFileSystem, FileIo, FileSystem},
 };
+#[cfg(feature = "replica")]
+use crab_storage::{CellStorageLayout, Store};
+#[cfg(feature = "replica")]
+use object_store::{memory::InMemory, path::Path as ObjectPath};
 use std::{
     collections::BTreeSet,
     io,
@@ -41,6 +47,13 @@ impl FileIo for File {
         }
         self.inner.write_all(bytes)
     }
+    fn write_all_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()> {
+        if let Err(error) = self.faults.check("write_all_at") {
+            self.inner.write_all_at(offset, &bytes[..bytes.len() / 2])?;
+            return Err(error);
+        }
+        self.inner.write_all_at(offset, bytes)
+    }
     fn read_exact_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
         self.faults.check("read_exact_at")?;
         self.inner.read_exact_at(offset, len)
@@ -75,6 +88,13 @@ impl FileSystem for Faults {
             faults: self.clone(),
         }))
     }
+    fn open_rw(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
+        self.check("open_rw")?;
+        Ok(Box::new(File {
+            inner: DirectFileSystem.open_rw(path)?,
+            faults: self.clone(),
+        }))
+    }
     fn create(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
         self.check("create")?;
         Ok(Box::new(File {
@@ -91,6 +111,7 @@ impl FileSystem for Faults {
     filesystem_operation!(rename(from: &Path, to: &Path) -> ());
     filesystem_operation!(sync_parent(path: &Path) -> ());
     filesystem_operation!(persist_new(path: &Path, bytes: &[u8]) -> ());
+    filesystem_operation!(persist_file_new(source: &Path, destination: &Path) -> ());
 }
 
 fn fixture() -> (tempfile::TempDir, Arc<Faults>, Host, ManagedDb) {
@@ -115,6 +136,134 @@ fn injected<T>(result: crab_ltx::Result<T>) {
     assert!(
         matches!(result, Err(CrabError::Io(error)) if error.kind() == io::ErrorKind::StorageFull)
     );
+}
+
+#[cfg(feature = "replica")]
+#[tokio::test(flavor = "multi_thread")]
+async fn cell_restore_install_failure_cleans_owned_scratch() {
+    let (directory, faults, host, mut writer) = fixture();
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("cell-restore"),
+            [1; 16],
+        ),
+        [2; 32],
+        [3; 16],
+        Limits::default(),
+    )
+    .unwrap()
+    .with_host(host);
+    let root = replica
+        .prepare(None, &writer.capture().unwrap(), 1, 1)
+        .await
+        .unwrap()
+        .root();
+    writer.close().unwrap();
+    let verified = replica.open_root(&root).await.unwrap();
+    let destination = directory.path().join("cell-restored.sqlite");
+
+    faults.arm(Some("persist_file_new"));
+    injected(verified.restore(&destination).await);
+    assert!(!destination.exists());
+    assert!(!std::fs::read_dir(directory.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".crab-restore-")
+    }));
+
+    faults.arm(None);
+    assert_eq!(verified.restore(&destination).await.unwrap(), root.position);
+}
+
+#[cfg(feature = "replica")]
+#[tokio::test(flavor = "multi_thread")]
+async fn cell_compaction_uses_injected_filesystem_and_cleans_failed_scratch() {
+    let (directory, faults, host, mut writer) = fixture();
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("cell-compaction"),
+            [11; 16],
+        ),
+        [12; 32],
+        [13; 16],
+        Limits::default(),
+    )
+    .unwrap()
+    .with_host(host);
+    let root = replica
+        .prepare(None, &writer.capture().unwrap(), 1, 1)
+        .await
+        .unwrap()
+        .root();
+    writer.close().unwrap();
+
+    faults.arm(Some("write_all"));
+    injected(
+        replica
+            .prepare_compaction(&root, 0..1, 9, directory.path())
+            .await,
+    );
+    assert!(!std::fs::read_dir(directory.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".crab-compaction-")
+    }));
+
+    faults.arm(None);
+    let compacted = replica
+        .prepare_compaction(&root, 0..1, 9, directory.path())
+        .await
+        .unwrap();
+    assert_eq!(compacted.root().position, root.position);
+    assert!(faults.calls.lock().unwrap().contains("open_rw"));
+}
+
+#[cfg(feature = "replica")]
+#[tokio::test(flavor = "multi_thread")]
+async fn cell_checksum_write_failure_fences_after_sealing_the_cut() {
+    let (directory, faults, host, mut source) = fixture();
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("cell-checksums"),
+            [4; 16],
+        ),
+        [5; 32],
+        [6; 16],
+        Limits::default(),
+    )
+    .unwrap()
+    .with_host(host);
+    let root = replica
+        .prepare(None, &source.capture().unwrap(), 1, 1)
+        .await
+        .unwrap()
+        .root();
+    source.close().unwrap();
+
+    let destination = directory.path().join("cell-active.sqlite");
+    let writable = replica
+        .open_root(&root)
+        .await
+        .unwrap()
+        .paged()
+        .prepare_writable(&destination)
+        .await
+        .unwrap();
+    let mut writer = writable.open_writable(&destination).unwrap();
+    writer
+        .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(2)"))
+        .unwrap();
+    faults.arm(Some("write_all_at"));
+    injected(writer.capture());
+    faults.arm(None);
+    assert!(matches!(writer.capture(), Err(CrabError::Fenced)));
 }
 
 #[test]
@@ -389,24 +538,19 @@ mod remote {
         assert_eq!(jobs.joined.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn published_pruning_retries_after_removal_but_failed_parent_sync() {
-        let (_directory, faults, host, mut writer) = fixture();
-        let replica = replica(host);
+    #[test]
+    fn captured_pruning_retries_after_removal_but_failed_parent_sync() {
+        let (_directory, faults, _host, mut writer) = fixture();
         let batch = writer.capture().unwrap();
-        let head = replica.replicate(&batch, None).await.unwrap();
         faults.arm(Some("sync_parent"));
-        injected(writer.prune_published(&head));
+        injected(writer.prune_captured(&batch));
         assert!(!batch.segments[0].path().exists());
         faults.arm(None);
-        assert_eq!(writer.prune_published(&head).unwrap(), batch.segments.len());
-        assert_eq!(writer.prune_published(&head).unwrap(), 0);
+        assert_eq!(writer.prune_captured(&batch).unwrap(), batch.segments.len());
+        assert_eq!(writer.prune_captured(&batch).unwrap(), 0);
         writer
             .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(3)"))
             .unwrap();
-        replica
-            .replicate(&writer.capture().unwrap(), Some(&head))
-            .await
-            .unwrap();
+        writer.capture().unwrap();
     }
 }

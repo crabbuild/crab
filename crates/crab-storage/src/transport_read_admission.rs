@@ -351,7 +351,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use bytes::Bytes;
-    use futures_util::{StreamExt as _, TryStreamExt as _, stream::BoxStream};
+    use futures_util::{TryStreamExt as _, stream::BoxStream};
     use object_store::client::HttpRequestBody;
     use object_store::path::Path;
     use object_store::{

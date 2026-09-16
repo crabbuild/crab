@@ -238,6 +238,7 @@ async fn finish(
     pull_view(
         &pull,
         &app::actor(principal)?,
+        server,
         repo,
         principal.can_write(&repo.config),
         None,
@@ -304,7 +305,7 @@ async fn execute(
         }
         return Ok((
             StatusCode::OK,
-            Json(pull_view(&pull, &candidate.author, repo, true, None).await?),
+            Json(pull_view(&pull, &candidate.author, &server, repo, true, None).await?),
         ));
     }
     if let Some(record) = &pull.merge_pending {
@@ -335,12 +336,12 @@ async fn execute(
     }
     // These reads order merge admission before later status or check-run updates.
     // Once the reservation exists, retries recover that admitted publication.
-    let protections = repo.branch_protections().await?;
+    let protections = repo.branch_protections(&server, &candidate.author).await?;
     let protection = protections.protection(&pull.base_ref);
     let (statuses, check_runs) = match protection {
         Some(rule) if !rule.required_checks.is_empty() => (
-            statuses::latest(repo, &candidate.head_oid).await?,
-            checks::latest(repo, &candidate.head_oid).await?,
+            statuses::latest(&server, repo, &candidate.author, &candidate.head_oid).await?,
+            checks::latest(&server, repo, &candidate.author, &candidate.head_oid).await?,
         ),
         _ => (vec![], vec![]),
     };

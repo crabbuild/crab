@@ -1,8 +1,8 @@
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use crab_http_server::catalog::CatalogStore;
 use crab_http_server::{RepositoryAccess, RepositoryMember};
 use serde::Deserialize;
@@ -30,6 +30,65 @@ enum Command {
         #[command(subcommand)]
         command: RepositoryCommand,
     },
+    /// Inspect or administer the embedded Cell runtime.
+    Cells {
+        #[command(subcommand)]
+        command: CellsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum CellsCommand {
+    /// Inspect or administer compiled Cell releases.
+    Release {
+        #[command(subcommand)]
+        command: CellReleaseCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum CellReleaseCommand {
+    /// Print the exact canonical descriptor compiled into this binary.
+    Inspect {
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Upload the compiled descriptor and conditionally select it for rollout.
+    Prepare {
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        image: String,
+    },
+    /// Initialize an empty application or admit this binary's selected release.
+    Bootstrap {
+        #[arg(long)]
+        image: String,
+    },
+    /// Verify every cataloged Cell and publish the prepared release as current.
+    Activate {
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long, value_enum)]
+        strategy: ActivationStrategy,
+        #[arg(long, required_if_eq("strategy", "compatible"))]
+        minimum_eligible_nodes: Option<usize>,
+    },
+    /// Print the canonical durable release selection.
+    Status,
+    /// List a bounded page of pending or failed Cell migrations.
+    Migrations {
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ActivationStrategy {
+    Compatible,
+    Maintenance,
 }
 
 #[derive(Subcommand)]
@@ -144,21 +203,112 @@ async fn main() -> crab_http_server::Result<()> {
         Command::Healthcheck => healthcheck(&config).await,
         Command::StorageProbe => crab_http_server::probe_storage(&config).await,
         Command::Repository { command } => repository(&config, command).await,
+        Command::Cells { command } => cells(&config, command).await,
     }
 }
 
+async fn cells(
+    config: &crab_http_server::Config,
+    command: CellsCommand,
+) -> crab_http_server::Result<()> {
+    let bytes = match command {
+        CellsCommand::Release {
+            command: CellReleaseCommand::Inspect { json: true },
+        } => crab_http_server::cell_release_descriptor()?,
+        CellsCommand::Release {
+            command: CellReleaseCommand::Inspect { json: false },
+        } => return Err(crab_http_server::Error::Config("--json is required")),
+        CellsCommand::Release {
+            command:
+                CellReleaseCommand::Prepare {
+                    expected_revision,
+                    image,
+                },
+        } => crab_http_server::prepare_cell_release(config, expected_revision, &image).await?,
+        CellsCommand::Release {
+            command: CellReleaseCommand::Bootstrap { image },
+        } => crab_http_server::bootstrap_cell_release(config, &image).await?,
+        CellsCommand::Release {
+            command:
+                CellReleaseCommand::Activate {
+                    expected_revision,
+                    strategy: ActivationStrategy::Compatible,
+                    minimum_eligible_nodes: Some(minimum_eligible_nodes),
+                },
+        } => {
+            crab_http_server::activate_cell_release(
+                config,
+                expected_revision,
+                minimum_eligible_nodes,
+            )
+            .await?
+        }
+        CellsCommand::Release {
+            command:
+                CellReleaseCommand::Activate {
+                    expected_revision: _,
+                    strategy: ActivationStrategy::Compatible,
+                    minimum_eligible_nodes: None,
+                },
+        } => {
+            return Err(crab_http_server::Error::Config(
+                "compatible activation requires --minimum-eligible-nodes",
+            ));
+        }
+        CellsCommand::Release {
+            command:
+                CellReleaseCommand::Activate {
+                    expected_revision,
+                    strategy: ActivationStrategy::Maintenance,
+                    minimum_eligible_nodes: None,
+                },
+        } => crab_http_server::enter_cell_maintenance(config, expected_revision).await?,
+        CellsCommand::Release {
+            command:
+                CellReleaseCommand::Activate {
+                    expected_revision: _,
+                    strategy: ActivationStrategy::Maintenance,
+                    minimum_eligible_nodes: Some(_),
+                },
+        } => {
+            return Err(crab_http_server::Error::Config(
+                "maintenance activation does not accept --minimum-eligible-nodes",
+            ));
+        }
+        CellsCommand::Release {
+            command: CellReleaseCommand::Status,
+        } => crab_http_server::cell_release_status(config).await?,
+        CellsCommand::Release {
+            command: CellReleaseCommand::Migrations { after, limit },
+        } => crab_http_server::cell_release_migrations(config, after.as_deref(), limit).await?,
+    };
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(&bytes)?;
+    stdout.write_all(b"\n")?;
+    Ok(())
+}
+
 async fn healthcheck(config: &crab_http_server::Config) -> crab_http_server::Result<()> {
-    let mut address = config.management_listen;
-    if address.ip().is_unspecified() {
-        address.set_ip(if address.is_ipv4() {
-            std::net::Ipv4Addr::LOCALHOST.into()
-        } else {
-            std::net::Ipv6Addr::LOCALHOST.into()
-        });
-    }
-    let url = format!("http://{address}/readyz");
-    reqwest::Client::builder()
+    let mut identity = std::fs::read(&config.cells.peer_certificate)?;
+    identity.extend_from_slice(&std::fs::read(&config.cells.peer_private_key)?);
+    let identity = reqwest::Identity::from_pem(&identity)
+        .map_err(|source| crab_http_server::Error::Healthcheck { source })?;
+    let authorities = reqwest::Certificate::from_pem_bundle(&std::fs::read(&config.cells.peer_ca)?)
+        .map_err(|source| crab_http_server::Error::Healthcheck { source })?;
+    let url = config
+        .cells
+        .peer_advertise
+        .join("readyz")
+        .map_err(|_| crab_http_server::Error::Config("cells.peer_advertise is invalid"))?;
+    let mut client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        .https_only(true)
+        .identity(identity)
+        .tls_built_in_root_certs(false);
+    for authority in authorities {
+        client = client.add_root_certificate(authority);
+    }
+    client
         .build()
         .map_err(|source| crab_http_server::Error::Healthcheck { source })?
         .get(url)
@@ -188,7 +338,14 @@ async fn repository(
                     members,
                 )
                 .await?;
-            println!("{}", serde_json::to_string_pretty(&record)?);
+            crab_http_server::initialize_repository_cell(config, record.id).await?;
+            let (document, _) = catalog.load().await?;
+            let ready = document
+                .repositories
+                .into_iter()
+                .find(|candidate| candidate.id == record.id)
+                .ok_or(crab_http_server::catalog::CatalogError::NotFound)?;
+            println!("{}", serde_json::to_string_pretty(&ready)?);
         }
         RepositoryCommand::Adopt(arguments) => {
             let identity = arguments.identity;
@@ -203,7 +360,14 @@ async fn repository(
                     members,
                 )
                 .await?;
-            println!("{}", serde_json::to_string_pretty(&record)?);
+            crab_http_server::initialize_repository_cell(config, record.id).await?;
+            let (document, _) = catalog.load().await?;
+            let ready = document
+                .repositories
+                .into_iter()
+                .find(|candidate| candidate.id == record.id)
+                .ok_or(crab_http_server::catalog::CatalogError::NotFound)?;
+            println!("{}", serde_json::to_string_pretty(&ready)?);
         }
         RepositoryCommand::SetMembers(arguments) => {
             let members = validate_members(
@@ -234,6 +398,200 @@ mod tests {
     #[test]
     fn command_line_contract_is_valid() {
         Arguments::command().debug_assert();
+    }
+
+    #[test]
+    fn release_inspect_requires_the_json_contract() {
+        let arguments = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "release",
+            "inspect",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Some(Command::Cells {
+                command: CellsCommand::Release {
+                    command: CellReleaseCommand::Inspect { json: true }
+                }
+            })
+        ));
+
+        assert!(
+            Arguments::try_parse_from([
+                "crab-http-server",
+                "--config",
+                "server.toml",
+                "cells",
+                "release",
+                "inspect",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn release_bootstrap_prepare_activate_and_status_match_the_administration_contract() {
+        let bootstrap = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "release",
+            "bootstrap",
+            "--image",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ])
+        .unwrap();
+        assert!(matches!(
+            bootstrap.command,
+            Some(Command::Cells {
+                command: CellsCommand::Release {
+                    command: CellReleaseCommand::Bootstrap { .. }
+                }
+            })
+        ));
+
+        let prepare = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "release",
+            "prepare",
+            "--expected-revision",
+            "7",
+            "--image",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ])
+        .unwrap();
+        assert!(matches!(
+            prepare.command,
+            Some(Command::Cells {
+                command: CellsCommand::Release {
+                    command: CellReleaseCommand::Prepare {
+                        expected_revision: 7,
+                        ..
+                    }
+                }
+            })
+        ));
+
+        let activate = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "release",
+            "activate",
+            "--expected-revision",
+            "8",
+            "--strategy",
+            "compatible",
+            "--minimum-eligible-nodes",
+            "2",
+        ])
+        .unwrap();
+        assert!(matches!(
+            activate.command,
+            Some(Command::Cells {
+                command: CellsCommand::Release {
+                    command: CellReleaseCommand::Activate {
+                        expected_revision: 8,
+                        strategy: ActivationStrategy::Compatible,
+                        minimum_eligible_nodes: Some(2),
+                    }
+                }
+            })
+        ));
+        assert!(
+            Arguments::try_parse_from([
+                "crab-http-server",
+                "--config",
+                "server.toml",
+                "cells",
+                "release",
+                "activate",
+                "--expected-revision",
+                "8",
+                "--strategy",
+                "compatible",
+            ])
+            .is_err()
+        );
+
+        let maintenance = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "release",
+            "activate",
+            "--expected-revision",
+            "8",
+            "--strategy",
+            "maintenance",
+        ])
+        .unwrap();
+        assert!(matches!(
+            maintenance.command,
+            Some(Command::Cells {
+                command: CellsCommand::Release {
+                    command: CellReleaseCommand::Activate {
+                        expected_revision: 8,
+                        strategy: ActivationStrategy::Maintenance,
+                        minimum_eligible_nodes: None,
+                    }
+                }
+            })
+        ));
+
+        let status = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "release",
+            "status",
+        ])
+        .unwrap();
+        assert!(matches!(
+            status.command,
+            Some(Command::Cells {
+                command: CellsCommand::Release {
+                    command: CellReleaseCommand::Status
+                }
+            })
+        ));
+
+        let migrations = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "release",
+            "migrations",
+            "--after",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--limit",
+            "25",
+        ])
+        .unwrap();
+        assert!(matches!(
+            migrations.command,
+            Some(Command::Cells {
+                command: CellsCommand::Release {
+                    command: CellReleaseCommand::Migrations {
+                        after: Some(after),
+                        limit: 25,
+                    }
+                }
+            }) if after == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
     }
 
     #[test]
@@ -272,6 +630,26 @@ mod tests {
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].subject, "alice-sub");
         assert_eq!(members[0].access, RepositoryAccess::Admin);
+    }
+
+    #[test]
+    fn hard_cut_rejects_the_removed_repository_import_command() {
+        assert!(
+            Arguments::try_parse_from([
+                "crab-http-server",
+                "--config",
+                "server.toml",
+                "cells",
+                "import-repository",
+                "--owner",
+                "team",
+                "--name",
+                "project",
+                "--operation",
+                "00000000-0000-0000-0000-000000000001",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

@@ -31,7 +31,7 @@ use object_store::{
     PutOptions,
 };
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crab_types::storage::StorageScope;
 
@@ -50,6 +50,43 @@ pub type ETag = object_store::UpdateVersion;
 /// Bounded-memory byte stream returned by object reads.
 pub type StorageByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'static>>;
 
+/// Re-openable bounded source for a retryable multipart upload.
+///
+/// Each whole-upload retry may read the same ranges again. Implementations must
+/// therefore keep the source immutable until this operation returns.
+#[async_trait::async_trait]
+pub trait MultipartUploadSource: Send + Sync {
+    /// Returns the complete source length.
+    async fn byte_len(&self) -> Result<u64>;
+
+    /// Reads exactly one source range without retaining prior ranges.
+    async fn read_exact(&self, offset: u64, length: usize) -> Result<Bytes>;
+}
+
+struct LocalFileUploadSource {
+    path: std::path::PathBuf,
+}
+
+#[async_trait::async_trait]
+impl MultipartUploadSource for LocalFileUploadSource {
+    async fn byte_len(&self) -> Result<u64> {
+        Ok(tokio::fs::metadata(&self.path).await?.len())
+    }
+
+    async fn read_exact(&self, offset: u64, length: usize) -> Result<Bytes> {
+        let mut file = tokio::fs::File::open(&self.path).await?;
+        file.seek(std::io::SeekFrom::Start(offset)).await?;
+        let mut bytes = vec![0; length];
+        file.read_exact(&mut bytes).await?;
+        Ok(Bytes::from(bytes))
+    }
+}
+
+fn next_cache_identity() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// CAS-aware facade over an `object_store::ObjectStore`.
 ///
 /// Cheap to clone: the inner store is held behind `Arc`, the retry
@@ -58,6 +95,7 @@ pub type StorageByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + '
 #[derive(Clone)]
 pub struct Store {
     inner: Arc<dyn ObjectStore>,
+    immutable_cache_identity: u64,
     retry: RetryPolicy,
     /// Stable bucket identity used for cross-scheme equality (same-
     /// bucket detection, safety rails). Defaults to
@@ -134,6 +172,7 @@ impl Store {
     pub fn new(inner: Arc<dyn ObjectStore>) -> Self {
         Self {
             inner,
+            immutable_cache_identity: next_cache_identity(),
             retry: RetryPolicy::DEFAULT,
             identity: BucketIdentity::local_unset(),
             target_identity: None,
@@ -157,6 +196,7 @@ impl Store {
     pub fn with_retry(inner: Arc<dyn ObjectStore>, retry: RetryPolicy) -> Self {
         Self {
             inner,
+            immutable_cache_identity: next_cache_identity(),
             retry,
             identity: BucketIdentity::local_unset(),
             target_identity: None,
@@ -488,6 +528,10 @@ impl Store {
     #[must_use]
     pub fn inner(&self) -> &Arc<dyn ObjectStore> {
         &self.inner
+    }
+
+    pub(crate) const fn immutable_cache_identity(&self) -> u64 {
+        self.immutable_cache_identity
     }
 
     /// Writes `bytes` at `path` iff nothing exists there yet.
@@ -1658,6 +1702,36 @@ impl Store {
         cancel: &tokio_util::sync::CancellationToken,
         on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
     ) -> Result<()> {
+        self.put_multipart_source_retry(
+            path,
+            Arc::new(LocalFileUploadSource {
+                path: file_path.to_owned(),
+            }),
+            size,
+            expected_hash,
+            part_size,
+            cancel,
+            on_part_done,
+        )
+        .await
+    }
+
+    /// Upload a re-openable bounded source, retrying the whole multipart upload.
+    ///
+    /// This is the filesystem-neutral counterpart to
+    /// [`Self::put_multipart_file_retry`]. It preserves the same hash, size,
+    /// abort and retry boundary while allowing callers with an injected
+    /// filesystem to supply ranges without materializing the complete object.
+    pub async fn put_multipart_source_retry(
+        &self,
+        path: &Path,
+        source: Arc<dyn MultipartUploadSource>,
+        size: u64,
+        expected_hash: [u8; 32],
+        part_size: usize,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
+    ) -> Result<()> {
         if part_size == 0 {
             return Err(StorageError::Internal(
                 "multipart part size must be greater than zero".to_owned(),
@@ -1667,14 +1741,14 @@ impl Store {
 
         let result = retry(&self.retry, || {
             let path = write_path.clone();
-            let file_path = file_path.to_owned();
+            let source = Arc::clone(&source);
             let cancel = cancel.clone();
             let inner = write_inner.clone();
             async move {
-                Self::put_multipart_file_once(
+                Self::put_multipart_source_once(
                     &inner,
                     &path,
-                    &file_path,
+                    source,
                     size,
                     expected_hash,
                     part_size,
@@ -2391,10 +2465,10 @@ impl Store {
         crate::multipart::complete_upload(&mut *upload, path).await
     }
 
-    async fn put_multipart_file_once(
+    async fn put_multipart_source_once(
         inner: &Arc<dyn ObjectStore>,
         path: &Path,
-        file_path: &std::path::Path,
+        source: Arc<dyn MultipartUploadSource>,
         size: u64,
         expected_hash: [u8; 32],
         part_size: usize,
@@ -2404,11 +2478,6 @@ impl Store {
         use futures_util::stream::{FuturesUnordered, StreamExt};
 
         const IN_FLIGHT_PARTS: usize = 4;
-
-        let mut upload = inner
-            .put_multipart(path)
-            .await
-            .map_err(|e| map_object_store_error(e, path.as_ref()))?;
 
         let abort_on = |mut upload: Box<dyn object_store::MultipartUpload>| async move {
             if let Err(e) = upload.abort().await {
@@ -2420,29 +2489,20 @@ impl Store {
             }
         };
 
-        let mut file = match tokio::fs::File::open(file_path).await {
-            Ok(file) => file,
-            Err(error) => {
-                abort_on(upload).await;
-                return Err(error.into());
-            }
-        };
-        let actual_size = match file.metadata().await {
-            Ok(metadata) => metadata.len(),
-            Err(error) => {
-                abort_on(upload).await;
-                return Err(error.into());
-            }
-        };
+        let actual_size = source.byte_len().await?;
         if actual_size != size {
-            abort_on(upload).await;
             return Err(StorageError::CorruptObject {
-                path: file_path.display().to_string(),
-                reason: format!("local file has {actual_size} bytes; upload expects {size}"),
+                path: path.to_string(),
+                reason: format!("multipart source has {actual_size} bytes; upload expects {size}"),
             });
         }
+        let mut upload = inner
+            .put_multipart(path)
+            .await
+            .map_err(|e| map_object_store_error(e, path.as_ref()))?;
         let mut hasher = blake3::Hasher::new();
         let mut remaining = size;
+        let mut offset = 0_u64;
         let mut pending = FuturesUnordered::new();
         while remaining > 0 {
             if cancel.is_cancelled() {
@@ -2470,17 +2530,30 @@ impl Store {
             }
 
             let want = std::cmp::min(part_size as u64, remaining) as usize;
-            let mut buf = vec![0u8; want];
-            if let Err(error) = file.read_exact(&mut buf).await {
-                abort_on(upload).await;
-                return Err(error.into());
-            }
-            hasher.update(&buf);
+            let bytes = match source.read_exact(offset, want).await {
+                Ok(bytes) if bytes.len() == want => bytes,
+                Ok(bytes) => {
+                    abort_on(upload).await;
+                    return Err(StorageError::CorruptObject {
+                        path: path.to_string(),
+                        reason: format!(
+                            "multipart source returned {} bytes for a {want}-byte range",
+                            bytes.len()
+                        ),
+                    });
+                }
+                Err(error) => {
+                    abort_on(upload).await;
+                    return Err(error);
+                }
+            };
+            hasher.update(&bytes);
             remaining -= want as u64;
+            offset += want as u64;
 
-            let bytes = want as u64;
-            let fut = upload.put_part(bytes::Bytes::from(buf).into());
-            pending.push(async move { (fut.await, bytes) });
+            let byte_count = want as u64;
+            let fut = upload.put_part(bytes.into());
+            pending.push(async move { (fut.await, byte_count) });
         }
 
         while let Some((res, bytes)) = pending.next().await {
@@ -2501,27 +2574,27 @@ impl Store {
         if actual_hash != expected_hash {
             abort_on(upload).await;
             return Err(StorageError::CorruptObject {
-                path: file_path.display().to_string(),
+                path: path.to_string(),
                 reason: format!(
-                    "local blake3 hash {} does not match expected {}",
+                    "multipart source blake3 hash {} does not match expected {}",
                     hex_lower(&actual_hash),
                     hex_lower(&expected_hash)
                 ),
             });
         }
-        let final_size = match file.metadata().await {
-            Ok(metadata) => metadata.len(),
+        let final_size = match source.byte_len().await {
+            Ok(size) => size,
             Err(error) => {
                 abort_on(upload).await;
-                return Err(error.into());
+                return Err(error);
             }
         };
         if final_size != size {
             abort_on(upload).await;
             return Err(StorageError::CorruptObject {
-                path: file_path.display().to_string(),
+                path: path.to_string(),
                 reason: format!(
-                    "local file changed during upload: expected {size} bytes, found {final_size}"
+                    "multipart source changed during upload: expected {size} bytes, found {final_size}"
                 ),
             });
         }
@@ -3699,6 +3772,62 @@ mod tests {
                 size: body.len() as u64,
             }]
         );
+    }
+
+    struct MemoryUploadSource {
+        bytes: Bytes,
+        largest_read: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl MultipartUploadSource for MemoryUploadSource {
+        async fn byte_len(&self) -> Result<u64> {
+            Ok(self.bytes.len() as u64)
+        }
+
+        async fn read_exact(&self, offset: u64, length: usize) -> Result<Bytes> {
+            self.largest_read
+                .fetch_max(length, std::sync::atomic::Ordering::SeqCst);
+            let start = usize::try_from(offset).map_err(|error| StorageError::ReadRejected {
+                source: Box::new(error),
+            })?;
+            let end = start
+                .checked_add(length)
+                .ok_or_else(|| StorageError::Internal("test source range overflow".to_owned()))?;
+            Ok(self.bytes.slice(start..end))
+        }
+    }
+
+    #[tokio::test]
+    async fn multipart_source_is_range_bounded_and_hash_verified() {
+        let store = memory_store();
+        let path = Path::from("blobs/injected-source");
+        let body = Bytes::from(vec![7; 65_537]);
+        let largest_read = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let source: Arc<dyn MultipartUploadSource> = Arc::new(MemoryUploadSource {
+            bytes: body.clone(),
+            largest_read: Arc::clone(&largest_read),
+        });
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        store
+            .put_multipart_source_retry(
+                &path,
+                source,
+                body.len() as u64,
+                *blake3::hash(&body).as_bytes(),
+                4_096,
+                &cancel,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            largest_read.load(std::sync::atomic::Ordering::SeqCst),
+            4_096
+        );
+        assert_eq!(store.get_with_etag(&path).await.unwrap().0, body);
     }
 
     #[tokio::test]

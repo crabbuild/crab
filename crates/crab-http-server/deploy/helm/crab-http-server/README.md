@@ -269,6 +269,18 @@ the verified package returned by
 downloaded file avoids resolving a mutable registry version between
 verification and rollout.
 
+Every pod first runs the same immutable image as a `cell-release-bootstrap` init
+container. On a new storage root, concurrent pods converge on one deterministic
+first-install operation and complete it. On an upgrade, prepare the new compiled
+release before changing `image.digest`; the init container validates the exact
+prepared/activating candidate but does not complete the operator-owned
+activation. After the rollout admission checks, execute the immutable image's
+`cells release activate --strategy compatible --minimum-eligible-nodes 2`
+command with the prepared revision. Keep this value aligned with the intended
+live quorum; the command counts current signed advertisements rather than trusting
+the Deployment replica field. A different desired descriptor or image keeps the
+pod unstarted instead of silently replacing release state.
+
 The Deployment becomes ready only after a pod can read and validate the durable
 catalog and open the current Git view of every discovered repository. Confirm
 the rollout and inspect the catalog:
@@ -317,10 +329,13 @@ kubectl --namespace crab exec --stdin deployment/crab-http-server -- \
 
 Authenticated repository creation and adoption fail unless the supplied
 membership contains at least one administrator; this prevents creating a
-repository that nobody can manage or open. Every healthy replica discovers the
-new record on its next five-second catalog poll and routes it after
-materialization succeeds. Use `repository adopt` instead when the target prefix
-already contains a canonical Crab repository.
+repository that nobody can manage or open. Create publishes and verifies the
+initial SQLite/LTX root before marking the record `cell_ready`. Every healthy
+replica discovers that ready record on its next five-second catalog poll. A
+pending record fails the refresh readiness gate and is never routed. Use
+`repository adopt` when the target prefix already contains a canonical Crab Git
+repository; it creates a new empty application Cell and does not import old
+collaboration data.
 
 Use the same private-file pattern to replace membership later:
 

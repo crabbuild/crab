@@ -126,6 +126,13 @@ they are not repeated in every pod's configuration.
 listen = "127.0.0.1:8788"
 management_listen = "127.0.0.1:8789"
 
+[cells]
+data_dir = "/var/lib/crab/cells"
+peer_advertise = "https://localhost:8789"
+peer_certificate = "/run/secrets/crab-peer/tls.crt"
+peer_private_key = "/run/secrets/crab-peer/tls.key"
+peer_ca = "/run/secrets/crab-peer/ca.crt"
+
 [storage]
 url = "s3://your-bucket/repositories"
 ```
@@ -175,9 +182,12 @@ Do not put storage credentials in `server.toml`, source files, logs, or frontend
 
 ### Create or adopt repositories
 
-Create initializes the canonical repository first and then publishes its
-catalog record with compare-and-swap. Adopt validates an existing layout and
-manifest and never converts arbitrary object prefixes.
+Create initializes the canonical Git repository, publishes an
+`empty_cell_pending` catalog record, publishes the repository application's
+initial SQLite/LTX root, then marks the record `cell_ready`. Exact retries resume
+the same catalog UUID. Adopt validates an existing layout and manifest, records
+`empty_cell_pending`, publishes a new empty application Cell and never converts
+arbitrary object prefixes. Old collaboration application data is not imported.
 
 ```sh
 SERVER="$HOME/Workspace/crabbuild-target/crab-http-server-dev/release/crab-http-server"
@@ -316,8 +326,10 @@ docker run --rm --name crab-http-server \
 ```
 
 Run `repository create` or `repository adopt` as a one-shot container with the
-same mounts before or after starting the service. Catalog changes are discovered
-without restarting the long-running container.
+same mounts. Creation and adoption initialize a new empty Cell before returning;
+adoption intentionally does not preserve old collaboration data. A running
+server rejects changed catalog versions containing pending or rootless repositories and marks
+readiness unhealthy; it swaps in ready changes without a restart.
 
 The binary's `healthcheck` command calls `/readyz` on the management listener.
 `SIGTERM` and Ctrl-C start the same graceful drain. Repository, catalog,
@@ -619,6 +631,13 @@ Use the provider's exact issuer string, including its path and trailing-slash po
 ```toml
 listen = "0.0.0.0:8788"
 management_listen = "0.0.0.0:8789"
+
+[cells]
+data_dir = "/var/lib/crab/cells"
+peer_advertise = "https://node-1.internal.example:8789"
+peer_certificate = "/run/secrets/crab-peer/tls.crt"
+peer_private_key = "/run/secrets/crab-peer/tls.key"
+peer_ca = "/run/secrets/crab-peer/ca.crt"
 
 [storage]
 url = "s3://your-bucket/repositories"
@@ -1029,7 +1048,10 @@ Create the temporary directory first. Replace the test name with `receive_faults
 
 ## Issues, pull requests and reviews
 
-Application collaboration data uses versioned JSON documents under the repository prefix. It does not mutate Git refs unless a pull request merge publishes a ref update.
+Issue, issue-comment and label state use one repository SQLite Cell whose committed
+LTX roots are authoritative in object storage. Remaining collaboration domains
+still use versioned JSON documents under the repository prefix. Collaboration
+does not mutate Git refs unless a pull request merge publishes a ref update.
 
 ### Use the collaboration route families
 
@@ -1110,23 +1132,27 @@ Stored assignments use stable IDs or subjects. Label renames appear immediately.
 
 ### Understand pagination and storage
 
-Issue, pull, comment, and review lists default to 30 items and accept 1 to 50. Each page scans at most 200 allocated numbers. A filtered page can be empty and still return `next`; clients must follow that cursor.
+Issue, pull, comment, and review lists default to 30 items and accept 1 to 50. Each page scans at most 200 allocated numbers. A filtered page can be empty and still return `next`; clients must follow that cursor. Label lists return the complete bounded catalog of at most 500 active labels.
 
 Titles accept 1 to 256 characters. Markdown bodies accept 64 KiB. Collaboration requests use an 80 KiB body limit, eight concurrent application slots, and a 30-second handler deadline.
 
-Data uses these versioned roots:
+Serving data currently uses these roots:
 
 | Root | Content |
 | --- | --- |
-| `app/v1/issues` | Issues, comments, counters, and request reservations |
+| Repository Cell/LTX namespace | Issues, issue comments, labels, label deletion tombstones, commit statuses, versioned check runs, branch protections, repository lifecycle, counters, and permanent product submission ledgers |
+| `app/v1/issues` | Retired issue documents; serving ignores them and operators delete them at hard cutover |
 | `app/v1/pulls` | Pulls, comments, reviews, merge state, counters, and reservations |
-| `app/v1/labels` | Label catalog, claims, reservations, and tombstones |
+| `app/v1/labels` | Retired Label documents; serving ignores them and operators delete them at hard cutover |
 | `app/v1/releases` | Releases, tags, assets, reservations, and tombstones |
-| `app/v1/statuses` | Commit statuses and immutable requests |
-| `app/v1/check-runs` | Check catalogs, versioned output, and requests |
-| `app/v1/settings` | Branch protection and repository lifecycle records |
+| `app/v1/statuses` | Retired status documents; serving ignores them and operators delete them at hard cutover |
+| `app/v1/check-runs` | Retired check-run documents; serving ignores them and operators delete them at hard cutover |
+| `app/v1/settings` | Retired policy documents; serving ignores them and operators delete them at hard cutover |
 
-Every JSON document uses `schema_version: 1`; unknown versions fail closed. Preserve the complete `app/v1` tree in backups. Restoring visible documents without counters, claims, and request reservations loses numbering and retry guarantees.
+Every remaining JSON document uses `schema_version: 1`; unknown versions fail
+closed. Preserve the complete application JSON and Cell/LTX namespaces in
+backups. Restoring visible records without counters, claims, request ledgers,
+control and immutable roots loses numbering, ownership and retry guarantees.
 
 Discussion deletion, moderation, edit history, activity feeds, and notifications remain unimplemented. Backup and restore qualification remains pending.
 
@@ -1258,7 +1284,7 @@ For an authenticated server, add `--cookies /path/to/private_cookies.txt` with a
 | Native receive, changed-path validation, and recovery | `src/receive.rs`, `src/receive/publish.rs`, `crab-git::receive_plan` | `src/receive_tests.rs` and `src/receive_fault_tests.rs` |
 | LFS transfer, range-resume, file-lock, and authoritative receive contracts | `src/lfs.rs`, `src/receive/publish.rs` | `src/lfs_tests.rs`, `src/receive_tests.rs`, `src/auth_tests/git_tokens.rs`, `tests/qualify_lfs_range_resume.sh`, and `tests/qualify_lfs_locking.sh` |
 | Browser Git writes and settings | `src/contents.rs`, `src/branches.rs` | `src/auth_tests/branches.rs` |
-| Issues, labels, and assignees | `src/issues.rs`, `src/labels.rs`, `src/assignees.rs` | Scoped authenticated tests |
+| Issues, labels, and assignees | `src/issues.rs`, `src/cells/repository.rs`, `src/cells/router.rs`, `src/labels.rs`, `src/assignees.rs` | Scoped authenticated Cell publication and source-loss tests |
 | Pulls, reviews, checks, and merge | `src/pulls/`, `src/statuses.rs`, `src/checks.rs` | `src/pulls_tests.rs` and `src/auth_tests/pulls.rs` |
 | Releases and assets | `src/releases.rs` | `src/auth_tests/releases.rs` |
 | Container and multi-cloud deployment contracts | `deploy/Dockerfile`, `deploy/helm/crab-http-server`, `deploy/terraform` | `.github/workflows/http-server-container.yml`, `.github/workflows/http-server-release.yml`, `.github/workflows/http-server-kubernetes-live.yml`, the Helm storage test, and `deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh` |
