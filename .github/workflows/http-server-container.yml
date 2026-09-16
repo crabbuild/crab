@@ -811,7 +811,17 @@ jobs:
             '.version == 2 and
              .owner_loss.session_before != .owner_loss.session_after and
              .owner_loss.epoch_after > .owner_loss.epoch_before and
+             (.owner_loss.root_before | keys | sort) ==
+               ["checksum", "commit_sequence", "digest", "txid"] and
+             (.owner_loss.root_before.digest | test("^[0-9a-f]{64}$")) and
+             .owner_loss.root_before.txid > 0 and
+             (.owner_loss.root_before.checksum | type) == "number" and
+             .owner_loss.root_before.commit_sequence > 0 and
              .owner_loss.root_after_restore == .owner_loss.root_before and
+             (.owner_loss.root_continued | keys | sort) ==
+               ["checksum", "commit_sequence", "digest", "txid"] and
+             (.owner_loss.root_continued.digest | test("^[0-9a-f]{64}$")) and
+             (.owner_loss.root_continued.checksum | type) == "number" and
              .owner_loss.root_continued.digest != .owner_loss.root_before.digest and
              .owner_loss.root_continued.txid > .owner_loss.root_before.txid and
              .owner_loss.root_continued.commit_sequence >
