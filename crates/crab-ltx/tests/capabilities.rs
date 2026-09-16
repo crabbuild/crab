@@ -1,12 +1,75 @@
 #![cfg(feature = "replica")]
 
 use crab_ltx::{
-    CaptureBatch, CompactionSchedule, Limits, ManagedDb, Replica,
+    CaptureBatch, CompactionSchedule, DiskBudget, Host, Limits, ManagedDb, Replica,
     bundle::{Bundle, BundleEntry},
 };
 use crab_storage::{Store, StoreLayout};
-use object_store::memory::InMemory;
-use std::{sync::Arc, time::Duration};
+use object_store::{
+    memory::InMemory,
+    throttle::{ThrottleConfig, ThrottledStore},
+};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sparse_page_materialization_obeys_shared_local_disk_admission() {
+    let (directory, batches) = captures();
+    let budget = DiskBudget::new(4095);
+    let replica = Replica::new(
+        StoreLayout::new(Store::new(Arc::new(InMemory::new())), "paged-disk".into()),
+        "epoch",
+        Limits::default(),
+    )
+    .unwrap()
+    .with_host(Host::default().with_local_disk_budget(budget.clone()));
+    let head = replica.replicate(&batches[0], None).await.unwrap();
+    let paged = replica.paged(&head).await.unwrap();
+    assert_eq!(paged.page_size(), 4096);
+
+    let result = paged.open_writable(&directory.path().join("disk-limited.sqlite"));
+
+    assert!(matches!(
+        result,
+        Err(crab_ltx::CrabError::Limit("local disk bytes"))
+    ));
+    assert_eq!(budget.used(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sparse_sqlite_fault_honors_its_callers_deadline() {
+    let (_directory, batches) = captures();
+    let store = Arc::new(ThrottledStore::new(
+        InMemory::new(),
+        ThrottleConfig::default(),
+    ));
+    let replica = Replica::new(
+        StoreLayout::new(Store::new(store.clone()), "paged-deadline".into()),
+        "epoch",
+        Limits::default(),
+    )
+    .unwrap();
+    let head = replica.replicate(&batches[0], None).await.unwrap();
+    let paged = replica.paged(&head).await.unwrap();
+    store.config_mut(|config| config.wait_get_per_call = Duration::from_secs(1));
+
+    let started = Instant::now();
+    let error = tokio::task::spawn_blocking(move || {
+        crab_ltx::with_paged_io_deadline(Instant::now() + Duration::from_millis(20), || match paged
+            .open_sqlite()
+        {
+            Ok(_) => panic!("delayed page read must exceed the scoped deadline"),
+            Err(error) => error,
+        })
+    })
+    .await
+    .unwrap();
+
+    assert!(matches!(error, crab_ltx::CrabError::Deadline));
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn idle_paged_worker_keeps_provider_runtime_tasks_alive() {

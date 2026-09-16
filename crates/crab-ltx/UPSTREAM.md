@@ -115,11 +115,28 @@ Paths in the first column are relative to upstream `crates/ltx/`.
     and local pruning; named process-lifetime SQLite base VFS; independently
     started/joined I/O workers. Exact local resume remains runtime-free unless
     the optional remote feature is enabled. No local listing-based authority.
+14. Every retained managed SQLite connection uses a 64 KiB page-cache target.
+    The three-connection total is exported for the embedding runtime's active-
+    database admission instead of relying on SQLite's multi-megabyte default.
+15. Full restore, resume, bundle and compaction jobs expose an injectable
+    scratch monitor. Crab remeasures actual free space after process-wide
+    scratch admission and rejects pressure before remote body downloads.
 
 Still omitted: duplicate provider/URL construction, epoch election, listing-based
-discovery, complete virtual-filesystem simulation, B-tree prediction heuristics,
-node-wide shared-bundle aggregation, node-log and cell-runtime integration. Retention planning,
-leases, permission checks and durable HTTP responses remain server policy.
+discovery, complete virtual-filesystem simulation and B-tree prediction heuristics.
+Native and canonical rows from shared multi-Cell bundles now use Crab's immutable
+Cell root and authenticated radix-directory format. Exact range/full compaction
+produces representation-only prepared roots, and the Cell VFS activates lazily
+through the runtime/server integration. Directory metadata reads use Crab's
+process-wide bounded verified-node cache, and sparse page faults coalesce
+adjacent frames into bounded range reads. Exact Cell roots can stream a verified
+database through exclusive scratch and no-clobber installation without a whole-
+database buffer. Node-wide bundle scheduling remains service policy. Full
+restore/resume and bounded external-merge Cell compaction now use byte-weighted
+scratch-disk admission supplied by the embedding service; active WAL,
+pending-cut, Git and LFS disk accounting remain service policy.
+Retention planning, leases, permission checks and durable HTTP responses remain
+server policy.
 The new remote modules are focused Crab adaptations of the referenced designs,
 not unmodified copies of those entire upstream files.
 

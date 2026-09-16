@@ -1,7 +1,7 @@
 //! Writable sparse-file adaptation of Celld paged_vfs.rs; see UPSTREAM.md.
 //! A static VFS and per-open Arc ownership keep SQLite discovery memory-safe.
 
-use crate::{CrabError, PagedDatabase, Result, paged_io::Io};
+use crate::{CrabError, Result, paged_io::Io};
 use rusqlite::{Connection, ffi};
 use std::{
     collections::HashMap,
@@ -36,6 +36,7 @@ struct App {
     io: Io,
     page_size: u32,
     count: u32,
+    local_disk: crate::DiskReservation,
     state: Mutex<State>,
     error: Mutex<Option<CrabError>>,
 }
@@ -53,7 +54,7 @@ pub(crate) struct Registration {
 }
 
 impl Registration {
-    pub(crate) fn new(database: PagedDatabase, path: &Path) -> Result<Self> {
+    pub(crate) fn new(database: crate::paged_io::Database, path: &Path) -> Result<Self> {
         let host = database.host();
         let vfs = register_for(host.sqlite_vfs.as_deref())?;
         let parent = path
@@ -88,6 +89,7 @@ impl Registration {
             io: Io::new(database)?,
             page_size,
             count,
+            local_disk: host.reserve_local_disk(0)?,
             state: Mutex::new(State {
                 present: vec![false; count as usize],
                 ceiling: count,
@@ -218,6 +220,7 @@ unsafe fn hydrate(file: *mut File, first: u32, last: u32) -> Result<()> {
             if bytes.len() != app.page_size as usize {
                 return Err(CrabError::LTXCorrupted);
             }
+            app.local_disk.try_grow(u64::from(app.page_size))?;
             let base = (*file).base;
             let write = (*(*base).pMethods)
                 .xWrite
@@ -338,6 +341,17 @@ unsafe extern "C" fn x_write(
                     .state
                     .lock()
                     .map_err(|_| CrabError::InvalidState("sparse state poisoned"))?;
+                let missing = (first..=last.min(app.count))
+                    .filter(|page| {
+                        *page != crate::ltx::lock_pgno(app.page_size)
+                            && !state.present[*page as usize - 1]
+                    })
+                    .count() as u64;
+                app.local_disk.try_grow(
+                    missing
+                        .checked_mul(u64::from(app.page_size))
+                        .ok_or(CrabError::Limit("local disk bytes"))?,
+                )?;
                 let write = (*(*base).pMethods)
                     .xWrite
                     .ok_or(CrabError::InvalidState("base VFS lacks xWrite"))?;

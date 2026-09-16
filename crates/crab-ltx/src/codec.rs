@@ -2,13 +2,15 @@
 // Apache-2.0; see LICENSE and UPSTREAM.md. Modified by Crab contributors.
 
 use crate::CHECKSUM_FLAG;
+use crate::environment::FileIo;
 use crate::error::{CrabError, Result};
 use crate::ltx::{
     CHECKSUM_SIZE, Crc64, HEADER_SIZE, Header, PAGE_HEADER_FLAG_SIZE, PAGE_HEADER_SIZE, PageHeader,
     TRAILER_SIZE, Trailer, checksum_page, lock_pgno,
 };
-use std::collections::BTreeMap;
 use std::io::{Read, Write};
+
+const INDEX_COPY_BYTES: usize = 64 << 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DecoderState {
@@ -194,7 +196,7 @@ pub(crate) struct Encoder<W> {
     pub(crate) header: Header,
     pub(crate) trailer: Trailer,
     hash: Crc64,
-    index: BTreeMap<u32, (u64, u64)>,
+    index: EncoderIndex,
     compressor: crate::lz4_block::Compressor,
     bytes_written: u64,
     previous_page_number: u32,
@@ -202,24 +204,92 @@ pub(crate) struct Encoder<W> {
     closed: bool,
 }
 
-impl<W: Write> Encoder<W> {
-    pub(crate) fn new_block(writer: W) -> Self {
-        Self::new(writer)
+#[cfg_attr(not(feature = "replica"), expect(dead_code))]
+pub(crate) struct EncodedPage {
+    pub(crate) page: u32,
+    pub(crate) offset: u64,
+    pub(crate) size: u64,
+    pub(crate) frame_hash: [u8; 32],
+    pub(crate) checksum: u64,
+}
+
+#[cfg_attr(all(not(feature = "replica"), not(test)), expect(dead_code))]
+enum EncoderIndex {
+    Memory(Vec<u8>),
+    File(Box<dyn FileIo>),
+}
+
+impl EncoderIndex {
+    fn write_entry(&mut self, page: u32, offset: u64, size: u64) -> Result<()> {
+        let mut bytes = Vec::with_capacity(30);
+        write_uvarint(&mut bytes, u64::from(page));
+        write_uvarint(&mut bytes, offset);
+        write_uvarint(&mut bytes, size);
+        self.write_all(&bytes)
     }
 
-    fn new(writer: W) -> Self {
+    fn finish(&mut self) -> Result<()> {
+        self.write_all(&[0])
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
+        match self {
+            Self::Memory(index) => index.extend_from_slice(bytes),
+            Self::File(index) => index.write_all(bytes)?,
+        }
+        Ok(())
+    }
+
+    fn len(&self) -> Result<u64> {
+        match self {
+            Self::Memory(index) => Ok(index.len() as u64),
+            Self::File(index) => Ok(index.file_len()?),
+        }
+    }
+
+    fn read_exact_at(&mut self, offset: u64, length: usize) -> Result<Vec<u8>> {
+        match self {
+            Self::Memory(index) => {
+                let start = usize::try_from(offset).map_err(|_| CrabError::LTXCorrupted)?;
+                let end = start.checked_add(length).ok_or(CrabError::LTXCorrupted)?;
+                Ok(index
+                    .get(start..end)
+                    .ok_or(CrabError::LTXCorrupted)?
+                    .to_vec())
+            }
+            Self::File(index) => Ok(index.read_exact_at(offset, length)?),
+        }
+    }
+}
+
+impl<W: Write> Encoder<W> {
+    pub(crate) fn new_block(writer: W) -> Self {
+        Self::new(writer, EncoderIndex::Memory(Vec::new()))
+    }
+
+    #[cfg_attr(all(not(feature = "replica"), not(test)), expect(dead_code))]
+    pub(crate) fn new_block_spooled(writer: W, index: Box<dyn FileIo>) -> Self {
+        Self::new(writer, EncoderIndex::File(index))
+    }
+
+    fn new(writer: W, index: EncoderIndex) -> Self {
         Self {
             writer,
             header: Header::default(),
             trailer: Trailer::default(),
             hash: Crc64::new(),
-            index: BTreeMap::new(),
+            index,
             compressor: crate::lz4_block::Compressor::default(),
             bytes_written: 0,
             previous_page_number: 0,
             header_written: false,
             closed: false,
         }
+    }
+
+    #[cfg_attr(all(not(feature = "replica"), not(test)), expect(dead_code))]
+    pub(crate) fn into_writer(self) -> W {
+        self.writer
     }
 
     pub(crate) fn encode_header(&mut self, header: Header) -> Result<()> {
@@ -234,7 +304,7 @@ impl<W: Write> Encoder<W> {
         Ok(())
     }
 
-    pub(crate) fn encode_page(&mut self, mut page: PageHeader, data: &[u8]) -> Result<()> {
+    pub(crate) fn encode_page(&mut self, mut page: PageHeader, data: &[u8]) -> Result<EncodedPage> {
         if !self.header_written
             || self.closed
             || page.pgno > self.header.commit
@@ -267,7 +337,8 @@ impl<W: Write> Encoder<W> {
         let offset = self.bytes_written;
         let compressed = self.compressor.compress(data)?;
         page.flags |= PAGE_HEADER_FLAG_SIZE;
-        self.write_hashed(&page.marshal())?;
+        let header = page.marshal();
+        self.write_hashed(&header)?;
         let size = u32::try_from(compressed.len())
             .map_err(|error| CrabError::Other(Box::new(error)))?
             .to_be_bytes();
@@ -277,9 +348,19 @@ impl<W: Write> Encoder<W> {
         self.hash.update(data);
 
         self.previous_page_number = page.pgno;
-        self.index
-            .insert(page.pgno, (offset, self.bytes_written - offset));
-        Ok(())
+        let frame_size = self.bytes_written - offset;
+        self.index.write_entry(page.pgno, offset, frame_size)?;
+        let mut frame_hash = blake3::Hasher::new();
+        frame_hash.update(&header);
+        frame_hash.update(&size);
+        frame_hash.update(&compressed);
+        Ok(EncodedPage {
+            page: page.pgno,
+            offset,
+            size: frame_size,
+            frame_hash: *frame_hash.finalize().as_bytes(),
+            checksum: checksum_page(page.pgno, data),
+        })
     }
 
     pub(crate) fn close(&mut self, post_apply_checksum: u64) -> Result<()> {
@@ -289,14 +370,16 @@ impl<W: Write> Encoder<W> {
 
         self.write_hashed(&[0; PAGE_HEADER_SIZE])?;
         let index_offset = self.bytes_written;
-        let mut index_bytes = Vec::new();
-        for (&page_number, &(offset, size)) in &self.index {
-            write_uvarint(&mut index_bytes, page_number as u64);
-            write_uvarint(&mut index_bytes, offset);
-            write_uvarint(&mut index_bytes, size);
+        self.index.finish()?;
+        let index_length = self.index.len()?;
+        let mut copied = 0_u64;
+        while copied < index_length {
+            let length = usize::try_from((index_length - copied).min(INDEX_COPY_BYTES as u64))
+                .map_err(|_| CrabError::LTXCorrupted)?;
+            let bytes = self.index.read_exact_at(copied, length)?;
+            self.write_hashed(&bytes)?;
+            copied += length as u64;
         }
-        write_uvarint(&mut index_bytes, 0);
-        self.write_hashed(&index_bytes)?;
         self.write_hashed(&(self.bytes_written - index_offset).to_be_bytes())?;
 
         self.trailer.post_apply_checksum = post_apply_checksum;
@@ -379,5 +462,56 @@ impl<R: Read> Read for CountingReader<R> {
         let n = self.inner.read(bytes)?;
         self.bytes += n as u64;
         Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Txid, ltx};
+
+    #[test]
+    fn file_spooled_index_matches_in_memory_encoder_bytes() {
+        let header = ltx::Header {
+            version: ltx::VERSION,
+            page_size: 4_096,
+            commit: 2,
+            min_txid: Txid(1),
+            max_txid: Txid(1),
+            ..ltx::Header::default()
+        };
+        let pages = [(1, vec![1; 4_096]), (2, vec![2; 4_096])];
+        let checksum = pages.iter().fold(CHECKSUM_FLAG, |checksum, (page, data)| {
+            CHECKSUM_FLAG | (checksum ^ ltx::checksum_page(*page, data))
+        });
+        let encode = |mut encoder: Encoder<Vec<u8>>| {
+            encoder.encode_header(header).unwrap();
+            for (page, data) in &pages {
+                encoder
+                    .encode_page(
+                        ltx::PageHeader {
+                            pgno: *page,
+                            flags: 0,
+                        },
+                        data,
+                    )
+                    .unwrap();
+            }
+            encoder.close(checksum).unwrap();
+            encoder.into_writer()
+        };
+        let expected = encode(Encoder::new_block(Vec::new()));
+        let directory = tempfile::TempDir::new().unwrap();
+        let index_path = directory.path().join("index");
+        let index = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(index_path)
+            .unwrap();
+        let actual = encode(Encoder::new_block_spooled(Vec::new(), Box::new(index)));
+
+        assert_eq!(actual, expected);
+        ltx::decode_file(&actual).unwrap();
     }
 }

@@ -9,8 +9,8 @@ storage, deployment, ownership, cancellation, and recovery boundaries.
 > CAS repository catalog, shared identity state, dynamic replica refresh,
 > private probes and bounded Prometheus metrics, a local Compose profile, and
 > hardened Helm profiles for EKS/GKE/AKS. The chart includes a fresh-workload
-> catalog test, and one portable live gate can exercise two replicas and a rolling
-> replacement. Container CI also exercises one
+> catalog test, and one portable live gate can exercise three replicas and a
+> rolling replacement. Container CI also exercises one
 > abrupt native receive and an isolated complete-root cold restore. The ECS
 > Fargate profile cannot preserve the full shutdown budget. Static artifacts
 > and local RustFS do not constitute live cloud qualification. Additional
@@ -19,9 +19,12 @@ storage, deployment, ownership, cancellation, and recovery boundaries.
 
 Use [the HTTP server reference](REFERENCE.md#native-git-push) for operator commands and route limits. Use this document when changing receive, publication, coordination, or recovery code.
 
-The [next-generation architecture proposal](next-architecture/README.md) designs
+The [next-generation architecture](next-architecture/README.md) designs
 per-repository SQLite/LTX application storage, owner routing and Kubernetes
-failover. Its proposed contracts do not describe the current runtime.
+failover. The current runtime implements its release/catalog boundary, private
+peer transport, explicit repository Cell initialization, exact-root restore and
+the issue/comment route slice; the linked delivery matrix distinguishes those
+surfaces from remaining target contracts.
 
 ## Read the design by responsibility
 
@@ -102,7 +105,7 @@ rules.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "version": 42,
   "repositories": [
     {
@@ -111,6 +114,7 @@ rules.
       "name": "service",
       "prefix": "team/service",
       "placement_generation": 1,
+      "application": "cell_ready",
       "description": "Production service",
       "members": [],
       "protected_branches": []
@@ -122,7 +126,9 @@ rules.
 Every mutation reads the document with its provider CAS token, validates the
 whole next document, sorts it deterministically, increments `version`, and uses
 conditional create or update. A state conflict restarts the bounded loop. Names
-are unique ignoring case; prefixes and IDs are exactly unique.
+are unique ignoring case; prefixes and IDs are exactly unique. Version 2 is
+mandatory and accepts only `empty_cell_pending` or `cell_ready`; version 1 is
+rejected at the forward-only hard cut instead of being upgraded or imported.
 
 ### Create and adopt without scanning
 
@@ -131,18 +137,27 @@ sequenceDiagram
     participant O as Operator CLI
     participant C as Catalog store
     participant R as Repository prefix
+    participant A as Repository application Cell
 
     O->>R: create canonical layout + generation-0 manifest
     O->>R: read layout and manifest back
-    O->>C: CAS insert catalog record
-    C-->>O: stable record or conflict
+    O->>C: CAS insert empty_cell_pending record
+    O->>A: provision, bootstrap SQLite, publish LTX root
+    O->>A: restore UUID and drain owner to idle
+    O->>C: CAS state to cell_ready
+    C-->>O: ready record or resumable failure
 ```
 
 `repository create` is idempotent for the same case-insensitive name and exact
-prefix. A catalog conflict can leave initialized but undiscoverable objects;
-this is safe and recoverable with `repository adopt`. It never leaves a catalog
-record pointing at an unvalidated repository. Adopt performs only the two
-canonical metadata reads before the same CAS insertion.
+prefix. A catalog conflict can leave initialized but undiscoverable Git objects;
+this is safe and recoverable with `repository adopt`. Once the pending record is
+published, exact retries retain its UUID, restore and verify the authoritative
+SQLite root, and complete the ready-state CAS. The server rejects pending records
+at startup and catalog refresh, so a partial initialization is never routable.
+Adopt performs the two canonical Git metadata reads, inserts an
+`empty_cell_pending` record and initializes a new empty application Cell through
+the same publication and verification path as create. Old application JSON is
+not read or preserved.
 
 For an authenticated deployment, the administration CLI requires an initial
 administrator before either operation reaches storage. Membership can stream
@@ -275,7 +290,7 @@ to converge, then gives Crab its complete ten-minute drain budget. The live
 gate checks provider placement, the admitted EKS Pod Identity, GKE Workload
 Identity Federation, or AKS Workload ID contract on every original and
 replacement pod, the signed chart version, every pod's readiness, public OIDC
-initiation, direct token use against two replicas, cross-replica Git and LFS,
+initiation, direct token use against three replicas, cross-replica Git and LFS,
 lock-owner publication, uninterrupted reads during rollout, and byte-identical
 state after replacement. Its JSON receipt binds the evidence to the provider,
 immutable image and chart, workload identity mechanism and ServiceAccount,
@@ -307,9 +322,12 @@ fixable HIGH or CRITICAL vulnerabilities before publication. Existing image
 tags and chart versions fail closed instead of being replaced.
 
 ECS cannot mount Secrets Manager values as files, so its task entrypoint writes
-three protected files to disposable scratch, unsets the injected environment
-variables, and execs the same binary. Repository, catalog, and session state
-never depend on that scratch volume.
+the HTTP configuration, OIDC secret, session key, and three peer mTLS files to
+disposable scratch, unsets the injected environment variables, and execs the
+same binary. Each task discovers its task-scoped `awsvpc` address through the fixed
+task-local ECS metadata endpoint and substitutes only the configured peer
+advertise host. Repository, catalog, and session state never depend on that
+scratch volume.
 
 Fargate limits container shutdown to 120 seconds. That limit is shorter than Crab's five-minute Git and LFS budgets and ten-minute archive budget. Treat the task definition as evaluation evidence until abrupt-crash qualification proves safe replacement outcomes.
 

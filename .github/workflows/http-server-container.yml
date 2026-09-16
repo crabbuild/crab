@@ -53,6 +53,23 @@ jobs:
           done
 
           jq empty crates/crab-http-server/deploy/ecs/task-definition.example.json
+          jq --exit-status '
+            .containerDefinitions[0].command[0]
+              | contains("cells release bootstrap --image \"$CRAB_HTTP_SERVER_RELEASE_IMAGE\"") and
+                contains("--peer-advertise-host-from-ecs-metadata") and
+                contains("unset CRAB_HTTP_CONFIG CRAB_OIDC_CLIENT_SECRET CRAB_STATE_KEY CRAB_PEER_CERTIFICATE CRAB_PEER_PRIVATE_KEY CRAB_PEER_CA")
+          ' crates/crab-http-server/deploy/ecs/task-definition.example.json >/dev/null
+          jq --exit-status '
+            [.containerDefinitions[0].environment[]
+              | select(.name == "CRAB_HTTP_SERVER_RELEASE_IMAGE")]
+              | length == 1
+          ' crates/crab-http-server/deploy/ecs/task-definition.example.json >/dev/null
+          jq --exit-status '
+            [.containerDefinitions[0].secrets[].name] as $names |
+            (["CRAB_HTTP_CONFIG", "CRAB_OIDC_CLIENT_SECRET", "CRAB_STATE_KEY",
+              "CRAB_PEER_CERTIFICATE", "CRAB_PEER_PRIVATE_KEY", "CRAB_PEER_CA"]
+             | all(. as $name | $names | index($name)))
+          ' crates/crab-http-server/deploy/ecs/task-definition.example.json >/dev/null
           docker compose --file crates/crab-http-server/deploy/compose.yaml config --quiet
           release_manifest="${RUNNER_TEMP}/crab-http-server-release.json"
           release_manifest_generator=crates/crab-http-server/deploy/generate-release-manifest.sh
@@ -117,6 +134,7 @@ jobs:
             CRAB_HTTP_SERVER_EXPECTED_CHART="$immutable_chart" \
             CRAB_HTTP_SERVER_EXPECTED_IMAGE=crab-http-server:mutable \
             CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true \
+            CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true \
             bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
               eks crab crab-http-server https://git.example.com \
               qualification repository "${RUNNER_TEMP}/invalid-evidence.json" \
@@ -131,6 +149,7 @@ jobs:
             CRAB_HTTP_SERVER_EXPECTED_CHART=mutable-chart \
             CRAB_HTTP_SERVER_EXPECTED_IMAGE="$immutable_image" \
             CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true \
+            CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true \
             bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
               eks crab crab-http-server https://git.example.com \
               qualification repository "${RUNNER_TEMP}/invalid-evidence.json" \
@@ -146,6 +165,7 @@ jobs:
             CRAB_HTTP_SERVER_RELEASE_TAG=invalid \
             CRAB_HTTP_SERVER_SOURCE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
             CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true \
+            CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true \
             bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
               eks crab crab-http-server https://git.example.com \
               qualification repository "${RUNNER_TEMP}/invalid-evidence.json" \
@@ -161,6 +181,7 @@ jobs:
             CRAB_HTTP_SERVER_RELEASE_TAG=crab-http-server-v0.1.0 \
             CRAB_HTTP_SERVER_SOURCE_SHA=invalid \
             CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true \
+            CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true \
             bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
               eks crab crab-http-server https://git.example.com \
               qualification repository "${RUNNER_TEMP}/invalid-evidence.json" \
@@ -254,6 +275,14 @@ jobs:
             grep -F -- '- "15"' "${rendered}"
             grep -F '"helm.sh/hook": test' "${rendered}"
             grep -F 'kind: Pod' "${rendered}"
+            grep -F 'name: cell-release-bootstrap' "${rendered}"
+            grep -F -- '- bootstrap' "${rendered}"
+            grep -F -- '- --peer-advertise-host' "${rendered}"
+            grep -F -- '- $(CRAB_POD_IP)' "${rendered}"
+            grep -F -- 'mountPath: /var/lib/crab' "${rendered}"
+            grep -F -- 'path: peer/tls.crt' "${rendered}"
+            grep -F -- 'path: peer/tls.key' "${rendered}"
+            grep -F -- 'path: peer/ca.crt' "${rendered}"
             grep -F -- '- storage-probe' "${rendered}"
             docker run --rm \
               --volume "${rendered}:/manifests/server.yaml:ro" \
@@ -336,6 +365,14 @@ jobs:
           assert config["listen"] == "0.0.0.0:8788"
           assert config["management_listen"] == "0.0.0.0:8789"
           assert config["storage"]["url"] == "s3://team-crab-repositories/repositories"
+          assert config["cells"] == {
+              "data_dir": "/var/lib/crab/cells",
+              "peer_advertise": "https://127.0.0.1:8789",
+              "peer_tls_server_name": "crab-http-server-peer",
+              "peer_certificate": "/run/secrets/crab/peer/tls.crt",
+              "peer_private_key": "/run/secrets/crab/peer/tls.key",
+              "peer_ca": "/run/secrets/crab/peer/ca.crt",
+          }
           assert config["auth"]["issuer"] == "https://identity.example.com/realms/team"
           assert config["auth"]["public_url"] == "https://git.example.com"
           ' "${config_file}"
@@ -376,7 +413,8 @@ jobs:
               --set ingress.enabled=false \
               --set-json 'networkPolicy.publicIngressFrom=[]' \
               > "${default_rendered}"
-          grep -F 'ingress: []' "${default_rendered}"
+          grep -F 'port: management' "${default_rendered}"
+          grep -F 'app.kubernetes.io/name: crab-http-server' "${default_rendered}"
 
           external_rendered="${RUNNER_TEMP}/crab-http-server-external-config.yaml"
           docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
@@ -385,6 +423,7 @@ jobs:
               --set-string image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
               --set config.existingConfigMap=platform-owned-config \
               --set secrets.existingSecret=platform-owned-secret \
+              --set cells.existingSecret=platform-owned-peer-secret \
               --set serviceAccount.name=crab-http-server \
               > "${external_rendered}"
           grep -F 'name: platform-owned-config' "${external_rendered}"
@@ -546,8 +585,15 @@ jobs:
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
-              --set podDisruptionBudget.minAvailable=2 >/dev/null 2>&1; then
+              --set podDisruptionBudget.minAvailable=3 >/dev/null 2>&1; then
             echo "chart accepted a disruption budget that blocks every minimum replica" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
+              --set-json 'extraEnv=[{"name":"CRAB_POD_IP","value":"127.0.0.1"}]' \
+              >/dev/null 2>&1; then
+            echo "chart accepted an override of its Pod IP identity" >&2
             exit 1
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
@@ -559,8 +605,8 @@ jobs:
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
-              --set 'topologySpreadConstraints[1].minDomains=1' >/dev/null 2>&1; then
-            echo "chart accepted single-node placement" >&2
+              --set 'topologySpreadConstraints[1].minDomains=2' >/dev/null 2>&1; then
+            echo "chart accepted fewer than three node domains" >&2
             exit 1
           fi
 
@@ -677,8 +723,12 @@ jobs:
             '^x-request-id: [0-9a-f-]{36}[[:space:]]*$' \
             "${RUNNER_TEMP}/crab-http-server-headers"
           docker compose --file crates/crab-http-server/deploy/compose.yaml \
-            exec --no-TTY proxy curl --fail --silent --show-error \
-              http://127.0.0.1:8789/metrics \
+            run --rm --no-deps metrics-probe \
+              --fail --silent --show-error \
+              --cacert /identity/ca.crt \
+              --cert /identity/peer.crt \
+              --key /identity/peer.key \
+              https://localhost:8789/metrics \
             | grep -F 'crab_http_server_requests_total{method="get",outcome="2xx"}'
           jq --exit-status \
             '.repositories | map(select(.owner == "demo" and (.name == "hello" or .name == "stdin-members"))) | length == 2' \

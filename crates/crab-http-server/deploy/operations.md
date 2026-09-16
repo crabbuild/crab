@@ -45,7 +45,7 @@ Complete these checks before the first install and every infrastructure change:
 9. Confirm the dedicated namespace pins Pod Security `enforce`, `audit`, and
    `warn` to `restricted:v1.29` or a reviewed newer policy version.
 10. Confirm the monitoring source can scrape port 8789 and ordinary peer pods cannot.
-11. Confirm the cluster can schedule two replicas in separate zones.
+11. Confirm the cluster can schedule three replicas on separate nodes across at least two zones.
 12. Confirm scratch capacity covers the largest qualified pack, LFS object, and concurrent transfers.
 13. For automated live qualification, confirm each provider has a separate
     protected GitHub environment using OIDC, required reviewers, release-tag
@@ -91,6 +91,13 @@ helm template crab-http-server \
 ```
 
 Review the rendered image digest, Service ports, ServiceAccount, NetworkPolicy, Secret name, storage URL, and ingress host. Keep the rendered file private because inline server configuration appears in it.
+
+The chart runs the immutable server image as a `cell-release-bootstrap` init
+container. A fresh root is initialized once even when several pods start
+concurrently. Before upgrading an existing release, run `cells release prepare`
+from the verified new image against the same configuration and expected release
+revision. The init container admits that exact candidate without taking over its
+activation operation; a different desired descriptor or image fails closed.
 
 For an official image, verify GitHub provenance against the pinned digest and
 the dedicated server release workflow:
@@ -310,7 +317,7 @@ repository runtime shutdown.
 
 Before planned cluster or node maintenance:
 
-1. Confirm at least two ready replicas.
+1. Confirm at least three ready replicas.
 2. Confirm the PodDisruptionBudget reports one allowed disruption and retains
    `unhealthyPodEvictionPolicy: AlwaysAllow`.
 3. Confirm endpoint and ingress deregistration complete during the pre-stop delay and connection-drain timeouts preserve active streams.
@@ -332,20 +339,23 @@ export CRAB_HTTP_SERVER_EXPECTED_CHART="$(jq --raw-output .chart.reference crab-
 export CRAB_HTTP_SERVER_RELEASE_TAG="$(jq --raw-output .tag crab-http-server-release.json)"
 export CRAB_HTTP_SERVER_SOURCE_SHA="$(jq --raw-output .source_commit crab-http-server-release.json)"
 export CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true
+export CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true
 
 bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
   gke crab crab-http-server https://git.example.com \
   your_team qualification /secure/crab-gke-qualification.json
 ```
 
-The rollout approval is deliberately explicit. The script checks the rendered
+Both mutation approvals are deliberately explicit. The script checks the rendered
 runtime controls, provider-matching placement across nodes and zones, readiness
 on every pod, the provider-native workload identity injection on both original
 and replacement pods, the installed signed chart version, public OIDC
 initiation, effective management-port NetworkPolicy isolation from an ordinary
 peer, direct authenticated Git traffic through two distinct replicas,
-byte-identical LFS transfer, lock-owner publication, and uninterrupted Git
-discovery while Kubernetes replaces every pod. It leaves a unique branch as
+byte-identical LFS transfer, lock-owner publication, uninterrupted Git
+discovery while Kubernetes replaces every pod, and exact repository state after
+force-deleting the serving Cell owner. A successor session must take over at a
+higher epoch and publish a new status visible through another replica. It leaves a unique branch as
 durable evidence and writes a secret-free JSON receipt bound to the supplied
 release tag, source commit, image, and chart. Review and retain that receipt
 with the release record; revoke the qualification token afterward.
@@ -411,7 +421,7 @@ A team release needs Level 3 or higher evidence: a user action, a real durable s
 
 Record these gates against a dedicated storage root:
 
-- Install two or more replicas across zones
+- Install three or more replicas across zones
 - Complete OIDC login when callbacks can reach either replica
 - Create a repository and observe it from every replica within five seconds
 - Push and fetch branches and tags with an independent Git client

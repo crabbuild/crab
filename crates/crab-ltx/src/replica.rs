@@ -260,7 +260,7 @@ impl Replica {
     /// Keep the destination exclusive and supervise this future through completion.
     pub async fn restore(&self, head: &ReplicaHead, destination: &Path) -> Result<Position> {
         self.check_head(head)?;
-        let scope = self.recovery_scope().await?;
+        let scope = self.recovery_scratch_scope(head).await?;
         let plan = scope.verified(head).await?;
         let destination = destination.to_owned();
         let host = self.host.clone();
@@ -405,7 +405,7 @@ impl Replica {
     /// Restores an exact cut and starts a fresh local writer continuing its TXID.
     pub async fn resume(&self, head: &ReplicaHead, destination: &Path) -> Result<crate::ManagedDb> {
         self.check_head(head)?;
-        let scope = self.recovery_scope().await?;
+        let scope = self.recovery_scratch_scope(head).await?;
         let plan = scope.verified(head).await?;
         let destination = destination.to_owned();
         let limits = self.limits;
@@ -418,6 +418,25 @@ impl Replica {
 
     async fn recovery_scope(&self) -> Result<Self> {
         Ok(self.clone().with_host(self.host.for_recovery().await?))
+    }
+
+    async fn recovery_scratch_scope(&self, head: &ReplicaHead) -> Result<Self> {
+        let endpoint = head
+            .manifest
+            .segments
+            .last()
+            .ok_or(CrabError::TxNotAvailable)?;
+        let scratch_bytes = crate::recovery::full_job_scratch_bytes(
+            endpoint.info.page_size,
+            endpoint.info.database_pages,
+        )?;
+        let host = self
+            .host
+            .for_recovery()
+            .await?
+            .for_scratch(scratch_bytes)
+            .await?;
+        Ok(self.clone().with_host(host))
     }
 
     /// Opens a pinned page map without downloading LTX page bodies.

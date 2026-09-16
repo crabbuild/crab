@@ -3,13 +3,142 @@
 use std::{
     io,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+/// Shared byte-precise admission for local files owned by active database work.
+#[derive(Clone, Debug)]
+pub struct DiskBudget {
+    inner: Arc<DiskBudgetInner>,
+}
+
+#[derive(Debug)]
+struct DiskBudgetInner {
+    capacity: u64,
+    used: AtomicU64,
+}
+
+impl DiskBudget {
+    /// Creates a budget. A zero capacity rejects every non-empty reservation.
+    #[must_use]
+    pub fn new(capacity: u64) -> Self {
+        Self {
+            inner: Arc::new(DiskBudgetInner {
+                capacity,
+                used: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    /// Reserves bytes without waiting or overcommitting the configured capacity.
+    pub fn try_reserve(&self, bytes: u64) -> crate::Result<DiskReservation> {
+        self.add(bytes)?;
+        Ok(DiskReservation {
+            budget: self.clone(),
+            bytes: Mutex::new(bytes),
+        })
+    }
+
+    #[must_use]
+    pub fn capacity(&self) -> u64 {
+        self.inner.capacity
+    }
+
+    #[must_use]
+    pub fn used(&self) -> u64 {
+        self.inner.used.load(Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub fn available(&self) -> u64 {
+        self.capacity().saturating_sub(self.used())
+    }
+
+    fn add(&self, bytes: u64) -> crate::Result<()> {
+        self.inner
+            .used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(bytes)
+                    .filter(|next| *next <= self.inner.capacity)
+            })
+            .map(|_| ())
+            .map_err(|_| crate::CrabError::Limit("local disk bytes"))
+    }
+}
+
+/// Owned local-disk admission released when its owner drops it.
+#[derive(Debug)]
+pub struct DiskReservation {
+    budget: DiskBudget,
+    bytes: Mutex<u64>,
+}
+
+impl DiskReservation {
+    pub(crate) fn try_grow(&self, bytes: u64) -> crate::Result<()> {
+        let mut held = match self.bytes.lock() {
+            Ok(held) => held,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let next = held
+            .checked_add(bytes)
+            .ok_or(crate::CrabError::Limit("local disk bytes"))?;
+        self.budget.add(bytes)?;
+        *held = next;
+        Ok(())
+    }
+
+    pub(crate) fn resize(&self, bytes: u64) -> crate::Result<()> {
+        let mut held = match self.bytes.lock() {
+            Ok(held) => held,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let current = *held;
+        if bytes > current {
+            self.budget.add(bytes - current)?;
+            *held = bytes;
+            return Ok(());
+        }
+        let released = current - bytes;
+        *held = bytes;
+        self.budget.inner.used.fetch_sub(released, Ordering::AcqRel);
+        Ok(())
+    }
+
+    fn release(&self) {
+        let mut held = match self.bytes.lock() {
+            Ok(held) => held,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let released = *held;
+        *held = 0;
+        self.budget.inner.used.fetch_sub(released, Ordering::AcqRel);
+    }
+
+    pub(crate) fn bytes(&self) -> u64 {
+        match self.bytes.lock() {
+            Ok(held) => *held,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
+    }
+}
+
+impl Drop for DiskReservation {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 /// An open local artifact/WAL handle supplied by a host filesystem.
+///
+/// Positional reads and writes use their explicit offsets. A handle returned by
+/// `FileSystem::open_rw` supports both operations.
 pub trait FileIo: Send {
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()>;
+    fn write_all_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()>;
     fn read_exact_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>>;
     fn sync_all(&mut self) -> io::Result<()>;
     fn file_len(&self) -> io::Result<u64>;
@@ -18,13 +147,17 @@ pub trait FileIo: Send {
 
 /// Local filesystem boundary; SQLite pager I/O remains under its selected VFS.
 ///
-/// `create` must exclusively create a new file. `rename` must sync the destination
-/// parent before succeeding. Implementations must preserve underlying I/O errors.
+/// `create` must exclusively create a new file. `open_rw` must not create.
+/// `rename` must sync the destination parent before succeeding. Implementations
+/// must preserve underlying I/O errors.
 /// `exists` must detect dangling symlinks. `create_dir` is an exclusive claim.
 /// `persist_new` atomically installs fully synced bytes without replacing any
-/// destination and syncs its parent; an error after installation is ambiguous.
+/// destination and syncs its parent; `persist_file_new` does the same for an
+/// already synced same-directory scratch file. An error after installation is
+/// ambiguous.
 pub trait FileSystem: Send + Sync {
     fn open(&self, path: &Path) -> io::Result<Box<dyn FileIo>>;
+    fn open_rw(&self, path: &Path) -> io::Result<Box<dyn FileIo>>;
     fn create(&self, path: &Path) -> io::Result<Box<dyn FileIo>>;
     fn file_len(&self, path: &Path) -> io::Result<u64>;
     fn create_dir_all(&self, path: &Path) -> io::Result<()>;
@@ -35,6 +168,27 @@ pub trait FileSystem: Send + Sync {
     fn create_dir(&self, path: &Path) -> io::Result<()>;
     fn sync_parent(&self, path: &Path) -> io::Result<()>;
     fn persist_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
+    fn persist_file_new(&self, source: &Path, destination: &Path) -> io::Result<()>;
+}
+
+/// Rechecks host disk pressure after full-job scratch admission.
+///
+/// `reserved_bytes` is the process-wide scratch reservation, including the
+/// current job. An embedding service can combine it with other local-disk
+/// reservations and an operator reserve before allowing remote downloads.
+#[cfg(feature = "replica")]
+pub trait ScratchMonitor: Send + Sync {
+    fn ensure_available(&self, reserved_bytes: u64) -> io::Result<()>;
+}
+
+#[cfg(feature = "replica")]
+struct UnlimitedScratch;
+
+#[cfg(feature = "replica")]
+impl ScratchMonitor for UnlimitedScratch {
+    fn ensure_available(&self, _: u64) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Wall-clock observations used in LTX timestamps and checkpoint eligibility.
@@ -72,6 +226,7 @@ pub struct Host {
     pub(crate) filesystem: Arc<dyn FileSystem>,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) sqlite_vfs: Option<String>,
+    pub(crate) local_disk: DiskBudget,
     #[cfg(feature = "replica")]
     pub(crate) executor: Arc<dyn Executor>,
     #[cfg(feature = "replica")]
@@ -83,7 +238,19 @@ pub struct Host {
     #[cfg(feature = "replica")]
     recovery_slots: Arc<tokio::sync::Semaphore>,
     #[cfg(feature = "replica")]
+    dirty_slots: Arc<tokio::sync::Semaphore>,
+    #[cfg(feature = "replica")]
+    scratch_slots: Arc<tokio::sync::Semaphore>,
+    #[cfg(feature = "replica")]
+    scratch_capacity: u32,
+    #[cfg(feature = "replica")]
+    scratch_monitor: Arc<dyn ScratchMonitor>,
+    #[cfg(feature = "replica")]
     recovery: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    #[cfg(feature = "replica")]
+    dirty: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    #[cfg(feature = "replica")]
+    scratch: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
 }
 
 impl Host {
@@ -127,6 +294,17 @@ impl Host {
     pub fn with_sqlite_vfs(mut self, name: &str) -> Self {
         self.sqlite_vfs = Some(name.to_owned());
         self
+    }
+
+    /// Shares byte-precise admission across WAL, LTX, sparse pages and staging.
+    #[must_use]
+    pub fn with_local_disk_budget(mut self, budget: DiskBudget) -> Self {
+        self.local_disk = budget;
+        self
+    }
+
+    pub(crate) fn reserve_local_disk(&self, bytes: u64) -> crate::Result<DiskReservation> {
+        self.local_disk.try_reserve(bytes)
     }
 
     pub(crate) fn read(&self, path: &Path, limit: u64) -> io::Result<Vec<u8>> {
@@ -189,9 +367,55 @@ impl Host {
         self
     }
 
+    /// Shares memory admission for capture, recovery and compaction jobs.
+    ///
+    /// One permit represents the embedding service's fixed per-job dirty-memory
+    /// reservation. The permit follows dispatched work after caller cancellation.
+    #[cfg(feature = "replica")]
+    #[must_use]
+    pub fn with_dirty_slots(mut self, slots: Arc<tokio::sync::Semaphore>) -> Self {
+        self.dirty_slots = slots;
+        self
+    }
+
+    /// Shares temporary local-disk admission in one-MiB permit units.
+    ///
+    /// Configure an unused semaphore before cloning the host. Requests larger
+    /// than its initial capacity fail instead of waiting forever.
+    #[cfg(feature = "replica")]
+    #[must_use]
+    pub fn with_scratch_slots(mut self, slots: Arc<tokio::sync::Semaphore>) -> Self {
+        self.scratch_capacity = u32::try_from(slots.available_permits()).unwrap_or(u32::MAX);
+        self.scratch_slots = slots;
+        self
+    }
+
+    /// Rechecks actual host capacity whenever a full scratch job is admitted.
+    #[cfg(feature = "replica")]
+    #[must_use]
+    pub fn with_scratch_monitor(mut self, monitor: Arc<dyn ScratchMonitor>) -> Self {
+        self.scratch_monitor = monitor;
+        self
+    }
+
+    #[cfg(feature = "replica")]
+    pub(crate) async fn for_dirty(&self) -> crate::Result<Self> {
+        let mut host = self.clone();
+        if host.dirty.is_none() {
+            host.dirty = Some(Arc::new(
+                self.dirty_slots
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| crate::CrabError::Other(Box::new(e)))?,
+            ));
+        }
+        Ok(host)
+    }
+
     #[cfg(feature = "replica")]
     pub(crate) async fn for_recovery(&self) -> crate::Result<Self> {
-        let mut host = self.clone();
+        let mut host = self.for_dirty().await?;
         if host.recovery.is_none() {
             host.recovery = Some(Arc::new(
                 self.recovery_slots
@@ -205,8 +429,58 @@ impl Host {
     }
 
     #[cfg(feature = "replica")]
+    pub(crate) async fn for_scratch(&self, bytes: u64) -> crate::Result<Self> {
+        const MIB: u64 = 1 << 20;
+        let units = bytes
+            .checked_add(MIB - 1)
+            .ok_or(crate::CrabError::Limit("scratch disk bytes"))?
+            / MIB;
+        let units =
+            u32::try_from(units).map_err(|_| crate::CrabError::Limit("scratch disk bytes"))?;
+        if units == 0 || units > self.scratch_capacity {
+            return Err(crate::CrabError::Limit("scratch disk bytes"));
+        }
+        let mut host = self.clone();
+        if let Some(permit) = &host.scratch {
+            if permit.num_permits() < units as usize {
+                return Err(crate::CrabError::Limit("scratch disk bytes"));
+            }
+            return Ok(host);
+        }
+        host.scratch = Some(Arc::new(
+            self.scratch_slots
+                .clone()
+                .acquire_many_owned(units)
+                .await
+                .map_err(|e| crate::CrabError::Other(Box::new(e)))?,
+        ));
+        let capacity = self.scratch_capacity as usize;
+        let reserved_units = capacity.saturating_sub(self.scratch_slots.available_permits());
+        let reserved_bytes = u64::try_from(reserved_units)
+            .ok()
+            .and_then(|units| units.checked_mul(MIB))
+            .ok_or(crate::CrabError::Limit("scratch disk bytes"))?;
+        self.scratch_monitor
+            .ensure_available(reserved_bytes)
+            .map_err(crate::CrabError::Io)?;
+        Ok(host)
+    }
+
+    #[cfg(feature = "replica")]
     pub(crate) fn without_recovery(mut self) -> Self {
         self.recovery = None;
+        self
+    }
+
+    #[cfg(feature = "replica")]
+    pub(crate) fn without_dirty(mut self) -> Self {
+        self.dirty = None;
+        self
+    }
+
+    #[cfg(feature = "replica")]
+    pub(crate) fn without_scratch(mut self) -> Self {
+        self.scratch = None;
         self
     }
 
@@ -232,6 +506,8 @@ impl Host {
             .map_err(|e| crate::CrabError::Other(Box::new(e)))?;
         let (send, receive) = tokio::sync::oneshot::channel();
         let recovery = self.recovery.clone();
+        let dirty = self.dirty.clone();
+        let scratch = self.scratch.clone();
         self.executor.dispatch(Box::new(move || {
             // Dispatched work can outlive its future. Keep admission with the
             // job, not the waiter, so cancellation cannot oversubscribe the pool.
@@ -241,6 +517,8 @@ impl Host {
             // admission first so returned long-lived handles cannot appear to
             // retain capacity while this closure is still being torn down.
             drop(recovery);
+            drop(dirty);
+            drop(scratch);
             drop(permit);
             let _ = send.send(result);
         }))?;
@@ -259,10 +537,19 @@ impl Default for Host {
         #[cfg(feature = "replica")]
         static RECOVERY: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
             std::sync::OnceLock::new();
+        #[cfg(feature = "replica")]
+        static DIRTY: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+        #[cfg(feature = "replica")]
+        static SCRATCH: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
+            std::sync::OnceLock::new();
+        static LOCAL_DISK: std::sync::OnceLock<DiskBudget> = std::sync::OnceLock::new();
         Self {
             filesystem: Arc::new(DirectFileSystem),
             clock: Arc::new(SystemClock),
             sqlite_vfs: None,
+            local_disk: LOCAL_DISK
+                .get_or_init(|| DiskBudget::new(64 * 1024 * 1024 * 1024))
+                .clone(),
             #[cfg(feature = "replica")]
             executor: Arc::new(TokioExecutor),
             #[cfg(feature = "replica")]
@@ -284,7 +571,27 @@ impl Default for Host {
                 .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
                 .clone(),
             #[cfg(feature = "replica")]
+            dirty_slots: DIRTY
+                .get_or_init(|| {
+                    Arc::new(tokio::sync::Semaphore::new(
+                        std::thread::available_parallelism().map_or(1, |n| n.get().min(16)),
+                    ))
+                })
+                .clone(),
+            #[cfg(feature = "replica")]
+            scratch_slots: SCRATCH
+                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(64 * 1024)))
+                .clone(),
+            #[cfg(feature = "replica")]
+            scratch_capacity: 64 * 1024,
+            #[cfg(feature = "replica")]
+            scratch_monitor: Arc::new(UnlimitedScratch),
+            #[cfg(feature = "replica")]
             recovery: None,
+            #[cfg(feature = "replica")]
+            dirty: None,
+            #[cfg(feature = "replica")]
+            scratch: None,
         }
     }
 }
@@ -295,6 +602,10 @@ pub struct DirectFileSystem;
 
 impl FileIo for std::fs::File {
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        io::Write::write_all(self, bytes)
+    }
+    fn write_all_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()> {
+        io::Seek::seek(self, io::SeekFrom::Start(offset))?;
         io::Write::write_all(self, bytes)
     }
     fn read_exact_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
@@ -317,6 +628,14 @@ impl FileIo for std::fs::File {
 impl FileSystem for DirectFileSystem {
     fn open(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
         Ok(Box::new(std::fs::File::open(path)?))
+    }
+    fn open_rw(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
+        Ok(Box::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)?,
+        ))
     }
     fn create(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
         let mut options = std::fs::OpenOptions::new();
@@ -367,6 +686,18 @@ impl FileSystem for DirectFileSystem {
         file.as_file().sync_all()?;
         file.persist_noclobber(path).map_err(|error| error.error)?;
         self.sync_parent(path)
+    }
+    fn persist_file_new(&self, source: &Path, destination: &Path) -> io::Result<()> {
+        if source.parent() != destination.parent() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "scratch and destination must share a directory",
+            ));
+        }
+        std::fs::hard_link(source, destination)?;
+        self.sync_parent(destination)?;
+        std::fs::remove_file(source)?;
+        self.sync_parent(destination)
     }
 }
 
@@ -419,7 +750,26 @@ impl Worker for std::thread::JoinHandle<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    #[test]
+    fn disk_budget_reservations_resize_and_release_exact_bytes() {
+        let budget = DiskBudget::new(10);
+        let first = budget.try_reserve(4).unwrap();
+        let second = budget.try_reserve(6).unwrap();
+        assert_eq!(budget.available(), 0);
+        assert!(matches!(
+            budget.try_reserve(1),
+            Err(crate::CrabError::Limit("local disk bytes"))
+        ));
+
+        first.resize(2).unwrap();
+        assert_eq!(budget.available(), 2);
+        drop(second);
+        assert_eq!(budget.available(), 8);
+        drop(first);
+        assert_eq!(budget.available(), 10);
+    }
 
     struct TestClock;
     impl Clock for TestClock {
@@ -435,6 +785,9 @@ mod tests {
     impl FileSystem for FaultFs {
         fn open(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
             DirectFileSystem.open(path)
+        }
+        fn open_rw(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
+            DirectFileSystem.open_rw(path)
         }
         fn create(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
             if self.0.load(Ordering::SeqCst) {
@@ -472,6 +825,9 @@ mod tests {
         fn persist_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
             DirectFileSystem.persist_new(path, bytes)
         }
+        fn persist_file_new(&self, source: &Path, destination: &Path) -> io::Result<()> {
+            DirectFileSystem.persist_file_new(source, destination)
+        }
     }
 
     #[test]
@@ -507,6 +863,37 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn synced_scratch_install_never_replaces_a_destination() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let destination = directory.path().join("database.sqlite");
+        let first = directory.path().join("first.scratch");
+        let mut file = DirectFileSystem.create(&first).unwrap();
+        file.write_all(b"first").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        DirectFileSystem
+            .persist_file_new(&first, &destination)
+            .unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"first");
+        assert!(!first.exists());
+
+        let second = directory.path().join("second.scratch");
+        let mut file = DirectFileSystem.create(&second).unwrap();
+        file.write_all(b"second").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        assert_eq!(
+            DirectFileSystem
+                .persist_file_new(&second, &destination)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(destination).unwrap(), b"first");
+        assert_eq!(std::fs::read(second).unwrap(), b"second");
+    }
+
     #[cfg(feature = "replica")]
     #[tokio::test]
     async fn dropped_executor_jobs_return_errors_without_hanging() {
@@ -529,10 +916,20 @@ mod tests {
     async fn cancelled_waiters_do_not_release_running_job_or_recovery_admission() {
         let jobs = Arc::new(tokio::sync::Semaphore::new(1));
         let recovery = Arc::new(tokio::sync::Semaphore::new(1));
+        let dirty = Arc::new(tokio::sync::Semaphore::new(1));
+        let scratch = Arc::new(tokio::sync::Semaphore::new(1));
         let host = Host::default()
             .with_job_slots(jobs.clone())
-            .with_recovery_slots(recovery.clone());
-        let scope = host.for_recovery().await.unwrap();
+            .with_recovery_slots(recovery.clone())
+            .with_dirty_slots(dirty.clone())
+            .with_scratch_slots(scratch.clone());
+        let scope = host
+            .for_recovery()
+            .await
+            .unwrap()
+            .for_scratch(1 << 20)
+            .await
+            .unwrap();
         let (started, entered) = tokio::sync::oneshot::channel();
         let (release, blocked) = std::sync::mpsc::channel();
         let task = tokio::spawn(async move {
@@ -548,12 +945,22 @@ mod tests {
         assert!(task.await.unwrap_err().is_cancelled());
         assert_eq!(jobs.available_permits(), 0);
         assert_eq!(recovery.available_permits(), 0);
+        assert_eq!(dirty.available_permits(), 0);
+        assert_eq!(scratch.available_permits(), 0);
         release.send(()).unwrap();
         let _job = tokio::time::timeout(Duration::from_secs(2), jobs.acquire())
             .await
             .unwrap()
             .unwrap();
         let _recovery = tokio::time::timeout(Duration::from_secs(2), recovery.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+        let _dirty = tokio::time::timeout(Duration::from_secs(2), dirty.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+        let _scratch = tokio::time::timeout(Duration::from_secs(2), scratch.acquire())
             .await
             .unwrap()
             .unwrap();
@@ -567,9 +974,52 @@ mod tests {
         let host = Host::default()
             .with_io_slots(slots.clone())
             .with_job_slots(slots.clone())
-            .with_recovery_slots(slots);
+            .with_recovery_slots(slots.clone())
+            .with_scratch_slots(slots);
         assert!(host.run(|| 1).await.is_err());
         assert!(host.io_permit().await.is_err());
         assert!(host.for_recovery().await.is_err());
+        assert!(host.for_scratch(1 << 20).await.is_err());
+    }
+
+    #[cfg(feature = "replica")]
+    #[tokio::test]
+    async fn scratch_monitor_rechecks_total_reservation_and_releases_rejection() {
+        struct RecordingScratch {
+            bytes: AtomicU64,
+            reject: AtomicBool,
+        }
+        impl ScratchMonitor for RecordingScratch {
+            fn ensure_available(&self, reserved_bytes: u64) -> io::Result<()> {
+                self.bytes.store(reserved_bytes, Ordering::Release);
+                if self.reject.load(Ordering::Acquire) {
+                    return Err(io::Error::from(io::ErrorKind::StorageFull));
+                }
+                Ok(())
+            }
+        }
+
+        let slots = Arc::new(tokio::sync::Semaphore::new(3));
+        let monitor = Arc::new(RecordingScratch {
+            bytes: AtomicU64::new(0),
+            reject: AtomicBool::new(false),
+        });
+        let host = Host::default()
+            .with_scratch_slots(slots.clone())
+            .with_scratch_monitor(monitor.clone());
+        let first = host.for_scratch(1 << 20).await.unwrap();
+        assert_eq!(monitor.bytes.load(Ordering::Acquire), 1 << 20);
+        let second = host.for_scratch(2 << 20).await.unwrap();
+        assert_eq!(monitor.bytes.load(Ordering::Acquire), 3 << 20);
+        drop((first, second));
+
+        monitor.reject.store(true, Ordering::Release);
+
+        assert!(matches!(
+            host.for_scratch(1 << 20).await,
+            Err(crate::CrabError::Io(error)) if error.kind() == io::ErrorKind::StorageFull
+        ));
+        assert_eq!(monitor.bytes.load(Ordering::Acquire), 1 << 20);
+        assert_eq!(slots.available_permits(), 3);
     }
 }

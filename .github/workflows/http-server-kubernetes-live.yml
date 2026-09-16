@@ -56,6 +56,11 @@ on:
         required: true
         default: false
         type: boolean
+      approve_owner_loss:
+        description: I approve forced deletion of the current Cell owner Pod
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -93,11 +98,16 @@ jobs:
       - name: Require explicit mutation approval
         shell: bash
         env:
-          APPROVED: ${{ inputs.approve_rollout }}
+          ROLLOUT_APPROVED: ${{ inputs.approve_rollout }}
+          OWNER_LOSS_APPROVED: ${{ inputs.approve_owner_loss }}
         run: |
           set -euo pipefail
-          test "$APPROVED" = true || {
+          test "$ROLLOUT_APPROVED" = true || {
             echo "::error::Approve the qualification write and rolling restart."
+            exit 1
+          }
+          test "$OWNER_LOSS_APPROVED" = true || {
+            echo "::error::Approve forced deletion of the current Cell owner Pod."
             exit 1
           }
 
@@ -345,6 +355,7 @@ jobs:
           CRAB_HTTP_SERVER_RELEASE_TAG: ${{ steps.release.outputs.tag }}
           CRAB_HTTP_SERVER_SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
           CRAB_HTTP_SERVER_APPROVE_ROLLOUT: "true"
+          CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS: "true"
         run: |
           set -euo pipefail
           evidence_dir="${RUNNER_TEMP}/crab-http-server-live-evidence"
@@ -379,7 +390,7 @@ jobs:
             --arg image "$EXPECTED_IMAGE" \
             --arg release_tag "$RELEASE_TAG" \
             --arg source_sha "$SOURCE_SHA" \
-            '.schema == 3 and .provider == $provider and
+            '.schema == 5 and .provider == $provider and
              .namespace == $namespace and .deployment == $deployment and
              .origin == $origin and .repository == $repository and
              .image == $image and .chart == $chart and
@@ -390,7 +401,7 @@ jobs:
                (if $provider == "eks" then "eks-pod-identity"
                 elif $provider == "gke" then "gke-workload-identity-federation"
                 else "aks-workload-identity" end) and
-             .replica_count >= 2 and .zone_count >= 2 and
+             .replica_count >= 3 and .zone_count >= 2 and
              .rollout_probes >= 1 and .rollout_probe_failures == 0 and
              .checks.oidc_login_redirect == true and
              .checks.oidc_secure_flow_cookie == true and
@@ -401,9 +412,26 @@ jobs:
              .checks.cross_replica_git == true and
              .checks.cross_replica_lfs == true and
              .checks.durable_lfs_lock == true and
+             .checks.cross_replica_cell == true and
              .checks.zero_unavailable_rollout == true and
              .checks.post_rollout_clone == true and
+             .checks.post_rollout_cell_restore == true and
+             .checks.abrupt_owner_loss == true and
+             .checks.owner_loss_exact_root_restore == true and
+             .checks.owner_loss_publication_continues == true and
+             (.continuation_context | length) > 0 and
+             (.owner_loss.deleted_pod_uid | length) > 0 and
+             (.owner_loss.session_before | test("^[0-9a-f]{32}$")) and
+             (.owner_loss.session_after | test("^[0-9a-f]{32}$")) and
+             .owner_loss.session_after != .owner_loss.session_before and
+             .owner_loss.epoch_after > .owner_loss.epoch_before and
+             (.owner_loss.root_digest_before | test("^[0-9a-f]{64}$")) and
+             (.owner_loss.root_digest_after | test("^[0-9a-f]{64}$")) and
+             .owner_loss.root_sequence_after >= .owner_loss.root_sequence_before and
+             .owner_loss.root_sequence_final > .owner_loss.root_sequence_after and
              (.commit | test("^[0-9a-f]{40}$")) and
+             (.status_context | length) > 0 and
+             (.check_run_id | type) == "number" and .check_run_id > 0 and
              (.payload_sha256 | test("^[0-9a-f]{64}$"))' \
             "$receipt" >/dev/null
 

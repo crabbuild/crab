@@ -71,7 +71,7 @@ struct ReceiveInput {
 }
 
 struct PublishAttempt<'a> {
-    directory: tempfile::TempDir,
+    directory: crate::local_disk::StagingDirectory,
     holders: &'a BTreeMap<String, String>,
     plan_id: Option<String>,
 }
@@ -80,7 +80,7 @@ pub(super) async fn run(
     server: &Server,
     principal: &Principal,
     key: &(String, String),
-    directory: tempfile::TempDir,
+    directory: crate::local_disk::StagingDirectory,
     body_digest: [u8; 32],
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>> {
@@ -123,7 +123,7 @@ pub(crate) async fn publish_existing_objects(
     publication: Publication,
     cancel: &CancellationToken,
 ) -> Result<()> {
-    let directory = tokio::task::spawn_blocking(tempfile::tempdir).await??;
+    let directory = server.local_staging.create(1, cancel).await?;
     let request = receive_wire::ReceiveRequest {
         updates: vec![update],
         report_status: false,
@@ -258,7 +258,7 @@ pub(super) async fn publish_pack(
     server: &Server,
     principal: &Principal,
     key: &(String, String),
-    directory: tempfile::TempDir,
+    directory: crate::local_disk::StagingDirectory,
     pack: BufReader<std::fs::File>,
     update: crab_git::receive_plan::RefUpdate,
     publication: PackPublication,
@@ -294,7 +294,7 @@ async fn run_request(
     server: &Server,
     principal: &Principal,
     key: &(String, String),
-    directory: tempfile::TempDir,
+    directory: crate::local_disk::StagingDirectory,
     request: receive_wire::ReceiveRequest,
     input: ReceiveInput,
     cancel: &CancellationToken,
@@ -338,7 +338,7 @@ async fn publish(
     entry: &Repository,
     request: &receive_wire::ReceiveRequest,
     input: ReceiveInput,
-    directory: tempfile::TempDir,
+    directory: crate::local_disk::StagingDirectory,
     holders: &BTreeMap<String, String>,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>> {
@@ -427,8 +427,9 @@ async fn publish_attempt<'a>(
         ));
     }
     let has_branch = refs.keys().any(|name| name.starts_with("refs/heads/"));
+    let actor = principal.identity().ok_or(ReceiveError::Forbidden)?;
     let protections = entry
-        .branch_protections()
+        .branch_protections(server, &actor)
         .await
         .map_err(|error| ReceiveError::Settings(Box::new(error)))?;
     let protected = input.publication == Publication::NativePush
@@ -500,6 +501,7 @@ async fn publish_attempt<'a>(
     };
     let outcome = if changed_path_hashes.is_empty() {
         commit_prepared(
+            server,
             principal,
             entry,
             artifacts,
@@ -535,6 +537,7 @@ async fn publish_attempt<'a>(
                     return Err(ReceiveError::Locked);
                 }
                 commit_prepared(
+                    server,
                     principal,
                     entry,
                     artifacts,
@@ -632,6 +635,7 @@ async fn recover_native_plan(
 }
 
 async fn commit_prepared(
+    server: &Server,
     principal: &Principal,
     entry: &Repository,
     artifacts: crab_remote::prepare::Artifacts<'_>,
@@ -643,8 +647,9 @@ async fn commit_prepared(
     if !principal.can_write(&entry.config) {
         return Err(ReceiveError::Forbidden);
     }
+    let actor = principal.identity().ok_or(ReceiveError::Forbidden)?;
     if entry
-        .lifecycle()
+        .lifecycle(server, &actor)
         .await
         .map_err(|error| ReceiveError::Settings(Box::new(error)))?
         .archived

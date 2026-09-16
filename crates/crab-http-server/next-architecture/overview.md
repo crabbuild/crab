@@ -1,6 +1,6 @@
 # Architecture, scope, and guarantees
 
-[Design index](README.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Target contract; implemented subset tracked in current implementation.
 
 The system boundaries below lead to the detailed
 [storage protocol](storage-protocol.md),
@@ -24,7 +24,7 @@ The system boundaries below lead to the detailed
 | Read policy | Owner-served application reads with a publication barrier | No stale follower SQLite reads in the first version |
 | Git storage | Existing Crab Git objects, manifests, journal, leases, and fences | Native Git and remote-helper coexistence remain separate qualification concerns |
 | Deployment | Existing Kubernetes Deployment extended for peer routing | StatefulSet and persistent database volumes are optional optimizations |
-| Migration | Fleet-wide hard cutover with offline per-repository imports | Maintenance downtime accepted; new runtime contains only the SQLite/LTX application backend |
+| Cutover | Fleet-wide offline reset with per-repository empty Cell initialization | Maintenance downtime and application-data loss are accepted; new runtime contains only the SQLite/LTX application backend |
 
 ### Goals
 
@@ -57,8 +57,9 @@ The system boundaries below lead to the detailed
   synchronous multi-region operation.
 - An assumption that Kubernetes deployment artifacts constitute production
   qualification.
-- A migration-aware intermediate release, old/new rolling coexistence, dual
+- Any application-data migration release, old/new rolling coexistence, dual
   writes, legacy application readers, or automatic rollback to JSON storage.
+  Future mentions of migration cover native SQLite schema/code upgrades only.
 
 ### Authority and transport boundaries
 
@@ -243,7 +244,7 @@ move is a separate quiesced migration and cannot be inferred from a name change.
 | Retry policy for existing edits | Preserve version/refetch; add IDs only with API change | UI and non-UI consumer contract tests |
 | Lease/admission tuning | Conservative constants then measured limits | Pause, storage latency and capacity experiments |
 | Retention duration | Operator-defined backup/recovery objectives | Cost model and restore/collector concurrency proof |
-| Hard-cutover window sizing | Maintenance-window transition already selected | Measure complete inventory/import/restore time and full-fleet acceptance against deployed data |
+| Hard-cutover window sizing | Maintenance-window transition already selected | Measure deletion verification, empty-Cell initialization/restore and full-fleet acceptance time |
 
 These are bounded implementation decisions. They do not weaken the publication,
 fencing or migration invariants. If an implementation cannot prove those

@@ -352,7 +352,7 @@ async fn prepared_artifacts_preserve_plan_attribution_through_compaction() {
         Some(crab_metadata::error::MetadataError::PlanAlreadyAttempted { .. })
     ));
     server.cancellation.cancel();
-    server.runtime.shutdown().await;
+    server.shutdown_runtimes().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -400,7 +400,7 @@ async fn native_receive_replays_an_identical_wire_request_from_its_receipt() {
     server.receives.close();
     server.receives.wait().await;
     server.finish_maintenance().await.unwrap();
-    server.runtime.shutdown().await;
+    server.shutdown_runtimes().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -542,7 +542,7 @@ async fn exercise(mut server: Arc<Server>, fault: Fault, body: &[u8], oid: &str)
     server.receives.close();
     server.receives.wait().await;
     server.finish_maintenance().await.unwrap();
-    server.runtime.shutdown().await;
+    server.shutdown_runtimes().await.unwrap();
     let snapshot = crab_metadata::manifest_store::read_repository_snapshot(&origin, &origin_layout)
         .await
         .unwrap();
@@ -688,7 +688,7 @@ async fn exercise(mut server: Arc<Server>, fault: Fault, body: &[u8], oid: &str)
     if !committed {
         restarted.cancellation.cancel();
         restarted.finish_maintenance().await.unwrap();
-        restarted.runtime.shutdown().await;
+        restarted.shutdown_runtimes().await.unwrap();
         return;
     }
     assert_eq!(
@@ -702,5 +702,5 @@ async fn exercise(mut server: Arc<Server>, fault: Fault, body: &[u8], oid: &str)
     );
     restarted.cancellation.cancel();
     restarted.finish_maintenance().await.unwrap();
-    restarted.runtime.shutdown().await;
+    restarted.shutdown_runtimes().await.unwrap();
 }

@@ -35,6 +35,15 @@ impl HostFile {
         Ok(bytes)
     }
 
+    #[cfg(feature = "replica")]
+    pub fn write_all_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()> {
+        let end = offset
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| io::Error::other("local file offset overflow"))?;
+        check_size(end, self.limit)?;
+        self.file.write_all_at(offset, bytes)
+    }
+
     pub fn sync_all(&mut self) -> io::Result<()> {
         self.file.sync_all()
     }
@@ -42,6 +51,12 @@ impl HostFile {
         let len = self.file.file_len()?;
         check_size(len, self.limit)?;
         Ok(len)
+    }
+
+    #[cfg(feature = "replica")]
+    pub fn set_len(&mut self, len: u64) -> io::Result<()> {
+        check_size(len, self.limit)?;
+        self.file.set_len(len)
     }
 }
 
@@ -64,6 +79,13 @@ impl LtxHost {
     pub fn open(&self, path: &Path) -> io::Result<HostFile> {
         Ok(HostFile {
             file: self.facilities.filesystem.open(path)?,
+            limit: self.max_file_bytes,
+        })
+    }
+    #[cfg(feature = "replica")]
+    pub fn open_rw(&self, path: &Path) -> io::Result<HostFile> {
+        Ok(HostFile {
+            file: self.facilities.filesystem.open_rw(path)?,
             limit: self.max_file_bytes,
         })
     }

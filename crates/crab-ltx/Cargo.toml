@@ -10,7 +10,7 @@ description = "SQLite LTX capture, object-store replication, and verified recove
 
 [features]
 default = []
-replica = ["dep:crab-storage", "dep:object_store", "dep:bytes", "dep:serde", "dep:serde_json", "dep:tokio"]
+replica = ["dep:crab-storage", "dep:object_store", "dep:bytes", "dep:serde", "dep:serde_json", "dep:tokio", "dep:async-trait", "dep:tokio-util"]
 
 [dependencies]
 rusqlite.workspace = true
@@ -25,6 +25,8 @@ bytes = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "sync", "time", "net", "macros"] }
+tokio-util = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
 
 [dev-dependencies]
 object_store = { workspace = true, features = ["fs"] }

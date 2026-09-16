@@ -1,6 +1,6 @@
 # Deployment, lifecycle, and operations
 
-[Design index](README.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Target contract; implemented subset tracked in current implementation.
 
 The fleet runs identical `crab-http-server` processes with embedded replication.
 No separate Celld servers, scheduler service, or SQLite database servers are
@@ -87,39 +87,47 @@ Capacity planning includes losing the largest relevant failure domain, not just
 one nominal replica. Three Pods do not by themselves prove that the remaining
 Pods have sufficient SQLite, restore, Git-transfer or storage-request capacity.
 
-### Listener and configuration proposal
+### Listener and configuration
 
 | Listener | Scope | Handler responsibility |
 | --- | --- | --- |
 | 8788 public | Public Service through configured edge | External auth/origin checks, UI/API/Git |
-| 8789 management | Kubelet and selected monitoring sources | Health/readiness and authenticated diagnostics where added |
-| 8790 peer | Authorized fleet identities only | Cell dispatch and authenticated internal control |
+| 8789 management and peer, current | Authorized fleet identities and credentialed probes | Health/readiness, metrics and Cell dispatch on mandatory mTLS |
+| 8790 peer, target split | Authorized fleet identities only | Cell dispatch and authenticated internal control |
 
-Proposed new configuration, not accepted by the current binary:
+The current binary accepts this exact shape. `peer_advertise` must be a root
+HTTPS URL on `management_listen`; all filesystem paths must be absolute. The
+certificate must be CA-trusted, valid for client and server authentication,
+match the Ed25519 private key and cover the advertised host.
 
 ```toml
-[cells]
-directory = "/var/lib/crab/tmp/cells"
+management_listen = "0.0.0.0:8789"
 
-[peer]
-listen = "0.0.0.0:8790"
-advertise_url = "https://10.42.3.17:8790"
-certificate_file = "/run/secrets/crab-peer/tls.crt"
-private_key_file = "/run/secrets/crab-peer/tls.key"
-trust_bundle_file = "/run/secrets/crab-peer/ca.crt"
+[cells]
+data_dir = "/var/lib/crab/cells"
+peer_advertise = "https://10.42.3.17:8789"
+peer_tls_server_name = "crab-http-server-peer"
+peer_certificate = "/run/secrets/crab-peer/tls.crt"
+peer_private_key = "/run/secrets/crab-peer/tls.key"
+peer_ca = "/run/secrets/crab-peer/ca.crt"
 ```
 
-Prefer deriving the cell directory from existing scratch policy. Peer binding,
-advertised address and trust material are necessary distributed-process inputs;
-per-repository cloud credentials and a second storage-root configuration are not.
-Keep algorithm tuning as documented internal constants until operational
-evidence warrants public configuration.
+`peer_tls_server_name` separates a stable certificate identity from the
+node-specific Pod IP. The peer client still verifies the CA chain, the server
+authentication EKU, and that DNS name; it then pins the exact enrolled leaf and
+Ed25519 key before sending the request. It does not disable TLS verification.
 
-Pod IP advertisement and TLS verification must agree. For IP endpoints, issue
-appropriate IP SAN certificates or use a reviewed verifier that authenticates a
-fleet workload identity independently of the dial address. Never disable
-certificate verification to make Pod IPs work. A mesh may supply this transport
-identity if the application trust boundary is explicitly configured and tested.
+The target may split peer traffic onto 8790 after the Helm, probe and certificate
+contracts are changed together. That is an operational isolation change, not a
+second Cell protocol. Advertised address and trust material are necessary
+distributed-process inputs; per-repository cloud credentials and a second
+storage-root configuration are not. Keep algorithm tuning as documented internal
+constants until operational evidence warrants public configuration.
+
+The Helm chart injects the Pod IP as `--peer-advertise-host`. The managed
+configuration supplies the stable TLS name and Secret paths. A signed node
+advertisement binds that IP endpoint to the leaf digest, public key, session,
+release, and fleet; a mismatched endpoint or leaf fails closed.
 
 ### Helm changes
 
@@ -137,9 +145,10 @@ available zones/nodes. Capacity must accommodate the surge and one unavailable
 node. PDB protects supported voluntary disruption flows, not involuntary crashes
 or every direct deletion.
 
-Current defaults require at least two topology domains via `minDomains: 2` and
-`DoNotSchedule`. A single-node local cluster needs an explicit local values
-profile; simply reducing replicas can leave Pods Pending.
+Current defaults require at least two zone domains and three node domains via
+`minDomains` and `DoNotSchedule`. A smaller local cluster needs an explicit
+local values profile; simply reducing replicas is rejected by the production
+chart and can leave Pods Pending.
 
 NetworkPolicy permits public traffic from the edge, peer traffic from Crab Pods
 in the expected namespace, and probes from the supported cluster sources.
@@ -150,6 +159,7 @@ TLS peer authentication.
 
 ### Readiness and termination
 
+Public `/livez` is a storage-independent load-balancer liveness check. Private
 `/healthz` checks process health without requiring object storage. `/readyz`
 checks bootstrap/catalog readiness, peer transport readiness, storage capability
 qualification and global draining/fencing state. A Pod can be ready with zero
@@ -187,7 +197,9 @@ replicas sharing an asynchronously copied bucket are not one linearizable fleet.
 The existing [ECS Fargate evaluation profile](../deploy/ecs/README.md) has a shorter
 stop timeout than the full server operation/drain budget. Preserve its documented
 qualification limitation; the new cell protocol does not make an interrupted Git
-or asset transfer complete successfully.
+or asset transfer complete successfully. The profile discovers each task's
+`awsvpc` address through the task-local ECS metadata endpoint and admits direct
+mTLS peer traffic on the management port from the task security group only.
 
 ## Lifecycle, admission, and resource limits
 
@@ -230,6 +242,17 @@ executor or all restore slots.
 Use weighted admission based on estimated disk requirement for restores and
 snapshots. `emptyDir.sizeLimit` alone does not reserve node disk. Account for
 Kubernetes ephemeral-storage requests/limits and eviction pressure.
+
+The implemented node split assigns one third of usable startup disk to
+one-MiB full-job scratch permits and two thirds to a byte-precise shared budget.
+The latter is injected into the replica `Host` and the HTTP transfer staging
+owner, so WAL/LTX growth, sparse-page materialization and Git/LFS/Release bodies
+cannot each spend the same bytes independently. Every full restore, resume,
+bundle and compaction admission also remeasures filesystem free space against
+the node reserve, shared long-lived bytes and all admitted scratch bytes before
+remote body downloads. The hard cut starts these Cell
+databases empty; there is no legacy application-data importer, dual read or
+bucket-to-SQLite migration path.
 
 ### Shutdown ordering
 

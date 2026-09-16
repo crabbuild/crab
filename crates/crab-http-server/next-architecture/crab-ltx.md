@@ -1,12 +1,15 @@
 # crab-ltx: reuse of Celld's SQLite replication engine
 
-[Design index](README.md) · Local/remote library implemented; HTTP integration remains proposed.
+[Design index](README.md) · Local/remote library and issue/comment/label/status/check/settings HTTP integration implemented.
 
 [crab-ltx](../../crab-ltx/README.md) now implements the embedded local SQLite
 WAL-to-LTX mechanics and optional `replica` transport/paged reads. The Cargo member contains a pinned, modified source
 integration of `celld-ltx`, not a Git dependency or separate daemon.
-The HTTP server does **not** yet consume it; repository actors, binding library
-manifests to owner/head CAS, UI durability and hard cutover remain future implementation.
+The HTTP server consumes it through `crab-cell-runtime`: repository issue,
+comment, label, commit-status, check-run, repository-policy, Pull and Release
+commands publish LTX before success, cold activation restores the exact
+published root, and public routes use the owner-aware typed client. Fleet-scale
+performance and process/network fault qualification remain delivery work.
 
 ## Implemented state
 
@@ -16,13 +19,13 @@ manifests to owner/head CAS, UI durability and hard cutover remain future implem
 | Capture | Checksum-bearing sized-block LTX, all cuts returned; SQLite WAL-hook frame boundary checked before checkpointing |
 | Snapshot | Full local snapshot plus ownership of every newly generated capture cut |
 | Restore | Explicit snapshot-plus-deltas plan; exact ranges/digests/checksums; owned verified bytes; new-file installation |
-| Compaction | Full snapshots and selected-body delta ranges; exact reduced bytes and replacement indexed state verified; caller-driven level scheduling |
+| Compaction | Full snapshots and selected-body delta ranges; exact reduced bytes and replacement indexed state verified; bounded eight-input Cell level scheduling plus pressure-triggered full replacement |
 | Remote replication (`replica` feature) | Existing `crab-storage` transport; immutable LTX/index/manifest objects; conditional epoch-head publication |
 | Remote recovery/compaction | Pinned cross-epoch inheritance, exact restore/resume, bundle locations and compaction guarded by head CAS |
 | Paged SQL | Authenticated immutable views and writable sparse activation; incremental hydration, bounded range read-ahead |
-| Failure/retention | Capture failure fences the handle; fresh-directory reactivation; exact published local cuts can be pruned |
-| Host facilities | Injectable filesystem/base VFS/clock/executor; shared page-fault worker/cache and I/O/job/recovery concurrency budgets |
-| Not wired | HTTP owner/control publication, leases/routing, domain SQL, server executor and responses |
+| Failure/retention | Capture failure fences the handle; fresh-directory reactivation; exact batch/head pruning reverifies local bytes before deleting and releasing admission accounting |
+| Host facilities | Injectable filesystem/base VFS/clock/executor; shared page-fault worker/cache and I/O/job/recovery/dirty concurrency budgets; one-MiB full-job scratch permits; temporary reservations follow cancelled jobs but are removed from returned long-lived handles |
+| Server wiring | All repository collaboration metadata, owner/control publication, scheduled owner-bound compaction, exact local-cut pruning, local/remote/idle/stale-owner routing, public HTTP response gating and source-loss restore are wired; immutable Release asset bodies remain object data by design |
 
 Source and usage: [crate README](../../crab-ltx/README.md),
 [public API](../../crab-ltx/src/lib.rs),
@@ -315,7 +318,11 @@ not inferred from the count of frames or files.
 A checksum index is disposable local state. Rebuild it from verified pages after
 restore; do not trust a stale index from another activation. At 4 KiB pages, a
 packed eight-byte checksum entry per page costs about 2 MiB per GiB of database,
-before container/allocator overhead. Budget and measure the actual representation.
+on local SSD. Cell writable preparation now streams that file from authenticated
+directory leaves in 64 KiB chunks. Capture keeps only changed entries resident,
+updates the aggregate incrementally, then persists positional entries after its
+LTX cut is durable. Any write/sync error fences the activation. Budget and
+measure disk use and the changed-page overlay separately.
 
 Qualification must compare incremental checksums with a full page checksum at
 each generated cut, including repeated writes to one page, truncation, growth,
@@ -442,28 +449,40 @@ downloaded files and reconstructs a database image in memory. Initially impose
 admission limits for compressed inputs, decoded pages, image buffers and scratch,
 plus a node-wide concurrency budget. The implemented `Limits` defaults are
 256 MiB per database, 512 MiB per local file including WAL, 1 GiB aggregate
-plan/retained artifacts and 1,024 segments. These are not RSS or disk quotas;
-verification and compaction retain multiple buffers, and aggregate capture
-accounting can fail after local files have been installed. Reserve headroom.
-The current checksum index is packed but cloned/scanned per cut, so this is not
-an O(changed-pages)-only implementation. Oversized cells receive a clear capacity
-failure. A bounded streaming implementation is a measured follow-up, not an
-assumed property of the reused APIs.
+plan/retained artifacts and 1,024 segments. `Host::with_local_disk_budget`
+adds a shared byte-precise disk gate: managed writes reserve WAL plus LTX peak
+space before BEGIN, reconcile to exact database/WAL/retained bytes, and sparse VFS faults
+reserve each newly materialized page. `TransactionError::Admission` proves SQL
+did not start and lets the runtime return capacity without fencing. These are
+not RSS quotas;
+`Host::with_scratch_monitor` also lets the server remeasure actual free space
+after weighted full-job admission and before remote body downloads.
+standalone plan verification/compaction retains input buffers, while Cell
+compaction uses bounded memory plus local scratch. Aggregate capture accounting
+can fail after local files have been installed. Reserve headroom.
+The Cell checksum index is disk-backed and its ordinary capture path is
+O(changed pages); truncation must additionally read the removed checksum suffix.
+Standalone local capture still uses an in-memory dense base. Oversized cells
+receive a clear capacity failure. Cell restore and compaction streaming are
+implemented; measured 5 GB/low-disk qualification remains follow-up evidence,
+not an assumed property.
 
 ## Compaction and cleanup
 
-The implemented API uses the upstream compactor on a verified snapshot chain
-or an exact contiguous delta span. Remote range compaction authenticates the original
-indexed plan, downloads only selected bodies, binds them to their index digests,
-compares the output with independently reduced selected page bytes, and verifies
-the replacement indexed plan before publication. Preserve
-the final database state/checksum and encode one qualified representation.
-The library returns a local immutable candidate. The server uploads it and
-publishes a replacement manifest with the same application revision; a failed
-CAS leaves an orphan candidate, not permission to delete original inputs.
-The optional `Replica::compact` implements that upload/epoch-head CAS for a
-complete pinned library plan. Binding its immutable root to the HTTP control
-record remains a separate server publication operation.
+The standalone API uses the upstream-derived compactor on a verified snapshot
+chain or exact contiguous delta span. `CellReplica::prepare_compaction` instead
+acquires recovery admission, range-fetches and verifies every authenticated
+index into caller-owned scratch, then externally merges one cursor per segment.
+It streams every selected LTX range through its manifest BLAKE3, fetches selected
+immutable frames in adjacent runs capped at 1 MiB, verifies frame and page
+checksums, streams the replacement LTX and sidecar, and uploads them in 8 MiB
+multipart ranges through the injected filesystem. It
+rebuilds the final radix directory from original and replacement sidecars and
+returns a representation-only `PreparedRoot`. The server publishes that root
+with the unchanged application revision through the normal authority CAS; a
+failed CAS leaves orphan immutable objects, not permission to delete inputs.
+The optional standalone `Replica::compact` still implements its own upload and
+epoch-head CAS. Neither API turns the standalone epoch head into HTTP authority.
 
 Keep remote deletion out of the first crate API. Upstream `ReplicaClient`
 includes listing, `delete_ltx_files` and `delete_all`; importing that entire

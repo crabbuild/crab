@@ -151,10 +151,12 @@ async fn inheritance_admits_every_destination_limit_before_io() {
         .unwrap();
     for limits in [
         Limits {
+            max_capture_bytes: 1024,
             max_file_bytes: 1024,
             ..Limits::default()
         },
         Limits {
+            max_capture_bytes: 1024,
             max_file_bytes: 1024,
             max_plan_bytes: 1024,
             ..Limits::default()
@@ -405,7 +407,10 @@ async fn recovery_admission_is_released_before_returning_long_lived_handles() {
     let directory = tempfile::TempDir::new().unwrap();
     let mut writer = writer(&directory);
     let slots = Arc::new(tokio::sync::Semaphore::new(1));
-    let host = crab_ltx::Host::default().with_recovery_slots(slots.clone());
+    let scratch = Arc::new(tokio::sync::Semaphore::new(256));
+    let host = crab_ltx::Host::default()
+        .with_recovery_slots(slots.clone())
+        .with_scratch_slots(scratch.clone());
     let remote = replica(
         Store::new(Arc::new(InMemory::new())),
         "one",
@@ -431,8 +436,10 @@ async fn recovery_admission_is_released_before_returning_long_lived_handles() {
         1,
         "a live writer must not retain recovery admission"
     );
+    assert_eq!(scratch.available_permits(), 256);
     let head = remote.bundle(&head).await.unwrap();
     assert_eq!(slots.available_permits(), 1);
+    assert_eq!(scratch.available_permits(), 256);
     remote
         .restore(&head, &directory.path().join("restored"))
         .await

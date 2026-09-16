@@ -18,6 +18,8 @@ use crate::{
     server::{Repository, Server},
 };
 
+pub(crate) const MAX_NUMBER: u64 = 9_007_199_254_740_991;
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
     #[error("{0}")]
@@ -92,6 +94,14 @@ pub(crate) enum Error {
         "This submission ID was already used for different content; check the existing discussion before submitting again"
     )]
     RequestConflict,
+    #[error("Collaboration Cell routing is unavailable")]
+    CellUnavailable,
+    #[error("Collaboration write outcome requires resolution")]
+    CellPending,
+    #[error("Collaboration Cell contract failed: {0}")]
+    CellContract(&'static str),
+    #[error("Collaboration Cell operation failed")]
+    Cell(#[source] crab_cell_runtime::Error),
     #[error("Collaboration storage failed")]
     Storage(#[from] StorageError),
     #[error("Collaboration data encoding failed")]
@@ -124,6 +134,8 @@ impl IntoResponse for Error {
                     | Self::ReleaseAssetIo(_)
                     | Self::ReleaseAssetWorker(_)
                     | Self::ReleaseAssetCoordination(_)
+                    | Self::CellContract(_)
+                    | Self::Cell(_)
             )
         {
             tracing::error!(error = ?self, "collaboration request failed");
@@ -261,6 +273,39 @@ impl IntoResponse for Error {
                 "submission_conflict",
                 "This submission ID was already used for different content; check the existing discussion before submitting again",
             ),
+            Self::Cell(crab_cell_runtime::Error::Capacity(_)) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "busy",
+                "Collaboration requests are busy; retry the same submission shortly",
+            ),
+            Self::CellPending => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "outcome_unknown",
+                "The write may have completed; retry the same submission to resolve it",
+            ),
+            Self::CellUnavailable
+            | Self::Cell(
+                crab_cell_runtime::Error::CellNotActive
+                | crab_cell_runtime::Error::CellDraining
+                | crab_cell_runtime::Error::RuntimeClosed
+                | crab_cell_runtime::Error::Fenced
+                | crab_cell_runtime::Error::PendingPublication
+                | crab_cell_runtime::Error::Deadline,
+            ) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "cell_unavailable",
+                "Repository collaboration is temporarily unavailable; retry the same submission shortly",
+            ),
+            Self::Cell(crab_cell_runtime::Error::PeerAuthorization(_)) => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Repository collaboration authorization was denied",
+            ),
+            Self::CellContract(_) | Self::Cell(_) => (
+                StatusCode::BAD_GATEWAY,
+                "cell_error",
+                "Repository collaboration runtime failed; retry the same submission after checking service health",
+            ),
             Self::Body(error) => (
                 error.status(),
                 "invalid_request",
@@ -350,7 +395,7 @@ pub(crate) fn actor(principal: &Principal) -> Result<Identity> {
 }
 
 pub(crate) fn number(value: u64) -> Result<u64> {
-    if value == 0 || value >= crate::app_storage::MAX_NUMBER {
+    if value == 0 || value >= MAX_NUMBER {
         return Err(Error::NotFound);
     }
     Ok(value)
@@ -395,14 +440,6 @@ pub(crate) fn search_query(value: Option<&str>) -> Result<Option<String>> {
         return Ok(None);
     }
     Ok(Some(value.to_lowercase()))
-}
-
-pub(crate) fn matches_query(query: Option<&str>, fields: &[&str]) -> bool {
-    query.is_none_or(|query| {
-        fields
-            .iter()
-            .any(|field| field.to_lowercase().contains(query))
-    })
 }
 
 pub(crate) fn body(value: &str, required: bool) -> Result<()> {

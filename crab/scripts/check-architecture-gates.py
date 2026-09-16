@@ -1748,6 +1748,7 @@ DELETED_WORKFLOW_REEXPORT_ADAPTER_FORBIDDEN_PATTERNS = {
     "pub use yaml::",
 }
 PRIVATE_INTERNAL_PACKAGES = {
+    "crab-cell-runtime",
     "crab-http-server",
     "crab-ltx",
     "crab-s3-gateway",
@@ -1792,6 +1793,7 @@ ALLOWED_SERVER_DEV_FIXTURES = {
     "crab-s3-gateway": set(),
 }
 WORKSPACE_DEPENDENCY_POLICY = {
+    "crab-cell-runtime": {"normal": {"crab-ltx", "crab-storage"}},
     "crab-ltx": {"normal": {"crab-storage"}},
     "crab-remote": {
         "normal": {"crab-auth", "crab-coordination", "crab-git", "crab-metadata", "crab-read", "crab-remote-git", "crab-storage", "crab-write", "crab-xet"},
@@ -1806,6 +1808,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
     "crab-http-server": {
         "normal": {
             "crab-coordination",
+            "crab-cell-runtime",
             "crab-git",
             "crab-lfs",
             "crab-metadata",
@@ -1933,6 +1936,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
     "crab-xet": {},
 }
 WORKSPACE_DEPENDENCY_PATHS = {
+    "crab-cell-runtime": "crates/crab-cell-runtime",
     "crab-ltx": "crates/crab-ltx",
     "crab-write": "crates/crab-write",
     "crab-http-server": "crates/crab-http-server",

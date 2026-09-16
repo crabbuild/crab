@@ -191,6 +191,7 @@ fn profile(
         batch_size,
         limits: Limits {
             max_database_bytes,
+            max_capture_bytes: 64 * MIB,
             max_file_bytes: 512 * MIB,
             max_plan_bytes,
             max_segments: 512,

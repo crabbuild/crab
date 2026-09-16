@@ -5,7 +5,7 @@
 ```mermaid
 flowchart LR
     Client[Browser / Git / LFS] --> Edge[TLS load balancer]
-    Edge --> Replicas[2+ server replicas]
+    Edge --> Replicas[3+ server replicas]
     Replicas --> Catalog[Durable CAS catalog]
     Replicas --> State[OIDC sessions and Git tokens]
     Replicas --> Repos[Crab repositories]
@@ -20,7 +20,7 @@ flowchart LR
 | AKS | `helm/crab-http-server` | AKS Workload ID | Recommended team profile; live qualification required |
 | ECS/Fargate | `ecs/task-definition.example.json` | ECS task role | Evaluation profile; replacement grace is too short |
 
-The Kubernetes chart generates configuration from typed values, runs two or more replicas,
+The Kubernetes chart generates configuration from typed values, runs three or more replicas,
 private probes and Prometheus metrics, an optional Prometheus Operator
 `PodMonitor` and alert rules, a disruption budget, ingress isolation, optional
 Transport Layer Security (TLS) ingress, and optional autoscaling. A provider is
@@ -85,11 +85,18 @@ flowchart LR
 The proxy shares the server's network namespace. It is the only process bound
 to Docker's published port; Crab still binds to loopback and keeps its
 unauthenticated local-trust invariant. The management listener and RustFS are
-not published to the host. Compose waits until the catalog is valid and every
-repository can open its current Git view. This profile is for local development
-and evaluation, not remote or multi-user service. Caddy preserves the validated
-external loopback authority, so Git LFS action URLs also follow a custom
-`CRAB_HTTP_SERVER_PORT`.
+not published to the host. Compose creates the peer CA and leaf once in a
+persistent identity volume, so ordinary container recreation remains in the
+same Cell fleet. A partial identity volume fails closed instead of silently
+creating a different fleet. A one-shot `release-init` service converges concurrent
+first-install callers on the exact Cell descriptor and image before repository
+initialization or server startup. It resumes only its own bootstrap operation,
+admits an operator-prepared candidate without activating it, and never replaces
+a different desired release.
+Compose then waits until the catalog is valid and every repository can open its
+current Git view. This profile is for local development and evaluation, not
+remote or multi-user service. Caddy preserves the validated external loopback
+authority, so Git LFS action URLs also follow a custom `CRAB_HTTP_SERVER_PORT`.
 
 ### Operate the local stack
 
@@ -104,6 +111,11 @@ docker compose --file crates/crab-http-server/deploy/compose.yaml run --rm \
   repository-init --config /etc/crab/server.toml repository list
 ```
 
+Create returns only after the initial repository SQLite/LTX root has been
+published, restored, identity-checked and marked `cell_ready`. Adopted
+repositories follow the same empty-Cell initialization and readiness transition;
+old collaboration application data is not imported.
+
 Inspect or stop the stack without deleting repositories:
 
 ```sh
@@ -111,13 +123,15 @@ docker compose --file crates/crab-http-server/deploy/compose.yaml logs --follow 
 docker compose --file crates/crab-http-server/deploy/compose.yaml down
 ```
 
-`docker compose down --volumes` permanently removes the local RustFS
-volume, including the catalog and every repository. The defaults need no
+`docker compose down --volumes` permanently removes the local RustFS and peer
+identity volumes, including the catalog and every repository. The next start
+therefore creates a new, empty Cell fleet. The defaults need no
 `.env` file. These optional environment variables customize local operation:
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `CRAB_HTTP_SERVER_PORT` | `8788` | Localhost port published by Docker |
+| `CRAB_HTTP_SERVER_RELEASE_IMAGE` | `sha256:` plus 64 `1` digits | Synthetic nonzero image identity recorded by local release bootstrap |
 | `CRAB_TMP_SIZE` | `2g` | Bounded receive-pack and index scratch space |
 | `CRAB_HTTP_SERVER_IMAGE` | `crab-http-server:local` | Server image name or prebuilt image reference |
 
@@ -153,7 +167,7 @@ flowchart LR
     Provider[Generated provider values] --> Helm[Helm release]
     Team[Team image, OIDC, and ingress values] --> Helm
     Secret[OIDC secret and stable state key] --> Helm
-    Identity[Cloud workload identity] --> Pods[Two or more Crab pods]
+    Identity[Cloud workload identity] --> Pods[Three or more Crab pods]
     Helm --> Pods
     Pods --> Root[(One storage root)]
 ```
@@ -209,13 +223,16 @@ input, which is useful with `kubectl exec --stdin`. Authenticated deployments
 require at least one `admin` member when creating or adopting a repository;
 unauthenticated loopback deployments may omit membership.
 
-`create` initializes canonical Crab layout and manifest objects before its CAS
-catalog publish. `adopt` requires those objects to exist already. `set-members`
-uses one conditional catalog update and reports a conflict instead of replaying
-a stale decision over a concurrent change. Every running replica checks the
-catalog every five seconds and swaps routing after the new document
-materializes successfully; in-flight requests retain the previous repository
-handle.
+`create` initializes canonical Crab layout and manifest objects, CAS-publishes
+`empty_cell_pending`, provisions and verifies the initial SQLite/LTX root, then
+CASes `cell_ready`. Exact retries retain the catalog UUID and restore the
+published root before completing. `adopt` requires canonical Git objects,
+publishes `empty_cell_pending`, initializes a new empty application Cell and
+then publishes `cell_ready`. `set-members` uses one conditional catalog update and reports a
+conflict instead of replaying a stale decision over a concurrent change. Every
+running replica checks the catalog every five seconds and swaps routing only
+after all records pass Cell readiness validation; in-flight requests retain the
+previous repository handle.
 
 ## Why Lambda is excluded
 

@@ -11,7 +11,22 @@ use tower::ServiceExt;
 
 const TTL: Duration = Duration::from_secs(60);
 
-pub(super) async fn fixture() -> Arc<Server> {
+struct UnavailableRoundTrip;
+
+impl crab_cell_runtime::PeerRoundTrip for UnavailableRoundTrip {
+    fn send(
+        &self,
+        _target: crab_cell_runtime::CellTarget,
+        _request: Vec<u8>,
+        _remaining_ms: u32,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>,
+    > {
+        Box::pin(async { Err(crab_cell_runtime::Error::CellNotActive) })
+    }
+}
+
+async fn fixture_without_cells() -> Arc<Server> {
     let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
     let admission_store = store.clone();
     let layout = StoreLayout::new(store.clone(), "maintenance".into());
@@ -22,6 +37,7 @@ pub(super) async fn fixture() -> Arc<Server> {
         repositories: BTreeMap::from([(
             ("team".into(), "repo".into()),
             Repository {
+                id: uuid::Uuid::from_bytes([1; 16]),
                 config: RepositoryConfig {
                     owner: "team".into(),
                     name: "repo".into(),
@@ -35,14 +51,15 @@ pub(super) async fn fixture() -> Arc<Server> {
                 identity: RepositoryIdentity::new("memory", "maintenance", 1).unwrap(),
                 store,
                 layout,
-                protections: RwLock::new(BranchProtections::configured(&[])),
-                lifecycle: RwLock::new(RepositoryLifecycle::active()),
                 pinned: Mutex::new(None),
                 maintenance: Mutex::new(None),
             },
         )])
         .into(),
         runtime: Arc::new(RemoteGitRuntime::default()),
+        cell_runtime: start_test_cell_runtime(),
+        repository_cells: None,
+        peer_receiver: None,
         options: RepositoryOptions::default(),
         cursor_key: [0; 32],
         admission: Semaphore::new(16),
@@ -51,6 +68,7 @@ pub(super) async fn fixture() -> Arc<Server> {
             "test/.crab/http-server/v1/admission".into(),
             4,
         ),
+        local_staging: crate::local_disk::LocalStaging::for_test(),
         app_admission: Semaphore::new(8),
         maintenance_admission: Arc::new(Semaphore::new(2)),
         cancellation: CancellationToken::new(),
@@ -58,8 +76,94 @@ pub(super) async fn fixture() -> Arc<Server> {
         auth: None,
         catalog: None,
         catalog_healthy: AtomicBool::new(false),
+        node_healthy: AtomicBool::new(false),
+        scheduler_status: crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap())
+            .unwrap(),
         metrics: crate::metrics::Metrics::new().unwrap(),
     })
+}
+
+pub(super) async fn fixture() -> Arc<Server> {
+    static CELL_DIRS: std::sync::OnceLock<std::sync::Mutex<Vec<tempfile::TempDir>>> =
+        std::sync::OnceLock::new();
+
+    let mut server = fixture_without_cells().await;
+    server.cell_runtime.shutdown().await.unwrap();
+    let repository = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
+    let identity = crab_cell_runtime::ApplicationIdentity::new(
+        crab_cell_runtime::TenantId::from_bytes([31; 16]),
+        crab_cell_runtime::ApplicationId::from_bytes([32; 16]),
+    );
+    let layout = crab_storage::CellStorageLayout::new(
+        repository.store.clone(),
+        object_store::path::Path::from("maintenance-test-cells"),
+        *identity.application().as_bytes(),
+    );
+    let registry = Arc::new(crate::cells::compiled_registry().unwrap());
+    crate::cells::bootstrap_release_at(
+        &layout,
+        identity,
+        &registry,
+        &format!("sha256:{}", "b".repeat(64)),
+    )
+    .await
+    .unwrap();
+    let cell_dir = tempfile::TempDir::new().unwrap();
+    crate::cells::initialize_repository_at(
+        &layout,
+        identity,
+        &registry,
+        cell_dir.path(),
+        "https://initializer.test:8081".into(),
+        repository.id,
+    )
+    .await
+    .unwrap();
+    let cell_session = crab_cell_runtime::SessionId::from_bytes([33; 16]);
+    let cell_runtime = crab_cell_runtime::CellRuntime::new(
+        crab_cell_runtime::SqlWorkerPool::new(1, 16).unwrap(),
+        16 * 1024 * 1024,
+        cell_session,
+    )
+    .unwrap();
+    let router = crate::cells::RepositoryCellRouter::new(
+        identity,
+        layout.clone(),
+        Arc::clone(&registry),
+        cell_runtime.clone(),
+        crate::cells::RepositoryCellPeer::new(
+            crab_cell_runtime::NodeDirectory::new(
+                layout,
+                crab_cell_runtime::Digest::from_bytes([34; 32]),
+                crab_cell_runtime::Digest::from_bytes([35; 32]),
+                registry.release_digest(),
+            ),
+            Arc::new(crab_cell_runtime::PeerSigner::new(
+                cell_session,
+                registry.release_digest(),
+                ed25519_dalek::SigningKey::from_bytes(&[36; 32]),
+            )),
+            Arc::new(UnavailableRoundTrip),
+            crab_cell_runtime::Owner {
+                session: cell_session,
+                endpoint: "https://server.test:8081".into(),
+            },
+        ),
+        cell_dir.path().to_path_buf(),
+    )
+    .unwrap();
+    CELL_DIRS
+        .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+        .lock()
+        .unwrap()
+        .push(cell_dir);
+    let mutable = Arc::get_mut(&mut server).unwrap();
+    mutable.cell_runtime = cell_runtime;
+    mutable.repository_cells = Some(router);
+    server
 }
 
 fn repository(server: &Server) -> Arc<Repository> {
@@ -124,16 +228,46 @@ async fn assert_released(repo: &Repository) {
 async fn close(server: &Server) {
     server.cancellation.cancel();
     server.finish_maintenance().await.unwrap();
-    server.runtime.shutdown().await;
+    server.shutdown_runtimes().await.unwrap();
 }
 
 fn enable_catalog_readiness(server: &mut Arc<Server>) {
     let store = repository(server).store.clone();
     let server = Arc::get_mut(server).unwrap();
     server.catalog = Some(CatalogStore::new(crate::storage_root::StorageRoot::memory(
-        store, "catalog",
+        store.clone(),
+        "catalog",
     )));
+    let identity = crab_cell_runtime::ApplicationIdentity::new(
+        crab_cell_runtime::TenantId::from_bytes([1; 16]),
+        crab_cell_runtime::ApplicationId::from_bytes([2; 16]),
+    );
+    let layout = crab_storage::CellStorageLayout::new(
+        store,
+        object_store::path::Path::from("catalog"),
+        *identity.application().as_bytes(),
+    );
+    let registry = Arc::new(crate::cells::compiled_registry().unwrap());
+    let resolver =
+        crate::peer::LocalCellResolver::new(layout.clone(), identity, server.cell_runtime.clone());
+    let releases = crab_cell_runtime::ReleaseStore::new(layout.clone(), identity).unwrap();
+    server.peer_receiver = Some(crate::peer::PeerReceiver::new(
+        crab_cell_runtime::NodeDirectory::new(
+            layout,
+            crab_cell_runtime::Digest::from_bytes([3; 32]),
+            crab_cell_runtime::Digest::from_bytes([4; 32]),
+            registry.release_digest(),
+        ),
+        registry,
+        releases,
+        resolver,
+        Arc::new(UnavailableRoundTrip),
+    ));
     server.catalog_healthy.store(true, Ordering::Release);
+    server.node_healthy.store(true, Ordering::Release);
+    server
+        .scheduler_status
+        .mark_completed(crate::cells::unix_now_ms().unwrap());
 }
 
 #[tokio::test]
@@ -179,6 +313,76 @@ async fn readiness_rejects_a_server_that_is_draining() {
             .and_then(|value| value.to_str().ok()),
         Some("5")
     );
+    close(&server).await;
+}
+
+#[tokio::test]
+async fn readiness_rejects_a_draining_cell_runtime() {
+    let mut server = fixture().await;
+    enable_catalog_readiness(&mut server);
+    server.shutdown_runtimes().await.unwrap();
+
+    let response = management_router(Arc::clone(&server))
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok()),
+        Some("5")
+    );
+}
+
+#[tokio::test]
+async fn readiness_rejects_a_stalled_cell_scheduler() {
+    let mut server = fixture().await;
+    enable_catalog_readiness(&mut server);
+    let now_ms = crate::cells::unix_now_ms().unwrap();
+    let stalled = crate::cells::SchedulerStatus::new(now_ms - 15_000).unwrap();
+    stalled.mark_completed(now_ms - 15_000);
+    Arc::get_mut(&mut server).unwrap().scheduler_status = stalled;
+
+    let response = management_router(Arc::clone(&server))
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    close(&server).await;
+}
+
+#[tokio::test]
+async fn readiness_requires_the_first_cell_scheduler_cycle() {
+    let mut server = fixture().await;
+    enable_catalog_readiness(&mut server);
+    Arc::get_mut(&mut server).unwrap().scheduler_status =
+        crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap()).unwrap();
+
+    let response = management_router(Arc::clone(&server))
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     close(&server).await;
 }
 

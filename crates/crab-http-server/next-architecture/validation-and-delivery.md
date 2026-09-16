@@ -1,6 +1,6 @@
 # Validation, delivery, and worked examples
 
-[Design index](README.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Target contract; implemented subset tracked in current implementation.
 
 ## Validation and real-repository qualification
 
@@ -15,10 +15,10 @@
 | Exact restore | Snapshot plus deltas matches SQL semantics and expected database checksum |
 | Capture correctness | WAL reset, checkpoint race, partial transaction and page-size cases |
 | Proxy authorization | Spoofed envelope, revoked credential, wrong repository and scope escalation rejected |
-| Git coexistence | Native push, browser edits, PR merges and remote helper share correct publication rules |
-| Migration correctness | Old fleet stopped, complete semantic inventory imported, all repositories restored and verified before reopening; incomplete requests and tombstones preserved |
+| Git coexistence | Native push, repository API mutations, PR merges and remote helper share correct publication rules |
+| Hard-cut correctness | Old fleet fenced, retired-key deletion allowlist proven, every retained Git repository initialized as an empty Cell and restored before reopening |
 | Rollout correctness | Drain, Pod kill, disk loss, incompatible reader, owner rebalance |
-| UI completeness | User action causes real storage change visible after reload and cold restart |
+| API completeness | Public API mutation causes a real storage change visible from another node after cold restart |
 
 ### Storage provider qualification
 
@@ -94,14 +94,14 @@ sizes and a permanently active repository. A planner cannot require all nodes to
 reach their ideal count when no eligible idle cells exist. The proactive cases
 gate the later rebalancer, not the initial on-demand release.
 
-### Real repositories and UI acceptance
+### Real repositories and API acceptance
 
 Use 5–10 real repositories from the mounted qualification checkout collection.
-Treat them as read-only source inputs. Import into dedicated Crab test prefixes;
-perform branch/content/PR mutations only in those imported test copies. A
+Treat them as read-only source inputs. Copy them into dedicated Crab test prefixes;
+perform branch/content/PR mutations only in those disposable Crab copies. A
 suggested ten-slot coverage matrix is:
 
-| Slot | Input characteristic | UI/storage purpose |
+| Slot | Input characteristic | API/storage purpose |
 | --- | --- | --- |
 | 1 | Small text repository | Fast complete collaboration workflow |
 | 2 | Rust workspace | Tree, history, blame and source navigation |
@@ -120,19 +120,19 @@ do not describe those as real-repository qualification.
 
 For each relevant repository, populate issues/comments/labels/assignments,
 PRs/reviews/checks/statuses and releases/assets using supported APIs. Record
-expected resource identities in test evidence. Confirm results through both the
-browser and an independent client, then repeat after stopping all Crab servers
-and discarding their local cell directories in the dedicated environment.
+expected resource identities in test evidence. Confirm results through public
+API requests entering different Pods, then repeat after stopping all Crab
+servers and discarding their local cell directories in the dedicated environment.
 
 Exercise clone, fetch and push with a native Git client separately from metadata
 tests. Select a request entering a non-owner Pod and prove the internal proxy
 path. Trigger a real owner failure during creation and merge and verify truthful
-UI recovery. Preserve drafts and request IDs on network errors.
+HTTP errors and idempotent retry with the original request IDs.
 
-Level 3 acceptance means user action → real RustFS side effect → visible result.
-Level 4 adds visible error paths. Level 5 requires the broader performance,
-accessibility, retention, upgrade and operational evidence. A compiled schema or
-an in-memory HTTP test alone does not satisfy these levels.
+Level 3 acceptance means public API action → real RustFS side effect → public
+API result. Level 4 adds externally observable error paths. Level 5 requires
+the broader performance, retention, upgrade and operational evidence. A
+compiled schema or an in-memory HTTP test alone does not satisfy these levels.
 
 ### Verification scope for the current implementation
 
@@ -163,11 +163,16 @@ workspace resolves a single SQLite linkage. The existing workspace CI will run
 the new member; broad CI and cross-platform results must be recorded separately.
 
 This does **not** complete phase 2's external golden/interoperability, fuzz,
-filesystem fault and measured-resource qualification. It does not prove phases
-1 or 3 onward: combined HTTP owner/control CAS, HTTP output barriers, ownership takeover,
-browser workflows and Kubernetes operations are still unimplemented. Validate
-design links/anchors alongside runtime changes; do not report those server gates
-as passed because the library tests pass.
+filesystem fault and measured-resource qualification. The server now proves
+owner/control CAS, output barriers, local source-loss restore, pending Pull merge
+and Release publication continuation, two-node routing and typed collaboration
+API flows in automated tests. The Kubernetes qualification tool can identify and
+force-delete the serving owner, require higher-epoch takeover, verify restored
+public state, and continue publication through another replica. A signed receipt
+from each provider environment is still required; network partitions, precise
+commit-window faults, and the full public API workflow remain unqualified.
+Validate design links/anchors alongside runtime changes; do not infer those
+deployment gates from library tests. Browser E2E is outside this delivery gate.
 
 ## Delivery sequence
 
@@ -178,19 +183,19 @@ Do not introduce placeholder backends or partially wired production routes.
 | --- | --- | --- |
 | 1. Protocol foundation | Control schema/transitions, immutable manifest graph, provider capability diagnosis | Model/property tests and independent RustFS CAS race |
 | 2. Replication mechanics — library capabilities implemented | [Pinned Celld integration](crab-ltx.md), capture/checkpoints, checksums, exact/inherited recovery, bundles, range compaction and sparse SQL/hydration | Local/process-kill/CRC and real RustFS round-trip proof; external interoperability, broad platform/fault/memory proof remains |
-| 3. Single-node issue slice | SQL issue/comment model, dedup, response barrier, tracked cancellation | Browser create/edit/retry, kill process, restore from RustFS |
+| 3. Single-node collaboration slice — local implementation present | SQL issue/comment/label/status/check/settings model, dedup, response barrier, tracked cancellation | Public API create/edit/retry, kill process, restore from real RustFS still required |
 | 4. Multi-node ownership | Session identity, leases, peer TLS, route policy, cold capacity admission, strong owner reads | Wrong-node routing, competing acquisition, overload, stale owner and lost-response tests |
-| 5. Domain parity | PR/reviews, labels/assignees, statuses/checks, release metadata/assets | Existing domain/API suites plus real UI workflows |
+| 5. Domain parity | PR/reviews, assignees and release metadata/assets; commit-status and check-run SQL/API are implemented | Existing domain/API suites plus real public API workflows |
 | 6. Cross-domain recovery | Durable outbox, canonical Git evidence and pending-work rules | Merge/tag crash and ABA/later-push qualification |
-| 7. Hard cutover | Stop old fleet, offline full inventory import, verify every repository, start SQL/LTX-only fleet | Real copied dataset comparison, interrupted import/resume and full-fleet acceptance before reopening |
+| 7. Hard cutover | Stop old fleet, manually delete retired application data/catalog, adopt every Git repository into a new empty Cell, start SQL/LTX-only fleet | Deletion allowlist proof, empty-state verification, interrupted initialization retry and full-fleet acceptance before reopening |
 | 8. Operational completeness | Kubernetes lifecycle, idle handoff, backups, schema/format rollout, resource limits | Three-Pod rolling update, scale-out/in, disk loss and backup restore |
 | 9. Measured optimization | Bounded proactive rebalance, batching, compaction and then safe collection as justified | Convergence/pressure tests and before/after benchmarks with unchanged fault invariants |
 
 Stages use isolated test instances until the new architecture is complete enough
 for the hard cutover. The new runtime contains one SQLite/LTX application path
 from the outset. Do not implement a legacy-serving adapter, backend toggle or
-migration-aware intermediate release. The offline importer preserves the source
-data contract without making the old store reachable from request handlers.
+migration-aware intermediate release. There is no offline importer; the cutover
+contract intentionally resets application state.
 
 Celld source reuse is approved. The first two phases must complete dependency
 alignment, attribution, capture/checksum qualification and control serialization.
@@ -213,9 +218,9 @@ Expected changes by owner:
 Replace and delete retired domain JSON runtime paths as their SQL equivalents
 land in the new architecture; remove tests that assert only removed internals.
 The hard-cutover release contains no retired collaboration backend. Retain
-offline import fixtures that protect real stored-data contracts. Review net code
-growth by responsibility rather than accepting an adapter stack around the old
-store.
+only native Cell restore and empty-initialization fixtures; there is no stored
+JSON import contract. Review net code growth by responsibility rather than
+accepting an adapter stack around the old store.
 
 ## Worked examples
 

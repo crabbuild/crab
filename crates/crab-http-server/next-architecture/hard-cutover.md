@@ -1,129 +1,128 @@
 # Hard cutover and future upgrades
 
-[Design index](README.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Forward-only empty-state cutover.
 
-The transition imports the [current collaboration storage](current-implementation.md)
-into the [repository SQL model](sqlite-and-data-model.md), then publishes each
-database using the [LTX control protocol](storage-protocol.md).
-[Acceptance gates](validation-and-delivery.md) must pass before reopening traffic.
+The transition intentionally discards existing collaboration application data,
+creates a new [repository SQL model](sqlite-and-data-model.md) for every Git
+repository, and publishes each empty database through the
+[LTX control protocol](storage-protocol.md). The
+[acceptance gates](validation-and-delivery.md) must pass before traffic reopens.
 
-## Hard cutover and future upgrades
+This is not a data migration. Every repository Cell starts from an empty SQLite
+database. Native bucket collaboration objects are disposable cutover input and
+are deleted manually while the old fleet is stopped; no code reads, converts,
+copies, inventories, or validates their application records. References below
+to migrations mean only future schema/code upgrades between already-native
+Cells.
 
-### Accepted transition contract
+## Accepted transition contract
 
-Use one maintenance-window stop/import/verify/start transition for the deployment.
-Downtime is acceptable. There is no requirement for an intermediate release,
-legacy storage fallback, dual writing, mixed old/new HTTP servers, or transparent
-rollback to the current architecture.
+Use one maintenance-window stop/delete/initialize/verify/start transition for
+the deployment. Downtime is acceptable. There is no intermediate compatibility
+release, JSON importer, dual write, fallback reader, mixed old/new fleet or
+automatic rollback.
 
-The new serving binary has one application storage implementation. The offline
-importer is the only component that reads retired collaboration JSON for this
-transition. Existing direct-CAS catalog, authentication and repository policy
-records remain intentional authorities as defined in [data ownership](overview.md#storage-allocation); they are not
-legacy fallback readers.
+The new binary has one application persistence path. Operators manually delete
+the retired `app/v1` collaboration trees and old HTTP catalog while every old
+writer is stopped. Git objects, refs, manifests, LFS objects, repository content,
+authentication authorities and explicitly retained direct-CAS policy are not
+part of that deletion. No old issue, pull, release, check, status, label,
+comment, request ID, counter or tombstone is preserved.
 
-Hard cutover changes the deployment and compatibility requirements. It does not
-authorize deleting existing repositories or application data. Import the existing
-state and retain source evidence. Domain authorization, data identity and retry
-guarantees still matter even though old runtime coexistence is unnecessary.
+This is a runtime contract:
 
-### Fleet cutover procedure
+- catalog schema v1 is rejected instead of silently upgraded;
+- `repository create` and `repository adopt` both install a new empty repository
+  Cell and publish its first LTX root;
+- the catalog moves `empty_cell_pending → cell_ready` only after the published
+  root restores and contains the exact repository UUID;
+- startup and catalog refresh reject pending entries and missing roots;
+- request routing never bootstraps a missing Cell; and
+- no serving or maintenance path reads retired application JSON.
+
+## Fleet cutover procedure
 
 ```mermaid
 stateDiagram-v2
-    CurrentFleet --> Maintenance: close external admission
-    Maintenance --> Offline: drain and stop all old writers
-    Offline --> Importing: capture stable source inventory
-    Importing --> Validating: publish per-repository LTX roots
-    Validating --> NewFleet: every repository passes and smoke checks pass
-    NewFleet --> Open: reopen external traffic
-    Importing --> Paused: failure or uncertain publication
-    Validating --> Paused: verification fails
-    Paused --> Importing: resolve evidence and resume offline
+    CurrentFleet --> Maintenance: close admission
+    Maintenance --> Offline: drain and stop every old writer
+    Offline --> Resetting: delete retired application data and catalog
+    Resetting --> Initializing: adopt Git repositories into empty Cells
+    Initializing --> Validating: restore published roots and smoke test
+    Validating --> NewFleet: every repository passes
+    NewFleet --> Open: reopen traffic
+    Resetting --> Paused: deletion inventory differs from plan
+    Initializing --> Paused: publication or verification fails
+    Validating --> Paused: acceptance gate fails
+    Paused --> Initializing: correct fault and retry exact setup
 ```
 
-1. Close external admission and pause scheduled jobs or other writers that could
-   affect the migration dataset. Drain HTTP mutations, asset attachments and
-   retained Git publication/cleanup workers, then stop every old server process.
-   Verify termination and prevent automatic rescheduling of the old deployment.
-   A marker or ingress removal alone does not stop a paused writer.
-2. Keep the new serving fleet stopped while importing. Establish a stable source
-   inventory and backup, including catalog/policy and Git state needed to
-   reconcile pending cross-domain operations. Pause other Git writers while
-   establishing and verifying those cross-domain boundaries.
-3. Inventory every repository's relevant `app/v1` trees, including request
-   reservations, label/tag claims, counters, pending merges, output versions and
-   tombstones. Record key, version/digest and semantic type in import evidence.
-4. Validate schemas, identities, references and uniqueness. Preserve number gaps
-   and incomplete but recoverable submissions. Import each repository in one SQL
-   transaction, including outstanding requests and verified allocation counters.
-   Retained direct-CAS settings do not become a second SQL policy authority.
-5. Run integrity and foreign-key checks; compare domain counts, sorted semantic
-   digests, allocated counters, replay behavior and representative views.
-6. Under the importer's exclusive cell activation, capture and upload the initial
-   full LTX snapshot and recovery manifest. Publish its exact head through control
-   CAS, then release the activation into `idle`. Persist the source inventory
-   identity and published position so an interrupted import can resume safely.
-7. Restore each imported repository independently from its published graph and
-   verify it. Complete the full catalog's import checklist before enabling the
-   new serving fleet. Per-repository imports are resumable units, not permission
-   to run old and new storage backends side by side.
-8. Start only the new binary and its matching embedded UI behind closed external
-   admission. Run readiness, owner routing, permission and workflow smoke checks
-   against the new architecture. No repository may initialize empty merely
-   because its import or control record is missing.
-9. Reopen external traffic after the entire deployment passes acceptance. Disable
-   old deployment automation and retire its application storage runtime paths.
-   Keep source JSON immutable for a documented evidence/backup retention period.
+1. Remove external admission, pause scheduled work, drain accepted HTTP/Git
+   mutations and stop every old process. Revoke its write credentials or prevent
+   rescheduling. An ingress marker alone does not stop a paused writer.
+2. Keep the new fleet stopped. Produce an explicit deletion inventory. Any
+   optional operator backup is outside the new runtime and is never accepted as
+   import input.
+3. Manually delete retired collaboration `app/v1` keys and
+   `.crab/http-server/v1/catalog.json`. This removes release metadata and release
+   asset bytes together with the other retired application data. The allowlist
+   must exclude Git objects, refs, manifests and LFS objects. Verify the intended
+   prefixes are absent before continuing.
+4. Bootstrap and activate the new compiled Cell release while public admission
+   remains closed.
+5. Run `repository adopt` once for every retained Git repository prefix. Adoption
+   writes a new UUID in `empty_cell_pending`, installs the empty SQLite schema,
+   publishes its initial full LTX/root/control state, restores and verifies the
+   UUID, drains ownership to `idle`, then CASes the catalog to `cell_ready`.
+6. Use `repository create` for brand-new repositories. It initializes Git storage
+   first and then follows the identical Cell readiness transition.
+7. Verify every catalog entry is `cell_ready`, every control contains a published
+   root, every Cell restores after deleting only its disposable local copy, and
+   all collaboration lists are intentionally empty.
+8. Start the new binary and embedded UI behind closed admission. Run readiness,
+   routing, authorization, Git clone/fetch/push and collaboration smoke checks.
+9. Reopen traffic only after the whole deployment passes. Permanently disable
+   the old deployment automation. Operator backups are offline disaster-recovery
+   artifacts, never a second serving backend.
 
-The per-repository control CAS establishes that repository's imported durable
-head. Reopening traffic is the fleet's operational cutover point; there is no
-claim of a multi-repository atomic object-store transaction. Partial completion
-keeps the deployment in maintenance until imports are resolved and verified.
+The per-repository control CAS establishes that repository's initial durable
+head. Reopening traffic is the fleet cutover point; there is no multi-repository
+atomic object-store transaction. Partial completion therefore keeps the fleet in
+maintenance until every repository has been initialized and verified.
 
-An uncertain head publication requires rereading authority and matching import
-evidence before retry. Do not start either server version as an automatic
-response to an import error, or overwrite an already published import blindly.
+## Failure recovery
 
-### Requests and partially completed work
+An initialization failure leaves the deployment offline. Correct the fault and
+retry the same repository setup; catalog insertion, Cell provision, root
+publication and `cell_ready` are each idempotent at their explicit boundary.
+Never mark a repository ready manually or initialize a replacement UUID over an
+uncertain published Cell.
 
-Existing request reservations sometimes contain a complete proposed domain
-object even when its visible object was never created. Import the established
-number and original validation inputs. The next retry must complete the same
-logical operation, not allocate a new number or present an invisible reservation
-as already visible content.
+Before step 3, operators may abandon the cutover and restart the unchanged old
+fleet. After retired application keys or the catalog are deleted, automatic
+rollback is unsupported. After any new-architecture mutation, runtime recovery
+uses only the published LTX graph or a corrected new binary. Operator backups
+may support an offline operational decision, but cannot be imported or mounted
+as a serving backend. Export back to old JSON is not a deliverable.
 
-Pending PR merges and tag publications must be settled using canonical Git
-evidence or imported as explicit reconciliation work. Do not drop them because
-the corresponding UI list happens to look complete. Release assets need their
-byte references, hashes, reservations and tombstone state preserved.
+The removed `cells import-repository` command and legacy importer modules must
+not be reintroduced without a new architecture decision. Later SQL migrations
+operate only on already-native Cells through the release maintenance protocol;
+they are not a path for reading deleted object documents.
 
-### Failure recovery
+## Future schema and format upgrades
 
-The planned transition is forward-only. An import failure keeps the deployment
-offline while the importer is repaired or resumed from its evidence. An offline
-abort back to the old deployment is an operator decision outside the automatic
-workflow and requires invalidating all staged imports before any old writes
-resume; a later attempt must inventory and import that changed source again.
+Record SQL schema version, migration checksum, module code, manifest format,
+decoder capability and minimum writer/reader generation. An incompatible node
+must reject ownership before migrating or serving a Cell.
 
-After any new-architecture mutation, including a pre-opening smoke test, the old
-JSON is stale. Recover through the new architecture's published LTX state,
-verified backups or a corrected new binary. An export back to old JSON is not a
-required deliverable, and retained source data is not a live secondary backend.
+For a new LTX encoding, deploy readers first, prove every takeover candidate can
+restore it, then enable writers through durable capability policy. For SQL
+migrations, run compiled migration SQL inside the managed SQLite transaction,
+publish the resulting LTX cut and advance control only after the recovery graph
+is complete. Breaking upgrades may use the existing fleet maintenance state and
+single executor; they do not regain authority to import legacy JSON.
 
-### Future schema and format upgrades
-
-Record SQL schema version, migration checksum, manifest version, decoder
-capabilities and minimum writer/reader generation. An incompatible node must
-reject ownership before migrating or serving a cell.
-
-For a new LTX encoding, deploy readers first, verify every takeover candidate,
-then enable writers through durable capability policy. For SQL migrations,
-use transactions, replicate the migration itself, and publish the new schema
-only after its recovery graph is complete. Incompatible future SQL upgrades can
-also use maintenance-window hard cutovers; no expand/contract compatibility layer
-is required by this design. Reader-first rolling upgrades apply only when that
-future version explicitly supports coexistence within the new architecture.
-
-An unsupported decoder is an availability problem to diagnose, not a reason to
-skip a segment, restore an older head or reinterpret unknown fields.
+An unsupported decoder or retained-work conflict is an availability problem to
+diagnose. It is never permission to skip a segment, restore an older head,
+reinterpret unknown bytes or start a fallback backend.

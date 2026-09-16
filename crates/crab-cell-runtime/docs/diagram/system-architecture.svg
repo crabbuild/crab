@@ -1,0 +1,155 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 730" role="img" aria-labelledby="title description">
+  <title id="title">Crab embedded Cell runtime architecture</title>
+  <desc id="description">A client enters any Crab HTTP server. The repository Cell router resolves the authoritative owner and runs locally or forwards over mutual TLS. The owning node executes a typed Rust handler through one Cell actor and SQLite writer, then publishes a checksum-verified LTX root and fenced control record to object storage.</desc>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+    </pattern>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-cyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#22d3ee"/>
+    </marker>
+    <marker id="arrow-emerald" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#34d399"/>
+    </marker>
+    <marker id="arrow-violet" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#a78bfa"/>
+    </marker>
+    <style>
+      text { font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace; }
+      .title { fill: #f8fafc; font-size: 18px; font-weight: 700; }
+      .subtitle { fill: #94a3b8; font-size: 10px; }
+      .region-label { font-size: 10px; font-weight: 600; }
+      .name { fill: #f8fafc; font-size: 11px; font-weight: 600; text-anchor: middle; }
+      .detail { fill: #94a3b8; font-size: 9px; text-anchor: middle; }
+      .edge-label { fill: #cbd5e1; font-size: 8px; text-anchor: middle; }
+      .note-title { fill: #f8fafc; font-size: 10px; font-weight: 600; }
+      .note-text { fill: #94a3b8; font-size: 8.5px; }
+    </style>
+  </defs>
+
+  <rect width="1320" height="730" fill="#0f172a"/>
+  <rect width="1320" height="730" fill="url(#grid)"/>
+
+  <text x="34" y="35" class="title">Crab embedded Cell runtime</text>
+  <text x="34" y="55" class="subtitle">One product binary · one active SQLite writer per Cell · object storage is the durable authority</text>
+
+  <rect x="220" y="90" width="350" height="490" rx="14" fill="rgba(8,51,68,0.10)" stroke="#22d3ee" stroke-width="1.2" stroke-dasharray="8,4"/>
+  <text x="236" y="112" fill="#22d3ee" class="region-label">ANY CRAB NODE · PUBLIC INGRESS</text>
+
+  <rect x="610" y="90" width="380" height="490" rx="14" fill="rgba(6,78,59,0.10)" stroke="#34d399" stroke-width="1.2" stroke-dasharray="8,4"/>
+  <text x="626" y="112" fill="#34d399" class="region-label">AUTHORITATIVE OWNER NODE</text>
+
+  <rect x="1025" y="90" width="260" height="490" rx="14" fill="rgba(76,29,149,0.10)" stroke="#a78bfa" stroke-width="1.2" stroke-dasharray="8,4"/>
+  <text x="1041" y="112" fill="#a78bfa" class="region-label">SHARED OBJECT STORE</text>
+
+  <!-- Connections are painted before opaque component masks. -->
+  <path d="M 185 285 L 265 285" fill="none" stroke="#22d3ee" stroke-width="2" marker-end="url(#arrow-cyan)"/>
+  <path d="M 395 230 L 395 265" fill="none" stroke="#22d3ee" stroke-width="1.8" marker-end="url(#arrow-cyan)"/>
+  <path d="M 395 335 L 395 405" fill="none" stroke="#fb923c" stroke-width="1.8" marker-end="url(#arrow)"/>
+  <path d="M 525 300 L 675 300" fill="none" stroke="#34d399" stroke-width="1.8" stroke-dasharray="6,4" marker-end="url(#arrow-emerald)"/>
+  <path d="M 525 440 L 590 440 L 590 175 L 675 175" fill="none" stroke="#fb923c" stroke-width="1.8" marker-end="url(#arrow)"/>
+  <path d="M 765 210 L 765 265" fill="none" stroke="#34d399" stroke-width="1.8" marker-end="url(#arrow-emerald)"/>
+  <path d="M 765 335 L 765 385" fill="none" stroke="#34d399" stroke-width="1.8" marker-end="url(#arrow-emerald)"/>
+  <path d="M 765 455 L 765 505" fill="none" stroke="#a78bfa" stroke-width="1.8" marker-end="url(#arrow-violet)"/>
+  <path d="M 855 420 L 895 420 L 895 505" fill="none" stroke="#34d399" stroke-width="1.8" marker-end="url(#arrow-emerald)"/>
+  <path d="M 970 540 L 1060 540 L 1060 455" fill="none" stroke="#a78bfa" stroke-width="1.8" marker-end="url(#arrow-violet)"/>
+  <path d="M 970 300 L 1035 300" fill="none" stroke="#a78bfa" stroke-width="1.8" marker-end="url(#arrow-violet)"/>
+  <path d="M 1155 265 L 1155 205 L 555 205 L 555 300 L 525 300" fill="none" stroke="#a78bfa" stroke-width="1.4" stroke-dasharray="6,4" marker-end="url(#arrow-violet)"/>
+
+  <text x="225" y="274" class="edge-label">HTTP / Git</text>
+  <text x="592" y="289" class="edge-label">local owner</text>
+  <text x="590" y="428" class="edge-label">remote owner</text>
+  <text x="624" y="164" class="edge-label">private mTLS</text>
+  <text x="1001" y="289" class="edge-label">resolve / CAS</text>
+  <text x="1014" y="528" class="edge-label">immutable publish</text>
+  <text x="765" y="366" class="edge-label">one writer</text>
+
+  <!-- Client -->
+  <rect x="35" y="245" width="150" height="80" rx="8" fill="#0f172a"/>
+  <rect x="35" y="245" width="150" height="80" rx="8" fill="rgba(30,41,59,0.72)" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="110" y="277" class="name">Client</text>
+  <text x="110" y="297" class="detail">browser · Git · API</text>
+
+  <!-- Ingress node -->
+  <rect x="265" y="160" width="260" height="70" rx="8" fill="#0f172a"/>
+  <rect x="265" y="160" width="260" height="70" rx="8" fill="rgba(8,51,68,0.45)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="395" y="188" class="name">crab-http-server</text>
+  <text x="395" y="207" class="detail">public routes · auth · repository policy</text>
+
+  <rect x="265" y="265" width="260" height="70" rx="8" fill="#0f172a"/>
+  <rect x="265" y="265" width="260" height="70" rx="8" fill="rgba(8,51,68,0.45)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="395" y="293" class="name">Repository Cell router</text>
+  <text x="395" y="312" class="detail">read authority · admit · route once</text>
+
+  <rect x="265" y="405" width="260" height="70" rx="8" fill="#0f172a"/>
+  <rect x="265" y="405" width="260" height="70" rx="8" fill="rgba(251,146,60,0.20)" stroke="#fb923c" stroke-width="1.5"/>
+  <text x="395" y="433" class="name">Authenticated peer client</text>
+  <text x="395" y="452" class="detail">bounded request · current membership</text>
+
+  <!-- Owner node -->
+  <rect x="675" y="140" width="180" height="70" rx="8" fill="#0f172a"/>
+  <rect x="675" y="140" width="180" height="70" rx="8" fill="rgba(251,146,60,0.20)" stroke="#fb923c" stroke-width="1.5"/>
+  <text x="765" y="168" class="name">Private peer endpoint</text>
+  <text x="765" y="187" class="detail">mTLS · release-aware dispatch</text>
+
+  <rect x="675" y="265" width="180" height="70" rx="8" fill="#0f172a"/>
+  <rect x="675" y="265" width="180" height="70" rx="8" fill="rgba(6,78,59,0.45)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="765" y="293" class="name">Compiled Rust registry</text>
+  <text x="765" y="312" class="detail">typed command · codec · schema</text>
+
+  <rect x="675" y="385" width="180" height="70" rx="8" fill="#0f172a"/>
+  <rect x="675" y="385" width="180" height="70" rx="8" fill="rgba(6,78,59,0.45)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="765" y="413" class="name">Cell actor</text>
+  <text x="765" y="432" class="detail">FIFO admission · fencing · replay</text>
+
+  <rect x="675" y="505" width="180" height="70" rx="8" fill="#0f172a"/>
+  <rect x="675" y="505" width="180" height="70" rx="8" fill="rgba(76,29,149,0.42)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="765" y="533" class="name">SQLite + WAL</text>
+  <text x="765" y="552" class="detail">runtime + application transaction</text>
+
+  <rect x="865" y="505" width="105" height="70" rx="8" fill="#0f172a"/>
+  <rect x="865" y="505" width="105" height="70" rx="8" fill="rgba(6,78,59,0.45)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="917.5" y="533" class="name">crab-ltx</text>
+  <text x="917.5" y="552" class="detail">capture · verify</text>
+
+  <!-- Object-store origin -->
+  <rect x="1035" y="265" width="240" height="70" rx="8" fill="#0f172a"/>
+  <rect x="1035" y="265" width="240" height="70" rx="8" fill="rgba(76,29,149,0.42)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="1155" y="293" class="name">control.json</text>
+  <text x="1155" y="312" class="detail">owner · epoch · exact root · ETag CAS</text>
+
+  <rect x="1035" y="385" width="240" height="70" rx="8" fill="#0f172a"/>
+  <rect x="1035" y="385" width="240" height="70" rx="8" fill="rgba(76,29,149,0.42)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="1155" y="413" class="name">Immutable LTX graph</text>
+  <text x="1155" y="432" class="detail">roots · frames · page directories · bundles</text>
+
+  <rect x="1035" y="505" width="240" height="70" rx="8" fill="#0f172a"/>
+  <rect x="1035" y="505" width="240" height="70" rx="8" fill="rgba(76,29,149,0.42)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="1155" y="533" class="name">Checksum-verifiable bytes</text>
+  <text x="1155" y="552" class="detail">durable origin · node disks are caches</text>
+
+  <!-- Contract notes -->
+  <rect x="35" y="625" width="390" height="70" rx="8" fill="rgba(8,51,68,0.34)" stroke="#22d3ee" stroke-width="1"/>
+  <text x="52" y="650" class="note-title">ROUTE</text>
+  <text x="52" y="668" class="note-text">
+    <tspan x="52" dy="0">Any node may receive traffic; authority decides local</tspan>
+    <tspan x="52" dy="15">execution or one authenticated peer hop.</tspan>
+  </text>
+
+  <rect x="465" y="625" width="390" height="70" rx="8" fill="rgba(6,78,59,0.34)" stroke="#34d399" stroke-width="1"/>
+  <text x="482" y="650" class="note-title">COMMIT</text>
+  <text x="482" y="668" class="note-text">
+    <tspan x="482" dy="0">A successful mutation names the exact SQLite root</tspan>
+    <tspan x="482" dy="15">durably published by its owner.</tspan>
+  </text>
+
+  <rect x="895" y="625" width="390" height="70" rx="8" fill="rgba(76,29,149,0.34)" stroke="#a78bfa" stroke-width="1"/>
+  <text x="912" y="650" class="note-title">RECOVER</text>
+  <text x="912" y="668" class="note-text">
+    <tspan x="912" dy="0">A fenced successor restores the authoritative root;</tspan>
+    <tspan x="912" dy="15">peer disks are never durability.</tspan>
+  </text>
+</svg>

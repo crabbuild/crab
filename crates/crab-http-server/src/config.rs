@@ -2,7 +2,7 @@ use openidconnect::IssuerUrl;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use url::Url;
+use url::{Host, Url};
 
 use serde::Deserialize;
 
@@ -15,6 +15,7 @@ pub struct Config {
     pub listen: SocketAddr,
     pub management_listen: SocketAddr,
     pub storage: StorageConfig,
+    pub cells: CellsConfig,
     pub auth: Option<OidcConfig>,
 }
 
@@ -23,6 +24,19 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 pub struct StorageConfig {
     pub url: String,
+}
+
+/// Local Cell storage and private fleet identity configuration.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CellsConfig {
+    pub data_dir: PathBuf,
+    pub peer_advertise: Url,
+    #[serde(default)]
+    pub peer_tls_server_name: Option<String>,
+    pub peer_certificate: PathBuf,
+    pub peer_private_key: PathBuf,
+    pub peer_ca: PathBuf,
 }
 
 /// One resolved repository from the durable application catalog.
@@ -80,12 +94,26 @@ impl Config {
         Ok(config)
     }
 
+    /// Replaces the node-specific host advertised by the Cell peer listener.
+    pub fn set_peer_advertise_host(&mut self, host: &str) -> Result<()> {
+        let ipv6 = host
+            .parse::<std::net::Ipv6Addr>()
+            .ok()
+            .map(|address| format!("[{address}]"));
+        self.cells
+            .peer_advertise
+            .set_host(Some(ipv6.as_deref().unwrap_or(host)))
+            .map_err(|_| Error::Config("Cell peer advertise host is invalid"))?;
+        self.validate()
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
         if self.listen == self.management_listen {
             return Err(Error::Config(
                 "public and management listeners must be different",
             ));
         }
+        validate_cells(&self.cells, self.management_listen)?;
         let storage = crab_git::url::ObjectUrl::parse(&self.storage.url)
             .map_err(|_| Error::Config("storage.url must be a valid raw cloud URL"))?;
         if storage.form != crab_git::url::UrlForm::Raw
@@ -125,6 +153,44 @@ impl Config {
         }
         Ok(())
     }
+}
+
+fn validate_cells(cells: &CellsConfig, management_listen: SocketAddr) -> Result<()> {
+    if !cells.data_dir.is_absolute()
+        || !cells.peer_certificate.is_absolute()
+        || !cells.peer_private_key.is_absolute()
+        || !cells.peer_ca.is_absolute()
+    {
+        return Err(Error::Config(
+            "Cell data and peer identity paths must be absolute",
+        ));
+    }
+    let endpoint = &cells.peer_advertise;
+    if endpoint.scheme() != "https"
+        || endpoint.host().is_none()
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.path() != "/"
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+        || endpoint.port_or_known_default() != Some(management_listen.port())
+        || endpoint.as_str().len() > 512
+    {
+        return Err(Error::Config(
+            "cells.peer_advertise must be a root HTTPS URL on management_listen",
+        ));
+    }
+    if let Some(name) = cells.peer_tls_server_name.as_deref()
+        && (name.trim() != name
+            || name.is_empty()
+            || name.len() > 253
+            || !matches!(Host::parse(name), Ok(Host::Domain(_))))
+    {
+        return Err(Error::Config(
+            "cells.peer_tls_server_name must be a DNS name without a port",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_repository(repository: &RepositoryConfig) -> Result<()> {
@@ -247,9 +313,11 @@ pub(crate) fn validate_identity_url(url: &Url, allow_loopback_http: bool) -> Res
 mod tests {
     use super::*;
 
+    const CELLS: &str = "\n[cells]\ndata_dir='/var/lib/crab/cells'\npeer_advertise='https://127.0.0.1:8789'\npeer_certificate='/run/secrets/crab/peer.crt'\npeer_private_key='/run/secrets/crab/peer.key'\npeer_ca='/run/secrets/crab/peer-ca.crt'\n";
+
     fn local_config(storage_url: &str) -> Config {
         toml::from_str(&format!(
-            "listen='127.0.0.1:8788'\nmanagement_listen='127.0.0.1:8789'\n[storage]\nurl='{storage_url}'"
+            "listen='127.0.0.1:8788'\nmanagement_listen='127.0.0.1:8789'\n[storage]\nurl='{storage_url}'{CELLS}"
         ))
         .unwrap()
     }
@@ -316,6 +384,41 @@ mod tests {
     fn management_listener_is_separate() {
         let mut config = local_config("s3://bucket/repositories");
         config.management_listen = config.listen;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn cells_require_absolute_paths_and_the_management_https_endpoint() {
+        let valid = local_config("s3://bucket/repositories");
+        assert!(valid.validate().is_ok());
+
+        for endpoint in [
+            "http://127.0.0.1:8789",
+            "https://127.0.0.1:8788",
+            "https://127.0.0.1:8789/path",
+            "https://user@127.0.0.1:8789",
+        ] {
+            let mut config = local_config("s3://bucket/repositories");
+            config.cells.peer_advertise = Url::parse(endpoint).unwrap();
+            assert!(config.validate().is_err(), "{endpoint}");
+        }
+        let mut config = local_config("s3://bucket/repositories");
+        config.cells.data_dir = "relative".into();
+        assert!(config.validate().is_err());
+
+        let mut config = local_config("s3://bucket/repositories");
+        config.cells.peer_tls_server_name = Some("crab-http-server-peer".into());
+        config.set_peer_advertise_host("10.42.3.17").unwrap();
+        assert_eq!(
+            config.cells.peer_advertise.as_str(),
+            "https://10.42.3.17:8789/"
+        );
+        config.set_peer_advertise_host("2001:db8::17").unwrap();
+        assert_eq!(
+            config.cells.peer_advertise.as_str(),
+            "https://[2001:db8::17]:8789/"
+        );
+        config.cells.peer_tls_server_name = Some("https://peer.invalid".into());
         assert!(config.validate().is_err());
     }
 
@@ -388,9 +491,11 @@ mod tests {
 
     #[test]
     fn public_listeners_require_identity_and_https() {
-        let base = "listen='0.0.0.0:8788'\nmanagement_listen='0.0.0.0:8789'\n[storage]\nurl='s3://bucket/repositories'\n";
+        let base = format!(
+            "listen='0.0.0.0:8788'\nmanagement_listen='0.0.0.0:8789'\n[storage]\nurl='s3://bucket/repositories'{CELLS}"
+        );
         let identity = "\n[auth]\nissuer='https://identity.example/realm'\nclient_id='crab'\npublic_url='https://git.example'\nstate_key_file='/run/secrets/crab/state-key'\n";
-        let config: Config = toml::from_str(base).unwrap();
+        let config: Config = toml::from_str(&base).unwrap();
         assert!(config.validate().is_err());
         let config: Config = toml::from_str(&format!("{base}{identity}")).unwrap();
         assert!(config.validate().is_ok());

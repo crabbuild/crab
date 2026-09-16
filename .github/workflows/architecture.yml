@@ -162,6 +162,77 @@ jobs:
            steps.split_crate_tests.outcome != 'success')
         run: exit 1
 
+  cell-runtime-rustfs:
+    name: Server, Cell and LTX RustFS recovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      AWS_ACCESS_KEY_ID: crab
+      AWS_SECRET_ACCESS_KEY: crab
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_REGION: us-east-1
+      AWS_EC2_METADATA_DISABLED: true
+      CRAB_LTX_TEST_BUCKET: crab-cell-runtime
+      CRAB_LTX_TEST_ENDPOINT: http://127.0.0.1:9000
+      CRAB_CELL_TEST_BUCKET: crab-cell-runtime
+      CRAB_CELL_TEST_ENDPOINT: http://127.0.0.1:9000
+      CRAB_CELL_TEST_PREFIX: cell-${{ github.run_id }}-${{ github.run_attempt }}
+      CRAB_HTTP_CELL_TEST_BUCKET: crab-cell-runtime
+      CRAB_HTTP_CELL_TEST_ENDPOINT: http://127.0.0.1:9000
+      CRAB_HTTP_CELL_TEST_PREFIX: server-${{ github.run_id }}-${{ github.run_attempt }}
+      RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install AWS CLI
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y pipx
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cell-runtime-rustfs
+
+      - name: Start isolated RustFS
+        run: |
+          set -euo pipefail
+          data_root="${RUNNER_TEMP}/cell-runtime-rustfs"
+          mkdir -p "$data_root"
+          sudo chown 10001:10001 "$data_root"
+          docker run -d --name cell-runtime-rustfs -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=crab -e RUSTFS_SECRET_KEY=crab \
+            -v "$data_root:/data" \
+            "$RUSTFS_IMAGE" server /data --address :9000
+          for _ in $(seq 1 90); do
+            if aws --endpoint-url "$CRAB_CELL_TEST_ENDPOINT" \
+              s3api list-buckets >/dev/null 2>&1; then
+              aws --endpoint-url "$CRAB_CELL_TEST_ENDPOINT" \
+                s3api create-bucket --bucket "$CRAB_CELL_TEST_BUCKET"
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs cell-runtime-rustfs >&2 || true
+          exit 1
+
+      - name: Verify LTX and Cell source-loss recovery
+        run: |
+          cargo test -p crab-ltx --locked --features replica --test remote \
+            rustfs_roundtrip -- --ignored --exact --nocapture
+          cargo test -p crab-cell-runtime --locked --test actor \
+            rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
+            -- --ignored --exact --nocapture
+          cargo test -p crab-http-server --locked --lib \
+            server::peer_e2e_tests::rustfs_public_collaboration_reaches_remote_owner_and_publishes_ltx \
+            -- --ignored --exact --nocapture
+
   binary-contracts:
     name: Binary and integration contracts
     runs-on: ubuntu-latest

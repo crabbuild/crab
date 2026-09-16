@@ -176,3 +176,47 @@ async fn repository_labels_are_durable_assignable_and_tombstoned() {
     );
     h.close().await;
 }
+
+#[tokio::test]
+async fn source_loss_restores_labels_without_legacy_label_objects() {
+    let h = Harness::new(false).await;
+    let cookie = h.login().await;
+    let request = json!({
+        "request_id": nonce(20),
+        "name": "durable",
+        "color": "123abc",
+        "description": "Published through LTX"
+    });
+    let (status, created) = write(&h, &cookie, "POST", LABELS, request.clone()).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let created = created.unwrap();
+    let repo = h.server.repositories.values().into_iter().next().unwrap();
+    assert!(
+        repo.store
+            .list_prefix(&repo.layout.repo_path("app/v1/labels"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    h.server
+        .repository_cells
+        .as_ref()
+        .unwrap()
+        .drain_local(repo.id)
+        .await
+        .unwrap();
+    for entry in std::fs::read_dir(h.cell_dir.path()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            std::fs::remove_dir_all(path).unwrap();
+        } else {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    assert_eq!(
+        write(&h, &cookie, "POST", LABELS, request).await.1,
+        Some(created.clone())
+    );
+    assert_eq!(h.json(LABELS, &cookie).await["items"][0], created);
+    h.close().await;
+}

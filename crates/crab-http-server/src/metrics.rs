@@ -45,6 +45,9 @@ struct MetricsInner {
     admission: [AdmissionMetrics; ADMISSION_COUNT],
     repositories: Gauge,
     catalog_healthy: Gauge,
+    scheduler_healthy: Gauge,
+    scheduler_progress: Gauge,
+    scheduler_lag_seconds: Gauge,
     draining: Gauge,
     receive_workers: Gauge,
     catalog_refresh_failures: Counter,
@@ -67,6 +70,9 @@ struct AdmissionMetrics {
 pub(crate) struct RuntimeSnapshot {
     pub(crate) repositories: usize,
     pub(crate) catalog_healthy: bool,
+    pub(crate) scheduler_healthy: bool,
+    pub(crate) scheduler_progress: u64,
+    pub(crate) scheduler_lag_seconds: f64,
     pub(crate) draining: bool,
     pub(crate) receive_workers: usize,
     pub(crate) admission_available: [usize; ADMISSION_COUNT],
@@ -92,6 +98,18 @@ impl Metrics {
                 ),
                 catalog_healthy: recorder.register_gauge(
                     &Key::from_static_name("crab_http_server_catalog_healthy"),
+                    &METADATA,
+                ),
+                scheduler_healthy: recorder.register_gauge(
+                    &Key::from_static_name("crab_http_server_scheduler_healthy"),
+                    &METADATA,
+                ),
+                scheduler_progress: recorder.register_gauge(
+                    &Key::from_static_name("crab_http_server_scheduler_progress"),
+                    &METADATA,
+                ),
+                scheduler_lag_seconds: recorder.register_gauge(
+                    &Key::from_static_name("crab_http_server_scheduler_lag_seconds"),
                     &METADATA,
                 ),
                 draining: recorder.register_gauge(
@@ -144,6 +162,15 @@ impl Metrics {
         self.inner
             .catalog_healthy
             .set(f64::from(snapshot.catalog_healthy));
+        self.inner
+            .scheduler_healthy
+            .set(f64::from(snapshot.scheduler_healthy));
+        self.inner
+            .scheduler_progress
+            .set(snapshot.scheduler_progress as f64);
+        self.inner
+            .scheduler_lag_seconds
+            .set(snapshot.scheduler_lag_seconds);
         self.inner.draining.set(f64::from(snapshot.draining));
         self.inner
             .receive_workers
@@ -400,6 +427,21 @@ fn describe_metrics(recorder: &impl Recorder) {
     );
     describe_gauge(
         recorder,
+        "crab_http_server_scheduler_healthy",
+        "Whether a complete repository scheduler cycle finished within 15 seconds.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_http_server_scheduler_progress",
+        "Completed repository scheduler cycles in this boot session.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_http_server_scheduler_lag_seconds",
+        "Seconds since this node completed a repository scheduler cycle.",
+    );
+    describe_gauge(
+        recorder,
         "crab_http_server_draining",
         "Whether graceful shutdown has started.",
     );
@@ -469,6 +511,9 @@ mod tests {
         RuntimeSnapshot {
             repositories: 2,
             catalog_healthy: true,
+            scheduler_healthy: true,
+            scheduler_progress: 3,
+            scheduler_lag_seconds: 0.25,
             draining: false,
             receive_workers: 1,
             admission_available: [16, 3, 8, 1],
@@ -497,6 +542,9 @@ mod tests {
             rendered.contains("crab_http_server_request_duration_seconds_count{method=\"get\"} 1")
         );
         assert!(rendered.contains("crab_http_server_catalog_healthy 1"));
+        assert!(rendered.contains("crab_http_server_scheduler_healthy 1"));
+        assert!(rendered.contains("crab_http_server_scheduler_progress 3"));
+        assert!(rendered.contains("crab_http_server_scheduler_lag_seconds 0.25"));
         assert!(rendered.contains("crab_http_server_repositories 2"));
         assert!(
             rendered

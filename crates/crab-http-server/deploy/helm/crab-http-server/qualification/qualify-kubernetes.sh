@@ -8,7 +8,8 @@ unset GIT_CURL_VERBOSE GIT_TRACE GIT_TRACE_CURL GIT_TRACE_CURL_NO_DATA \
 usage() {
   echo "usage: qualify-kubernetes.sh PROVIDER NAMESPACE DEPLOYMENT HTTPS_ORIGIN OWNER REPOSITORY EVIDENCE_FILE" >&2
   echo "Set CRAB_HTTP_SERVER_GIT_TOKEN, CRAB_HTTP_SERVER_EXPECTED_IMAGE, CRAB_HTTP_SERVER_EXPECTED_CHART," >&2
-  echo "CRAB_HTTP_SERVER_RELEASE_TAG, CRAB_HTTP_SERVER_SOURCE_SHA, and CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true." >&2
+  echo "CRAB_HTTP_SERVER_RELEASE_TAG, CRAB_HTTP_SERVER_SOURCE_SHA, CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true," >&2
+  echo "and CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true." >&2
   exit 2
 }
 
@@ -25,6 +26,10 @@ expected_image="${CRAB_HTTP_SERVER_EXPECTED_IMAGE:?set CRAB_HTTP_SERVER_EXPECTED
 expected_chart="${CRAB_HTTP_SERVER_EXPECTED_CHART:?set CRAB_HTTP_SERVER_EXPECTED_CHART to the exact oci:// chart@sha256 reference}"
 test "${CRAB_HTTP_SERVER_APPROVE_ROLLOUT:-}" = true || {
   echo "Set CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true to approve a rolling restart." >&2
+  exit 2
+}
+test "${CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS:-}" = true || {
+  echo "Set CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true to approve forced deletion of the current Cell owner Pod." >&2
   exit 2
 }
 if [[ ! "$expected_image" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
@@ -243,10 +248,10 @@ jq --exit-status '
        "FABRIC_WORKLOAD_HOST", "FABRIC_SESSION_TOKEN", "FABRIC_CLUSTER_IDENTIFIER",
        "CREDENTIAL_TYPE", "ENCRYPTION_KEY"] | index($name)) != null);
   (.metadata.generation == .status.observedGeneration) and
-  (.status.readyReplicas >= 2) and
-  (.status.availableReplicas >= 2) and
+  (.status.readyReplicas >= 3) and
+  (.status.availableReplicas >= 3) and
   (.status.updatedReplicas == .spec.replicas) and
-  (.spec.replicas >= 2) and
+  (.spec.replicas >= 3) and
   (.spec.strategy.type == "RollingUpdate") and
   (.spec.strategy.rollingUpdate.maxUnavailable == 0) and
   (.spec.strategy.rollingUpdate.maxSurge == 1) and
@@ -266,18 +271,32 @@ jq --exit-status '
       .labelSelector.matchLabels == $selector) and
     any(.spec.template.spec.topologySpreadConstraints[]?;
       .topologyKey == "kubernetes.io/hostname" and
-      .maxSkew == 1 and .minDomains >= 2 and
+      .maxSkew == 1 and .minDomains >= 3 and
       .whenUnsatisfiable == "DoNotSchedule" and
       .labelSelector.matchLabels == $selector)) and
   (.spec.template.spec.containers[] | select(.name == "crab-http-server") |
     (.image | test("@sha256:[0-9a-f]{64}$")) and
+    (.args == ["--config", "/etc/crab/http-server/server.toml",
+      "--peer-advertise-host", "$(CRAB_POD_IP)"]) and
     (.securityContext.allowPrivilegeEscalation == false) and
     (.securityContext.readOnlyRootFilesystem == true) and
     (.securityContext.capabilities.drop == ["ALL"]) and
+    (.startupProbe.exec.command == ["crab-http-server", "--config",
+      "/etc/crab/http-server/server.toml", "healthcheck"]) and
+    (.readinessProbe.exec.command == ["crab-http-server", "--config",
+      "/etc/crab/http-server/server.toml", "healthcheck"]) and
+    (.livenessProbe.tcpSocket.port == "management") and
+    any(.env[]?; .name == "CRAB_POD_IP" and .valueFrom.fieldRef.fieldPath == "status.podIP") and
+    any(.volumeMounts[]?; .name == "scratch" and .mountPath == "/var/lib/crab") and
     all(.env[]?; (.name | forbidden_cloud_env | not)) and
     (.lifecycle.preStop.exec.command == ["/usr/bin/sleep", "15"])) and
   any(.spec.template.spec.volumes[]?;
-    .name == "scratch" and (.emptyDir.sizeLimit | length) > 0)
+    .name == "scratch" and (.emptyDir.sizeLimit | length) > 0) and
+  any(.spec.template.spec.volumes[]?;
+    .name == "secrets" and
+    any(.projected.sources[]?.secret.items[]?; .path == "peer/tls.crt") and
+    any(.projected.sources[]?.secret.items[]?; .path == "peer/tls.key") and
+    any(.projected.sources[]?.secret.items[]?; .path == "peer/ca.crt"))
 ' "$deployment_json" >/dev/null
 release_version="${release_tag#crab-http-server-v}"
 expected_chart_label="crab-http-server-${release_version}"
@@ -322,6 +341,9 @@ jq --exit-status --argjson selector "$selector_json" '
   (.spec.policyTypes == ["Ingress"]) and
   (.spec.podSelector.matchLabels == $selector) and
   any(.spec.ingress[]?; (.from | length) > 0 and any(.ports[]?; .port == "http")) and
+  any(.spec.ingress[]?;
+    any(.ports[]?; .port == "management") and
+    any(.from[]?; .podSelector.matchLabels == $selector)) and
   all(.spec.ingress[]?.from[]?; restricted_peer) and
   ([.spec.ingress[]?.ports[]?.port] | all(. == "http" or . == "management"))
 ' "$policy_json" >/dev/null
@@ -335,7 +357,7 @@ fi
 jq --exit-status --argjson selector "$selector_json" \
   --argjson minimum "$minimum_replicas" '
   ((.spec.minAvailable | type) == "number") and
-  (.spec.minAvailable >= 1) and
+  (.spec.minAvailable >= 2) and
   (.spec.minAvailable < $minimum) and
   (.spec.unhealthyPodEvictionPolicy == "AlwaysAllow") and
   (.spec.selector.matchLabels == $selector)
@@ -351,7 +373,7 @@ load_ready_pods() {
   kubectl --namespace "$namespace" get pods --selector "$selector" -o json > "$pods_json"
   jq --exit-status '
     [.items[] | select(.metadata.deletionTimestamp == null)] as $pods |
-    ($pods | length) >= 2 and
+    ($pods | length) >= 3 and
     all($pods[];
       .status.phase == "Running" and
       any(.status.conditions[]?; .type == "Ready" and .status == "True"))
@@ -366,7 +388,7 @@ check_placement() {
   jq --raw-output '.items[] | select(.metadata.deletionTimestamp == null) | .spec.nodeName' \
     "$pods_json" | sort -u > "$nodes_file"
   node_count="$(wc -l < "$nodes_file" | tr -d '[:space:]')"
-  test "$node_count" -ge 2
+  test "$node_count" -ge 3
   : > "$details_file"
   while IFS= read -r node; do
     kubectl get node "$node" \
@@ -537,8 +559,10 @@ start_forward() {
 
 port_a="${CRAB_HTTP_SERVER_PORT_A:-28788}"
 port_b="${CRAB_HTTP_SERVER_PORT_B:-28789}"
+port_c="${CRAB_HTTP_SERVER_PORT_C:-28790}"
 start_forward "${pods[0]}" "$port_a" "${work_dir}/forward-a.log"
 start_forward "${pods[1]}" "$port_b" "${work_dir}/forward-b.log"
+start_forward "${pods[2]}" "$port_c" "${work_dir}/forward-c.log"
 
 remote_public="${origin}/git/${owner}/${repository}.git"
 remote_a="http://127.0.0.1:${port_a}/git/${owner}/${repository}.git"
@@ -609,6 +633,72 @@ git_public -C "$client" push "$remote_public" "HEAD:refs/heads/${branch}"
 git_public -C "$client" lfs unlock "$payload"
 lock_held=false
 
+uuid_from_text() {
+  local digest
+  if command -v sha256sum >/dev/null; then
+    digest="$(printf '%s' "$1" | sha256sum | awk '{print $1}')"
+  else
+    digest="$(printf '%s' "$1" | shasum -a 256 | awk '{print $1}')"
+  fi
+  printf '%s-%s-%s-%s-%s' \
+    "${digest:0:8}" "${digest:8:4}" "${digest:12:4}" \
+    "${digest:16:4}" "${digest:20:12}"
+}
+
+status_context="crab/live-qualification"
+status_request_id="$(uuid_from_text "${qualification_id}:status")"
+jq --null-input \
+  --arg request_id "$status_request_id" \
+  --arg context "$status_context" \
+  --arg target_url "${origin}/qualification/${qualification_id}" \
+  '{request_id: $request_id, context: $context, state: "success",
+    description: "Three-node Cell qualification", target_url: $target_url}' \
+  > "${work_dir}/status-input.json"
+curl_pod --request POST --header 'content-type: application/json' \
+  --data-binary "@${work_dir}/status-input.json" \
+  --output "${work_dir}/status-created.json" \
+  "http://127.0.0.1:${port_a}/api/repos/${owner}/${repository}/statuses/${final_oid}"
+jq --exit-status \
+  --arg context "$status_context" \
+  '.context == $context and .state == "success"' \
+  "${work_dir}/status-created.json" >/dev/null
+curl_pod --output "${work_dir}/status-replica.json" \
+  "http://127.0.0.1:${port_b}/api/repos/${owner}/${repository}/commits/${final_oid}/status"
+jq --exit-status \
+  --arg oid "$final_oid" --arg context "$status_context" \
+  '.sha == $oid and .state == "success" and
+   any(.statuses[]; .context == $context and .state == "success")' \
+  "${work_dir}/status-replica.json" >/dev/null
+
+check_request_id="$(uuid_from_text "${qualification_id}:check")"
+jq --null-input \
+  --arg request_id "$check_request_id" \
+  --arg head_sha "$final_oid" \
+  --arg details_url "${origin}/qualification/${qualification_id}" \
+  '{request_id: $request_id, head_sha: $head_sha,
+    name: "crab/live-qualification", status: "completed",
+    conclusion: "success", details_url: $details_url,
+    output: {title: "Three-node Cell qualification passed",
+      summary: "The record must survive replacement of every serving Pod.",
+      text: null, steps: [], annotations: []}}' \
+  > "${work_dir}/check-input.json"
+curl_pod --request POST --header 'content-type: application/json' \
+  --data-binary "@${work_dir}/check-input.json" \
+  --output "${work_dir}/check-created.json" \
+  "http://127.0.0.1:${port_c}/api/repos/${owner}/${repository}/check-runs"
+check_run_id="$(jq --raw-output \
+  'select(.name == "crab/live-qualification" and .status == "completed" and .conclusion == "success") | .id' \
+  "${work_dir}/check-created.json")"
+[[ "$check_run_id" =~ ^[1-9][0-9]*$ ]]
+check_path="/api/repos/${owner}/${repository}/commits/${final_oid}/check-runs/${check_run_id}"
+curl_pod --output "${work_dir}/check-replica.json" \
+  "http://127.0.0.1:${port_a}${check_path}"
+jq --exit-status \
+  --argjson id "$check_run_id" \
+  '.id == $id and .status == "completed" and .conclusion == "success" and
+   .output.title == "Three-node Cell qualification passed"' \
+  "${work_dir}/check-replica.json" >/dev/null
+
 stop_forwards
 kubectl --namespace "$namespace" rollout restart "deployment/${deployment}"
 rollout_log="${work_dir}/rollout.log"
@@ -642,6 +732,156 @@ jq --raw-output '.items[] | select(.metadata.deletionTimestamp == null) | .metad
   "$pods_json" | sort > "${work_dir}/new-uids"
 test -z "$(comm -12 "${work_dir}/old-uids" "${work_dir}/new-uids")"
 
+pods=()
+while IFS= read -r pod; do
+  pods+=("$pod")
+done < <(jq --raw-output '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name' "$pods_json")
+start_forward "${pods[0]}" "$port_a" "${work_dir}/forward-restored-a.log"
+start_forward "${pods[1]}" "$port_b" "${work_dir}/forward-restored-b.log"
+start_forward "${pods[2]}" "$port_c" "${work_dir}/forward-restored-c.log"
+
+curl_pod --output "${work_dir}/status-restored.json" \
+  "http://127.0.0.1:${port_c}/api/repos/${owner}/${repository}/commits/${final_oid}/status"
+jq --exit-status \
+  --arg oid "$final_oid" --arg context "$status_context" \
+  '.sha == $oid and .state == "success" and
+   any(.statuses[]; .context == $context and .state == "success")' \
+  "${work_dir}/status-restored.json" >/dev/null
+curl_pod --output "${work_dir}/check-restored.json" \
+  "http://127.0.0.1:${port_b}${check_path}"
+jq --exit-status \
+  --argjson id "$check_run_id" \
+  '.id == $id and .status == "completed" and .conclusion == "success" and
+   .output.title == "Three-node Cell qualification passed"' \
+  "${work_dir}/check-restored.json" >/dev/null
+
+control_before="${work_dir}/control-before-owner-loss.json"
+kubectl --namespace "$namespace" exec "${pods[0]}" -- \
+  crab-http-server --config /etc/crab/http-server/server.toml \
+    cells status --owner "$owner" --name "$repository" > "$control_before"
+jq --exit-status '
+  .version == 1 and .state == "serving" and
+  (.owner.session | test("^[0-9a-f]{32}$")) and
+  (.owner.endpoint | startswith("https://")) and
+  (.root.digest | test("^[0-9a-f]{64}$")) and
+  .root.commit_sequence > 0
+' "$control_before" >/dev/null
+owner_endpoint="$(jq --raw-output '.owner.endpoint' "$control_before")"
+owner_session_before="$(jq --raw-output '.owner.session' "$control_before")"
+owner_epoch_before="$(jq --raw-output '.epoch' "$control_before")"
+owner_commit_sequence_before="$(jq --raw-output '.root.commit_sequence' "$control_before")"
+owner_pod=""
+owner_pod_uid=""
+while IFS=$'\t' read -r pod ip uid; do
+  peer_host="$ip"
+  if [[ "$ip" == *:* ]]; then
+    peer_host="[${ip}]"
+  fi
+  if [ "$owner_endpoint" = "https://${peer_host}:8789/" ]; then
+    owner_pod="$pod"
+    owner_pod_uid="$uid"
+    break
+  fi
+done < <(jq --raw-output '
+  .items[] | select(.metadata.deletionTimestamp == null) |
+  [.metadata.name, .status.podIP, .metadata.uid] | @tsv
+' "$pods_json")
+test -n "$owner_pod"
+test -n "$owner_pod_uid"
+
+stop_forwards
+kubectl --namespace "$namespace" delete pod "$owner_pod" \
+  --grace-period=0 --force --wait=false >/dev/null
+kubectl --namespace "$namespace" wait --for=delete "pod/${owner_pod}" --timeout=2m
+kubectl --namespace "$namespace" rollout status "deployment/${deployment}" --timeout=15m
+owner_replacement_ready=false
+for _attempt in $(seq 1 60); do
+  if load_ready_pods; then
+    owner_replacement_ready=true
+    break
+  fi
+  sleep 2
+done
+$owner_replacement_ready
+jq --exit-status --arg uid "$owner_pod_uid" '
+  [.items[] | select(.metadata.deletionTimestamp == null) | .metadata.uid] |
+  index($uid) == null
+' "$pods_json" >/dev/null
+check_placement
+check_workload_identity
+check_pod_health
+
+pods=()
+while IFS= read -r pod; do
+  pods+=("$pod")
+done < <(jq --raw-output '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name' "$pods_json")
+start_forward "${pods[0]}" "$port_a" "${work_dir}/forward-owner-loss-a.log"
+start_forward "${pods[1]}" "$port_b" "${work_dir}/forward-owner-loss-b.log"
+start_forward "${pods[2]}" "$port_c" "${work_dir}/forward-owner-loss-c.log"
+
+owner_loss_restored=false
+for _attempt in $(seq 1 60); do
+  if curl_pod --output "${work_dir}/status-owner-loss.json" \
+      "http://127.0.0.1:${port_a}/api/repos/${owner}/${repository}/commits/${final_oid}/status" &&
+    jq --exit-status \
+      --arg oid "$final_oid" --arg context "$status_context" \
+      '.sha == $oid and .state == "success" and
+       any(.statuses[]; .context == $context and .state == "success")' \
+      "${work_dir}/status-owner-loss.json" >/dev/null; then
+    owner_loss_restored=true
+    break
+  fi
+  sleep 2
+done
+$owner_loss_restored
+
+control_after="${work_dir}/control-after-owner-loss.json"
+kubectl --namespace "$namespace" exec "${pods[0]}" -- \
+  crab-http-server --config /etc/crab/http-server/server.toml \
+    cells status --owner "$owner" --name "$repository" > "$control_after"
+jq --exit-status \
+  --arg session "$owner_session_before" \
+  --argjson epoch "$owner_epoch_before" \
+  --argjson sequence "$owner_commit_sequence_before" '
+  .version == 1 and .state == "serving" and
+  .owner.session != $session and .epoch > $epoch and
+  .root.commit_sequence >= $sequence
+' "$control_after" >/dev/null
+
+continuation_context="crab/live-qualification-after-owner-loss"
+continuation_request_id="$(uuid_from_text "${qualification_id}:owner-loss")"
+jq --null-input \
+  --arg request_id "$continuation_request_id" \
+  --arg context "$continuation_context" \
+  --arg target_url "${origin}/qualification/${qualification_id}" \
+  '{request_id: $request_id, context: $context, state: "success",
+    description: "Cell publication continued after owner loss", target_url: $target_url}' \
+  > "${work_dir}/owner-loss-status-input.json"
+curl_pod --request POST --header 'content-type: application/json' \
+  --data-binary "@${work_dir}/owner-loss-status-input.json" \
+  --output "${work_dir}/owner-loss-status-created.json" \
+  "http://127.0.0.1:${port_b}/api/repos/${owner}/${repository}/statuses/${final_oid}"
+jq --exit-status --arg context "$continuation_context" \
+  '.context == $context and .state == "success"' \
+  "${work_dir}/owner-loss-status-created.json" >/dev/null
+curl_pod --output "${work_dir}/owner-loss-status-replica.json" \
+  "http://127.0.0.1:${port_c}/api/repos/${owner}/${repository}/commits/${final_oid}/status"
+jq --exit-status --arg context "$continuation_context" \
+  'any(.statuses[]; .context == $context and .state == "success")' \
+  "${work_dir}/owner-loss-status-replica.json" >/dev/null
+control_final="${work_dir}/control-after-owner-loss-publication.json"
+kubectl --namespace "$namespace" exec "${pods[0]}" -- \
+  crab-http-server --config /etc/crab/http-server/server.toml \
+    cells status --owner "$owner" --name "$repository" > "$control_final"
+jq --exit-status \
+  --arg session "$(jq --raw-output '.owner.session' "$control_after")" \
+  --argjson epoch "$(jq --raw-output '.epoch' "$control_after")" \
+  --argjson sequence "$(jq --raw-output '.root.commit_sequence' "$control_after")" '
+  .version == 1 and .state == "serving" and
+  .owner.session == $session and .epoch == $epoch and
+  .root.commit_sequence > $sequence
+' "$control_final" >/dev/null
+
 git_public clone --branch "$branch" --single-branch \
   "$remote_public" "${work_dir}/post-rollout-clone"
 test "$(git -C "${work_dir}/post-rollout-clone" rev-parse HEAD)" = "$final_oid"
@@ -667,6 +907,19 @@ jq --null-input \
   --arg branch "$branch" \
   --arg commit "$final_oid" \
   --arg payload_sha256 "$payload_sha256" \
+  --arg status_context "$status_context" \
+  --arg continuation_context "$continuation_context" \
+  --arg owner_pod_uid "$owner_pod_uid" \
+  --arg owner_session_before "$owner_session_before" \
+  --arg owner_session_after "$(jq --raw-output '.owner.session' "$control_after")" \
+  --arg root_digest_before "$(jq --raw-output '.root.digest' "$control_before")" \
+  --arg root_digest_after "$(jq --raw-output '.root.digest' "$control_after")" \
+  --argjson owner_epoch_before "$owner_epoch_before" \
+  --argjson owner_epoch_after "$(jq --raw-output '.epoch' "$control_after")" \
+  --argjson root_sequence_before "$owner_commit_sequence_before" \
+  --argjson root_sequence_after "$(jq --raw-output '.root.commit_sequence' "$control_after")" \
+  --argjson root_sequence_final "$(jq --raw-output '.root.commit_sequence' "$control_final")" \
+  --argjson check_run_id "$check_run_id" \
   --arg completed_at "$completed_at" \
   --argjson rollout_probes "$probes" \
   --argjson rollout_probe_failures "$probe_failures" \
@@ -674,7 +927,7 @@ jq --null-input \
   --argjson zone_count "$zone_count" \
   --argjson old_pod_uids "$old_uids" \
   --argjson new_pod_uids "$new_uids" \
-  '{schema: 3, provider: $provider, namespace: $namespace, deployment: $deployment,
+  '{schema: 5, provider: $provider, namespace: $namespace, deployment: $deployment,
     origin: $origin, image: $image, chart: $chart,
     qualification_source: {release_tag: $release_tag, commit: $source_sha},
     workload_identity: {
@@ -683,6 +936,20 @@ jq --null-input \
     },
     repository: $repository, branch: $branch,
     commit: $commit, payload_sha256: $payload_sha256,
+    status_context: $status_context, continuation_context: $continuation_context,
+    check_run_id: $check_run_id,
+    owner_loss: {
+      deleted_pod_uid: $owner_pod_uid,
+      session_before: $owner_session_before,
+      session_after: $owner_session_after,
+      epoch_before: $owner_epoch_before,
+      epoch_after: $owner_epoch_after,
+      root_digest_before: $root_digest_before,
+      root_digest_after: $root_digest_after,
+      root_sequence_before: $root_sequence_before,
+      root_sequence_after: $root_sequence_after,
+      root_sequence_final: $root_sequence_final
+    },
     replica_count: $replica_count, zone_count: $zone_count,
     old_pod_uids: $old_pod_uids, new_pod_uids: $new_pod_uids,
     rollout_probes: $rollout_probes,
@@ -697,8 +964,13 @@ jq --null-input \
       cross_replica_git: true,
       cross_replica_lfs: true,
       durable_lfs_lock: true,
+      cross_replica_cell: true,
       zero_unavailable_rollout: true,
-      post_rollout_clone: true
+      post_rollout_clone: true,
+      post_rollout_cell_restore: true,
+      abrupt_owner_loss: true,
+      owner_loss_exact_root_restore: true,
+      owner_loss_publication_continues: true
     },
     completed_at: $completed_at}' \
   > "$evidence_temp"

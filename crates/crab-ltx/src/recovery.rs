@@ -5,6 +5,16 @@ use crate::{
     CrabError, Limits, LocalSegment, Position, Result, SegmentInfo, ltx, pages::PageChecksums,
 };
 
+#[cfg(feature = "replica")]
+pub(crate) fn full_job_scratch_bytes(page_size: u32, database_pages: u32) -> Result<u64> {
+    const HEADROOM: u64 = 64 << 20;
+    u64::from(page_size)
+        .checked_mul(u64::from(database_pages))
+        .and_then(|bytes| bytes.checked_mul(2))
+        .and_then(|bytes| bytes.checked_add(HEADROOM))
+        .ok_or(CrabError::Limit("scratch disk bytes"))
+}
+
 /// A fully verified, explicit snapshot-plus-deltas plan ending at an exact position.
 ///
 /// Construction reads only named files and owns their bytes, preventing later

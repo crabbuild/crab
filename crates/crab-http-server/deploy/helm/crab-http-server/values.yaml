@@ -1,4 +1,4 @@
-replicaCount: 2
+replicaCount: 3
 
 image:
   repository: ""
@@ -30,6 +30,13 @@ secrets:
   oidcClientSecretKey: oidc-client-secret
   stateKeyKey: state-key
 
+cells:
+  existingSecret: ""
+  certificateKey: tls.crt
+  privateKeyKey: tls.key
+  caKey: ca.crt
+  tlsServerName: crab-http-server-peer
+
 service:
   port: 80
   annotations: {}
@@ -59,7 +66,7 @@ metrics:
 
 autoscaling:
   enabled: false
-  minReplicas: 2
+  minReplicas: 3
   maxReplicas: 10
   targetCPUUtilizationPercentage: 70
   behavior:
@@ -76,14 +83,14 @@ resources:
   requests:
     cpu: 500m
     memory: 1Gi
-    ephemeral-storage: 2Gi
+    ephemeral-storage: 20Gi
   limits:
     cpu: "2"
     memory: 4Gi
-    ephemeral-storage: 20Gi
+    ephemeral-storage: 50Gi
 
 scratch:
-  sizeLimit: 16Gi
+  sizeLimit: 32Gi
 
 startupProbe:
   periodSeconds: 5
@@ -112,7 +119,7 @@ podLabels: {}
 
 podDisruptionBudget:
   enabled: true
-  minAvailable: 1
+  minAvailable: 2
 
 topologySpreadConstraints:
   - maxSkew: 1
@@ -120,7 +127,7 @@ topologySpreadConstraints:
     topologyKey: topology.kubernetes.io/zone
     whenUnsatisfiable: DoNotSchedule
   - maxSkew: 1
-    minDomains: 2
+    minDomains: 3
     topologyKey: kubernetes.io/hostname
     whenUnsatisfiable: DoNotSchedule
 

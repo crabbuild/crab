@@ -19,5 +19,5 @@
 {{- end }}
 
 The management port is absent from the Service. NetworkPolicy admits it only
-from the peers in networkPolicy.metricsIngressFrom.
+from Crab peer pods and the explicit sources in networkPolicy.metricsIngressFrom.
 Change rolloutToken on a Helm upgrade after changing an externally managed ConfigMap or Secret.

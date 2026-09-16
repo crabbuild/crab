@@ -5,16 +5,24 @@ replication and paged SQL reads. Crab-owned integration of Celld's mechanics;
 no Celld Git dependency or Litestream daemon. Default features remain empty.
 Enable `replica` for the existing `crab-storage` transport and Tokio integration.
 
-Status: local and remote replication library implemented. **Not wired into
-`crab-http-server` yet.** The HTTP server still uses its existing application
-storage. See the [next architecture](../crab-http-server/next-architecture/README.md)
-for the publication, ownership and hard-cutover work that remains.
+Status: local and standalone remote replication are implemented. Native and
+shared-bundle LTX cuts can be prepared as immutable Cell/incarnation-scoped roots,
+and exact range/full compaction can produce a representation-only prepared root.
+These roots are bound to checked `crab-cell-runtime` control successors and the
+runtime is composed by `crab-http-server`. Initial directories are constructed
+from a streaming k-way index merge and uploaded one radix leaf at a time.
+Writable Cell activation now streams authenticated checksums to a local
+fixed-width file and capture updates it incrementally. Cell compaction now uses
+disk-spooled authenticated indexes, a k-way external merge, bounded frame reads
+and multipart uploads from the injected filesystem. The complete product hard
+cutover and measured capacity qualification still remain. See the
+[next architecture](../crab-http-server/next-architecture/README.md).
 
 ## Contract
 
 | API | Local result |
 | --- | --- |
-| `ManagedDb::open(path, limits)` | Exclusive fresh capture session; owns control, read-lock and application-writer SQLite connections |
+| `ManagedDb::open(path, limits)` | Exclusive fresh capture session; owns control, read-lock and application-writer SQLite connections, each configured with a 64 KiB page-cache target |
 | `ManagedDb::{resume,resume_with_host}(plan, path, limits, …)` | New local session continuing an exact verified TXID/checksum; available without `replica` |
 | `transaction(closure)` | One locally committed SQL transaction; no remote-durability claim |
 | `capture()` | Ordered `CaptureBatch` containing every newly generated cut and its endpoint, including checkpoint cuts |
@@ -23,6 +31,8 @@ for the publication, ownership and hard-cutover work that remains.
 | `VerifiedLocalPlan::new(files, target, limits)` | Owns verified bytes of an explicitly selected snapshot-plus-deltas chain |
 | `restore_exact(plan, path)` | Installs a new SQLite file at exactly the verified endpoint; never overwrites |
 | `compact_exact(plan, path)` | Compacts that complete chain into a verified standalone snapshot; never deletes inputs |
+| `Host::with_local_disk_budget(DiskBudget)` | Shares byte-precise WAL/LTX/sparse-page admission across cloned hosts; exhausted write admission occurs before SQL begins |
+| `Host::with_scratch_monitor(ScratchMonitor)` | Rechecks embedding-service disk pressure after process-wide full-job scratch admission and before remote body downloads |
 | `close()` | Releases local connections/read lock; does not upload, publish or release a remote lease |
 
 `SegmentInfo` includes TXID range, page size/count, pre/post rolling checksum,
@@ -86,6 +96,12 @@ db.close()?;
 # }
 ```
 
+`ManagedDb::transaction_with` preserves typed application failures separately
+from SQLite and WAL-boundary ambiguity. `ManagedDb::query_with` temporarily
+enables SQLite `query_only` for one synchronous callback and fences the session
+if that boundary cannot be installed or removed. This is a trusted-code
+guardrail, not a sandbox or a replacement for the runtime's scoped authorizer.
+
 Runnable demonstration, from the repository root with this worktree's external
 Cargo target directory configured:
 
@@ -107,6 +123,63 @@ sparse writable continuation, compaction, and historical recovery. See the
 Enable `crab-ltx`'s `replica` feature. Construct a `crab_storage::Store` using
 Crab's existing credential/provider builders; wrap it in a repository
 `StoreLayout`. There is no second S3 URL parser or credential stack.
+
+The next Cell runtime uses `CellReplica`, not the standalone epoch head:
+
+| API | Result |
+| --- | --- |
+| `CellReplica::new(layout, cell, incarnation, limits)` | Binds every immutable path to one typed Cell incarnation and rejects staged stores |
+| `CellReplica::open_new(path)` | Exclusively creates a fresh local database with the replica's filesystem, SQLite VFS and limits for worker-owned bootstrap |
+| `prepare(base, cuts, sequence, schema).await` | Admits the complete chain, verifies native LTX/index bytes, writes content-addressed directory/descriptor/root objects and returns an unforgeable `PreparedRoot`; writes no mutable key |
+| `prepare_bundle(base, bundle, sequence, schema).await` | Selects canonical rows for this Cell/incarnation from a shared bundle, verifies their chain, retains the bundle and indexes, and prepares the advancing immutable root without a mutable write |
+| `prepare_compaction(base, range, level, scratch_directory).await` | Admits before remote reads, externally merges authenticated indexes through caller-owned scratch, streams the exact replacement, preserves logical position/sequence/schema, and returns a representation-only prepared root for the normal authority CAS |
+| `prepare_scheduled_compaction(base, scratch_directory).await` | Selects one bounded eight-input level promotion, or a complete level-nine replacement near segment/graph-byte admission; returns `None` when no work is due and never publishes control |
+| `open_root(root).await` | Reopens the exact digest, validates canonical metadata, scope, chain and the authenticated radix root without downloading LTX bodies or every directory leaf |
+| `VerifiedRoot::paged().read_page(page).await` | Walks only the selected hash-pinned radix path, range-reads its LTX frame and verifies frame BLAKE3, decoded page number and page checksum |
+| `VerifiedRoot::paged().prepare_writable(path).await` | Streams authenticated directory checksums to a fresh local file without LTX bodies and returns an exact-root writable activation value bound to `path` |
+| `CellWritableDatabase::open_writable(path)` | Creates a fresh sparse SQLite file, seeds exact TXID/checksum continuation and faults verified pages through the shared VFS driver |
+| `PreparedRoot::{root,predecessor,verified}` | Supplies the exact publication proposal and predecessor proof without exposing an unchecked constructor |
+
+`crab-cell-runtime::Control::publish_prepared` verifies Cell/incarnation, schema
+and predecessor identity before constructing the one legal control successor.
+Only `CellAuthority` may then apply the ETag update. An upload or a returned
+`PreparedRoot` alone is not publication and must never release an application
+response.
+
+Cell objects use `CellStorageLayout` under
+`cells/v1/apps/<app>/cells/<cell>/inc/<inc>/objects/`. Root JSON is canonical
+compact v1 and references at most 64 pages of 96 segment descriptors. Its binary
+`CRBDIR01` radix tree has 256-entry leaves/branches, hashes every node and binds
+the live-page count and rolling SQLite checksum. Cold open reads bounded root
+metadata and one directory root; page bodies and descendant directory nodes fault
+on demand. Writable activation walks the authenticated directory once and streams
+one big-endian eight-byte checksum per database page to a fresh local sidecar in
+64 KiB chunks. Capture clones only its pending overlay, updates the rolling
+checksum from changed pages and a truncated suffix, then applies positional
+sidecar writes only after the matching LTX cut is synced and renamed. A sidecar
+write or sync failure fences the session. Incremental preparation copy-on-writes only
+changed leaves and ancestors, prunes truncated subtrees by their authenticated
+ranges and reuses every untouched digest; it does not fetch historical indexes or
+materialize all live locators. Initial root construction does not materialize a
+locator map or retain encoded directory bodies: it k-way merges final locators,
+filters entries invalidated by a later truncation and uploads each completed
+256-page leaf before continuing. Cell compaction range-fetches and authenticates
+index chunks into scratch, streams every selected LTX range through its manifest
+BLAKE3, keeps one cursor per segment, range-fetches at most 1 MiB of adjacent
+frames, and spools both the codec index and authenticated sidecar. The compacted
+LTX and sidecar upload in 8 MiB parts without bypassing the injected filesystem;
+scratch is removed best effort on every return path.
+Directory nodes do share a process-wide 8 MiB verified-byte cache whose
+key isolates backing Store instances and exact Cell/incarnation paths. Sparse
+page faults coalesce adjacent frames from one immutable object into bounded 1 MiB
+range reads while retaining per-frame verification. `VerifiedRoot::restore`
+streams those runs to a same-directory scratch file, verifies the final checksum
+and length, then atomically installs a new destination without replacement. This
+is therefore not yet the complete streaming 5 GB write path required by the
+platform capacity gate.
+
+The older `Replica` API below remains for standalone repository replication and
+its existing callers. Its mutable epoch head is not Cell ownership authority.
 
 | API | Result |
 | --- | --- |
@@ -321,8 +394,10 @@ records what remains before qualifying 1K–10K active databases per node.
   Directory ownership is local exclusion, not distributed fencing. Paths are
   UTF-8. Destination parent directories must exist; restore rejects SQLite
   sidecars and will not replace an existing destination.
-- Retained artifacts are not removed by drop/close. `prune_published()` releases
-  only this session's exact cuts present in a pinned published head. Prune before
+- Retained artifacts are not removed by drop/close. `prune_captured()` releases
+  one exact acknowledged batch by path and manifest equality; `prune_published()`
+  reconciles exact cuts present in a pinned standalone head. Both reverify bytes
+  before deletion. Prune before
   compacting that head; a replacement snapshot alone cannot prove a local cut's
   publication. Remote retention and retired-directory cleanup remain caller-owned.
 - Artifact writes fsync files and their containing directory. A failed operation
@@ -333,20 +408,33 @@ records what remains before qualifying 1K–10K active databases per node.
 
 ## Resource bounds and current limits
 
-Defaults: 256 MiB database, 512 MiB per local input/output file (including WAL),
-1 GiB aggregate plan/retained captured bytes and 1,024 segments. Oversized headers
+Defaults: 256 MiB database, 64 MiB per capture, 512 MiB per local input/output
+file and 1 GiB aggregate plan/retained captured bytes, with 1,024 segments.
+Oversized headers
 are rejected before page allocation. The managed writer has `max_page_count`;
 capture checks database/WAL sizes and stops on limits. Capture errors fence the
 handle. A session at its retention limit must be published/rotated by the caller.
 
-These are admission bounds, **not an RSS or disk quota**. Snapshot capture and
-restore materialize database-sized buffers. Plans retain compressed input bytes;
-verification/restore/compaction may hold multiple database images and page
-buffers. Each cut clones/scans the packed checksum index (eight bytes per page,
-about 2 MiB per GiB at 4 KiB pages). Compaction buffers selected decoded pages and
-encoded output rather than providing bounded streaming memory. One failed capture
-can leave additional bounded artifacts on disk before aggregate accounting
-rejects its result. The server must reserve headroom and throttle aggregate cells.
+These format and per-operation limits are not an RSS quota. A host may add an
+aggregate local-disk quota with `DiskBudget`; standalone snapshot capture and
+local plan operations still materialize database-sized buffers.
+Plans retain compressed input bytes. Cell exact-root restore and compaction use
+bounded frame batches and disk scratch rather than database-sized memory. Cell
+capture keeps its packed checksum index on local disk (about 2 MiB
+per GiB at 4 KiB pages) and keeps only the current changed-page overlay resident;
+large truncations still read the removed suffix to update the exact rolling sum.
+Standalone local capture retains its dense in-memory checksum base. Cell
+compaction retains O(segment count) cursors and a bounded decoded-page batch;
+its scratch requirement includes all authenticated indexes plus the compacted
+LTX, codec index and sidecar. Managed writes reserve twice `max_capture_bytes`
+before SQLite begins and reconcile to exact main database, live WAL and retained LTX bytes
+after capture, checkpoint and pruning. Sparse activation reserves every newly
+materialized page. A failed post-BEGIN operation retains conservative admission
+until the fenced handle is discarded. `ScratchMonitor` lets the embedding
+service reserve filesystem headroom and remeasure actual free space alongside
+unrelated consumers.
+`resume_with_host` reserves the complete restored database before installing its
+destination; writable sparse activation instead admits pages as they materialize.
 
 `Host` injects all library-owned local filesystem operations: canonical paths,
 exclusive session claims, committed WAL observation, bounded artifact reads,
@@ -354,6 +442,9 @@ capture, snapshot/restore/compaction installation, sparse creation and local pru
 Use `Host::{verify,restore,compact}` for injected local operations; the free
 functions use the same path with the default host. `resume_with_host` retains
 that host through installation and subsequent capture, even without `replica`.
+`with_local_disk_budget(DiskBudget)` shares byte-precise admission across cloned
+hosts. A failed write reservation returns `TransactionError::Admission` before
+the callback runs, so callers may retry without treating the writer as ambiguous.
 
 `with_sqlite_vfs(name)` selects an already registered SQLite base VFS, including
 for the writable sparse wrapper. The embedding host must keep that registration
@@ -367,15 +458,24 @@ Both seams are needed to simulate local machine faults coherently.
 and blocking pool; `Worker::join` supervises teardown after queue closure. The
 worker still drives a Tokio runtime while idle so pooled provider connections
 continue progressing. Dispatch cancellation never rolls back side effects.
-Default hosts share 32 object-store request slots, up to 16 CPU job slots (capped
-by available CPUs), and two large-recovery slots. `with_io_slots`, `with_job_slots`
-and `with_recovery_slots` accept shared Tokio semaphores for explicit service
-budgets. Recovery admission precedes body downloads for restore, resume, bundle
-and compaction. Cancelled dispatched jobs retain their CPU/recovery reservation
-until the work finishes; returned database handles do not retain that reservation.
+Default hosts share 32 object-store request slots, up to 16 CPU and dirty-job
+slots (each independently capped by available CPUs), and two large-recovery slots.
+`with_io_slots`, `with_job_slots`, `with_dirty_slots`, `with_recovery_slots` and
+`with_scratch_slots` accept shared Tokio semaphores for explicit service budgets;
+scratch permits represent one MiB each. `with_scratch_monitor` receives the
+process-wide admitted scratch bytes after those permits are acquired, so the
+embedding service can reject current disk pressure before body downloads. Dirty admission
+precedes capture preparation; recovery admission is nested inside it before body
+downloads for restore, resume, bundle and compaction. Full restore/resume and
+Cell compaction reserve two database images plus 64 MiB; Cell compaction also
+reserves the exact authenticated source-index bytes. Oversized jobs fail before
+body downloads instead of waiting forever. Cancelled dispatched jobs retain
+their CPU/dirty/recovery/scratch reservation until the work finishes; returned
+roots, page maps, sparse writers and database handles do not retain it.
 Closed semaphores reject new work. These are concurrency ceilings, not byte-weighted
 memory admission, bounded caller task queues or admission for synchronous local APIs.
-SQL, capture, snapshot, activation and request scheduling still need host policy.
+The disk budget covers managed WAL/LTX and sparse-page growth; request scheduling
+and memory admission remain host policy.
 
 The clock controls capture timestamps and checkpoint ages; compaction receives
 explicit monotonic times from its owner. No default provider or dependency
@@ -399,18 +499,17 @@ remote retention/GC, encryption/key management, application schema or HTTP integ
 
 ## Verification
 
-Latest scalability-audit proof (2026-09-13, macOS): 68 runtime tests and five
-doctests pass with `replica`; 29 runtime tests and five doctests pass with minimal
-features. Shared-worker/cache bounds, ordered concurrent reads, cancellation-safe
-admission, copy-on-write metadata and selected-body compaction have regression
-coverage. The isolated RustFS fixture passes separately in 5.66 seconds; its
-disposable container/bucket were removed. This is library correctness evidence,
+Latest local proof (2026-09-15, macOS): 98 executed runtime tests and five
+doctests pass with `replica` (one additional remote test is ignored); 33 runtime
+tests and five doctests pass with minimal features. Shared-worker/cache bounds,
+ordered concurrent reads, cancellation-safe admission, copy-on-write metadata,
+external-merge compaction, injected-filesystem failure cleanup and bounded frame
+reads have regression coverage. The isolated RustFS fixture passes separately;
+its disposable container/bucket were removed. This is library correctness evidence,
 not a 1K–10K active-database or 1,000 TPS capacity result. See
 [SCALABILITY.md](SCALABILITY.md) for sizing assumptions and remaining gates.
-Strict Clippy passes on Rust 1.98 with `replica`; formatting passes. The scoped
-architecture checks still reject missing `crab-ltx` release/dependency policy
-entries and its `object_store/fs` feature ownership. Those integration gates are
-not waived or qualified by this test run; policy inventories remain unchanged.
+Strict Clippy passes on Rust 1.97 with and without `replica`; formatting and the
+workspace architecture guardrails pass.
 
 ```sh
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-b347" cargo test -p crab-ltx --locked

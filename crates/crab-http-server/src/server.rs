@@ -1,5 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
+use std::io;
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock as SyncRwLock};
 use std::time::{Duration, Instant};
@@ -13,13 +16,18 @@ use axum::{
     routing::{get, post},
 };
 use bytes::Bytes;
+use crab_cell_runtime::{
+    ACTIVE_CELL_FILE_DESCRIPTORS, ACTIVE_CELL_NATIVE_BYTES, ACTIVE_CELL_PAGE_CACHE_BYTES,
+    CellRuntime, Digest, NodeDirectory, Owner, PeerRoundTrip, PeerSigner, ReleaseState,
+    ReleaseStore, ReplicaHost, ScratchMonitor, SessionId, SqlWorkerPool,
+};
 use crab_metadata::manifest_store::read_manifest;
 use crab_remote_git::{
     OperationLimits, RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
 };
 use crab_storage::{StorageError, Store, StoreLayout};
 use serde_json::json;
-use tokio::sync::{Mutex, RwLock, Semaphore};
+use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use uuid::Uuid;
@@ -39,6 +47,147 @@ const READ_ADMISSION_CAPACITY: usize = 16;
 const GIT_ADMISSION_CAPACITY: usize = 4;
 const APP_ADMISSION_CAPACITY: usize = 8;
 const MAINTENANCE_ADMISSION_CAPACITY: usize = 2;
+const MAX_ACTIVE_CELLS: usize = 10_000;
+const MIB: u64 = 1024 * 1024;
+const GIB: u64 = 1024 * MIB;
+const MIN_CELL_MEMORY_BYTES: u64 = 2 * GIB;
+const MIN_USABLE_CELL_DISK_BYTES: u64 = 20 * GIB;
+const FILE_DESCRIPTOR_RESERVE_MINIMUM: usize = 128;
+const DIRTY_JOB_MEMORY_BYTES: u64 = 64 * MIB;
+const MAX_REPLICA_JOBS: usize = 16;
+const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(110);
+const RELEASE_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CellRuntimeBudget {
+    node_retained_bytes: usize,
+    max_active_cells: usize,
+    replica_jobs: usize,
+    scratch_mebibytes: usize,
+    local_disk_mebibytes: usize,
+    disk_reserve_bytes: u64,
+}
+
+impl CellRuntimeBudget {
+    pub(crate) fn from_resources(resources: crate::peer::LocalResources) -> Result<Self> {
+        if resources.memory_bytes < MIN_CELL_MEMORY_BYTES {
+            return Err(crate::Error::Config(
+                "Cell runtime requires at least 2 GiB effective memory",
+            ));
+        }
+        let disk_reserve = (resources.free_disk_bytes / 5).max(10 * GIB);
+        let usable_disk = resources.free_disk_bytes.saturating_sub(disk_reserve);
+        if usable_disk < MIN_USABLE_CELL_DISK_BYTES {
+            return Err(crate::Error::Config(
+                "Cell runtime requires at least 20 GiB usable local disk",
+            ));
+        }
+        let process_reserve = (resources.memory_bytes / 4).max(512 * MIB);
+        let cell_memory = resources.memory_bytes - process_reserve;
+        let page_cache_memory = cell_memory.saturating_mul(35) / 100;
+        let memory_cells = page_cache_memory / ACTIVE_CELL_PAGE_CACHE_BYTES;
+        let native_memory = cell_memory.saturating_mul(10) / 100;
+        let native_cells = native_memory / ACTIVE_CELL_NATIVE_BYTES;
+        let descriptor_reserve =
+            (resources.available_file_descriptors / 10).max(FILE_DESCRIPTOR_RESERVE_MINIMUM);
+        let descriptor_cells = resources
+            .available_file_descriptors
+            .saturating_sub(descriptor_reserve)
+            / ACTIVE_CELL_FILE_DESCRIPTORS;
+        let max_active_cells = usize::try_from(memory_cells)
+            .unwrap_or(usize::MAX)
+            .min(usize::try_from(native_cells).unwrap_or(usize::MAX))
+            .min(descriptor_cells)
+            .min(MAX_ACTIVE_CELLS);
+        if max_active_cells == 0 {
+            return Err(crate::Error::Config(
+                "Cell runtime has no memory and file-descriptor capacity",
+            ));
+        }
+        let mailbox = usize::try_from(cell_memory / 20)
+            .unwrap_or(usize::MAX)
+            .min(tokio::sync::Semaphore::MAX_PERMITS);
+        let dirty_memory = cell_memory.saturating_mul(25) / 100;
+        let replica_jobs = usize::try_from(dirty_memory / DIRTY_JOB_MEMORY_BYTES)
+            .unwrap_or(usize::MAX)
+            .min(resources.job_credits)
+            .min(MAX_REPLICA_JOBS);
+        if replica_jobs == 0 {
+            return Err(crate::Error::Config(
+                "Cell runtime has no capture and recovery job capacity",
+            ));
+        }
+        let scratch_mebibytes = usize::try_from(usable_disk / 3 / MIB)
+            .unwrap_or(usize::MAX)
+            .min(u32::MAX as usize)
+            .min(tokio::sync::Semaphore::MAX_PERMITS);
+        if scratch_mebibytes == 0 {
+            return Err(crate::Error::Config(
+                "Cell runtime has no temporary scratch-disk capacity",
+            ));
+        }
+        let local_disk_mebibytes = usize::try_from(usable_disk.saturating_mul(2) / 3 / MIB)
+            .unwrap_or(usize::MAX)
+            .min(u32::MAX as usize)
+            .min(tokio::sync::Semaphore::MAX_PERMITS);
+        if local_disk_mebibytes == 0 {
+            return Err(crate::Error::Config(
+                "Cell runtime has no local working-disk capacity",
+            ));
+        }
+        Ok(Self {
+            node_retained_bytes: mailbox,
+            max_active_cells,
+            replica_jobs,
+            scratch_mebibytes,
+            local_disk_mebibytes,
+            disk_reserve_bytes: disk_reserve,
+        })
+    }
+
+    pub(crate) fn local_disk(self) -> crab_cell_runtime::DiskBudget {
+        crab_cell_runtime::DiskBudget::new(self.local_disk_mebibytes as u64 * MIB)
+    }
+
+    pub(crate) fn replica_host(
+        self,
+        local_disk: crab_cell_runtime::DiskBudget,
+        scratch_root: PathBuf,
+    ) -> ReplicaHost {
+        let scratch_monitor = Arc::new(ActualScratchMonitor {
+            root: scratch_root,
+            local_disk: local_disk.clone(),
+            reserve_bytes: self.disk_reserve_bytes,
+        });
+        ReplicaHost::default()
+            .with_job_slots(Arc::new(Semaphore::new(self.replica_jobs)))
+            .with_recovery_slots(Arc::new(Semaphore::new(self.replica_jobs)))
+            .with_dirty_slots(Arc::new(Semaphore::new(self.replica_jobs)))
+            .with_scratch_slots(Arc::new(Semaphore::new(self.scratch_mebibytes)))
+            .with_scratch_monitor(scratch_monitor)
+            .with_local_disk_budget(local_disk)
+    }
+}
+
+struct ActualScratchMonitor {
+    root: PathBuf,
+    local_disk: crab_cell_runtime::DiskBudget,
+    reserve_bytes: u64,
+}
+
+impl ScratchMonitor for ActualScratchMonitor {
+    fn ensure_available(&self, scratch_bytes: u64) -> io::Result<()> {
+        let required = self
+            .reserve_bytes
+            .checked_add(self.local_disk.used())
+            .and_then(|bytes| bytes.checked_add(scratch_bytes))
+            .ok_or_else(|| io::Error::from(io::ErrorKind::StorageFull))?;
+        if fs4::available_space(&self.root)? < required {
+            return Err(io::Error::from(io::ErrorKind::StorageFull));
+        }
+        Ok(())
+    }
+}
 
 fn transfer_admission(catalog: &CatalogStore) -> TransferAdmission {
     TransferAdmission::new(
@@ -49,6 +198,85 @@ fn transfer_admission(catalog: &CatalogStore) -> TransferAdmission {
             .to_string(),
         GIT_ADMISSION_CAPACITY,
     )
+}
+
+fn start_cell_runtime(
+    session: SessionId,
+    budget: CellRuntimeBudget,
+    local_disk: crab_cell_runtime::DiskBudget,
+    scratch_root: PathBuf,
+) -> Result<CellRuntime> {
+    crate::cells::compiled_registry()?;
+    Ok(CellRuntime::new_with_replica_host(
+        SqlWorkerPool::for_system(budget.max_active_cells)?,
+        budget.node_retained_bytes,
+        session,
+        budget.replica_host(local_disk, scratch_root),
+    )?)
+}
+
+async fn before_shutdown_deadline<T>(
+    deadline: Instant,
+    future: impl Future<Output = T>,
+) -> Result<T> {
+    tokio::time::timeout_at(deadline.into(), future)
+        .await
+        .map_err(|_| crate::Error::ShutdownTimeout)
+}
+
+fn release_admits_process(
+    state: ReleaseState,
+    current: Option<Digest>,
+    desired: Option<Digest>,
+    compiled: Digest,
+) -> bool {
+    match state {
+        ReleaseState::Ready => current == Some(compiled) && desired == Some(compiled),
+        ReleaseState::Prepared | ReleaseState::Activating => {
+            current == Some(compiled) || desired == Some(compiled)
+        }
+        ReleaseState::Maintenance | ReleaseState::Failed => false,
+    }
+}
+
+async fn watch_release(
+    releases: ReleaseStore,
+    compiled: Digest,
+    cancellation: CancellationToken,
+) -> Result<()> {
+    loop {
+        tokio::select! {
+            () = cancellation.cancelled() => return Ok(()),
+            () = tokio::time::sleep(RELEASE_POLL_INTERVAL) => {}
+        }
+        let observed = match releases.load().await {
+            Ok(Some(observed)) => observed,
+            Ok(None) => {
+                cancellation.cancel();
+                return Err(crate::Error::Config("Cell application release disappeared"));
+            }
+            Err(error) => {
+                cancellation.cancel();
+                return Err(error.into());
+            }
+        };
+        let record = observed.record();
+        if !release_admits_process(record.state(), record.current(), record.desired(), compiled) {
+            cancellation.cancel();
+            return Ok(());
+        }
+    }
+}
+
+#[cfg(test)]
+fn start_test_cell_runtime() -> CellRuntime {
+    crate::cells::compiled_registry().unwrap();
+    CellRuntime::new(
+        SqlWorkerPool::new(1, 16).unwrap(),
+        2 * 1024 * 1024,
+        SessionId::from_bytes(Uuid::now_v7().into_bytes()),
+    )
+    .unwrap()
 }
 
 async fn probe_storage_contract(
@@ -84,18 +312,22 @@ async fn probe_storage_contract(
 }
 
 pub(crate) struct Repository {
+    pub id: Uuid,
     pub config: RepositoryConfig,
     pub store: Store,
     pub layout: StoreLayout<Store>,
     pub identity: RepositoryIdentity,
-    pub(crate) protections: RwLock<BranchProtections>,
-    pub(crate) lifecycle: RwLock<RepositoryLifecycle>,
     pinned: Mutex<Option<(Instant, RemoteGitRepository)>>,
     maintenance: Mutex<Option<tokio::task::JoinHandle<crab_write::Result<()>>>>,
 }
 
 pub(crate) struct RepositorySet {
-    current: SyncRwLock<BTreeMap<(String, String), Arc<Repository>>>,
+    current: SyncRwLock<RepositoryIndex>,
+}
+
+struct RepositoryIndex {
+    by_name: BTreeMap<(String, String), Arc<Repository>>,
+    by_id: HashMap<Uuid, (String, String)>,
 }
 
 impl RepositorySet {
@@ -103,7 +335,20 @@ impl RepositorySet {
         self.current
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .by_name
             .get(key)
+            .cloned()
+    }
+
+    pub(crate) fn by_id(&self, id: Uuid) -> Option<Arc<Repository>> {
+        let current = self
+            .current
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        current
+            .by_id
+            .get(&id)
+            .and_then(|key| current.by_name.get(key))
             .cloned()
     }
 
@@ -111,6 +356,7 @@ impl RepositorySet {
         self.current
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .by_name
             .values()
             .cloned()
             .collect()
@@ -120,6 +366,7 @@ impl RepositorySet {
         self.current
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .by_name
             .len()
     }
 
@@ -127,7 +374,7 @@ impl RepositorySet {
         *self
             .current
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = RepositoryIndex::new(next);
     }
 
     #[cfg(test)]
@@ -135,6 +382,7 @@ impl RepositorySet {
         self.current
             .get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .by_name
             .get_mut(key)
             .and_then(Arc::get_mut)
     }
@@ -143,12 +391,12 @@ impl RepositorySet {
 impl From<BTreeMap<(String, String), Repository>> for RepositorySet {
     fn from(repositories: BTreeMap<(String, String), Repository>) -> Self {
         Self {
-            current: SyncRwLock::new(
+            current: SyncRwLock::new(RepositoryIndex::new(
                 repositories
                     .into_iter()
                     .map(|(key, repository)| (key, Arc::new(repository)))
                     .collect(),
-            ),
+            )),
         }
     }
 }
@@ -156,18 +404,36 @@ impl From<BTreeMap<(String, String), Repository>> for RepositorySet {
 impl From<BTreeMap<(String, String), Arc<Repository>>> for RepositorySet {
     fn from(repositories: BTreeMap<(String, String), Arc<Repository>>) -> Self {
         Self {
-            current: SyncRwLock::new(repositories),
+            current: SyncRwLock::new(RepositoryIndex::new(repositories)),
         }
     }
 }
 
+impl RepositoryIndex {
+    fn new(by_name: BTreeMap<(String, String), Arc<Repository>>) -> Self {
+        let by_id = by_name
+            .iter()
+            .map(|(key, repository)| (repository.id, key.clone()))
+            .collect();
+        Self { by_name, by_id }
+    }
+}
+
 impl Repository {
-    pub(crate) async fn branch_protections(&self) -> app::Result<BranchProtections> {
-        repository_settings::refresh(self).await
+    pub(crate) async fn branch_protections(
+        &self,
+        server: &Server,
+        actor: &auth::Identity,
+    ) -> app::Result<BranchProtections> {
+        repository_settings::load(server, self, actor).await
     }
 
-    pub(crate) async fn lifecycle(&self) -> app::Result<RepositoryLifecycle> {
-        repository_settings::refresh_lifecycle(self).await
+    pub(crate) async fn lifecycle(
+        &self,
+        server: &Server,
+        actor: &auth::Identity,
+    ) -> app::Result<RepositoryLifecycle> {
+        repository_settings::load_lifecycle(server, self, actor).await
     }
 
     pub(crate) async fn invalidate(&self) {
@@ -266,10 +532,14 @@ impl Repository {
 pub(crate) struct Server {
     pub repositories: RepositorySet,
     pub runtime: Arc<RemoteGitRuntime>,
+    pub cell_runtime: CellRuntime,
+    pub(crate) repository_cells: Option<crate::cells::RepositoryCellRouter>,
+    pub(crate) peer_receiver: Option<crate::peer::PeerReceiver>,
     pub options: RepositoryOptions,
     pub cursor_key: [u8; 32],
     pub admission: Semaphore,
     pub transfer_admission: TransferAdmission,
+    pub(crate) local_staging: crate::local_disk::LocalStaging,
     pub app_admission: Semaphore,
     maintenance_admission: Arc<Semaphore>,
     pub cancellation: CancellationToken,
@@ -277,6 +547,8 @@ pub(crate) struct Server {
     pub auth: Option<Authentication>,
     catalog: Option<CatalogStore>,
     catalog_healthy: AtomicBool,
+    pub(crate) node_healthy: AtomicBool,
+    scheduler_status: crate::cells::SchedulerStatus,
     metrics: crate::metrics::Metrics,
 }
 
@@ -315,6 +587,12 @@ impl Server {
         }
         result
     }
+
+    async fn shutdown_runtimes(&self) -> Result<()> {
+        let cells = self.cell_runtime.shutdown().await;
+        self.runtime.shutdown().await;
+        cells.map_err(Into::into)
+    }
 }
 
 /// Serve configured repositories and compiled React assets until shutdown.
@@ -333,6 +611,11 @@ pub async fn serve(config: Config) -> Result<()> {
         None => None,
     };
     let catalog_version = document.version;
+    let repository_cells = document
+        .repositories
+        .iter()
+        .map(|record| (record.id, record.application))
+        .collect::<Vec<_>>();
     let repositories = materialize_catalog(&catalog, document).await?;
     let runtime = Arc::new(RemoteGitRuntime::default());
     let cancellation = CancellationToken::new();
@@ -353,13 +636,112 @@ pub async fn serve(config: Config) -> Result<()> {
     )?;
     let transfer_admission = transfer_admission(&catalog);
     probe_storage_contract(&catalog, &transfer_admission).await?;
+    let startup = crate::cells::verify_startup_release(&config).await?;
+    crate::cells::verify_repository_cells(&startup.layout, startup.identity, repository_cells)
+        .await?;
+    let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
+    let session = SessionId::from_bytes(Uuid::now_v7().into_bytes());
+    let registry = Arc::new(startup.registry);
+    let directory = NodeDirectory::new(
+        startup.layout.clone(),
+        peer_tls.fleet(),
+        startup.image,
+        registry.release_digest(),
+    );
+    let scheduler_status = crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms()?)?;
+    let node_publisher = crate::peer::NodePublisher::new(
+        directory.clone(),
+        peer_tls.signing_key().clone(),
+        session,
+        config.cells.peer_advertise.to_string(),
+        peer_tls.fleet(),
+        peer_tls.certificate(),
+        startup.image,
+        registry.release_digest(),
+        registry.module_digests(),
+        config.cells.data_dir.clone(),
+        scheduler_status.clone(),
+    )?;
+    let session_dir = node_publisher.session_dir();
+    let cell_budget = CellRuntimeBudget::from_resources(node_publisher.local_resources()?)?;
+    let local_disk = cell_budget.local_disk();
+    let local_staging = crate::local_disk::LocalStaging::new(
+        session_dir.join("transfers"),
+        local_disk.clone(),
+        cell_budget.disk_reserve_bytes,
+    )
+    .map_err(|source| crate::Error::LocalStaging {
+        source: Box::new(source),
+    })?;
     // A pod must prove the complete storage contract before it owns any socket;
     // otherwise incomplete cloud permissions can look partially started.
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
+    let metrics = crate::metrics::Metrics::new()?;
+    let cell_runtime = start_cell_runtime(session, cell_budget, local_disk, session_dir.clone())?;
+    let cell_resolver = crate::peer::LocalCellResolver::new(
+        startup.layout.clone(),
+        startup.identity,
+        cell_runtime.clone(),
+    );
+    let peer_round_trip: Arc<dyn PeerRoundTrip> = Arc::new(crate::peer::PeerHttpRoundTrip::new(
+        startup.identity,
+        crab_cell_runtime::CellAuthority::new(startup.layout.clone()),
+        directory.clone(),
+        peer_tls.client_identity(),
+        session,
+    ));
+    let release_store = ReleaseStore::new(startup.layout.clone(), startup.identity)?;
+    let peer_receiver = crate::peer::PeerReceiver::new(
+        directory.clone(),
+        Arc::clone(&registry),
+        release_store.clone(),
+        cell_resolver,
+        Arc::clone(&peer_round_trip),
+    );
+    let repository_cells = crate::cells::RepositoryCellRouter::new(
+        startup.identity,
+        startup.layout.clone(),
+        Arc::clone(&registry),
+        cell_runtime.clone(),
+        crate::cells::RepositoryCellPeer::new(
+            directory.clone(),
+            Arc::new(PeerSigner::new(
+                session,
+                registry.release_digest(),
+                peer_tls.signing_key().clone(),
+            )),
+            peer_round_trip,
+            Owner {
+                session,
+                endpoint: config.cells.peer_advertise.to_string(),
+            },
+        ),
+        session_dir,
+    )?;
+    let cell_scheduler = crate::cells::RepositoryCellScheduler::new(
+        startup.identity,
+        startup.layout,
+        directory.clone(),
+        repository_cells.clone(),
+        session,
+        scheduler_status.clone(),
+    )?;
+    let advertised = match node_publisher.publish_initial().await {
+        Ok(advertised) => advertised,
+        Err(error) => {
+            if let Err(shutdown_error) = cell_runtime.shutdown().await {
+                tracing::warn!(error = %shutdown_error, "Cell runtime startup cleanup failed");
+            }
+            return Err(error);
+        }
+    };
     let server = Arc::new(Server {
         repositories: repositories.into(),
         runtime: Arc::clone(&runtime),
+        cell_runtime,
+        repository_cells: Some(repository_cells),
+        peer_receiver: Some(peer_receiver),
         cancellation: cancellation.clone(),
         receives: tokio_util::task::TaskTracker::new(),
         options,
@@ -369,12 +751,15 @@ pub async fn serve(config: Config) -> Result<()> {
             .unwrap_or_else(rand::random),
         admission: Semaphore::new(READ_ADMISSION_CAPACITY),
         transfer_admission,
+        local_staging,
         app_admission: Semaphore::new(APP_ADMISSION_CAPACITY),
         maintenance_admission: Arc::new(Semaphore::new(MAINTENANCE_ADMISSION_CAPACITY)),
         auth,
         catalog: Some(catalog),
         catalog_healthy: AtomicBool::new(true),
-        metrics: crate::metrics::Metrics::new()?,
+        node_healthy: AtomicBool::new(true),
+        scheduler_status,
+        metrics,
     });
     let app = router(Arc::clone(&server));
     let management = management_router(Arc::clone(&server));
@@ -388,31 +773,85 @@ pub async fn serve(config: Config) -> Result<()> {
     let refresh_server = Arc::clone(&server);
     let refresh =
         tokio::spawn(async move { refresh_catalog(refresh_server, catalog_version).await });
+    let node_shutdown = CancellationToken::new();
+    let node_server = Arc::clone(&server);
+    let heartbeat_shutdown = node_shutdown.clone();
+    let heartbeat = tokio::spawn(async move {
+        node_publisher
+            .run(node_server, advertised, heartbeat_shutdown)
+            .await
+    });
+    let release_cancellation = cancellation.clone();
+    let compiled_release = registry.release_digest();
+    let release_watch = tokio::spawn(async move {
+        watch_release(release_store, compiled_release, release_cancellation).await
+    });
+    let scheduler_cancellation = cancellation.clone();
+    let scheduler = tokio::spawn(async move { cell_scheduler.run(scheduler_cancellation).await });
     let public_shutdown = cancellation.clone();
     let management_shutdown = cancellation.clone();
-    let result = tokio::try_join!(
-        axum::serve(listener, app).with_graceful_shutdown(public_shutdown.cancelled_owned()),
-        axum::serve(management_listener, management)
+    let listeners = async {
+        tokio::try_join!(
+            axum::serve(listener, app).with_graceful_shutdown(public_shutdown.cancelled_owned()),
+            axum::serve(
+                peer_tls.listener(management_listener),
+                management
+                    .into_make_service_with_connect_info::<crate::peer_tls::PeerTlsIdentity>(),
+            )
             .with_graceful_shutdown(management_shutdown.cancelled_owned()),
-    );
-    cancellation.cancel();
+        )
+    };
+    tokio::pin!(listeners);
+    let (listener_result, shutdown_deadline) = tokio::select! {
+        result = &mut listeners => {
+            cancellation.cancel();
+            (Ok(result), Instant::now() + SHUTDOWN_DEADLINE)
+        }
+        () = cancellation.cancelled() => {
+            signal.abort();
+            let deadline = Instant::now() + SHUTDOWN_DEADLINE;
+            (before_shutdown_deadline(deadline, &mut listeners).await, deadline)
+        }
+    };
     signal.abort();
-    if let Err(error) = refresh.await {
-        tracing::warn!(error = %error, "repository catalog refresh task failed");
-    }
-    // Axum has drained its connections, so no handler can register a new
-    // receive after the tracker becomes empty. Close readers only after that drain.
-    server.cancellation.cancel();
-    server.receives.close();
-    server.receives.wait().await;
-    server.transfer_admission.close();
-    server.transfer_admission.wait().await;
-    let maintenance = server.finish_maintenance().await;
-    runtime.shutdown().await;
-    result
-        .map(|_| ())
-        .map_err(crate::Error::from)
-        .and(maintenance)
+    let result = listener_result?;
+    before_shutdown_deadline(shutdown_deadline, async move {
+        let _cancel_heartbeat_on_drop = node_shutdown.clone().drop_guard();
+        if let Err(error) = refresh.await {
+            tracing::warn!(error = %error, "repository catalog refresh task failed");
+        }
+        let scheduler = match scheduler.await {
+            Ok(result) => result,
+            Err(error) => Err(error.into()),
+        };
+        let release_watch = match release_watch.await {
+            Ok(result) => result,
+            Err(error) => Err(error.into()),
+        };
+        // Axum has drained its connections, so no handler can register a new
+        // receive after the tracker becomes empty. Close readers only after that drain.
+        server.cancellation.cancel();
+        server.receives.close();
+        server.receives.wait().await;
+        server.transfer_admission.close();
+        server.transfer_admission.wait().await;
+        let maintenance = server.finish_maintenance().await;
+        let runtimes = server.shutdown_runtimes().await;
+        node_shutdown.cancel();
+        let heartbeat = match heartbeat.await {
+            Ok(result) => result,
+            Err(error) => Err(error.into()),
+        };
+        result
+            .map(|_| ())
+            .map_err(crate::Error::from)
+            .and(heartbeat)
+            .and(scheduler)
+            .and(release_watch)
+            .and(maintenance)
+            .and(runtimes)
+    })
+    .await?
 }
 
 /// Validate the durable catalog and the storage coordination write path.
@@ -450,8 +889,8 @@ async fn materialize_catalog(
                     "catalog repository HEAD must name a branch",
                 ))?;
         let entry = record.runtime_config(catalog.root(), default_branch)?;
-        let configured_protections = BranchProtections::configured(&entry.protected_branches);
         let repository = Repository {
+            id: record.id,
             layout,
             identity: RepositoryIdentity::new(
                 catalog.root().provider_namespace.clone(),
@@ -460,23 +899,9 @@ async fn materialize_catalog(
             )?,
             config: entry.clone(),
             store,
-            protections: RwLock::new(configured_protections),
-            lifecycle: RwLock::new(RepositoryLifecycle::active()),
             pinned: Mutex::new(None),
             maintenance: Mutex::new(None),
         };
-        let protections = repository_settings::load(&repository)
-            .await
-            .map_err(|source| crate::Error::Settings {
-                source: Box::new(source),
-            })?;
-        *repository.protections.write().await = protections;
-        let lifecycle = repository_settings::load_lifecycle(&repository)
-            .await
-            .map_err(|source| crate::Error::Settings {
-                source: Box::new(source),
-            })?;
-        *repository.lifecycle.write().await = lifecycle;
         repositories.insert(
             (entry.owner.clone(), entry.name.clone()),
             Arc::new(repository),
@@ -515,6 +940,23 @@ async fn refresh_catalog(server: Arc<Server>, mut version: u64) {
         }
         if document.version == version {
             server.catalog_healthy.store(true, Ordering::Release);
+            continue;
+        }
+        let repository_cells = document
+            .repositories
+            .iter()
+            .map(|record| (record.id, record.application))
+            .collect::<Vec<_>>();
+        let verified = match server.repository_cells.as_ref() {
+            Some(router) => router.verify_repositories(repository_cells).await,
+            None => Err(crate::Error::Config(
+                "repository catalog refresh requires Cell routing",
+            )),
+        };
+        if let Err(error) = verified {
+            server.catalog_healthy.store(false, Ordering::Release);
+            server.metrics.record_catalog_refresh_failure();
+            tracing::warn!(error = ?error, "repository catalog Cell readiness failed");
             continue;
         }
         let next_version = document.version;
@@ -615,6 +1057,7 @@ pub(crate) fn router(server: Arc<Server>) -> Router {
         .route("/auth/login", get(auth::login))
         .route("/auth/callback", get(auth::callback))
         .route("/auth/logout", post(auth::logout))
+        .route("/livez", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/api/repos", get(catalog))
         .route("/api/repos/{owner}/{name}/archive", get(archive::download))
         .route("/api/repos/{owner}/{name}/{action}", get(api::read))
@@ -631,13 +1074,23 @@ fn management_router(server: Arc<Server>) -> Router {
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/readyz", get(readiness))
         .route("/metrics", get(render_metrics))
+        .route(
+            "/internal/cells/v1/forward",
+            post(crate::peer::forward).layer(axum::extract::DefaultBodyLimit::max(
+                crab_cell_runtime::MAX_PEER_REQUEST_BYTES,
+            )),
+        )
         .with_state(server)
 }
 
 async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
+    let scheduler_now_ms = crate::cells::unix_now_ms().unwrap_or(0);
     let body = server.metrics.render(crate::metrics::RuntimeSnapshot {
         repositories: server.repositories.len(),
         catalog_healthy: server.catalog_healthy.load(Ordering::Acquire),
+        scheduler_healthy: server.scheduler_status.is_healthy(scheduler_now_ms),
+        scheduler_progress: server.scheduler_status.progress(),
+        scheduler_lag_seconds: server.scheduler_status.lag_ms(scheduler_now_ms) as f64 / 1_000.0,
         draining: server.cancellation.is_cancelled(),
         receive_workers: server.receives.len(),
         admission_available: [
@@ -684,6 +1137,21 @@ async fn check_readiness(server: &Server) -> Result<()> {
     if server.cancellation.is_cancelled() {
         return Err(crate::Error::Config("server is draining"));
     }
+    if server.cell_runtime.is_shutting_down() {
+        return Err(crate::Error::Config("embedded Cell runtime is draining"));
+    }
+    if server.catalog.is_some() && server.peer_receiver.is_none() {
+        return Err(crate::Error::Config("Cell peer receiver is unavailable"));
+    }
+    if !server.node_healthy.load(Ordering::Acquire) {
+        return Err(crate::Error::Config("Cell node advertisement is unhealthy"));
+    }
+    if !server
+        .scheduler_status
+        .is_healthy(crate::cells::unix_now_ms()?)
+    {
+        return Err(crate::Error::Config("Cell scheduler is unhealthy"));
+    }
     if !server.catalog_healthy.load(Ordering::Acquire) {
         return Err(crate::Error::Config("catalog refresh is unhealthy"));
     }
@@ -715,6 +1183,7 @@ async fn catalog(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
 ) -> app::Result<Json<serde_json::Value>> {
+    let actor = app::actor(&principal)?;
     let mut repositories = Vec::new();
     for repository in server
         .repositories
@@ -722,8 +1191,8 @@ async fn catalog(
         .into_iter()
         .filter(|repository| principal.can_read(&repository.config))
     {
-        let protections = repository.branch_protections().await?;
-        let lifecycle = repository.lifecycle().await?;
+        let protections = repository.branch_protections(&server, &actor).await?;
+        let lifecycle = repository.lifecycle(&server, &actor).await?;
         repositories.push(json!({
             "owner": repository.config.owner, "name": repository.config.name,
             "description": repository.config.description,
@@ -780,8 +1249,10 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
         .get("host")
         .and_then(|value| value.to_str().ok());
     let local_host = is_local_host(host);
-    let health_probe = matches!(request.uri().path(), "/healthz" | "/readyz");
-    let valid_host = (health_probe && local_host)
+    let management_probe = matches!(request.uri().path(), "/healthz" | "/readyz");
+    let load_balancer_probe = request.uri().path() == "/livez";
+    let valid_host = load_balancer_probe
+        || (management_probe && local_host)
         || server
             .auth
             .as_ref()
@@ -887,7 +1358,8 @@ async fn archived_mutation_response(
         .repositories
         .get(&(owner.to_owned(), name.to_owned()))
         .filter(|repository| principal.can_read(&repository.config))?;
-    match repository.lifecycle().await {
+    let actor = app::actor(principal).ok()?;
+    match repository.lifecycle(server, &actor).await {
         Ok(lifecycle) if lifecycle.archived => Some(app::Error::Archived.into_response()),
         Ok(_) => None,
         Err(error) => Some(error.into_response()),
@@ -925,11 +1397,180 @@ fn integration_api_path(path: &str) -> bool {
 mod maintenance_tests;
 
 #[cfg(test)]
+#[path = "server_peer_e2e_tests.rs"]
+mod peer_e2e_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::Body;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    struct DropSignal(Arc<AtomicBool>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    fn local_resources(
+        memory_bytes: u64,
+        free_disk_bytes: u64,
+        available_file_descriptors: usize,
+    ) -> crate::peer::LocalResources {
+        crate::peer::LocalResources {
+            memory_bytes,
+            free_disk_bytes,
+            available_file_descriptors,
+            job_credits: 16,
+        }
+    }
+
+    #[test]
+    fn cell_runtime_budget_derives_mailbox_and_active_cell_capacity() {
+        let budget =
+            CellRuntimeBudget::from_resources(local_resources(2 * GIB, 30 * GIB, 10_000)).unwrap();
+        assert_eq!(
+            budget,
+            CellRuntimeBudget {
+                node_retained_bytes: (3 * GIB / 2 / 20) as usize,
+                max_active_cells: 1_125,
+                replica_jobs: 6,
+                scratch_mebibytes: 6_826,
+                local_disk_mebibytes: 13_653,
+                disk_reserve_bytes: 10 * GIB,
+            }
+        );
+    }
+
+    #[test]
+    fn cell_scratch_monitor_rechecks_actual_free_space() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let available = fs4::available_space(directory.path()).unwrap();
+        let monitor = ActualScratchMonitor {
+            root: directory.path().to_owned(),
+            local_disk: crab_cell_runtime::DiskBudget::new(MIB),
+            reserve_bytes: available,
+        };
+
+        assert!(matches!(
+            monitor.ensure_available(1),
+            Err(error) if error.kind() == io::ErrorKind::StorageFull
+        ));
+    }
+
+    #[test]
+    fn release_lifecycle_admits_only_the_current_rollout_members() {
+        let current = Digest::from_bytes([1; 32]);
+        let desired = Digest::from_bytes([2; 32]);
+
+        assert!(release_admits_process(
+            ReleaseState::Ready,
+            Some(current),
+            Some(current),
+            current,
+        ));
+        assert!(release_admits_process(
+            ReleaseState::Prepared,
+            Some(current),
+            Some(desired),
+            current,
+        ));
+        assert!(release_admits_process(
+            ReleaseState::Activating,
+            Some(current),
+            Some(desired),
+            desired,
+        ));
+        assert!(!release_admits_process(
+            ReleaseState::Ready,
+            Some(desired),
+            Some(desired),
+            current,
+        ));
+        for state in [ReleaseState::Maintenance, ReleaseState::Failed] {
+            assert!(!release_admits_process(
+                state,
+                Some(current),
+                Some(desired),
+                current,
+            ));
+        }
+    }
+
+    #[test]
+    fn cell_runtime_budget_memory_bounds_active_cells() {
+        let budget =
+            CellRuntimeBudget::from_resources(local_resources(2 * GIB, 30 * GIB, 1_000_000))
+                .unwrap();
+        assert_eq!(budget.max_active_cells, 2_457);
+        assert_eq!(budget.replica_jobs, 6);
+        assert_eq!(budget.scratch_mebibytes, 6_826);
+        assert_eq!(budget.local_disk_mebibytes, 13_653);
+        assert_eq!(budget.disk_reserve_bytes, 10 * GIB);
+    }
+
+    #[test]
+    fn cell_runtime_budget_caps_dirty_jobs_by_cpu_credits() {
+        let mut resources = local_resources(64 * GIB, 1000 * GIB, 1_000_000);
+        resources.job_credits = 2;
+        let budget = CellRuntimeBudget::from_resources(resources).unwrap();
+        assert_eq!(budget.replica_jobs, 2);
+    }
+
+    #[test]
+    fn cell_runtime_budget_keeps_the_node_safety_ceiling() {
+        let budget =
+            CellRuntimeBudget::from_resources(local_resources(64 * GIB, 1000 * GIB, 1_000_000))
+                .unwrap();
+        assert_eq!(budget.max_active_cells, MAX_ACTIVE_CELLS);
+    }
+
+    #[test]
+    fn cell_runtime_budget_rejects_insufficient_memory() {
+        assert!(
+            CellRuntimeBudget::from_resources(local_resources(2 * GIB - 1, 30 * GIB, 10_000))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cell_runtime_budget_rejects_insufficient_disk() {
+        assert!(
+            CellRuntimeBudget::from_resources(local_resources(2 * GIB, 30 * GIB - 1, 10_000))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cell_runtime_budget_rejects_insufficient_file_descriptors() {
+        assert!(
+            CellRuntimeBudget::from_resources(crate::peer::LocalResources {
+                memory_bytes: 2 * GIB,
+                free_disk_bytes: 30 * GIB,
+                available_file_descriptors: FILE_DESCRIPTOR_RESERVE_MINIMUM,
+                job_credits: 16,
+            })
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_deadline_drops_an_unfinished_phase() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let signal = DropSignal(dropped.clone());
+        let result =
+            before_shutdown_deadline(Instant::now() + Duration::from_millis(10), async move {
+                let _signal = signal;
+                std::future::pending::<()>().await;
+            })
+            .await;
+
+        assert!(matches!(result, Err(crate::Error::ShutdownTimeout)));
+        assert!(dropped.load(Ordering::Acquire));
+    }
 
     #[tokio::test]
     async fn storage_preflight_leaves_no_live_probe_object() {
@@ -985,6 +1626,9 @@ mod tests {
         let server = Arc::new(Server {
             repositories: RepositorySet::from(BTreeMap::<(String, String), Repository>::new()),
             runtime: Arc::clone(&runtime),
+            cell_runtime: start_test_cell_runtime(),
+            repository_cells: None,
+            peer_receiver: None,
             options: RepositoryOptions::default(),
             cursor_key: [0; 32],
             admission: Semaphore::new(1),
@@ -993,6 +1637,7 @@ mod tests {
                 "test/.crab/http-server/v1/admission".into(),
                 1,
             ),
+            local_staging: crate::local_disk::LocalStaging::for_test(),
             app_admission: Semaphore::new(1),
             maintenance_admission: Arc::new(Semaphore::new(1)),
             cancellation: CancellationToken::new(),
@@ -1000,6 +1645,11 @@ mod tests {
             auth: None,
             catalog: None,
             catalog_healthy: AtomicBool::new(false),
+            node_healthy: AtomicBool::new(false),
+            scheduler_status: crate::cells::SchedulerStatus::new(
+                crate::cells::unix_now_ms().unwrap(),
+            )
+            .unwrap(),
             metrics: crate::metrics::Metrics::new().unwrap(),
         });
         let app = router(Arc::clone(&server));
@@ -1088,7 +1738,7 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
         }
-        let management = management_router(server);
+        let management = management_router(Arc::clone(&server));
         for (path, expected) in [
             ("/healthz", StatusCode::OK),
             ("/readyz", StatusCode::SERVICE_UNAVAILABLE),
@@ -1121,7 +1771,18 @@ mod tests {
         let body = std::str::from_utf8(&body).unwrap();
         assert!(body.contains("crab_http_server_catalog_healthy 0"));
         assert!(body.contains("crab_http_server_requests_total{method=\"get\",outcome=\"2xx\"} 2"));
-        runtime.shutdown().await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/livez")
+                    .header("host", "10.42.3.17:8788")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        server.shutdown_runtimes().await.unwrap();
     }
 }
 

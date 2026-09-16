@@ -94,7 +94,7 @@ async fn lfs_batch_upload_download_is_verified_and_idempotent() {
         "hello"
     );
     assert_eq!(server.transfer_admission.available_permits(), 4);
-    server.runtime.shutdown().await;
+    server.shutdown_runtimes().await.unwrap();
 }
 
 #[tokio::test]
@@ -119,7 +119,7 @@ async fn lfs_action_urls_preserve_the_validated_loopback_authority() {
         response["objects"][0]["actions"]["upload"]["href"],
         format!("http://127.0.0.1:18791/git/team/repo.git/info/lfs/objects/{HELLO}?size=5")
     );
-    server.runtime.shutdown().await;
+    server.shutdown_runtimes().await.unwrap();
 }
 
 #[tokio::test]
@@ -254,7 +254,7 @@ async fn lfs_lock_lifecycle_is_paginated_partitioned_and_retry_safe() {
             .unwrap()
             .is_empty()
     );
-    server.runtime.shutdown().await;
+    server.shutdown_runtimes().await.unwrap();
 }
 
 #[tokio::test]
@@ -290,7 +290,7 @@ async fn lfs_lock_mutations_share_the_receive_publication_guard() {
     )
     .await;
     assert_eq!(created.status(), StatusCode::CREATED);
-    server.runtime.shutdown().await;
+    server.shutdown_runtimes().await.unwrap();
 }
 
 #[tokio::test]
@@ -324,7 +324,7 @@ async fn lfs_lock_inputs_are_bounded() {
             StatusCode::NOT_FOUND,
         )
     );
-    server.runtime.shutdown().await;
+    server.shutdown_runtimes().await.unwrap();
 }
 
 #[test]
@@ -431,7 +431,7 @@ async fn lfs_range_response_is_resumable_and_rejects_unsatisfiable_ranges() {
             ),
         )
     );
-    server.runtime.shutdown().await;
+    server.shutdown_runtimes().await.unwrap();
 }
 
 #[tokio::test]
@@ -461,7 +461,7 @@ async fn lfs_ignores_multi_range_and_unknown_range_units() {
             "{range}"
         );
     }
-    server.runtime.shutdown().await;
+    server.shutdown_runtimes().await.unwrap();
 }
 
 #[tokio::test]
@@ -503,7 +503,7 @@ async fn lfs_head_ignores_range_and_describes_the_complete_object() {
             Bytes::new(),
         )
     );
-    server.runtime.shutdown().await;
+    server.shutdown_runtimes().await.unwrap();
 }
 
 #[tokio::test]
@@ -534,7 +534,7 @@ async fn lfs_range_verifies_the_complete_object_before_partial_delivery() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    server.runtime.shutdown().await;
+    server.shutdown_runtimes().await.unwrap();
 }
 
 #[tokio::test]
@@ -580,7 +580,7 @@ async fn lfs_download_does_not_publish_verification_receipts() {
         .try_collect()
         .await
         .unwrap();
-    server.runtime.shutdown().await;
+    server.shutdown_runtimes().await.unwrap();
     assert_eq!((bytes, after), (Bytes::from_static(b"hello"), before));
 }
 
@@ -611,7 +611,7 @@ async fn lfs_corrupt_download_fails_its_body_and_releases_admission() {
     )
     .await;
     let result = response.into_body().collect().await;
-    server.runtime.shutdown().await;
+    server.shutdown_runtimes().await.unwrap();
     assert_eq!(
         (
             result.is_err(),
@@ -628,9 +628,19 @@ async fn archived_repository_rejects_lfs_writes_and_keeps_reads_available() {
         .repositories
         .get(&("team".into(), "repo".into()))
         .unwrap();
-    repository_settings::replace_lifecycle(&repository, 0, true)
-        .await
-        .unwrap();
+    repository_settings::replace_lifecycle(
+        &server,
+        &repository,
+        &crate::auth::Identity {
+            issuer: "urn:crab:local".into(),
+            subject: "operator".into(),
+            name: "Local operator".into(),
+        },
+        0,
+        true,
+    )
+    .await
+    .unwrap();
     let batch = |operation| {
         Body::from(json!({"operation":operation,"objects":[{"oid":HELLO,"size":5}]}).to_string())
     };
@@ -654,7 +664,7 @@ async fn archived_repository_rejects_lfs_writes_and_keeps_reads_available() {
             .status(),
         StatusCode::FORBIDDEN
     );
-    server.runtime.shutdown().await;
+    server.shutdown_runtimes().await.unwrap();
 }
 
 #[tokio::test]
@@ -687,12 +697,13 @@ async fn lfs_rejects_invalid_batches_and_releases_disconnected_uploads() {
         .await
     });
     tokio::time::timeout(Duration::from_secs(2), async {
-        while server.receives.is_empty() {
+        while server.receives.is_empty() || server.local_staging.available_mebibytes() == 8 * 1024 {
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
+    assert_eq!(server.local_staging.available_mebibytes(), 8 * 1024 - 1);
     client.abort();
     let _ = client.await;
     server.receives.close();
@@ -700,7 +711,8 @@ async fn lfs_rejects_invalid_batches_and_releases_disconnected_uploads() {
         .await
         .unwrap();
     assert_eq!(server.transfer_admission.available_permits(), 4);
-    server.runtime.shutdown().await;
+    assert_eq!(server.local_staging.available_mebibytes(), 8 * 1024);
+    server.shutdown_runtimes().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -762,7 +774,7 @@ async fn native_git_lfs_push_and_clone_transfer_exact_large_file() {
     server.receives.close();
     server.receives.wait().await;
     server.finish_maintenance().await.unwrap();
-    server.runtime.shutdown().await;
+    server.shutdown_runtimes().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -833,7 +845,7 @@ async fn cancelled_lfs_response_fails_http_body_and_releases_capacity() {
             .await
             .unwrap()
             .unwrap();
-        server.runtime.shutdown().await;
+        server.shutdown_runtimes().await.unwrap();
         if cancel {
             assert!(
                 matches!(result, Err(ref error) if !error.is_timeout()),
