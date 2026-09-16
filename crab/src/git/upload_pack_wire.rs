@@ -397,6 +397,52 @@ async fn acquire_read_admission(
     acquire_read_admission_with_wait(store, prefix, cancellation, READ_ADMISSION_WAIT).await
 }
 
+/// Run one non-terminal upload-pack operation under the shared reader limit.
+pub(crate) async fn with_read_admission<T>(
+    store: &crab_storage::Store,
+    prefix: &str,
+    cancellation: &CancellationToken,
+    operation: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    let mut admission = acquire_read_admission(store.inner(), prefix, cancellation).await?;
+    let renewal_interval = (admission.ttl() / 3).max(Duration::from_secs(1));
+    let mut ticker = tokio::time::interval(renewal_interval);
+    ticker.tick().await;
+    tokio::pin!(operation);
+    let mut renewal_error = None;
+    let result = loop {
+        tokio::select! {
+            result = &mut operation => {
+                break match result {
+                    Err(error) => Err(error),
+                    Ok(value) => match renewal_error {
+                        Some(error) => Err(CrabError::from(error)),
+                        None => Ok(value),
+                    },
+                };
+            }
+            _ = ticker.tick(), if renewal_error.is_none() => {
+                if let Err(error) = admission.renew().await {
+                    cancellation.cancel();
+                    renewal_error = Some(error);
+                }
+            }
+        }
+    };
+    let release = admission.release().await.map_err(CrabError::from);
+    match (result, release) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(release_error)) => {
+            tracing::warn!(
+                error = %release_error,
+                "upload-pack read admission release failed after operation failure"
+            );
+            Err(error)
+        }
+    }
+}
+
 async fn acquire_read_admission_with_wait(
     store: &Arc<dyn object_store::ObjectStore>,
     prefix: &str,

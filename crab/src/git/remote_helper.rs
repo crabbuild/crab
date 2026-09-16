@@ -2510,14 +2510,19 @@ async fn fetch_packs(
                 "raw object fetch cannot carry shallow constraints".to_owned(),
             ));
         }
-        fetch_capsule_promisor_objects(
-            store,
-            router,
-            entries,
-            config,
-            filter_requested || fetch_options.filter.is_some(),
-            cache.capsule_view.take(),
+        crate::git::upload_pack_wire::with_read_admission(
+            store.as_storage(),
+            router.repo_prefix(),
             cancel,
+            fetch_capsule_promisor_objects(
+                store,
+                router,
+                entries,
+                config,
+                filter_requested || fetch_options.filter.is_some(),
+                cache.capsule_view.take(),
+                cancel,
+            ),
         )
         .await?;
         return Ok(None);
