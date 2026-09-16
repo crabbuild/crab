@@ -26,6 +26,112 @@ pub(crate) struct PreparedProtectedPush {
     pub session: ProtectedPushSession,
 }
 
+pub(crate) async fn finalize_capsule_push(
+    session: &ProtectedPushSession,
+    store: &Store,
+    router: &StoreLayout,
+    transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
+    capsule: &crab_metadata::capsule_protocol::Capsule,
+    upload_concurrency: usize,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    if session.active_active_writer.is_some()
+        || match &session.backend {
+            ProtectedPushBackend::CrabAuth {
+                active_active_replication,
+                ..
+            } => active_active_replication.is_some(),
+            ProtectedPushBackend::Managed { request, .. } => request.replication.is_some(),
+        }
+    {
+        return Err(CrabError::Configuration {
+            key: "capsule-protocol protected push coordination".to_owned(),
+            origin: "protocol-v2 protected active-active finalize is not implemented".to_owned(),
+        });
+    }
+    crate::core::error::check_cancelled(cancel)?;
+    let run = crab_metadata::capsule_protocol::CapsuleRun::leaf(capsule.clone())?;
+    let run_path = router.capsule_path(run.hash());
+    store.put(&run_path, run.bytes().clone()).await?;
+    let staged_objects = store.flush_staged_writes(upload_concurrency).await?;
+    let plan = crab_remote::protected::ProtectedCapsulePushPlan {
+        schema_version: crab_remote::protected::PROTECTED_CAPSULE_PUSH_PLAN_SCHEMA_VERSION,
+        repo_prefix: router.repo_prefix().to_owned(),
+        push_id: session.push_id.clone(),
+        upload_prefix: session.upload_prefix.clone(),
+        base_root_digest: transaction.base_root_digest().to_owned(),
+        transaction_id: transaction.id()?,
+        run_hash: run.hash().to_owned(),
+        run_size: run.bytes().len() as u64,
+        ref_updates: session.ref_updates.clone(),
+        staged_objects,
+    };
+    let plan_bytes = serde_json::to_vec_pretty(&plan).map_err(|error| {
+        CrabError::Internal(format!("protected capsule plan serialize: {error}"))
+    })?;
+    let plan_digest = blake3::hash(&plan_bytes).to_hex().to_string();
+    let plan_size = plan_bytes.len() as u64;
+    let upload_prefix = session.upload_prefix.trim_matches('/');
+    let plan_path = object_store::path::Path::from(format!("{upload_prefix}/push-plan.json"));
+    store
+        .put_exact(&plan_path, bytes::Bytes::from(plan_bytes))
+        .await?;
+    store.flush_staging_object(&plan_path, plan_size).await?;
+    crate::core::error::check_cancelled(cancel)?;
+
+    let response = match &session.backend {
+        ProtectedPushBackend::CrabAuth {
+            auth,
+            bucket,
+            prefix,
+            ..
+        } => {
+            auth.finalize_push(
+                bucket,
+                prefix,
+                session.ref_updates.clone(),
+                &session.push_id,
+                None,
+                None,
+            )
+            .await?
+        }
+        ProtectedPushBackend::Managed {
+            token_cache_directory,
+            repository,
+            push_id,
+            request,
+        } => {
+            crab_auth_store::ManagedRepositoryResolver::new(token_cache_directory.clone())
+                .finalize_push(repository, *push_id, request, cancel)
+                .await?
+        }
+    };
+    if response.ref_updates != session.ref_updates {
+        return Err(CrabError::AuthFailed {
+            path: "protected capsule finalize returned mismatched ref updates".to_owned(),
+        });
+    }
+    if response.operation_id.is_some()
+        || response.coordinator_epoch.is_some()
+        || response.writer_region.is_some()
+        || response.manifest_generation.is_some()
+        || response.commit_state.is_some()
+    {
+        return Err(CrabError::AuthFailed {
+            path: "protected capsule finalize returned unexpected active-active metadata"
+                .to_owned(),
+        });
+    }
+    tracing::info!(
+        push_id = %session.push_id,
+        plan_digest,
+        status = %response.status,
+        "protected capsule push finalized"
+    );
+    Ok(())
+}
+
 pub(crate) async fn prepare_crab_auth_push(
     config: &Config,
     parsed_url: &CrabUrl,

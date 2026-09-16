@@ -131,11 +131,20 @@ async fn run_inner(
     if let Some(result) = duplicate_destination_result(specs) {
         return Ok((result, advertised));
     }
-    if config.protected_push.is_some() {
+    if config.protected_push.is_some() && config.mirror_plan_id.is_some() {
         return Err(CrabError::Configuration {
             key: "capsule-protocol push coordination".to_owned(),
-            origin: "protected publication requires a protocol-v2 authorization commit adapter"
-                .to_owned(),
+            origin: "protocol-v2 protected mirror-plan publication is not implemented".to_owned(),
+        });
+    }
+    if config.protected_push.is_some()
+        && (config.active_active_replication.is_some()
+            || config.active_active_writer.is_some()
+            || config.active_active_coordinator.is_some())
+    {
+        return Err(CrabError::Configuration {
+            key: "capsule-protocol protected push coordination".to_owned(),
+            origin: "protocol-v2 protected active-active finalize is not implemented".to_owned(),
         });
     }
     if cancel.is_cancelled() {
@@ -327,7 +336,7 @@ async fn run_inner(
         pointers = prepared.pointers.len(),
         "prepared capsule-protocol Git payload"
     );
-    let gc_writer = if prepared.pointers.is_empty() {
+    let gc_writer = if prepared.pointers.is_empty() || config.protected_push.is_some() {
         None
     } else {
         Some(
@@ -383,10 +392,13 @@ async fn run_inner(
                 staging,
                 caching_store,
                 metrics,
+                config.protected_push.is_none(),
                 cancel,
             )
             .await?;
-            if let Some(replication) = config.active_active_replication.as_ref() {
+            if config.protected_push.is_none()
+                && let Some(replication) = config.active_active_replication.as_ref()
+            {
                 crate::replication::register_active_active_coordinator_for_repo(
                     store,
                     router,
@@ -424,6 +436,19 @@ async fn run_inner(
                 sections,
             )?;
             check_cancelled(cancel)?;
+            if let Some(session) = config.protected_push.as_ref() {
+                super::protected_push::finalize_capsule_push(
+                    session,
+                    store,
+                    router,
+                    &transaction,
+                    &capsule,
+                    config.upload_concurrency,
+                    cancel,
+                )
+                .await?;
+                return Ok(Some(None));
+            }
             let result = if changes_namespace {
                 let commit_layout = layout.clone();
                 crab_write::with_ref_namespaces(

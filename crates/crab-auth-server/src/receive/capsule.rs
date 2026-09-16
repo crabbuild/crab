@@ -45,6 +45,14 @@ pub(super) async fn commit_capsule_candidate(
         .first()
         .cloned()
         .ok_or_else(|| invalid("protected capsule run is empty"))?;
+    if let Some(delta) = capsule.pointer_catalog_delta()? {
+        crab_metadata::ref_registry::union_register_repo_shards(
+            ctx.store(),
+            ctx.router(),
+            delta.shards().keys().cloned().collect(),
+        )
+        .await?;
+    }
     let transaction = capsule.transaction()?;
     let ref_names = transaction
         .edits()

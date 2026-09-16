@@ -27,6 +27,7 @@ pub(crate) async fn prepare_delta(
     staging: Option<&Arc<StagingAreaReadOnly>>,
     caching_store: Option<&crab_cache_store::CachingStore>,
     metrics: Option<&Metrics>,
+    publish_gc_roots: bool,
     cancel: &CancellationToken,
 ) -> Result<crab_metadata::capsule_protocol::PointerCatalog> {
     use crab_metadata::capsule_protocol::{
@@ -424,12 +425,14 @@ pub(crate) async fn prepare_delta(
     // Registry partitions are monotonic. Re-registering the pinned catalog
     // would rewrite every historical partition on each push without adding
     // protection; only this transaction's candidate roots need unioning.
-    crab_metadata::ref_registry::union_register_repo_shards(
-        layout.store(),
-        layout,
-        shard_hashes.iter().cloned().collect(),
-    )
-    .await?;
+    if publish_gc_roots {
+        crab_metadata::ref_registry::union_register_repo_shards(
+            layout.store(),
+            layout,
+            shard_hashes.iter().cloned().collect(),
+        )
+        .await?;
+    }
 
     let mut shard_closures = vec![HashSet::new(); shards.len()];
     for (file_hash, _, shard_index, dependency_hashes) in &pending_files {
