@@ -99,13 +99,27 @@ command.
 
 ### `crab metadb owner`
 
-Run one durable derived-state owner for a repository. The continuous owner
-fingerprints the manifest and active ref transactions, then waits until that
-activity is unchanged for one configured interval before it begins maintenance.
-Each eligible cycle pins one manifest snapshot and performs bounded maintenance:
-advance the object catalog, repair visibility, rebuild or compact the split
-commit graph, rebuild the shallow-closure index, or roll up the smallest
-non-geometric pack suffix.
+Run one durable derived-state owner for a repository. Authority selection is
+format-strict: a present v2 root selects capsule maintenance, while an absent
+v2 root selects the legacy manifest path. A corrupt v2 root fails closed and
+never falls back to or creates a legacy manifest.
+
+For v2, the continuous owner fingerprints one transaction-consistent root/ref
+view and waits until it is unchanged for one configured interval. An eligible
+cycle checkpoints the authenticated capsule frontier once it reaches 32
+capsules. The already-pinned view is reused for consolidation and exact-root
+CAS publication, avoiding a duplicate root/ref-head capture; a concurrent push
+wins cleanly and a later owner pass retries from its newer authority. `--once`
+eagerly checkpoints any non-empty Git-pack frontier. Git visibility, object
+locations, and Xet pointer catalogs are carried inside the verified checkpoint;
+the owner does not publish v1 locator, graph, receipt, or manifest objects.
+
+For v1, the continuous owner fingerprints the manifest and active ref
+transactions, then waits until that activity is unchanged for one configured
+interval before it begins maintenance. Each eligible cycle pins one manifest
+snapshot and performs bounded maintenance: advance the object catalog, repair
+visibility, rebuild or compact the split commit graph, rebuild the
+shallow-closure index, or roll up the smallest non-geometric pack suffix.
 An eligible pack suffix is repacked before commit-graph or shallow-closure
 rebuilding when both the object catalog and visibility proof cover the pinned
 generation. Stale catalog coverage is advanced first because bounded repack
@@ -150,9 +164,12 @@ expired leases remain reclaimable after a process or host failure.
 
 The default 30-second poll bounds normal derived-state lag to roughly one
 interval per pending action after foreground activity becomes quiet. An active
-repository reads only the manifest and bounded active-transaction inventory on
-each poll; it does not enter journal compaction, catalog, graph, or repack work.
-An unchanged repository does not download stable pack bodies. The
+v1 repository reads only the manifest and bounded active-transaction inventory
+on each poll; it does not enter journal compaction, catalog, graph, or repack
+work. A v2 poll captures every independently mutable ref head so its quiet
+decision covers per-ref publication that does not advance the compacted root;
+this is exact but its request cost currently scales with ref count. An unchanged
+repository does not download stable pack bodies. The
 repository-owner lease is renewed every one-third of the configured
 push-lock TTL; the shorter locator lease is acquired only while advancing its
 SlateDB catalog. Choose a longer interval for low-traffic repositories; choose
@@ -189,12 +206,16 @@ rebuild once; later generations can return to the incremental path.
 `action` is `none`, or run the continuous owner. `--jsonl` emits one record per
 sample with the selected action, stable `maintenance_reason`,
 `next_eligibility_secs` (`0` when the owner immediately rechecks a superseded
-generation), active pack count/bytes, geometric roll-up size, catalog and
+generation), `protocol`, `inventory_loaded`, active pack count/bytes, geometric
+roll-up size, catalog and
 commit-graph layer count/bytes, maintenance bytes read and written, visibility
 state, supersession, and elapsed time. The reason values are operational
 labels, not user-controlled repository names: for example,
 `catalog_coverage_stale`, `commit_graph_layers_due`,
-`shallow_closure_missing`, and `geometric_pack_threshold`.
+`shallow_closure_missing`, `geometric_pack_threshold`, and
+`capsule_frontier_threshold`. A payload-free v2 quiet/no-op poll reports
+`inventory_loaded: false`; its zero pack counters mean the pack inventory was
+deliberately not downloaded, not that the repository is empty.
 
 ### `crab metadb compact`
 

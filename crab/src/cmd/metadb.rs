@@ -360,6 +360,8 @@ fn build_metadb(
 struct GenerationOwnerSample {
     #[serde(skip)]
     identity: GenerationOwnerIdentity,
+    protocol: &'static str,
+    inventory_loaded: bool,
     generation: u64,
     action: &'static str,
     maintenance_reason: &'static str,
@@ -381,11 +383,16 @@ struct GenerationOwnerSample {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct GenerationOwnerIdentity {
-    generation: u64,
-    pack_index_hash: String,
-    git_validation_digest: String,
-    commit_graph_hash: Option<String>,
+enum GenerationOwnerIdentity {
+    Legacy {
+        generation: u64,
+        pack_index_hash: String,
+        git_validation_digest: String,
+        commit_graph_hash: Option<String>,
+    },
+    Capsule {
+        state_digest: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -396,7 +403,7 @@ struct GenerationOwnerActivity {
 
 impl From<&crab_metadata::manifests::Manifest> for GenerationOwnerIdentity {
     fn from(manifest: &crab_metadata::manifests::Manifest) -> Self {
-        Self {
+        Self::Legacy {
             generation: manifest.generation,
             pack_index_hash: manifest.pack_index_hash.clone(),
             git_validation_digest: manifest.git_validation_digest.clone(),
@@ -434,6 +441,8 @@ const GENERATION_OWNER_ONCE_RETRY_INTERVAL_SECS: u64 = 2;
 const GENERATION_OWNER_MIN_QUIESCENCE: std::time::Duration = std::time::Duration::from_secs(5);
 const GENERATION_OWNER_STABLE_REVALIDATION: std::time::Duration =
     std::time::Duration::from_mins(10);
+const CAPSULE_OWNER_CHECKPOINT_THRESHOLD: u32 = 32;
+const CAPSULE_OWNER_MAX_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 fn generation_owner_repack_has_priority(
     geometric_repack_packs: u64,
@@ -462,6 +471,12 @@ async fn run_generation_owner(
     let (inner, repo_prefix, bucket_identity, config) = resolve_repo_store(cancel).await?;
     let store = crate::storage::store::Store::new(inner).with_bucket_identity(bucket_identity);
     let router = crate::storage::StoreLayout::new(store.clone(), repo_prefix.clone());
+    let capsule_layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let capsule_root = capsule_owner_root(&capsule_layout).await?;
     let lock_ttl = std::time::Duration::from_secs(config.push_lock_ttl_secs);
     let owner_cancel = cancel.child_token();
     let mut owner = crab_coordination::PushLock::acquire_internal(
@@ -478,6 +493,7 @@ async fn run_generation_owner(
         generation_owner_loop(
             &store,
             &router,
+            capsule_root.as_ref().map(|_| &capsule_layout),
             once,
             interval_secs,
             jsonl,
@@ -496,9 +512,214 @@ async fn run_generation_owner(
     operation
 }
 
+async fn capsule_owner_root(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+) -> Result<Option<crab_metadata::capsule_protocol::RootSnapshot>> {
+    match crab_metadata::capsule_protocol::load_root(layout).await {
+        Ok(root) => Ok(Some(root)),
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        }) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn capsule_generation_owner_sample(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    once: bool,
+    interval_secs: u64,
+    quiescence: std::time::Duration,
+    observed_activity: &mut Option<(GenerationOwnerActivity, std::time::Instant)>,
+    completed_work: Option<&CompletedGenerationOwnerWork>,
+    cancel: &CancellationToken,
+) -> Result<GenerationOwnerSample> {
+    let started = std::time::Instant::now();
+    let root = crab_metadata::capsule_protocol::load_root(layout).await?;
+    let generation = root.record().root().generation();
+    let activity = crab_read::capsule_protocol::read_activity_from_root(layout, &root).await?;
+    let identity = GenerationOwnerIdentity::Capsule {
+        state_digest: activity.state_digest().to_owned(),
+    };
+    let quiet = once
+        || generation_owner_activity_is_quiet(
+            GenerationOwnerActivity {
+                identity: identity.clone(),
+                active_transactions_digest: [0; 32],
+            },
+            observed_activity,
+            std::time::Instant::now(),
+            quiescence,
+        );
+    if !quiet {
+        return Ok(capsule_owner_sample(
+            identity,
+            generation,
+            "quiescence_wait",
+            interval_secs,
+            0,
+            0,
+            false,
+            false,
+            started,
+        ));
+    }
+    if let Some(completed) = completed_work
+        && completed.sample.identity == identity
+        && completed.completed_at.elapsed() < GENERATION_OWNER_STABLE_REVALIDATION
+    {
+        let mut sample = completed.sample.clone();
+        sample.action = "idle";
+        sample.maintenance_reason = generation_owner_reason("idle");
+        sample.next_eligibility_secs = interval_secs;
+        sample.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        return Ok(sample);
+    }
+    if !once && activity.capsule_count() < u64::from(CAPSULE_OWNER_CHECKPOINT_THRESHOLD) {
+        return Ok(capsule_owner_sample(
+            identity,
+            generation,
+            "none",
+            interval_secs,
+            0,
+            0,
+            false,
+            false,
+            started,
+        ));
+    }
+    let view = crab_read::capsule_protocol::open_view_from_root(
+        layout,
+        root,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+            max_frontier_bytes: CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+        },
+    )
+    .await?;
+    let view_identity = GenerationOwnerIdentity::Capsule {
+        state_digest: view.state_digest(),
+    };
+    if !once
+        && !generation_owner_activity_is_quiet(
+            GenerationOwnerActivity {
+                identity: view_identity.clone(),
+                active_transactions_digest: [0; 32],
+            },
+            observed_activity,
+            std::time::Instant::now(),
+            quiescence,
+        )
+    {
+        return Ok(capsule_owner_sample(
+            view_identity,
+            view.root().root().generation(),
+            "quiescence_wait",
+            interval_secs,
+            u64::try_from(view.git_pack_count()).unwrap_or(u64::MAX),
+            view.git_pack_bytes()?,
+            true,
+            false,
+            started,
+        ));
+    }
+    let active_packs = u64::try_from(view.git_pack_count()).unwrap_or(u64::MAX);
+    let active_pack_bytes = view.git_pack_bytes()?;
+    if active_packs == 0 {
+        return Ok(capsule_owner_sample(
+            view_identity,
+            view.root().root().generation(),
+            "none",
+            interval_secs,
+            active_packs,
+            active_pack_bytes,
+            true,
+            false,
+            started,
+        ));
+    }
+    let threshold = if once {
+        0
+    } else {
+        CAPSULE_OWNER_CHECKPOINT_THRESHOLD
+    };
+    let checkpointed = crab_remote::checkpoint::publish_capsule_checkpoint_from_view(
+        layout,
+        &view,
+        threshold,
+        CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+        cancel,
+    )
+    .await
+    .map_err(map_capsule_owner_error)?;
+    Ok(capsule_owner_sample(
+        view_identity,
+        view.root().root().generation(),
+        if checkpointed {
+            "capsule_checkpoint"
+        } else {
+            "none"
+        },
+        if checkpointed { 0 } else { interval_secs },
+        active_packs,
+        active_pack_bytes,
+        true,
+        checkpointed,
+        started,
+    ))
+}
+
+fn capsule_owner_sample(
+    identity: GenerationOwnerIdentity,
+    generation: u64,
+    action: &'static str,
+    next_eligibility_secs: u64,
+    active_packs: u64,
+    active_pack_bytes: u64,
+    inventory_loaded: bool,
+    superseded: bool,
+    started: std::time::Instant,
+) -> GenerationOwnerSample {
+    GenerationOwnerSample {
+        identity,
+        protocol: "capsule-v2",
+        inventory_loaded,
+        generation,
+        action,
+        maintenance_reason: generation_owner_reason(action),
+        next_eligibility_secs,
+        locator_advanced: false,
+        visibility: "embedded",
+        active_packs,
+        active_pack_bytes,
+        geometric_repack_packs: 0,
+        catalog_layers: 0,
+        catalog_bytes: 0,
+        locator_sweep: Default::default(),
+        commit_graph_layers: 0,
+        commit_graph_bytes: 0,
+        maintenance_bytes_read: 0,
+        maintenance_bytes_written: 0,
+        superseded,
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    }
+}
+
+fn map_capsule_owner_error(error: crab_remote::checkpoint::CheckpointError) -> CrabError {
+    match error {
+        crab_remote::checkpoint::CheckpointError::Cancelled => CrabError::Cancelled,
+        crab_remote::checkpoint::CheckpointError::Read(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Repack(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Pack(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Metadata(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Io(source) => source.into(),
+        other => CrabError::Internal(other.to_string()),
+    }
+}
+
 async fn generation_owner_loop(
     store: &crate::storage::store::Store,
     router: &crate::storage::StoreLayout,
+    capsule_layout: Option<&crab_storage::StoreLayout<crab_storage::Store>>,
     once: bool,
     interval_secs: u64,
     jsonl: bool,
@@ -516,6 +737,18 @@ async fn generation_owner_loop(
             return Ok(());
         }
         let sample = async {
+            if let Some(layout) = capsule_layout {
+                return capsule_generation_owner_sample(
+                    layout,
+                    once,
+                    interval_secs,
+                    quiescence,
+                    &mut observed_activity,
+                    completed_work.as_ref(),
+                    cancel,
+                )
+                .await;
+            }
             let maintenance_ready = if once {
                 true
             } else {
@@ -790,6 +1023,8 @@ async fn generation_owner_sample(
     if locator_advanced {
         return Ok(GenerationOwnerSample {
             identity,
+            protocol: "manifest-v1",
+            inventory_loaded: true,
             generation,
             action: "catalog_advance",
             maintenance_reason: generation_owner_reason("catalog_advance"),
@@ -843,6 +1078,8 @@ async fn generation_owner_sample(
         };
         return Ok(GenerationOwnerSample {
             identity,
+            protocol: "manifest-v1",
+            inventory_loaded: true,
             generation,
             action,
             maintenance_reason: generation_owner_reason(action),
@@ -899,6 +1136,8 @@ async fn generation_owner_sample(
     }
     Ok(GenerationOwnerSample {
         identity,
+        protocol: "manifest-v1",
+        inventory_loaded: true,
         generation,
         action: graph.action,
         maintenance_reason: generation_owner_reason(graph.action),
@@ -1008,6 +1247,8 @@ fn repack_owner_sample(
 ) -> GenerationOwnerSample {
     GenerationOwnerSample {
         identity: GenerationOwnerIdentity::from(manifest),
+        protocol: "manifest-v1",
+        inventory_loaded: true,
         generation: manifest.generation,
         action: repack.action,
         maintenance_reason: generation_owner_reason(repack.action),
@@ -1060,6 +1301,8 @@ fn empty_owner_sample(
 ) -> GenerationOwnerSample {
     GenerationOwnerSample {
         identity,
+        protocol: "manifest-v1",
+        inventory_loaded: true,
         generation,
         action,
         maintenance_reason: generation_owner_reason(action),
@@ -1096,6 +1339,7 @@ fn generation_owner_reason(action: &str) -> &'static str {
         "geometric_repack" => "geometric_pack_threshold",
         "geometric_repack_bounded" => "geometric_pack_budget",
         "geometric_repack_deferred" => "maintenance_budget",
+        "capsule_checkpoint" => "capsule_frontier_threshold",
         "superseded" => "manifest_superseded",
         _ => "no_maintenance_due",
     }
@@ -1316,6 +1560,8 @@ fn render_generation_owner_sample(sample: &GenerationOwnerSample, jsonl: bool) -
         stream.emit_snapshot(sample)?;
     } else {
         info!(
+            protocol = sample.protocol,
+            inventory_loaded = sample.inventory_loaded,
             generation = sample.generation,
             action = sample.action,
             locator_advanced = sample.locator_advanced,
@@ -4289,6 +4535,66 @@ mod tests {
         assert!(!sample.locator_advanced);
         assert_eq!(sample.visibility, "published");
         assert!(!sample.superseded);
+    }
+
+    #[tokio::test]
+    async fn capsule_owner_uses_v2_authority_without_creating_a_manifest() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let storage = crab_storage::Store::new(Arc::clone(&inner));
+        let layout = crab_storage::StoreLayout::new(storage, "org/v2-owner".to_owned());
+        crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+            .await
+            .expect("initialize capsule root");
+        assert!(
+            capsule_owner_root(&layout)
+                .await
+                .expect("select capsule authority")
+                .is_some()
+        );
+        let mut observed = None;
+        let sample = capsule_generation_owner_sample(
+            &layout,
+            true,
+            30,
+            std::time::Duration::ZERO,
+            &mut observed,
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("sample capsule owner");
+
+        assert_eq!(sample.protocol, "capsule-v2");
+        assert!(sample.inventory_loaded);
+        assert_eq!(sample.action, "none");
+        assert_eq!(sample.visibility, "embedded");
+        assert_eq!(sample.active_packs, 0);
+        assert!(!sample.superseded);
+        let legacy_manifest = layout.manifest_path();
+        assert!(matches!(
+            inner.head(&legacy_manifest).await,
+            Err(object_store::Error::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn capsule_owner_fails_closed_on_corrupt_v2_authority() {
+        let inner = Arc::new(InMemory::new());
+        let storage = crab_storage::Store::new(inner);
+        let layout = crab_storage::StoreLayout::new(storage, "org/corrupt-owner".to_owned());
+        layout
+            .store()
+            .put(
+                &layout.capsule_root_path(),
+                bytes::Bytes::from_static(b"not a capsule root"),
+            )
+            .await
+            .expect("seed corrupt root");
+
+        assert!(matches!(
+            capsule_owner_root(&layout).await,
+            Err(CrabError::CorruptObject { .. })
+        ));
     }
 
     #[tokio::test]

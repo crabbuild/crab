@@ -38,6 +38,27 @@ pub struct CapsuleRepositoryView {
     capsule_run_pointers: Vec<CapsulePointer>,
 }
 
+/// Payload-free fingerprint used by background maintenance polling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapsuleRepositoryActivity {
+    state_digest: String,
+    capsule_count: u64,
+}
+
+impl CapsuleRepositoryActivity {
+    /// Return the digest covering the root and every visible per-ref position.
+    #[must_use]
+    pub fn state_digest(&self) -> &str {
+        &self.state_digest
+    }
+
+    /// Return the total immutable capsule count in the visible frontier.
+    #[must_use]
+    pub const fn capsule_count(&self) -> u64 {
+        self.capsule_count
+    }
+}
+
 impl CapsuleRepositoryView {
     /// Return the authoritative repository generation and ref state.
     #[must_use]
@@ -102,18 +123,54 @@ impl CapsuleRepositoryView {
         &self.capsule_run_pointers
     }
 
+    /// Return the total immutable capsule count represented by the visible frontier.
+    #[must_use]
+    pub fn capsule_count(&self) -> Result<u64> {
+        self.capsule_run_pointers
+            .iter()
+            .try_fold(0_u64, |total, pointer| {
+                total
+                    .checked_add(u64::from(pointer.capsule_count()))
+                    .ok_or_else(|| ReadError::internal("capsule frontier count overflowed"))
+            })
+    }
+
+    /// Return the number of Git packs authenticated by this exact view.
+    #[must_use]
+    pub fn git_pack_count(&self) -> usize {
+        self.checkpoint
+            .as_ref()
+            .map_or(0, |checkpoint| checkpoint.git_packs().len())
+            .saturating_add(
+                self.capsules
+                    .iter()
+                    .map(|capsule| capsule.git_packs().len())
+                    .sum(),
+            )
+    }
+
+    /// Return the total authenticated Git pack-body bytes in this exact view.
+    pub fn git_pack_bytes(&self) -> Result<u64> {
+        self.checkpoint
+            .iter()
+            .cloned()
+            .map(GitPackContainer::Checkpoint)
+            .chain(self.capsules.iter().cloned().map(GitPackContainer::Capsule))
+            .try_fold(0_u64, |total, container| {
+                container.git_packs().iter().try_fold(total, |total, pack| {
+                    total
+                        .checked_add(container.section_bytes(pack.pack_section())?.len() as u64)
+                        .ok_or_else(|| {
+                            ReadError::internal("capsule Git pack byte total overflowed")
+                        })
+                })
+            })
+    }
+
     /// Return a digest that changes with the root or any visible per-ref position.
     #[must_use]
     pub fn state_digest(&self) -> String {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"crab capsule repository view v2\0");
-        hasher.update(self.root.record().digest().as_bytes());
-        for (ref_name, transaction_id) in &self.visible_ref_transactions {
-            hasher.update(ref_name.as_bytes());
-            hasher.update(&[0]);
-            hasher.update(transaction_id.as_bytes());
-        }
-        hasher.finalize().to_hex().to_string()
+        state_digest(self.root.record(), &self.visible_ref_transactions)
     }
 
     /// Materialize the complete generation-pinned external pointer catalog.
@@ -607,6 +664,27 @@ pub async fn read_visible_refs_from_root(
     Ok(materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?.refs)
 }
 
+/// Inspect one root and every visible per-ref position without loading payloads.
+///
+/// Maintenance polling uses this to detect quiescence without repeatedly
+/// downloading stable capsule or checkpoint bodies.
+pub async fn read_activity_from_root(
+    router: &StoreLayout<Store>,
+    snapshot: &crab_metadata::capsule_protocol::RootSnapshot,
+) -> Result<CapsuleRepositoryActivity> {
+    let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
+    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?;
+    let capsule_count = visible.pointers.iter().try_fold(0_u64, |total, pointer| {
+        total
+            .checked_add(u64::from(pointer.capsule_count()))
+            .ok_or_else(|| ReadError::internal("capsule frontier count overflowed"))
+    })?;
+    Ok(CapsuleRepositoryActivity {
+        state_digest: state_digest(snapshot.record(), &visible.transactions),
+        capsule_count,
+    })
+}
+
 /// Read only requested current refs from an already verified root.
 ///
 /// Missing and deleted refs are omitted. The result is authoritative only for
@@ -851,6 +929,18 @@ struct VisibleRefHeads {
     transactions: BTreeMap<String, String>,
     frontiers: BTreeMap<String, (Option<String>, Vec<CapsulePointer>)>,
     pointers: Vec<CapsulePointer>,
+}
+
+fn state_digest(root: &RootRecord, transactions: &BTreeMap<String, String>) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"crab capsule repository view v2\0");
+    hasher.update(root.digest().as_bytes());
+    for (ref_name, transaction_id) in transactions {
+        hasher.update(ref_name.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(transaction_id.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
 }
 
 fn materialize_visible_ref_heads(
@@ -1829,6 +1919,40 @@ mod tests {
                 StorageOperation::List,
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn activity_poll_matches_full_view_without_fetching_capsules() {
+        let inner = Arc::new(InMemory::new());
+        seed_one_capsule(inner.clone(), None).await;
+        let observer = Arc::new(RecordingObserver::default());
+        let store = Store::new(inner).with_storage_observer(observer.clone());
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+
+        let root = load_root(&router).await.unwrap();
+        let activity = read_activity_from_root(&router, &root).await.unwrap();
+        let poll_operations = observer
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|observation| observation.outcome == StorageOutcome::Success)
+            .map(|observation| observation.operation)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            poll_operations,
+            vec![
+                StorageOperation::Get,
+                StorageOperation::List,
+                StorageOperation::List,
+            ]
+        );
+
+        let view = open_view_from_root(&router, root, TEST_LIMITS)
+            .await
+            .unwrap();
+        assert_eq!(activity.state_digest(), view.state_digest());
+        assert_eq!(activity.capsule_count(), view.capsule_count().unwrap());
     }
 
     #[tokio::test]

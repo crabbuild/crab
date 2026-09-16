@@ -135,18 +135,23 @@ pub async fn publish_capsule_checkpoint(
         },
     )
     .await?;
-    let capsule_count = view
-        .capsule_run_pointers()
-        .iter()
-        .try_fold(0_u32, |total, pointer| {
-            total.checked_add(pointer.capsule_count())
-        })
-        .ok_or_else(|| {
-            crab_metadata::error::MetadataError::Internal(
-                "capsule checkpoint count overflowed".to_owned(),
-            )
-        })?;
-    if capsule_count < threshold {
+    publish_capsule_checkpoint_from_view(layout, &view, threshold, maximum_bytes, cancel).await
+}
+
+/// Compact one already authenticated repository view when its frontier is due.
+///
+/// Reusing the caller's pinned view avoids a second mutable-root and ref-head
+/// capture. Publication still compares against that exact root, so concurrent
+/// writers either win cleanly or leave this maintenance pass as a no-op.
+pub async fn publish_capsule_checkpoint_from_view(
+    layout: &StoreLayout<Store>,
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    threshold: u32,
+    maximum_bytes: u64,
+    cancel: &CancellationToken,
+) -> Result<bool, CheckpointError> {
+    check_cancelled(cancel)?;
+    if view.capsule_count()? < u64::from(threshold) {
         return Ok(false);
     }
     let packs = consolidate_git_packs(&view, maximum_bytes, maximum_bytes, cancel)
