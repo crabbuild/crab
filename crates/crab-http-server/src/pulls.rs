@@ -74,7 +74,7 @@ async fn pull_view(
     let (statuses, check_runs) = match protection {
         Some(rule) if !rule.required_checks.is_empty() => (
             statuses::latest(server, repo, actor, head_oid).await?,
-            checks::latest(repo, head_oid).await?,
+            checks::latest(server, repo, actor, head_oid).await?,
         ),
         _ => (vec![], vec![]),
     };

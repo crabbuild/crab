@@ -5,6 +5,13 @@ use crab_cell_runtime::{
 
 use super::RepositoryModule;
 
+pub(crate) use checks::{
+    CheckAnnotationRecord, CheckOutputRecord, CheckReportInput, CheckRunDetail, CheckRunKey,
+    CheckRunPage, CheckRunRecord, CheckStepRecord, CheckSubmissionKey, CreateCheckRun,
+    CreateCheckRunInput, CreateCheckRunOutcome, GetCheckCreateSubmission, GetCheckRun,
+    GetCheckUpdateSubmission, ListCheckRuns, ListCheckRunsInput, UpdateCheckRun,
+    UpdateCheckRunInput, UpdateCheckRunOutcome,
+};
 pub(crate) use operations::{
     CreateCommitStatus, CreateLabel, DeleteLabel, GetCommitStatusSubmission, ListComments,
     ListCommitStatuses, ListIssues, ListLabels, UpdateComment, UpdateIssue, UpdateLabel,
@@ -529,6 +536,8 @@ impl Query for GetComment {
     }
 }
 
+mod checks;
+mod checks_codec;
 mod operations;
 
 pub(crate) fn register(registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
@@ -540,13 +549,19 @@ pub(crate) fn register(registry: &mut RegistryBuilder) -> crab_cell_runtime::Res
     registry.bind_command::<UpdateLabel>()?;
     registry.bind_command::<DeleteLabel>()?;
     registry.bind_command::<CreateCommitStatus>()?;
+    registry.bind_command::<CreateCheckRun>()?;
+    registry.bind_command::<UpdateCheckRun>()?;
     registry.bind_query::<GetIssue>()?;
     registry.bind_query::<GetComment>()?;
     registry.bind_query::<ListIssues>()?;
     registry.bind_query::<ListComments>()?;
     registry.bind_query::<ListLabels>()?;
     registry.bind_query::<ListCommitStatuses>()?;
-    registry.bind_query::<GetCommitStatusSubmission>()
+    registry.bind_query::<GetCommitStatusSubmission>()?;
+    registry.bind_query::<ListCheckRuns>()?;
+    registry.bind_query::<GetCheckRun>()?;
+    registry.bind_query::<GetCheckCreateSubmission>()?;
+    registry.bind_query::<GetCheckUpdateSubmission>()
 }
 
 fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlStatement {

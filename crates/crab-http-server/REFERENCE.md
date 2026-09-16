@@ -1138,13 +1138,13 @@ Serving data currently uses these roots:
 
 | Root | Content |
 | --- | --- |
-| Repository Cell/LTX namespace | Issues, issue comments, labels, label deletion tombstones, commit statuses, counters, and permanent product submission ledgers |
+| Repository Cell/LTX namespace | Issues, issue comments, labels, label deletion tombstones, commit statuses, versioned check runs, counters, and permanent product submission ledgers |
 | `app/v1/issues` | Retired issue documents; serving ignores them and operators delete them at hard cutover |
 | `app/v1/pulls` | Pulls, comments, reviews, merge state, counters, and reservations |
 | `app/v1/labels` | Retired Label documents; serving ignores them and operators delete them at hard cutover |
 | `app/v1/releases` | Releases, tags, assets, reservations, and tombstones |
 | `app/v1/statuses` | Retired status documents; serving ignores them and operators delete them at hard cutover |
-| `app/v1/check-runs` | Check catalogs, versioned output, and requests |
+| `app/v1/check-runs` | Retired check-run documents; serving ignores them and operators delete them at hard cutover |
 | `app/v1/settings` | Branch protection and repository lifecycle records |
 
 Every remaining JSON document uses `schema_version: 1`; unknown versions fail

@@ -73,8 +73,8 @@ retries one definitely-not-started stale-owner attempt without retrying ambiguou
 mutations. Typed local SQL, KV, Queue
 and Workflow capabilities are implemented. The server composition root now
 compiles and binds create/update and get/list operations for issues and comments,
-plus create/update/delete/list operations for labels and create/latest/replay
-operations for commit statuses, with its repository
+plus create/update/delete/list operations for labels, create/latest/replay
+operations for commit statuses and create/update/get/list/replay operations for check runs, with its repository
 identity and collaboration migration. Server integration tests drive these bindings through the runtime, publish each
 decision through LTX, removes the first local SQLite database and restores the
 updated detail and list results under a second owner. The built-binary release
@@ -1048,7 +1048,7 @@ ready record with a missing control/root fails verification rather than
 bootstrapping again. `serve` verifies this state and root for every repository
 before binding either listener.
 
-The router and authenticated issue/comment/label/status HTTP routes are integration-qualified
+The router and authenticated issue/comment/label/status/check HTTP routes are integration-qualified
 for explicit bootstrap, local reuse, clean idle release, source-independent
 exact-root restoration and stable submission replay. Old collaboration objects
 are not read by serving or maintenance code.

@@ -27,9 +27,9 @@ does not establish a working runtime.
 | [application.rs](../../../../crates/crab-cell-runtime/src/application.rs), [release.rs](../../../../crates/crab-cell-runtime/src/release.rs) | Canonical immutable root identity, exact-winner initialization, immutable descriptor upload, expected-revision prepared CAS, verified descriptor reads, operation-bound resumable activating/ready and prepared/maintenance/ready transitions, explicit 1–10,000 live-compatible-node activation quorum and release-aware catalog provisioning with post-publication operation recheck; retained code/schema pairs pass serving compatibility but fail the separate final current-version gate | Add arbitrary transform contracts |
 | [node.rs](../../../../crates/crab-cell-runtime/src/node.rs) | Canonical signed 15-second node advertisements, strict-create/ETag refresh and explicit shutdown withdrawal with exact ambiguous-write reconciliation, fleet/certificate/release/key/inventory/capacity binding, non-regressing scheduler progress, certificate-SPKI-bound session verification, streaming bounded live-fleet enumeration, expired-but-unfenced maintenance inventory and ETag-fenced stale-record collection after the clock-skew horizon | Add qualified large-directory latency evidence |
 | [codec.rs](../../../../crates/crab-cell-runtime/src/codec.rs), [peer.rs](../../../../crates/crab-cell-runtime/src/peer.rs) | Canonical bounded scalar/bytes/text/option encoding; generated peer Protobuf messages; strict request/reply unknown/duplicate/oneof rejection; exact nested-payload BLAKE3; canonical Ed25519 signing; enrollment/release/time binding; two-hop forwarding; mandatory authorization; active-owner resolution; canonical local command/query/effect dispatch; registry-derived migration without SQL on the wire and Describe-based unknown-result reconciliation; bounded mTLS management ingress; and mutation/effect-safe ambiguous transport classification | Fuzz the complete boundary |
-| [client.rs](../../../../crates/crab-cell-runtime/src/client.rs) | Typed local and authenticated peer command/query/Resolve capabilities, namespace/code/schema/incarnation checks, canonical operation digest, outcome classification and minimum receipts; repository issue/comment/label/status routes and typed KV, SQL, Queue and Workflow handles use it | Add remaining product-domain adapters |
-| [HTTP server.rs](../../../../crates/crab-http-server/src/server.rs), [issues.rs](../../../../crates/crab-http-server/src/issues.rs), [labels.rs](../../../../crates/crab-http-server/src/labels.rs), [statuses.rs](../../../../crates/crab-http-server/src/statuses.rs), [peer.rs](../../../../crates/crab-http-server/src/peer.rs), [peer_tls.rs](../../../../crates/crab-http-server/src/peer_tls.rs), [cells.rs](../../../../crates/crab-http-server/src/cells.rs), [cells/initializer.rs](../../../../crates/crab-http-server/src/cells/initializer.rs), [cells/repository.rs](../../../../crates/crab-http-server/src/cells/repository.rs), [cells/router.rs](../../../../crates/crab-http-server/src/cells/router.rs), [cells/scheduler.rs](../../../../crates/crab-http-server/src/cells/scheduler.rs) | Static repository registry; typed issue/comment/label/status bindings; permanent submission replay; verified create/adopt empty-Cell initialization; startup/root gates; mTLS owner routing; stale-owner takeover; bounded scheduler, release migration, maintenance and shutdown; resource-derived Cell admission. Catalog v1 and legacy application import are deliberately unsupported | Add remaining native collaboration adapters, unsupported-source/namespace maintenance transforms, dirty-job admission and real multi-Pod fault qualification |
-| [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Remaining pulls, releases, checks and settings still use object application storage; issue, label and commit-status serving no longer call their legacy storage paths | Remove remaining serving callers domain by domain, then manually delete their retired keys during the hard cut |
+| [client.rs](../../../../crates/crab-cell-runtime/src/client.rs) | Typed local and authenticated peer command/query/Resolve capabilities, namespace/code/schema/incarnation checks, canonical operation digest, outcome classification and minimum receipts; repository issue/comment/label/status/check routes and typed KV, SQL, Queue and Workflow handles use it | Add remaining product-domain adapters |
+| [HTTP server.rs](../../../../crates/crab-http-server/src/server.rs), [issues.rs](../../../../crates/crab-http-server/src/issues.rs), [labels.rs](../../../../crates/crab-http-server/src/labels.rs), [statuses.rs](../../../../crates/crab-http-server/src/statuses.rs), [checks.rs](../../../../crates/crab-http-server/src/checks.rs), [peer.rs](../../../../crates/crab-http-server/src/peer.rs), [peer_tls.rs](../../../../crates/crab-http-server/src/peer_tls.rs), [cells.rs](../../../../crates/crab-http-server/src/cells.rs), [cells/initializer.rs](../../../../crates/crab-http-server/src/cells/initializer.rs), [cells/repository.rs](../../../../crates/crab-http-server/src/cells/repository.rs), [cells/router.rs](../../../../crates/crab-http-server/src/cells/router.rs), [cells/scheduler.rs](../../../../crates/crab-http-server/src/cells/scheduler.rs) | Static repository registry; typed issue/comment/label/status/check bindings; permanent submission replay; verified create/adopt empty-Cell initialization; startup/root gates; mTLS owner routing; stale-owner takeover; bounded scheduler, release migration, maintenance and shutdown; resource-derived Cell admission. Catalog v1 and legacy application import are deliberately unsupported | Add remaining native collaboration adapters, unsupported-source/namespace maintenance transforms, dirty-job admission and real multi-Pod fault qualification |
+| [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Remaining pulls, releases and settings still use object application storage; issue, label, status and check serving no longer call their legacy storage paths | Remove remaining serving callers domain by domain, then manually delete their retired keys during the hard cut |
 
 Reuse existing [publication tests](../../../../crates/crab-ltx/tests/publication.rs),
 [host tests](../../../../crates/crab-ltx/tests/host_hooks.rs) and
@@ -309,10 +309,11 @@ application registration, module upload or handler replacement is accepted after
 The internal repository operation set is implemented: `cells.rs` is the single
 registry composition root; its schema and stable codecs bind create/update and
 get/list operations for issues and comments, create/update/delete/list for
-labels, and create/latest/replay for commit statuses, including atomic active-label validation for issue selection state. The
+labels, create/latest/replay for commit statuses, and create/update/get/list/replay for
+check runs, including atomic active-label validation for issue selection state. The
 integration fixture provisions a repository Cell, creates
 and replays an issue, records missing-resource and wrong-author rejections,
-creates and updates a comment and statuses, updates issue metadata, exercises the list
+creates and updates a comment, statuses and a versioned check run, updates issue metadata, exercises the list
 queries, drains the first owner, removes its local database and restores the
 updated detail and list results from the exact published root on a new owner.
 
@@ -341,7 +342,7 @@ The server-owned `RepositoryCellRouter` now resolves authorized identities to a
 local-or-peer `CellClient`, including release-fenced provision, serialized
 rootless bootstrap, local handle reuse and idle exact-root acquisition. Its test
 publishes through the router, drains the first owner and verifies a second
-session restores and reads the same row. Authorized issue/comment/label/status handlers
+session restores and reads the same row. Authorized issue/comment/label/status/check handlers
 now use that result while retaining product HTTP authorization in app.rs. Label
 create/edit/delete/list is a hard cut with no JSON serving fallback. No legacy
 repository importer exists. Do not ship
@@ -391,7 +392,7 @@ selection, exact endpoint/certificate/SPKI validation and authoritative reload
 after a stale endpoint returns definitely-not-started. A transport unit test
 proves an ambiguous command is sent once and retains its original request ID and
 operation digest. Repository routing and idle acquisition are now implemented
-and exercised by the public issue/comment/label/status adapters. The server acceptance test
+and exercised by the public issue/comment/label/status/check adapters. The server acceptance test
 `public_collaboration_requests_reach_remote_owner_over_mtls_and_publish_ltx` starts a
 real public HTTP ingress and a distinct real mTLS owner endpoint, then proves
 public Issue/Label create/assign/read, private typed forwarding, current authorization and an
@@ -399,12 +400,12 @@ advanced authoritative LTX root in one path. A mutation capability is admitted
 for its required `Describe` preflight but remains forbidden from product queries.
 `crab-http-server` now supplies the
 first compiled repository implementation, including migration, descriptors,
-typed codecs and bindings for the internal issue/comment/label/status route group.
+typed codecs and bindings for the internal issue/comment/label/status/check route group.
 Its runtime test
 `repository_commands_publish_replay_reject_and_restore_from_exact_root` proves
 native create/update/list/detail behavior, exact runtime replay, later permanent
 submission replay, conflict rejection and source-loss recovery. Codec tests pin exact bytes for
-the discussion, label and commit-status operations; binary command and inspection tests prove
+the discussion, label, commit-status and check-run operations; binary command and inspection tests prove
 release bytes remain deterministic.
 `route_reuses_and_restores_explicit_repository_cell` additionally proves local
 reuse and second-session idle restoration through the server-owned router. The

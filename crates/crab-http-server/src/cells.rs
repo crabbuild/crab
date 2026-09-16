@@ -65,6 +65,8 @@ const REPOSITORY_COMMANDS: &[OperationDescriptor] = &[
     operation(9, 8 * 1024, 4 * 1024),
     operation(10, 16, 1),
     operation(11, 8 * 1024, 8 * 1024),
+    operation(12, 256 * 1024, 256 * 1024),
+    operation(13, 256 * 1024, 256 * 1024),
 ];
 const REPOSITORY_QUERIES: &[OperationDescriptor] = &[
     operation(1, 8, 80 * 1024),
@@ -75,6 +77,10 @@ const REPOSITORY_QUERIES: &[OperationDescriptor] = &[
     operation(6, 8, 384 * 1024),
     operation(7, 128, 1024 * 1024),
     operation(8, 64, 8 * 1024),
+    operation(9, 128, 1024 * 1024),
+    operation(10, 64, 256 * 1024),
+    operation(11, 32, 256 * 1024),
+    operation(12, 32, 256 * 1024),
 ];
 
 struct RepositoryModule;
@@ -1284,6 +1290,8 @@ fn repository_source_digest() -> Digest {
     hasher.update(REPOSITORY_MIGRATION.as_bytes());
     hasher.update(include_bytes!("cells/repository.rs"));
     hasher.update(include_bytes!("cells/repository/codec.rs"));
+    hasher.update(include_bytes!("cells/repository/checks.rs"));
+    hasher.update(include_bytes!("cells/repository/checks_codec.rs"));
     hasher.update(include_bytes!("cells/repository/operations.rs"));
     Digest::from_bytes(*hasher.finalize().as_bytes())
 }
@@ -1329,13 +1337,16 @@ mod tests {
     use serde_json::Value;
 
     use super::repository::{
-        CommentKey, CommentPage, CommitStatusCatalog, CreateComment, CreateCommentInput,
+        CheckAnnotationRecord, CheckOutputRecord, CheckReportInput, CheckRunKey, CheckStepRecord,
+        CheckSubmissionKey, CommentKey, CommentPage, CommitStatusCatalog, CreateCheckRun,
+        CreateCheckRunInput, CreateCheckRunOutcome, CreateComment, CreateCommentInput,
         CreateCommentOutcome, CreateCommitStatus, CreateCommitStatusInput,
         CreateCommitStatusOutcome, CreateIssue, CreateIssueInput, CreateIssueOutcome, CreateLabel,
-        CreateLabelInput, CreateLabelOutcome, GetComment, GetIssue, IssuePage, LabelCatalog,
-        ListComments, ListCommentsInput, ListCommitStatuses, ListIssues, ListIssuesInput,
-        ListLabels, RepositoryAuthor, UpdateComment, UpdateCommentInput, UpdateCommentOutcome,
-        UpdateIssue, UpdateIssueInput, UpdateIssueOutcome,
+        CreateLabelInput, CreateLabelOutcome, GetCheckRun, GetCheckUpdateSubmission, GetComment,
+        GetIssue, IssuePage, LabelCatalog, ListComments, ListCommentsInput, ListCommitStatuses,
+        ListIssues, ListIssuesInput, ListLabels, RepositoryAuthor, UpdateCheckRun,
+        UpdateCheckRunInput, UpdateCheckRunOutcome, UpdateComment, UpdateCommentInput,
+        UpdateCommentOutcome, UpdateIssue, UpdateIssueInput, UpdateIssueOutcome,
     };
     use super::*;
 
@@ -1413,7 +1424,7 @@ mod tests {
         assert_eq!(descriptor["modules"][0]["name"], "repository");
         assert_eq!(
             descriptor["modules"][0]["code"],
-            "107973fd0ba63cd83e24180deaa6c51bd4c116cc8eae49a96524ca0b43167045"
+            "00817144d1e7cae1c9c423163f48c0dbebe0adb57888b027fe6690d545c1a0d2"
         );
         assert_eq!(descriptor["modules"][0]["schema_min"], 1);
         assert_eq!(descriptor["modules"][0]["schema_max"], 1);
@@ -1422,14 +1433,14 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            11
+            13
         );
         assert_eq!(
             descriptor["modules"][0]["queries"]
                 .as_array()
                 .unwrap()
                 .len(),
-            8
+            12
         );
         assert_eq!(descriptor["namespaces"][0]["role"], "repository");
         assert_eq!(descriptor["namespaces"][0]["shards"], 1);
@@ -2873,6 +2884,118 @@ mod tests {
                 if outcome.output == CreateCommitStatusOutcome::RequestConflict
         ));
 
+        let queued_output = CheckOutputRecord {
+            title: "Tests queued".into(),
+            summary: "Waiting for a runner.".into(),
+            text: None,
+            steps: vec![],
+            annotations: vec![],
+        };
+        let created_check = first_client
+            .command::<CreateCheckRun>(
+                &target,
+                mutation(20),
+                CreateCheckRunInput {
+                    submission_id: [20; 16],
+                    author: status_input.author.clone(),
+                    oid: status_input.oid.clone(),
+                    name: "ci/test".into(),
+                    report: CheckReportInput {
+                        status: 0,
+                        conclusion: None,
+                        details_url: Some("https://ci.example.test/check/20".into()),
+                        output: queued_output,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let CreateCheckRunOutcome::Created(created_check_detail) = &created_check.output else {
+            panic!("successful check command returned a rejection outcome");
+        };
+        assert_eq!(created_check_detail.run.version, 1);
+
+        let running_input = UpdateCheckRunInput {
+            submission_id: [21; 16],
+            actor: status_input.author.clone(),
+            oid: status_input.oid.clone(),
+            number: created_check_detail.run.number,
+            version: 1,
+            report: CheckReportInput {
+                status: 1,
+                conclusion: None,
+                details_url: Some("https://ci.example.test/check/20".into()),
+                output: CheckOutputRecord {
+                    title: "Tests running".into(),
+                    summary: "The build step passed.".into(),
+                    text: None,
+                    steps: vec![CheckStepRecord {
+                        name: "build".into(),
+                        status: 2,
+                        conclusion: Some(5),
+                        log: Some("build passed\n".into()),
+                    }],
+                    annotations: vec![],
+                },
+            },
+        };
+        let running_check = first_client
+            .command::<UpdateCheckRun>(&target, mutation(21), running_input.clone())
+            .await
+            .unwrap();
+        let UpdateCheckRunOutcome::Updated(running_detail) = &running_check.output else {
+            panic!("successful check update returned a rejection outcome");
+        };
+        assert_eq!(running_detail.run.version, 2);
+
+        let completed_check = first_client
+            .command::<UpdateCheckRun>(
+                &target,
+                mutation(22),
+                UpdateCheckRunInput {
+                    submission_id: [22; 16],
+                    actor: status_input.author.clone(),
+                    oid: status_input.oid.clone(),
+                    number: created_check_detail.run.number,
+                    version: 2,
+                    report: CheckReportInput {
+                        status: 2,
+                        conclusion: Some(5),
+                        details_url: Some("https://ci.example.test/check/20".into()),
+                        output: CheckOutputRecord {
+                            title: "Tests passed".into(),
+                            summary: "All tests passed.".into(),
+                            text: Some("No failures.".into()),
+                            steps: vec![],
+                            annotations: vec![CheckAnnotationRecord {
+                                path: "src/lib.rs".into(),
+                                start_line: 4,
+                                end_line: 4,
+                                level: 1,
+                                title: Some("Slow test".into()),
+                                message: "This test was slow.".into(),
+                            }],
+                        },
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let UpdateCheckRunOutcome::Updated(completed_detail) = &completed_check.output else {
+            panic!("completed check returned a rejection outcome");
+        };
+        assert_eq!(completed_detail.run.version, 3);
+        let replayed_running = first_client
+            .command::<UpdateCheckRun>(&target, mutation(23), running_input)
+            .await
+            .unwrap();
+        let UpdateCheckRunOutcome::Updated(replayed_running_detail) = replayed_running.output
+        else {
+            panic!("check replay returned a rejection outcome");
+        };
+        assert_eq!(replayed_running_detail.run.version, 2);
+        assert_eq!(replayed_running_detail.output.title, "Tests running");
+
         assert_eq!(
             first_client
                 .query::<ListIssues>(
@@ -2906,6 +3029,35 @@ mod tests {
             CommitStatusCatalog {
                 statuses: vec![second_status_record.as_ref().clone()],
             }
+        );
+        assert_eq!(
+            first_client
+                .query::<GetCheckRun>(
+                    &target,
+                    Some(completed_check.receipt),
+                    CheckRunKey {
+                        oid: status_input.oid.clone(),
+                        number: created_check_detail.run.number,
+                    },
+                )
+                .await
+                .unwrap()
+                .output,
+            Some(completed_detail.as_ref().clone())
+        );
+        assert_eq!(
+            first_client
+                .query::<GetCheckUpdateSubmission>(
+                    &target,
+                    Some(completed_check.receipt),
+                    CheckSubmissionKey {
+                        submission_id: [21; 16],
+                    },
+                )
+                .await
+                .unwrap()
+                .output,
+            Some(running_detail.as_ref().clone())
         );
         assert_eq!(
             first_client
@@ -3002,7 +3154,7 @@ mod tests {
                 .query::<ListCommitStatuses>(
                     &target,
                     Some(second_status.receipt),
-                    status_input.oid,
+                    status_input.oid.clone(),
                 )
                 .await
                 .unwrap()
@@ -3010,6 +3162,21 @@ mod tests {
             CommitStatusCatalog {
                 statuses: vec![second_status_record.as_ref().clone()],
             }
+        );
+        assert_eq!(
+            second_client
+                .query::<GetCheckRun>(
+                    &target,
+                    Some(completed_check.receipt),
+                    CheckRunKey {
+                        oid: status_input.oid.clone(),
+                        number: created_check_detail.run.number,
+                    },
+                )
+                .await
+                .unwrap()
+                .output,
+            Some(completed_detail.as_ref().clone())
         );
         assert_eq!(
             second_client

@@ -278,6 +278,85 @@ fn repository_codec_v1_pins_commit_status_fixtures() {
 }
 
 #[test]
+fn repository_codec_v1_pins_check_fixtures() {
+    let author = RepositoryAuthor {
+        issuer: "i".into(),
+        subject: "s".into(),
+        name: "n".into(),
+    };
+    let output = CheckOutputRecord {
+        title: "t".into(),
+        summary: "m".into(),
+        text: None,
+        steps: vec![],
+        annotations: vec![],
+    };
+    let report = CheckReportInput {
+        status: 0,
+        conclusion: None,
+        details_url: Some("https://ci.test/5".into()),
+        output: output.clone(),
+    };
+    let create = CreateCheckRunInput {
+        submission_id: [5; 16],
+        author: author.clone(),
+        oid: "0123456789abcdef0123456789abcdef01234567".into(),
+        name: "ci/test".into(),
+        report: report.clone(),
+    };
+    let detail = CheckRunDetail {
+        run: CheckRunRecord {
+            number: 9,
+            create_submission_id: [5; 16],
+            author: author.clone(),
+            oid: create.oid.clone(),
+            name: create.name.clone(),
+            status: 0,
+            conclusion: None,
+            details_url: report.details_url.clone(),
+            output_title: output.title.clone(),
+            version: 1,
+            started_at_ms: None,
+            completed_at_ms: None,
+            created_at_ms: 3,
+            updated_at_ms: 3,
+        },
+        output,
+    };
+    let update = UpdateCheckRunInput {
+        submission_id: [6; 16],
+        actor: author,
+        oid: create.oid.clone(),
+        number: 9,
+        version: 1,
+        report,
+    };
+    assert_fixture(
+        &create,
+        "000000100505050505050505050505050505050500000001690000000173000000016e00000028303132333435363738396162636465663031323334353637383961626364656630313233343536370000000763692f746573740000010000001168747470733a2f2f63692e746573742f350000000174000000016d000000000000000000",
+    );
+    assert_fixture(
+        &CreateCheckRunOutcome::Created(Box::new(detail.clone())),
+        "010000000000000009000000100505050505050505050505050505050500000001690000000173000000016e00000028303132333435363738396162636465663031323334353637383961626364656630313233343536370000000763692f746573740000010000001168747470733a2f2f63692e746573742f35000000017400000000000000010000000000000000000300000000000000030000000174000000016d000000000000000000",
+    );
+    assert_fixture(
+        &update,
+        "000000100606060606060606060606060606060600000001690000000173000000016e0000002830313233343536373839616263646566303132333435363738396162636465663031323334353637000000000000000900000000000000010000010000001168747470733a2f2f63692e746573742f350000000174000000016d000000000000000000",
+    );
+    assert_fixture(
+        &UpdateCheckRunOutcome::Updated(Box::new(detail.clone())),
+        "010000000000000009000000100505050505050505050505050505050500000001690000000173000000016e00000028303132333435363738396162636465663031323334353637383961626364656630313233343536370000000763692f746573740000010000001168747470733a2f2f63692e746573742f35000000017400000000000000010000000000000000000300000000000000030000000174000000016d000000000000000000",
+    );
+    assert_fixture(
+        &CheckRunPage {
+            runs: vec![detail.run],
+            next: Some(8),
+        },
+        "000000010000000000000009000000100505050505050505050505050505050500000001690000000173000000016e00000028303132333435363738396162636465663031323334353637383961626364656630313233343536370000000763692f746573740000010000001168747470733a2f2f63692e746573742f3500000001740000000000000001000000000000000000030000000000000003010000000000000008",
+    );
+}
+
+#[test]
 fn maximum_utf8_label_catalog_fits_its_registered_output_bound() {
     let label = LabelRecord {
         number: 1,
@@ -323,6 +402,62 @@ fn maximum_utf8_status_catalog_fits_its_registered_output_bound() {
     let mut encoder = BoundedEncoder::new(1024 * 1024).unwrap();
     catalog.encode(&mut encoder).unwrap();
     assert!(encoder.finish().len() <= 1024 * 1024);
+}
+
+#[test]
+fn maximum_check_results_fit_their_registered_output_bounds() {
+    let target_prefix = "https://example.test/";
+    let run = CheckRunRecord {
+        number: 1,
+        create_submission_id: [1; 16],
+        author: RepositoryAuthor {
+            issuer: "🦀".repeat(512),
+            subject: "🦀".repeat(512),
+            name: "🦀".repeat(160),
+        },
+        oid: "0123456789abcdef0123456789abcdef01234567".into(),
+        name: "🦀".repeat(100),
+        status: 1,
+        conclusion: None,
+        details_url: Some(format!(
+            "{target_prefix}{}",
+            "a".repeat(2_048 - target_prefix.len())
+        )),
+        output_title: "🦀".repeat(200),
+        version: 1,
+        started_at_ms: Some(1),
+        completed_at_ms: None,
+        created_at_ms: 1,
+        updated_at_ms: 1,
+    };
+    let page = CheckRunPage {
+        runs: vec![run.clone(); 100],
+        next: None,
+    };
+    let mut page_encoder = BoundedEncoder::new(1024 * 1024).unwrap();
+    page.encode(&mut page_encoder).unwrap();
+    assert!(page_encoder.finish().len() <= 1024 * 1024);
+
+    let detail = CheckRunDetail {
+        run,
+        output: CheckOutputRecord {
+            title: "🦀".repeat(200),
+            summary: "s".repeat(32 * 1024),
+            text: Some("t".repeat(64 * 1024)),
+            steps: (0..10)
+                .map(|index| CheckStepRecord {
+                    name: format!("step-{index}"),
+                    status: 1,
+                    conclusion: None,
+                    log: Some("l".repeat(8 * 1024)),
+                })
+                .collect(),
+            annotations: vec![],
+        },
+    };
+    let mut detail_encoder = BoundedEncoder::new(256 * 1024).unwrap();
+    detail.encode(&mut detail_encoder).unwrap();
+    assert!(detail_encoder.finish().len() <= 256 * 1024);
 }
 
 fn assert_fixture<T: WireValue + PartialEq + std::fmt::Debug>(value: &T, fixture: &str) {

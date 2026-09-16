@@ -10,7 +10,7 @@ CREATE TABLE repository_sequences (
     last INTEGER NOT NULL CHECK (last BETWEEN 0 AND 9007199254740991)
 ) STRICT;
 
-INSERT INTO repository_sequences(kind, last) VALUES ('issue', 0), ('label', 0);
+INSERT INTO repository_sequences(kind, last) VALUES ('issue', 0), ('label', 0), ('check', 0);
 
 CREATE TABLE repository_label_submissions (
     request_id BLOB PRIMARY KEY CHECK (length(request_id) = 16),
@@ -112,3 +112,49 @@ CREATE TABLE repository_commit_statuses (
 
 CREATE INDEX repository_commit_status_contexts
 ON repository_commit_statuses(oid, context_key, number DESC);
+
+CREATE TABLE repository_check_create_submissions (
+    request_id BLOB PRIMARY KEY CHECK (length(request_id) = 16),
+    payload_digest BLOB NOT NULL CHECK (length(payload_digest) = 32),
+    run_number INTEGER NOT NULL UNIQUE
+        CHECK (run_number BETWEEN 1 AND 9007199254740991)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE repository_check_run_versions (
+    run_number INTEGER NOT NULL
+        CHECK (run_number BETWEEN 1 AND 9007199254740991),
+    version INTEGER NOT NULL
+        CHECK (version BETWEEN 1 AND 9007199254740991),
+    create_request_id BLOB NOT NULL CHECK (length(create_request_id) = 16),
+    author_issuer TEXT NOT NULL,
+    author_subject TEXT NOT NULL,
+    author_name TEXT NOT NULL,
+    oid TEXT NOT NULL CHECK (length(oid) = 40),
+    name TEXT NOT NULL,
+    status INTEGER NOT NULL CHECK (status BETWEEN 0 AND 2),
+    conclusion INTEGER CHECK (conclusion BETWEEN 0 AND 6),
+    details_url TEXT,
+    output_title TEXT NOT NULL,
+    output BLOB NOT NULL CHECK (length(output) <= 196608),
+    started_at_ms INTEGER CHECK (started_at_ms >= 0),
+    completed_at_ms INTEGER CHECK (completed_at_ms >= 0),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    PRIMARY KEY (run_number, version),
+    FOREIGN KEY (create_request_id)
+        REFERENCES repository_check_create_submissions(request_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE INDEX repository_check_runs_by_commit
+ON repository_check_run_versions(oid, run_number DESC, version DESC);
+
+CREATE TABLE repository_check_update_submissions (
+    request_id BLOB PRIMARY KEY CHECK (length(request_id) = 16),
+    payload_digest BLOB NOT NULL CHECK (length(payload_digest) = 32),
+    run_number INTEGER NOT NULL
+        CHECK (run_number BETWEEN 1 AND 9007199254740991),
+    result_version INTEGER NOT NULL
+        CHECK (result_version BETWEEN 2 AND 9007199254740991),
+    FOREIGN KEY (run_number, result_version)
+        REFERENCES repository_check_run_versions(run_number, version)
+) STRICT, WITHOUT ROWID;
