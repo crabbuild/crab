@@ -59,6 +59,15 @@ pub enum WriteError {
         source: Box<crab_storage::StorageError>,
         verification: Option<Box<WriteError>>,
     },
+    #[error(
+        "capsule-protocol HEAD update to {head} may have committed; reconcile exact root evidence before retrying"
+    )]
+    CapsuleHeadCommitUncertain {
+        head: String,
+        #[source]
+        source: Box<crab_storage::StorageError>,
+        verification: Option<Box<WriteError>>,
+    },
     #[error("publication coordination failed")]
     Coordination(#[from] crab_coordination::CoordinationError),
     #[error("publication storage operation failed")]

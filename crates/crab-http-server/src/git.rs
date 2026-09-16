@@ -8,8 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use crab_read::{
-    UploadPackRequest, plan_upload_pack_catalog, upload_pack_repository_options,
-    upload_pack_wire as wire,
+    UploadPackRequest, plan_upload_pack, upload_pack_repository_options, upload_pack_wire as wire,
 };
 use crab_remote_git::RepositoryRefs;
 use futures_util::StreamExt;
@@ -263,8 +262,8 @@ pub(crate) async fn upload_pack(
             "Only one command is allowed per HTTP request",
         ));
     }
-    let repository = entry
-        .open_current(&server, upload_pack_repository_options()?, &cancel)
+    let (view, repository) = entry
+        .open_capsule_repository(&server, upload_pack_repository_options()?, &cancel)
         .await?;
     let mut response = Vec::new();
     match request.command.as_str() {
@@ -279,7 +278,7 @@ pub(crate) async fn upload_pack(
         }
         "fetch" => {
             let request = wire::parse_fetch(&request.args)?;
-            let visibility = repository.catalog_visibility_index(&cancel).await?;
+            let visibility = view.git_visibility_index()?;
             let refs = repository
                 .refs()
                 .entries
@@ -296,8 +295,7 @@ pub(crate) async fn upload_pack(
                 filter: request.filter.clone(),
             };
             let plan =
-                plan_upload_pack_catalog(&repository, &visibility, &refs, &semantic, &cancel)
-                    .await?;
+                plan_upload_pack(&repository, &visibility, &refs, &semantic, &cancel).await?;
             if !request.done {
                 wire::write_packet(&mut response, b"acknowledgments\n", None, &cancel).await?;
                 if plan.common_haves.is_empty() {

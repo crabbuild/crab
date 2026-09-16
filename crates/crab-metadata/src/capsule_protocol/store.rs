@@ -89,6 +89,26 @@ impl RootSnapshot {
         Ok(Self { record, etag })
     }
 
+    /// Bind a HEAD-only root replacement to its exact CAS predecessor.
+    pub fn committed_head(&self, record: RootRecord, etag: ETag) -> Result<Self> {
+        if record.root().generation() != self.record.root().generation()
+            || record.root().parent_root_digest() != Some(self.record.digest())
+            || record.root().repository_id() != self.record.root().repository_id()
+            || record.root().refs() != self.record.root().refs()
+            || record.root().peeled_refs() != self.record.root().peeled_refs()
+            || record.root().checkpoint() != self.record.root().checkpoint()
+            || record.root().capsule_frontier() != self.record.root().capsule_frontier()
+            || record.root().compacted_ref_transactions()
+                != self.record.root().compacted_ref_transactions()
+            || record.root().gc_fence() != self.record.root().gc_fence()
+        {
+            return Err(contract_error(
+                "committed HEAD root changed published repository state",
+            ));
+        }
+        Ok(Self { record, etag })
+    }
+
     /// Bind a GC fence transition that preserves all logical repository state.
     pub fn committed_maintenance(&self, record: RootRecord, etag: ETag) -> Result<Self> {
         if record.root().generation() != self.record.root().generation()

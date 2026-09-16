@@ -307,10 +307,8 @@ impl PointerCatalog {
         }
         for (hash, entry) in &self.shards {
             validate_hash(hash, "shard", corrupt_input)?;
-            if entry.encoded_size == 0 || entry.xorb_hashes.is_empty() {
-                return Err(failure(format!(
-                    "shard {hash} has an empty dependency closure"
-                )));
+            if entry.encoded_size == 0 {
+                return Err(failure(format!("shard {hash} is empty")));
             }
             if !entry.xorb_hashes.windows(2).all(|pair| pair[0] < pair[1]) {
                 return Err(failure(format!(

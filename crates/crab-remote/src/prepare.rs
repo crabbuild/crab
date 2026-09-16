@@ -7,6 +7,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 use bytes::Bytes;
@@ -18,8 +19,11 @@ use crab_git::{
     },
 };
 use crab_metadata::{
+    capsule_protocol::{
+        FileCatalogEntry, PointerCatalog, ShardCatalogEntry, XorbCatalogEntry, XorbChunkEntry,
+    },
     git_object_locator::GitObjectKind,
-    git_visibility::{GitCatalogVisibilityIndex, GitVisibilityEdit},
+    git_visibility::{GitCatalogVisibilityIndex, GitVisibilityEdit, GitVisibilityIndex},
 };
 use crab_remote_git::{OperationContext, OperationKind, RemoteGitRepository};
 use gix_hash::ObjectId;
@@ -47,6 +51,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("publication content dependency rejected")]
     Dependency(#[source] Box<crab_read::dependency_proof::DependencyProofError>),
+    #[error("capsule repository view failed")]
+    CapsuleRead(#[from] crab_read::ReadError),
     #[error("publication commitment failed")]
     Write(#[from] crab_write::WriteError),
     #[error("publication artifact storage failed")]
@@ -160,6 +166,7 @@ pub struct PreparedContent {
     pub(crate) xorbs: Vec<ContentArtifact>,
     pub(crate) shards: Vec<ContentArtifact>,
     pub(crate) files: Vec<ContentFile>,
+    catalog: PointerCatalog,
 }
 
 impl PreparedContent {
@@ -242,6 +249,7 @@ impl PreparedContent {
         let mut seen_files = std::collections::BTreeSet::new();
         let mut used_shards = std::collections::BTreeSet::new();
         let mut used_xorbs = std::collections::BTreeSet::new();
+        let mut shard_xorbs = BTreeMap::<[u8; 32], std::collections::BTreeSet<[u8; 32]>>::new();
         for file in &files {
             if !seen_files.insert(file.file_hash) {
                 return Err(Error::Content("content file is duplicated".to_owned()));
@@ -275,6 +283,7 @@ impl PreparedContent {
                     .get(&hash)
                     .ok_or_else(|| Error::Content("shard xorb is missing".to_owned()))?;
                 used_xorbs.insert(hash);
+                shard_xorbs.entry(file.shard_hash).or_default().insert(hash);
                 let dependency = reader
                     .get_xorb_info(&segment.xorb_hash)
                     .map_err(Error::ContentFormat)?
@@ -312,10 +321,51 @@ impl PreparedContent {
                 "content contains unused artifacts".to_owned(),
             ));
         }
+        let mut catalog = PointerCatalog::new();
+        for artifact in &xorbs {
+            let inspected = inspected
+                .get(&artifact.protocol_hash)
+                .ok_or_else(|| Error::Content("inspected xorb disappeared".to_owned()))?;
+            catalog.insert_xorb(
+                crab_xet::hash::MerkleHash::from(artifact.protocol_hash).hex(),
+                XorbCatalogEntry::new(
+                    artifact.size,
+                    crab_xet::hash::MerkleHash::from(artifact.body_hash).hex(),
+                    inspected
+                        .chunks
+                        .iter()
+                        .map(|chunk| XorbChunkEntry::new(chunk.hash.hex(), chunk.uncompressed_len))
+                        .collect(),
+                ),
+            )?;
+        }
+        for artifact in &shards {
+            let dependencies = shard_xorbs
+                .remove(&artifact.protocol_hash)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|hash| crab_xet::hash::MerkleHash::from(hash).hex())
+                .collect();
+            catalog.insert_shard(
+                crab_xet::hash::MerkleHash::from(artifact.protocol_hash).hex(),
+                ShardCatalogEntry::new(artifact.size, dependencies),
+            )?;
+        }
+        for file in &files {
+            catalog.insert_file(
+                crab_xet::hash::MerkleHash::from(file.file_hash).hex(),
+                FileCatalogEntry::new(
+                    file.size,
+                    crab_xet::hash::MerkleHash::from(file.shard_hash).hex(),
+                ),
+            )?;
+        }
+        catalog.encode()?;
         Ok(Self {
             xorbs,
             shards,
             files,
+            catalog,
         })
     }
 
@@ -332,6 +382,12 @@ impl PreparedContent {
     #[must_use]
     pub fn files(&self) -> &[ContentFile] {
         &self.files
+    }
+
+    /// Return the complete authenticated catalog for these prepared artifacts.
+    #[must_use]
+    pub fn pointer_catalog(&self) -> &PointerCatalog {
+        &self.catalog
     }
 }
 
@@ -363,6 +419,29 @@ pub struct Artifacts<'a> {
     pub(crate) edits: Vec<crab_metadata::ref_journal::RefJournalEdit>,
     pub(crate) packs: Vec<crab_metadata::manifests::PackManifestEntry>,
     pub(crate) shards: Vec<String>,
+}
+
+/// Uploaded capsule-protocol artifacts ready for per-ref publication.
+pub struct CapsuleArtifacts {
+    layout: crab_storage::StoreLayout<crab_storage::Store>,
+    base: crab_metadata::capsule_protocol::RootSnapshot,
+    edits: Vec<crab_metadata::capsule_protocol::CapsuleRefEdit>,
+    packs: Vec<crab_metadata::capsule_protocol::CapsuleGitPack>,
+    sections: Vec<crab_metadata::capsule_protocol::CapsuleSection>,
+    changes_namespace: bool,
+}
+
+/// Proven or unresolved result after attempting capsule visibility publication.
+#[derive(Debug)]
+#[must_use]
+pub enum CapsuleCommitOutcome {
+    Committed {
+        transaction_id: String,
+    },
+    Indeterminate {
+        transaction_id: String,
+        source: Box<crab_write::WriteError>,
+    },
 }
 
 impl Artifacts<'_> {
@@ -730,6 +809,372 @@ impl Prepared {
             shards,
         })
     }
+
+    /// Upload artifacts for one captured capsule-protocol repository view.
+    ///
+    /// The caller must hold ref leases and GC fences from before opening
+    /// `view` through commitment. This validates all historical dependencies
+    /// against that view, uploads same-publication Xet content before Git
+    /// visibility, and retains the exact root snapshot for per-ref CAS.
+    pub async fn upload_capsule(
+        &self,
+        view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+        limits: crab_read::dependency_proof::DependencyProofLimits,
+        cancel: &CancellationToken,
+    ) -> Result<CapsuleArtifacts> {
+        let repository_refs = self
+            .repository
+            .refs()
+            .entries
+            .iter()
+            .map(|reference| (reference.name.clone(), reference.target.to_string()))
+            .collect::<BTreeMap<_, _>>();
+        if repository_refs != *view.refs()
+            || self.repository.generation() != view.root().root().generation()
+        {
+            return Err(Error::Request(
+                "Capsule view differs from the prepared repository version",
+            ));
+        }
+        let base_catalog = view.pointer_catalog()?;
+        let prepared_files = self
+            .content
+            .as_ref()
+            .map(|content| {
+                content
+                    .files
+                    .iter()
+                    .map(|file| file.file_hash)
+                    .collect::<std::collections::BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        crab_read::dependency_proof::verify_capsule_dependencies_except_crab(
+            &self.layout,
+            &base_catalog,
+            self.plan.pointers(),
+            &prepared_files,
+            limits,
+            cancel,
+        )
+        .await
+        .map_err(|error| Error::Dependency(Box::new(error)))?;
+
+        let pointer_delta = match &self.content {
+            Some(content) => {
+                upload_capsule_content(&self.layout, &base_catalog, content, cancel).await?
+            }
+            None => PointerCatalog::new(),
+        };
+        let mut packs = Vec::new();
+        if let Some(pack) = &self.pack {
+            if cancel.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            let (pack_bytes, index, reverse_index, locator) = tokio::try_join!(
+                tokio::fs::read(pack.pack_path()),
+                tokio::fs::read(pack.index_path()),
+                tokio::fs::read(pack.reverse_path()),
+                tokio::fs::read(pack.kinds_path()),
+            )?;
+            packs.push(crab_metadata::capsule_protocol::CapsuleGitPack::new(
+                Bytes::from(pack_bytes),
+                Bytes::from(index),
+                Bytes::from(reverse_index),
+                Bytes::from(locator),
+                pack.git_sha1().to_string(),
+                u64::from(pack.object_count()),
+            )?);
+        }
+        let mut sections = Vec::with_capacity(2);
+        if !pointer_delta.is_empty() {
+            sections.push(crab_metadata::capsule_protocol::CapsuleSection::new(
+                crab_metadata::capsule_protocol::CapsuleSectionKind::CatalogDelta,
+                pointer_delta.encode_delta()?,
+            ));
+        }
+        if !self.visibility.is_empty() {
+            let visibility = crab_metadata::capsule_protocol::CapsuleVisibilityDelta::new(
+                self.visibility.clone(),
+            )?;
+            sections.push(crab_metadata::capsule_protocol::CapsuleSection::new(
+                crab_metadata::capsule_protocol::CapsuleSectionKind::VisibilityDelta,
+                visibility.encode()?,
+            ));
+        }
+        let edits = self
+            .updates
+            .iter()
+            .map(|update| {
+                crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+                    update.name.clone(),
+                    update.old.map(|oid| oid.to_string()),
+                    update.new.map(|oid| oid.to_string()),
+                    self.plan
+                        .peeled()
+                        .get(&update.name)
+                        .map(ToString::to_string),
+                )
+            })
+            .collect::<Vec<_>>();
+        let changes_namespace = edits
+            .iter()
+            .any(|edit| edit.expected_old().is_none() != edit.new_oid().is_none());
+        Ok(CapsuleArtifacts {
+            layout: self.layout.clone(),
+            base: view.root_snapshot().clone(),
+            edits,
+            packs,
+            sections,
+            changes_namespace,
+        })
+    }
+}
+
+impl CapsuleArtifacts {
+    /// Commit through independently mutable ref heads and one capsule authority.
+    ///
+    /// Revalidate authorization and repository policy immediately before this
+    /// call. The caller must retain its original ref leases and GC fences until
+    /// the returned outcome is known and all lease cleanup has completed.
+    pub async fn commit(
+        self,
+        plan_id: Option<&str>,
+        namespace_ttl: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<CapsuleCommitOutcome> {
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let transaction = match plan_id {
+            Some(plan_id) => crab_metadata::capsule_protocol::CapsuleTransaction::for_plan(
+                self.base.record().digest(),
+                plan_id,
+                self.edits,
+            )?,
+            None => crab_metadata::capsule_protocol::CapsuleTransaction::new(
+                self.base.record().digest(),
+                self.edits,
+            )?,
+        };
+        let transaction_id = transaction.id()?;
+        let capsule = crab_metadata::capsule_protocol::Capsule::build(
+            &transaction,
+            self.packs,
+            self.sections,
+        )?;
+        let publish = if self.changes_namespace {
+            let ref_names = transaction
+                .edits()
+                .iter()
+                .map(|edit| edit.ref_name().to_owned())
+                .collect::<Vec<_>>();
+            let layout = self.layout.clone();
+            let commit_layout = layout.clone();
+            let base = self.base;
+            crab_write::with_ref_namespaces(
+                layout.store(),
+                &layout,
+                &ref_names,
+                namespace_ttl,
+                cancel,
+                move |scoped| async move {
+                    if scoped.is_cancelled() {
+                        return Err(crab_write::WriteError::Cancelled);
+                    }
+                    crab_write::capsule_protocol::validate_ref_namespace(
+                        &commit_layout,
+                        base.record().root(),
+                        transaction.edits(),
+                    )
+                    .await?;
+                    crab_write::capsule_protocol::publish(
+                        &commit_layout,
+                        base,
+                        &transaction,
+                        &capsule,
+                    )
+                    .await
+                },
+            )
+            .await
+        } else {
+            crab_write::capsule_protocol::publish(&self.layout, self.base, &transaction, &capsule)
+                .await
+        };
+        match publish {
+            Ok(_) => Ok(CapsuleCommitOutcome::Committed { transaction_id }),
+            Err(error @ crab_write::WriteError::CapsuleCommitUncertain { .. }) => {
+                Ok(CapsuleCommitOutcome::Indeterminate {
+                    transaction_id,
+                    source: Box::new(error),
+                })
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+async fn upload_capsule_content(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    base: &PointerCatalog,
+    content: &PreparedContent,
+    cancel: &CancellationToken,
+) -> Result<PointerCatalog> {
+    let local = content.pointer_catalog();
+    let mut delta = PointerCatalog::new();
+    let mut needed_shards = std::collections::BTreeSet::new();
+    for (file_hash, file) in local.files() {
+        if let Some(existing) = base.files().get(file_hash) {
+            if existing.size() != file.size() {
+                return Err(Error::Content(format!(
+                    "file {file_hash} conflicts with the captured pointer catalog"
+                )));
+            }
+            continue;
+        }
+        needed_shards.insert(file.shard_hash().to_owned());
+        delta.insert_file(file_hash.clone(), file.clone())?;
+    }
+    let mut needed_xorbs = std::collections::BTreeSet::new();
+    for shard_hash in &needed_shards {
+        let shard = local
+            .shards()
+            .get(shard_hash)
+            .ok_or_else(|| Error::Content("prepared shard catalog entry is missing".to_owned()))?;
+        if let Some(existing) = base.shards().get(shard_hash) {
+            if existing != shard {
+                return Err(Error::Content(format!(
+                    "shard {shard_hash} conflicts with the captured pointer catalog"
+                )));
+            }
+            continue;
+        }
+        needed_xorbs.extend(shard.xorb_hashes().iter().cloned());
+        delta.insert_shard(shard_hash.clone(), shard.clone())?;
+    }
+    let xorb_artifacts = content
+        .xorbs
+        .iter()
+        .map(|artifact| {
+            (
+                crab_xet::hash::MerkleHash::from(artifact.protocol_hash).hex(),
+                artifact,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for xorb_hash in needed_xorbs {
+        let local_entry = local
+            .xorbs()
+            .get(&xorb_hash)
+            .ok_or_else(|| Error::Content("prepared xorb catalog entry is missing".to_owned()))?;
+        if let Some(existing) = base.xorbs().get(&xorb_hash) {
+            if existing.chunks() != local_entry.chunks() {
+                return Err(Error::Content(format!(
+                    "xorb {xorb_hash} conflicts with the captured pointer catalog"
+                )));
+            }
+            continue;
+        }
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let artifact = xorb_artifacts
+            .get(&xorb_hash)
+            .ok_or_else(|| Error::Content("prepared xorb artifact is missing".to_owned()))?;
+        let bytes = Bytes::from(tokio::fs::read(&artifact.path).await?);
+        let hash = crab_xet::hash::MerkleHash::from(artifact.protocol_hash);
+        let entry = match layout
+            .store()
+            .create_or_read_immutable(
+                &layout.xorb_path(&hash),
+                bytes,
+                crab_xet::xorb::format::MAX_XORB_SIZE as u64,
+            )
+            .await?
+        {
+            crab_storage::ImmutableCreateOutcome::Created => local_entry.clone(),
+            crab_storage::ImmutableCreateOutcome::Existing(existing) => {
+                catalog_xorb_from_existing(&xorb_hash, local_entry, existing)?
+            }
+        };
+        delta.insert_xorb(xorb_hash, entry)?;
+    }
+    let shard_artifacts = content
+        .shards
+        .iter()
+        .map(|artifact| {
+            (
+                crab_xet::hash::MerkleHash::from(artifact.protocol_hash).hex(),
+                artifact,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for shard_hash in needed_shards {
+        if base.shards().contains_key(&shard_hash) {
+            continue;
+        }
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let artifact = shard_artifacts
+            .get(&shard_hash)
+            .ok_or_else(|| Error::Content("prepared shard artifact is missing".to_owned()))?;
+        let bytes = Bytes::from(tokio::fs::read(&artifact.path).await?);
+        layout
+            .store()
+            .put_if_absent_verified(
+                &layout.shard_path(&crab_xet::hash::MerkleHash::from(artifact.protocol_hash)),
+                bytes,
+            )
+            .await?;
+    }
+    if !delta.shards().is_empty() {
+        crab_metadata::ref_registry::union_register_repo_shards(
+            layout.store(),
+            layout,
+            delta.shards().keys().cloned().collect(),
+        )
+        .await?;
+    }
+    let mut complete = base.clone();
+    complete.apply(&delta)?;
+    Ok(delta)
+}
+
+fn catalog_xorb_from_existing(
+    xorb_hash: &str,
+    local: &XorbCatalogEntry,
+    bytes: Bytes,
+) -> Result<XorbCatalogEntry> {
+    let parser =
+        crab_xet::xorb::parser::XorbParser::parse(bytes.clone()).map_err(Error::ContentFormat)?;
+    parser
+        .verify_payload_digest()
+        .map_err(Error::ContentFormat)?;
+    parser.verify_all_chunks().map_err(Error::ContentFormat)?;
+    if parser.hash().hex() != xorb_hash {
+        return Err(Error::Content(
+            "existing xorb has the wrong logical identity".to_owned(),
+        ));
+    }
+    let chunks = (0..parser.num_chunks())
+        .map(|index| {
+            parser
+                .chunk_meta(index)
+                .map(|chunk| XorbChunkEntry::new(chunk.hash.hex(), chunk.uncompressed_len))
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Error::ContentFormat)?;
+    if chunks != local.chunks() {
+        return Err(Error::Content(
+            "existing xorb has a conflicting chunk layout".to_owned(),
+        ));
+    }
+    Ok(XorbCatalogEntry::new(
+        bytes.len() as u64,
+        blake3::hash(&bytes).to_hex().to_string(),
+        chunks,
+    ))
 }
 
 impl Artifacts<'_> {
@@ -749,17 +1194,22 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 struct Source<'a> {
     operation: &'a OperationContext,
-    proof: Option<GitCatalogVisibilityIndex>,
+    proof: Option<VisibilityProof>,
     refs: Vec<String>,
     prior: Option<(String, ObjectId)>,
     handle: tokio::runtime::Handle,
+}
+
+enum VisibilityProof {
+    Catalog(GitCatalogVisibilityIndex),
+    Materialized(GitVisibilityIndex),
 }
 
 type SourceResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 impl Source<'_> {
     fn ordinal(&self, oid: &ObjectId) -> SourceResult<Option<u32>> {
-        if self.proof.is_none() {
+        if !matches!(self.proof, Some(VisibilityProof::Catalog(_))) {
             return Ok(None);
         }
         Ok(self
@@ -770,11 +1220,26 @@ impl Source<'_> {
             .flatten())
     }
     fn visible(&self, oid: &ObjectId) -> SourceResult<bool> {
-        Ok(self.ordinal(oid)?.is_some_and(|ordinal| {
-            self.proof.as_ref().is_some_and(|proof| {
-                proof.contains_ordinal_for_refs(self.refs.iter().map(String::as_str), ordinal)
-            })
-        }))
+        match &self.proof {
+            Some(VisibilityProof::Catalog(proof)) => {
+                Ok(self.ordinal(oid)?.is_some_and(|ordinal| {
+                    proof.contains_ordinal_for_refs(self.refs.iter().map(String::as_str), ordinal)
+                }))
+            }
+            Some(VisibilityProof::Materialized(proof)) => {
+                let oid = oid.as_bytes().try_into()?;
+                Ok(proof.contains_for_refs(self.refs.iter().map(String::as_str), &oid))
+            }
+            None => Ok(false),
+        }
+    }
+
+    fn contains_ref(&self, name: &str) -> bool {
+        match &self.proof {
+            Some(VisibilityProof::Catalog(proof)) => proof.contains_ref(name),
+            Some(VisibilityProof::Materialized(proof)) => proof.contains_ref(name),
+            None => false,
+        }
     }
 }
 
@@ -826,11 +1291,16 @@ impl VisibilitySource for Source<'_> {
         let Some((name, _)) = &self.prior else {
             return Ok(false);
         };
-        Ok(self.ordinal(oid)?.is_some_and(|ordinal| {
-            self.proof
-                .as_ref()
-                .is_some_and(|proof| proof.contains_ordinal_in_ref(name, ordinal))
-        }))
+        match &self.proof {
+            Some(VisibilityProof::Catalog(proof)) => Ok(self
+                .ordinal(oid)?
+                .is_some_and(|ordinal| proof.contains_ordinal_in_ref(name, ordinal))),
+            Some(VisibilityProof::Materialized(proof)) => {
+                let oid = oid.as_bytes().try_into()?;
+                Ok(proof.contains_in_ref(name, &oid))
+            }
+            None => Ok(false),
+        }
     }
 }
 
@@ -847,7 +1317,65 @@ pub async fn prepare(
     cancel: &CancellationToken,
     options: Options<impl Fn(&str) -> RefPolicy + Send + 'static>,
 ) -> Result<Prepared> {
-    if !repository.matches_store_layout(&options.layout) {
+    prepare_with_layout_binding(
+        repository,
+        directory,
+        input,
+        updates,
+        visibility_bases,
+        cancel,
+        options,
+        None,
+        true,
+    )
+    .await
+}
+
+/// Validate an incoming graph against a repository opened from one capsule view.
+///
+/// The caller must retain that exact authenticated view and pass it to
+/// [`Prepared::upload_capsule`]. The origin layout is intentionally distinct
+/// from the view's private in-memory Git reader, so this entry point does not
+/// apply the v1 transport-identity check.
+pub async fn prepare_capsule(
+    repository: RemoteGitRepository,
+    visibility: GitVisibilityIndex,
+    directory: std::path::PathBuf,
+    input: Option<BufReader<File>>,
+    updates: Vec<RefUpdate>,
+    visibility_bases: BTreeMap<String, (String, ObjectId)>,
+    cancel: &CancellationToken,
+    options: Options<impl Fn(&str) -> RefPolicy + Send + 'static>,
+) -> Result<Prepared> {
+    prepare_with_layout_binding(
+        repository,
+        directory,
+        input,
+        updates,
+        visibility_bases,
+        cancel,
+        options,
+        Some(visibility),
+        false,
+    )
+    .await
+}
+
+async fn prepare_with_layout_binding<P>(
+    repository: RemoteGitRepository,
+    directory: std::path::PathBuf,
+    input: Option<BufReader<File>>,
+    updates: Vec<RefUpdate>,
+    visibility_bases: BTreeMap<String, (String, ObjectId)>,
+    cancel: &CancellationToken,
+    options: Options<P>,
+    capsule_visibility: Option<GitVisibilityIndex>,
+    require_layout_match: bool,
+) -> Result<Prepared>
+where
+    P: Fn(&str) -> RefPolicy + Send + 'static,
+{
+    if require_layout_match && !repository.matches_store_layout(&options.layout) {
         return Err(Error::Request(
             "Preparation layout differs from the validated repository",
         ));
@@ -860,8 +1388,12 @@ pub async fn prepare(
         .collect();
     let proof = if base.is_empty() {
         None
+    } else if let Some(visibility) = capsule_visibility {
+        Some(VisibilityProof::Materialized(visibility))
     } else {
-        Some(repository.catalog_visibility_index(cancel).await?)
+        Some(VisibilityProof::Catalog(
+            repository.catalog_visibility_index(cancel).await?,
+        ))
     };
     let operation = repository
         .operation(OperationKind::Repository, cancel)
@@ -934,13 +1466,7 @@ pub async fn prepare(
                             // New refs at an existing tip can reuse that exact
                             // committed ref closure instead of walking the graph.
                             base.iter()
-                                .find(|(name, tip)| {
-                                    **tip == new
-                                        && source
-                                            .proof
-                                            .as_ref()
-                                            .is_some_and(|proof| proof.contains_ref(name))
-                                })
+                                .find(|(name, tip)| **tip == new && source.contains_ref(name))
                                 .map(|(name, tip)| (name.clone(), *tip))
                         }),
                 };

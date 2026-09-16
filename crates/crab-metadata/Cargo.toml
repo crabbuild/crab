@@ -37,6 +37,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt"], optional = true }
 tokio-util = { workspace = true, features = ["rt"], optional = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

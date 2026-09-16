@@ -21,7 +21,6 @@ use crab_cell_runtime::{
     CellRuntime, Digest, NodeDirectory, Owner, PeerRoundTrip, PeerSigner, ReleaseState,
     ReleaseStore, ReplicaHost, ScratchMonitor, SessionId, SqlWorkerPool,
 };
-use crab_metadata::manifest_store::read_manifest;
 use crab_remote_git::{
     OperationLimits, RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
 };
@@ -37,7 +36,7 @@ use crate::catalog::CatalogStore;
 use crate::{
     Config, RepositoryConfig, Result, api, app, archive, assets, assignees,
     auth::{self, Authentication, Principal},
-    branches, checks, contents, git, issues, labels, lfs, maintenance, pulls, receive, releases,
+    branches, checks, contents, git, issues, labels, lfs, pulls, receive, releases,
     repository_settings::{self, BranchProtections, RepositoryLifecycle},
     statuses,
     transfer_admission::TransferAdmission,
@@ -562,6 +561,42 @@ impl Repository {
         *self.pinned.lock().await = None;
     }
 
+    pub(crate) async fn open_view(
+        &self,
+    ) -> Result<crab_read::capsule_protocol::CapsuleRepositoryView> {
+        crab_read::capsule_protocol::open_view(
+            &self.layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+                max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+            },
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    pub(crate) async fn open_capsule_repository(
+        &self,
+        server: &Server,
+        options: RepositoryOptions,
+        cancellation: &CancellationToken,
+    ) -> Result<(
+        crab_read::capsule_protocol::CapsuleRepositoryView,
+        RemoteGitRepository,
+    )> {
+        let view = self.open_view().await?;
+        let repository = view
+            .git_repository(
+                self.identity.clone(),
+                Arc::clone(&server.runtime),
+                options,
+                2 * 1024 * 1024 * 1024,
+                cancellation,
+            )
+            .await?;
+        Ok((view, repository))
+    }
+
     pub async fn open(
         &self,
         server: &Server,
@@ -591,63 +626,9 @@ impl Repository {
         options: RepositoryOptions,
         cancellation: &CancellationToken,
     ) -> Result<RemoteGitRepository> {
-        let open = || {
-            RemoteGitRepository::open(
-                self.store.clone(),
-                self.layout.clone(),
-                self.identity.clone(),
-                Arc::clone(&server.runtime),
-                options,
-                cancellation,
-            )
-        };
-        match open().await {
-            Ok(repository)
-                if repository.refs().is_empty() || repository.commit_graph_available() =>
-            {
-                return Ok(repository);
-            }
-            Ok(_) => {}
-            Err(crab_remote_git::Error::RepositoryIndexing { .. }) => {}
-            Err(error) => return Err(error.into()),
-        }
-        let mut worker = tokio::select! {
-            () = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled.into()),
-            worker = self.maintenance.lock() => worker,
-        };
-        if worker.is_none() {
-            // A preceding request may have finished maintenance while this one waited.
-            match open().await {
-                Ok(repository)
-                    if repository.refs().is_empty() || repository.commit_graph_available() =>
-                {
-                    return Ok(repository);
-                }
-                Ok(_) => {}
-                Err(crab_remote_git::Error::RepositoryIndexing { .. }) => {}
-                Err(error) => return Err(error.into()),
-            }
-            *worker = Some(tokio::spawn(maintenance::run(
-                self.store.clone(),
-                self.layout.clone(),
-                self.identity.clone(),
-                Arc::clone(&server.runtime),
-                options,
-                Arc::clone(&server.maintenance_admission),
-                server.cancellation.clone(),
-            )));
-        }
-        if let Some(task) = worker.as_mut() {
-            // A cancelled reader leaves the handle in this slot. A later reader
-            // or server shutdown must drain publication and its lease cleanup.
-            let result = tokio::select! {
-                () = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled.into()),
-                result = task => result,
-            };
-            *worker = None;
-            result??;
-        }
-        open().await.map_err(Into::into)
+        self.open_capsule_repository(server, options, cancellation)
+            .await
+            .map(|(_, repository)| repository)
     }
 }
 
@@ -1354,19 +1335,19 @@ async fn materialize_catalog(
         let store = catalog.root().store.clone();
         let prefix = catalog.root().repository_prefix(&record.prefix)?;
         let layout = StoreLayout::new(store.clone(), prefix.clone());
-        let (manifest, _) =
-            read_manifest(&store, &layout)
-                .await
-                .map_err(|source| crate::Error::Settings {
-                    source: Box::new(source),
-                })?;
-        let default_branch =
-            manifest
-                .head
-                .strip_prefix("refs/heads/")
-                .ok_or(crate::Error::Config(
-                    "catalog repository HEAD must name a branch",
-                ))?;
+        let root = crab_metadata::capsule_protocol::load_root(&layout)
+            .await
+            .map_err(|source| crate::Error::Settings {
+                source: Box::new(source),
+            })?;
+        let default_branch = root
+            .record()
+            .root()
+            .head()
+            .strip_prefix("refs/heads/")
+            .ok_or(crate::Error::Config(
+                "catalog repository HEAD must name a branch",
+            ))?;
         let entry = record.runtime_config(catalog.root(), default_branch)?;
         let repository = Repository {
             id: record.id,

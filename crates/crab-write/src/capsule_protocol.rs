@@ -55,6 +55,50 @@ pub async fn open_root(router: &StoreLayout<Store>) -> Result<RootSnapshot> {
     Ok(load_root(router).await?)
 }
 
+/// Atomically retarget HEAD without serializing ordinary per-ref publication.
+pub async fn retarget_head(
+    router: &StoreLayout<Store>,
+    base: RootSnapshot,
+    expected_head: &str,
+    head: &str,
+) -> Result<RootSnapshot> {
+    let next = base
+        .record()
+        .root()
+        .retarget_head(base.record().digest(), expected_head, head)?;
+    let candidate = RootRecord::encode(next)?;
+    let root_path = router.capsule_root_path();
+    match router
+        .store()
+        .update(&root_path, candidate.bytes().clone(), base.etag().clone())
+        .await
+    {
+        Ok(etag) => Ok(base.committed_head(candidate, etag)?),
+        Err(StorageError::StateConflict { .. }) => Err(WriteError::CapsuleRootChanged {
+            path: root_path.to_string(),
+        }),
+        Err(source) => {
+            let verification = open_root(router).await;
+            match verification {
+                Ok(snapshot) if snapshot.record().digest() == candidate.digest() => Ok(snapshot),
+                Ok(snapshot) if snapshot.record().digest() == base.record().digest() => {
+                    Err(source.into())
+                }
+                Ok(_) => Err(WriteError::CapsuleHeadCommitUncertain {
+                    head: head.to_owned(),
+                    source: Box::new(source),
+                    verification: None,
+                }),
+                Err(verification) => Err(WriteError::CapsuleHeadCommitUncertain {
+                    head: head.to_owned(),
+                    source: Box::new(source),
+                    verification: Some(Box::new(verification)),
+                }),
+            }
+        }
+    }
+}
+
 /// Publish one verified capsule through independently mutable per-ref heads.
 ///
 /// A single-ref push commits at that ref's head CAS. Multi-ref pushes prepare
@@ -1216,6 +1260,33 @@ mod tests {
                 head.head.prepared_activation_id(),
                 Some(record.activation_id())
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn head_retarget_preserves_visible_per_ref_capsules() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        let base = initialize(&router, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let transaction = multi_ref_transaction(&base);
+        publish(&router, base.clone(), &transaction, &capsule(&transaction))
+            .await
+            .unwrap();
+
+        let retargeted = retarget_head(&router, base, "refs/heads/main", "refs/heads/feature")
+            .await
+            .unwrap();
+        assert_eq!(retargeted.record().root().head(), "refs/heads/feature");
+        for (ref_name, expected) in [
+            ("refs/heads/main", "2".repeat(40)),
+            ("refs/heads/feature", "3".repeat(40)),
+        ] {
+            let head = read_ref_head(&router, retargeted.record().root(), ref_name)
+                .await
+                .unwrap();
+            assert_eq!(head.visible.oid(), Some(expected.as_str()));
         }
     }
 

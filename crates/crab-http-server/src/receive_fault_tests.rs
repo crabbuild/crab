@@ -22,7 +22,7 @@ enum Fault {
 struct FaultStore {
     inner: Arc<dyn ObjectStore>,
     marker_prefix: String,
-    manifest_path: String,
+    root_path: String,
     committed: std::sync::atomic::AtomicBool,
     head_path: String,
     cancel: CancellationToken,
@@ -91,7 +91,7 @@ impl ObjectStore for FaultStore {
         }
         if matches!(self.fault, Fault::ReadinessAfterMarker)
             && self.committed.load(std::sync::atomic::Ordering::SeqCst)
-            && location.as_ref() == self.manifest_path
+            && location.as_ref() == self.root_path
         {
             return Err(disconnected());
         }
@@ -163,8 +163,7 @@ const FAULTS: [Fault; 6] = [
 
 #[tokio::test(flavor = "multi_thread")]
 async fn prepared_artifacts_preserve_plan_attribution_through_compaction() {
-    use crab_metadata::{manifest_store, plan_receipt};
-    use crab_remote::publication::{CommitOutcome, with_leases, with_plan};
+    use crab_remote::publication::{with_capsule_plan, with_leases};
     type TestError = Box<dyn std::error::Error + Send + Sync>;
 
     let (wire, oid) = body().await;
@@ -189,7 +188,7 @@ async fn prepared_artifacts_preserve_plan_attribution_through_compaction() {
     let planned_repo = Arc::clone(&repo);
     let plan_key = plan_id.clone();
     let plan_server = Arc::clone(&server);
-    let outcome = with_plan(
+    let outcome = with_capsule_plan(
         &repo.store,
         &repo.layout,
         &plan_id,
@@ -207,23 +206,21 @@ async fn prepared_artifacts_preserve_plan_attribution_through_compaction() {
                     names,
                     ttl,
                     &cancel,
-                    move |holders, cancel| async move {
-                        let snapshot = manifest_store::read_repository_snapshot(
-                            &leased_repo.store,
-                            &leased_repo.layout,
-                        )
-                        .await?;
-                        let repository = RemoteGitRepository::open(
-                            leased_repo.store.clone(),
-                            leased_repo.layout.clone(),
-                            leased_repo.identity.clone(),
-                            server.runtime.clone(),
-                            RepositoryOptions::default(),
-                            &cancel,
-                        )
-                        .await?;
-                        let prepared = crab_remote::prepare::prepare(
+                    move |_holders, cancel| async move {
+                        let view = leased_repo.open_view().await?;
+                        let visibility = view.git_visibility_index()?;
+                        let repository = view
+                            .git_repository(
+                                leased_repo.identity.clone(),
+                                server.runtime.clone(),
+                                RepositoryOptions::default(),
+                                4 * 1024 * 1024,
+                                &cancel,
+                            )
+                            .await?;
+                        let prepared = crab_remote::prepare::prepare_capsule(
                             repository,
+                            visibility,
                             directory.path().to_owned(),
                             Some(input),
                             request.updates,
@@ -270,16 +267,8 @@ async fn prepared_artifacts_preserve_plan_attribution_through_compaction() {
                                 max_duration: ttl,
                             },
                         };
-                        let artifacts = prepared
-                            .upload(&snapshot, limits, &holders, &cancel)
-                            .await?;
-                        let outcome = artifacts
-                            .commit(
-                                None,
-                                crab_write::journal::CommitOptions::new(ttl, &cancel)
-                                    .with_plan(&plan_id),
-                            )
-                            .await?;
+                        let artifacts = prepared.upload_capsule(&view, limits, &cancel).await?;
+                        let outcome = artifacts.commit(Some(&plan_id), ttl, &cancel).await?;
                         Ok::<_, TestError>(outcome)
                     },
                 )
@@ -289,24 +278,23 @@ async fn prepared_artifacts_preserve_plan_attribution_through_compaction() {
     )
     .await
     .unwrap();
-    let CommitOutcome::Committed(committed) = outcome else {
+    let crab_remote::prepare::CapsuleCommitOutcome::Committed { transaction_id } = outcome else {
         panic!("successful marker must retain commitment");
     };
-    // Exercise the same catalog maintenance used after HTTP receive, then read
-    // the plan's historical proof after its active marker has been compacted.
     repo.invalidate().await;
     let repository = repo
         .open_current(&server, RepositoryOptions::default(), &cancel)
         .await
         .unwrap();
-    let receipt = plan_receipt::read_plan_receipt(&repo.store, &repo.layout, &plan_id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(
-        matches!(receipt.commit, plan_receipt::PlanCommit::RefJournal { transaction_id, .. }
-        if transaction_id == committed.transaction_id)
-    );
+    let receipt = crab_metadata::capsule_protocol::resolve_capsule_plan_receipt(
+        &repo.store,
+        &repo.layout,
+        &plan_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(receipt.transaction().id().unwrap(), transaction_id);
     assert_eq!(repository.refs().entries[0].target.to_string(), oid);
     let operation = repository
         .operation(crab_remote_git::OperationKind::Repository, &cancel)
@@ -327,12 +315,8 @@ async fn prepared_artifacts_preserve_plan_attribution_through_compaction() {
         .await;
     let content = operation.finish(content).await.unwrap();
     assert_eq!(content.bytes.as_ref(), b"fault qualification\n");
-    let snapshot = manifest_store::read_repository_snapshot(&repo.store, &repo.layout)
-        .await
-        .unwrap();
-    assert!(snapshot.journal.transactions.is_empty());
     let mut replayed = false;
-    let blocked = with_plan(
+    let blocked = with_capsule_plan(
         &repo.store,
         &repo.layout,
         &plan_id,
@@ -389,12 +373,16 @@ async fn native_receive_replays_an_identical_wire_request_from_its_receipt() {
         .repositories
         .get(&("team".into(), "repo".into()))
         .unwrap();
-    let snapshot =
-        crab_metadata::manifest_store::read_repository_snapshot(&repo.store, &repo.layout)
+    let view = repo.open_view().await.unwrap();
+    assert_eq!(view.refs().get("refs/heads/main"), Some(&oid));
+    assert_eq!(
+        repo.store
+            .list_prefix(&repo.layout.repo_path("v2/plans"))
             .await
-            .unwrap();
-    assert_eq!(snapshot.journal.refs.get("refs/heads/main"), Some(&oid));
-    assert!(snapshot.journal.transactions.is_empty());
+            .unwrap()
+            .len(),
+        2
+    );
 
     server.cancellation.cancel();
     server.receives.close();
@@ -465,9 +453,15 @@ async fn receive_faults_rustfs() {
         repo.config.bucket = bucket.clone();
         repo.config.prefix = prefix.clone();
         repo.identity = RepositoryIdentity::new(format!("s3:{bucket}"), prefix, 1).unwrap();
-        crab_write::initialize::initialize_repository(&repo.store, &repo.layout, "refs/heads/main")
-            .await
-            .unwrap();
+        crab_write::capsule_protocol::initialize(
+            &repo.layout,
+            &blake3::hash(repo.config.prefix.as_bytes())
+                .to_hex()
+                .to_string(),
+            "refs/heads/main",
+        )
+        .await
+        .unwrap();
         exercise(server, fault, &body, &oid).await;
     }
 }
@@ -486,12 +480,12 @@ async fn exercise(mut server: Arc<Server>, fault: Fault, body: &[u8], oid: &str)
     let faulty = Store::with_retry(
         Arc::new(FaultStore {
             inner: Arc::clone(origin.inner()),
-            marker_prefix: format!("{}/", repo.layout.ref_journal_active_prefix()),
-            manifest_path: repo.layout.manifest_path().to_string(),
+            marker_prefix: format!("{}/", repo.layout.capsule_committed_transactions_prefix()),
+            root_path: repo.layout.capsule_root_path().to_string(),
             committed: std::sync::atomic::AtomicBool::new(false),
             head_path: repo
                 .layout
-                .ref_journal_head_path(&crab_metadata::ref_journal::ref_name_hash(
+                .capsule_ref_head_path(&crab_metadata::capsule_protocol::capsule_ref_name_key(
                     "refs/heads/main",
                 ))
                 .to_string(),
@@ -522,12 +516,17 @@ async fn exercise(mut server: Arc<Server>, fault: Fault, body: &[u8], oid: &str)
     let response = response.into_body().collect().await.unwrap().to_bytes();
     let acknowledged = matches!(
         fault,
-        Fault::LostMarkerReply | Fault::CancelAfterMarker | Fault::ReadinessAfterMarker
+        Fault::LostMarkerReply
+            | Fault::CancelAfterHead
+            | Fault::CancelAfterMarker
+            | Fault::ReadinessAfterMarker
     );
     let committed = matches!(
         fault,
         Fault::LostMarkerReply
             | Fault::LostMarkerReadback
+            | Fault::RejectedMarker
+            | Fault::CancelAfterHead
             | Fault::CancelAfterMarker
             | Fault::ReadinessAfterMarker
     );
@@ -543,30 +542,20 @@ async fn exercise(mut server: Arc<Server>, fault: Fault, body: &[u8], oid: &str)
     server.receives.wait().await;
     server.finish_maintenance().await.unwrap();
     server.shutdown_runtimes().await.unwrap();
-    let snapshot = crab_metadata::manifest_store::read_repository_snapshot(&origin, &origin_layout)
-        .await
-        .unwrap();
+    let view = crab_read::capsule_protocol::open_view(
+        &origin_layout,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 4 * 1024 * 1024,
+            max_frontier_bytes: 16 * 1024 * 1024,
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(
-        snapshot
-            .journal
-            .refs
-            .get("refs/heads/main")
-            .map(String::as_str),
+        view.refs().get("refs/heads/main").map(String::as_str),
         committed.then_some(oid),
         "{fault:?}"
     );
-    for head in crab_metadata::ref_journal::list_ref_heads(&origin, &origin_layout)
-        .await
-        .unwrap()
-    {
-        // An attempted marker with no conclusive readback retains recovery
-        // evidence. A new lease holder may replace it on an explicit retry.
-        assert_eq!(
-            head.head.prepared_transaction.is_some(),
-            matches!(fault, Fault::RejectedMarker | Fault::LostMarkerReadback),
-            "{fault:?}"
-        );
-    }
     for domain in [origin_layout.global_prefix(), origin_layout.repo_prefix()] {
         let sweep = crab_coordination::GcFenceLease::acquire_sweep(
             origin.inner(),
@@ -642,27 +631,12 @@ async fn exercise(mut server: Arc<Server>, fault: Fault, body: &[u8], oid: &str)
             StatusCode::SERVICE_UNAVAILABLE,
             "ambiguous retry after {fault:?} must remain unreplayed"
         );
-        let snapshot =
-            crab_metadata::manifest_store::read_repository_snapshot(&origin, &origin_layout)
-                .await
-                .unwrap();
-        assert_eq!(
-            snapshot
-                .journal
-                .refs
-                .get("refs/heads/main")
-                .map(String::as_str),
-            None
-        );
-        for head in crab_metadata::ref_journal::list_ref_heads(&origin, &origin_layout)
-            .await
-            .unwrap()
-        {
-            assert_eq!(
-                head.head.prepared_transaction.is_some(),
-                matches!(fault, Fault::RejectedMarker)
-            );
-        }
+        let current = restarted
+            .repositories
+            .get(&("team".into(), "repo".into()))
+            .unwrap();
+        let view = current.open_view().await.unwrap();
+        assert!(!view.refs().contains_key("refs/heads/main"));
     }
     let blob = router(Arc::clone(&restarted))
         .oneshot(

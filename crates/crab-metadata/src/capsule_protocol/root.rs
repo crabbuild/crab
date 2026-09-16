@@ -396,6 +396,28 @@ impl RepositoryRoot {
         Ok(root)
     }
 
+    /// Retarget HEAD while preserving the complete published repository state.
+    pub fn retarget_head(
+        &self,
+        parent_root_digest: &str,
+        expected_head: &str,
+        head: &str,
+    ) -> Result<Self> {
+        if self.gc_fence.is_some() {
+            return Err(contract_error(
+                "HEAD publication is forbidden while the GC fence is active",
+            ));
+        }
+        if self.head != expected_head {
+            return Err(contract_error("root HEAD changed from its expected value"));
+        }
+        let mut root = self.clone();
+        root.parent_root_digest = Some(parent_root_digest.to_owned());
+        root.head = head.to_owned();
+        validate_root(&root)?;
+        Ok(root)
+    }
+
     /// Install an exclusive GC fence without changing logical repository state.
     pub fn begin_gc(&self, parent_root_digest: &str, fence: GcFence) -> Result<Self> {
         if self.gc_fence.is_some() {
@@ -971,5 +993,37 @@ mod tests {
         .unwrap();
         assert!(released.root().gc_fence().is_none());
         assert!(advance_with_synthetic_run(&released, 2).is_ok());
+    }
+
+    #[test]
+    fn head_retarget_preserves_publication_state_and_generation() {
+        let initial = RootRecord::encode(
+            RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
+        )
+        .unwrap();
+        let published = advance_with_synthetic_run(&initial, 1).unwrap();
+
+        let retargeted = RootRecord::encode(
+            published
+                .root()
+                .retarget_head(published.digest(), "refs/heads/main", "refs/heads/trunk")
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            retargeted.root().generation(),
+            published.root().generation()
+        );
+        assert_eq!(retargeted.root().refs(), published.root().refs());
+        assert_eq!(
+            retargeted.root().capsule_frontier(),
+            published.root().capsule_frontier()
+        );
+        assert_eq!(retargeted.root().head(), "refs/heads/trunk");
+        assert_eq!(
+            retargeted.root().parent_root_digest(),
+            Some(published.digest())
+        );
     }
 }

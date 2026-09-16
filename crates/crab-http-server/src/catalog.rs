@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 
 use bytes::Bytes;
-use crab_metadata::{layout_descriptor::read_canonical_layout, manifest_store::read_manifest};
 use crab_storage::{ETag, StorageError, StoreLayout};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -208,14 +207,13 @@ impl CatalogStore {
         crate::config::validate_repository(&runtime)
             .map_err(|_| CatalogError::Invalid("repository record failed validation"))?;
         let layout = StoreLayout::new(self.root.store.clone(), runtime.prefix.clone());
-        crab_write::initialize::initialize_repository(
-            &self.root.store,
+        crab_write::capsule_protocol::initialize(
             &layout,
+            &blake3::hash(record.id.as_bytes()).to_hex().to_string(),
             &format!("refs/heads/{default_branch}"),
         )
         .await?;
-        read_canonical_layout(&self.root.store, &layout).await?;
-        read_manifest(&self.root.store, &layout).await?;
+        crab_metadata::capsule_protocol::load_root(&layout).await?;
         self.insert(record).await
     }
 
@@ -242,8 +240,7 @@ impl CatalogStore {
         crate::config::validate_repository(&runtime)
             .map_err(|_| CatalogError::Invalid("repository record failed validation"))?;
         let layout = StoreLayout::new(self.root.store.clone(), runtime.prefix);
-        read_canonical_layout(&self.root.store, &layout).await?;
-        read_manifest(&self.root.store, &layout).await?;
+        crab_metadata::capsule_protocol::load_root(&layout).await?;
         self.insert(record).await
     }
 

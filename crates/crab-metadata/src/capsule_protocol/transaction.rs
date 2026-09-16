@@ -66,6 +66,7 @@ impl CapsuleRefEdit {
 pub struct CapsuleTransaction {
     version: u32,
     base_root_digest: String,
+    publication_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     plan_id: Option<String>,
     edits: Vec<CapsuleRefEdit>,
@@ -74,7 +75,10 @@ pub struct CapsuleTransaction {
 impl CapsuleTransaction {
     /// Create a canonical transaction, sorting edits and rejecting duplicate refs.
     pub fn new(base_root_digest: &str, edits: Vec<CapsuleRefEdit>) -> Result<Self> {
-        Self::new_inner(base_root_digest, None, edits)
+        let publication_id = blake3::hash(uuid::Uuid::now_v7().as_bytes())
+            .to_hex()
+            .to_string();
+        Self::new_inner(base_root_digest, publication_id, None, edits)
     }
 
     /// Create a transaction whose identity is bound to one reviewed mirror plan.
@@ -84,17 +88,28 @@ impl CapsuleTransaction {
         edits: Vec<CapsuleRefEdit>,
     ) -> Result<Self> {
         validate_content_hash(plan_id, "mirror plan id", "capsule-protocol transaction")?;
-        Self::new_inner(base_root_digest, Some(plan_id.to_owned()), edits)
+        Self::new_inner(
+            base_root_digest,
+            plan_id.to_owned(),
+            Some(plan_id.to_owned()),
+            edits,
+        )
     }
 
     fn new_inner(
         base_root_digest: &str,
+        publication_id: String,
         plan_id: Option<String>,
         mut edits: Vec<CapsuleRefEdit>,
     ) -> Result<Self> {
         validate_content_hash(
             base_root_digest,
             "transaction base root digest",
+            "capsule-protocol transaction",
+        )?;
+        validate_content_hash(
+            &publication_id,
+            "transaction publication id",
             "capsule-protocol transaction",
         )?;
         if edits.is_empty() {
@@ -112,6 +127,7 @@ impl CapsuleTransaction {
         Ok(Self {
             version: TRANSACTION_VERSION,
             base_root_digest: base_root_digest.to_owned(),
+            publication_id,
             plan_id,
             edits,
         })
@@ -157,6 +173,12 @@ impl CapsuleTransaction {
         &self.base_root_digest
     }
 
+    /// Return the unique publication attempt bound into this transaction.
+    #[must_use]
+    pub fn publication_id(&self) -> &str {
+        &self.publication_id
+    }
+
     /// Return the reviewed mirror plan committed by this transaction, if any.
     #[must_use]
     pub fn plan_id(&self) -> Option<&str> {
@@ -179,6 +201,11 @@ fn validate_transaction(transaction: &CapsuleTransaction) -> Result<()> {
     validate_content_hash(
         &transaction.base_root_digest,
         "transaction base root digest",
+        "capsule-protocol transaction",
+    )?;
+    validate_content_hash(
+        &transaction.publication_id,
+        "transaction publication id",
         "capsule-protocol transaction",
     )?;
     if let Some(plan_id) = &transaction.plan_id {
@@ -259,5 +286,29 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn unplanned_repeated_edits_have_distinct_transaction_identities() {
+        let edit = CapsuleRefEdit::new("refs/tags/v1", None, Some("2".repeat(40)), None);
+
+        let first = CapsuleTransaction::new(&"1".repeat(64), vec![edit.clone()]).unwrap();
+        let second = CapsuleTransaction::new(&"1".repeat(64), vec![edit]).unwrap();
+
+        assert_ne!(first.publication_id(), second.publication_id());
+        assert_ne!(first.id().unwrap(), second.id().unwrap());
+    }
+
+    #[test]
+    fn planned_retries_have_the_same_transaction_identity() {
+        let plan_id = "3".repeat(64);
+        let edit = CapsuleRefEdit::new("refs/heads/main", None, Some("2".repeat(40)), None);
+
+        let first =
+            CapsuleTransaction::for_plan(&"1".repeat(64), &plan_id, vec![edit.clone()]).unwrap();
+        let second = CapsuleTransaction::for_plan(&"1".repeat(64), &plan_id, vec![edit]).unwrap();
+
+        assert_eq!(first.publication_id(), plan_id);
+        assert_eq!(first.id().unwrap(), second.id().unwrap());
     }
 }

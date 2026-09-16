@@ -200,6 +200,8 @@ pub enum Error {
     },
     #[error("repository initialization failed")]
     Remote(#[from] crab_remote_git::Error),
+    #[error("capsule repository read failed")]
+    Read(#[from] crab_read::ReadError),
     #[error("repository maintenance failed")]
     Maintenance(#[from] crab_write::WriteError),
     #[error("repository catalog operation failed")]

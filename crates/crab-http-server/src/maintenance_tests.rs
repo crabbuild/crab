@@ -1,12 +1,5 @@
 use super::*;
 use axum::body::Body;
-use crab_coordination::{
-    CoordinationError, GIT_GENERATION_OWNER_RESOURCE, GIT_MANIFEST_RESOURCE, GcFenceLease,
-    PushLock, internal_lock_path,
-};
-use crab_metadata::{manifest_store, ref_journal::RefJournalEdit};
-use crab_write::WriteError;
-use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 const TTL: Duration = Duration::from_secs(60);
@@ -30,7 +23,7 @@ async fn fixture_without_cells() -> Arc<Server> {
     let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
     let admission_store = store.clone();
     let layout = StoreLayout::new(store.clone(), "maintenance".into());
-    crab_write::initialize::initialize_repository(&store, &layout, "refs/heads/main")
+    crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
         .await
         .unwrap();
     Arc::new(Server {
@@ -177,58 +170,6 @@ fn repository(server: &Server) -> Arc<Repository> {
         .unwrap()
 }
 
-pub(super) async fn commit_without_proof(repo: &Repository) -> PushLock {
-    let lease = PushLock::acquire_ref(
-        repo.store.inner(),
-        repo.layout.repo_prefix(),
-        "refs/heads/main",
-        TTL,
-    )
-    .await
-    .unwrap();
-    let snapshot = manifest_store::read_repository_snapshot(&repo.store, &repo.layout)
-        .await
-        .unwrap();
-    crab_write::journal::commit_edits(
-        &repo.store,
-        &repo.layout,
-        &snapshot,
-        vec![RefJournalEdit {
-            ref_name: "refs/heads/main".into(),
-            old_oid: None,
-            new_oid: Some("a".repeat(40)),
-            peeled_oid: None,
-            lock_holder: Some(lease.holder().to_owned()),
-            visibility_evidence_hash: None,
-        }],
-        None,
-        vec![],
-        vec![],
-        crab_write::journal::CommitOptions::new(TTL, &tokio_util::sync::CancellationToken::new()),
-    )
-    .await
-    .unwrap();
-    lease
-}
-
-async fn assert_released(repo: &Repository) {
-    let owner = PushLock::acquire_internal(
-        repo.store.inner(),
-        repo.layout.repo_prefix(),
-        GIT_GENERATION_OWNER_RESOURCE,
-        TTL,
-    )
-    .await
-    .unwrap();
-    owner.release().await.unwrap();
-    for domain in [repo.layout.global_prefix(), repo.layout.repo_prefix()] {
-        let sweep = GcFenceLease::acquire_sweep(repo.store.inner(), domain, TTL)
-            .await
-            .unwrap();
-        sweep.release().await.unwrap();
-    }
-}
-
 async fn close(server: &Server) {
     server.cancellation.cancel();
     server.finish_maintenance().await.unwrap();
@@ -321,7 +262,6 @@ async fn readiness_rejects_a_server_that_is_draining() {
     );
     close(&server).await;
 }
-
 #[tokio::test]
 async fn readiness_rejects_a_draining_cell_runtime() {
     let mut server = fixture().await;
