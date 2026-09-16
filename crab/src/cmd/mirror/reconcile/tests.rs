@@ -797,6 +797,7 @@ async fn plan_replay_requires_the_same_verified_repository_identity() {
                 &[],
                 None,
                 None,
+                None,
                 &cancel,
             )
             .await

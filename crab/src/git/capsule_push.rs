@@ -10,6 +10,7 @@ use gix_object::{Exists, Find, FindHeader};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::error::{CrabError, Result, check_cancelled};
+use crate::core::metrics::Metrics;
 use crate::git::pack::{
     PushPackConfig, RemotePackExclusions, generate_push_pack_files_with_exclusions,
     install_pack_file_locally_with_timeout,
@@ -27,6 +28,10 @@ const POINTER_SCAN_ALLOCATION_BYTES: usize = 64 * 1024 * 1024;
 /// Ref policy and Git-integrity checks complete before immutable pointer data is
 /// uploaded. A single-ref head CAS or the per-attempt multi-ref transaction
 /// protocol publishes refs; failed preparation can leave only safe immutable orphans.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "push pipeline dependencies are explicit"
+)]
 pub async fn run(
     config: &PushConfig,
     specs: &[PushSpec],
@@ -36,6 +41,7 @@ pub async fn run(
     hidden_ref_patterns: &[String],
     staging: Option<&Arc<StagingAreaReadOnly>>,
     caching_store: Option<&crab_cache_store::CachingStore>,
+    metrics: Option<&Metrics>,
     cancel: &CancellationToken,
 ) -> Result<(
     PushResult,
@@ -51,6 +57,7 @@ pub async fn run(
             hidden_ref_patterns,
             staging,
             caching_store,
+            metrics,
             cancel,
         )
         .await;
@@ -85,6 +92,7 @@ pub async fn run(
                 hidden_ref_patterns,
                 staging,
                 caching_store,
+                metrics,
                 &cancel,
             )
             .await
@@ -106,6 +114,7 @@ async fn run_inner(
     hidden_ref_patterns: &[String],
     staging: Option<&Arc<StagingAreaReadOnly>>,
     caching_store: Option<&crab_cache_store::CachingStore>,
+    metrics: Option<&Metrics>,
     cancel: &CancellationToken,
 ) -> Result<(
     PushResult,
@@ -364,6 +373,7 @@ async fn run_inner(
             &prepared.pointers,
             staging,
             caching_store,
+            metrics,
             cancel,
         )
         .await?;
@@ -1037,6 +1047,7 @@ mod tests {
             &[],
             None,
             None,
+            None,
             &CancellationToken::new(),
         )
         .await
@@ -1102,6 +1113,7 @@ mod tests {
             &[],
             None,
             None,
+            None,
             &CancellationToken::new(),
         )
         .await
@@ -1143,6 +1155,7 @@ mod tests {
             &router,
             Some(committed),
             &[],
+            None,
             None,
             None,
             &CancellationToken::new(),
@@ -1209,6 +1222,7 @@ mod tests {
             &router,
             Some(checkpoint_view),
             &[],
+            None,
             None,
             None,
             &CancellationToken::new(),

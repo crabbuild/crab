@@ -16,6 +16,7 @@ use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::error::{CrabError, Result, check_cancelled};
+use crate::core::metrics::Metrics;
 
 const PREPARED_XORB_UPLOAD_CONCURRENCY: usize = 4;
 
@@ -25,6 +26,7 @@ pub(crate) async fn prepare_delta(
     pointers: &[crab_types::pointer::Pointer],
     staging: Option<&Arc<StagingAreaReadOnly>>,
     caching_store: Option<&crab_cache_store::CachingStore>,
+    metrics: Option<&Metrics>,
     cancel: &CancellationToken,
 ) -> Result<crab_metadata::capsule_protocol::PointerCatalog> {
     use crab_metadata::capsule_protocol::{
@@ -112,14 +114,14 @@ pub(crate) async fn prepare_delta(
     for (file_hash, file_size) in unresolved {
         check_cancelled(cancel)?;
         let chunks = staging.chunks_for_file_with_sizes(&file_hash)?;
-        if chunks.is_empty() {
+        if chunks.is_empty() && file_size != 0 {
             return Err(CrabError::StagingCorrupt(format!(
                 "pointer file {} has no staged chunk recipe",
                 file_hash.hex()
             )));
         }
         let plan = staging.load_file_push_plan(&file_hash).await?;
-        if plan.is_none() {
+        if chunks.is_empty() || plan.is_none() {
             staging
                 .verify_file_reconstruction_from_chunks(&file_hash, file_size, &chunks)
                 .await?;
@@ -287,7 +289,14 @@ pub(crate) async fn prepare_delta(
                 xorb_placements,
             )
             .await?;
-            Ok::<_, CrabError>((ordinal, planned_hash, entry, xorb_placements, created))
+            let uploaded_bytes = if created { entry.encoded_size() } else { 0 };
+            Ok::<_, CrabError>((
+                ordinal,
+                planned_hash,
+                entry,
+                xorb_placements,
+                uploaded_bytes,
+            ))
         },
     ))
     .buffer_unordered(PREPARED_XORB_UPLOAD_CONCURRENCY);
@@ -297,9 +306,12 @@ pub(crate) async fn prepare_delta(
         verified_candidates.push(result?);
     }
     verified_candidates.sort_by_key(|(ordinal, _, _, _, _)| *ordinal);
-    for (_, planned_hash, entry, xorb_placements, created) in verified_candidates {
-        if created {
+    for (_, planned_hash, entry, xorb_placements, uploaded_bytes) in verified_candidates {
+        if uploaded_bytes > 0 {
             uploaded_xorbs.insert(planned_hash);
+            if let Some(metrics) = metrics {
+                metrics.add_bytes_uploaded(uploaded_bytes);
+            }
         }
         for placement in xorb_placements {
             placements.entry(placement.chunk_hash).or_insert(placement);
@@ -334,7 +346,7 @@ pub(crate) async fn prepare_delta(
                         })?),
                     )?;
                     while let Some(result) = builder.take_completed() {
-                        publish_built_xorb(
+                        let uploaded_bytes = publish_built_xorb(
                             layout,
                             caching_store,
                             result,
@@ -343,11 +355,14 @@ pub(crate) async fn prepare_delta(
                             &mut uploaded_xorbs,
                         )
                         .await?;
+                        if let Some(metrics) = metrics {
+                            metrics.add_bytes_uploaded(uploaded_bytes);
+                        }
                     }
                 }
             }
             for result in builder.finalize()? {
-                publish_built_xorb(
+                let uploaded_bytes = publish_built_xorb(
                     layout,
                     caching_store,
                     result,
@@ -356,6 +371,9 @@ pub(crate) async fn prepare_delta(
                     &mut uploaded_xorbs,
                 )
                 .await?;
+                if let Some(metrics) = metrics {
+                    metrics.add_bytes_uploaded(uploaded_bytes);
+                }
             }
         }
 
@@ -474,7 +492,8 @@ async fn publish_built_xorb(
     placements: &mut ChunkPlacementMap,
     xorb_entries: &mut HashMap<MerkleHash, crab_metadata::capsule_protocol::XorbCatalogEntry>,
     uploaded_xorbs: &mut HashSet<MerkleHash>,
-) -> Result<()> {
+) -> Result<u64> {
+    let encoded_size = result.bytes.len() as u64;
     let body_digest = blake3::hash(&result.bytes).to_hex().to_string();
     let entry = catalog_xorb_entry(result.bytes.len() as u64, body_digest, &result.placements)?;
     let (entry, xorb_placements, created) = publish_xorb_candidate(
@@ -493,7 +512,7 @@ async fn publish_built_xorb(
         placements.entry(placement.chunk_hash).or_insert(placement);
     }
     xorb_entries.insert(result.hash, entry);
-    Ok(())
+    Ok(if created { encoded_size } else { 0 })
 }
 
 async fn publish_xorb_candidate(

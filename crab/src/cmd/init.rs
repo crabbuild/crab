@@ -1151,6 +1151,16 @@ fn parse_init_remote(url: &str) -> Result<InitRemote> {
     })
 }
 
+pub(crate) fn canonical_remote_url_and_storage_provider(
+    url: &str,
+) -> Result<(String, Option<StorageProvider>)> {
+    if url.trim().to_ascii_lowercase().starts_with("file://") {
+        return Ok((url.trim().to_owned(), None));
+    }
+    let remote = parse_init_remote(url)?;
+    Ok((remote.canonical_url, remote.inferred_storage_provider))
+}
+
 fn storage_provider_for_init_scheme(scheme: &str) -> Option<StorageProvider> {
     if scheme.eq_ignore_ascii_case("crab") {
         None

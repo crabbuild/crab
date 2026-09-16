@@ -755,7 +755,7 @@ explicit `not yet part of the capsule protocol` error is a parity blocker.
 | Xet add, dedup, push, clone checkout, smudge, hydrate, prefetch, and diff | Whole-object RustFS path implemented | Finish hosted checksum/multipart, cross-repository reuse, cache, and corrupt-object qualification | Byte equality, dedup accounting, retry safety, and integrity failures across supported providers and object sizes |
 | FUSE/NFS mount | Shared v2 file-index and hydrator wiring implemented | Qualify range reads, cold/warm cache, eviction, cancellation, unmount, and restored-tier objects | Mount/read/stat/range/concurrent-reader suite on every supported mount platform and provider |
 | `download`, `export`, and remote `run` inputs | Remote snapshot materialization now resolves refs and installs Git packs from one authenticated v2 view; direct RustFS file equality is proven | Complete every revision form, selector shape, pointer payload, missing/corrupt-pack, and cancellation case | Output equality against a local clone for `download`, `export`, and workflow `--pull` |
-| Import publication | Production path is disabled pending v2 file/recipe support | Make import populate canonical staging recipes and invoke the one v2 publisher, or implement the required capsule sections | Large-file import, resume, cancellation, dedup, clone, hydrate, and fsck without a v1 manifest |
+| Import publication | Canonical staging recipes now publish through the one v2 capsule publisher; imports commit portable Crab configuration, account newly created xorb bytes, preserve empty files, and create no v1 manifest or file-index metadata | Complete hosted-provider, interrupted-resume, cancellation, and cross-import dedup qualification | Large-file import, resume, cancellation, dedup, clone, hydrate, and fsck without a v1 manifest |
 | HTTP server, repository browser, smart Git receive, and server maintenance | Catalog and receive paths still read and mutate the v1 manifest | Introduce a v2 repository-view adapter and route receive through the canonical v2 transaction publisher | Browser and smart-HTTP read/write/auth/maintenance suites against a v2-only repository |
 | S3 gateway read and mutation | Git snapshot and mutation publication still depend on the v1 manifest/journal | Resolve trees from v2 packs/refs and publish gateway mutations through v2 ref transactions | S3 read/list/write/delete/multipart semantics, concurrent mutations, restart, and clone/fsck verification |
 | Repack, repository GC, bucket GC, and fsck | V2 paths implemented | Complete crash/fault and forced-GC concurrency qualification | Injection at each publication boundary; resurrection, restart, no reachable deletion, and bounded writer pause |
@@ -893,10 +893,22 @@ full outgoing closure, advanced only the branch, and preserved the existing
 remote tag after a conflicting local rewrite. A fresh v2 clone matched both
 remote OIDs and passed `git fsck --strict`.
 
+The isolated `v2-import-rustfs-20260915` run used the installed release binary
+and a fresh RustFS bucket. A flat same-bucket import published 101,844,789
+source bytes in 1.835 seconds and reported 59,475,287 newly created xorb bytes.
+The first commit carried the canonical `crab://` locator, S3 provider hint,
+extension globs, an exact extensionless-path attribute, and a zero-byte file.
+A fresh eager clone completed in 1.149 seconds; all three files matched the raw
+source byte-for-byte and strict Git fsck passed. A subsequent full dehydrate
+and hydrate cycle restored all 101,844,789 bytes in 1.238 seconds. Store
+inspection found the v2 root, ref head, capsule, xorbs, and shard, with no v1
+manifest, refs, metadata, or file-index objects.
+
 This qualifies the ordinary RustFS whole-object path. Hosted-provider,
-multipart, replica, tiering, mount-range, browser/HTTP, S3-gateway, import,
-migration/recovery, managed publication, and backup/restore coverage remain
-explicit release gates; this evidence does not waive them.
+multipart, replica, tiering, mount-range, browser/HTTP, S3-gateway, import
+fault/resume/provider coverage, migration/recovery, managed publication, and
+backup/restore coverage remain explicit release gates; this evidence does not
+waive them.
 
 ## 18. Acceptance boundary
 

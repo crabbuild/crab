@@ -656,6 +656,7 @@ async fn run_push_once(
         &config.transfer_hide_refs,
         staging.reader(),
         caching_store.as_ref(),
+        None,
         cancel,
     )
     .await

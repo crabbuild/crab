@@ -1670,6 +1670,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                         &config.transfer_hide_refs,
                         staging.reader(),
                         caching_store,
+                        Some(cache.metrics.as_ref()),
                         cancel,
                     )
                     .await

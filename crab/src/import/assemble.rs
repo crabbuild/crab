@@ -34,11 +34,14 @@
 //!    pointer blob (or unlink, for delete markers), `git add -A`,
 //!    then `git commit --date=<window_end>` with the resolved
 //!    author / message template. Capture each commit OID.
-//! 7. **Remote registration.** `git remote add origin <target-url>`
+//! 7. **Portable repository configuration.** Commit `crab.toml` with the
+//!    canonical `crab://` locator and provider hint. Raw cloud target URLs
+//!    never become unusable Git remote schemes.
+//! 8. **Remote registration.** `git remote add origin <canonical-url>`
 //!    once at the end; if `origin` already exists and `--force`
 //!    was passed, use `set-url` instead. Otherwise error with
 //!    [`CrabError::ImportRemoteExists`].
-//! 8. **Progress events.** Emit one [`AssembleEvent`] per commit
+//! 9. **Progress events.** Emit one [`AssembleEvent`] per commit
 //!    via [`AssembleProgressSink`].
 //!
 //! No `std::sync::Mutex` is held across an `.await` — the progress
@@ -57,6 +60,7 @@ use crab_types::time::from_epoch_millis;
 
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::metrics::Metrics;
+use crate::core::project_config::{ProjectAuthConfig, ProjectConfig, RemoteConfig};
 use crate::import::ingest::DELETE_MARKER_FILE_HASH;
 use crate::import::journal::EntryState;
 use crate::import::window::CommitWindow;
@@ -86,8 +90,8 @@ pub struct AssembleInputs<P: AssembleProgressSink> {
     pub force: bool,
     /// `--resume`: target contents may come from a prior attempt.
     pub resume: bool,
-    /// Canonical import target URL; written as `origin` after the
-    /// final commit lands.
+    /// Import target URL. Raw provider URLs are canonicalized to `crab://`
+    /// before they are committed to project configuration or Git remotes.
     pub target_url: String,
     /// Planned commit sequence. In flat mode this is a single
     /// window; in versioned mode there is one window per time
@@ -200,9 +204,28 @@ where
     ensure_git_repo(&into, &branch)?;
     ensure_internal_state_ignored(&into)?;
 
+    let (target_url, storage_provider) =
+        crate::cmd::init::canonical_remote_url_and_storage_provider(&target_url)?;
+    let project_config = ProjectConfig {
+        version: 1,
+        remote: RemoteConfig {
+            url: target_url.clone(),
+        },
+        track: None,
+        hydrate: None,
+        mirror: None,
+        replication: None,
+        auth: storage_provider.map(|storage_provider| ProjectAuthConfig {
+            storage_provider: Some(storage_provider),
+        }),
+        prefetch: None,
+        workflow: None,
+    };
+
     let gitattributes_body = synthesize_gitattributes(&windows, &track, &into)?;
 
-    if resume && let Some(stats) = try_reuse_resume_head(&into, &windows, &track)? {
+    if resume && let Some(stats) = try_reuse_resume_head(&into, &windows, &track, &project_config)?
+    {
         crate::cmd::init::install_filter_driver(&into)?;
         if let Some(m) = metrics.as_deref() {
             m.add_import_files_total(stats.files_imported);
@@ -219,6 +242,7 @@ where
     }
 
     ensure_git_identity(&into)?;
+    ProjectConfig::write(&into.join("crab.toml"), &project_config)?;
 
     let mut stats = AssembleStats::default();
 
@@ -484,12 +508,12 @@ fn ensure_git_identity(into: &Path) -> Result<()> {
 /// Build the additional `.gitattributes` lines that this import
 /// should contribute.
 ///
-/// Heuristic:
+/// Coverage strategy:
 ///
-/// 1. For every `Staged`, non-delete-marker entry across every
-///    window, bucket by file-extension (lowercase, no leading dot).
-/// 2. For each extension with at least one committed pointer blob,
-///    emit `*.<ext> filter=crab diff=crab merge=crab -text`.
+/// 1. For every `Staged`, non-delete-marker entry across every window, use an
+///    extension glob when its case-sensitive extension is glob-safe.
+/// 2. Emit a quoted root-relative literal for extensionless paths and paths
+///    whose extension contains pattern syntax.
 /// 3. Append every user-supplied `--track` glob verbatim.
 /// 4. Drop lines already present in `<into>/.gitattributes` so we
 ///    never clobber a user-maintained file.
@@ -541,7 +565,7 @@ fn synthesize_gitattributes(
 fn required_gitattributes_lines(windows: &[CommitWindow], track: &[String]) -> Vec<String> {
     use std::collections::BTreeSet;
 
-    let mut auto_exts: BTreeSet<String> = BTreeSet::new();
+    let mut auto_patterns: BTreeSet<String> = BTreeSet::new();
 
     for window in windows {
         for entry in &window.entries {
@@ -555,16 +579,23 @@ fn required_gitattributes_lines(windows: &[CommitWindow], track: &[String]) -> V
                 EntryState::Staged { file_hash } if *file_hash != DELETE_MARKER_FILE_HASH => {}
                 _ => continue,
             }
-            let Some(ext) = extension_of(&entry.relative_path) else {
-                continue;
+            let pattern = match extension_of(&entry.relative_path) {
+                Some(ext)
+                    if ext.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+                    }) =>
+                {
+                    format!("*.{ext}")
+                }
+                _ => quote_literal_attribute_pattern(&entry.relative_path),
             };
-            auto_exts.insert(ext);
+            auto_patterns.insert(pattern);
         }
     }
 
-    let mut lines: Vec<String> = auto_exts
+    let mut lines: Vec<String> = auto_patterns
         .into_iter()
-        .map(|ext| format!("*.{ext} filter=crab diff=crab merge=crab -text"))
+        .map(|pattern| crate::cmd::track::attrs_line(&pattern))
         .collect();
 
     for glob in track {
@@ -581,16 +612,44 @@ fn required_gitattributes_lines(windows: &[CommitWindow], track: &[String]) -> V
     lines
 }
 
-/// Lowercase file extension (no leading dot) or `None` if the
-/// basename does not contain an extension. Matches the convention
-/// used elsewhere in the codebase for extension-keyed lookups.
+/// Case-sensitive file extension (no leading dot) or `None` if the basename
+/// does not contain an extension.
 fn extension_of(relative_path: &str) -> Option<String> {
     let name = relative_path.rsplit('/').next().unwrap_or(relative_path);
     let (_, ext) = name.rsplit_once('.')?;
     if ext.is_empty() {
         return None;
     }
-    Some(ext.to_ascii_lowercase())
+    Some(ext.to_owned())
+}
+
+fn quote_literal_attribute_pattern(path: &str) -> String {
+    let mut pattern = Vec::with_capacity(path.len() + 1);
+    pattern.push(b'/');
+    for byte in path.bytes() {
+        if matches!(byte, b'\\' | b'*' | b'?' | b'[' | b']') {
+            pattern.push(b'\\');
+        }
+        pattern.push(byte);
+    }
+
+    let mut quoted = String::with_capacity(pattern.len() + 2);
+    quoted.push('"');
+    for byte in pattern {
+        match byte {
+            b'"' => quoted.push_str("\\\""),
+            b'\\' => quoted.push_str("\\\\"),
+            0x20..=0x7e => quoted.push(char::from(byte)),
+            _ => {
+                quoted.push('\\');
+                quoted.push(char::from(b'0' + ((byte >> 6) & 0o7)));
+                quoted.push(char::from(b'0' + ((byte >> 3) & 0o7)));
+                quoted.push(char::from(b'0' + (byte & 0o7)));
+            }
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 /// Append `body` to `<into>/.gitattributes` (creating the file if
@@ -667,6 +726,7 @@ fn try_reuse_resume_head(
     into: &Path,
     windows: &[CommitWindow],
     track: &[String],
+    project_config: &ProjectConfig,
 ) -> Result<Option<AssembleStats>> {
     let Some(head) = rev_parse_optional(into, "HEAD")? else {
         return Ok(None);
@@ -675,6 +735,7 @@ fn try_reuse_resume_head(
     let pointer_entries = final_pointer_entries(windows);
     let required_attrs = required_gitattributes_lines(windows, track);
     let mut expected_paths = final_imported_paths(windows);
+    expected_paths.insert("crab.toml".to_owned());
     if !required_attrs.is_empty() {
         expected_paths.insert(".gitattributes".to_owned());
     }
@@ -682,6 +743,34 @@ fn try_reuse_resume_head(
     let actual_paths: std::collections::BTreeSet<String> =
         list_tree_paths(into, "HEAD")?.into_iter().collect();
     if actual_paths != expected_paths {
+        return Ok(None);
+    }
+
+    let Some(bytes) = show_head_blob(into, "crab.toml")? else {
+        return Ok(None);
+    };
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return Ok(None);
+    };
+    let Ok(committed_config) = ProjectConfig::parse(text, "HEAD:crab.toml") else {
+        return Ok(None);
+    };
+    if committed_config.remote.url != project_config.remote.url
+        || committed_config
+            .auth
+            .as_ref()
+            .and_then(|auth| auth.storage_provider.as_ref())
+            != project_config
+                .auth
+                .as_ref()
+                .and_then(|auth| auth.storage_provider.as_ref())
+        || committed_config.track.is_some()
+        || committed_config.hydrate.is_some()
+        || committed_config.mirror.is_some()
+        || committed_config.replication.is_some()
+        || committed_config.prefetch.is_some()
+        || committed_config.workflow.is_some()
+    {
         return Ok(None);
     }
 
@@ -1265,10 +1354,10 @@ mod tests {
     }
 
     #[test]
-    fn extension_of_strips_lowercases_and_tolerates_missing() {
+    fn extension_of_preserves_case_and_tolerates_missing() {
         assert_eq!(
             extension_of("models/a.SafeTensors").as_deref(),
-            Some("safetensors")
+            Some("SafeTensors")
         );
         assert_eq!(extension_of("no-extension").as_deref(), None);
         assert_eq!(extension_of("dot.").as_deref(), None);
@@ -1289,6 +1378,8 @@ mod tests {
                 staged("c.txt", sample_hash(4), 100, 0),
                 staged("d.txt", sample_hash(5), 100, 0),
                 staged("e.txt", sample_hash(6), 100, 0),
+                staged("bin/crab", sample_hash(7), 100, 0),
+                staged("data/literal.[bin]", sample_hash(8), 100, 0),
             ],
         }];
         let tmp = TempDir::new().unwrap();
@@ -1304,6 +1395,14 @@ mod tests {
         assert!(
             body.contains("*.safetensors filter=crab"),
             "body should track *.safetensors, got:\n{body}"
+        );
+        assert!(
+            body.contains(r#""/bin/crab" filter=crab"#),
+            "body should track an extensionless path literally, got:\n{body}"
+        );
+        assert!(
+            body.contains(r#""/data/literal.\\[bin\\]" filter=crab"#),
+            "body should escape pattern syntax in literal paths, got:\n{body}"
         );
     }
 
@@ -1344,6 +1443,49 @@ mod tests {
         assert!(
             body.is_empty(),
             "existing line must suppress duplicate emission; got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn synthesized_literals_cover_extensionless_and_pattern_paths() {
+        let tmp = TempDir::new().unwrap();
+        let status = Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(tmp.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let windows = vec![CommitWindow {
+            window_start: 0,
+            window_end: 0,
+            entries: vec![
+                staged("bin/crab", sample_hash(1), 100, 0),
+                staged("data/literal.[bin]", sample_hash(2), 100, 0),
+            ],
+        }];
+        let body = synthesize_gitattributes(&windows, &[], tmp.path()).unwrap();
+        std::fs::write(tmp.path().join(".gitattributes"), body).unwrap();
+
+        let output = Command::new("git")
+            .args([
+                "check-attr",
+                "filter",
+                "--",
+                "bin/crab",
+                "data/literal.[bin]",
+            ])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("bin/crab: filter: crab"), "{stdout}");
+        assert!(
+            stdout.contains("data/literal.[bin]: filter: crab"),
+            "{stdout}"
         );
     }
 
@@ -1459,7 +1601,7 @@ mod tests {
             branch: "main".into(),
             force: false,
             resume: false,
-            target_url: "crab://bucket/repo".into(),
+            target_url: "s3://bucket/repo".into(),
             windows: vec![window.clone()],
             track: Vec::new(),
             message_template: None,
@@ -1539,6 +1681,20 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&url.stdout).trim(),
             "crab://bucket/repo"
+        );
+        let project = ProjectConfig::load(&into.join("crab.toml")).unwrap();
+        assert_eq!(project.remote.url, "crab://bucket/repo");
+        assert_eq!(
+            project.auth.and_then(|auth| auth.storage_provider),
+            Some(crate::core::config::StorageProvider::S3)
+        );
+        let committed = show_head_blob(&into, "crab.toml")
+            .unwrap()
+            .expect("commit must carry crab.toml");
+        assert!(
+            std::str::from_utf8(&committed)
+                .unwrap()
+                .contains("url = \"crab://bucket/repo\"")
         );
     }
 
