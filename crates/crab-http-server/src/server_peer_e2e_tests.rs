@@ -145,7 +145,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     )
     .unwrap();
     ingress_publisher.publish_initial().await.unwrap();
-    owner_publisher.publish_initial().await.unwrap();
+    let owner_advertisement = owner_publisher.publish_initial().await.unwrap();
 
     let owner_runtime = runtime(owner_session);
     let owner_router = crate::cells::RepositoryCellRouter::new(
@@ -347,12 +347,82 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .clone();
     assert_ne!(root_after, root_before);
 
-    public_stop.send(()).unwrap();
     management_stop.send(()).unwrap();
-    public_task.await.unwrap();
     management_task.await.unwrap();
+    directory
+        .withdraw(&owner_advertisement, crate::cells::unix_now_ms().unwrap())
+        .await
+        .unwrap();
+    let stale_owner = authority.load(target.cell_id()).await.unwrap().unwrap();
+    let takeover = stale_owner
+        .value()
+        .takeover(crab_cell_runtime::Owner {
+            session: ingress_session,
+            endpoint: "https://localhost:2".into(),
+        })
+        .unwrap();
+    authority
+        .transition(
+            &stale_owner,
+            takeover,
+            crab_cell_runtime::Transition::Takeover,
+        )
+        .await
+        .unwrap();
+    std::fs::remove_dir_all(owner_dir.path()).unwrap();
+
+    let restored = client
+        .get(format!(
+            "{public_origin}/api/repos/team/repo/issues?state=all"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(restored.status(), StatusCode::OK);
+    let restored: Value = serde_json::from_slice(&restored.bytes().await.unwrap()).unwrap();
+    assert_eq!(restored["items"][0]["title"], "Remote Cell");
+    let taken_over = authority.load(target.cell_id()).await.unwrap().unwrap();
+    assert_eq!(taken_over.value().root, root_after);
+    assert_eq!(
+        taken_over.value().owner.as_ref().unwrap().session,
+        ingress_session
+    );
+
+    let continued = client
+        .post(format!("{public_origin}/api/repos/team/repo/issues"))
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(
+            serde_json::json!({
+                "request_id": "00000000-0000-4000-8000-000000000003",
+                "title": "Recovered Cell",
+                "body": "Published by the successor node"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(continued.status(), StatusCode::CREATED);
+    let continued: Value = serde_json::from_slice(&continued.bytes().await.unwrap()).unwrap();
+    assert_eq!(continued["number"], 2);
+    let continued_control = authority.load(target.cell_id()).await.unwrap().unwrap();
+    assert!(
+        continued_control
+            .value()
+            .root
+            .as_ref()
+            .unwrap()
+            .commit_sequence
+            > taken_over.value().root.as_ref().unwrap().commit_sequence
+    );
+
+    public_stop.send(()).unwrap();
+    public_task.await.unwrap();
     ingress_server.shutdown_runtimes().await.unwrap();
-    owner_server.shutdown_runtimes().await.unwrap();
+    assert!(matches!(
+        owner_server.shutdown_runtimes().await,
+        Err(crate::Error::Cell(crab_cell_runtime::Error::Fenced))
+    ));
 }
 
 async fn repository(store: Store, bucket: &str, prefix: String) -> Arc<Repository> {

@@ -68,7 +68,9 @@ also runs the Cell actor through first-owner publication, local database loss,
 second-session exact-root takeover, replay resolution and continued publication.
 The server-level RustFS case additionally sends public repository HTTP through
 an ingress node, private mTLS and the remote Cell owner before verifying the
-published root changed.
+published root changed. It then stops that owner endpoint, withdraws its node
+record, publishes the fenced takeover, deletes its local Cell directory, restores
+the same root on the ingress runtime and continues publication from the successor.
 The server's static repository module now calls the managed runtime indirectly
 through typed `CellClient` commands and queries. Its schema owns repository
 identity, issue/comment/label/status/check/settings/Pull/Release sequences and rows; integration tests prove replay,

@@ -147,8 +147,11 @@ RustFS image.
 
 The same CI job also runs `crab-http-server` through public HTTP, private mTLS
 forwarding to a remote owner, typed repository commands and LTX publication on
-that RustFS origin. This combines the product network and storage boundaries;
-it does not replace the three-Pod kill and partition matrix below.
+that RustFS origin. It then stops the owner endpoint, withdraws its advertisement,
+publishes the authoritative fenced takeover, deletes the old local Cell directory,
+restores the exact root on the ingress runtime and publishes the next command.
+This combines the product network, source-loss and storage boundaries; it does
+not replace the three-Pod kill and partition matrix below.
 
 ## Prove each primitive through recovery
 
