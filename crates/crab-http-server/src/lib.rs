@@ -16,6 +16,7 @@ mod git_objects;
 mod issues;
 mod labels;
 mod lfs;
+mod local_disk;
 mod maintenance;
 mod metrics;
 mod peer;
@@ -124,6 +125,11 @@ pub enum Error {
     },
     #[error("object storage preflight failed: {0}")]
     StorageProbe(&'static str),
+    #[error("local staging setup failed")]
+    LocalStaging {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     #[error("repository initialization failed")]
     Remote(#[from] crab_remote_git::Error),
     #[error("repository maintenance failed")]

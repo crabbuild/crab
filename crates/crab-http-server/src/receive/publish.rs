@@ -71,7 +71,7 @@ struct ReceiveInput {
 }
 
 struct PublishAttempt<'a> {
-    directory: tempfile::TempDir,
+    directory: crate::local_disk::StagingDirectory,
     holders: &'a BTreeMap<String, String>,
     plan_id: Option<String>,
 }
@@ -80,7 +80,7 @@ pub(super) async fn run(
     server: &Server,
     principal: &Principal,
     key: &(String, String),
-    directory: tempfile::TempDir,
+    directory: crate::local_disk::StagingDirectory,
     body_digest: [u8; 32],
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>> {
@@ -123,7 +123,7 @@ pub(crate) async fn publish_existing_objects(
     publication: Publication,
     cancel: &CancellationToken,
 ) -> Result<()> {
-    let directory = tokio::task::spawn_blocking(tempfile::tempdir).await??;
+    let directory = server.local_staging.create(1, cancel).await?;
     let request = receive_wire::ReceiveRequest {
         updates: vec![update],
         report_status: false,
@@ -258,7 +258,7 @@ pub(super) async fn publish_pack(
     server: &Server,
     principal: &Principal,
     key: &(String, String),
-    directory: tempfile::TempDir,
+    directory: crate::local_disk::StagingDirectory,
     pack: BufReader<std::fs::File>,
     update: crab_git::receive_plan::RefUpdate,
     publication: PackPublication,
@@ -294,7 +294,7 @@ async fn run_request(
     server: &Server,
     principal: &Principal,
     key: &(String, String),
-    directory: tempfile::TempDir,
+    directory: crate::local_disk::StagingDirectory,
     request: receive_wire::ReceiveRequest,
     input: ReceiveInput,
     cancel: &CancellationToken,
@@ -338,7 +338,7 @@ async fn publish(
     entry: &Repository,
     request: &receive_wire::ReceiveRequest,
     input: ReceiveInput,
-    directory: tempfile::TempDir,
+    directory: crate::local_disk::StagingDirectory,
     holders: &BTreeMap<String, String>,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>> {

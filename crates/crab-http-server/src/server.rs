@@ -62,6 +62,8 @@ pub(crate) struct CellRuntimeBudget {
     max_active_cells: usize,
     replica_jobs: usize,
     scratch_mebibytes: usize,
+    staging_mebibytes: usize,
+    disk_reserve_bytes: u64,
 }
 
 impl CellRuntimeBudget {
@@ -122,11 +124,22 @@ impl CellRuntimeBudget {
                 "Cell runtime has no temporary scratch-disk capacity",
             ));
         }
+        let staging_mebibytes = usize::try_from(usable_disk.saturating_mul(2) / 3 / MIB)
+            .unwrap_or(usize::MAX)
+            .min(u32::MAX as usize)
+            .min(tokio::sync::Semaphore::MAX_PERMITS);
+        if staging_mebibytes == 0 {
+            return Err(crate::Error::Config(
+                "Cell runtime has no local staging-disk capacity",
+            ));
+        }
         Ok(Self {
             node_retained_bytes: mailbox,
             max_active_cells,
             replica_jobs,
             scratch_mebibytes,
+            staging_mebibytes,
+            disk_reserve_bytes: disk_reserve,
         })
     }
 
@@ -484,6 +497,7 @@ pub(crate) struct Server {
     pub cursor_key: [u8; 32],
     pub admission: Semaphore,
     pub transfer_admission: TransferAdmission,
+    pub(crate) local_staging: crate::local_disk::LocalStaging,
     pub app_admission: Semaphore,
     maintenance_admission: Arc<Semaphore>,
     pub cancellation: CancellationToken,
@@ -608,6 +622,14 @@ pub async fn serve(config: Config) -> Result<()> {
     )?;
     let session_dir = node_publisher.session_dir();
     let cell_budget = CellRuntimeBudget::from_resources(node_publisher.local_resources()?)?;
+    let local_staging = crate::local_disk::LocalStaging::new(
+        session_dir.join("transfers"),
+        cell_budget.staging_mebibytes,
+        cell_budget.disk_reserve_bytes,
+    )
+    .map_err(|source| crate::Error::LocalStaging {
+        source: Box::new(source),
+    })?;
     // A pod must prove the complete storage contract before it owns any socket;
     // otherwise incomplete cloud permissions can look partially started.
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
@@ -686,6 +708,7 @@ pub async fn serve(config: Config) -> Result<()> {
             .unwrap_or_else(rand::random),
         admission: Semaphore::new(READ_ADMISSION_CAPACITY),
         transfer_admission,
+        local_staging,
         app_admission: Semaphore::new(APP_ADMISSION_CAPACITY),
         maintenance_admission: Arc::new(Semaphore::new(MAINTENANCE_ADMISSION_CAPACITY)),
         auth,
@@ -1370,6 +1393,8 @@ mod tests {
                 max_active_cells: 1_125,
                 replica_jobs: 6,
                 scratch_mebibytes: 6_826,
+                staging_mebibytes: 13_653,
+                disk_reserve_bytes: 10 * GIB,
             }
         );
     }
@@ -1421,6 +1446,8 @@ mod tests {
         assert_eq!(budget.max_active_cells, 2_457);
         assert_eq!(budget.replica_jobs, 6);
         assert_eq!(budget.scratch_mebibytes, 6_826);
+        assert_eq!(budget.staging_mebibytes, 13_653);
+        assert_eq!(budget.disk_reserve_bytes, 10 * GIB);
     }
 
     #[test]
@@ -1548,6 +1575,7 @@ mod tests {
                 "test/.crab/http-server/v1/admission".into(),
                 1,
             ),
+            local_staging: crate::local_disk::LocalStaging::for_test(),
             app_admission: Semaphore::new(1),
             maintenance_admission: Arc::new(Semaphore::new(1)),
             cancellation: CancellationToken::new(),

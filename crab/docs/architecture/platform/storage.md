@@ -266,6 +266,10 @@ The Host implements the full-job reservation with shared one-MiB permits.
 Cell compaction adds the exact source-index byte total to the two-image estimate.
 The server sizes this pool to one third of usable startup disk and fails an
 individually oversized request before immutable body downloads.
+The other two thirds bound HTTP Git, LFS and Release upload staging in one-MiB
+units. Those files live below the current Cell session on the same configured
+volume; each reservation also rechecks actual free space plus the node reserve
+before the request body is consumed.
 
 Exact Cell-root restore now holds the Host recovery permit, fetches authenticated
 adjacent-frame runs capped at 1 MiB, writes them sequentially through the Host

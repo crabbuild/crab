@@ -68,6 +68,7 @@ async fn fixture_without_cells() -> Arc<Server> {
             "test/.crab/http-server/v1/admission".into(),
             4,
         ),
+        local_staging: crate::local_disk::LocalStaging::for_test(),
         app_admission: Semaphore::new(8),
         maintenance_admission: Arc::new(Semaphore::new(2)),
         cancellation: CancellationToken::new(),

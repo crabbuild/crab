@@ -64,13 +64,14 @@ async fn disconnected_receive_drains_intake_and_returns_transfer_capacity() {
     let app = router(Arc::clone(&server));
     let client = tokio::spawn(app.oneshot(request));
     tokio::time::timeout(Duration::from_secs(2), async {
-        while server.receives.is_empty() {
+        while server.receives.is_empty() || server.local_staging.available_mebibytes() == 8 * 1024 {
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
     assert_eq!(server.transfer_admission.available_permits(), 3);
+    assert_eq!(server.local_staging.available_mebibytes(), 6 * 1024);
     client.abort();
     let _ = client.await;
     server.receives.close();
@@ -78,6 +79,7 @@ async fn disconnected_receive_drains_intake_and_returns_transfer_capacity() {
         .await
         .unwrap();
     assert_eq!(server.transfer_admission.available_permits(), 4);
+    assert_eq!(server.local_staging.available_mebibytes(), 8 * 1024);
     let repo = server
         .repositories
         .get(&("team".into(), "repo".into()))

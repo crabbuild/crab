@@ -552,8 +552,11 @@ descriptor budgets, derives shared 64 MiB dirty-job slots from memory and CPU,
 derives a one-MiB-granularity full-job scratch pool from one third of usable
 startup disk, and enforces the effective-memory and free-volume startup floors
 above. Restore and compaction reserve their complete estimate before immutable
-body reads. Active WAL/pending-cut and Git/LFS byte admission, periodic free-space
-remeasurement and measured capacity qualification remain. The configured
+body reads. Git receive, LFS and Release uploads reserve their declared or
+maximum body size from the remaining two-thirds pool, use the Cell data volume,
+and remeasure actual free space before creating staging. Active WAL/pending-cut
+byte admission, periodic full-job remeasurement and measured capacity
+qualification remain. The configured
 Cell directory now owns per-process session paths and per-Cell activation files;
 capacity checks use that same volume. Cross-session activity takeover, local-volume
 loss, exact-root restore, expired-lease reclaim and attempt-two completion are

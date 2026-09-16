@@ -102,6 +102,18 @@ impl From<crate::transfer_admission::Error> for ReceiveError {
     }
 }
 
+impl From<crate::local_disk::Error> for ReceiveError {
+    fn from(error: crate::local_disk::Error) -> Self {
+        match error {
+            crate::local_disk::Error::TooLarge => Self::TooLarge,
+            crate::local_disk::Error::Busy => Self::Busy,
+            crate::local_disk::Error::Cancelled => Self::Cancelled,
+            crate::local_disk::Error::Io(error) => Self::Io(error),
+            crate::local_disk::Error::Worker(error) => Self::Worker(error),
+        }
+    }
+}
+
 impl From<crab_remote::publication::Error> for ReceiveError {
     fn from(error: crab_remote::publication::Error) -> Self {
         match error {
@@ -167,7 +179,10 @@ async fn publish_generated_objects(
     server.receives.spawn(async move {
         let _permit = permit;
         let work = async {
-            let directory = tokio::task::spawn_blocking(tempfile::tempdir).await??;
+            let directory = worker_server
+                .local_staging
+                .create(MAX_BODY, &worker_cancel)
+                .await?;
             let path = directory.path().join("generated.pack");
             let pack_path = path.clone();
             let packing_cancel = worker_cancel.clone();
@@ -353,7 +368,10 @@ pub(crate) async fn receive(
     server.receives.spawn(async move {
         let _permit = permit;
         let work = async {
-            let directory = tokio::task::spawn_blocking(tempfile::tempdir).await??;
+            let directory = worker_server
+                .local_staging
+                .create(MAX_BODY, &worker_cancel)
+                .await?;
             let path = directory.path().join("receive");
             let mut file = tokio::fs::File::create(&path).await?;
             let mut stream = request.into_body().into_data_stream();

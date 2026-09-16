@@ -96,6 +96,18 @@ impl From<crate::transfer_admission::Error> for Error {
     }
 }
 
+impl From<crate::local_disk::Error> for Error {
+    fn from(error: crate::local_disk::Error) -> Self {
+        match error {
+            crate::local_disk::Error::TooLarge => Self::TooLarge,
+            crate::local_disk::Error::Busy => Self::Busy,
+            crate::local_disk::Error::Cancelled => Self::Cancelled,
+            crate::local_disk::Error::Io(error) => Self::Io(error),
+            crate::local_disk::Error::Worker(error) => Self::Worker(error),
+        }
+    }
+}
+
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         if let Self::RangeNotSatisfiable { size } = &self {
@@ -513,7 +525,10 @@ pub(crate) async fn upload(
     server.receives.spawn(async move {
         let _permit = permit;
         let work = async {
-            let directory = tokio::task::spawn_blocking(tempfile::tempdir).await??;
+            let directory = worker_server
+                .local_staging
+                .create(pointer.size, &cancel)
+                .await?;
             let path = directory.path().join("lfs");
             let mut file = tokio::fs::File::create(&path).await?;
             let mut stream = request.into_body().into_data_stream();

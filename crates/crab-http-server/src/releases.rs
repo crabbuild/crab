@@ -39,6 +39,16 @@ fn transfer_error(error: crate::transfer_admission::Error) -> Error {
     }
 }
 
+fn staging_error(error: crate::local_disk::Error) -> Error {
+    match error {
+        crate::local_disk::Error::TooLarge => Error::ReleaseAssetTooLarge,
+        crate::local_disk::Error::Busy => Error::ReleaseBusy,
+        crate::local_disk::Error::Cancelled => Error::ReleaseAssetCancelled,
+        crate::local_disk::Error::Io(error) => Error::ReleaseAssetIo(error),
+        crate::local_disk::Error::Worker(error) => Error::ReleaseAssetWorker(error),
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Release {
@@ -489,12 +499,12 @@ async fn upload_asset(
             "Release asset uploads require identity content encoding",
         ));
     }
-    if headers
+    let staging_bytes = headers
         .get(header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
-        .is_some_and(|size| size > crate::server::MAX_DEPENDENCY_FILE_BYTES)
-    {
+        .unwrap_or(crate::server::MAX_DEPENDENCY_FILE_BYTES);
+    if staging_bytes > crate::server::MAX_DEPENDENCY_FILE_BYTES {
         return Err(Error::ReleaseAssetTooLarge);
     }
     let reservation = storage::AssetReservation {
@@ -523,10 +533,11 @@ async fn upload_asset(
     server.receives.spawn(async move {
         let _permit = permit;
         let work = async {
-            let directory = tokio::task::spawn_blocking(tempfile::tempdir)
+            let directory = worker_server
+                .local_staging
+                .create(staging_bytes, &cancel)
                 .await
-                .map_err(Error::ReleaseAssetWorker)?
-                .map_err(Error::ReleaseAssetIo)?;
+                .map_err(staging_error)?;
             let path = directory.path().join("release-asset");
             let mut file = tokio::fs::File::create(&path)
                 .await

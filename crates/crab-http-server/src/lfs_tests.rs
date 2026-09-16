@@ -697,12 +697,13 @@ async fn lfs_rejects_invalid_batches_and_releases_disconnected_uploads() {
         .await
     });
     tokio::time::timeout(Duration::from_secs(2), async {
-        while server.receives.is_empty() {
+        while server.receives.is_empty() || server.local_staging.available_mebibytes() == 8 * 1024 {
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
+    assert_eq!(server.local_staging.available_mebibytes(), 8 * 1024 - 1);
     client.abort();
     let _ = client.await;
     server.receives.close();
@@ -710,6 +711,7 @@ async fn lfs_rejects_invalid_batches_and_releases_disconnected_uploads() {
         .await
         .unwrap();
     assert_eq!(server.transfer_admission.available_permits(), 4);
+    assert_eq!(server.local_staging.available_mebibytes(), 8 * 1024);
     server.shutdown_runtimes().await.unwrap();
 }
 
