@@ -589,13 +589,17 @@ pub async fn verify_reachable_dependencies(
         })?;
         Ok(scan)
     });
+    tokio::pin!(scan);
     let scan = tokio::select! {
         biased;
         () = cancellation.cancelled() => {
             scan_cancel.cancel();
+            // The worker borrows the temporary Git database by path. Drain it
+            // before that database and any caller-owned admission are released.
+            let _ = scan.await;
             return Err(ReadError::Cancelled);
         }
-        result = scan => result
+        result = &mut scan => result
             .map_err(|error| ReadError::Internal(format!("Git dependency scan failed: {error}")))??,
     };
 

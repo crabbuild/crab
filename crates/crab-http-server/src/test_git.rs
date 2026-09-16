@@ -50,6 +50,39 @@ pub(crate) fn history_with_blob(body: &[u8]) -> GitHistory {
     finish(workspace, git_dir, vec![commit])
 }
 
+pub(crate) async fn publish_blob(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    body: &[u8],
+) {
+    let base = crab_write::capsule_protocol::initialize(
+        layout,
+        blake3::hash(b"team-project").to_hex().as_ref(),
+        "refs/heads/main",
+    )
+    .await
+    .unwrap();
+    let history = history_with_blob(body);
+    let transaction = crab_metadata::capsule_protocol::CapsuleTransaction::new(
+        base.record().digest(),
+        vec![crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+            "refs/heads/main",
+            None,
+            Some(history.oids[0].clone()),
+            None,
+        )],
+    )
+    .unwrap();
+    let capsule = crab_metadata::capsule_protocol::Capsule::build(
+        &transaction,
+        vec![history.pack],
+        Vec::new(),
+    )
+    .unwrap();
+    crab_write::capsule_protocol::publish(layout, base, &transaction, &capsule)
+        .await
+        .unwrap();
+}
+
 fn initialize(git_dir: &Path) {
     assert!(
         Command::new("git")

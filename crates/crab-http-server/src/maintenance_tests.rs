@@ -51,6 +51,7 @@ async fn fixture_without_cells() -> Arc<Server> {
                 layout,
                 pinned: Mutex::new(None),
                 maintenance: Mutex::new(None),
+                integrity: crate::integrity::Status::default(),
             },
         )])
         .into(),
@@ -334,6 +335,69 @@ async fn readiness_requires_the_first_cell_scheduler_cycle() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    close(&server).await;
+}
+
+#[tokio::test]
+async fn integrity_proof_is_reported_separately_from_readiness() {
+    let server = fixture_without_cells().await;
+    let management = management_router(Arc::clone(&server));
+    let pending = management
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/integrityz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pending.status(), StatusCode::ACCEPTED);
+    let repository = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
+    crate::integrity::scrub(
+        &repository,
+        Arc::clone(&server.maintenance_admission),
+        &server.cancellation,
+    )
+    .await
+    .unwrap();
+
+    let complete = management
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/integrityz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(complete.status(), StatusCode::OK);
+    let body = http_body_util::BodyExt::collect(complete.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let report: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(report["status"], "complete");
+    assert_eq!(report["repositories"][0]["proof"]["state"], "complete");
+    assert!(
+        report["repositories"][0]["proof"]["last_complete"]["state_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.len() == 64)
+    );
+    let readiness = management
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(readiness.status(), StatusCode::SERVICE_UNAVAILABLE);
     close(&server).await;
 }
 

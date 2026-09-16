@@ -13,6 +13,7 @@ mod config;
 mod contents;
 mod git;
 mod git_objects;
+mod integrity;
 mod issues;
 mod labels;
 mod lfs;

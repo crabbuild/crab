@@ -411,36 +411,6 @@ mod tests {
         CatalogStore::new(StorageRoot::memory(store, "repositories"))
     }
 
-    async fn publish_blob(layout: &crab_storage::StoreLayout<crab_storage::Store>, body: &[u8]) {
-        let base = crab_write::capsule_protocol::initialize(
-            layout,
-            blake3::hash(b"team-project").to_hex().as_ref(),
-            "refs/heads/main",
-        )
-        .await
-        .unwrap();
-        let history = crate::test_git::history_with_blob(body);
-        let transaction = crab_metadata::capsule_protocol::CapsuleTransaction::new(
-            base.record().digest(),
-            vec![crab_metadata::capsule_protocol::CapsuleRefEdit::new(
-                "refs/heads/main",
-                None,
-                Some(history.oids[0].clone()),
-                None,
-            )],
-        )
-        .unwrap();
-        let capsule = crab_metadata::capsule_protocol::Capsule::build(
-            &transaction,
-            vec![history.pack],
-            Vec::new(),
-        )
-        .unwrap();
-        crab_write::capsule_protocol::publish(layout, base, &transaction, &capsule)
-            .await
-            .unwrap();
-    }
-
     #[tokio::test]
     async fn create_initializes_and_publishes_one_repository() {
         let catalog = catalog();
@@ -564,7 +534,7 @@ mod tests {
             size: 7,
             extensions: Vec::new(),
         };
-        publish_blob(&layout, &pointer.serialize()).await;
+        crate::test_git::publish_blob(&layout, &pointer.serialize()).await;
 
         let result = catalog
             .adopt_repository(
@@ -595,7 +565,7 @@ mod tests {
             "version https://crab.build/spec/v1\nfile-hash {}\nsize 7\n",
             "31".repeat(32)
         );
-        publish_blob(&layout, pointer.as_bytes()).await;
+        crate::test_git::publish_blob(&layout, pointer.as_bytes()).await;
 
         let result = catalog
             .adopt_repository(
@@ -630,7 +600,7 @@ mod tests {
             size: content.len() as u64,
             extensions: Vec::new(),
         };
-        publish_blob(&layout, &pointer.serialize()).await;
+        crate::test_git::publish_blob(&layout, &pointer.serialize()).await;
         crab_lfs::LfsObjectStore::new(layout.store().clone(), layout.repo_prefix())
             .put(&oid, content)
             .await

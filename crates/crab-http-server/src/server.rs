@@ -440,6 +440,7 @@ pub(crate) struct Repository {
     pub identity: RepositoryIdentity,
     pinned: Mutex<Option<(Instant, RemoteGitRepository)>>,
     maintenance: Mutex<Option<tokio::task::JoinHandle<crate::maintenance::Result<()>>>>,
+    pub(crate) integrity: crate::integrity::Status,
 }
 
 pub(crate) struct RepositorySet {
@@ -679,7 +680,7 @@ pub(crate) struct Server {
     pub transfer_admission: TransferAdmission,
     pub(crate) local_staging: crate::local_disk::LocalStaging,
     pub app_admission: Semaphore,
-    maintenance_admission: Arc<Semaphore>,
+    pub(crate) maintenance_admission: Arc<Semaphore>,
     pub cancellation: CancellationToken,
     pub receives: tokio_util::task::TaskTracker,
     pub auth: Option<Authentication>,
@@ -1088,6 +1089,8 @@ pub async fn serve(config: Config) -> Result<()> {
     server.node_healthy.store(true, Ordering::Release);
     let app = router(Arc::clone(&server));
     tracing::info!(address = %listener.local_addr()?, "public listener started");
+    let integrity_server = Arc::clone(&server);
+    let integrity = tokio::spawn(async move { crate::integrity::run(integrity_server).await });
     let public_shutdown = cancellation.clone();
     let public = async move {
         axum::serve(listener, app)
@@ -1142,6 +1145,7 @@ pub async fn serve(config: Config) -> Result<()> {
             Ok(result) => result,
             Err(error) => Err(error.into()),
         };
+        let integrity = integrity.await.map_err(crate::Error::from);
         let release_watch = match release_watch.await {
             Ok(result) => result,
             Err(error) => Err(error.into()),
@@ -1176,6 +1180,7 @@ pub async fn serve(config: Config) -> Result<()> {
             .and(heartbeat)
             .and(lease_watch)
             .and(scheduler)
+            .and(integrity)
             .and(release_watch)
             .and(durability_recruiter)
             .and(durability_rotator)
@@ -1394,6 +1399,7 @@ async fn materialize_catalog(
             store,
             pinned: Mutex::new(None),
             maintenance: Mutex::new(None),
+            integrity: crate::integrity::Status::default(),
         };
         repositories.insert(
             (entry.owner.clone(), entry.name.clone()),
@@ -1597,6 +1603,7 @@ fn management_router(server: Arc<Server>) -> Router {
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/readyz", get(readiness))
         .route("/capacity", get(render_capacity))
+        .route("/integrityz", get(integrity_status))
         .route("/metrics", get(render_metrics))
         .merge(application)
         .merge(recovery)
@@ -1618,6 +1625,38 @@ async fn render_capacity(State(server): State<Arc<Server>>) -> Response {
     (
         [(axum::http::header::CACHE_CONTROL, "no-store")],
         Json(server.cell_capacity.clone()),
+    )
+        .into_response()
+}
+
+async fn integrity_status(State(server): State<Arc<Server>>) -> Response {
+    let mut failed = false;
+    let mut complete = true;
+    let repositories = server
+        .repositories
+        .values()
+        .into_iter()
+        .map(|repository| {
+            let snapshot = repository.integrity.snapshot();
+            failed |= snapshot.state == crate::integrity::State::Failed;
+            complete &= snapshot.state == crate::integrity::State::Complete;
+            json!({
+                "owner": repository.config.owner,
+                "name": repository.config.name,
+                "proof": snapshot,
+            })
+        })
+        .collect::<Vec<_>>();
+    let (status, state) = if failed {
+        (StatusCode::SERVICE_UNAVAILABLE, "failed")
+    } else if complete {
+        (StatusCode::OK, "complete")
+    } else {
+        (StatusCode::ACCEPTED, "pending")
+    };
+    (
+        status,
+        Json(json!({"status": state, "repositories": repositories})),
     )
         .into_response()
 }
@@ -2317,7 +2356,7 @@ mod tests {
                 assert_eq!(value["error"]["code"], "repository_not_found");
             }
         }
-        for path in ["/healthz", "/readyz"] {
+        for path in ["/healthz", "/readyz", "/integrityz"] {
             let response = app
                 .clone()
                 .oneshot(
@@ -2335,6 +2374,7 @@ mod tests {
         for (path, expected) in [
             ("/healthz", StatusCode::OK),
             ("/readyz", StatusCode::SERVICE_UNAVAILABLE),
+            ("/integrityz", StatusCode::OK),
         ] {
             let response = management
                 .clone()
