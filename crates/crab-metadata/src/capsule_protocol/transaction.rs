@@ -81,6 +81,29 @@ impl CapsuleTransaction {
         Self::new_inner(base_root_digest, publication_id, None, edits)
     }
 
+    /// Create a deterministic source transaction from one authorized view transaction.
+    pub fn for_protected_source(
+        base_root_digest: &str,
+        candidate_transaction_id: &str,
+        edits: Vec<CapsuleRefEdit>,
+    ) -> Result<Self> {
+        validate_content_hash(
+            candidate_transaction_id,
+            "candidate transaction id",
+            "capsule-protocol transaction",
+        )?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"crab protected source publication v1\0");
+        hasher.update(base_root_digest.as_bytes());
+        hasher.update(candidate_transaction_id.as_bytes());
+        Self::new_inner(
+            base_root_digest,
+            hasher.finalize().to_hex().to_string(),
+            None,
+            edits,
+        )
+    }
+
     /// Create a transaction whose identity is bound to one reviewed mirror plan.
     pub fn for_plan(
         base_root_digest: &str,
@@ -310,5 +333,30 @@ mod tests {
 
         assert_eq!(first.publication_id(), plan_id);
         assert_eq!(first.id().unwrap(), second.id().unwrap());
+    }
+
+    #[test]
+    fn protected_source_retries_bind_candidate_and_source_base() {
+        let candidate = "3".repeat(64);
+        let edit = CapsuleRefEdit::new("refs/heads/main", None, Some("2".repeat(40)), None);
+        let first = CapsuleTransaction::for_protected_source(
+            &"1".repeat(64),
+            &candidate,
+            vec![edit.clone()],
+        )
+        .unwrap();
+        let second = CapsuleTransaction::for_protected_source(
+            &"1".repeat(64),
+            &candidate,
+            vec![edit.clone()],
+        )
+        .unwrap();
+        let different_base =
+            CapsuleTransaction::for_protected_source(&"4".repeat(64), &candidate, vec![edit])
+                .unwrap();
+
+        assert_eq!(first.id().unwrap(), second.id().unwrap());
+        assert_ne!(first.id().unwrap(), different_base.id().unwrap());
+        assert!(first.plan_id().is_none());
     }
 }

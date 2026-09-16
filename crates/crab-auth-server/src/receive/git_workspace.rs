@@ -9,7 +9,10 @@ use std::process::{Command, Stdio};
 use crab_auth::{PushRefUpdate, normalize_optional_oid};
 use crab_git::pack::canonical_pack_id_from_object_filename;
 use crab_metadata::{
-    capsule_protocol::Capsule,
+    capsule_protocol::{
+        Capsule, CapsuleGitPack, CapsuleRefEdit, CapsuleTransaction, CapsuleVisibilityDelta,
+    },
+    git_visibility::GitVisibilityEdit,
     manifest_store,
     manifests::{Manifest, PackManifestEntry, validate_pack_manifest_entry},
     pack_metadata::PackMetadata,
@@ -143,6 +146,132 @@ pub(super) async fn verify_capsule_git_candidate(
     }
     let pointers = scan_reachable_pointers_from_refs(&git_dir, &refs)?;
     Ok((paths, pointers))
+}
+
+pub(super) struct MaterializedCapsuleSourcePush {
+    pub transaction: CapsuleTransaction,
+    pub git_packs: Vec<CapsuleGitPack>,
+    pub visibility: CapsuleVisibilityDelta,
+    pub pointers: ReachablePointerScan,
+    pub changed_paths: Vec<String>,
+}
+
+pub(super) async fn materialize_capsule_source_push(
+    source_router: &StoreLayout<Store>,
+    source_view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    filtered_view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    candidate: &Capsule,
+    view_updates: &[PushRefUpdate],
+    source_updates: &[PushRefUpdate],
+    candidate_transaction_id: &str,
+    max_input_bytes: u64,
+) -> Result<MaterializedCapsuleSourcePush> {
+    if view_updates.len() != source_updates.len() {
+        return Err(invalid("source ref updates do not match view ref updates"));
+    }
+    let temp = tempfile::tempdir()?;
+    let git_dir = temp.path().join("source.git");
+    run_git(["init", "--bare", path_str(&git_dir)?], None)?;
+    crab_read::capsule_protocol::install_git_packs_with_candidates(
+        source_view,
+        &[],
+        &git_dir,
+        max_input_bytes,
+    )
+    .await?;
+    crab_read::capsule_protocol::install_git_packs_with_candidates(
+        filtered_view,
+        std::slice::from_ref(candidate),
+        &git_dir,
+        max_input_bytes,
+    )
+    .await?;
+
+    let workspace = GitReceiveWorkspace::new(
+        source_router.store(),
+        source_router,
+        source_router.repo_prefix(),
+    );
+    let changed_paths =
+        workspace.compute_changed_paths_in(&git_dir, view_updates, filtered_view.refs(), true)?;
+    let mut final_updates = Vec::with_capacity(source_updates.len());
+    let mut synthesized_tips = Vec::with_capacity(source_updates.len());
+    for (view_update, source_update) in view_updates.iter().zip(source_updates) {
+        let source_new = workspace.synthesize_source_commit(
+            &git_dir,
+            temp.path(),
+            source_update.old_oid.as_deref(),
+            view_update.old_oid.as_deref(),
+            &view_update.new_oid,
+        )?;
+        synthesized_tips.push((source_new.clone(), source_update.old_oid.clone()));
+        final_updates.push(PushRefUpdate {
+            ref_name: source_update.ref_name.clone(),
+            old_oid: source_update.old_oid.clone(),
+            new_oid: source_new,
+        });
+    }
+    validate_git_publication(&git_dir, &final_updates)?;
+    let git_pack = build_synthesized_capsule_pack(&git_dir, temp.path(), &synthesized_tips)?;
+
+    let mut final_refs = source_view.refs().clone();
+    for update in &final_updates {
+        final_refs.insert(update.ref_name.clone(), update.new_oid.clone());
+    }
+    let ref_pairs = final_refs.into_iter().collect::<Vec<_>>();
+    let peeled_refs = derive_peeled_refs(&git_dir, &ref_pairs)?;
+    let closures = crab_git::walk_reachable_by_ref_bounded(
+        &git_dir,
+        &ref_pairs,
+        &peeled_refs,
+        usize::try_from(crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS)
+            .map_err(|_| invalid("Git visibility object limit does not fit usize"))?,
+    )
+    .map_err(|source| AuthServerError::GitVisibilityWalk { source })?;
+    let visibility = CapsuleVisibilityDelta::new(
+        final_updates
+            .iter()
+            .map(|update| {
+                let reachable = closures.get(&update.ref_name).ok_or_else(|| {
+                    invalid(format!(
+                        "source visibility omitted updated ref {}",
+                        update.ref_name
+                    ))
+                })?;
+                Ok((
+                    update.ref_name.clone(),
+                    GitVisibilityEdit::from_replacement_objects(
+                        update.old_oid.clone(),
+                        update.new_oid.clone(),
+                        reachable_object_ids(reachable),
+                    ),
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?,
+    )?;
+    let transaction = CapsuleTransaction::for_protected_source(
+        source_view.root().digest(),
+        candidate_transaction_id,
+        final_updates
+            .iter()
+            .map(|update| {
+                CapsuleRefEdit::new(
+                    update.ref_name.clone(),
+                    update.old_oid.clone(),
+                    Some(update.new_oid.clone()),
+                    peeled_refs.get(&update.ref_name).cloned(),
+                )
+            })
+            .collect(),
+    )?;
+    let pointers = scan_reachable_pointers_from_refs(&git_dir, &ref_pairs)?;
+    Ok(MaterializedCapsuleSourcePush {
+        transaction,
+        git_packs: vec![git_pack],
+        visibility,
+        pointers,
+        changed_paths,
+    })
 }
 
 struct CommitIdentity {
@@ -1030,6 +1159,79 @@ fn reachable_object_ids(reachable: &crab_git::walk::ReachableSet) -> Vec<String>
     objects.sort_unstable();
     objects.dedup();
     objects
+}
+
+fn build_synthesized_capsule_pack(
+    git_dir: &Path,
+    temp_root: &Path,
+    tips: &[(String, Option<String>)],
+) -> Result<CapsuleGitPack> {
+    let mut input = String::new();
+    for (new_oid, old_oid) in tips {
+        input.push_str(new_oid);
+        input.push('\n');
+        if let Some(old_oid) = old_oid {
+            input.push('^');
+            input.push_str(old_oid);
+            input.push('\n');
+        }
+    }
+    let pack_bytes = git_capture_bytes_with_input_owned(
+        vec![
+            "--git-dir".to_owned(),
+            path_str(git_dir)?.to_owned(),
+            "pack-objects".to_owned(),
+            "--stdout".to_owned(),
+            "--revs".to_owned(),
+        ],
+        input.as_bytes(),
+    )?;
+    let pack_id = blake3_hex(&pack_bytes);
+    let pack_path = temp_root.join(format!("capsule-pack-{pack_id}.pack"));
+    fs::write(&pack_path, &pack_bytes)?;
+    run_git(
+        ["index-pack", "--strict", path_str(&pack_path)?],
+        Some(git_dir),
+    )?;
+    let idx_path = pack_path.with_extension("idx");
+    let rev_path = pack_path.with_extension("rev");
+    crab_git::pack_locator::write_pack_reverse_index(&idx_path, &rev_path)
+        .map_err(crab_git::pack::PackError::from)?;
+    let mut locations = crab_git::pack_locator::PackLocationIter::open(
+        &idx_path,
+        &rev_path,
+        pack_bytes.len() as u64,
+    )
+    .map_err(crab_git::pack::PackError::from)?;
+    let object_count = locations.object_count();
+    let object_ids = locations
+        .by_ref()
+        .map(|location| location.map(|location| location.oid))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(crab_git::pack::PackError::from)?;
+    let kinds =
+        crab_git::object_kinds_from_git_dir(git_dir, &object_ids).map_err(AuthServerError::from)?;
+    let ordered_kinds = object_ids
+        .iter()
+        .map(|oid| {
+            kinds
+                .get(oid)
+                .copied()
+                .ok_or_else(|| invalid("synthesized capsule pack kind metadata omitted an object"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let checksum = locations.pack_checksum();
+    let locator = crab_git::pack_locator::encode_pack_kind_metadata(checksum, &ordered_kinds)
+        .map_err(crab_git::pack::PackError::from)?;
+    CapsuleGitPack::new(
+        bytes::Bytes::from(pack_bytes),
+        bytes::Bytes::from(fs::read(idx_path)?),
+        bytes::Bytes::from(fs::read(rev_path)?),
+        bytes::Bytes::from(locator),
+        checksum.to_string(),
+        object_count,
+    )
+    .map_err(Into::into)
 }
 
 async fn read_manifest(store: &Store, router: &StoreLayout<Store>) -> Result<(Manifest, String)> {

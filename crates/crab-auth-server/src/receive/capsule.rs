@@ -2,24 +2,20 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bytes::Bytes;
 use crab_auth::PushRefUpdate;
 use crab_coordination::write_coordinator::{CommitOutcome, CoordinatedRefUpdate};
-use crab_metadata::capsule_protocol::{Capsule, CapsuleRun, PointerCatalog};
-use crab_storage::content_hash_from_path;
-use crab_xet::hash::{MerkleHash, compute_data_hash};
-use crab_xet::shard::ShardReader;
-use sha2::{Digest, Sha256};
+use crab_metadata::capsule_protocol::{Capsule, CapsuleRun, CapsuleSection, CapsuleSectionKind};
 
-use super::git_workspace::verify_capsule_git_candidate;
+use super::capsule_dependencies::{
+    DependencyCopy, promote_dependency_copies, source_pointer_delta, verify_pointer_dependencies,
+};
+use super::git_workspace::{materialize_capsule_source_push, verify_capsule_git_candidate};
 use super::{
     ActiveActiveReceiveConfig, ProtectedCapsulePushPlan, PushPrepareRecord, ReceiveContext,
     active_active_coordinator_registration, conflict, invalid, promote_staged_writes,
-    read_verified_staged_object, strict_xorb_references_from_shard,
-    validate_protected_capsule_plan_shape, validate_staged_xorb,
+    read_verified_staged_object, validate_protected_capsule_plan_shape,
 };
 use crate::error::Result;
-use crate::git_pointer_scan::ReachablePointerScan;
 
 const MAX_PROTECTED_CAPSULE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -28,6 +24,8 @@ pub(super) struct VerifiedCapsuleCandidate {
     pub changed_paths: Vec<String>,
     pub staged_bytes: u64,
     pub replication_objects: Vec<String>,
+    pub publication: Capsule,
+    dependency_copies: Vec<DependencyCopy>,
 }
 
 pub(super) async fn commit_capsule_candidate(
@@ -38,7 +36,10 @@ pub(super) async fn commit_capsule_candidate(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<Option<CommitOutcome>> {
     let view = open_candidate_view(ctx).await?;
-    if capsule_is_visible(&view, plan) {
+    if plan.ref_updates.iter().all(|update| {
+        view.refs().get(&update.ref_name) == Some(&update.new_oid)
+            && view.visible_ref_transactions().get(&update.ref_name) == Some(&plan.transaction_id)
+    }) {
         let Some(active_active) = active_active else {
             return Ok(None);
         };
@@ -67,20 +68,41 @@ pub(super) async fn commit_capsule_candidate(
         .await
         .map(Some);
     }
-
     let verified = verify_capsule_candidate(ctx, plan).await?;
     if verified.replication_objects != replication_objects {
         return Err(conflict(
             "capsule dependency closure changed after protected verification",
         ));
     }
+    let capsule = verified.publication;
+    let transaction = capsule.transaction()?;
+    if capsule_is_visible(&view, &transaction) {
+        let Some(active_active) = active_active else {
+            return Ok(None);
+        };
+        let run = CapsuleRun::leaf(capsule)?;
+        let descriptor = crab_write::capsule_protocol::coordinated_publication_descriptor(
+            transaction.base_root_digest(),
+            &transaction.id()?,
+            run.hash(),
+            run.bytes().len() as u64,
+        );
+        return commit_active_active_candidate(
+            ctx.store(),
+            ctx.router(),
+            ctx.repo_prefix(),
+            active_active,
+            descriptor,
+            &transaction,
+            replication_objects,
+            None,
+        )
+        .await
+        .map(Some);
+    }
+
     promote_staged_writes(ctx.store(), &plan.staged_objects).await?;
-    let run = read_candidate_run(ctx, plan).await?;
-    let capsule = run
-        .capsules()
-        .first()
-        .cloned()
-        .ok_or_else(|| invalid("protected capsule run is empty"))?;
+    promote_dependency_copies(ctx, &verified.dependency_copies).await?;
     if let Some(delta) = capsule.pointer_catalog_delta()? {
         crab_metadata::ref_registry::union_register_repo_shards(
             ctx.store(),
@@ -89,7 +111,6 @@ pub(super) async fn commit_capsule_candidate(
         )
         .await?;
     }
-    let transaction = capsule.transaction()?;
     let ref_names = transaction
         .edits()
         .iter()
@@ -285,11 +306,14 @@ async fn open_candidate_view(
 
 fn capsule_is_visible(
     view: &crab_read::capsule_protocol::CapsuleRepositoryView,
-    plan: &ProtectedCapsulePushPlan,
+    transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
 ) -> bool {
-    plan.ref_updates.iter().all(|update| {
-        view.refs().get(&update.ref_name) == Some(&update.new_oid)
-            && view.visible_ref_transactions().get(&update.ref_name) == Some(&plan.transaction_id)
+    let Ok(transaction_id) = transaction.id() else {
+        return false;
+    };
+    transaction.edits().iter().all(|edit| {
+        view.refs().get(edit.ref_name()).map(String::as_str) == edit.new_oid()
+            && view.visible_ref_transactions().get(edit.ref_name()) == Some(&transaction_id)
     })
 }
 
@@ -304,11 +328,6 @@ pub(super) async fn verify_capsule_candidate(
             "capsule push-plan does not match the prepared repository protocol",
         ));
     }
-    if prepare.view_scope.is_some() {
-        return Err(invalid(
-            "protocol-v2 protected view synthesis is not implemented",
-        ));
-    }
     if prepare.view_ref_updates != plan.ref_updates {
         return Err(conflict("staged ref updates do not match prepare record"));
     }
@@ -316,11 +335,7 @@ pub(super) async fn verify_capsule_candidate(
         .source_root_digest
         .as_deref()
         .ok_or_else(|| invalid("capsule prepare record is missing its root digest"))?;
-    if prepared_root != plan.base_root_digest {
-        return Err(conflict("capsule base root differs from prepare record"));
-    }
-
-    let view = crab_read::capsule_protocol::open_view(
+    let source_view = crab_read::capsule_protocol::open_view(
         ctx.router(),
         crab_read::capsule_protocol::CapsuleReadLimits {
             max_capsule_bytes: MAX_PROTECTED_CAPSULE_BYTES,
@@ -328,37 +343,120 @@ pub(super) async fn verify_capsule_candidate(
         },
     )
     .await?;
-    if view.root().digest() != plan.base_root_digest {
-        return Err(conflict("capsule root changed since prepare"));
+    if source_view.root().digest() != prepared_root {
+        return Err(conflict("source capsule root changed since prepare"));
     }
-    validate_prepared_ref_heads(&prepare, view.refs())?;
-
     let run = read_candidate_run(ctx, plan).await?;
     if run.level() != 0 || run.capsules().len() != 1 {
         return Err(invalid(
             "protected capsule publication must contain one level-zero capsule",
         ));
     }
-    let capsule = run
+    let candidate = run
         .capsules()
         .first()
         .ok_or_else(|| invalid("protected capsule run is empty"))?;
-    validate_capsule_transaction(plan, capsule)?;
+    validate_capsule_transaction(plan, candidate)?;
 
-    let mut catalog = view.pointer_catalog()?;
-    if let Some(delta) = capsule.pointer_catalog_delta()? {
-        catalog.apply(&delta)?;
+    let (changed_paths, publication, replication_objects, dependency_copies) =
+        match prepare.view_scope.as_ref() {
+            None => {
+                if prepared_root != plan.base_root_digest {
+                    return Err(conflict("capsule base root differs from prepare record"));
+                }
+                let mut catalog = source_view.pointer_catalog()?;
+                if let Some(delta) = candidate.pointer_catalog_delta()? {
+                    catalog.apply(&delta)?;
+                }
+                let (changed_paths, pointers) = verify_capsule_git_candidate(
+                    ctx.store(),
+                    ctx.router(),
+                    &source_view,
+                    candidate,
+                    &plan.ref_updates,
+                    MAX_PROTECTED_CAPSULE_BYTES,
+                )
+                .await?;
+                let (objects, copies) =
+                    verify_pointer_dependencies(ctx, plan, &catalog, &pointers, None).await?;
+                (changed_paths, candidate.clone(), objects, copies)
+            }
+            Some(scope) => {
+                let filtered_router = crab_storage::StoreLayout::with_global_prefix(
+                    ctx.store().clone(),
+                    scope.repo_prefix.clone(),
+                    scope.global_prefix.clone(),
+                );
+                let filtered_view = crab_read::capsule_protocol::open_view(
+                    &filtered_router,
+                    crab_read::capsule_protocol::CapsuleReadLimits {
+                        max_capsule_bytes: MAX_PROTECTED_CAPSULE_BYTES,
+                        max_frontier_bytes: MAX_PROTECTED_CAPSULE_BYTES,
+                    },
+                )
+                .await?;
+                if filtered_view.root().digest() != plan.base_root_digest {
+                    return Err(conflict("filtered capsule root changed since prepare"));
+                }
+                validate_ref_heads(&prepare.view_ref_updates, filtered_view.refs())?;
+                let candidate_delta = candidate.pointer_catalog_delta()?.unwrap_or_default();
+                let mut candidate_catalog = filtered_view.pointer_catalog()?;
+                candidate_catalog.apply(&candidate_delta)?;
+                let materialized = materialize_capsule_source_push(
+                    ctx.router(),
+                    &source_view,
+                    &filtered_view,
+                    candidate,
+                    &plan.ref_updates,
+                    &prepare.source_ref_updates,
+                    &plan.transaction_id,
+                    MAX_PROTECTED_CAPSULE_BYTES,
+                )
+                .await?;
+                let source_catalog = source_view.pointer_catalog()?;
+                let delta = source_pointer_delta(
+                    &source_catalog,
+                    &candidate_catalog,
+                    &candidate_delta,
+                    &materialized.pointers,
+                )?;
+                let mut final_catalog = source_catalog;
+                final_catalog.apply(&delta)?;
+                let (objects, copies) = verify_pointer_dependencies(
+                    ctx,
+                    plan,
+                    &final_catalog,
+                    &materialized.pointers,
+                    Some(&filtered_router),
+                )
+                .await?;
+                let mut sections = vec![CapsuleSection::new(
+                    CapsuleSectionKind::VisibilityDelta,
+                    materialized.visibility.encode()?,
+                )];
+                if !delta.is_empty() {
+                    sections.push(CapsuleSection::new(
+                        CapsuleSectionKind::CatalogDelta,
+                        delta.encode_delta()?,
+                    ));
+                }
+                let publication =
+                    Capsule::build(&materialized.transaction, materialized.git_packs, sections)?;
+                (materialized.changed_paths, publication, objects, copies)
+            }
+        };
+    let publication_transaction = publication.transaction()?;
+    if !capsule_is_visible(&source_view, &publication_transaction) {
+        validate_ref_heads(&prepare.source_ref_updates, source_view.refs())?;
     }
-    let (changed_paths, pointers) = verify_capsule_git_candidate(
-        ctx.store(),
-        ctx.router(),
-        &view,
-        capsule,
-        &plan.ref_updates,
-        MAX_PROTECTED_CAPSULE_BYTES,
-    )
-    .await?;
-    let replication_objects = verify_pointer_dependencies(ctx, plan, &catalog, &pointers).await?;
+    let mut replication_objects = replication_objects;
+    replication_objects.remove(ctx.router().capsule_path(&plan.run_hash).as_ref());
+    let publication_run = CapsuleRun::leaf(publication.clone())?;
+    replication_objects.insert(
+        ctx.router()
+            .capsule_path(publication_run.hash())
+            .to_string(),
+    );
     let staged_bytes = plan
         .staged_objects
         .iter()
@@ -369,173 +467,9 @@ pub(super) async fn verify_capsule_candidate(
         changed_paths,
         staged_bytes,
         replication_objects: replication_objects.into_iter().collect(),
+        publication,
+        dependency_copies,
     })
-}
-
-async fn verify_pointer_dependencies(
-    ctx: &ReceiveContext,
-    plan: &ProtectedCapsulePushPlan,
-    catalog: &PointerCatalog,
-    pointers: &ReachablePointerScan,
-) -> Result<BTreeSet<String>> {
-    let mut referenced = BTreeSet::from([ctx
-        .router()
-        .capsule_path(&plan.run_hash)
-        .as_ref()
-        .to_owned()]);
-    let mut verified_shards = BTreeMap::<String, Bytes>::new();
-    let mut verified_xorbs = BTreeSet::new();
-    for pointer in &pointers.crab_pointers {
-        let file_hash = MerkleHash::from(pointer.file_hash).hex();
-        let file = catalog
-            .files()
-            .get(&file_hash)
-            .ok_or_else(|| invalid("Crab pointer is absent from the candidate catalog"))?;
-        if file.size() != pointer.size {
-            return Err(invalid(
-                "Crab pointer size differs from the candidate catalog",
-            ));
-        }
-        let shard_hash = MerkleHash::from_hex(file.shard_hash())
-            .map_err(|error| invalid(format!("candidate shard hash is invalid: {error}")))?;
-        let shard = catalog
-            .shards()
-            .get(file.shard_hash())
-            .ok_or_else(|| invalid("candidate catalog omits a pointer shard"))?;
-        let shard_key = ctx.router().shard_path(&shard_hash).as_ref().to_owned();
-        referenced.insert(shard_key.clone());
-        let first_shard_use = !verified_shards.contains_key(file.shard_hash());
-        let bytes = match verified_shards.get(file.shard_hash()) {
-            Some(bytes) => bytes.clone(),
-            None => {
-                let bytes =
-                    read_candidate_object(ctx, plan, &shard_key, shard.encoded_size()).await?;
-                verified_shards.insert(file.shard_hash().to_owned(), bytes.clone());
-                bytes
-            }
-        };
-        if first_shard_use {
-            if compute_data_hash(&bytes) != shard_hash {
-                return Err(invalid(
-                    "candidate shard body hash differs from its catalog",
-                ));
-            }
-            let xorb_refs = strict_xorb_references_from_shard(&bytes)?;
-            let actual = xorb_refs
-                .keys()
-                .filter_map(|key| content_hash_from_path(key, "xorbs"))
-                .map(str::to_owned)
-                .collect::<BTreeSet<_>>();
-            let expected = shard.xorb_hashes().iter().cloned().collect::<BTreeSet<_>>();
-            if actual != expected {
-                return Err(invalid(
-                    "candidate shard dependency closure differs from its catalog",
-                ));
-            }
-            for (relative_key, chunks) in xorb_refs {
-                let hash = content_hash_from_path(&relative_key, "xorbs")
-                    .ok_or_else(|| invalid("candidate shard contains an invalid xorb key"))?;
-                let xorb = catalog
-                    .xorbs()
-                    .get(hash)
-                    .ok_or_else(|| invalid("candidate catalog omits a shard xorb"))?;
-                if xorb.chunks().len() != chunks.len()
-                    || xorb.chunks().iter().zip(&chunks).any(|(catalog, shard)| {
-                        catalog.hash() != shard.hash.hex()
-                            || catalog.uncompressed_size() != shard.uncompressed_size
-                    })
-                {
-                    return Err(invalid(
-                        "candidate xorb chunk catalog differs from its shard",
-                    ));
-                }
-                let xorb_hash = MerkleHash::from_hex(hash)
-                    .map_err(|error| invalid(format!("candidate xorb hash is invalid: {error}")))?;
-                let key = ctx.router().xorb_path(&xorb_hash).as_ref().to_owned();
-                referenced.insert(key.clone());
-                if verified_xorbs.insert(hash.to_owned()) {
-                    let bytes = read_candidate_object(ctx, plan, &key, xorb.encoded_size()).await?;
-                    if blake3::hash(&bytes).to_hex().as_str() != xorb.body_digest() {
-                        return Err(invalid(
-                            "candidate xorb body digest differs from its catalog",
-                        ));
-                    }
-                    validate_staged_xorb(&key, &bytes, &chunks)?;
-                }
-            }
-        }
-        let reader = ShardReader::from_bytes(bytes, shard_hash);
-        let file_info = reader
-            .get_file_info(&MerkleHash::from(pointer.file_hash))?
-            .ok_or_else(|| invalid("candidate shard does not contain its pointer recipe"))?;
-        if file_info.file_size() != pointer.size {
-            return Err(invalid(
-                "candidate shard recipe size differs from its pointer",
-            ));
-        }
-    }
-    for pointer in &pointers.lfs_pointers {
-        let key = crab_lfs::LfsObjectStore::object_path_for_prefix(
-            ctx.router().repo_prefix(),
-            &pointer.oid,
-        )
-        .to_string();
-        referenced.insert(key.clone());
-        let bytes = read_candidate_object(ctx, plan, &key, pointer.size).await?;
-        if <[u8; 32]>::from(Sha256::digest(&bytes)) != pointer.oid {
-            return Err(invalid(
-                "candidate LFS object digest differs from its pointer",
-            ));
-        }
-    }
-    if let Some(unreferenced) = plan
-        .staged_objects
-        .iter()
-        .find(|object| !referenced.contains(&object.canonical_key))
-    {
-        return Err(invalid(format!(
-            "staged object is not reachable from the candidate capsule: {}",
-            unreferenced.canonical_key
-        )));
-    }
-    Ok(referenced)
-}
-
-async fn read_candidate_object(
-    ctx: &ReceiveContext,
-    plan: &ProtectedCapsulePushPlan,
-    canonical_key: &str,
-    expected_size: u64,
-) -> Result<Bytes> {
-    let bytes = match plan
-        .staged_objects
-        .iter()
-        .find(|object| object.canonical_key == canonical_key)
-    {
-        Some(object) => {
-            if object.size != expected_size {
-                return Err(invalid(
-                    "staged dependency size differs from the candidate catalog",
-                ));
-            }
-            read_verified_staged_object(ctx.store(), object).await?
-        }
-        None => {
-            ctx.store()
-                .get_with_etag_bounded(
-                    &object_store::path::Path::from(canonical_key.to_owned()),
-                    expected_size,
-                )
-                .await?
-                .0
-        }
-    };
-    if bytes.len() as u64 != expected_size {
-        return Err(invalid(
-            "candidate dependency size differs from the candidate catalog",
-        ));
-    }
-    Ok(bytes)
 }
 
 async fn read_candidate_run(
@@ -571,11 +505,8 @@ async fn read_candidate_run(
     Ok(run)
 }
 
-fn validate_prepared_ref_heads(
-    prepare: &PushPrepareRecord,
-    current: &BTreeMap<String, String>,
-) -> Result<()> {
-    for update in &prepare.source_ref_updates {
+fn validate_ref_heads(updates: &[PushRefUpdate], current: &BTreeMap<String, String>) -> Result<()> {
+    for update in updates {
         if current.get(&update.ref_name).map(String::as_str) != update.old_oid.as_deref() {
             return Err(conflict(format!(
                 "source ref changed since prepare: {}",
@@ -637,9 +568,15 @@ fn validate_capsule_transaction(plan: &ProtectedCapsulePushPlan, capsule: &Capsu
 
 #[cfg(test)]
 mod tests {
-    use crab_metadata::capsule_protocol::{CapsuleRefEdit, CapsuleTransaction};
+    use crab_metadata::capsule_protocol::{
+        CapsuleRefEdit, CapsuleTransaction, FileCatalogEntry, PointerCatalog, ShardCatalogEntry,
+        XorbCatalogEntry, XorbChunkEntry,
+    };
+    use crab_types::pointer::Pointer;
+    use crab_xet::hash::MerkleHash;
 
     use super::*;
+    use crate::git_pointer_scan::ReachablePointerScan;
 
     fn oid(ch: char) -> String {
         std::iter::repeat_n(ch, 40).collect()
@@ -681,5 +618,49 @@ mod tests {
         };
 
         validate_capsule_transaction(&plan, &capsule).expect("matching transaction");
+    }
+
+    #[test]
+    fn scoped_source_delta_carries_external_xorb_and_shard_closure() {
+        let file_hash = hash('f');
+        let shard_hash = hash('d');
+        let xorb_hash = hash('e');
+        let mut candidate = PointerCatalog::new();
+        candidate
+            .insert_xorb(
+                xorb_hash.clone(),
+                XorbCatalogEntry::new(12, hash('b'), vec![XorbChunkEntry::new(hash('c'), 7)]),
+            )
+            .unwrap();
+        candidate
+            .insert_shard(
+                shard_hash.clone(),
+                ShardCatalogEntry::new(9, vec![xorb_hash.clone()]),
+            )
+            .unwrap();
+        candidate
+            .insert_file(
+                file_hash.clone(),
+                FileCatalogEntry::new(7, shard_hash.clone()),
+            )
+            .unwrap();
+        let delta = source_pointer_delta(
+            &PointerCatalog::new(),
+            &candidate,
+            &candidate,
+            &ReachablePointerScan {
+                crab_pointers: vec![Pointer {
+                    file_hash: MerkleHash::from_hex(&file_hash).unwrap().into(),
+                    size: 7,
+                    shard_hint: None,
+                }],
+                lfs_pointers: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        assert!(delta.files().contains_key(&file_hash));
+        assert!(delta.shards().contains_key(&shard_hash));
+        assert!(delta.xorbs().contains_key(&xorb_hash));
     }
 }

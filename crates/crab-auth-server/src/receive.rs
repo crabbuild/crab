@@ -48,6 +48,7 @@ pub use crab_remote::protected::{ProtectedCapsulePushPlan, ProtectedPushPlan};
 use crate::error::{AuthServerError, Result};
 
 mod capsule;
+mod capsule_dependencies;
 mod finalize;
 mod git_workspace;
 mod session;
