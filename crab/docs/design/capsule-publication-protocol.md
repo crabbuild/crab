@@ -374,6 +374,25 @@ repository view:
 - current visibility state;
 - the generation and root digest it covers.
 
+The checkpoint object MUST place Git pack payload sections first and one
+contiguous control suffix last. The control suffix contains the pack indexes,
+reverse indexes, object locators, pointer catalog, visibility snapshot, and
+footer. Its root pointer binds the whole-object identity and size plus the
+control-suffix offset, length, and footer BLAKE3. The footer in turn binds every
+section's kind, range, and BLAKE3, as well as hashes for fixed-size pack blocks
+used for selected range verification. This lets a cold reader fetch and
+authenticate the complete control plane in one range request without
+downloading the Git pack payload.
+
+Metadata consumers MUST NOT call the whole-object checkpoint decoder. They
+read the authenticated control suffix, validate every complete metadata
+section, and fetch pack ranges only after authorization selects them. A full
+clone still streams and verifies the complete pack section. A selected range
+is accepted only after its footer-bound block hashes, pack-entry CRC and delta
+evidence, and reconstructed Git object ID all verify. A missing, truncated, or
+corrupt control suffix or range fails closed; silently retrying with an
+unbounded whole-checkpoint GET is forbidden.
+
 The checkpoint locator maps each Git object ID to its checkpoint or retained
 capsule, pack-section base, pack-relative offset, encoded length, CRC, kind,
 and delta-base evidence. Physical reads add the pack-section base to the
@@ -599,7 +618,8 @@ first opens one immutable repository view:
    activation records still named by captured heads;
 3. pin the root generation, compacted refs, visible heads, checkpoint, and
    bounded per-ref frontiers;
-4. load checkpoint metadata and bounded post-checkpoint metadata;
+4. range-load the checkpoint's authenticated control suffix and bounded
+   post-checkpoint metadata without reading checkpoint pack payloads;
 5. validate that the combined locator, catalog, and visibility proof cover the
    exact pinned generation;
 6. advertise refs from the pinned view, applying hidden-ref policy.
@@ -675,18 +695,23 @@ protocol decision is closed.
 
 ### 10.6 Read request budgets
 
-Let `D` be the number of distinct post-checkpoint capsule runs and `R` the
-number of coalesced ranges needed for an incremental selection. Assuming the
-root contains the checkpoint pack descriptor and one GET can return a complete
-run or required contiguous pack range, the theoretical minima are:
+Let `C` be one cold checkpoint-control-suffix range (`0` after an immutable
+cache hit), `D` the number of distinct post-checkpoint capsule runs, and `R`
+the number of coalesced pack ranges needed for an incremental selection.
+Assuming one GET can return a complete run or required contiguous range, the
+theoretical minima for a single-ref view are:
 
 | Operation | Minimum object-store reads | Qualification |
 | --- | ---: | --- |
 | Ref advertisement | **1** | Root GET |
 | Full authorized clone at checkpoint generation | **2** | Root GET plus checkpoint pack range |
 | Full clone ahead of checkpoint | **2 + D** | Root, checkpoint pack, and each capsule run; run reads are concurrent |
-| Incremental fetch or pull | **1 + R** | Root plus selected coalesced ranges |
-| Lazy object fetch | **2** | Root plus one range only when object and bases co-locate |
+| Incremental fetch or pull | **1 + C + D + R** | Root, cold control suffix, visible runs, and selected pack ranges |
+| Lazy object fetch | **1 + C + D + R** | `R = 1` only when the object and required bases co-locate |
+
+Ref-head capture adds its bounded LIST/GET work when refs are not represented
+by the checkpoint baseline. Many-ref qualification reports those requests
+separately; it may not hide them inside the payload-range budget.
 
 At the 32-capsule maintenance threshold, a healthy checkpointed repository
 normally needs two origin reads for a full authorized clone and at most 34
@@ -916,9 +941,11 @@ safe while omitted required bytes violate reconstruction.
    S3 endpoints and unqualified providers retain mandatory readback.
 5. **Complete:** publish ordinary native and remote-helper pushes with capsule
    upload plus per-ref heads and activation records.
-6. **Complete for Git reads:** checkpoint and capsule packs carry authenticated
-   indexes, reverse indexes, object locators, and visibility closures; readers
-   install them without per-object storage requests.
+6. **Incomplete for production-scale Git reads:** checkpoint and capsule packs
+   carry authenticated indexes, reverse indexes, object locators, and
+   visibility closures. The checkpoint codec still needs the root-authenticated
+   contiguous control suffix above so metadata-only open and incremental fetch
+   never download or hash the complete pack payload.
 7. **Complete for ordinary full, shallow, and filtered clone/fetch/pull and
    raw lazy-object recovery:** remove their v1 runtime path. A later promisor
    request re-enters the line-oriented helper, pins one authenticated capsule
@@ -931,10 +958,13 @@ safe while omitted required bytes violate reconstruction.
    qualification remains open.
 9. **Complete:** fence repository GC with one root transition, recheck object
    identity before delete, and release through another root transition.
-10. **Complete on RustFS:** live-qualify a fresh Kubernetes source with 5,000
+10. **Incomplete on RustFS:** live-qualify a fresh Kubernetes source with 5,000
     incremental pushes, 10 fetches, 11 checkpoints including the seed, a final
-    independent clone, and full Git integrity verification. Hosted-provider,
-    injected-failure, and concurrency qualification remain release gates.
+    independent clone, and full Git integrity verification. The first
+    checkpoint-history rerun proved bounded pushes but exposed whole-checkpoint
+    payload loading on interval fetch; rerun only after the control-suffix path
+    is implemented. Hosted-provider, injected-failure, and concurrency
+    qualification remain release gates.
 11. **Complete on RustFS:** live-qualify external xorbs and shards with ten
     non-zero 512 MiB files, ten versioned edits, cold cross-repository reuse,
     independent clone, two hydrate/dehydrate cycles, byte-digest comparison,
