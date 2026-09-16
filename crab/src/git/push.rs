@@ -2951,6 +2951,9 @@ pub struct PushConfig {
     /// Explicit git directory for callers that publish a repository
     /// other than the process current directory.
     pub git_dir: Option<PathBuf>,
+    /// Include the complete outgoing Git and LFS closure instead of excluding
+    /// objects reachable from current remote tips.
+    pub force_full_graph: bool,
     /// Validated internal mirror-plan identity for durable commit attribution.
     pub mirror_plan_id: Option<String>,
     pub protected_push: Option<ProtectedPushSession>,
@@ -3022,6 +3025,7 @@ impl Default for PushConfig {
             active_active_coordinator: None,
             perf_phase_sink: None,
             git_dir: None,
+            force_full_graph: false,
             mirror_plan_id: None,
             protected_push: None,
         }
@@ -3075,6 +3079,7 @@ impl PushConfig {
             active_active_coordinator: None,
             perf_phase_sink: None,
             git_dir: None,
+            force_full_graph: false,
             mirror_plan_id: None,
             protected_push: None,
         }

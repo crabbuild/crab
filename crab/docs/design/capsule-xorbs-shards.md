@@ -750,7 +750,7 @@ explicit `not yet part of the capsule protocol` error is a parity blocker.
 | Repository initialization and ordinary single-/multi-ref push | Implemented with per-ref heads and transaction records | Qualify provider conditional-write and uncertain-response behavior | Concurrent same-ref and disjoint-ref pushes on S3, GCS, and Azure; fresh clone and fsck after every run |
 | Full clone, fetch, pull, and ref advertisement | Implemented for complete repository views | Bound full-view read amplification as ref count grows; add derived indexes only if measurements require them | Repositories with thousands of refs; exact refs, byte-identical checkout, strict fsck, bounded requests and memory |
 | Shallow, deepen, unshallow, filtered/partial, and raw-object/promisor fetch | Implemented through the terminal Git protocol-v2 upload-pack path and qualified on RustFS | Complete released-shape, older-Git, hosted-provider, interrupted-resume, and adversarial transport qualification | Git compatibility matrix for every fetch mode, including interrupted resume and adversarial missing objects |
-| Explicit tag push | Uses the ordinary ref transaction | Add `--follow-tags`; decide whether `--no-incremental` remains a supported contract or is removed | Annotated/lightweight tag creation, replacement, deletion, atomic branch-plus-tag push, and follow-tags behavior |
+| Explicit tag push | Uses the ordinary ref transaction; `crab push --follow-tags` adds only missing reachable annotated tags, and `--no-incremental` publishes the full outgoing Git/LFS closure | Complete hosted-provider and adversarial multi-ref qualification | Annotated/lightweight tag creation, replacement, deletion, atomic branch-plus-tag push, follow-tags missing-only behavior, and full-closure clone/fsck |
 | Managed/protected push and active-active publication | Rejected before v2 publication | Add authorization and external-consensus commit adapters whose decision is bound to the exact v2 transaction | Deny/allow/stale-policy races, lost responses, regional failover, and all-old/all-new multi-ref visibility |
 | Xet add, dedup, push, clone checkout, smudge, hydrate, prefetch, and diff | Whole-object RustFS path implemented | Finish hosted checksum/multipart, cross-repository reuse, cache, and corrupt-object qualification | Byte equality, dedup accounting, retry safety, and integrity failures across supported providers and object sizes |
 | FUSE/NFS mount | Shared v2 file-index and hydrator wiring implemented | Qualify range reads, cold/warm cache, eviction, cancellation, unmount, and restored-tier objects | Mount/read/stat/range/concurrent-reader suite on every supported mount platform and provider |
@@ -884,6 +884,14 @@ provider-failure reporting. All 33 non-zero commands were expected rejection
 or injected-failure cases. The qualification runner now faults the v2
 authenticated root rather than the removed v1 layout/manifest and proves that
 mirror verification neither needs nor recreates the v1 file-index database.
+
+The isolated `v2-flags-rustfs-20260915` run used the installed release binary
+against a fresh RustFS server and repository prefix. An initial
+`--follow-tags` push atomically published the branch and its reachable
+annotated tag. A successor `--follow-tags --no-incremental` push published the
+full outgoing closure, advanced only the branch, and preserved the existing
+remote tag after a conflicting local rewrite. A fresh v2 clone matched both
+remote OIDs and passed `git fsck --strict`.
 
 This qualifies the ordinary RustFS whole-object path. Hosted-provider,
 multipart, replica, tiering, mount-range, browser/HTTP, S3-gateway, import,

@@ -301,6 +301,7 @@ async fn run_inner(
         remote_refs,
         &updates,
         config.receive_max_input_size,
+        config.force_full_graph,
     )
     .await?;
     let visibility_delta = prepare_visibility_delta(&common_git_dir, remote_refs, &edits)?;
@@ -335,12 +336,16 @@ async fn run_inner(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let lfs_remote_tips = updates
-        .iter()
-        .filter_map(|update| update.old_sha.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let lfs_remote_tips = if config.force_full_graph {
+        Vec::new()
+    } else {
+        updates
+            .iter()
+            .filter_map(|update| update.old_sha.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    };
     let publication: Result<Option<()>> = async {
         // LFS bytes share the ref visibility boundary with Git and Xet data.
         // Publishing them here also covers mirror batches that own hook stdin.
@@ -595,14 +600,20 @@ async fn prepare_git_packs(
     remote_refs: &BTreeMap<String, String>,
     updates: &[RefUpdate],
     max_input_size: u64,
+    force_full_graph: bool,
 ) -> Result<PreparedGitPush> {
     if updates.is_empty() {
         return Ok(PreparedGitPush::default());
     }
-    let exclusions = locally_available_remote_tips(git_dir, remote_refs)?;
+    let excluded_tips = if force_full_graph {
+        None
+    } else {
+        Some(locally_available_remote_tips(git_dir, remote_refs)?)
+    };
+    let exclusions = excluded_tips.as_deref().map(RemotePackExclusions::RefTips);
     let generated = generate_push_pack_files_with_exclusions(
         updates,
-        Some(RemotePackExclusions::RefTips(&exclusions)),
+        exclusions,
         &PushPackConfig {
             thin_packs: false,
             max_input_size,
@@ -923,6 +934,47 @@ mod tests {
                 .expect("missing object is a normal refresh condition"),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn full_graph_pack_contains_more_history_than_incremental_pack() {
+        let source = tempfile::tempdir().expect("source repository");
+        git(source.path(), &["init", "-b", "main"]);
+        git(source.path(), &["config", "user.name", "Crab Test"]);
+        git(
+            source.path(),
+            &["config", "user.email", "crab@example.invalid"],
+        );
+        let first = commit(source.path(), "first");
+        let second = commit(source.path(), "second");
+        let git_dir = source.path().join(".git");
+        let remote_refs = BTreeMap::from([("refs/heads/main".to_owned(), first.clone())]);
+        let updates = [RefUpdate {
+            ref_name: "refs/heads/main".to_owned(),
+            old_sha: Some(first),
+            new_sha: second,
+            force: false,
+        }];
+
+        let incremental =
+            prepare_git_packs(&git_dir, &remote_refs, &updates, 16 * 1024 * 1024, false)
+                .await
+                .expect("prepare incremental pack");
+        let full = prepare_git_packs(&git_dir, &remote_refs, &updates, 16 * 1024 * 1024, true)
+            .await
+            .expect("prepare full graph pack");
+        let incremental_bytes = incremental
+            .packs
+            .iter()
+            .map(crab_metadata::capsule_protocol::CapsuleGitPack::pack_size)
+            .sum::<u64>();
+        let full_bytes = full
+            .packs
+            .iter()
+            .map(crab_metadata::capsule_protocol::CapsuleGitPack::pack_size)
+            .sum::<u64>();
+
+        assert!(full_bytes > incremental_bytes);
     }
 
     #[tokio::test]
