@@ -321,7 +321,7 @@ async fn run_inner(
         config.force_full_graph,
     )
     .await?;
-    let visibility_delta = prepare_visibility_delta(&common_git_dir, remote_refs, &edits)?;
+    let visibility_delta = prepare_visibility_delta(&common_git_dir, &edits)?;
     tracing::debug!(
         git_packs = prepared.packs.len(),
         pointers = prepared.pointers.len(),
@@ -624,13 +624,11 @@ async fn publish_capsule(
 
 fn prepare_visibility_delta(
     git_dir: &Path,
-    base_refs: &BTreeMap<String, String>,
     edits: &[crab_metadata::capsule_protocol::CapsuleRefEdit],
 ) -> Result<Option<crab_metadata::capsule_protocol::CapsuleVisibilityDelta>> {
     let maximum = usize::try_from(crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS)
         .map_err(|_| CrabError::Internal("Git visibility limit does not fit usize".to_owned()))?;
     let mut visibility = BTreeMap::new();
-    let reusable_tips = base_refs.values().cloned().collect::<BTreeSet<_>>();
     for edit in edits {
         let Some(new_oid) = edit.new_oid() else {
             continue;
@@ -655,13 +653,6 @@ fn prepare_visibility_delta(
                 new_oid.to_owned(),
                 added,
                 removed,
-            )
-        } else if reusable_tips.contains(new_oid) {
-            crab_metadata::git_visibility::GitVisibilityEdit::from_delta_objects(
-                Some(new_oid.to_owned()),
-                new_oid.to_owned(),
-                Vec::new(),
-                Vec::new(),
             )
         } else {
             let objects =
@@ -1008,18 +999,10 @@ mod tests {
         git_dir: &Path,
         edits: Vec<crab_metadata::capsule_protocol::CapsuleRefEdit>,
     ) {
-        let limits = crab_read::capsule_protocol::CapsuleReadLimits {
-            max_capsule_bytes: 16 * 1024 * 1024,
-            max_frontier_bytes: 16 * 1024 * 1024,
-        };
-        let view = crab_read::capsule_protocol::open_view(layout, limits)
-            .await
-            .expect("open base view");
         let root = crab_write::capsule_protocol::open_root(layout)
             .await
             .expect("open root");
-        let visibility =
-            prepare_visibility_delta(git_dir, view.refs(), &edits).expect("prepare Git visibility");
+        let visibility = prepare_visibility_delta(git_dir, &edits).expect("prepare Git visibility");
         let transaction =
             crab_metadata::capsule_protocol::CapsuleTransaction::new(root.record().digest(), edits)
                 .expect("build ref transaction");
@@ -1224,6 +1207,37 @@ mod tests {
                 .expect("missing object is a normal refresh condition"),
             None
         );
+    }
+
+    #[test]
+    fn new_ref_visibility_is_self_contained() {
+        let source = tempfile::tempdir().expect("source repository");
+        git(source.path(), &["init", "--initial-branch=main"]);
+        git(source.path(), &["config", "user.name", "Crab Test"]);
+        git(
+            source.path(),
+            &["config", "user.email", "crab@example.invalid"],
+        );
+        let tip = commit(source.path(), "tip");
+        let ref_name = "refs/heads/feature";
+        let edits = [crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+            ref_name,
+            None,
+            Some(tip.clone()),
+            None,
+        )];
+
+        let visibility = prepare_visibility_delta(&source.path().join(".git"), &edits)
+            .expect("prepare Git visibility")
+            .expect("new ref has visibility evidence");
+        let evidence = visibility
+            .edits()
+            .get(ref_name)
+            .expect("feature visibility evidence");
+
+        assert!(evidence.replaces);
+        assert_eq!(evidence.old_oid, None);
+        assert!(evidence.added.binary_search(&tip).is_ok());
     }
 
     #[tokio::test]

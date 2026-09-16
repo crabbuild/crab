@@ -35,9 +35,6 @@ pub struct GitVisibilityEdit {
     /// Schema version of this object.
     pub version: u32,
     /// Ref tip used as the prior closure, if one exists.
-    ///
-    /// For a new destination ref this may be the tip of an existing visible
-    /// ref whose closure can be reused by catalog-bound compaction.
     pub old_oid: Option<String>,
     /// Ref tip made visible by the update.
     pub new_oid: String,
