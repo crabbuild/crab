@@ -137,16 +137,6 @@ async fn run_inner(
             origin: "protocol-v2 protected mirror-plan publication is not implemented".to_owned(),
         });
     }
-    if config.protected_push.is_some()
-        && (config.active_active_replication.is_some()
-            || config.active_active_writer.is_some()
-            || config.active_active_coordinator.is_some())
-    {
-        return Err(CrabError::Configuration {
-            key: "capsule-protocol protected push coordination".to_owned(),
-            origin: "protocol-v2 protected active-active finalize is not implemented".to_owned(),
-        });
-    }
     if cancel.is_cancelled() {
         return Err(CrabError::Cancelled);
     }
@@ -437,7 +427,7 @@ async fn run_inner(
             )?;
             check_cancelled(cancel)?;
             if let Some(session) = config.protected_push.as_ref() {
-                super::protected_push::finalize_capsule_push(
+                let outcome = super::protected_push::finalize_capsule_push(
                     session,
                     store,
                     router,
@@ -447,7 +437,7 @@ async fn run_inner(
                     cancel,
                 )
                 .await?;
-                return Ok(Some(None));
+                return Ok(Some(outcome));
             }
             let result = if changes_namespace {
                 let commit_layout = layout.clone();

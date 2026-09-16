@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::Bytes;
 use crab_auth::PushRefUpdate;
+use crab_coordination::write_coordinator::{CommitOutcome, CoordinatedRefUpdate};
 use crab_metadata::capsule_protocol::{Capsule, CapsuleRun, PointerCatalog};
 use crab_storage::content_hash_from_path;
 use crab_xet::hash::{MerkleHash, compute_data_hash};
@@ -12,8 +13,9 @@ use sha2::{Digest, Sha256};
 
 use super::git_workspace::verify_capsule_git_candidate;
 use super::{
-    ProtectedCapsulePushPlan, PushPrepareRecord, ReceiveContext, conflict, invalid,
-    promote_staged_writes, read_verified_staged_object, strict_xorb_references_from_shard,
+    ActiveActiveReceiveConfig, ProtectedCapsulePushPlan, PushPrepareRecord, ReceiveContext,
+    active_active_coordinator_registration, conflict, invalid, promote_staged_writes,
+    read_verified_staged_object, strict_xorb_references_from_shard,
     validate_protected_capsule_plan_shape, validate_staged_xorb,
 };
 use crate::error::Result;
@@ -25,19 +27,53 @@ pub(super) struct VerifiedCapsuleCandidate {
     pub prepare: PushPrepareRecord,
     pub changed_paths: Vec<String>,
     pub staged_bytes: u64,
+    pub replication_objects: Vec<String>,
 }
 
 pub(super) async fn commit_capsule_candidate(
     ctx: &ReceiveContext,
     plan: &ProtectedCapsulePushPlan,
+    active_active: Option<&ActiveActiveReceiveConfig>,
+    replication_objects: &[String],
     cancel: &tokio_util::sync::CancellationToken,
-) -> Result<()> {
+) -> Result<Option<CommitOutcome>> {
     let view = open_candidate_view(ctx).await?;
     if capsule_is_visible(&view, plan) {
-        return Ok(());
+        let Some(active_active) = active_active else {
+            return Ok(None);
+        };
+        let run = read_candidate_run(ctx, plan).await?;
+        let capsule = run
+            .capsules()
+            .first()
+            .ok_or_else(|| invalid("protected capsule run is empty"))?;
+        let transaction = capsule.transaction()?;
+        let descriptor = crab_write::capsule_protocol::coordinated_publication_descriptor(
+            &plan.base_root_digest,
+            &plan.transaction_id,
+            &plan.run_hash,
+            plan.run_size,
+        );
+        return commit_active_active_candidate(
+            ctx.store(),
+            ctx.router(),
+            ctx.repo_prefix(),
+            active_active,
+            descriptor,
+            &transaction,
+            replication_objects,
+            None,
+        )
+        .await
+        .map(Some);
     }
 
-    verify_capsule_candidate(ctx, plan).await?;
+    let verified = verify_capsule_candidate(ctx, plan).await?;
+    if verified.replication_objects != replication_objects {
+        return Err(conflict(
+            "capsule dependency closure changed after protected verification",
+        ));
+    }
     promote_staged_writes(ctx.store(), &plan.staged_objects).await?;
     let run = read_candidate_run(ctx, plan).await?;
     let capsule = run
@@ -66,6 +102,9 @@ pub(super) async fn commit_capsule_candidate(
     let base = view.root_snapshot().clone();
     if changes_namespace {
         let layout = ctx.router().clone();
+        let repo_prefix = ctx.repo_prefix().to_owned();
+        let active_active = active_active.cloned();
+        let replication_objects = replication_objects.to_vec();
         return crab_write::with_ref_namespaces(
             ctx.store(),
             ctx.router(),
@@ -84,15 +123,150 @@ pub(super) async fn commit_capsule_candidate(
                     transaction.edits(),
                 )
                 .await?;
-                crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
-                    .await?;
-                Ok(())
+                publish_verified_candidate(
+                    layout.store(),
+                    &layout,
+                    &repo_prefix,
+                    base,
+                    &transaction,
+                    &capsule,
+                    active_active.as_ref(),
+                    &replication_objects,
+                )
+                .await
             },
         )
         .await;
     }
-    crab_write::capsule_protocol::publish(ctx.router(), base, &transaction, &capsule).await?;
-    Ok(())
+    publish_verified_candidate(
+        ctx.store(),
+        ctx.router(),
+        ctx.repo_prefix(),
+        base,
+        &transaction,
+        &capsule,
+        active_active,
+        replication_objects,
+    )
+    .await
+}
+
+async fn publish_verified_candidate(
+    store: &crab_storage::Store,
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    repo_prefix: &str,
+    base: crab_metadata::capsule_protocol::RootSnapshot,
+    transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
+    capsule: &Capsule,
+    active_active: Option<&ActiveActiveReceiveConfig>,
+    replication_objects: &[String],
+) -> Result<Option<CommitOutcome>> {
+    let Some(active_active) = active_active else {
+        crab_write::capsule_protocol::publish(layout, base, transaction, capsule).await?;
+        return Ok(None);
+    };
+    let prepared = crab_write::capsule_protocol::prepare_coordinated_publication(
+        layout,
+        base,
+        transaction,
+        capsule,
+    )
+    .await?;
+    let descriptor = prepared.descriptor().clone();
+    commit_active_active_candidate(
+        store,
+        layout,
+        repo_prefix,
+        active_active,
+        descriptor,
+        transaction,
+        replication_objects,
+        Some(prepared),
+    )
+    .await
+    .map(Some)
+}
+
+async fn commit_active_active_candidate(
+    store: &crab_storage::Store,
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    repo_prefix: &str,
+    active_active: &ActiveActiveReceiveConfig,
+    descriptor: crab_coordination::write_coordinator::CoordinatedCapsulePublication,
+    transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
+    replication_objects: &[String],
+    prepared: Option<crab_write::capsule_protocol::CoordinatedPreparedCapsulePublication>,
+) -> Result<CommitOutcome> {
+    let refs = transaction
+        .edits()
+        .iter()
+        .map(|edit| CoordinatedRefUpdate {
+            name: edit.ref_name().to_owned(),
+            expected: edit.expected_old().map(str::to_owned),
+            new: edit.new_oid().map(str::to_owned),
+            force: false,
+        })
+        .collect::<Vec<_>>();
+    let mut uploaded_objects = replication_objects.iter().cloned().collect::<BTreeSet<_>>();
+    uploaded_objects.insert(layout.capsule_path(&descriptor.run_hash).to_string());
+    let plan = crab_coordination::active_active::plan_active_active_capsule_push(
+        &active_active.replication,
+        Some(&active_active.writer),
+        descriptor,
+        refs,
+        uploaded_objects.into_iter().collect(),
+    )?;
+    let registration = active_active_coordinator_registration(&active_active.replication)?;
+    crab_metadata::ref_registry::register_active_active_coordinator_for_repo(
+        store,
+        layout,
+        registration,
+    )
+    .await?;
+    let coordinator = crab_coordination::active_active_write_coordinator_for_repo(
+        &active_active.replication,
+        repo_prefix,
+    )
+    .await?;
+    let mut outcome = crab_coordination::write_coordinator::commit_uploaded_push_refs(
+        coordinator.as_ref(),
+        plan.request.clone(),
+    )
+    .await?;
+    let materialized = match prepared {
+        Some(prepared) => {
+            match crab_write::capsule_protocol::materialize_coordinated_publication(
+                layout, prepared,
+            )
+            .await
+            {
+                Ok(_) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        operation_id = %outcome.operation_id,
+                        "protected capsule coordinator commit succeeded; local materialization requires repair"
+                    );
+                    false
+                }
+            }
+        }
+        None => true,
+    };
+    if materialized {
+        match coordinator
+            .mark_region_materialized(&outcome.operation_id, &plan.request.region)
+            .await
+        {
+            Ok(state) => outcome.state = state,
+            Err(error) => tracing::warn!(
+                %error,
+                operation_id = %outcome.operation_id,
+                "protected capsule materialization acknowledgement requires repair"
+            ),
+        }
+    }
+    Ok(outcome)
 }
 
 async fn open_candidate_view(
@@ -184,7 +358,7 @@ pub(super) async fn verify_capsule_candidate(
         MAX_PROTECTED_CAPSULE_BYTES,
     )
     .await?;
-    verify_pointer_dependencies(ctx, plan, &catalog, &pointers).await?;
+    let replication_objects = verify_pointer_dependencies(ctx, plan, &catalog, &pointers).await?;
     let staged_bytes = plan
         .staged_objects
         .iter()
@@ -194,6 +368,7 @@ pub(super) async fn verify_capsule_candidate(
         prepare,
         changed_paths,
         staged_bytes,
+        replication_objects: replication_objects.into_iter().collect(),
     })
 }
 
@@ -202,7 +377,7 @@ async fn verify_pointer_dependencies(
     plan: &ProtectedCapsulePushPlan,
     catalog: &PointerCatalog,
     pointers: &ReachablePointerScan,
-) -> Result<()> {
+) -> Result<BTreeSet<String>> {
     let mut referenced = BTreeSet::from([ctx
         .router()
         .capsule_path(&plan.run_hash)
@@ -323,7 +498,7 @@ async fn verify_pointer_dependencies(
             unreferenced.canonical_key
         )));
     }
-    Ok(())
+    Ok(referenced)
 }
 
 async fn read_candidate_object(

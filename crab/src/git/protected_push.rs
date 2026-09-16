@@ -34,21 +34,7 @@ pub(crate) async fn finalize_capsule_push(
     capsule: &crab_metadata::capsule_protocol::Capsule,
     upload_concurrency: usize,
     cancel: &CancellationToken,
-) -> Result<()> {
-    if session.active_active_writer.is_some()
-        || match &session.backend {
-            ProtectedPushBackend::CrabAuth {
-                active_active_replication,
-                ..
-            } => active_active_replication.is_some(),
-            ProtectedPushBackend::Managed { request, .. } => request.replication.is_some(),
-        }
-    {
-        return Err(CrabError::Configuration {
-            key: "capsule-protocol protected push coordination".to_owned(),
-            origin: "protocol-v2 protected active-active finalize is not implemented".to_owned(),
-        });
-    }
+) -> Result<Option<crab_coordination::write_coordinator::CommitOutcome>> {
     crate::core::error::check_cancelled(cancel)?;
     let run = crab_metadata::capsule_protocol::CapsuleRun::leaf(capsule.clone())?;
     let run_path = router.capsule_path(run.hash());
@@ -84,15 +70,15 @@ pub(crate) async fn finalize_capsule_push(
             auth,
             bucket,
             prefix,
-            ..
+            active_active_replication,
         } => {
             auth.finalize_push(
                 bucket,
                 prefix,
                 session.ref_updates.clone(),
                 &session.push_id,
-                None,
-                None,
+                active_active_replication.clone(),
+                session.active_active_writer.clone(),
             )
             .await?
         }
@@ -112,24 +98,61 @@ pub(crate) async fn finalize_capsule_push(
             path: "protected capsule finalize returned mismatched ref updates".to_owned(),
         });
     }
-    if response.operation_id.is_some()
-        || response.coordinator_epoch.is_some()
-        || response.writer_region.is_some()
-        || response.manifest_generation.is_some()
-        || response.commit_state.is_some()
-    {
-        return Err(CrabError::AuthFailed {
-            path: "protected capsule finalize returned unexpected active-active metadata"
-                .to_owned(),
-        });
-    }
+    let outcome =
+        protected_capsule_commit_outcome(&response, session.active_active_writer.as_deref())?;
     tracing::info!(
         push_id = %session.push_id,
         plan_digest,
         status = %response.status,
         "protected capsule push finalized"
     );
-    Ok(())
+    Ok(outcome)
+}
+
+fn protected_capsule_commit_outcome(
+    response: &crab_auth::PushFinalizeResponse,
+    writer: Option<&str>,
+) -> Result<Option<crab_coordination::write_coordinator::CommitOutcome>> {
+    let fields = [
+        response.operation_id.is_some(),
+        response.coordinator_epoch.is_some(),
+        response.writer_region.is_some(),
+        response.manifest_generation.is_some(),
+        response.commit_state.is_some(),
+    ];
+    if !fields.iter().any(|field| *field) {
+        return Ok(None);
+    }
+    if !fields.iter().all(|field| *field) {
+        return Err(CrabError::AuthFailed {
+            path: "protected capsule finalize returned partial active-active metadata".to_owned(),
+        });
+    }
+    Ok(Some(
+        crab_coordination::write_coordinator::CommitOutcome {
+            operation_id: response.operation_id.clone().ok_or_else(|| CrabError::AuthFailed {
+                path: "protected capsule finalize omitted operation ID".to_owned(),
+            })?,
+            coordinator_epoch: response.coordinator_epoch.ok_or_else(|| CrabError::AuthFailed {
+                path: "protected capsule finalize omitted coordinator epoch".to_owned(),
+            })?,
+            writer: writer
+                .ok_or_else(|| CrabError::AuthFailed {
+                    path: "protected capsule finalize returned coordinator metadata without a selected writer".to_owned(),
+                })?
+                .to_owned(),
+            region: response.writer_region.clone().ok_or_else(|| CrabError::AuthFailed {
+                path: "protected capsule finalize omitted writer region".to_owned(),
+            })?,
+            manifest_generation: response.manifest_generation.ok_or_else(|| CrabError::AuthFailed {
+                path: "protected capsule finalize omitted manifest generation".to_owned(),
+            })?,
+            commit_sequence: 0,
+            state: response.commit_state.ok_or_else(|| CrabError::AuthFailed {
+                path: "protected capsule finalize omitted commit state".to_owned(),
+            })?,
+        },
+    ))
 }
 
 pub(crate) async fn prepare_crab_auth_push(
@@ -484,6 +507,52 @@ mod tests {
 
         assert_eq!(plan.estimated_objects, 58);
         assert_eq!(plan.estimated_bytes, 2_128_928);
+    }
+
+    #[test]
+    fn protected_capsule_commit_outcome_preserves_coordinator_metadata() {
+        let response = crab_auth::PushFinalizeResponse {
+            status: "updated".to_owned(),
+            ref_updates: Vec::new(),
+            operation_id: Some("operation".to_owned()),
+            coordinator_epoch: Some(7),
+            writer_region: Some("us-west-2".to_owned()),
+            manifest_generation: Some(0),
+            commit_state: Some(
+                crab_coordination::write_coordinator::PushTransactionState::Materialized,
+            ),
+        };
+
+        let outcome = protected_capsule_commit_outcome(&response, Some("west"))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(outcome.operation_id, "operation");
+        assert_eq!(outcome.coordinator_epoch, 7);
+        assert_eq!(outcome.writer, "west");
+        assert_eq!(outcome.region, "us-west-2");
+        assert_eq!(outcome.manifest_generation, 0);
+        assert_eq!(
+            outcome.state,
+            crab_coordination::write_coordinator::PushTransactionState::Materialized
+        );
+    }
+
+    #[test]
+    fn protected_capsule_commit_outcome_rejects_partial_metadata() {
+        let response = crab_auth::PushFinalizeResponse {
+            status: "updated".to_owned(),
+            ref_updates: Vec::new(),
+            operation_id: Some("operation".to_owned()),
+            coordinator_epoch: None,
+            writer_region: None,
+            manifest_generation: None,
+            commit_state: None,
+        };
+
+        let error = protected_capsule_commit_outcome(&response, Some("west")).unwrap_err();
+
+        assert!(matches!(error, CrabError::AuthFailed { .. }));
     }
 
     #[tokio::test]

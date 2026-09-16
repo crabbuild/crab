@@ -114,6 +114,7 @@ struct VerifiedCapsuleReceiveEvidence {
     transaction_id: String,
     run_hash: String,
     changed_paths: Vec<String>,
+    replication_objects: Vec<String>,
 }
 
 /// Prepared protected-push receive state returned to the helper.
@@ -161,6 +162,7 @@ async fn write_verified_capsule_receive_evidence(
     plan: &super::ProtectedCapsulePushPlan,
     prepare: &super::PushPrepareRecord,
     changed_paths: Vec<String>,
+    replication_objects: Vec<String>,
 ) -> Result<String> {
     let source_plan_digest = blake3::hash(
         &serde_json::to_vec(plan)
@@ -178,6 +180,7 @@ async fn write_verified_capsule_receive_evidence(
         transaction_id: plan.transaction_id.clone(),
         run_hash: plan.run_hash.clone(),
         changed_paths,
+        replication_objects,
     };
     let body = serde_json::to_vec(&evidence).map_err(|error| {
         invalid(format!(
@@ -288,6 +291,7 @@ pub async fn verify_receive(ctx: &ReceiveContext) -> Result<VerifiedReceive> {
                 &plan,
                 &verified.prepare,
                 verified.changed_paths.clone(),
+                verified.replication_objects,
             )
             .await?;
             Ok(VerifiedReceive {
@@ -388,16 +392,22 @@ async fn commit_capsule_receive(
     active_active: Option<&super::ActiveActiveReceiveConfig>,
 ) -> Result<PushFinalizeResponse> {
     super::validate_protected_capsule_plan_shape(&plan, ctx.repo_prefix(), ctx.push_id())?;
-    if active_active.is_some() {
-        return Err(invalid(
-            "protocol-v2 protected active-active finalize is not implemented",
-        ));
-    }
     let prepare = ctx.read_prepare_record().await?;
-    read_verified_capsule_receive_evidence(ctx, plan_digest, &plan, &prepare).await?;
+    let evidence =
+        read_verified_capsule_receive_evidence(ctx, plan_digest, &plan, &prepare).await?;
     let cancel = CancellationToken::new();
-    commit_capsule_candidate(ctx, &plan, &cancel).await?;
-    Ok(PushFinalizeResponse::updated(plan.ref_updates))
+    let outcome = commit_capsule_candidate(
+        ctx,
+        &plan,
+        active_active,
+        &evidence.replication_objects,
+        &cancel,
+    )
+    .await?;
+    Ok(PushFinalizeResponse::updated_with_commit_outcome(
+        plan.ref_updates,
+        outcome.as_ref(),
+    ))
 }
 
 async fn commit_manifest_receive(

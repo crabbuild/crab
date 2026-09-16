@@ -129,15 +129,29 @@ impl PreparedCapsulePublication {
         &self,
     ) -> Result<crab_coordination::write_coordinator::CoordinatedCapsulePublication> {
         let transaction_id = self.transaction.id()?;
-        Ok(
-            crab_coordination::write_coordinator::CoordinatedCapsulePublication {
-                base_root_digest: self.base.record().digest().to_owned(),
-                transaction_id: transaction_id.clone(),
-                activation_id: coordinated_activation_id(&transaction_id, self.run.hash()),
-                run_hash: self.run.hash().to_owned(),
-                run_size: self.run.bytes().len() as u64,
-            },
-        )
+        Ok(coordinated_publication_descriptor(
+            self.base.record().digest(),
+            &transaction_id,
+            self.run.hash(),
+            self.run.bytes().len() as u64,
+        ))
+    }
+}
+
+/// Build the deterministic coordinator descriptor for one verified leaf run.
+#[must_use]
+pub fn coordinated_publication_descriptor(
+    base_root_digest: &str,
+    transaction_id: &str,
+    run_hash: &str,
+    run_size: u64,
+) -> crab_coordination::write_coordinator::CoordinatedCapsulePublication {
+    crab_coordination::write_coordinator::CoordinatedCapsulePublication {
+        base_root_digest: base_root_digest.to_owned(),
+        transaction_id: transaction_id.to_owned(),
+        activation_id: coordinated_activation_id(transaction_id, run_hash),
+        run_hash: run_hash.to_owned(),
+        run_size,
     }
 }
 
@@ -1785,6 +1799,12 @@ mod tests {
         .await
         .unwrap();
         let descriptor = prepared.descriptor().clone();
+        let rebuilt = coordinated_publication_descriptor(
+            &descriptor.base_root_digest,
+            &descriptor.transaction_id,
+            &descriptor.run_hash,
+            descriptor.run_size,
+        );
 
         let before = read_ref_head(&router, base.record().root(), "refs/heads/main")
             .await
@@ -1792,6 +1812,7 @@ mod tests {
         assert_eq!(before.visible.oid(), None);
         assert_eq!(descriptor.transaction_id, transaction.id().unwrap());
         assert_eq!(descriptor.base_root_digest, base.record().digest());
+        assert_eq!(rebuilt, descriptor);
 
         materialize_coordinated_publication(&router, prepared)
             .await
