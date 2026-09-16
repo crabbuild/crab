@@ -271,6 +271,7 @@ pub async fn run_cost_report(
     let report = crate::cost::engine::build_report(
         config,
         &store,
+        &remote.repo_path,
         &crate::cost::engine::ReportOptions {
             pricing_file,
             inventory_source,
