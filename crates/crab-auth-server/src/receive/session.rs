@@ -7,9 +7,10 @@ use crab_storage::{StorageError, Store, StoreLayout, build_static_env_store};
 use object_store::path::Path as ObjectPath;
 
 use super::{
-    PreparedViewScope, ProtectedPushPlan, PushPrepareRecord, build_capsule_prepare_record,
-    build_prepare_record, invalid, read_verified_staged_object, receive_provider,
-    validate_prepare_record_shape, validate_push_id, validate_staged_object_shapes,
+    PreparedViewScope, ProtectedCapsulePushPlan, ProtectedPushPlan, PushPrepareRecord,
+    build_capsule_prepare_record, build_prepare_record, invalid, read_verified_staged_object,
+    receive_provider, validate_prepare_record_shape, validate_push_id,
+    validate_staged_object_shapes,
 };
 use crate::error::{AuthServerError, Result};
 
@@ -29,6 +30,13 @@ pub struct ReceiveContext {
 pub struct BaseState {
     manifest: Manifest,
     etag: String,
+}
+
+/// Typed protected-push plan selected by its explicit schema version.
+#[derive(Debug)]
+pub enum ProtectedReceivePlan {
+    Manifest(Box<ProtectedPushPlan>),
+    Capsule(ProtectedCapsulePushPlan),
 }
 
 impl ReceiveContext {
@@ -108,7 +116,7 @@ impl ReceiveContext {
             .map_err(AuthServerError::from)
     }
 
-    pub async fn read_plan(&self) -> Result<ProtectedPushPlan> {
+    async fn read_plan_body(&self) -> Result<bytes::Bytes> {
         let path = ObjectPath::from(format!(
             "{}/staging/{}/push-plan.json",
             self.repo_prefix, self.push_id
@@ -121,7 +129,39 @@ impl ReceiveContext {
             return Err(invalid("push-plan.json is too large"));
         }
         let (body, _) = self.store.get_with_etag(&path).await?;
-        serde_json::from_slice(&body).map_err(|e| invalid(format!("invalid push-plan JSON: {e}")))
+        Ok(body)
+    }
+
+    pub async fn read_plan_document(&self) -> Result<ProtectedReceivePlan> {
+        #[derive(serde::Deserialize)]
+        struct PlanHeader {
+            schema_version: u32,
+        }
+
+        let body = self.read_plan_body().await?;
+        let header: PlanHeader = serde_json::from_slice(&body)
+            .map_err(|e| invalid(format!("invalid push-plan JSON: {e}")))?;
+        match header.schema_version {
+            1 | 2 => serde_json::from_slice(&body)
+                .map(Box::new)
+                .map(ProtectedReceivePlan::Manifest)
+                .map_err(|e| invalid(format!("invalid push-plan JSON: {e}"))),
+            crab_remote::protected::PROTECTED_CAPSULE_PUSH_PLAN_SCHEMA_VERSION => {
+                serde_json::from_slice(&body)
+                    .map(ProtectedReceivePlan::Capsule)
+                    .map_err(|e| invalid(format!("invalid push-plan JSON: {e}")))
+            }
+            _ => Err(invalid("unsupported push-plan schema_version")),
+        }
+    }
+
+    pub async fn read_plan(&self) -> Result<ProtectedPushPlan> {
+        match self.read_plan_document().await? {
+            ProtectedReceivePlan::Manifest(plan) => Ok(*plan),
+            ProtectedReceivePlan::Capsule(_) => Err(invalid(
+                "capsule push-plan requires protocol-v2 verification",
+            )),
+        }
     }
 
     pub fn verified_plan_digest(
@@ -477,6 +517,41 @@ mod tests {
             err.to_string().contains("push-plan.json is too large"),
             "unexpected error: {err}"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_plan_document_selects_capsule_schema() -> Result<()> {
+        let ctx = context();
+        let path = ObjectPath::from(format!("org/repo/staging/{PUSH_ID}/push-plan.json"));
+        let plan = ProtectedCapsulePushPlan {
+            schema_version: crab_remote::protected::PROTECTED_CAPSULE_PUSH_PLAN_SCHEMA_VERSION,
+            repo_prefix: "org/repo".to_owned(),
+            push_id: PUSH_ID.to_owned(),
+            upload_prefix: format!("org/repo/staging/{PUSH_ID}/"),
+            base_root_digest: hash('1'),
+            transaction_id: hash('2'),
+            capsule_hash: hash('3'),
+            capsule_size: 42,
+            ref_updates: vec![PushRefUpdate {
+                ref_name: "refs/heads/main".to_owned(),
+                old_oid: Some(oid('1')),
+                new_oid: oid('2'),
+            }],
+            staged_objects: Vec::new(),
+        };
+        ctx.store()
+            .put_exact(
+                &path,
+                Bytes::from(serde_json::to_vec(&plan).expect("serialize capsule plan")),
+            )
+            .await?;
+
+        let ProtectedReceivePlan::Capsule(actual) = ctx.read_plan_document().await? else {
+            panic!("capsule schema must select the capsule plan");
+        };
+
+        assert_eq!(actual, plan);
         Ok(())
     }
 

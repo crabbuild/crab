@@ -43,7 +43,7 @@ use crab_xet::xorb::parser::{XorbParser, xorb_payload_digest_from_footer};
 use object_store::path::Path as ObjectPath;
 use serde::{Deserialize, Serialize};
 
-pub use crab_remote::protected::ProtectedPushPlan;
+pub use crab_remote::protected::{ProtectedCapsulePushPlan, ProtectedPushPlan};
 
 use crate::error::{AuthServerError, Result};
 
@@ -405,9 +405,73 @@ pub fn validate_staged_object_shapes(
     repo_prefix: &str,
     push_id: &str,
 ) -> Result<()> {
+    validate_staged_write_shapes(&plan.staged_objects, repo_prefix, push_id)
+}
+
+/// Validates the bounded identity and staged-object shape of a v2 push plan.
+pub fn validate_protected_capsule_plan_shape(
+    plan: &ProtectedCapsulePushPlan,
+    repo_prefix: &str,
+    push_id: &str,
+) -> Result<()> {
+    if plan.schema_version != crab_remote::protected::PROTECTED_CAPSULE_PUSH_PLAN_SCHEMA_VERSION {
+        return Err(invalid("unsupported capsule push-plan schema_version"));
+    }
+    if plan.repo_prefix != repo_prefix {
+        return Err(invalid("push-plan repo_prefix does not match repo_url"));
+    }
+    if plan.push_id != push_id {
+        return Err(invalid("push-plan push_id does not match request"));
+    }
+    let expected_prefix = format!("{repo_prefix}/staging/{push_id}/");
+    if plan.upload_prefix.trim_matches('/') != expected_prefix.trim_matches('/') {
+        return Err(invalid("push-plan upload_prefix does not match push_id"));
+    }
+    validate_hash_component(&plan.base_root_digest, "base root digest")?;
+    validate_hash_component(&plan.transaction_id, "transaction id")?;
+    validate_hash_component(&plan.capsule_hash, "capsule hash")?;
+    if plan.capsule_size == 0 {
+        return Err(invalid("capsule push-plan declares an empty capsule"));
+    }
+    if plan.ref_updates.is_empty() {
+        return Err(invalid("protected push requires at least one ref update"));
+    }
+    if plan.ref_updates.len() > MAX_PUSH_REF_UPDATES {
+        return Err(invalid("push-plan contains too many ref updates"));
+    }
+    if plan.staged_objects.len() > MAX_PUSH_STAGED_OBJECTS {
+        return Err(invalid("push-plan contains too many staged objects"));
+    }
+    validate_push_ref_updates(&plan.ref_updates).map_err(|error| invalid(error.to_string()))?;
+    validate_staged_write_shapes(&plan.staged_objects, repo_prefix, push_id)?;
+
+    let partition = &plan.capsule_hash[..2];
+    let capsule_key = format!(
+        "{}/v2/capsules/{partition}/{}",
+        repo_prefix.trim_matches('/'),
+        plan.capsule_hash
+    );
+    if let Some(capsule) = plan
+        .staged_objects
+        .iter()
+        .find(|object| object.canonical_key == capsule_key)
+        && (capsule.blake3 != plan.capsule_hash || capsule.size != plan.capsule_size)
+    {
+        return Err(invalid(
+            "staged capsule metadata differs from the push-plan capsule",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_staged_write_shapes(
+    staged_objects: &[StagedWrite],
+    repo_prefix: &str,
+    push_id: &str,
+) -> Result<()> {
     let mut canonical_keys = BTreeSet::new();
     let mut staged_keys = BTreeSet::new();
-    for object in &plan.staged_objects {
+    for object in staged_objects {
         if !canonical_keys.insert(object.canonical_key.as_str()) {
             return Err(invalid("push-plan contains duplicate canonical object key"));
         }
@@ -2639,6 +2703,37 @@ fn is_allowed_repo_key(relative: &str) -> bool {
     is_allowed_global_key(relative)
         || is_allowed_pack_key(relative)
         || is_allowed_metadata_key(relative)
+        || is_allowed_capsule_key(relative)
+        || is_allowed_lfs_key(relative)
+}
+
+fn is_allowed_capsule_key(relative: &str) -> bool {
+    let Some(rest) = relative.strip_prefix("v2/capsules/") else {
+        return false;
+    };
+    let Some((partition, hash)) = rest.split_once('/') else {
+        return false;
+    };
+    partition.len() == 2
+        && hash.starts_with(partition)
+        && validate_hash_component(hash, "capsule hash").is_ok()
+}
+
+fn is_allowed_lfs_key(relative: &str) -> bool {
+    let Some(rest) = relative.strip_prefix("lfs/objects/") else {
+        return false;
+    };
+    let mut parts = rest.split('/');
+    let (Some(first), Some(second), Some(oid), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    first.len() == 2
+        && second.len() == 2
+        && oid.starts_with(first)
+        && oid.get(2..4) == Some(second)
+        && validate_hash_component(oid, "LFS object id").is_ok()
 }
 
 fn is_allowed_pack_key(relative: &str) -> bool {
@@ -2681,6 +2776,12 @@ fn validate_key_content_hash(key: &str, actual_blake3: &str) -> Result<()> {
 }
 
 fn expected_blake3_from_key(key: &str) -> Option<&str> {
+    if let Some(hash) = key.split_once("/v2/capsules/").map(|(_, rest)| rest)
+        && let Some((partition, hash)) = hash.split_once('/')
+        && hash.starts_with(partition)
+    {
+        return Some(hash);
+    }
     if let Some(rest) = key.rsplit_once("/pack-").map(|(_, rest)| rest) {
         return rest.strip_suffix(".pack");
     }
@@ -2806,6 +2907,29 @@ mod tests {
                 )),
                 staged_object(format!("org/repo/metadata/pack/indexes/{}.json", hash('d'))),
             ],
+        }
+    }
+
+    fn capsule_push_plan() -> ProtectedCapsulePushPlan {
+        let capsule_hash = hash('a');
+        ProtectedCapsulePushPlan {
+            schema_version: crab_remote::protected::PROTECTED_CAPSULE_PUSH_PLAN_SCHEMA_VERSION,
+            repo_prefix: "org/repo".to_owned(),
+            push_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+            upload_prefix: "org/repo/staging/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/".to_owned(),
+            base_root_digest: hash('c'),
+            transaction_id: hash('d'),
+            capsule_hash: capsule_hash.clone(),
+            capsule_size: 7,
+            ref_updates: vec![ref_update(Some(oid('1')), oid('2'))],
+            staged_objects: vec![StagedWrite {
+                canonical_key: format!("org/repo/v2/capsules/aa/{capsule_hash}"),
+                staged_key: format!(
+                    "org/repo/staging/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/objects/org/repo/v2/capsules/aa/{capsule_hash}"
+                ),
+                blake3: capsule_hash,
+                size: 7,
+            }],
         }
     }
 
@@ -3102,6 +3226,31 @@ mod tests {
         assert!(
             validate_push_plan_shape(&plan, "org/repo", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").is_ok()
         );
+    }
+
+    #[test]
+    fn capsule_push_plan_shape_binds_staged_capsule() {
+        validate_protected_capsule_plan_shape(
+            &capsule_push_plan(),
+            "org/repo",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .expect("valid capsule plan");
+    }
+
+    #[test]
+    fn capsule_push_plan_shape_rejects_mismatched_staged_capsule() {
+        let mut plan = capsule_push_plan();
+        plan.staged_objects[0].size += 1;
+
+        let error = validate_protected_capsule_plan_shape(
+            &plan,
+            "org/repo",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .expect_err("capsule metadata mismatch must be rejected");
+
+        assert!(error.to_string().contains("staged capsule metadata"));
     }
 
     #[test]

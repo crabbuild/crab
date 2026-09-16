@@ -17,6 +17,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::prepare::{Artifacts, Error, Result};
 
+/// Current server-verified capsule publication plan format.
+pub const PROTECTED_CAPSULE_PUSH_PLAN_SCHEMA_VERSION: u32 = 3;
+
 /// Server-verified protected publication plan shared by every Crab client.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
@@ -32,6 +35,22 @@ pub struct ProtectedPushPlan {
     pub ref_updates: Vec<PushRefUpdate>,
     pub candidate_manifest: Manifest,
     pub push_commit_receipt: Option<PushCommitReceipt>,
+    pub staged_objects: Vec<StagedWrite>,
+}
+
+/// Server-verified protected publication plan for one protocol-v2 capsule.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProtectedCapsulePushPlan {
+    pub schema_version: u32,
+    pub repo_prefix: String,
+    pub push_id: String,
+    pub upload_prefix: String,
+    pub base_root_digest: String,
+    pub transaction_id: String,
+    pub capsule_hash: String,
+    pub capsule_size: u64,
+    pub ref_updates: Vec<PushRefUpdate>,
     pub staged_objects: Vec<StagedWrite>,
 }
 
