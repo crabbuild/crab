@@ -1026,8 +1026,8 @@ async fn compact_ref_frontier(
     let mut level_runs = runs[carry_count..].to_vec();
     while level_runs.len() > 1 {
         let mut merged = Vec::with_capacity(level_runs.len() / 2);
-        for pair in level_runs.chunks_exact(2) {
-            merged.push(pair[0].merge(&pair[1])?);
+        for [older, newer] in level_runs.as_chunks::<2>().0 {
+            merged.push(older.merge(newer)?);
         }
         level_runs = merged;
     }
