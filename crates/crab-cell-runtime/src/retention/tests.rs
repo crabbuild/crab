@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::UNIX_EPOCH};
 
 use bytes::Bytes;
-use crab_storage::{CellObjectKind, Store};
+use crab_storage::{CellObjectKind, ObjectStoreCredentials, Store, build_explicit_store};
 use object_store::{memory::InMemory, path::Path};
 
 use super::*;
@@ -130,13 +130,39 @@ async fn put_content_addressed(layout: &CellStorageLayout, path: Path, body: &[u
 
 #[tokio::test(flavor = "multi_thread")]
 async fn maintenance_collection_preserves_live_and_pinned_graphs() {
-    let backend = Arc::new(InMemory::new());
-    let identity = identity();
-    let layout = CellStorageLayout::new(
-        Store::new(backend),
+    collection_preserves_live_and_pinned_graphs(
+        Store::new(Arc::new(InMemory::new())),
         Path::from("runtime"),
-        *identity.application().as_bytes(),
-    );
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires an isolated pre-created RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_maintenance_collection_preserves_live_and_pinned_graphs() {
+    let required = |name| std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
+    let store = build_explicit_store(
+        &required("CRAB_CELL_TEST_BUCKET"),
+        ObjectStoreCredentials::Aws {
+            access_key_id: required("AWS_ACCESS_KEY_ID"),
+            secret_access_key: required("AWS_SECRET_ACCESS_KEY"),
+            session_token: None,
+            region: "us-east-1".into(),
+        },
+        Some(&required("CRAB_CELL_TEST_ENDPOINT")),
+        true,
+    )
+    .unwrap();
+    collection_preserves_live_and_pinned_graphs(
+        store,
+        Path::from(format!("{}/retention", required("CRAB_CELL_TEST_PREFIX"))),
+    )
+    .await;
+}
+
+async fn collection_preserves_live_and_pinned_graphs(store: Store, prefix: Path) {
+    let identity = identity();
+    let layout = CellStorageLayout::new(store, prefix, *identity.application().as_bytes());
     let catalog = CellCatalog::new(layout.clone(), identity.tenant());
     let code = Digest::from_bytes([4; 32]);
     let current_target = target(identity, b"current");

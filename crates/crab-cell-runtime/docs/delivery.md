@@ -165,6 +165,13 @@ cargo test -p crab-cell-runtime --test actor \
   rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
   -- --ignored --exact
 
+CRAB_CELL_TEST_BUCKET="$BUCKET" \
+CRAB_CELL_TEST_ENDPOINT="$ENDPOINT" \
+CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX" \
+cargo test -p crab-cell-runtime --lib \
+  retention::tests::rustfs_maintenance_collection_preserves_live_and_pinned_graphs \
+  -- --ignored --exact
+
 CRAB_HTTP_CELL_TEST_BUCKET="$BUCKET" \
 CRAB_HTTP_CELL_TEST_ENDPOINT="$ENDPOINT" \
 CRAB_HTTP_CELL_TEST_PREFIX="$UNIQUE_PREFIX" \
