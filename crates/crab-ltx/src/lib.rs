@@ -17,6 +17,8 @@ mod db;
 pub mod environment;
 mod error;
 mod host;
+#[cfg(feature = "replica")]
+pub use environment::ScratchMonitor;
 pub use environment::{DiskBudget, DiskReservation, Host};
 mod ltx;
 mod lz4_block;

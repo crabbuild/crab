@@ -82,11 +82,12 @@ pub(crate) async fn initialize_repository_at(
         .tempdir_in(data_dir)?;
     let budget =
         crate::server::CellRuntimeBudget::from_resources(crate::peer::local_resources(data_dir)?)?;
+    let local_disk = budget.local_disk();
     let runtime = CellRuntime::new_with_replica_host(
         SqlWorkerPool::new(1, 1)?,
         INITIALIZE_MAILBOX_BYTES,
         session,
-        budget.replica_host(budget.local_disk()),
+        budget.replica_host(local_disk, directory.path().to_owned()),
     )?;
     let replica = CellReplica::new(
         layout.clone(),

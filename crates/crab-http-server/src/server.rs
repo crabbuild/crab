@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
+use std::io;
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock as SyncRwLock};
 use std::time::{Duration, Instant};
@@ -17,7 +19,7 @@ use bytes::Bytes;
 use crab_cell_runtime::{
     ACTIVE_CELL_FILE_DESCRIPTORS, ACTIVE_CELL_NATIVE_BYTES, ACTIVE_CELL_PAGE_CACHE_BYTES,
     CellRuntime, Digest, NodeDirectory, Owner, PeerRoundTrip, PeerSigner, ReleaseState,
-    ReleaseStore, ReplicaHost, SessionId, SqlWorkerPool,
+    ReleaseStore, ReplicaHost, ScratchMonitor, SessionId, SqlWorkerPool,
 };
 use crab_metadata::manifest_store::read_manifest;
 use crab_remote_git::{
@@ -147,13 +149,43 @@ impl CellRuntimeBudget {
         crab_cell_runtime::DiskBudget::new(self.local_disk_mebibytes as u64 * MIB)
     }
 
-    pub(crate) fn replica_host(self, local_disk: crab_cell_runtime::DiskBudget) -> ReplicaHost {
+    pub(crate) fn replica_host(
+        self,
+        local_disk: crab_cell_runtime::DiskBudget,
+        scratch_root: PathBuf,
+    ) -> ReplicaHost {
+        let scratch_monitor = Arc::new(ActualScratchMonitor {
+            root: scratch_root,
+            local_disk: local_disk.clone(),
+            reserve_bytes: self.disk_reserve_bytes,
+        });
         ReplicaHost::default()
             .with_job_slots(Arc::new(Semaphore::new(self.replica_jobs)))
             .with_recovery_slots(Arc::new(Semaphore::new(self.replica_jobs)))
             .with_dirty_slots(Arc::new(Semaphore::new(self.replica_jobs)))
             .with_scratch_slots(Arc::new(Semaphore::new(self.scratch_mebibytes)))
+            .with_scratch_monitor(scratch_monitor)
             .with_local_disk_budget(local_disk)
+    }
+}
+
+struct ActualScratchMonitor {
+    root: PathBuf,
+    local_disk: crab_cell_runtime::DiskBudget,
+    reserve_bytes: u64,
+}
+
+impl ScratchMonitor for ActualScratchMonitor {
+    fn ensure_available(&self, scratch_bytes: u64) -> io::Result<()> {
+        let required = self
+            .reserve_bytes
+            .checked_add(self.local_disk.used())
+            .and_then(|bytes| bytes.checked_add(scratch_bytes))
+            .ok_or_else(|| io::Error::from(io::ErrorKind::StorageFull))?;
+        if fs4::available_space(&self.root)? < required {
+            return Err(io::Error::from(io::ErrorKind::StorageFull));
+        }
+        Ok(())
     }
 }
 
@@ -172,13 +204,14 @@ fn start_cell_runtime(
     session: SessionId,
     budget: CellRuntimeBudget,
     local_disk: crab_cell_runtime::DiskBudget,
+    scratch_root: PathBuf,
 ) -> Result<CellRuntime> {
     crate::cells::compiled_registry()?;
     Ok(CellRuntime::new_with_replica_host(
         SqlWorkerPool::for_system(budget.max_active_cells)?,
         budget.node_retained_bytes,
         session,
-        budget.replica_host(local_disk),
+        budget.replica_host(local_disk, scratch_root),
     )?)
 }
 
@@ -645,7 +678,7 @@ pub async fn serve(config: Config) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
     let metrics = crate::metrics::Metrics::new()?;
-    let cell_runtime = start_cell_runtime(session, cell_budget, local_disk)?;
+    let cell_runtime = start_cell_runtime(session, cell_budget, local_disk, session_dir.clone())?;
     let cell_resolver = crate::peer::LocalCellResolver::new(
         startup.layout.clone(),
         startup.identity,
@@ -1410,6 +1443,22 @@ mod tests {
                 disk_reserve_bytes: 10 * GIB,
             }
         );
+    }
+
+    #[test]
+    fn cell_scratch_monitor_rechecks_actual_free_space() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let available = fs4::available_space(directory.path()).unwrap();
+        let monitor = ActualScratchMonitor {
+            root: directory.path().to_owned(),
+            local_disk: crab_cell_runtime::DiskBudget::new(MIB),
+            reserve_bytes: available,
+        };
+
+        assert!(matches!(
+            monitor.ensure_available(1),
+            Err(error) if error.kind() == io::ErrorKind::StorageFull
+        ));
     }
 
     #[test]

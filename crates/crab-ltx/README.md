@@ -32,6 +32,7 @@ cutover and measured capacity qualification still remain. See the
 | `restore_exact(plan, path)` | Installs a new SQLite file at exactly the verified endpoint; never overwrites |
 | `compact_exact(plan, path)` | Compacts that complete chain into a verified standalone snapshot; never deletes inputs |
 | `Host::with_local_disk_budget(DiskBudget)` | Shares byte-precise WAL/LTX/sparse-page admission across cloned hosts; exhausted write admission occurs before SQL begins |
+| `Host::with_scratch_monitor(ScratchMonitor)` | Rechecks embedding-service disk pressure after process-wide full-job scratch admission and before remote body downloads |
 | `close()` | Releases local connections/read lock; does not upload, publish or release a remote lease |
 
 `SegmentInfo` includes TXID range, page size/count, pre/post rolling checksum,
@@ -429,8 +430,9 @@ LTX, codec index and sidecar. Managed writes reserve twice `max_capture_bytes`
 before SQLite begins and reconcile to exact main database, live WAL and retained LTX bytes
 after capture, checkpoint and pruning. Sparse activation reserves every newly
 materialized page. A failed post-BEGIN operation retains conservative admission
-until the fenced handle is discarded. The server must still reserve filesystem
-headroom and remeasure actual free space for unrelated consumers.
+until the fenced handle is discarded. `ScratchMonitor` lets the embedding
+service reserve filesystem headroom and remeasure actual free space alongside
+unrelated consumers.
 `resume_with_host` reserves the complete restored database before installing its
 destination; writable sparse activation instead admits pages as they materialize.
 
@@ -460,7 +462,9 @@ Default hosts share 32 object-store request slots, up to 16 CPU and dirty-job
 slots (each independently capped by available CPUs), and two large-recovery slots.
 `with_io_slots`, `with_job_slots`, `with_dirty_slots`, `with_recovery_slots` and
 `with_scratch_slots` accept shared Tokio semaphores for explicit service budgets;
-scratch permits represent one MiB each. Dirty admission
+scratch permits represent one MiB each. `with_scratch_monitor` receives the
+process-wide admitted scratch bytes after those permits are acquired, so the
+embedding service can reject current disk pressure before body downloads. Dirty admission
 precedes capture preparation; recovery admission is nested inside it before body
 downloads for restore, resume, bundle and compaction. Full restore/resume and
 Cell compaction reserve two database images plus 64 MiB; Cell compaction also

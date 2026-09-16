@@ -455,6 +455,8 @@ space before BEGIN, reconcile to exact database/WAL/retained bytes, and sparse V
 reserve each newly materialized page. `TransactionError::Admission` proves SQL
 did not start and lets the runtime return capacity without fencing. These are
 not RSS quotas;
+`Host::with_scratch_monitor` also lets the server remeasure actual free space
+after weighted full-job admission and before remote body downloads.
 standalone plan verification/compaction retains input buffers, while Cell
 compaction uses bounded memory plus local scratch. Aggregate capture accounting
 can fail after local files have been installed. Reserve headroom.

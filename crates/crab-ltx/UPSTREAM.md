@@ -118,6 +118,9 @@ Paths in the first column are relative to upstream `crates/ltx/`.
 14. Every retained managed SQLite connection uses a 64 KiB page-cache target.
     The three-connection total is exported for the embedding runtime's active-
     database admission instead of relying on SQLite's multi-megabyte default.
+15. Full restore, resume, bundle and compaction jobs expose an injectable
+    scratch monitor. Crab remeasures actual free space after process-wide
+    scratch admission and rejects pressure before remote body downloads.
 
 Still omitted: duplicate provider/URL construction, epoch election, listing-based
 discovery, complete virtual-filesystem simulation and B-tree prediction heuristics.

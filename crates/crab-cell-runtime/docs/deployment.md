@@ -113,7 +113,10 @@ Each open `ManagedDb` charges:
 - Sparse-page cache allowance
 - Native handler allowance
 
-The shared disk budget covers SQLite files, WAL, retained LTX, sparse pages, restore scratch, and Git/LFS/Release staging on the same volume.
+The shared byte budget covers SQLite files, WAL, retained LTX, sparse pages,
+and Git/LFS/Release staging. Full restore and compaction use a separate weighted
+scratch budget; after admission, the server remeasures actual free space against
+both budgets and the node reserve before any remote body download.
 
 Large jobs reserve two database sizes plus 64 MiB scratch and 64 MiB memory. Concurrent large jobs cap at the smaller of vCPU count and two, then apply byte admission.
 

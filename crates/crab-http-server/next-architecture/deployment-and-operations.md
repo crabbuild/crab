@@ -247,7 +247,10 @@ The implemented node split assigns one third of usable startup disk to
 one-MiB full-job scratch permits and two thirds to a byte-precise shared budget.
 The latter is injected into the replica `Host` and the HTTP transfer staging
 owner, so WAL/LTX growth, sparse-page materialization and Git/LFS/Release bodies
-cannot each spend the same bytes independently. The hard cut starts these Cell
+cannot each spend the same bytes independently. Every full restore, resume,
+bundle and compaction admission also remeasures filesystem free space against
+the node reserve, shared long-lived bytes and all admitted scratch bytes before
+remote body downloads. The hard cut starts these Cell
 databases empty; there is no legacy application-data importer, dual read or
 bucket-to-SQLite migration path.
 

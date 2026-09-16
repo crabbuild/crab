@@ -49,6 +49,7 @@ pub use codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 pub use control::{Control, ControlState, Owner, RootRef, Transition};
 pub use crab_ltx::{
     CellReplica, DiskBudget, DiskReservation, Host as ReplicaHost, Limits as ReplicaLimits,
+    ScratchMonitor,
 };
 pub use effects::{
     EffectAckRequest, EffectBatch, EffectClaim, EffectClaimCommand, EffectClaimRequest,

@@ -171,6 +171,26 @@ pub trait FileSystem: Send + Sync {
     fn persist_file_new(&self, source: &Path, destination: &Path) -> io::Result<()>;
 }
 
+/// Rechecks host disk pressure after full-job scratch admission.
+///
+/// `reserved_bytes` is the process-wide scratch reservation, including the
+/// current job. An embedding service can combine it with other local-disk
+/// reservations and an operator reserve before allowing remote downloads.
+#[cfg(feature = "replica")]
+pub trait ScratchMonitor: Send + Sync {
+    fn ensure_available(&self, reserved_bytes: u64) -> io::Result<()>;
+}
+
+#[cfg(feature = "replica")]
+struct UnlimitedScratch;
+
+#[cfg(feature = "replica")]
+impl ScratchMonitor for UnlimitedScratch {
+    fn ensure_available(&self, _: u64) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Wall-clock observations used in LTX timestamps and checkpoint eligibility.
 pub trait Clock: Send + Sync {
     fn unix_millis(&self) -> i64;
@@ -223,6 +243,8 @@ pub struct Host {
     scratch_slots: Arc<tokio::sync::Semaphore>,
     #[cfg(feature = "replica")]
     scratch_capacity: u32,
+    #[cfg(feature = "replica")]
+    scratch_monitor: Arc<dyn ScratchMonitor>,
     #[cfg(feature = "replica")]
     recovery: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     #[cfg(feature = "replica")]
@@ -368,6 +390,14 @@ impl Host {
         self
     }
 
+    /// Rechecks actual host capacity whenever a full scratch job is admitted.
+    #[cfg(feature = "replica")]
+    #[must_use]
+    pub fn with_scratch_monitor(mut self, monitor: Arc<dyn ScratchMonitor>) -> Self {
+        self.scratch_monitor = monitor;
+        self
+    }
+
     #[cfg(feature = "replica")]
     pub(crate) async fn for_dirty(&self) -> crate::Result<Self> {
         let mut host = self.clone();
@@ -424,6 +454,15 @@ impl Host {
                 .await
                 .map_err(|e| crate::CrabError::Other(Box::new(e)))?,
         ));
+        let capacity = self.scratch_capacity as usize;
+        let reserved_units = capacity.saturating_sub(self.scratch_slots.available_permits());
+        let reserved_bytes = u64::try_from(reserved_units)
+            .ok()
+            .and_then(|units| units.checked_mul(MIB))
+            .ok_or(crate::CrabError::Limit("scratch disk bytes"))?;
+        self.scratch_monitor
+            .ensure_available(reserved_bytes)
+            .map_err(crate::CrabError::Io)?;
         Ok(host)
     }
 
@@ -545,6 +584,8 @@ impl Default for Host {
                 .clone(),
             #[cfg(feature = "replica")]
             scratch_capacity: 64 * 1024,
+            #[cfg(feature = "replica")]
+            scratch_monitor: Arc::new(UnlimitedScratch),
             #[cfg(feature = "replica")]
             recovery: None,
             #[cfg(feature = "replica")]
@@ -709,7 +750,7 @@ impl Worker for std::thread::JoinHandle<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     #[test]
     fn disk_budget_reservations_resize_and_release_exact_bytes() {
@@ -939,5 +980,46 @@ mod tests {
         assert!(host.io_permit().await.is_err());
         assert!(host.for_recovery().await.is_err());
         assert!(host.for_scratch(1 << 20).await.is_err());
+    }
+
+    #[cfg(feature = "replica")]
+    #[tokio::test]
+    async fn scratch_monitor_rechecks_total_reservation_and_releases_rejection() {
+        struct RecordingScratch {
+            bytes: AtomicU64,
+            reject: AtomicBool,
+        }
+        impl ScratchMonitor for RecordingScratch {
+            fn ensure_available(&self, reserved_bytes: u64) -> io::Result<()> {
+                self.bytes.store(reserved_bytes, Ordering::Release);
+                if self.reject.load(Ordering::Acquire) {
+                    return Err(io::Error::from(io::ErrorKind::StorageFull));
+                }
+                Ok(())
+            }
+        }
+
+        let slots = Arc::new(tokio::sync::Semaphore::new(3));
+        let monitor = Arc::new(RecordingScratch {
+            bytes: AtomicU64::new(0),
+            reject: AtomicBool::new(false),
+        });
+        let host = Host::default()
+            .with_scratch_slots(slots.clone())
+            .with_scratch_monitor(monitor.clone());
+        let first = host.for_scratch(1 << 20).await.unwrap();
+        assert_eq!(monitor.bytes.load(Ordering::Acquire), 1 << 20);
+        let second = host.for_scratch(2 << 20).await.unwrap();
+        assert_eq!(monitor.bytes.load(Ordering::Acquire), 3 << 20);
+        drop((first, second));
+
+        monitor.reject.store(true, Ordering::Release);
+
+        assert!(matches!(
+            host.for_scratch(1 << 20).await,
+            Err(crate::CrabError::Io(error)) if error.kind() == io::ErrorKind::StorageFull
+        ));
+        assert_eq!(monitor.bytes.load(Ordering::Acquire), 1 << 20);
+        assert_eq!(slots.available_permits(), 3);
     }
 }

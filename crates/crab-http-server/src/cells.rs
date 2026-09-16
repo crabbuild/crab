@@ -767,11 +767,12 @@ pub(crate) async fn enter_maintenance(config: &Config, expected_revision: u64) -
     let budget = crate::server::CellRuntimeBudget::from_resources(crate::peer::local_resources(
         &config.cells.data_dir,
     )?)?;
+    let local_disk = budget.local_disk();
     let runtime = CellRuntime::new_with_replica_host(
         SqlWorkerPool::new(1, 1)?,
         MAINTENANCE_RUNTIME_BYTES,
         session,
-        budget.replica_host(budget.local_disk()),
+        budget.replica_host(local_disk, session_dir.path().to_owned()),
     )?;
     let router = RepositoryCellRouter::new(
         identity,
