@@ -21,17 +21,21 @@ flowchart LR
 
 ## How Compaction Works
 
-1. Pins the repository's current shard inventory and validates its size and
-   entry bounds.
-2. Downloads shards with bounded concurrency into a temporary maintenance
-   workspace, verifying each content hash before parsing.
+1. Selects repository authority. Capsule v2 pins one authenticated root,
+   per-ref frontier, checkpoint, capsule set, and pointer catalog; v1 reads the
+   legacy shard list. Corrupt v2 authority fails closed.
+2. Downloads the selected shards into a temporary workspace, verifying each
+   content hash before parsing.
 3. Merges the complete set with xet-core's shard merging algorithm, respecting
    the maximum shard size limit.
-4. Uploads hash-verified replacement shards and the new immutable shard index.
-5. Atomically updates the shard-list with compare-and-swap and publishes
-   candidate roots before the new list is visible.
-6. Reconciles the partitioned ref registry without dropping roots registered by
-   a concurrent push.
+4. Removes file records outside the authenticated v2 catalog and Xorb metadata
+   not referenced by a retained file, then proves every authenticated file
+   occurs exactly once in the replacement.
+5. Uploads immutable replacement shards, verifies every replacement shard and
+   retained Xorb body against the new catalog, and registers the new GC roots.
+6. For v2, consolidates the pinned Git packs and publishes the replacement
+   pointer catalog as a checkpoint with an exact-root compare-and-swap. For v1,
+   compare-and-swap updates the legacy shard list.
 
 Source shards are left in place for garbage collection to clean up later.
 
@@ -43,7 +47,8 @@ Source shards are left in place for garbage collection to clean up later.
 crab compact --repo org/models --bucket my-crab-bucket --dry-run
 ```
 
-Reports how many shards would be merged without downloading or uploading anything.
+Reports how many shards would be merged without downloading or uploading shard
+bodies. Capsule-v2 dry-runs still read and authenticate the repository view.
 
 ### Compact with defaults (100 MiB max shard size)
 
@@ -57,7 +62,9 @@ crab compact --repo org/models --bucket my-crab-bucket
 crab compact --repo org/models --bucket my-crab-bucket --max-shard-size 50MiB
 ```
 
-Smaller compacted shards trade fewer total shards for lower per-shard download latency — useful when shard sync latency matters more than minimizing shard count. The value must be greater than zero and cannot exceed Xet's native 100 MiB shard cap.
+Smaller compacted shards trade fewer total shards for lower per-shard download
+latency—useful when shard sync latency matters more than minimizing shard count.
+The supported range is 1 MiB through 512 MiB.
 
 ## When to Compact
 
@@ -69,11 +76,13 @@ Smaller compacted shards trade fewer total shards for lower per-shard download l
 
 ## Concurrency Safety
 
-Compaction holds a renewable repository maintenance lease and is safe to retry.
-Pushes may continue: immutable candidate objects are safe before publication,
-the manifest compare-and-swap prevents stale commits, and registry
-reconciliation preserves concurrent push roots. Cancellation is checked between
-bounded download, parse, and publish units.
+Compaction holds a renewable repository maintenance lease and the GC writer
+fence, and it is safe to retry. Pushes may continue: immutable candidates are
+safe before publication, v2's exact-root compare-and-swap prevents a stale
+checkpoint from replacing root state, and per-ref updates that occur after the
+captured view remain visible as a suffix. Registry union preserves concurrent
+push roots. Cancellation is checked between bounded download, parse, and
+publish units.
 
 ## Compaction vs. Repacking
 

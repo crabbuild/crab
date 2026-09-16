@@ -154,7 +154,25 @@ pub async fn publish_capsule_checkpoint_from_view(
     if view.capsule_count()? < u64::from(threshold) {
         return Ok(false);
     }
-    let packs = consolidate_git_packs(&view, maximum_bytes, maximum_bytes, cancel)
+    let catalog = view.pointer_catalog()?;
+    publish_capsule_checkpoint_with_catalog_from_view(layout, view, catalog, maximum_bytes, cancel)
+        .await
+}
+
+/// Publish one checkpoint from a pinned view with a replacement pointer catalog.
+///
+/// The caller must make every external object named by `catalog` durable and
+/// verify its complete dependency closure before calling. Publication retains
+/// the captured ref frontier and succeeds only against the view's exact root.
+pub async fn publish_capsule_checkpoint_with_catalog_from_view(
+    layout: &StoreLayout<Store>,
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    catalog: crab_metadata::capsule_protocol::PointerCatalog,
+    maximum_bytes: u64,
+    cancel: &CancellationToken,
+) -> Result<bool, CheckpointError> {
+    check_cancelled(cancel)?;
+    let packs = consolidate_git_packs(view, maximum_bytes, maximum_bytes, cancel)
         .await?
         .into_packs();
     if packs.is_empty() {
@@ -167,7 +185,7 @@ pub async fn publish_capsule_checkpoint_from_view(
         view.root().root().generation(),
         view.root().digest(),
         packs,
-        view.pointer_catalog()?,
+        catalog,
         Some(visibility),
     )?;
     check_cancelled(cancel)?;

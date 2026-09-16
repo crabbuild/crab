@@ -1,16 +1,19 @@
 //! Shard compaction: merge many small shards into fewer large ones.
 //!
-//! Downloads all shards referenced by a repo's shard-list, merges them
-//! using xet-core's `merge_shards()`, uploads the compacted shards to
-//! `.crab/shards/{first-two-hex}/{new_hash}`, and CAS-updates the shard-list and
-//! ref-registry. Source shards are left for GC.
+//! For capsule repositories, pins one authenticated view, merges every shard
+//! referenced by its pointer catalog, verifies the replacement dependency
+//! closure, and publishes the catalog in an exact-root-CAS checkpoint. Legacy
+//! repositories retain the standalone shard-list publication path. Source
+//! shards are left for GC in both formats.
 //!
 //! When shards contain xorb-info entries from other repos (cross-repo
 //! global dedup), a post-merge filtering step uses
 //! `MDBMinimalShard::serialize_xorb_subset_only()` to strip xorb entries
-//! not referenced by any file-info entry, producing smaller output shards.
+//! not referenced by any file-info entry. Capsule repositories additionally
+//! rebuild each output from only the authenticated file set and its exact
+//! xorb dependencies.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -22,7 +25,6 @@ use crate::coordination::cas::cas_update_default;
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::storage::store::Store;
 use crab_metadata::manifests::ShardList;
-use crab_storage::canonical_global_content_path;
 use crab_xet::hash::{MerkleHash, compute_data_hash};
 use crab_xet::shard::{
     MDBMinimalShard, MDBShardFile, merge_shards, new_shard_file_cache, shard_set_union,
@@ -34,9 +36,7 @@ pub const DEFAULT_MAX_SHARD_SIZE: u64 = 100 * 1024 * 1024;
 const MAX_SOURCE_SHARD_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_SHARD_LIST_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SHARD_LIST_ENTRIES: usize = 1_000_000;
-
-/// Global prefix for content-addressed objects.
-const GLOBAL_PREFIX: &str = ".crab";
+const MAX_CAPSULE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// CLI arguments for `crab compact`.
 #[derive(Debug, Clone)]
@@ -82,9 +82,8 @@ impl CompactOutcome {
 
 /// Run shard compaction for a single repo.
 ///
-/// Downloads all shards from the repo's shard-list, merges them via
-/// xet-core's `merge_shards()`, uploads the results, and CAS-updates
-/// the shard-list and ref-registry.
+/// Selects the repository authority, merges its authenticated shard inventory,
+/// and atomically publishes the replacement metadata for that format.
 pub async fn run_compact(args: &CompactArgs, store: &Store) -> Result<CompactOutcome> {
     run_compact_with_cancel(args, store, &CancellationToken::new()).await
 }
@@ -100,10 +99,11 @@ pub async fn run_compact_with_cancel(
     if args.dry_run {
         return run_compact_inner(args, store, cancel).await;
     }
+    let layout = crab_storage::StoreLayout::new(store.as_storage().clone(), args.repo.clone());
     let writer = crate::maintenance::RepositoryMaintenanceLease::acquire(
         store,
-        GLOBAL_PREFIX,
-        &args.repo,
+        layout.global_prefix(),
+        layout.repo_prefix(),
         cancel,
     )
     .await?;
@@ -125,12 +125,25 @@ async fn run_compact_inner(
     cancel: &CancellationToken,
 ) -> Result<CompactOutcome> {
     check_cancelled(cancel)?;
-    let shard_list_path = format!("{}/manifests/shard-list", args.repo);
+    let layout = crab_storage::StoreLayout::new(store.as_storage().clone(), args.repo.clone());
+    match crab_metadata::capsule_protocol::load_root(&layout).await {
+        Ok(root) => run_capsule_compact_inner(args, store, &layout, root, cancel).await,
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        }) => run_legacy_compact_inner(args, store, cancel).await,
+        Err(error) => Err(error.into()),
+    }
+}
 
-    // Step 1: Read the per-repo shard-list.
+async fn run_legacy_compact_inner(
+    args: &CompactArgs,
+    store: &Store,
+    cancel: &CancellationToken,
+) -> Result<CompactOutcome> {
+    let layout = crab_storage::StoreLayout::new(store.as_storage().clone(), args.repo.clone());
+    let shard_list_path = layout.repo_path("manifests/shard-list").to_string();
     let shard_list = read_shard_list(store, &shard_list_path).await?;
-    let source_hashes: Vec<String> = shard_list.entries.clone();
-
+    let source_hashes = shard_list.entries.clone();
     if source_hashes.is_empty() {
         info!(repo = %args.repo, "no shards to compact");
         return Ok(CompactOutcome {
@@ -159,24 +172,160 @@ async fn run_compact_inner(
         outcome.log();
         return Ok(outcome);
     }
+    let compacted =
+        prepare_compacted_shards(args, store, &layout, &source_hashes, None, cancel).await?;
+    if compacted.is_empty() {
+        return Ok(CompactOutcome {
+            source_shards: source_hashes.len(),
+            compacted_shards: 0,
+            dry_run: false,
+        });
+    }
+    let new_hashes = upload_compacted_shards(store, &layout, &compacted, cancel).await?;
+    let source_set: HashSet<&str> = source_hashes.iter().map(String::as_str).collect();
+    let new_hash_set: Vec<String> = new_hashes.clone();
+    cas_update_default::<ShardList, _>(store, &shard_list_path, |list| {
+        list.entries.retain(|h| !source_set.contains(h.as_str()));
+        list.entries.extend(new_hash_set.clone());
+        list.generation += 1;
+        debug!(
+            generation = list.generation,
+            entries = list.entries.len(),
+            "updated shard-list"
+        );
+    })
+    .await?;
+    let updated_shard_list = read_shard_list(store, &shard_list_path).await?;
+    let final_hashes = updated_shard_list.entries.clone();
+    let generation = crab_metadata::ref_registry::union_register_repo_shards(
+        layout.store(),
+        &layout,
+        final_hashes,
+    )
+    .await?;
+    debug!(generation, repo = %args.repo, "updated ref-registry");
 
-    // Step 2: Download all shards to a temp directory.
-    let source_dir = tempfile::tempdir().map_err(|e| {
-        CrabError::Io(std::io::Error::new(
-            e.kind(),
-            format!("failed to create temp dir: {e}"),
-        ))
-    })?;
-    let target_dir = tempfile::tempdir().map_err(|e| {
-        CrabError::Io(std::io::Error::new(
-            e.kind(),
-            format!("failed to create temp dir: {e}"),
-        ))
-    })?;
+    let outcome = CompactOutcome {
+        source_shards: source_hashes.len(),
+        compacted_shards: compacted.len(),
+        dry_run: false,
+    };
+    outcome.log();
+    Ok(outcome)
+}
 
-    download_shards(store, &source_hashes, source_dir.path(), cancel).await?;
+async fn run_capsule_compact_inner(
+    args: &CompactArgs,
+    store: &Store,
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    root: crab_metadata::capsule_protocol::RootSnapshot,
+    cancel: &CancellationToken,
+) -> Result<CompactOutcome> {
+    let view = crab_read::capsule_protocol::open_view_from_root(
+        layout,
+        root,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: MAX_CAPSULE_BYTES,
+            max_frontier_bytes: MAX_CAPSULE_BYTES,
+        },
+    )
+    .await?;
+    if view.refs().is_empty() {
+        info!(repo = %args.repo, protocol = "capsule-v2", "no visible refs to compact");
+        return Ok(CompactOutcome {
+            dry_run: args.dry_run,
+            ..CompactOutcome::default()
+        });
+    }
+    let catalog = view.pointer_catalog()?;
+    let source_hashes = catalog
+        .files()
+        .values()
+        .map(|file| file.shard_hash().to_owned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let selected_files = catalog.files().keys().cloned().collect::<BTreeSet<_>>();
+    if source_hashes.is_empty() {
+        info!(repo = %args.repo, protocol = "capsule-v2", "no shards to compact");
+        return Ok(CompactOutcome {
+            dry_run: args.dry_run,
+            ..CompactOutcome::default()
+        });
+    }
+    if args.dry_run {
+        let outcome = CompactOutcome {
+            source_shards: source_hashes.len(),
+            compacted_shards: 0,
+            dry_run: true,
+        };
+        outcome.log();
+        return Ok(outcome);
+    }
 
-    // Step 3: Merge shards via xet-core.
+    let compacted = prepare_compacted_shards(
+        args,
+        store,
+        layout,
+        &source_hashes,
+        Some(&selected_files),
+        cancel,
+    )
+    .await?;
+    if compacted.is_empty() {
+        return Ok(CompactOutcome {
+            source_shards: source_hashes.len(),
+            compacted_shards: 0,
+            dry_run: false,
+        });
+    }
+    let replacement = compacted_pointer_catalog(&catalog, &compacted)?;
+    let new_hashes = upload_compacted_shards(store, layout, &compacted, cancel).await?;
+    crab_read::verify_capsule_pointer_catalog_objects(layout, &replacement).await?;
+    crab_metadata::ref_registry::union_register_repo_shards(layout.store(), layout, new_hashes)
+        .await?;
+    let published = crab_remote::checkpoint::publish_capsule_checkpoint_with_catalog_from_view(
+        layout,
+        &view,
+        replacement,
+        MAX_CAPSULE_BYTES,
+        cancel,
+    )
+    .await
+    .map_err(map_checkpoint_error)?;
+    if !published {
+        return Err(CrabError::CasConflict {
+            path: layout.capsule_root_path().to_string(),
+            expected_etag: None,
+        });
+    }
+    let outcome = CompactOutcome {
+        source_shards: source_hashes.len(),
+        compacted_shards: compacted.len(),
+        dry_run: false,
+    };
+    outcome.log();
+    Ok(outcome)
+}
+
+struct PreparedCompactedShard {
+    hash: MerkleHash,
+    body: Bytes,
+    files: Vec<String>,
+    xorbs: Vec<String>,
+}
+
+async fn prepare_compacted_shards(
+    args: &CompactArgs,
+    store: &Store,
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    source_hashes: &[String],
+    selected_files: Option<&BTreeSet<String>>,
+    cancel: &CancellationToken,
+) -> Result<Vec<PreparedCompactedShard>> {
+    let source_dir = tempfile::tempdir().map_err(CrabError::Io)?;
+    let target_dir = tempfile::tempdir().map_err(CrabError::Io)?;
+    download_shards(store, layout, source_hashes, source_dir.path(), cancel).await?;
     let xet_context = XetContext::default().map_err(|error| {
         CrabError::Internal(format!("failed to initialize xet context: {error}"))
     })?;
@@ -198,128 +347,187 @@ async fn run_compact_inner(
         }
     })
     .await
-    .map_err(|e| CrabError::Internal(format!("merge_shards join error: {e}")))?
-    .map_err(|e| CrabError::Internal(format!("merge_shards failed: {e}")))?;
-
-    let merged = merge_result.merged_shards;
+    .map_err(|error| CrabError::Internal(format!("merge_shards join error: {error}")))?
+    .map_err(|error| CrabError::Internal(format!("merge_shards failed: {error}")))?;
     info!(
-        merged_count = merged.len(),
+        merged_count = merge_result.merged_shards.len(),
         obsolete_count = merge_result.obsolete_shards.len(),
         "merge complete"
     );
-
-    if merged.is_empty() {
-        return Ok(CompactOutcome {
-            source_shards: source_hashes.len(),
-            compacted_shards: 0,
-            dry_run: false,
-        });
-    }
-
-    // Step 3b: Filter unreferenced xorbs from merged shards.
-    // In the global-dedup layout, merged shards may carry xorb-info from
-    // other repos. Strip those entries so the compacted output is lean.
-    let filter_dir = tempfile::tempdir().map_err(|e| {
-        CrabError::Io(std::io::Error::new(
-            e.kind(),
-            format!("failed to create filter temp dir: {e}"),
-        ))
-    })?;
+    let filter_dir = tempfile::tempdir().map_err(CrabError::Io)?;
     let filtered = tokio::task::spawn_blocking({
-        let merged_clone = merged.clone();
+        let merged = merge_result.merged_shards;
         let filter_path = filter_dir.path().to_owned();
-        move || filter_unreferenced_xorbs(&merged_clone, &filter_path)
+        let selected_files = selected_files.cloned();
+        move || filter_unreferenced_xorbs(&merged, &filter_path, selected_files.as_ref())
     })
     .await
-    .map_err(|e| CrabError::Internal(format!("filter_unreferenced_xorbs join error: {e}")))??;
+    .map_err(|error| {
+        CrabError::Internal(format!("filter_unreferenced_xorbs join error: {error}"))
+    })??;
+    filtered
+        .into_iter()
+        .map(|shard| inspect_compacted_shard(&shard))
+        .collect()
+}
 
-    // Step 4: Upload merged shards to the canonical global shard namespace.
-    let mut new_hashes: Vec<String> = Vec::with_capacity(filtered.len());
-    for shard_file in &filtered {
-        check_cancelled(cancel)?;
-        let hash_hex = shard_file.shard_hash.hex();
-        let shard_path = canonical_global_content_path("shards", &hash_hex);
+fn inspect_compacted_shard(shard: &MDBShardFile) -> Result<PreparedCompactedShard> {
+    let mut body = Vec::new();
+    shard
+        .read_into_buffer(&mut body)
+        .map_err(|error| CrabError::Internal(format!("read merged shard: {error}")))?;
+    let actual = compute_data_hash(&body);
+    if actual != shard.shard_hash {
+        return Err(CrabError::CorruptObject {
+            path: format!("compacted shard {}", shard.shard_hash.hex()),
+            reason: format!(
+                "shard content hash is {actual}, expected {}",
+                shard.shard_hash
+            ),
+        });
+    }
+    let parsed = MDBMinimalShard::from_reader(&mut std::io::Cursor::new(&body), true, true)
+        .map_err(|error| CrabError::Internal(format!("parse compacted shard: {error}")))?;
+    let mut files = (0..parsed.num_files())
+        .filter_map(|index| parsed.file(index))
+        .map(|file| file.file_hash().hex())
+        .collect::<Vec<_>>();
+    let mut xorbs = (0..parsed.num_xorb())
+        .filter_map(|index| parsed.xorb(index))
+        .map(|xorb| xorb.xorb_hash().hex())
+        .collect::<Vec<_>>();
+    files.sort_unstable();
+    xorbs.sort_unstable();
+    if files.windows(2).any(|pair| pair[0] == pair[1])
+        || xorbs.windows(2).any(|pair| pair[0] == pair[1])
+    {
+        return Err(CrabError::CorruptObject {
+            path: format!("compacted shard {}", shard.shard_hash.hex()),
+            reason: "compacted shard contains duplicate file or xorb identities".to_owned(),
+        });
+    }
+    Ok(PreparedCompactedShard {
+        hash: shard.shard_hash,
+        body: Bytes::from(body),
+        files,
+        xorbs,
+    })
+}
 
-        let mut buf = Vec::new();
-        shard_file
-            .read_into_buffer(&mut buf)
-            .map_err(|e| CrabError::Internal(format!("read merged shard: {e}")))?;
-
-        // Verify hash before upload.
-        let computed = compute_data_hash(&buf);
-        if computed != shard_file.shard_hash {
-            return Err(CrabError::CorruptObject {
-                path: shard_path.to_string(),
-                reason: format!(
-                    "hash mismatch: expected {}, computed {}",
-                    hash_hex,
-                    computed.hex()
-                ),
-            });
+fn compacted_pointer_catalog(
+    current: &crab_metadata::capsule_protocol::PointerCatalog,
+    compacted: &[PreparedCompactedShard],
+) -> Result<crab_metadata::capsule_protocol::PointerCatalog> {
+    let mut file_shards = BTreeMap::new();
+    for shard in compacted {
+        for file in &shard.files {
+            if file_shards.insert(file.clone(), shard.hash.hex()).is_some() {
+                return Err(CrabError::CorruptObject {
+                    path: "compacted shard set".to_owned(),
+                    reason: format!("file {file} occurs in more than one compacted shard"),
+                });
+            }
         }
+    }
+    if file_shards.len() != current.files().len()
+        || current
+            .files()
+            .keys()
+            .any(|file| !file_shards.contains_key(file))
+    {
+        return Err(CrabError::CorruptObject {
+            path: "compacted shard set".to_owned(),
+            reason: "compacted shards do not cover every authenticated file exactly once"
+                .to_owned(),
+        });
+    }
+    let mut replacement = crab_metadata::capsule_protocol::PointerCatalog::new();
+    for shard in compacted {
+        for xorb in &shard.xorbs {
+            let entry = current
+                .xorbs()
+                .get(xorb)
+                .ok_or_else(|| CrabError::CorruptObject {
+                    path: "compacted shard set".to_owned(),
+                    reason: format!("compacted shard references absent xorb {xorb}"),
+                })?;
+            replacement.insert_xorb(xorb.clone(), entry.clone())?;
+        }
+        replacement.insert_shard(
+            shard.hash.hex(),
+            crab_metadata::capsule_protocol::ShardCatalogEntry::new(
+                shard.body.len() as u64,
+                shard.xorbs.clone(),
+            ),
+        )?;
+    }
+    for (file, entry) in current.files() {
+        let shard = file_shards
+            .get(file)
+            .ok_or_else(|| CrabError::CorruptObject {
+                path: "compacted shard set".to_owned(),
+                reason: format!("compacted shard mapping lost file {file}"),
+            })?;
+        replacement.insert_file(
+            file.clone(),
+            crab_metadata::capsule_protocol::FileCatalogEntry::new(entry.size(), shard.clone()),
+        )?;
+    }
+    replacement.encode()?;
+    Ok(replacement)
+}
 
-        debug!(hash = %hash_hex, size = buf.len(), "uploading compacted shard");
-        let body = Bytes::from(buf);
-        let hash = MerkleHash::from_hex(&hash_hex).map_err(|error| CrabError::CorruptObject {
-            path: shard_path.to_string(),
-            reason: format!("invalid compacted shard hash: {error}"),
-        })?;
-        let local_path = target_dir.path().join(format!("upload-{}.shard", hash_hex));
-        tokio::fs::write(&local_path, &body)
+async fn upload_compacted_shards(
+    store: &Store,
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    compacted: &[PreparedCompactedShard],
+    cancel: &CancellationToken,
+) -> Result<Vec<String>> {
+    let upload_dir = tempfile::tempdir().map_err(CrabError::Io)?;
+    let mut hashes = Vec::with_capacity(compacted.len());
+    for shard in compacted {
+        check_cancelled(cancel)?;
+        let hash = shard.hash.hex();
+        let path = layout.shard_path(&shard.hash);
+        let local_path = upload_dir.path().join(format!("upload-{hash}.shard"));
+        tokio::fs::write(&local_path, &shard.body)
             .await
             .map_err(CrabError::Io)?;
         store
             .put_multipart_file_retry_with_xet_hash(
-                &shard_path,
+                &path,
                 &local_path,
-                body.len() as u64,
-                hash.into(),
+                shard.body.len() as u64,
+                shard.hash.into(),
                 8 * 1024 * 1024,
                 cancel,
                 None,
             )
             .await?;
-        crate::cmd::gc::closure::publish(store, GLOBAL_PREFIX, &hash, body, shard_path.as_ref())
-            .await?;
-        new_hashes.push(hash_hex);
+        crate::cmd::gc::closure::publish(
+            store,
+            layout.global_prefix(),
+            &shard.hash,
+            shard.body.clone(),
+            path.as_ref(),
+        )
+        .await?;
+        hashes.push(hash);
     }
+    Ok(hashes)
+}
 
-    // Step 5: CAS-update the shard-list — replace source hashes with compacted.
-    let source_set: HashSet<&str> = source_hashes.iter().map(String::as_str).collect();
-    let new_hash_set: Vec<String> = new_hashes.clone();
-
-    cas_update_default::<ShardList, _>(store, &shard_list_path, |list| {
-        // Remove all source shard hashes and add the new compacted ones.
-        list.entries.retain(|h| !source_set.contains(h.as_str()));
-        list.entries.extend(new_hash_set.clone());
-        list.generation += 1;
-        debug!(
-            generation = list.generation,
-            entries = list.entries.len(),
-            "updated shard-list"
-        );
-    })
-    .await?;
-
-    // Step 6: Conservatively publish the committed shard set. Exact root
-    // removal belongs to the exclusive registry repair; a concurrent push
-    // must never lose its pre-registered roots to compaction reconciliation.
-    let updated_shard_list = read_shard_list(store, &shard_list_path).await?;
-    let final_hashes = updated_shard_list.entries.clone();
-    let storage = store.as_storage().clone();
-    let router = crab_storage::StoreLayout::new(storage.clone(), args.repo.clone());
-    let generation =
-        crab_metadata::ref_registry::union_register_repo_shards(&storage, &router, final_hashes)
-            .await?;
-    debug!(generation, repo = %args.repo, "updated ref-registry");
-
-    let outcome = CompactOutcome {
-        source_shards: source_hashes.len(),
-        compacted_shards: filtered.len(),
-        dry_run: false,
-    };
-    outcome.log();
-    Ok(outcome)
+fn map_checkpoint_error(error: crab_remote::checkpoint::CheckpointError) -> CrabError {
+    match error {
+        crab_remote::checkpoint::CheckpointError::Cancelled => CrabError::Cancelled,
+        crab_remote::checkpoint::CheckpointError::Read(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Repack(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Pack(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Metadata(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Write(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Io(source) => source.into(),
+        other => CrabError::Internal(other.to_string()),
+    }
 }
 
 /// Read the shard-list manifest from the store.
@@ -356,6 +564,7 @@ async fn read_shard_list(store: &Store, path: &str) -> Result<ShardList> {
 /// Download all shards by hash into a local directory as `MDBShardFile` instances.
 async fn download_shards(
     store: &Store,
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
     shard_hashes: &[String],
     target_dir: &std::path::Path,
     cancel: &CancellationToken,
@@ -363,7 +572,12 @@ async fn download_shards(
     let shard_file_cache = new_shard_file_cache();
     for hash_hex in shard_hashes {
         check_cancelled(cancel)?;
-        let shard_path = canonical_global_content_path("shards", hash_hex);
+        let expected =
+            MerkleHash::from_hex(hash_hex).map_err(|error| CrabError::CorruptObject {
+                path: format!("shard identity {hash_hex}"),
+                reason: format!("invalid shard hash: {error}"),
+            })?;
+        let shard_path = layout.shard_path(&expected);
         let (data, _) = store
             .get_with_etag_bounded(&shard_path, MAX_SOURCE_SHARD_BYTES)
             .await
@@ -373,11 +587,6 @@ async fn download_shards(
                     reason: "shard-list references a missing shard".to_owned(),
                 },
                 error => error,
-            })?;
-        let expected =
-            MerkleHash::from_hex(hash_hex).map_err(|error| CrabError::CorruptObject {
-                path: shard_path.to_string(),
-                reason: format!("invalid shard hash: {error}"),
             })?;
         let actual = compute_data_hash(&data);
         if actual != expected {
@@ -408,6 +617,7 @@ async fn download_shards(
 fn filter_unreferenced_xorbs(
     merged: &[Arc<MDBShardFile>],
     output_dir: &std::path::Path,
+    selected_files: Option<&BTreeSet<String>>,
 ) -> std::result::Result<Vec<Arc<MDBShardFile>>, CrabError> {
     let shard_file_cache = new_shard_file_cache();
     let mut result = Vec::with_capacity(merged.len());
@@ -422,6 +632,48 @@ fn filter_unreferenced_xorbs(
         let min_shard =
             MDBMinimalShard::from_reader(&mut std::io::Cursor::new(&buf), true, true)
                 .map_err(|e| CrabError::Internal(format!("parse shard for filtering: {e}")))?;
+
+        if let Some(selected_files) = selected_files {
+            let selected = (0..min_shard.num_files())
+                .filter_map(|index| min_shard.file(index))
+                .filter(|file| selected_files.contains(&file.file_hash().hex()))
+                .map(crab_xet::shard::MDBFileInfo::from)
+                .collect::<Vec<_>>();
+            if selected.is_empty() {
+                continue;
+            }
+            let referenced = selected
+                .iter()
+                .flat_map(|file| file.segments.iter().map(|segment| segment.xorb_hash))
+                .collect::<BTreeSet<_>>();
+            let xorbs = (0..min_shard.num_xorb())
+                .filter_map(|index| min_shard.xorb(index))
+                .map(|xorb| {
+                    let info = Arc::new(crab_xet::shard::MDBXorbInfo::from(xorb));
+                    (info.metadata.xorb_hash, info)
+                })
+                .collect::<BTreeMap<_, _>>();
+            let mut writer = crab_xet::shard::ShardWriter::new();
+            for xorb in referenced {
+                let info = xorbs.get(&xorb).ok_or_else(|| CrabError::CorruptObject {
+                    path: format!("source shard {}", shard_file.shard_hash.hex()),
+                    reason: format!("selected file references absent xorb {}", xorb.hex()),
+                })?;
+                writer.add_xorb(Arc::clone(info))?;
+            }
+            for file in selected {
+                writer.add_file(file)?;
+            }
+            let (filtered, _) = writer.finalize()?;
+            let filtered_handle = MDBShardFile::write_out_from_reader(
+                output_dir,
+                &mut std::io::Cursor::new(filtered),
+                &shard_file_cache,
+            )
+            .map_err(|e| CrabError::Internal(format!("write selected-file shard: {e}")))?;
+            result.push(filtered_handle);
+            continue;
+        }
 
         // Collect xorb hashes referenced by file entries.
         let mut referenced: HashSet<MerkleHash> = HashSet::new();
@@ -581,10 +833,185 @@ fn validate_max_shard_size(value: u64) -> Result<()> {
 mod tests {
     use super::*;
     use object_store::memory::InMemory;
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
     use std::sync::Arc;
 
     fn memory_store() -> Store {
         Store::new(Arc::new(InMemory::new()))
+    }
+
+    fn git_pack_fixture() -> (String, crab_metadata::capsule_protocol::CapsuleGitPack) {
+        let workspace = tempfile::tempdir().unwrap();
+        let git_dir = workspace.path().join("repository.git");
+        assert!(
+            Command::new("git")
+                .args(["init", "--bare", "--quiet"])
+                .arg(&git_dir)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut hash = Command::new("git")
+            .arg("--git-dir")
+            .arg(&git_dir)
+            .args(["hash-object", "-t", "tree", "-w", "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        hash.stdin.take().unwrap().write_all(b"").unwrap();
+        let tree = String::from_utf8(hash.wait_with_output().unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        let mut commit = Command::new("git")
+            .arg("--git-dir")
+            .arg(&git_dir)
+            .args(["commit-tree", &tree])
+            .env("GIT_AUTHOR_NAME", "Crab Test")
+            .env("GIT_AUTHOR_EMAIL", "crab@example.invalid")
+            .env("GIT_AUTHOR_DATE", "@1 +0000")
+            .env("GIT_COMMITTER_NAME", "Crab Test")
+            .env("GIT_COMMITTER_EMAIL", "crab@example.invalid")
+            .env("GIT_COMMITTER_DATE", "@1 +0000")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        commit.stdin.take().unwrap().write_all(b"commit\n").unwrap();
+        let tip = String::from_utf8(commit.wait_with_output().unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert!(
+            Command::new("git")
+                .arg("--git-dir")
+                .arg(&git_dir)
+                .args(["update-ref", "refs/heads/main", &tip])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("--git-dir")
+                .arg(&git_dir)
+                .args(["repack", "-a", "-d", "--depth=64"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let source_pack = std::fs::read_dir(git_dir.join("objects/pack"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "pack")
+            })
+            .unwrap();
+        let pack_bytes = std::fs::read(&source_pack).unwrap();
+        let canonical_id = blake3::hash(&pack_bytes).to_hex().to_string();
+        let installed_dir = workspace.path().join("installed");
+        std::fs::create_dir_all(&installed_dir).unwrap();
+        let installed = crab_git::pack::install_pack_file_from_path(
+            &installed_dir,
+            &source_pack,
+            &canonical_id,
+            MAX_CAPSULE_BYTES,
+            true,
+        )
+        .unwrap();
+        let mut locations = crab_git::pack_locator::PackLocationIter::open(
+            &installed.idx_path,
+            &installed.rev_path,
+            pack_bytes.len() as u64,
+        )
+        .unwrap();
+        let object_count = locations.object_count();
+        let object_ids = locations
+            .by_ref()
+            .map(|location| location.unwrap().oid)
+            .collect::<Vec<_>>();
+        let kinds = crab_git::pack::object_kinds_from_git_dir(&git_dir, &object_ids).unwrap();
+        let ordered_kinds = object_ids
+            .iter()
+            .map(|oid| *kinds.get(oid).unwrap())
+            .collect::<Vec<_>>();
+        let checksum = gix_hash::ObjectId::from_hex(installed.git_sha1.as_bytes()).unwrap();
+        let locator =
+            crab_git::pack_locator::encode_pack_kind_metadata(checksum, &ordered_kinds).unwrap();
+        let pack = crab_metadata::capsule_protocol::CapsuleGitPack::new(
+            Bytes::from(pack_bytes),
+            Bytes::from(std::fs::read(&installed.idx_path).unwrap()),
+            Bytes::from(std::fs::read(&installed.rev_path).unwrap()),
+            Bytes::from(locator),
+            installed.git_sha1,
+            object_count,
+        )
+        .unwrap();
+        (tip, pack)
+    }
+
+    struct XetShardFixture {
+        content_size: u64,
+        file_hash: MerkleHash,
+        xorb_hash: MerkleHash,
+        xorb_body: Bytes,
+        chunk_hash: MerkleHash,
+        chunk_size: u32,
+        shard_hash: MerkleHash,
+        shard_body: Bytes,
+    }
+
+    fn xet_file_shard(byte: u8) -> XetShardFixture {
+        use crab_xet::shard::{
+            FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo, MDBXorbInfo, ShardWriter,
+            XorbChunkSequenceEntry, XorbChunkSequenceHeader,
+        };
+        use crab_xet::xorb::builder::{RunId, XorbBuilder};
+        use crab_xet::xorb::format::Chunk;
+
+        let content = Bytes::from(vec![byte; 1024]);
+        let chunk = Chunk::new(content.clone());
+        let mut builder = XorbBuilder::new();
+        builder.push(&chunk, RunId(0)).unwrap();
+        let xorb = builder.finalize().unwrap().remove(0);
+        let mut writer = ShardWriter::new();
+        writer
+            .add_xorb(Arc::new(MDBXorbInfo {
+                metadata: XorbChunkSequenceHeader::new(xorb.hash, 1, content.len()),
+                chunks: vec![XorbChunkSequenceEntry::new(
+                    chunk.hash,
+                    content.len() as u32,
+                    0,
+                )],
+            }))
+            .unwrap();
+        writer
+            .add_file(MDBFileInfo {
+                metadata: FileDataSequenceHeader::new(chunk.hash, 1, false, false),
+                segments: vec![FileDataSequenceEntry::new(
+                    xorb.hash,
+                    content.len() as u32,
+                    0,
+                    1,
+                )],
+                verification: Vec::new(),
+                metadata_ext: None,
+            })
+            .unwrap();
+        let (bytes, hash) = writer.finalize().unwrap();
+        XetShardFixture {
+            content_size: content.len() as u64,
+            file_hash: chunk.hash,
+            xorb_hash: xorb.hash,
+            xorb_body: xorb.bytes,
+            chunk_hash: chunk.hash,
+            chunk_size: content.len() as u32,
+            shard_hash: hash,
+            shard_body: Bytes::from(bytes),
+        }
     }
 
     #[test]
@@ -684,6 +1111,377 @@ mod tests {
         assert_eq!(after.entries.len(), 2);
     }
 
+    #[tokio::test]
+    async fn corrupt_capsule_root_never_falls_back_to_legacy_shard_list() {
+        let store = memory_store();
+        let repo = "org/corrupt-capsule-compact";
+        let layout = crab_storage::StoreLayout::new(store.as_storage().clone(), repo.to_owned());
+        store
+            .put(
+                &layout.capsule_root_path(),
+                Bytes::from_static(b"corrupt root"),
+            )
+            .await
+            .unwrap();
+        let body = serde_json::to_vec(&ShardList {
+            generation: 1,
+            entries: vec![MerkleHash::from([1_u64; 4]).hex()],
+        })
+        .unwrap();
+        store
+            .put(&layout.repo_path("manifests/shard-list"), Bytes::from(body))
+            .await
+            .unwrap();
+
+        let result = run_compact(
+            &CompactArgs {
+                repo: repo.to_owned(),
+                bucket: "test-bucket".to_owned(),
+                dry_run: true,
+                max_shard_size: DEFAULT_MAX_SHARD_SIZE,
+            },
+            &store,
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn capsule_dry_run_uses_authenticated_catalog_without_legacy_shard_list() {
+        let store = memory_store();
+        let layout = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            "org/capsule-compact".to_owned(),
+        );
+        let root =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+        let xorb = MerkleHash::from([1_u64; 4]).hex();
+        let shard = MerkleHash::from([2_u64; 4]).hex();
+        let file = MerkleHash::from([3_u64; 4]).hex();
+        let mut catalog = crab_metadata::capsule_protocol::PointerCatalog::new();
+        catalog
+            .insert_xorb(
+                xorb.clone(),
+                crab_metadata::capsule_protocol::XorbCatalogEntry::new(
+                    1,
+                    "4".repeat(64),
+                    vec![crab_metadata::capsule_protocol::XorbChunkEntry::new(
+                        "5".repeat(64),
+                        1,
+                    )],
+                ),
+            )
+            .unwrap();
+        catalog
+            .insert_shard(
+                shard.clone(),
+                crab_metadata::capsule_protocol::ShardCatalogEntry::new(1, vec![xorb]),
+            )
+            .unwrap();
+        catalog
+            .insert_file(
+                file,
+                crab_metadata::capsule_protocol::FileCatalogEntry::new(1, shard),
+            )
+            .unwrap();
+        let pack = crab_metadata::capsule_protocol::CapsuleGitPack::new(
+            Bytes::from_static(b"pack"),
+            Bytes::from_static(b"index"),
+            Bytes::from_static(b"reverse"),
+            Bytes::from_static(b"locator"),
+            "6".repeat(40),
+            1,
+        )
+        .unwrap();
+        let checkpoint = crab_metadata::capsule_protocol::Checkpoint::build_with_catalogs(
+            root.record().root().generation(),
+            root.record().digest(),
+            vec![pack],
+            catalog,
+            None,
+        )
+        .unwrap();
+        let transaction_id = "7".repeat(64);
+        let capsule = crab_metadata::capsule_protocol::CapsulePointer::new(
+            "8".repeat(64),
+            1,
+            0,
+            vec![transaction_id.clone()],
+            root.record().digest(),
+        )
+        .unwrap();
+        crab_write::capsule_protocol::publish_ref_checkpoint(
+            &layout,
+            root,
+            &checkpoint,
+            BTreeMap::from([("refs/heads/main".to_owned(), "9".repeat(40))]),
+            BTreeMap::new(),
+            BTreeMap::from([("refs/heads/main".to_owned(), transaction_id)]),
+            vec![capsule],
+        )
+        .await
+        .unwrap();
+
+        let outcome = run_compact(
+            &CompactArgs {
+                repo: "org/capsule-compact".to_owned(),
+                bucket: "test-bucket".to_owned(),
+                dry_run: true,
+                max_shard_size: DEFAULT_MAX_SHARD_SIZE,
+            },
+            &store,
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.dry_run);
+        assert_eq!(outcome.source_shards, 1);
+        assert!(matches!(
+            store
+                .get_with_etag(&ObjectPath::from(
+                    "org/capsule-compact/manifests/shard-list"
+                ))
+                .await,
+            Err(CrabError::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn capsule_compaction_publishes_verified_checkpoint_without_legacy_metadata() {
+        let store = memory_store().with_storage_scope(crab_types::storage::StorageScope {
+            repo_prefix: "scoped/capsule-compact-apply".to_owned(),
+            global_prefix: "scoped/capsule-compact-apply/.crab".to_owned(),
+            source_repo: "org/capsule-compact-apply".to_owned(),
+            scope_hash: "a".repeat(64),
+        });
+        let layout = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            "org/capsule-compact-apply".to_owned(),
+        );
+        let root =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+        let fixture_a = xet_file_shard(11);
+        let fixture_b = xet_file_shard(12);
+        for fixture in [&fixture_a, &fixture_b] {
+            layout
+                .store()
+                .put(
+                    &layout.xorb_path(&fixture.xorb_hash),
+                    fixture.xorb_body.clone(),
+                )
+                .await
+                .unwrap();
+            layout
+                .store()
+                .put(
+                    &layout.shard_path(&fixture.shard_hash),
+                    fixture.shard_body.clone(),
+                )
+                .await
+                .unwrap();
+        }
+        let mut catalog = crab_metadata::capsule_protocol::PointerCatalog::new();
+        for fixture in [&fixture_a, &fixture_b] {
+            catalog
+                .insert_xorb(
+                    fixture.xorb_hash.hex(),
+                    crab_metadata::capsule_protocol::XorbCatalogEntry::new(
+                        fixture.xorb_body.len() as u64,
+                        blake3::hash(&fixture.xorb_body).to_hex().to_string(),
+                        vec![crab_metadata::capsule_protocol::XorbChunkEntry::new(
+                            fixture.chunk_hash.hex(),
+                            fixture.chunk_size,
+                        )],
+                    ),
+                )
+                .unwrap();
+            catalog
+                .insert_shard(
+                    fixture.shard_hash.hex(),
+                    crab_metadata::capsule_protocol::ShardCatalogEntry::new(
+                        fixture.shard_body.len() as u64,
+                        vec![fixture.xorb_hash.hex()],
+                    ),
+                )
+                .unwrap();
+            catalog
+                .insert_file(
+                    fixture.file_hash.hex(),
+                    crab_metadata::capsule_protocol::FileCatalogEntry::new(
+                        fixture.content_size,
+                        fixture.shard_hash.hex(),
+                    ),
+                )
+                .unwrap();
+        }
+        let (tip, pack) = git_pack_fixture();
+        let transaction = crab_metadata::capsule_protocol::CapsuleTransaction::new(
+            root.record().digest(),
+            vec![crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some(tip.clone()),
+                None,
+            )],
+        )
+        .unwrap();
+        let visibility =
+            crab_metadata::capsule_protocol::CapsuleVisibilityDelta::new(BTreeMap::from([(
+                "refs/heads/main".to_owned(),
+                crab_metadata::git_visibility::GitVisibilityEdit::from_replacement_objects(
+                    None,
+                    tip.clone(),
+                    vec![tip],
+                ),
+            )]))
+            .unwrap();
+        let capsule = crab_metadata::capsule_protocol::Capsule::build(
+            &transaction,
+            vec![pack],
+            vec![
+                crab_metadata::capsule_protocol::CapsuleSection::new(
+                    crab_metadata::capsule_protocol::CapsuleSectionKind::CatalogDelta,
+                    catalog.encode_delta().unwrap(),
+                ),
+                crab_metadata::capsule_protocol::CapsuleSection::new(
+                    crab_metadata::capsule_protocol::CapsuleSectionKind::VisibilityDelta,
+                    visibility.encode().unwrap(),
+                ),
+            ],
+        )
+        .unwrap();
+        crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
+            .await
+            .unwrap();
+
+        let outcome = run_compact(
+            &CompactArgs {
+                repo: "org/capsule-compact-apply".to_owned(),
+                bucket: "test-bucket".to_owned(),
+                dry_run: false,
+                max_shard_size: 1024 * 1024,
+            },
+            &store,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.source_shards, 2);
+        assert_eq!(outcome.compacted_shards, 1);
+        let view = crab_read::capsule_protocol::open_view(
+            &layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: MAX_CAPSULE_BYTES,
+                max_frontier_bytes: MAX_CAPSULE_BYTES,
+            },
+        )
+        .await
+        .unwrap();
+        let compacted = view.pointer_catalog().unwrap();
+        assert_eq!(compacted.shards().len(), 1);
+        assert_eq!(
+            compacted
+                .files()
+                .get(&fixture_a.file_hash.hex())
+                .unwrap()
+                .shard_hash(),
+            compacted
+                .files()
+                .get(&fixture_b.file_hash.hex())
+                .unwrap()
+                .shard_hash()
+        );
+        assert!(!compacted.shards().contains_key(&fixture_a.shard_hash.hex()));
+        assert!(!compacted.shards().contains_key(&fixture_b.shard_hash.hex()));
+        assert_eq!(compacted.xorbs().len(), 2);
+        assert!(view.root().root().checkpoint().is_some());
+        assert!(matches!(
+            store
+                .get_with_etag(&layout.repo_path("manifests/shard-list"))
+                .await,
+            Err(CrabError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn capsule_compaction_remaps_every_file_and_prunes_old_shards() {
+        let old_shard_a = MerkleHash::from([1_u64; 4]).hex();
+        let old_shard_b = MerkleHash::from([2_u64; 4]).hex();
+        let new_shard = MerkleHash::from([3_u64; 4]);
+        let file_a = MerkleHash::from([4_u64; 4]).hex();
+        let file_b = MerkleHash::from([5_u64; 4]).hex();
+        let xorb_a = MerkleHash::from([6_u64; 4]).hex();
+        let xorb_b = MerkleHash::from([7_u64; 4]).hex();
+        let mut current = crab_metadata::capsule_protocol::PointerCatalog::new();
+        for (xorb, chunk, digest) in [
+            (&xorb_a, "8".repeat(64), "9".repeat(64)),
+            (&xorb_b, "a".repeat(64), "b".repeat(64)),
+        ] {
+            current
+                .insert_xorb(
+                    xorb.clone(),
+                    crab_metadata::capsule_protocol::XorbCatalogEntry::new(
+                        10,
+                        digest,
+                        vec![crab_metadata::capsule_protocol::XorbChunkEntry::new(
+                            chunk, 10,
+                        )],
+                    ),
+                )
+                .unwrap();
+        }
+        current
+            .insert_shard(
+                old_shard_a.clone(),
+                crab_metadata::capsule_protocol::ShardCatalogEntry::new(10, vec![xorb_a.clone()]),
+            )
+            .unwrap();
+        current
+            .insert_shard(
+                old_shard_b.clone(),
+                crab_metadata::capsule_protocol::ShardCatalogEntry::new(10, vec![xorb_b.clone()]),
+            )
+            .unwrap();
+        current
+            .insert_file(
+                file_a.clone(),
+                crab_metadata::capsule_protocol::FileCatalogEntry::new(10, old_shard_a.clone()),
+            )
+            .unwrap();
+        current
+            .insert_file(
+                file_b.clone(),
+                crab_metadata::capsule_protocol::FileCatalogEntry::new(20, old_shard_b.clone()),
+            )
+            .unwrap();
+        let compacted = [PreparedCompactedShard {
+            hash: new_shard,
+            body: Bytes::from_static(b"compacted"),
+            files: vec![file_a.clone(), file_b.clone()],
+            xorbs: vec![xorb_a.clone(), xorb_b.clone()],
+        }];
+
+        let replacement = compacted_pointer_catalog(&current, &compacted).unwrap();
+
+        assert_eq!(replacement.shards().len(), 1);
+        assert!(!replacement.shards().contains_key(&old_shard_a));
+        assert!(!replacement.shards().contains_key(&old_shard_b));
+        assert_eq!(
+            replacement.files().get(&file_a).unwrap().shard_hash(),
+            new_shard.hex()
+        );
+        assert_eq!(
+            replacement.files().get(&file_b).unwrap().shard_hash(),
+            new_shard.hex()
+        );
+        assert_eq!(replacement.xorbs().len(), 2);
+    }
+
     #[test]
     fn filter_strips_unreferenced_xorbs() {
         use crab_xet::shard::ShardWriter;
@@ -756,7 +1554,7 @@ mod tests {
         assert_eq!(original.num_files(), 1);
 
         // Run the filter.
-        let filtered = filter_unreferenced_xorbs(&[shard_file], output_dir.path()).unwrap();
+        let filtered = filter_unreferenced_xorbs(&[shard_file], output_dir.path(), None).unwrap();
 
         assert_eq!(filtered.len(), 1);
 
@@ -782,6 +1580,57 @@ mod tests {
             1,
             "file-info should be preserved"
         );
+    }
+
+    #[test]
+    fn capsule_filter_keeps_only_authenticated_files_and_dependencies() {
+        use crab_xet::shard::ShardWriter;
+
+        let retained = xet_file_shard(31);
+        let foreign = xet_file_shard(32);
+        let mut writer = ShardWriter::new();
+        for fixture in [&retained, &foreign] {
+            let parsed = MDBMinimalShard::from_reader(
+                &mut std::io::Cursor::new(&fixture.shard_body),
+                true,
+                true,
+            )
+            .unwrap();
+            writer
+                .add_xorb(Arc::new(crab_xet::shard::MDBXorbInfo::from(
+                    parsed.xorb(0).unwrap(),
+                )))
+                .unwrap();
+            writer
+                .add_file(crab_xet::shard::MDBFileInfo::from(parsed.file(0).unwrap()))
+                .unwrap();
+        }
+        let (body, _) = writer.finalize().unwrap();
+        let source_dir = tempfile::tempdir().unwrap();
+        let output_dir = tempfile::tempdir().unwrap();
+        let shard_file = MDBShardFile::write_out_from_reader(
+            source_dir.path(),
+            &mut std::io::Cursor::new(body),
+            &new_shard_file_cache(),
+        )
+        .unwrap();
+
+        let filtered = filter_unreferenced_xorbs(
+            &[shard_file],
+            output_dir.path(),
+            Some(&BTreeSet::from([retained.file_hash.hex()])),
+        )
+        .unwrap();
+
+        assert_eq!(filtered.len(), 1);
+        let mut body = Vec::new();
+        filtered[0].read_into_buffer(&mut body).unwrap();
+        let parsed =
+            MDBMinimalShard::from_reader(&mut std::io::Cursor::new(body), true, true).unwrap();
+        assert_eq!(parsed.num_files(), 1);
+        assert_eq!(parsed.file(0).unwrap().file_hash(), retained.file_hash);
+        assert_eq!(parsed.num_xorb(), 1);
+        assert_eq!(parsed.xorb(0).unwrap().xorb_hash(), retained.xorb_hash);
     }
 
     #[test]
@@ -835,7 +1684,7 @@ mod tests {
 
         let original_hash = shard_file.shard_hash;
 
-        let filtered = filter_unreferenced_xorbs(&[shard_file], output_dir.path()).unwrap();
+        let filtered = filter_unreferenced_xorbs(&[shard_file], output_dir.path(), None).unwrap();
 
         assert_eq!(filtered.len(), 1);
         // When all xorbs are referenced, the original shard is returned as-is.
