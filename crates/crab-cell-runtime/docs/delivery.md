@@ -260,6 +260,11 @@ digest, profile, workload parameters, and live measurements. Reject a receipt
 when its observed active-Cell capacity or retained-byte capacity differs from
 the corresponding private metrics sample taken before traffic.
 
+The Kubernetes qualification receipt records this report for every original
+Pod, every Pod after the zero-unavailable rollout, and every Pod after forced
+owner loss. Each entry is bound to the Pod UID so a replacement cannot inherit
+another process's startup envelope.
+
 Measure:
 
 - Resident set size per active Cell and per workload class

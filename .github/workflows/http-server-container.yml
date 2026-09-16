@@ -126,8 +126,10 @@ jobs:
           done
           bash -n \
             crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
+            crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-capacity-envelope.sh \
             crates/crab-http-server/deploy/helm/crab-http-server/qualification/verify-workload-identity.sh \
             crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-workload-identity.sh
+          crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-capacity-envelope.sh
           crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-workload-identity.sh
           immutable_chart=oci://registry.example.com/charts/crab-http-server@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
           if CRAB_HTTP_SERVER_GIT_TOKEN=test-only \
@@ -196,6 +198,7 @@ jobs:
             /src/crates/crab-http-server/tests/qualify_backup_restore.sh \
             /src/crates/crab-http-server/deploy/generate-release-manifest.sh \
             /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
+            /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-capacity-envelope.sh \
             /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/verify-workload-identity.sh \
             /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-workload-identity.sh \
             /src/crates/crab-http-server/tests/qualify_lfs_locking.sh \
@@ -339,6 +342,10 @@ jobs:
             | grep -F 'crab-http-server/qualification/verify-workload-identity.sh'
           tar -tzf "$chart_archive" \
             | grep -F 'crab-http-server/qualification/test-workload-identity.sh'
+          tar -tzf "$chart_archive" \
+            | grep -F 'crab-http-server/qualification/test-capacity-envelope.sh'
+          tar -tzf "$chart_archive" \
+            | grep -F 'crab-http-server/qualification/validate-capacity-envelope.jq'
           tar -tzf "$chart_archive" \
             | grep -F 'crab-http-server/qualification/rbac.example.yaml'
 

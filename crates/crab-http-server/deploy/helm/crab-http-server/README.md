@@ -432,6 +432,8 @@ The test fails unless it can prove all of these boundaries:
 - Every original and replacement pod has the provider's admitted workload
   identity contract: EKS Pod Identity token injection, GKE's annotated
   Kubernetes-to-Google service account link, or AKS Workload ID token injection
+- Every original, rolled, and owner-loss replacement Pod returns a valid live
+  Cell capacity envelope bound to its Kubernetes Pod UID
 - The Deployment uses an immutable digest, a private ClusterIP Service, the
   signed release's chart version, the chart NetworkPolicy, TLS ingress,
   hardened containers, and no automatic Kubernetes API token
@@ -456,10 +458,11 @@ The test fails unless it can prove all of these boundaries:
 The script writes a secret-free JSON evidence receipt containing the provider,
 image and chart digests, release tag and source commit, workload identity
 mechanism and Kubernetes ServiceAccount, repository, qualification branch and
-commit, payload digest, rollout probes and failures, and explicit successful
-checks including the installed chart version, management-network-isolation
-result, deleted owner Pod UID, old/new owner sessions, and takeover epochs. It
-also records completion time.
+commit, payload digest, per-Pod capacity envelopes before traffic, after the
+rollout, and after owner loss, rollout probes and failures, and explicit
+successful checks including the installed chart version,
+management-network-isolation result, deleted owner Pod UID, old/new owner
+sessions, and takeover epochs. It also records completion time.
 Retain it with the release record. The Git token remains only in process memory
 and must still be rotated or revoked after qualification according to team
 policy.

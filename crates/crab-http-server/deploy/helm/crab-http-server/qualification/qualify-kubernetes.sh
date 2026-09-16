@@ -419,6 +419,34 @@ check_pod_health() {
   done < <(jq --raw-output '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name' "$pods_json")
 }
 
+capture_capacity_envelopes() {
+  local phase="$1"
+  local output="$2"
+  local entries="${work_dir}/capacity-${phase}.jsonl"
+  local pod
+  local pod_uid
+  local report
+  : > "$entries"
+
+  while IFS=$'\t' read -r pod pod_uid; do
+    report="${work_dir}/capacity-${phase}-${pod}.json"
+    kubectl --namespace "$namespace" exec "$pod" -- \
+      crab-http-server --config /etc/crab/http-server/server.toml \
+        cells capacity --json --live > "$report"
+    jq --compact-output \
+      --arg phase "$phase" --arg pod "$pod" --arg pod_uid "$pod_uid" \
+      '{phase: $phase, pod: $pod, pod_uid: $pod_uid, envelope: .}' \
+      "$report" >> "$entries"
+  done < <(jq --raw-output '
+    .items[] | select(.metadata.deletionTimestamp == null) |
+    [.metadata.name, .metadata.uid] | @tsv
+  ' "$pods_json")
+
+  jq --slurp . "$entries" > "$output"
+  jq --exit-status --arg phase "$phase" --from-file \
+    "$(dirname -- "$0")/validate-capacity-envelope.jq" "$output" >/dev/null
+}
+
 check_workload_identity() {
   workload_identity_mechanism="$(
     "$(dirname -- "$0")/verify-workload-identity.sh" \
@@ -513,6 +541,10 @@ check_placement
 check_workload_identity
 check_management_isolation
 check_pod_health
+capacity_before_traffic="${work_dir}/capacity-before-traffic.json"
+capacity_after_rollout="${work_dir}/capacity-after-rollout.json"
+capacity_after_owner_loss="${work_dir}/capacity-after-owner-loss.json"
+capture_capacity_envelopes before-traffic "$capacity_before_traffic"
 jq --raw-output '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.uid' \
   "$pods_json" | sort > "${work_dir}/old-uids"
 
@@ -728,6 +760,7 @@ load_ready_pods
 check_placement
 check_workload_identity
 check_pod_health
+capture_capacity_envelopes after-rollout "$capacity_after_rollout"
 jq --raw-output '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.uid' \
   "$pods_json" | sort > "${work_dir}/new-uids"
 test -z "$(comm -12 "${work_dir}/old-uids" "${work_dir}/new-uids")"
@@ -810,6 +843,7 @@ jq --exit-status --arg uid "$owner_pod_uid" '
 check_placement
 check_workload_identity
 check_pod_health
+capture_capacity_envelopes after-owner-loss "$capacity_after_owner_loss"
 
 pods=()
 while IFS= read -r pod; do
@@ -927,7 +961,10 @@ jq --null-input \
   --argjson zone_count "$zone_count" \
   --argjson old_pod_uids "$old_uids" \
   --argjson new_pod_uids "$new_uids" \
-  '{schema: 5, provider: $provider, namespace: $namespace, deployment: $deployment,
+  --slurpfile capacity_before_traffic "$capacity_before_traffic" \
+  --slurpfile capacity_after_rollout "$capacity_after_rollout" \
+  --slurpfile capacity_after_owner_loss "$capacity_after_owner_loss" \
+  '{schema: 6, provider: $provider, namespace: $namespace, deployment: $deployment,
     origin: $origin, image: $image, chart: $chart,
     qualification_source: {release_tag: $release_tag, commit: $source_sha},
     workload_identity: {
@@ -952,6 +989,11 @@ jq --null-input \
     },
     replica_count: $replica_count, zone_count: $zone_count,
     old_pod_uids: $old_pod_uids, new_pod_uids: $new_pod_uids,
+    capacity: {
+      before_traffic: $capacity_before_traffic[0],
+      after_rollout: $capacity_after_rollout[0],
+      after_owner_loss: $capacity_after_owner_loss[0]
+    },
     rollout_probes: $rollout_probes,
     rollout_probe_failures: $rollout_probe_failures,
     checks: {
@@ -961,6 +1003,7 @@ jq --null-input \
       release_chart_version: true,
       workload_identity_only: true,
       management_network_isolation: true,
+      capacity_envelopes: true,
       cross_replica_git: true,
       cross_replica_lfs: true,
       durable_lfs_lock: true,
