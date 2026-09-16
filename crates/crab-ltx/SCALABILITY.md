@@ -153,6 +153,12 @@ production-ready 10K-database backend. Celld's bounded restore concurrency and
 selected-input compaction informed this audit; its surrounding actor/node-log
 service does not become part of Crab merely by reusing the LTX crate.
 
+The deliverable design for that missing node-log service, dual durability gate,
+and takeover interlock is
+[Follower durability and warm failover](../crab-cell-runtime/docs/failover-and-followers.md).
+It uses one multiplexed log per owner session rather than one full follower
+database per repository.
+
 ## Qualification plan
 
 Run small deterministic correctness tests locally. Large workloads belong in a

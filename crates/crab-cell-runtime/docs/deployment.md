@@ -10,6 +10,11 @@ Run one `crab-http-server` process per Kubernetes Pod or virtual machine. Nodes 
 
 [Back to the Cell runtime index](README.md)
 
+The current deployment has no follower durability tier. The target node-session
+lease, follower placement, recovery-only startup listener, and warm failover
+ordering are defined in
+[Follower durability and warm failover](failover-and-followers.md).
+
 ## Configure one process per node
 
 The existing HTTP server owns Cell runtime construction. Configuration supplies the authoritative object store, local volume, public listener, management listener, and peer identity.

@@ -10,6 +10,11 @@ Cell storage separates one mutable authority record from immutable SQLite histor
 
 [Back to the Cell runtime index](README.md)
 
+This page describes the implemented `cells/v1` object-store contract. The
+incompatible `cells/v2` session record and control-pinned recovery overlay
+needed before follower fsync may release a response are specified in
+[Follower durability and warm failover](failover-and-followers.md).
+
 ## Derive stable identities
 
 Tenant, application, namespace, session, incarnation, and request IDs are 16 bytes. Cell IDs and BLAKE3 digests are 32 bytes.

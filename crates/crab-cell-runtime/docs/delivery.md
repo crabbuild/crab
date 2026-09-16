@@ -32,6 +32,11 @@ Each layer has one owner and one primary evidence surface.
 | Immutable retention | `src/retention.rs`, `crab-storage::Store::list_stream` | mark/sweep tests and server maintenance-fence tests |
 | Product composition | `crab-http-server/src/cells/` | server route, restore, and lifecycle tests |
 
+Celld-style follower durability is a target extension, not part of this
+implemented evidence map. Its phase gates and failure matrix live in
+[Follower durability and warm failover](failover-and-followers.md). Until those
+gates pass, only an exact object-store root publication can release a response.
+
 Use the map during review. A change to one boundary needs caller, callee, sibling, and source-loss evidence where applicable.
 
 ## Run design-contract validation

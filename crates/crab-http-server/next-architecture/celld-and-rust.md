@@ -59,9 +59,11 @@ gate and recovery protocol establish which results survive. See the
 Crab's combined owner/head CAS is a new protocol decision. Borrowing Celld's WAL
 mechanics does not make Celld's acknowledgement or restore rules interchangeable
 with it. The [publication ordering proof](storage-protocol.md#why-takeover-cannot-lose-a-published-commit)
-must hold independently. Follower selection is outside Crab's first release;
-adding it would change the promise that every acknowledged mutation survives
-loss of all HTTP-node disks.
+must hold independently. Follower selection is outside Crab's first release.
+The detailed target extension uses a node-session recovery interlock plus a
+control-pinned recovery overlay so follower durability remains compatible with
+Crab's exact roots; see
+[follower durability and warm failover](../../crab-cell-runtime/docs/failover-and-followers.md).
 
 Celld's pinned peer transport uses fleet HMAC authentication over private HTTP;
 network encryption is supplied externally. Crab proposes mutual TLS on its
