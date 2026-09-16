@@ -6,6 +6,7 @@ use crab_metadata::capsule_protocol::{
 };
 use crab_storage::{ETag, StorageError, Store, StoreLayout};
 use futures_util::future::try_join_all;
+use futures_util::{StreamExt, TryStreamExt};
 
 use crate::{Result, WriteError};
 
@@ -1387,6 +1388,88 @@ pub async fn end_gc(
     update_maintenance_root(router, base, RootRecord::encode(next)?, fence_id).await
 }
 
+/// Publish a rebuilt retained-history chain and atomically replace its root pointer.
+pub async fn replace_history(
+    router: &StoreLayout<Store>,
+    base: RootSnapshot,
+    segments: &[HistorySegment],
+) -> Result<RootSnapshot> {
+    let fence = base.record().root().gc_fence().ok_or_else(|| {
+        WriteError::Internal("history replacement requires a GC fence".to_owned())
+    })?;
+    let newest = segments
+        .first()
+        .ok_or_else(|| WriteError::Internal("history replacement cannot be empty".to_owned()))?;
+    if base.record().root().checkpoint() != Some(newest.checkpoint()) {
+        return Err(WriteError::CorruptObject {
+            path: "capsule-protocol history".to_owned(),
+            reason: "rebuilt history does not retain the current checkpoint frontier".to_owned(),
+        });
+    }
+    for pair in segments.windows(2) {
+        if pair[0].previous() != Some(&pair[1].pointer()?) {
+            return Err(WriteError::CorruptObject {
+                path: "capsule-protocol history".to_owned(),
+                reason: "rebuilt history chain is not contiguous".to_owned(),
+            });
+        }
+    }
+    if segments
+        .last()
+        .is_some_and(|segment| segment.previous().is_some())
+    {
+        return Err(WriteError::CorruptObject {
+            path: "capsule-protocol history".to_owned(),
+            reason: "rebuilt history chain does not terminate".to_owned(),
+        });
+    }
+    futures_util::stream::iter(segments.iter().map(|segment| async move {
+        let path = router.capsule_history_segment_path(segment.hash());
+        router
+            .store()
+            .put_if_absent_verified(&path, segment.bytes().clone())
+            .await
+    }))
+    .buffer_unordered(16)
+    .try_collect::<Vec<_>>()
+    .await?;
+    let next = base
+        .record()
+        .root()
+        .replace_history(base.record().digest(), newest.pointer()?)?;
+    let candidate = RootRecord::encode(next)?;
+    let root_path = router.capsule_root_path();
+    match router
+        .store()
+        .update(&root_path, candidate.bytes().clone(), base.etag().clone())
+        .await
+    {
+        Ok(etag) => Ok(base.committed_history(candidate, etag)?),
+        Err(StorageError::StateConflict { .. }) => Err(WriteError::CapsuleRootChanged {
+            path: root_path.to_string(),
+        }),
+        Err(source) => {
+            let verification = open_root(router).await;
+            match verification {
+                Ok(snapshot) if snapshot.record().digest() == candidate.digest() => Ok(snapshot),
+                Ok(snapshot) if snapshot.record().digest() == base.record().digest() => {
+                    Err(source.into())
+                }
+                Ok(_) => Err(WriteError::CapsuleMaintenanceCommitUncertain {
+                    fence_id: fence.id().to_owned(),
+                    source: Box::new(source),
+                    verification: None,
+                }),
+                Err(verification) => Err(WriteError::CapsuleMaintenanceCommitUncertain {
+                    fence_id: fence.id().to_owned(),
+                    source: Box::new(source),
+                    verification: Some(Box::new(verification)),
+                }),
+            }
+        }
+    }
+}
+
 async fn update_maintenance_root(
     router: &StoreLayout<Store>,
     base: RootSnapshot,
@@ -2397,6 +2480,47 @@ mod tests {
         assert_eq!(segments[0].checkpoint().covered_generation(), 1);
         assert_eq!(segments[1].checkpoint().covered_generation(), 0);
         assert_eq!(segments[0].previous().unwrap().hash(), segments[1].hash());
+
+        let newest = &segments[0];
+        let replacement = HistorySegment::build(
+            newest.checkpoint().clone(),
+            None,
+            HistorySegmentState::new(
+                newest.refs().clone(),
+                newest.peeled_refs().clone(),
+                newest.head().to_owned(),
+                newest.compacted_ref_transactions().clone(),
+                newest.capsule_runs().to_vec(),
+            ),
+        )
+        .unwrap();
+        let fence_id = "f".repeat(64);
+        let fenced = begin_gc(
+            &router,
+            published,
+            crab_metadata::capsule_protocol::GcFence::new(&fence_id, 1).unwrap(),
+        )
+        .await
+        .unwrap();
+        let replaced = replace_history(&router, fenced, &[replacement])
+            .await
+            .unwrap();
+        let released = end_gc(&router, replaced, &fence_id).await.unwrap();
+        let retained = crab_metadata::capsule_protocol::load_history_chain(
+            &router,
+            released.record().root().history().unwrap(),
+            8,
+            1024 * 1024,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(retained.len(), 1);
+        assert_eq!(
+            retained[0].checkpoint(),
+            released.record().root().checkpoint().unwrap()
+        );
+        assert!(released.record().root().gc_fence().is_none());
     }
 
     #[tokio::test]

@@ -3,15 +3,16 @@
 Operator-visible recovery planning and verified local restore for missing or
 corrupt Crab content.
 
-## Historical Manifest Recovery
+## Historical Checkpoint Recovery
 
-Every successful manifest replacement now preserves the displaced committed
-manifest as an immutable object under
-`<repository>/manifests/history/<generation>-<blake3>.json`. The current
-`<repository>/manifest` remains the only visible repository state. History is
-kept indefinitely by default, and repository, bucket, and managed-service GC
-retain every pack, pack index, reverse index, metadata segment, shard, and xorb
-reachable from every validated historical root.
+Protocol-v2 checkpoint publication preserves each compacted repository state
+as an immutable authenticated segment under `<repository>/v2/history/`. The
+mutable `<repository>/v2/root` authenticates the newest retained segment, and
+each segment authenticates its predecessor, checkpoint, exact refs, symbolic
+HEAD, compacted ref positions, and capsule runs. History is kept indefinitely
+by default. Repository GC retains every checkpoint and capsule run in the
+validated chain; the append-only current pointer catalog keeps retained
+shard/xorb identities protected from bucket GC.
 
 Operators can preview an explicit retention boundary and then apply it:
 
@@ -22,18 +23,16 @@ crab gc --scope repo --dry-run
 crab gc --scope repo
 ```
 
-`--keep-last` counts distinct generations and retains every root in each kept
-generation. Prune never removes the current manifest or dependent data; a
-later GC run re-evaluates reachability and grace periods before reclaiming
-objects that were unique to removed roots. Prune apply, restore apply, and
-destructive repository GC share a renewable maintenance lease, so recovery
-cannot race object deletion. Destructive bucket GC acquires the same lease for
-every registered repository before deleting shared objects.
+`--keep-last` retains that many newest checkpoint segments. Prune apply takes
+the repository sweep lease and root GC fence, rebuilds the retained immutable
+chain without a pointer to the removed suffix, and atomically replaces only the
+root's history frontier. It never directly deletes checkpoint, capsule, shard,
+or xorb data. A later GC run independently re-evaluates reachability and grace
+periods before reclaiming objects unique to removed recovery points.
 
-Writers create history only when they replace a manifest. Repositories pushed
-only by older Crab versions therefore have no retroactive history for those
-earlier generations. After all writers are upgraded, each later successful
-push archives the state it displaced.
+Writers append history when checkpoint maintenance compacts one or more
+capsules. Ordinary foreground pushes therefore add no history request and do
+not create a checkpoint for every commit.
 
 List the available roots, verify a chosen root, preview its ref changes, and
 then apply it explicitly:
@@ -45,28 +44,21 @@ crab recover history prune --keep-last 20 --apply
 crab recover history verify 41
 crab recover history verify 41 --digest <64-character-blake3>
 crab recover history restore 41
-crab recover history restore 41 --apply
 ```
 
 `list`, `verify`, and `restore` also accept `--json`. A generation with more
-than one valid root is ambiguous and requires `--digest`. Verification is
-mandatory before both preview and apply: Crab validates the historical
-manifest digest, segmented metadata, pack bodies and canonical indexes, Git
-object connectivity with strict `git fsck`, shard structure, and every
-referenced xorb payload and chunk. Stored reverse indexes are validated; when a
-direct push has no remote reverse-index sidecar, Crab regenerates that
-derivable acceleration data from the verified canonical pack index. The result
-reports deterministic remote dependency object and byte counts.
+than one valid checkpoint is ambiguous and requires `--digest`. Verification
+is mandatory before restore preview: Crab authenticates the history chain,
+checkpoint and capsule-run closure, complete pointer catalog, visibility
+snapshot, embedded pack/index/reverse-index/locator agreement, every shard and
+xorb dependency, and Git connectivity with strict `git fsck`. The result
+reports deterministic dependency object and byte counts.
 
-Restore never rewrites an old generation in place. It acquires leases for the
-union of current and historical refs, renews them while working, confirms the
-current manifest still matches the state used for the preview, and publishes
-the historical contents as `current generation + 1` through manifest CAS. A
-concurrent push or held ref lease aborts the restore without moving the
-manifest. The displaced bad state is itself archived, so the recovery can be
-reversed. Generation-pinned Git locator metadata is rebuilt after publication;
-if that optional acceleration rebuild needs repair, the restored manifest is
-still authoritative and the command reports `acceleration_rebuilt=false`.
+`restore --apply` currently fails closed. V2 restore must publish the selected
+state as a new atomic authority epoch so stale or in-flight per-ref heads cannot
+override the restored refs, while retaining the displaced state as a reversible
+checkpoint. That publication boundary remains a release blocker; Crab does not
+fall back to the v1 manifest-restoration path.
 
 Status: release-manifest large-file and workflow-output inventory, Crab pointer
 metadata inventory, staged import journal inventory, hashed workflow journal

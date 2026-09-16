@@ -82,6 +82,42 @@ impl CapsuleGitPack {
     pub fn pack_size(&self) -> u64 {
         self.pack.len() as u64
     }
+
+    /// Return the complete Git packfile bytes.
+    #[must_use]
+    pub fn pack_bytes(&self) -> &Bytes {
+        &self.pack
+    }
+
+    /// Return the matching Git pack-index bytes.
+    #[must_use]
+    pub fn index_bytes(&self) -> &Bytes {
+        &self.index
+    }
+
+    /// Return the matching Git reverse-index bytes.
+    #[must_use]
+    pub fn reverse_index_bytes(&self) -> &Bytes {
+        &self.reverse_index
+    }
+
+    /// Return the authenticated object-locator bytes.
+    #[must_use]
+    pub fn locator_bytes(&self) -> &Bytes {
+        &self.locator
+    }
+
+    /// Return the SHA-1 checksum in the Git pack trailer.
+    #[must_use]
+    pub fn git_checksum(&self) -> &str {
+        &self.git_checksum
+    }
+
+    /// Return the number of objects proven by the pack index.
+    #[must_use]
+    pub fn object_count(&self) -> u64 {
+        self.object_count
+    }
 }
 
 /// Authenticated section bindings and Git identity for one capsule pack.

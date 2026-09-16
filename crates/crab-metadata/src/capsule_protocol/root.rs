@@ -472,6 +472,35 @@ impl RepositoryRoot {
         Ok(root)
     }
 
+    /// Replace only the retained history frontier under the active GC fence.
+    pub fn replace_history(
+        &self,
+        parent_root_digest: &str,
+        history: HistorySegmentPointer,
+    ) -> Result<Self> {
+        if self.gc_fence.is_none() {
+            return Err(contract_error(
+                "history replacement requires an active GC fence",
+            ));
+        }
+        let checkpoint = self
+            .checkpoint
+            .as_ref()
+            .ok_or_else(|| contract_error("history replacement requires a current checkpoint"))?;
+        if history.covered_generation() != checkpoint.covered_generation()
+            || history.covered_root_digest() != checkpoint.covered_root_digest()
+        {
+            return Err(contract_error(
+                "history replacement must retain the current checkpoint frontier",
+            ));
+        }
+        let mut root = self.clone();
+        root.parent_root_digest = Some(parent_root_digest.to_owned());
+        root.history = Some(history);
+        validate_root(&root)?;
+        Ok(root)
+    }
+
     /// Return the repository identity bound into every generation.
     #[must_use]
     pub fn repository_id(&self) -> &str {

@@ -1,14 +1,14 @@
-//! Historical manifest inspection, verification, and restoration.
+//! Authenticated repository-history inspection, verification, and recovery.
 
-use crab_write::generation::CommittedManifestAnchor;
+#[path = "history_recovery_v2.rs"]
+mod v2;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
 use clap::{Args, Subcommand};
-use crab_coordination::PushLock;
 use crab_git::pack_locator::PackLocationIter;
 use crab_xet::hash::{MerkleHash, compute_data_hash};
 use crab_xet::shard::ShardReader;
@@ -19,17 +19,13 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use tokio::io::AsyncReadExt as _;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
 
 use crate::audit::{AuditEvent, AuditOutcome, NewAuditEvent, append_event, default_log_path};
-use crate::coordination::heartbeat::LockHeartbeat;
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::{OutputMode, emit_json};
-use crate::git::push::{CommittedPackIndex, publish_committed_pack_locators};
 use crate::metadata::manifest::{
-    Manifest, ManifestHistoryEntry, PackManifestEntry, list_manifest_history, read_bulk_pack_list,
-    read_bulk_shard_list, read_manifest, read_pack_index, read_shard_index,
-    select_manifest_history, write_manifest_cas,
+    Manifest, ManifestHistoryEntry, PackManifestEntry, read_bulk_pack_list, read_bulk_shard_list,
+    read_pack_index, read_shard_index, select_manifest_history,
 };
 use crate::storage::StoreLayout;
 use crate::storage::store::Store;
@@ -39,9 +35,6 @@ pub const HISTORY_PRUNE_SCHEMA: &str = "recover.history.prune";
 pub const HISTORY_VERIFY_SCHEMA: &str = "recover.history.verify";
 pub const HISTORY_RESTORE_SCHEMA: &str = "recover.history.restore";
 pub const HISTORY_SCHEMA_VERSION: &str = "1.0";
-
-const RECOVERY_LOCK_TTL: Duration = Duration::from_mins(5);
-const HISTORY_PRUNE_DELETE_CONCURRENCY: usize = 64;
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum HistoryCmd {
@@ -205,68 +198,26 @@ pub struct HistoryRestorePayload {
 
 struct VerifiedPack {
     manifest: PackManifestEntry,
-    index_path: PathBuf,
-    reverse_index_path: PathBuf,
     git_sha1: String,
 }
 
 struct VerifiedHistory {
     entry: ManifestHistoryEntry,
-    verification: HistoryVerificationPayload,
     _workspace: tempfile::TempDir,
-    packs: Vec<VerifiedPack>,
-}
-
-struct RecoveryLease {
-    lock: PushLock,
-    heartbeat: LockHeartbeat,
 }
 
 pub async fn run(
     command: &HistoryCmd,
     store: &Store,
     prefix: &str,
+    root: crab_metadata::capsule_protocol::RootSnapshot,
     cancel: &CancellationToken,
 ) -> Result<()> {
     let router = StoreLayout::new(store.clone(), prefix.to_owned());
-    match command {
-        HistoryCmd::List(_) => run_list(store, &router, command.output_mode()).await,
-        HistoryCmd::Prune(args) => {
-            let payload = prune_history(store, &router, args, cancel).await?;
-            if payload.applied
-                && let Err(error) = record_prune_audit(prefix, &payload)
-            {
-                warn!(%error, "failed to append historical prune audit event");
-            }
-            emit_prune(&payload, command.output_mode())?;
-            Ok(())
-        }
-        HistoryCmd::Verify(args) => {
-            let verified = verify_history(
-                store,
-                &router,
-                args.generation,
-                args.digest.as_deref(),
-                cancel,
-            )
-            .await?;
-            emit_verification(&verified.verification, command.output_mode())?;
-            Ok(())
-        }
-        HistoryCmd::Restore(args) => {
-            let payload = restore_history(store, &router, args, cancel).await?;
-            if payload.applied
-                && let Err(error) = record_restore_audit(prefix, &payload)
-            {
-                warn!(%error, "failed to append historical restore audit event");
-            }
-            emit_restore(&payload, command.output_mode())?;
-            Ok(())
-        }
-    }
+    v2::run(command, store, &router, root, cancel).await
 }
 
-fn record_prune_audit(prefix: &str, payload: &HistoryPrunePayload) -> Result<()> {
+pub(super) fn record_prune_audit(prefix: &str, payload: &HistoryPrunePayload) -> Result<()> {
     let event = AuditEvent::new(NewAuditEvent {
         operation: "recover.history.prune".to_owned(),
         outcome: AuditOutcome::Success,
@@ -285,396 +236,6 @@ fn record_prune_audit(prefix: &str, payload: &HistoryPrunePayload) -> Result<()>
         }),
     });
     append_event(&default_log_path(), &event)
-}
-
-fn record_restore_audit(prefix: &str, payload: &HistoryRestorePayload) -> Result<()> {
-    let event = AuditEvent::new(NewAuditEvent {
-        operation: "recover.history.restore".to_owned(),
-        outcome: AuditOutcome::Success,
-        actor: None,
-        repository: Some(prefix.to_owned()),
-        details: serde_json::json!({
-            "source_generation": payload.source_generation,
-            "source_digest": payload.source_digest,
-            "previous_generation": payload.previous_generation,
-            "restored_generation": payload.restored_generation,
-            "refs_added": payload.refs_added,
-            "refs_updated": payload.refs_updated,
-            "refs_deleted": payload.refs_deleted,
-            "acceleration_rebuilt": payload.acceleration_rebuilt,
-            "dependency_objects": payload.verification.dependency_objects,
-            "dependency_bytes": payload.verification.dependency_bytes,
-        }),
-    });
-    append_event(&default_log_path(), &event)
-}
-
-async fn run_list(store: &Store, router: &StoreLayout, mode: OutputMode) -> Result<()> {
-    let (current, _) = read_manifest(store, router).await?;
-    let entries = list_manifest_history(store, router)
-        .await?
-        .into_iter()
-        .map(|entry| history_entry_payload(&entry))
-        .collect::<Vec<_>>();
-    let payload = HistoryListPayload {
-        current_generation: current.generation,
-        entries,
-    };
-    match mode {
-        OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(HISTORY_LIST_SCHEMA, HISTORY_SCHEMA_VERSION, &payload)?;
-        }
-        OutputMode::Text => {
-            println!(
-                "current generation: {}; historical roots: {}",
-                payload.current_generation,
-                payload.entries.len()
-            );
-            for entry in payload.entries {
-                println!(
-                    "{} {} refs={} bytes={} created_at={}",
-                    entry.generation,
-                    entry.digest,
-                    entry.refs,
-                    entry.manifest_bytes,
-                    entry.created_at
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-fn history_entry_payload(entry: &ManifestHistoryEntry) -> HistoryEntryPayload {
-    HistoryEntryPayload {
-        generation: entry.generation,
-        digest: entry.digest.clone(),
-        created_at: entry.manifest.created_at.clone(),
-        session_id: entry.manifest.session_id.clone(),
-        refs: entry.manifest.refs.len() as u64,
-        manifest_bytes: entry.size,
-    }
-}
-
-fn plan_history_prune(
-    entries: &[ManifestHistoryEntry],
-    keep_last: usize,
-) -> Vec<&ManifestHistoryEntry> {
-    let generations = entries
-        .iter()
-        .map(|entry| entry.generation)
-        .collect::<BTreeSet<_>>();
-    let Some(oldest_retained) = generations.iter().rev().nth(keep_last.saturating_sub(1)) else {
-        return Vec::new();
-    };
-    entries
-        .iter()
-        .filter(|entry| entry.generation < *oldest_retained)
-        .collect()
-}
-
-fn prune_payload(
-    entries: &[ManifestHistoryEntry],
-    keep_last: usize,
-    applied: bool,
-) -> HistoryPrunePayload {
-    let pruned = plan_history_prune(entries, keep_last);
-    HistoryPrunePayload {
-        applied,
-        keep_last: keep_last as u64,
-        roots_before: entries.len() as u64,
-        roots_kept: entries.len().saturating_sub(pruned.len()) as u64,
-        roots_pruned: pruned.len() as u64,
-        manifest_bytes_pruned: pruned.iter().map(|entry| entry.size).sum(),
-        pruned: pruned.into_iter().map(history_entry_payload).collect(),
-    }
-}
-
-async fn prune_history(
-    store: &Store,
-    router: &StoreLayout,
-    args: &HistoryPruneArgs,
-    cancel: &CancellationToken,
-) -> Result<HistoryPrunePayload> {
-    if !args.apply {
-        let entries = list_manifest_history(store, router).await?;
-        return Ok(prune_payload(&entries, args.keep_last, false));
-    }
-
-    let operation_cancel = cancel.child_token();
-    let lease = crate::maintenance::RepositoryMaintenanceLease::acquire(
-        store,
-        router.global_prefix(),
-        router.repo_prefix(),
-        &operation_cancel,
-    )
-    .await?;
-    let operation = async {
-        let entries = list_manifest_history(store, router).await?;
-        let paths = plan_history_prune(&entries, args.keep_last)
-            .into_iter()
-            .map(|entry| object_store::path::Path::from(entry.path.clone()))
-            .collect::<Vec<_>>();
-        for paths in paths.chunks(HISTORY_PRUNE_DELETE_CONCURRENCY) {
-            check_cancelled(&operation_cancel)?;
-            for result in
-                futures_util::future::join_all(paths.iter().map(|path| store.delete(path))).await
-            {
-                result?;
-            }
-        }
-        Ok(prune_payload(&entries, args.keep_last, true))
-    }
-    .await;
-    let release = lease.release().await;
-    match (operation, release) {
-        (Ok(payload), Ok(())) => Ok(payload),
-        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
-    }
-}
-
-async fn restore_history(
-    store: &Store,
-    router: &StoreLayout,
-    args: &HistoryRestoreArgs,
-    cancel: &CancellationToken,
-) -> Result<HistoryRestorePayload> {
-    if !args.apply {
-        return restore_history_under_maintenance(store, router, args, cancel).await;
-    }
-
-    let operation_cancel = cancel.child_token();
-    let lease = crate::maintenance::RepositoryMaintenanceLease::acquire(
-        store,
-        router.global_prefix(),
-        router.repo_prefix(),
-        &operation_cancel,
-    )
-    .await?;
-    let operation = restore_history_under_maintenance(store, router, args, &operation_cancel).await;
-    let release = lease.release().await;
-    match (operation, release) {
-        (Ok(payload), Ok(())) => Ok(payload),
-        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
-    }
-}
-
-async fn restore_history_under_maintenance(
-    store: &Store,
-    router: &StoreLayout,
-    args: &HistoryRestoreArgs,
-    cancel: &CancellationToken,
-) -> Result<HistoryRestorePayload> {
-    let verified = verify_history(
-        store,
-        router,
-        args.generation,
-        args.digest.as_deref(),
-        cancel,
-    )
-    .await?;
-    let (current, current_etag) = read_manifest(store, router).await?;
-    let (refs_added, refs_updated, refs_deleted) =
-        ref_change_counts(&current, &verified.entry.manifest);
-    let mut payload = HistoryRestorePayload {
-        applied: false,
-        source_generation: verified.entry.generation,
-        source_digest: verified.entry.digest.clone(),
-        previous_generation: current.generation,
-        restored_generation: None,
-        refs_added,
-        refs_updated,
-        refs_deleted,
-        acceleration_rebuilt: false,
-        verification: verified.verification.clone(),
-    };
-    if !args.apply {
-        return Ok(payload);
-    }
-
-    let (restored, acceleration_rebuilt) =
-        apply_verified_history(store, router, &verified, &current, &current_etag, cancel).await?;
-    payload.applied = true;
-    payload.restored_generation = Some(restored.generation);
-    payload.acceleration_rebuilt = acceleration_rebuilt;
-    Ok(payload)
-}
-
-async fn apply_verified_history(
-    store: &Store,
-    router: &StoreLayout,
-    verified: &VerifiedHistory,
-    current: &Manifest,
-    current_etag: &str,
-    cancel: &CancellationToken,
-) -> Result<(Manifest, bool)> {
-    let operation_cancel = cancel.child_token();
-    let refs = recovery_lock_refs(current, &verified.entry.manifest);
-    let leases = acquire_recovery_leases(store, router, &refs, &operation_cancel).await?;
-    let operation = async {
-        check_cancelled(&operation_cancel)?;
-        let (pinned, pinned_etag) = read_manifest(store, router).await?;
-        if pinned_etag != current_etag || pinned != *current {
-            return Err(CrabError::CasConflict {
-                path: router.manifest_path().as_ref().to_owned(),
-                expected_etag: Some(current_etag.to_owned()),
-            });
-        }
-        let generation = current.generation.checked_add(1).ok_or_else(|| {
-            CrabError::Internal("manifest generation overflow during history restore".to_owned())
-        })?;
-        let mut restored = verified.entry.manifest.clone();
-        restored.generation = generation;
-        restored.created_at = now_iso8601();
-        restored.pusher = None;
-        restored.session_id = format!(
-            "history-recovery-{}-{}",
-            verified.entry.generation,
-            &verified.entry.digest[..12]
-        );
-        restored.seal_git_validation();
-        write_manifest_cas(store, router, &restored, current_etag).await?;
-        Ok(restored)
-    }
-    .await;
-    let release = release_recovery_leases(leases).await;
-    let restored = match (operation, release) {
-        (Ok(restored), Ok(())) => restored,
-        (Err(error), _) | (Ok(_), Err(error)) => return Err(error),
-    };
-
-    let locator_rebuilt = rebuild_locator_inventory(store, router, &restored, verified, cancel)
-        .await
-        .map_or_else(
-            |error| {
-                warn!(%error, generation = restored.generation, "history restored; locator acceleration requires repair");
-                false
-            },
-            |()| true,
-        );
-    let repository = verified._workspace.path().join("repository.git");
-    let visibility_rebuilt = crate::git::push::publish_git_visibility_index_from_git_dir(
-        &repository,
-        &restored,
-        store,
-        router,
-    )
-    .await
-    .map_or_else(
-        |error| {
-            warn!(%error, generation = restored.generation, "history restored; Git visibility proof requires repair");
-            false
-        },
-        |()| true,
-    );
-    let storage_router =
-        crab_storage::StoreLayout::new(store.as_storage().clone(), router.repo_prefix().to_owned());
-    let shallow_closure_rebuilt = crate::git::push::rebuild_shallow_closure_index_from_storage_git_dir(
-        &repository,
-        &restored,
-        store.as_storage(),
-        &storage_router,
-    )
-    .await
-    .unwrap_or_else(|error| {
-        warn!(%error, generation = restored.generation, "history restored; shallow closure acceleration requires repair");
-        false
-    });
-    let acceleration_rebuilt = locator_rebuilt && visibility_rebuilt && shallow_closure_rebuilt;
-    Ok((restored, acceleration_rebuilt))
-}
-
-fn ref_change_counts(current: &Manifest, historical: &Manifest) -> (u64, u64, u64) {
-    let added = historical
-        .refs
-        .keys()
-        .filter(|name| !current.refs.contains_key(*name))
-        .count() as u64;
-    let updated = historical
-        .refs
-        .iter()
-        .filter(|(name, oid)| current.refs.get(*name).is_some_and(|value| value != *oid))
-        .count() as u64;
-    let deleted = current
-        .refs
-        .keys()
-        .filter(|name| !historical.refs.contains_key(*name))
-        .count() as u64;
-    (added, updated, deleted)
-}
-
-fn recovery_lock_refs(current: &Manifest, historical: &Manifest) -> Vec<String> {
-    let mut refs = current.refs.keys().cloned().collect::<BTreeSet<_>>();
-    refs.extend(historical.refs.keys().cloned());
-    refs.into_iter().collect()
-}
-
-async fn acquire_recovery_leases(
-    store: &Store,
-    router: &StoreLayout,
-    refs: &[String],
-    cancel: &CancellationToken,
-) -> Result<Vec<RecoveryLease>> {
-    let mut leases = Vec::with_capacity(refs.len().max(1));
-    for ref_name in refs.iter().map(Some).chain(refs.is_empty().then_some(None)) {
-        if let Err(error) = check_cancelled(cancel) {
-            let _ = release_recovery_leases(leases).await;
-            return Err(error);
-        }
-        let acquired = match ref_name {
-            Some(ref_name) => {
-                PushLock::acquire_ref(
-                    store.inner(),
-                    router.repo_prefix(),
-                    ref_name,
-                    RECOVERY_LOCK_TTL,
-                )
-                .await
-            }
-            None => {
-                PushLock::acquire_internal(
-                    store.inner(),
-                    router.repo_prefix(),
-                    crab_coordination::HISTORY_RECOVERY_RESOURCE,
-                    RECOVERY_LOCK_TTL,
-                )
-                .await
-            }
-        };
-        let lock = match acquired.map_err(CrabError::from) {
-            Ok(lock) => lock,
-            Err(error) => {
-                let _ = release_recovery_leases(leases).await;
-                return Err(error);
-            }
-        };
-        let heartbeat = LockHeartbeat::spawn(
-            store.clone(),
-            lock.path().to_owned(),
-            lock.holder().to_owned(),
-            lock.ttl(),
-            lock.ttl() / 3,
-            cancel.clone(),
-        );
-        leases.push(RecoveryLease { lock, heartbeat });
-    }
-    Ok(leases)
-}
-
-async fn release_recovery_leases(mut leases: Vec<RecoveryLease>) -> Result<()> {
-    let mut first_error = None;
-    while let Some(RecoveryLease { lock, heartbeat }) = leases.pop() {
-        heartbeat.stop().await;
-        if let Err(error) = lock.release().await.map_err(CrabError::from)
-            && first_error.is_none()
-        {
-            first_error = Some(error);
-        }
-    }
-    match first_error {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
 }
 
 async fn verify_history(
@@ -779,7 +340,6 @@ async fn verify_history(
     }
 
     let mut verified_packs = Vec::with_capacity(pack_manifests.len());
-    let mut git_objects = 0_u64;
     for pack in pack_manifests {
         check_cancelled(cancel)?;
         let pack_path = packs_dir.join(format!("{}.pack", pack.pack_id));
@@ -868,15 +428,10 @@ async fn verify_history(
                 ),
             });
         }
-        git_objects = git_objects.checked_add(pack.object_count).ok_or_else(|| {
-            CrabError::Internal("Git object count overflow during history verification".to_owned())
-        })?;
         let git_sha1 = locations.pack_checksum().to_string();
         drop(locations);
         verified_packs.push(VerifiedPack {
             manifest: pack,
-            index_path,
-            reverse_index_path,
             git_sha1,
         });
     }
@@ -960,27 +515,9 @@ async fn verify_history(
         record_object(&mut objects, path.as_ref().to_owned(), bytes.len() as u64)?;
     }
 
-    let dependency_bytes = objects.values().try_fold(0_u64, |total, size| {
-        total
-            .checked_add(*size)
-            .ok_or_else(|| CrabError::Internal("dependency byte count overflow".to_owned()))
-    })?;
-    let verification = HistoryVerificationPayload {
-        generation: entry.generation,
-        digest: entry.digest.clone(),
-        refs: entry.manifest.refs.len() as u64,
-        packs: verified_packs.len() as u64,
-        git_objects,
-        shards: shards.len() as u64,
-        xorbs: xorb_hashes.len() as u64,
-        dependency_objects: objects.len() as u64,
-        dependency_bytes,
-    };
     Ok(VerifiedHistory {
         entry,
-        verification,
         _workspace: workspace,
-        packs: verified_packs,
     })
 }
 
@@ -1187,84 +724,10 @@ fn git_command(command: &mut Command) -> &mut Command {
         .env("GIT_OPTIONAL_LOCKS", "0")
 }
 
-async fn rebuild_locator_inventory(
-    store: &Store,
-    router: &StoreLayout,
-    restored: &Manifest,
-    verified: &VerifiedHistory,
-    cancel: &CancellationToken,
+pub(super) fn emit_verification(
+    payload: &HistoryVerificationPayload,
+    mode: OutputMode,
 ) -> Result<()> {
-    let shard_index_hash = manifest_hash_or_default(&restored.shard_index_hash)?;
-    let pack_index_hash = manifest_hash_or_default(&restored.pack_index_hash)?;
-    let committed = verified
-        .packs
-        .iter()
-        .map(|pack| CommittedPackIndex {
-            pack: &pack.manifest,
-            idx_path: &pack.index_path,
-            rev_path: &pack.reverse_index_path,
-            git_sha1: &pack.git_sha1,
-            kind_by_oid: None,
-        })
-        .collect::<Vec<_>>();
-    publish_committed_pack_locators(
-        store,
-        router,
-        &committed,
-        CommittedManifestAnchor {
-            generation: restored.generation,
-            shard_index_hash,
-            pack_index_hash,
-        },
-        None,
-        RECOVERY_LOCK_TTL,
-        cancel,
-    )
-    .await?;
-    Ok(())
-}
-
-fn manifest_hash_or_default(value: &str) -> Result<MerkleHash> {
-    if value.is_empty() {
-        return Ok(MerkleHash::default());
-    }
-    MerkleHash::from_hex(value)
-        .map_err(|error| CrabError::Internal(format!("invalid committed manifest hash: {error}")))
-}
-
-fn now_iso8601() -> String {
-    let duration = std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    let seconds = duration.as_secs();
-    let days = seconds / 86_400;
-    let time_of_day = seconds % 86_400;
-    let (year, month, day) = days_to_ymd(days);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        time_of_day / 3_600,
-        (time_of_day % 3_600) / 60,
-        time_of_day % 60
-    )
-}
-
-fn days_to_ymd(days: u64) -> (u64, u64, u64) {
-    let z = days + 719_468;
-    let era = z / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let mut year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    if month <= 2 {
-        year += 1;
-    }
-    (year, month, day)
-}
-
-fn emit_verification(payload: &HistoryVerificationPayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
             emit_json(HISTORY_VERIFY_SCHEMA, HISTORY_SCHEMA_VERSION, payload)?;
@@ -1285,7 +748,7 @@ fn emit_verification(payload: &HistoryVerificationPayload, mode: OutputMode) -> 
     Ok(())
 }
 
-fn emit_prune(payload: &HistoryPrunePayload, mode: OutputMode) -> Result<()> {
+pub(super) fn emit_prune(payload: &HistoryPrunePayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
             emit_json(HISTORY_PRUNE_SCHEMA, HISTORY_SCHEMA_VERSION, payload)?;
@@ -1308,7 +771,7 @@ fn emit_prune(payload: &HistoryPrunePayload, mode: OutputMode) -> Result<()> {
     Ok(())
 }
 
-fn emit_restore(payload: &HistoryRestorePayload, mode: OutputMode) -> Result<()> {
+pub(super) fn emit_restore(payload: &HistoryRestorePayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
             emit_json(HISTORY_RESTORE_SCHEMA, HISTORY_SCHEMA_VERSION, payload)?;
@@ -1332,445 +795,4 @@ fn emit_restore(payload: &HistoryRestorePayload, mode: OutputMode) -> Result<()>
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    clippy::panic,
-    clippy::unwrap_used,
-    reason = "test assertions"
-)]
-mod tests {
-    use std::sync::Arc;
-
-    use bytes::Bytes;
-    use object_store::memory::InMemory;
-
-    use super::*;
-    use crate::metadata::manifest::{
-        BulkData, PackManifestEntry, compact_pack_index, create_manifest, read_manifest,
-        upload_segmented_bulk, write_manifest_cas,
-    };
-
-    fn memory_store() -> Store {
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        Store::new(inner)
-    }
-
-    async fn repository_with_history() -> (Store, StoreLayout, Manifest) {
-        let store = memory_store();
-        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
-        let mut historical = Manifest::default_for_repo("refs/heads/main");
-        historical.created_at = "2026-01-01T00:00:00Z".to_owned();
-        historical.session_id = "known-good".to_owned();
-        historical.seal_git_validation();
-        create_manifest(&store, &router, &historical).await.unwrap();
-        let (_, etag) = read_manifest(&store, &router).await.unwrap();
-        let mut current = historical.clone();
-        current.generation = 1;
-        current.created_at = "2026-01-02T00:00:00Z".to_owned();
-        current.session_id = "bad-push".to_owned();
-        current.seal_git_validation();
-        write_manifest_cas(&store, &router, &current, &etag)
-            .await
-            .unwrap();
-        (store, router, historical)
-    }
-
-    async fn put_history(store: &Store, router: &StoreLayout, manifest: &Manifest) -> String {
-        let body = serde_json::to_vec_pretty(manifest).unwrap();
-        let digest = blake3::hash(&body).to_hex().to_string();
-        store
-            .put_exact(
-                &router.manifest_history_path(manifest.generation, &digest),
-                Bytes::from(body),
-            )
-            .await
-            .unwrap();
-        digest
-    }
-
-    #[tokio::test]
-    async fn verify_preview_and_restore_republish_historical_state_monotonically() {
-        let (store, router, historical) = repository_with_history().await;
-        let cancel = CancellationToken::new();
-
-        let verified = verify_history(&store, &router, 0, None, &cancel)
-            .await
-            .unwrap();
-        assert_eq!(verified.verification.dependency_objects, 1);
-
-        let preview = restore_history(
-            &store,
-            &router,
-            &HistoryRestoreArgs {
-                generation: 0,
-                digest: None,
-                apply: false,
-                json: false,
-            },
-            &cancel,
-        )
-        .await
-        .unwrap();
-        assert!(!preview.applied);
-        assert_eq!(
-            read_manifest(&store, &router).await.unwrap().0.generation,
-            1
-        );
-
-        let restored = restore_history(
-            &store,
-            &router,
-            &HistoryRestoreArgs {
-                generation: 0,
-                digest: None,
-                apply: true,
-                json: false,
-            },
-            &cancel,
-        )
-        .await
-        .unwrap();
-        let current = read_manifest(&store, &router).await.unwrap().0;
-
-        assert!(restored.applied);
-        assert_eq!(restored.restored_generation, Some(2));
-        assert_eq!(current.generation, 2);
-        assert_eq!(current.refs, historical.refs);
-        assert_eq!(current.head, historical.head);
-        assert_eq!(
-            list_manifest_history(&store, &router).await.unwrap().len(),
-            2
-        );
-    }
-
-    #[tokio::test]
-    async fn ambiguous_generation_requires_digest_selection() {
-        let (store, router, historical) = repository_with_history().await;
-        let mut alternative = historical;
-        alternative.session_id = "alternative-root".to_owned();
-        let digest = put_history(&store, &router, &alternative).await;
-
-        assert!(
-            verify_history(&store, &router, 0, None, &CancellationToken::new())
-                .await
-                .is_err()
-        );
-        let selected = verify_history(&store, &router, 0, Some(&digest), &CancellationToken::new())
-            .await
-            .unwrap();
-        assert_eq!(selected.entry.digest, digest);
-    }
-
-    #[tokio::test]
-    async fn history_prune_keeps_every_root_in_newest_generations_and_is_idempotent() {
-        let store = memory_store();
-        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
-        for generation in 1..=4 {
-            let mut manifest = Manifest::default_for_repo("refs/heads/main");
-            manifest.generation = generation;
-            manifest.session_id = format!("generation-{generation}");
-            manifest.seal_git_validation();
-            put_history(&store, &router, &manifest).await;
-            if generation == 3 {
-                manifest.session_id = "generation-3-alternate".to_owned();
-                manifest.seal_git_validation();
-                put_history(&store, &router, &manifest).await;
-            }
-        }
-        let args = HistoryPruneArgs {
-            keep_last: 2,
-            apply: false,
-            json: false,
-        };
-
-        let preview = prune_history(&store, &router, &args, &CancellationToken::new())
-            .await
-            .unwrap();
-        assert!(!preview.applied);
-        assert_eq!(preview.roots_before, 5);
-        assert_eq!(preview.roots_pruned, 2);
-        assert_eq!(preview.roots_kept, 3);
-        assert_eq!(
-            preview
-                .pruned
-                .iter()
-                .map(|entry| entry.generation)
-                .collect::<Vec<_>>(),
-            vec![1, 2]
-        );
-        assert_eq!(
-            list_manifest_history(&store, &router).await.unwrap().len(),
-            5
-        );
-
-        let applied = prune_history(
-            &store,
-            &router,
-            &HistoryPruneArgs {
-                apply: true,
-                ..args.clone()
-            },
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        assert!(applied.applied);
-        assert_eq!(applied.roots_pruned, 2);
-        assert_eq!(
-            list_manifest_history(&store, &router)
-                .await
-                .unwrap()
-                .into_iter()
-                .map(|entry| entry.generation)
-                .collect::<Vec<_>>(),
-            vec![3, 3, 4]
-        );
-
-        let repeated = prune_history(
-            &store,
-            &router,
-            &HistoryPruneArgs {
-                apply: true,
-                ..args
-            },
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(repeated.roots_pruned, 0);
-    }
-
-    #[tokio::test]
-    async fn pruning_old_root_makes_its_unique_pack_collectible() {
-        let store = memory_store();
-        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
-        crate::core::remote_layout::initialize(&store, &router)
-            .await
-            .unwrap();
-        let old_pack_id = "c".repeat(64);
-        let (old_pack_hash, _, pack_write) = compact_pack_index(
-            1,
-            &[PackManifestEntry {
-                pack_id: old_pack_id.clone(),
-                size: 1024,
-                content_hash: old_pack_id.clone(),
-                ref_tips: Vec::new(),
-                object_count: 1,
-            }],
-        )
-        .unwrap();
-        upload_segmented_bulk(
-            &store,
-            &router,
-            &BulkData {
-                shard_index: crab_metadata::segmented::SegmentWrite::default(),
-                pack_index: pack_write,
-            },
-        )
-        .await
-        .unwrap();
-        let mut old = Manifest::default_for_repo("refs/heads/main");
-        old.generation = 1;
-        old.pack_index_hash = old_pack_hash;
-        old.seal_git_validation();
-        create_manifest(&store, &router, &old).await.unwrap();
-
-        let (_, etag) = read_manifest(&store, &router).await.unwrap();
-        let mut middle = old.clone();
-        middle.generation = 2;
-        middle.pack_index_hash.clear();
-        middle.session_id = "middle".to_owned();
-        middle.seal_git_validation();
-        write_manifest_cas(&store, &router, &middle, &etag)
-            .await
-            .unwrap();
-        let (_, etag) = read_manifest(&store, &router).await.unwrap();
-        let mut current = middle;
-        current.generation = 3;
-        current.session_id = "current".to_owned();
-        current.seal_git_validation();
-        write_manifest_cas(&store, &router, &current, &etag)
-            .await
-            .unwrap();
-
-        let pack_key = format!("org/repo/packs/pack-{old_pack_id}.pack");
-        let (_, before) = crate::cmd::gc::reachable_repo_objects_from_manifest(&store, &router)
-            .await
-            .unwrap();
-        assert!(before.contains(&pack_key));
-
-        prune_history(
-            &store,
-            &router,
-            &HistoryPruneArgs {
-                keep_last: 1,
-                apply: true,
-                json: false,
-            },
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-
-        let (_, after) = crate::cmd::gc::reachable_repo_objects_from_manifest(&store, &router)
-            .await
-            .unwrap();
-        assert!(!after.contains(&pack_key));
-    }
-
-    #[tokio::test]
-    async fn maintenance_lease_blocks_history_prune_and_restore_apply() {
-        let (store, router, _) = repository_with_history().await;
-        let lock = PushLock::acquire_internal(
-            store.inner(),
-            router.repo_prefix(),
-            crab_coordination::REPOSITORY_MAINTENANCE_RESOURCE,
-            RECOVERY_LOCK_TTL,
-        )
-        .await
-        .unwrap();
-
-        let prune_error = prune_history(
-            &store,
-            &router,
-            &HistoryPruneArgs {
-                keep_last: 1,
-                apply: true,
-                json: false,
-            },
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(prune_error, CrabError::PushLockHeld { .. }));
-
-        let restore_error = restore_history(
-            &store,
-            &router,
-            &HistoryRestoreArgs {
-                generation: 0,
-                digest: None,
-                apply: true,
-                json: false,
-            },
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(restore_error, CrabError::PushLockHeld { .. }));
-        assert_eq!(
-            read_manifest(&store, &router).await.unwrap().0.generation,
-            1
-        );
-        lock.release().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn verification_rejects_missing_and_corrupt_dependencies() {
-        let store = memory_store();
-        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
-        let mut missing = Manifest::default_for_repo("refs/heads/main");
-        missing.shard_index_hash = "a".repeat(64);
-        missing.seal_git_validation();
-        put_history(&store, &router, &missing).await;
-        assert!(
-            verify_history(&store, &router, 0, None, &CancellationToken::new())
-                .await
-                .is_err()
-        );
-
-        let corrupt_store = memory_store();
-        let corrupt_router = StoreLayout::new(corrupt_store.clone(), "org/repo".to_owned());
-        let mut corrupt = Manifest::default_for_repo("refs/heads/main");
-        corrupt.commit_graph_hash = Some("b".repeat(64));
-        corrupt.seal_git_validation();
-        put_history(&corrupt_store, &corrupt_router, &corrupt).await;
-        corrupt_store
-            .put(
-                &corrupt_router.bulk_manifest_path("commit-graph", &"b".repeat(64)),
-                Bytes::from_static(b"corrupt"),
-            )
-            .await
-            .unwrap();
-        assert!(
-            verify_history(
-                &corrupt_store,
-                &corrupt_router,
-                0,
-                None,
-                &CancellationToken::new(),
-            )
-            .await
-            .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn stale_pinned_current_aborts_restore_and_releases_lease() {
-        let (store, router, _) = repository_with_history().await;
-        let cancel = CancellationToken::new();
-        let verified = verify_history(&store, &router, 0, None, &cancel)
-            .await
-            .unwrap();
-        let (pinned, pinned_etag) = read_manifest(&store, &router).await.unwrap();
-        let mut concurrent = pinned.clone();
-        concurrent.generation += 1;
-        concurrent.session_id = "concurrent-push".to_owned();
-        concurrent.seal_git_validation();
-        write_manifest_cas(&store, &router, &concurrent, &pinned_etag)
-            .await
-            .unwrap();
-
-        let error =
-            apply_verified_history(&store, &router, &verified, &pinned, &pinned_etag, &cancel)
-                .await
-                .unwrap_err();
-        assert!(matches!(error, CrabError::CasConflict { .. }));
-        let lock = PushLock::acquire_internal(
-            store.inner(),
-            router.repo_prefix(),
-            crab_coordination::HISTORY_RECOVERY_RESOURCE,
-            RECOVERY_LOCK_TTL,
-        )
-        .await
-        .unwrap();
-        lock.release().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn held_internal_recovery_lease_blocks_restore_without_moving_manifest() {
-        let (store, router, _) = repository_with_history().await;
-        let lock = PushLock::acquire_internal(
-            store.inner(),
-            router.repo_prefix(),
-            crab_coordination::HISTORY_RECOVERY_RESOURCE,
-            RECOVERY_LOCK_TTL,
-        )
-        .await
-        .unwrap();
-
-        let error = restore_history(
-            &store,
-            &router,
-            &HistoryRestoreArgs {
-                generation: 0,
-                digest: None,
-                apply: true,
-                json: false,
-            },
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap_err();
-
-        assert!(matches!(error, CrabError::PushLockHeld { .. }));
-        assert_eq!(
-            read_manifest(&store, &router).await.unwrap().0.generation,
-            1
-        );
-        lock.release().await.unwrap();
-    }
 }

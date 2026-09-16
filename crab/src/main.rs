@@ -3278,6 +3278,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                     command,
                     &selection.store,
                     selection.router.repo_prefix(),
+                    selection.capsule_root,
                     &cancel,
                 )
                 .await?;
