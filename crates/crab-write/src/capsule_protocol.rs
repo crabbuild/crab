@@ -185,28 +185,20 @@ pub async fn prepare_publication(
         }
     }
 
-    let prepared = transaction
-        .edits()
-        .iter()
-        .zip(snapshots)
-        .map(|(edit, snapshot)| {
-            prepare_ref_successor(snapshot, edit, &transaction_id, capsule.clone())
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let run = prepared
-        .first()
-        .map(|(_, run)| run.clone())
-        .ok_or_else(|| WriteError::Internal("capsule publication has no refs".to_owned()))?;
-    if prepared.iter().any(|(_, candidate)| candidate != &run) {
-        return Err(WriteError::Internal(
-            "one capsule publication produced conflicting ref runs".to_owned(),
-        ));
-    }
-    let path = router.capsule_path(run.hash());
-    router
-        .store()
-        .put_if_absent_verified(&path, run.bytes().clone())
-        .await?;
+    let run = CapsuleRun::leaf(capsule.clone())?;
+    let prepared = try_join_all(transaction.edits().iter().zip(snapshots).map(
+        |(edit, snapshot)| {
+            prepare_ref_successor(router, snapshot, edit, &transaction_id, run.clone())
+        },
+    ))
+    .await?;
+    let mut immutable_runs = vec![run.clone()];
+    immutable_runs.extend(
+        prepared
+            .iter()
+            .filter_map(|(_, compacted)| compacted.clone()),
+    );
+    upload_immutable_runs(router, immutable_runs).await?;
     let refs = prepared
         .into_iter()
         .map(|(prepared, _)| prepared)
@@ -382,8 +374,7 @@ pub async fn materialize_coordinated_repair(
     base: RootSnapshot,
     descriptor: &crab_coordination::write_coordinator::CoordinatedCapsulePublication,
 ) -> Result<CoordinatedRepairOutcome> {
-    let (run, capsule, transaction) = load_coordinated_publication(router, descriptor).await?;
-    let path = router.capsule_path(&descriptor.run_hash);
+    let (run, _, transaction) = load_coordinated_publication(router, descriptor).await?;
     let snapshots = try_join_all(
         transaction
             .edits()
@@ -413,21 +404,23 @@ pub async fn materialize_coordinated_repair(
             });
         }
     }
-    let prepared = transaction
-        .edits()
+    let prepared = try_join_all(transaction.edits().iter().zip(snapshots).map(
+        |(edit, snapshot)| {
+            prepare_ref_successor(
+                router,
+                snapshot,
+                edit,
+                &descriptor.transaction_id,
+                run.clone(),
+            )
+        },
+    ))
+    .await?;
+    let compacted = prepared
         .iter()
-        .zip(snapshots)
-        .map(|(edit, snapshot)| {
-            prepare_ref_successor(snapshot, edit, &descriptor.transaction_id, capsule.clone())
-        })
-        .collect::<Result<Vec<_>>>()?;
-    if prepared.iter().any(|(_, candidate)| candidate != &run) {
-        return Err(WriteError::CorruptObject {
-            path: path.to_string(),
-            reason: "regional ref successor does not reproduce the coordinated capsule run"
-                .to_owned(),
-        });
-    }
+        .filter_map(|(_, run)| run.clone())
+        .collect::<Vec<_>>();
+    upload_immutable_runs(router, compacted).await?;
     let refs = prepared.into_iter().map(|(prepared, _)| prepared).collect();
     let activation_id = activation_id(&descriptor.transaction_id);
     commit_multi_ref(router, &descriptor.transaction_id, &activation_id, refs).await?;
@@ -765,13 +758,11 @@ async fn read_ref_head(
             let frontier = match position {
                 Some(position) => {
                     let compacted_pointer = &visible.frontier()[position];
-                    if compacted_pointer.transaction_ids().last() != Some(compacted) {
-                        return Err(WriteError::CorruptObject {
-                            path: path.to_string(),
-                            reason: "checkpoint splits an indivisible capsule run".to_owned(),
-                        });
-                    }
-                    visible.frontier()[position + 1..].to_vec()
+                    let suffix_start = position
+                        + usize::from(
+                            compacted_pointer.transaction_ids().last() == Some(compacted),
+                        );
+                    visible.frontier()[suffix_start..].to_vec()
                 }
                 None if visible.checkpoint_transaction_id() == Some(compacted.as_str()) => {
                     visible.frontier().to_vec()
@@ -932,21 +923,22 @@ async fn resolve_prepared_activation(
     }
 }
 
-fn prepare_ref_successor(
+async fn prepare_ref_successor(
+    router: &StoreLayout<Store>,
     snapshot: RefHeadSnapshot,
     edit: &crab_metadata::capsule_protocol::CapsuleRefEdit,
     transaction_id: &str,
-    capsule: Capsule,
-) -> Result<(PreparedRefHead, CapsuleRun)> {
-    let run = CapsuleRun::leaf(capsule)?;
+    leaf: CapsuleRun,
+) -> Result<(PreparedRefHead, Option<CapsuleRun>)> {
     let mut frontier = snapshot.visible.frontier().to_vec();
     frontier.push(CapsulePointer::new(
-        run.hash(),
-        run.bytes().len() as u64,
-        run.level(),
-        run.transaction_ids(),
-        run.newest_base_root_digest(),
+        leaf.hash(),
+        leaf.bytes().len() as u64,
+        leaf.level(),
+        leaf.transaction_ids(),
+        leaf.newest_base_root_digest(),
     )?);
+    let compacted = compact_ref_frontier(router, &mut frontier, &leaf).await?;
     let state = snapshot.visible.successor(
         edit.new_oid().map(str::to_owned),
         edit.peeled_oid().map(str::to_owned),
@@ -959,8 +951,126 @@ fn prepare_ref_successor(
             original: snapshot,
             candidate,
         },
-        run,
+        compacted,
     ))
+}
+
+async fn compact_ref_frontier(
+    router: &StoreLayout<Store>,
+    frontier: &mut Vec<CapsulePointer>,
+    known_leaf: &CapsuleRun,
+) -> Result<Option<CapsuleRun>> {
+    let fan_in = crab_metadata::capsule_protocol::CAPSULE_REF_COMPACTION_FAN_IN;
+    if !fan_in.is_power_of_two() {
+        return Err(WriteError::Internal(
+            "capsule compaction fan-in is not a power of two".to_owned(),
+        ));
+    }
+    let Some(level) = frontier.last().map(CapsulePointer::level) else {
+        return Ok(None);
+    };
+    let suffix_len = frontier
+        .iter()
+        .rev()
+        .take_while(|pointer| pointer.level() == level)
+        .count();
+    if suffix_len < fan_in {
+        return Ok(None);
+    }
+
+    let capsules_per_run = 1_usize
+        .checked_shl(u32::from(level))
+        .ok_or_else(|| WriteError::Internal("capsule compaction level overflowed".to_owned()))?;
+    if capsules_per_run
+        .checked_mul(fan_in)
+        .is_none_or(|count| count > crab_metadata::capsule_protocol::MAX_CAPSULES_PER_RUN)
+    {
+        return Ok(None);
+    }
+
+    let suffix_start = frontier.len() - fan_in;
+    let level_delta = u8::try_from(fan_in.ilog2())
+        .map_err(|_| WriteError::Internal("capsule compaction level overflowed".to_owned()))?;
+    let mut next_level = level
+        .checked_add(level_delta)
+        .ok_or_else(|| WriteError::Internal("capsule compaction level overflowed".to_owned()))?;
+    let mut carry_start = suffix_start;
+    while carry_start > 0
+        && frontier[carry_start - 1].level() == next_level
+        && (1_usize << usize::from(next_level))
+            < crab_metadata::capsule_protocol::MAX_CAPSULES_PER_RUN
+    {
+        carry_start -= 1;
+        next_level = next_level.checked_add(1).ok_or_else(|| {
+            WriteError::Internal("capsule compaction level overflowed".to_owned())
+        })?;
+    }
+
+    let pointers = frontier[carry_start..].to_vec();
+    let pointer_count = pointers.len();
+    let runs = try_join_all(
+        pointers
+            .iter()
+            .enumerate()
+            .map(|(index, pointer)| async move {
+                if index + 1 == pointer_count {
+                    return Ok::<_, WriteError>(known_leaf.clone());
+                }
+                Ok::<_, WriteError>(
+                    crab_metadata::capsule_protocol::load_capsule_run(router, pointer).await?,
+                )
+            }),
+    )
+    .await?;
+    let carry_count = suffix_start - carry_start;
+    let mut level_runs = runs[carry_count..].to_vec();
+    while level_runs.len() > 1 {
+        let mut merged = Vec::with_capacity(level_runs.len() / 2);
+        for pair in level_runs.chunks_exact(2) {
+            merged.push(pair[0].merge(&pair[1])?);
+        }
+        level_runs = merged;
+    }
+    let mut compacted = level_runs
+        .pop()
+        .ok_or_else(|| WriteError::Internal("capsule compaction suffix disappeared".to_owned()))?;
+    for older in runs[..carry_count].iter().rev() {
+        compacted = older.merge(&compacted)?;
+    }
+    frontier.truncate(carry_start);
+    frontier.push(CapsulePointer::new(
+        compacted.hash(),
+        compacted.bytes().len() as u64,
+        compacted.level(),
+        compacted.transaction_ids(),
+        compacted.newest_base_root_digest(),
+    )?);
+    Ok(Some(compacted))
+}
+
+async fn upload_immutable_runs(router: &StoreLayout<Store>, runs: Vec<CapsuleRun>) -> Result<()> {
+    let mut unique = std::collections::BTreeMap::new();
+    for run in runs {
+        match unique.get(run.hash()) {
+            Some(existing) if existing != &run => {
+                return Err(WriteError::Internal(
+                    "capsule run hash names conflicting bodies".to_owned(),
+                ));
+            }
+            Some(_) => {}
+            None => {
+                unique.insert(run.hash().to_owned(), run);
+            }
+        }
+    }
+    try_join_all(unique.into_values().map(|run| async move {
+        router
+            .store()
+            .put_if_absent_verified(&router.capsule_path(run.hash()), run.bytes().clone())
+            .await
+    }))
+    .await?;
+    Ok(())
 }
 
 async fn commit_single_ref(router: &StoreLayout<Store>, prepared: PreparedRefHead) -> Result<()> {
@@ -2258,6 +2368,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coordinated_repair_rebuilds_batched_ref_compaction() {
+        let source = StoreLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            "repositories/test".to_owned(),
+        );
+        let target = StoreLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            "repositories/test".to_owned(),
+        );
+        let source_base = initialize(&source, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let target_base = initialize(&target, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let mut previous = None;
+
+        for sequence in 1..=32_u64 {
+            let next = format!("{sequence:040x}");
+            let transaction = transaction(&source_base, previous.as_deref(), &next);
+            let prepared = prepare_coordinated_publication(
+                &source,
+                source_base.clone(),
+                &transaction,
+                &capsule(&transaction),
+            )
+            .await
+            .unwrap();
+            let descriptor = prepared.descriptor().clone();
+            let (leaf, _) = source
+                .store()
+                .get_with_etag_bounded(
+                    &source.capsule_path(&descriptor.run_hash),
+                    descriptor.run_size,
+                )
+                .await
+                .unwrap();
+            target
+                .store()
+                .put_if_absent_verified(&target.capsule_path(&descriptor.run_hash), leaf)
+                .await
+                .unwrap();
+            materialize_coordinated_publication(&source, prepared)
+                .await
+                .unwrap();
+            materialize_coordinated_repair(&target, target_base.clone(), &descriptor)
+                .await
+                .unwrap();
+            previous = Some(next);
+        }
+
+        let source_head = read_ref_head(&source, source_base.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
+        let target_head = read_ref_head(&target, target_base.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
+        assert_eq!(source_head.visible, target_head.visible);
+        assert_eq!(target_head.visible.frontier().len(), 1);
+        assert_eq!(target_head.visible.frontier()[0].level(), 5);
+    }
+
+    #[tokio::test]
     async fn coordinated_repair_publishes_plan_receipt_for_fresh_activation() {
         let source = StoreLayout::new(
             Store::new(Arc::new(InMemory::new())),
@@ -2377,12 +2550,15 @@ mod tests {
         let snapshot = read_ref_head(&router, base.record().root(), "refs/heads/main")
             .await
             .unwrap();
+        let leaf = CapsuleRun::leaf(capsule(&transaction)).unwrap();
         let (prepared, _) = prepare_ref_successor(
+            &router,
             snapshot,
             &transaction.edits()[0],
             &transaction_id,
-            capsule(&transaction),
+            leaf,
         )
+        .await
         .unwrap();
         let activation_id = "5".repeat(64);
         let record = crab_metadata::capsule_protocol::CapsuleTransactionRecord::preparing(
@@ -2501,7 +2677,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn leaf_publication_stays_flat_until_checkpoint_boundary() {
+    async fn batched_ref_compaction_stays_below_ten_requests_per_push() {
         let inner = Arc::new(InMemory::new());
         let observer = Arc::new(RecordingObserver::default());
         let store = Store::new(inner)
@@ -2515,7 +2691,7 @@ mod tests {
 
         let mut previous = None;
         let mut published = None;
-        for sequence in 1..=64_u64 {
+        for sequence in 1..=65_u64 {
             let base = open_root(&router).await.unwrap();
             let next = format!("{sequence:040x}");
             let transaction = transaction(&base, previous.as_deref(), &next);
@@ -2538,7 +2714,7 @@ mod tests {
                 .iter()
                 .map(CapsulePointer::level)
                 .collect::<Vec<_>>(),
-            vec![0; 64]
+            vec![6, 0]
         );
         let request_count = observer
             .observations
@@ -2547,8 +2723,91 @@ mod tests {
             .iter()
             .filter(|observation| observation.outcome == StorageOutcome::Success)
             .count();
-        assert!(request_count <= 320, "request count was {request_count}");
-        assert!((request_count as f64 / 64.0) <= 5.0);
+        assert!(request_count <= 393, "request count was {request_count}");
+        assert!((request_count as f64 / 65.0) < 6.1);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_may_split_a_compacted_ref_run() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        let mut base = initialize(&router, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let mut previous = None;
+        let mut checkpoint_transaction = None;
+        let mut checkpoint_runs = None;
+
+        for sequence in 1..=64_u64 {
+            let next = format!("{sequence:040x}");
+            let transaction = transaction(&base, previous.as_deref(), &next);
+            base = publish(&router, base, &transaction, &capsule(&transaction))
+                .await
+                .unwrap();
+            previous = Some(next);
+            if sequence == 40 {
+                checkpoint_transaction = Some(transaction.id().unwrap());
+                checkpoint_runs = Some(
+                    read_ref_head(&router, base.record().root(), "refs/heads/main")
+                        .await
+                        .unwrap()
+                        .visible
+                        .frontier()
+                        .to_vec(),
+                );
+            }
+        }
+
+        let checkpoint_transaction = checkpoint_transaction.unwrap();
+        let checkpoint = Checkpoint::build(
+            base.record().root().generation(),
+            base.record().digest(),
+            vec![
+                CapsuleGitPack::new(
+                    Bytes::from_static(b"PACK"),
+                    Bytes::from_static(b"index"),
+                    Bytes::from_static(b"reverse"),
+                    Bytes::from_static(b"locator"),
+                    "f".repeat(40),
+                    1,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let checkpointed = publish_ref_checkpoint(
+            &router,
+            base,
+            &checkpoint,
+            std::collections::BTreeMap::from([(
+                "refs/heads/main".to_owned(),
+                format!("{:040x}", 40),
+            )]),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::from([(
+                "refs/heads/main".to_owned(),
+                checkpoint_transaction.clone(),
+            )]),
+            checkpoint_runs.unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let visible = read_ref_head(&router, checkpointed.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
+        assert_eq!(visible.visible.oid(), Some(format!("{:040x}", 64).as_str()));
+        assert_eq!(
+            visible.visible.checkpoint_transaction_id(),
+            Some(checkpoint_transaction.as_str())
+        );
+        assert_eq!(visible.visible.frontier().len(), 1);
+        assert_eq!(visible.visible.frontier()[0].level(), 6);
+        let catalog =
+            crab_metadata::capsule_protocol::load_pointer_catalog_from_root(&router, &checkpointed)
+                .await
+                .unwrap();
+        assert!(catalog.files().is_empty());
     }
 
     #[tokio::test]

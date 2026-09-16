@@ -224,12 +224,16 @@ through the combined view.
 
 Each ref head contains committed state and, only for a multi-ref transaction,
 one prepared state. A state binds the ref OID, peeled OID, newest transaction,
-and a bounded frontier of immutable leaf capsules. Foreground publication does
-not read or rewrite older capsules. Background checkpoint maintenance folds a
-complete authenticated view after 32 visible capsules; the next writer drops
-the exact checkpointed prefix and preserves any concurrently published suffix.
-The 64-entry hard bound leaves maintenance headroom without making an
-unbounded read contract.
+and a bounded frontier of immutable capsule runs. The foreground writer always
+publishes the coordinator-bound leaf, then folds each 32-run equal-level suffix
+through one concurrent predecessor-read wave and one immutable support-run
+write. Checkpoints may split a support run; readers authenticate the run and
+skip through the exact compacted transaction before replaying its suffix, so a
+concurrent checkpoint cannot invalidate compaction. Background checkpoint
+maintenance folds a complete authenticated view after 32 visible capsules; the
+next writer drops the exact checkpointed prefix and preserves any concurrently
+published suffix. Runs cap at 512 capsules and the 64-segment hard bound leaves
+maintenance headroom without making an unbounded read contract.
 
 The v2 root contains the compacted ref baseline, exact per-ref checkpoint
 positions, generation, parent digest, checkpoint, capabilities, GC fence, and
@@ -484,6 +488,9 @@ Let:
   outside the pinned base;
 - `B` be checkpoint/frontier reads needed to materialize an uncached base
   file/xorb catalog;
+- `C` be bounded ref-run compaction reads and writes; it is zero for ordinary
+  pushes and averages below 1.04 qualified or 1.07 readback-required attempts
+  per push over a complete 512-capsule cycle;
 - `P` be additional multipart operations beyond one single-object PUT;
 - `R` be ref-registry transport attempts;
 - `G` be exceptional GC-publication-guard transport attempts.
@@ -513,8 +520,8 @@ With repository-local payloads and no bucket registry, a single-PUT pointer
 push needs at least:
 
 ```text
-qualified: 4 + B + Xw + Sw + P
-readback:  5 + B + 2Xw + 2Sw + P
+qualified: 4 + B + C + Xw + Sw + P
+readback:  5 + B + C + 2Xw + 2Sw + P
 ```
 
 Canonical bucket-global xorbs and shards additionally require registry
@@ -522,8 +529,8 @@ protection, and cross-repository reuse outside the pinned base requires a GC
 publication guard. Their complete request formulas are:
 
 ```text
-qualified global: 4 + B + Xw + Sw + V + P + R + G
-readback global:  5 + B + 2Xw + 2Sw + V + P + R + G
+qualified global: 4 + B + C + Xw + Sw + V + P + R + G
+readback global:  5 + B + C + 2Xw + 2Sw + V + P + R + G
 ```
 
 An uncontended registry GET plus CAS normally makes `R = 2`. In the current
@@ -832,11 +839,14 @@ Implemented:
    payloads, records exact compacted positions for every ref, and readers
    discard the whole compacted history prefix rather than only its last
    transaction.
-9. Foreground ref publication appends one immutable leaf capsule and never
-   performs history-dependent carry reads. Server maintenance checkpoints at
-   32 visible capsules. A foreground checkpoint is forced at 56 capsules if
-   maintenance falls behind; per-ref frontiers reject more than 64 entries if
-   maintenance still cannot preserve the bounded-read contract.
+9. Foreground ref publication appends one immutable leaf capsule. Every 32
+   equal-level suffix runs fold through one parallel predecessor-read wave and
+   one support-run write; higher-level carries join that same wave. Server
+   maintenance checkpoints at 32 visible capsules. A foreground checkpoint is
+   forced at 56 capsules if maintenance falls behind; runs cap at 512 capsules
+   and per-ref frontiers reject more than 64 segments if maintenance still
+   cannot preserve the bounded-read contract. Checkpoint positions may split a
+   run, and readers replay only the authenticated suffix after that position.
 10. Readers retain authenticated predecessor edges from every per-ref
     frontier while ordering capsules. Expected-old OIDs remain a consistency
     check, but do not define causality by themselves: a force-push sequence
@@ -853,7 +863,7 @@ explicit `not yet part of the capsule protocol` error is a parity blocker.
 
 | Surface | Current v2 state | Work required for parity | Acceptance proof |
 | --- | --- | --- | --- |
-| Repository initialization and ordinary single-/multi-ref push | Implemented with per-ref heads and transaction records | Qualify provider conditional-write and uncertain-response behavior | Concurrent same-ref and disjoint-ref pushes on S3, GCS, and Azure; fresh clone and fsck after every run |
+| Repository initialization and ordinary single-/multi-ref push | Implemented with per-ref heads, transaction records, and bounded batched run compaction | Complete the fresh 5,000-push RustFS replay, then qualify provider conditional-write and uncertain-response behavior | Flat request/latency distributions through 5,000 same-ref pushes with periodic fetch/checkpoint, plus concurrent same-ref and disjoint-ref pushes on S3, GCS, and Azure; fresh clone and fsck after every run |
 | Full clone, fetch, pull, and ref advertisement | Implemented for complete repository views | Bound full-view read amplification as ref count grows; add derived indexes only if measurements require them | Repositories with thousands of refs; exact refs, byte-identical checkout, strict fsck, bounded requests and memory |
 | Shallow, deepen, unshallow, filtered/partial, and raw-object/promisor fetch | Filtered transfer uses terminal Git protocol-v2. The classic helper advertises shallow support, pins one authenticated capsule view, uses the same canonical upload-pack planner for shallow/deepen/unshallow, generates a self-contained pack, serializes local installation, and transactionally updates `.git/shallow`; relative deepening and follow-tags are covered by an end-to-end helper test. Raw-OID recovery uses the same pinned view and authorization proof, then atomically installs the selected pack plus `.promisor` sidecar. RustFS qualification covers the initial filter matrix and lazy retrieval | Complete released-shape, older-Git, hosted-provider, interrupted-resume, hidden-ref, cancellation, and adversarial transport qualification | Git compatibility matrix for every fetch mode, including lazy recovery after process restart, interrupted installation, hidden-only objects, and adversarial missing objects |
 | Explicit tag push | Uses the ordinary ref transaction; `crab push --follow-tags` adds only missing reachable annotated tags, and `--no-incremental` publishes the full outgoing Git/LFS closure | Complete hosted-provider and adversarial multi-ref qualification | Annotated/lightweight tag creation, replacement, deletion, atomic branch-plus-tag push, follow-tags missing-only behavior, and full-closure clone/fsck |
@@ -1069,8 +1079,20 @@ and hydrate cycle restored all 101,844,789 bytes in 1.238 seconds. Store
 inspection found the v2 root, ref head, capsule, xorbs, and shard, with no v1
 manifest, refs, metadata, or file-index objects.
 
+The fresh Kubernetes replay `v2-k8s-5000-20260916-codex2` qualified the
+payload-free admission path but exposed the retired leaf-only lifecycle. The
+seed published in 268.328 seconds. Incremental publications 1 through 64 each
+used exactly eight RustFS operations; response traffic grew only with each
+small incremental pack rather than redownloading the 1.18 GiB checkpoint, and
+most pushes completed in 350–600 ms. Publication 65 failed closed before
+mutation because the ref head already contained 64 leaf segments. This is
+negative evidence, not a passing qualification. Batched ref-run compaction now
+supersedes that implementation and has deterministic writer, checkpoint-race,
+catalog-replay, request-budget, and active-active repair tests; the complete
+5,000-push live replay remains required.
+
 This qualifies the earlier ordinary RustFS whole-object path. The current
-leaf/checkpoint implementation still requires a fresh 5,000-push replay.
+batched-run/checkpoint implementation still requires a fresh 5,000-push replay.
 Hosted-provider, multipart, replica, tiering, mount-range, browser/HTTP
 hosted-load, S3-gateway, import fault/resume/provider, migration/recovery,
 managed publication, command-surface inventory, and backup/restore coverage

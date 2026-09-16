@@ -36,8 +36,8 @@ pub use pointer::{
     FileCatalogEntry, PointerCatalog, ShardCatalogEntry, XorbCatalogEntry, XorbChunkEntry,
 };
 pub use ref_head::{
-    CapsuleRefHead, CapsuleRefState, MAX_CAPSULE_REF_FRONTIER, MAX_CAPSULE_REF_HEADS,
-    capsule_ref_name_from_key, capsule_ref_name_key,
+    CAPSULE_REF_COMPACTION_FAN_IN, CapsuleRefHead, CapsuleRefState, MAX_CAPSULE_REF_FRONTIER,
+    MAX_CAPSULE_REF_HEADS, capsule_ref_name_from_key, capsule_ref_name_key,
 };
 pub use root::{
     CapsulePointer, CheckpointPointer, GcFence, MAX_CAPSULE_FRONTIER, MAX_ROOT_BYTES,

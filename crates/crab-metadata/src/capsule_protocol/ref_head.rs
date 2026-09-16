@@ -11,6 +11,8 @@ const REF_HEAD_VERSION: u32 = 4;
 pub const MAX_CAPSULE_REF_HEADS: usize = 1_000_000;
 /// Maximum immutable run segments retained by one independently mutable ref.
 pub const MAX_CAPSULE_REF_FRONTIER: usize = 64;
+/// Equal-level suffix runs folded in one bounded compaction wave.
+pub const CAPSULE_REF_COMPACTION_FAN_IN: usize = 32;
 
 /// One visible or prepared ref value and its bounded immutable capsule frontier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -28,9 +28,10 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
 - capsule and checkpoint records persist ref-keyed Git visibility closures;
   upload-pack authenticates those closures before reading embedded packs and
   uses embedded locator metadata for exact filtered-object selection;
-- foreground per-ref publication appends one leaf capsule without reading or
-  rewriting history; server maintenance checkpoints after 32 visible capsules
-  and writers discard the exact checkpointed prefix;
+- foreground per-ref publication appends one leaf capsule; every 32 equal-level
+  suffix runs are folded in one parallel read wave and one immutable support-run
+  write, while server maintenance checkpoints after 32 visible capsules and
+  writers discard the exact checkpointed prefix;
 - CLI and remote-helper push admission use a payload-free ref view; checkpoint
   and capsule payloads remain exclusive to Git transfer, pointer-catalog, and
   maintenance consumers, so foreground pointer-free push traffic is flat over
@@ -63,7 +64,7 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
   independent clone, and full `git fsck` passed. RustFS measured 24,940
   requests, or 4.988 per incremental push: p50 4, p95 8, p99 10, maximum 12
   at binary carry boundaries. Incremental latency was p50 273 ms, p95 545 ms,
-  and p99 927 ms. Those results do not qualify the current leaf/checkpoint
+  and p99 927 ms. Those results do not qualify the current batched-run
   implementation; the same workload must be rerun before release.
 
 The hard cutover never falls back after a v2 root is selected. Direct
@@ -384,16 +385,26 @@ equals its complete catalog. Hidden refs, partial-clone filters, shallow
 boundaries, or any smaller selection require Crab to generate a pack containing
 only the authorized selected objects.
 
-Each ref head points to a bounded frontier of post-checkpoint leaf capsules.
-Appending a leaf never reads or rewrites its predecessors, so foreground
-request count and uploaded capsule bytes do not grow with history. Server
-maintenance captures a complete view after 32 visible capsules and publishes
-one checkpoint root CAS. A later writer rebases the head onto that checkpoint,
-drops the exact compacted prefix, and retains capsules committed after the
-maintenance snapshot. The hard 64-entry frontier fails closed if maintenance
-cannot keep reads bounded. Server receive forces a synchronous checkpoint at
-56 entries, leaving eight entries of headroom when background maintenance
-falls behind.
+Each ref head points to a bounded frontier of post-checkpoint capsule runs.
+The coordinator-bound leaf is always written unchanged. Once 32 equal-level
+suffix runs accumulate, the writer reads the older 31 runs concurrently,
+folds them with the in-memory leaf, consumes any higher-level carries already
+named by the head in the same read wave, and writes one immutable support run.
+The published ref head replaces only that suffix. Ordinary pushes do no
+history reads; compaction pushes pay one bounded extra read wave, and the
+amortized request count stays flat as history grows.
+
+Server maintenance captures a complete view after 32 visible capsules and
+publishes one checkpoint root CAS. A later writer rebases the head onto that
+checkpoint, drops the exact compacted prefix, and retains capsules committed
+after the maintenance snapshot. A checkpoint may split a compacted run:
+readers authenticate the complete run and ignore capsules through the exact
+compacted transaction before replaying its suffix. This makes compaction safe
+when it races a checkpoint snapshot. Runs contain at most 512 capsules and a
+ref head retains at most 64 run segments, so stalled maintenance still fails
+closed instead of creating an unbounded read contract. Server receive forces a
+synchronous checkpoint at 56 visible capsules, before that segment bound can
+be approached.
 
 Checkpoint construction is background maintenance and is not part of the
 clean push budget. A checkpoint becomes visible through the same root CAS and
@@ -655,8 +666,8 @@ protocol decision is closed.
 
 ### 10.6 Read request budgets
 
-Let `D` be the number of post-checkpoint leaf capsules and `R` the number of coalesced ranges needed
-for an incremental selection. Assuming the
+Let `D` be the number of distinct post-checkpoint capsule runs and `R` the
+number of coalesced ranges needed for an incremental selection. Assuming the
 root contains the checkpoint pack descriptor and one GET can return a complete
 run or required contiguous pack range, the theoretical minima are:
 
@@ -664,16 +675,19 @@ run or required contiguous pack range, the theoretical minima are:
 | --- | ---: | --- |
 | Ref advertisement | **1** | Root GET |
 | Full authorized clone at checkpoint generation | **2** | Root GET plus checkpoint pack range |
-| Full clone ahead of checkpoint | **2 + D** | Root, checkpoint pack, and each leaf capsule; leaf reads are concurrent |
+| Full clone ahead of checkpoint | **2 + D** | Root, checkpoint pack, and each capsule run; run reads are concurrent |
 | Incremental fetch or pull | **1 + R** | Root plus selected coalesced ranges |
 | Lazy object fetch | **2** | Root plus one range only when object and bases co-locate |
 
 At the 32-capsule maintenance threshold, a healthy checkpointed repository
 normally needs two origin reads for a full authorized clone and at most 34
-while checkpoint publication is pending. The tradeoff is deliberate: simple
-incremental push remains four qualified or five readback-required operations
-at every depth, while bounded concurrent reads and background checkpointing
-absorb history. Checkpoint construction now installs and validates the pinned
+while checkpoint publication is pending; batched run compaction usually makes
+the actual suffix-read count smaller. The tradeoff is deliberate: an ordinary
+incremental push remains four qualified or five readback-required operations.
+One push per 32 equal-level runs adds at most 31 concurrent predecessor reads,
+bounded carry reads, and one support-run write. Over a complete 512-capsule
+cycle this adds fewer than 1.04 qualified or 1.07 readback-required operations
+per push on average. Checkpoint construction installs and validates the pinned
 pack inventory, verifies the current ref graph with strict Git fsck, and emits
 one complete replacement pack through the same implementation used by
 `crab repack`. Checkpoint bytes still grow with the reachable Git object graph
@@ -901,8 +915,8 @@ safe while omitted required bytes violate reconstruction.
    request re-enters the line-oriented helper, pins one authenticated capsule
    view, authorizes the raw OID against its visible closure, and atomically
    installs only the generated promisor pack.
-8. **Complete in the HTTP server:** append leaf capsules with history-flat
-   foreground requests, checkpoint after 32 visible capsules, and force a
+8. **Complete in the HTTP server:** append leaf capsules with bounded batched
+   run compaction, checkpoint after 32 visible capsules, and force a
    foreground checkpoint at 56. Background, foreground, and manual checkpoints
    share one strict-fsck, complete-pack consolidation path. Long-run hosted
    qualification remains open.
@@ -934,12 +948,15 @@ production wiring and format freeze require these decisions to be closed:
 - **Partly decided:** roots are capped at 8 MiB. Repositories whose complete
   ref map cannot fit require a separately designed protocol and cannot use v2;
 - the maximum capsule size before multipart and the multipart part policy;
-- **Decided for foreground publication:** per-ref heads append leaf capsules,
-  maintenance starts at 32 visible capsules, receive forces a checkpoint at
-  56, and the hard frontier limit is 64. This keeps incremental writes
-  history-flat. Checkpoints consolidate the complete reachable Git graph into
-  one verified pack; byte-growth and final clone-read bounds remain release
-  measurements;
+- **Decided for foreground publication:** per-ref heads append leaf capsules
+  and fold 32 equal-level suffix runs in one bounded parallel wave. Maintenance
+  starts at 32 visible capsules, receive forces a checkpoint at 56, runs cap at
+  512 capsules, and the hard frontier limit is 64 run segments. Checkpoint
+  positions may split a run and readers replay only its authenticated suffix.
+  This keeps incremental writes amortized history-flat without depending on a
+  hot repository root. Checkpoints consolidate the complete reachable Git
+  graph into one verified pack; byte-growth and final clone-read bounds remain
+  release measurements;
 - whether native LFS bodies are capsule sections or retain a separately
   counted protocol;
 - the exact active-active boundary, which cannot use one object-store root as
