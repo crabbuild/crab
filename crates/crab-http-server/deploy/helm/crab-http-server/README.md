@@ -452,8 +452,9 @@ The test fails unless it can prove all of these boundaries:
 - The durable Cell control identifies one serving owner whose endpoint matches a
   ready Pod
 - Forced loss of that owner removes its ephemeral SQLite directory; a different
-  session takes over at a higher epoch, restores the committed status, and
-  publishes another status visible through a third replica
+  session takes over at a higher epoch, restores the exact digest, transaction
+  ID, checksum, and commit sequence, serves the committed status, and publishes
+  another status visible through a third replica
 
 The script writes a secret-free JSON evidence receipt containing the provider,
 image and chart digests, release tag and source commit, workload identity
@@ -462,7 +463,8 @@ commit, payload digest, per-Pod capacity envelopes before traffic, after the
 rollout, and after owner loss, rollout probes and failures, and explicit
 successful checks including the installed chart version,
 management-network-isolation result, deleted owner Pod UID, old/new owner
-sessions, and takeover epochs. It also records completion time.
+sessions, takeover epochs, the complete root before and after takeover, and the
+strictly newer root after continuation. It also records completion time.
 Retain it with the release record. The Git token remains only in process memory
 and must still be rotated or revoked after qualification according to team
 policy.

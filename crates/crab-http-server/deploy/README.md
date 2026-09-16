@@ -185,13 +185,15 @@ Compose project, and then:
 3. Sends `SIGKILL` to B, destroying its local SQLite files.
 4. Waits until B's exact signed boot-session advertisement is expired.
 5. Reads through C and requires a higher epoch, a different session, and the
-   same LTX root digest.
-6. Writes a second issue through C and requires a higher commit sequence.
+   same complete LTX root: digest, transaction ID, checksum, and commit sequence.
+6. Writes a second issue through C and requires a different digest plus higher
+   transaction ID and commit sequence.
 7. Restarts B with empty local Cell storage and proves it routes to C.
 
 Success prints a JSON receipt containing the before/after sessions, epochs,
-root digest, commit sequences, and each process's admission envelope. The trap
-removes only the uniquely named qualification project and its volumes. Set
+complete roots before takeover, after restore, and after continuation, plus
+each process's admission envelope. The trap removes only the uniquely named
+qualification project and its volumes. Set
 `CRAB_HTTP_CLUSTER_BUILD=false` to reuse an already-built
 `CRAB_HTTP_SERVER_IMAGE`.
 

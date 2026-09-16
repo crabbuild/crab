@@ -98,7 +98,6 @@ control_before="$("${compose[@]}" exec -T server-b crab-http-server \
 session_before="$(jq --raw-output '.owner.session' <<<"$control_before")"
 epoch_before="$(jq --raw-output '.epoch' <<<"$control_before")"
 sequence_before="$(jq --raw-output '.root.commit_sequence' <<<"$control_before")"
-root_before="$(jq --raw-output '.root.digest' <<<"$control_before")"
 root_before_state="$(jq --compact-output '.root' <<<"$control_before")"
 jq --exit-status \
   '.state == "serving" and .owner.endpoint == "https://localhost:8889/" and
@@ -139,7 +138,7 @@ control_after="$("${compose[@]}" exec -T server-c crab-http-server \
   --config /etc/crab/server.toml cells status --owner demo --name hello)"
 session_after="$(jq --raw-output '.owner.session' <<<"$control_after")"
 epoch_after="$(jq --raw-output '.epoch' <<<"$control_after")"
-sequence_after_restore="$(jq --raw-output '.root.commit_sequence' <<<"$control_after")"
+root_after_state="$(jq --compact-output '.root' <<<"$control_after")"
 jq --exit-status \
   --arg session_before "$session_before" \
   --argjson epoch_before "$epoch_before" \
@@ -167,6 +166,7 @@ jq --exit-status '.number == 2 and .title == "Recovered owner"' \
 control_continued="$("${compose[@]}" exec -T server-c crab-http-server \
   --config /etc/crab/server.toml cells status --owner demo --name hello)"
 sequence_continued="$(jq --raw-output '.root.commit_sequence' <<<"$control_continued")"
+root_continued_state="$(jq --compact-output '.root' <<<"$control_continued")"
 jq --exit-status \
   --arg session_after "$session_after" \
   --argjson sequence_before "$sequence_before" \
@@ -209,27 +209,25 @@ jq --null-input \
   --arg project "$project" \
   --arg session_before "$session_before" \
   --arg session_after "$session_after" \
-  --arg root "$root_before" \
+  --argjson root_before "$root_before_state" \
+  --argjson root_after_restore "$root_after_state" \
+  --argjson root_continued "$root_continued_state" \
   --argjson epoch_before "$epoch_before" \
   --argjson epoch_after "$epoch_after" \
-  --argjson sequence_before "$sequence_before" \
-  --argjson sequence_after_restore "$sequence_after_restore" \
-  --argjson sequence_continued "$sequence_continued" \
   --argjson capacity_a "$capacity_a" \
   --argjson capacity_b "$capacity_b" \
   --argjson capacity_c "$capacity_c" \
   '{
-    version: 1,
+    version: 2,
     project: $project,
     owner_loss: {
       session_before: $session_before,
       session_after: $session_after,
       epoch_before: $epoch_before,
       epoch_after: $epoch_after,
-      root_digest: $root,
-      sequence_before: $sequence_before,
-      sequence_after_restore: $sequence_after_restore,
-      sequence_continued: $sequence_continued
+      root_before: $root_before,
+      root_after_restore: $root_after_restore,
+      root_continued: $root_continued
     },
     capacity: {node_a: $capacity_a, node_b: $capacity_b, node_c: $capacity_c}
   }'

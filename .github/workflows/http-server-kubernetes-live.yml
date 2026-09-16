@@ -390,7 +390,7 @@ jobs:
             --arg image "$EXPECTED_IMAGE" \
             --arg release_tag "$RELEASE_TAG" \
             --arg source_sha "$SOURCE_SHA" \
-            '.schema == 8 and .provider == $provider and
+            '.schema == 9 and .provider == $provider and
              .namespace == $namespace and .deployment == $deployment and
              .origin == $origin and .repository == $repository and
              .image == $image and .chart == $chart and
@@ -426,10 +426,23 @@ jobs:
              (.owner_loss.session_after | test("^[0-9a-f]{32}$")) and
              .owner_loss.session_after != .owner_loss.session_before and
              .owner_loss.epoch_after > .owner_loss.epoch_before and
-             (.owner_loss.root_digest_before | test("^[0-9a-f]{64}$")) and
-             (.owner_loss.root_digest_after | test("^[0-9a-f]{64}$")) and
-             .owner_loss.root_sequence_after >= .owner_loss.root_sequence_before and
-             .owner_loss.root_sequence_final > .owner_loss.root_sequence_after and
+             (.owner_loss.root_before | keys | sort) ==
+               ["checksum", "commit_sequence", "digest", "txid"] and
+             (.owner_loss.root_before.digest | test("^[0-9a-f]{64}$")) and
+             (.owner_loss.root_before.txid | type) == "number" and
+             .owner_loss.root_before.txid > 0 and
+             (.owner_loss.root_before.checksum | type) == "number" and
+             (.owner_loss.root_before.commit_sequence | type) == "number" and
+             .owner_loss.root_before.commit_sequence > 0 and
+             .owner_loss.root_after == .owner_loss.root_before and
+             (.owner_loss.root_final | keys | sort) ==
+               ["checksum", "commit_sequence", "digest", "txid"] and
+             (.owner_loss.root_final.digest | test("^[0-9a-f]{64}$")) and
+             (.owner_loss.root_final.checksum | type) == "number" and
+             .owner_loss.root_final.digest != .owner_loss.root_after.digest and
+             .owner_loss.root_final.txid > .owner_loss.root_after.txid and
+             .owner_loss.root_final.commit_sequence >
+               .owner_loss.root_after.commit_sequence and
              (.commit | test("^[0-9a-f]{40}$")) and
              (.status_context | length) > 0 and
              (.check_run_id | type) == "number" and .check_run_id > 0 and

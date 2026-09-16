@@ -808,9 +808,12 @@ jobs:
             crates/crab-http-server/tests/qualify_compose_cluster.sh \
             > "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json"
           jq --exit-status \
-            '.version == 1 and
+            '.version == 2 and
              .owner_loss.session_before != .owner_loss.session_after and
              .owner_loss.epoch_after > .owner_loss.epoch_before and
-             .owner_loss.sequence_after_restore == .owner_loss.sequence_before and
-             .owner_loss.sequence_continued > .owner_loss.sequence_before' \
+             .owner_loss.root_after_restore == .owner_loss.root_before and
+             .owner_loss.root_continued.digest != .owner_loss.root_before.digest and
+             .owner_loss.root_continued.txid > .owner_loss.root_before.txid and
+             .owner_loss.root_continued.commit_sequence >
+               .owner_loss.root_before.commit_sequence' \
             "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json"

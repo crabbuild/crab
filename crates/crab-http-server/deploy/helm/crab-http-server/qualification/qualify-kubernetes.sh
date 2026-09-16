@@ -839,7 +839,7 @@ jq --exit-status '
 owner_endpoint="$(jq --raw-output '.owner.endpoint' "$control_before")"
 owner_session_before="$(jq --raw-output '.owner.session' "$control_before")"
 owner_epoch_before="$(jq --raw-output '.epoch' "$control_before")"
-owner_commit_sequence_before="$(jq --raw-output '.root.commit_sequence' "$control_before")"
+owner_root_before="$(jq --compact-output '.root' "$control_before")"
 owner_pod=""
 owner_pod_uid=""
 while IFS=$'\t' read -r pod ip uid; do
@@ -934,10 +934,10 @@ kubectl --namespace "$namespace" exec "${pods[0]}" -- \
 jq --exit-status \
   --arg session "$owner_session_before" \
   --argjson epoch "$owner_epoch_before" \
-  --argjson sequence "$owner_commit_sequence_before" '
+  --argjson root "$owner_root_before" '
   .version == 1 and .state == "serving" and
   .owner.session != $session and .epoch > $epoch and
-  .root.commit_sequence >= $sequence
+  .root == $root
 ' "$control_after" >/dev/null
 
 continuation_context="crab/live-qualification-after-owner-loss"
@@ -968,10 +968,12 @@ kubectl --namespace "$namespace" exec "${pods[0]}" -- \
 jq --exit-status \
   --arg session "$(jq --raw-output '.owner.session' "$control_after")" \
   --argjson epoch "$(jq --raw-output '.epoch' "$control_after")" \
-  --argjson sequence "$(jq --raw-output '.root.commit_sequence' "$control_after")" '
+  --argjson root "$(jq --compact-output '.root' "$control_after")" '
   .version == 1 and .state == "serving" and
   .owner.session == $session and .epoch == $epoch and
-  .root.commit_sequence > $sequence
+  .root.digest != $root.digest and
+  .root.txid > $root.txid and
+  .root.commit_sequence > $root.commit_sequence
 ' "$control_final" >/dev/null
 
 git_public clone --branch "$branch" --single-branch \
@@ -1006,13 +1008,11 @@ jq --null-input \
   --arg owner_session_after "$(jq --raw-output '.owner.session' "$control_after")" \
   --argjson owner_advertisement_observed_at_ms \
     "$(jq --raw-output '.observed_at_ms' "$owner_advertisement_status")" \
-  --arg root_digest_before "$(jq --raw-output '.root.digest' "$control_before")" \
-  --arg root_digest_after "$(jq --raw-output '.root.digest' "$control_after")" \
+  --argjson root_before "$owner_root_before" \
+  --argjson root_after "$(jq --compact-output '.root' "$control_after")" \
+  --argjson root_final "$(jq --compact-output '.root' "$control_final")" \
   --argjson owner_epoch_before "$owner_epoch_before" \
   --argjson owner_epoch_after "$(jq --raw-output '.epoch' "$control_after")" \
-  --argjson root_sequence_before "$owner_commit_sequence_before" \
-  --argjson root_sequence_after "$(jq --raw-output '.root.commit_sequence' "$control_after")" \
-  --argjson root_sequence_final "$(jq --raw-output '.root.commit_sequence' "$control_final")" \
   --argjson check_run_id "$check_run_id" \
   --arg completed_at "$completed_at" \
   --argjson rollout_probes "$probes" \
@@ -1024,7 +1024,7 @@ jq --null-input \
   --slurpfile capacity_before_traffic "$capacity_before_traffic" \
   --slurpfile capacity_after_rollout "$capacity_after_rollout" \
   --slurpfile capacity_after_owner_loss "$capacity_after_owner_loss" \
-  '{schema: 8, provider: $provider, namespace: $namespace, deployment: $deployment,
+  '{schema: 9, provider: $provider, namespace: $namespace, deployment: $deployment,
     origin: $origin, image: $image, chart: $chart,
     qualification_source: {release_tag: $release_tag, commit: $source_sha},
     workload_identity: {
@@ -1043,11 +1043,9 @@ jq --null-input \
       advertisement_observed_at_ms: $owner_advertisement_observed_at_ms,
       epoch_before: $owner_epoch_before,
       epoch_after: $owner_epoch_after,
-      root_digest_before: $root_digest_before,
-      root_digest_after: $root_digest_after,
-      root_sequence_before: $root_sequence_before,
-      root_sequence_after: $root_sequence_after,
-      root_sequence_final: $root_sequence_final
+      root_before: $root_before,
+      root_after: $root_after,
+      root_final: $root_final
     },
     replica_count: $replica_count, zone_count: $zone_count,
     old_pod_uids: $old_pod_uids, new_pod_uids: $new_pod_uids,
