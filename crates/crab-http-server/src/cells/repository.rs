@@ -16,6 +16,19 @@ pub(crate) use operations::{
     CreateCommitStatus, CreateLabel, DeleteLabel, GetCommitStatusSubmission, ListComments,
     ListCommitStatuses, ListIssues, ListLabels, UpdateComment, UpdateIssue, UpdateLabel,
 };
+pub(crate) use pulls::{
+    CreatePull, CreatePullComment, CreatePullCommentInput, CreatePullCommentOutcome,
+    CreatePullInput, CreatePullOutcome, CreatePullReview, CreatePullReviewInput,
+    CreatePullReviewOutcome, GetPull, GetPullComment, GetPullMergeSubmission, GetPullReview,
+    GetPullReviewSubmission, GetPullSubmission, ListPullComments, ListPullReviews, ListPulls,
+    MergeMethod, PullChildKey, PullChildListInput, PullCommentPage, PullCommentRecord,
+    PullListInput, PullMerge, PullMergeTransition, PullPage, PullRecord, PullReviewPage,
+    PullReviewRecord, PullState, PullSubmissionKey, ReservePullMerge, ReservePullMergeInput,
+    ReservePullMergeOutcome, ReviewState, TransitionPullMerge, TransitionPullMergeInput,
+    TransitionPullMergeOutcome, UpdatePull, UpdatePullComment, UpdatePullCommentInput,
+    UpdatePullCommentOutcome, UpdatePullInput, UpdatePullOutcome, UpdatePullReview,
+    UpdatePullReviewInput, UpdatePullReviewOutcome,
+};
 pub(crate) use settings::{
     BranchProtectionRecord, BranchProtectionSettings, GetBranchProtections, GetRepositoryLifecycle,
     ReplaceBranchProtections, ReplaceBranchProtectionsInput, ReplaceBranchProtectionsOutcome,
@@ -33,7 +46,8 @@ const MAX_STATUS_SUBMISSIONS: u64 = 1_000;
 const MAX_ASSIGNEES: usize = 10;
 const MAX_LIST_OUTPUT_BYTES: usize = 1024 * 1024;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RepositoryAuthor {
     pub issuer: String,
     pub subject: String,
@@ -545,6 +559,8 @@ impl Query for GetComment {
 mod checks;
 mod checks_codec;
 mod operations;
+mod pulls;
+mod pulls_codec;
 mod settings;
 mod settings_codec;
 
@@ -561,6 +577,14 @@ pub(crate) fn register(registry: &mut RegistryBuilder) -> crab_cell_runtime::Res
     registry.bind_command::<UpdateCheckRun>()?;
     registry.bind_command::<ReplaceBranchProtections>()?;
     registry.bind_command::<ReplaceRepositoryLifecycle>()?;
+    registry.bind_command::<CreatePull>()?;
+    registry.bind_command::<UpdatePull>()?;
+    registry.bind_command::<CreatePullComment>()?;
+    registry.bind_command::<UpdatePullComment>()?;
+    registry.bind_command::<CreatePullReview>()?;
+    registry.bind_command::<UpdatePullReview>()?;
+    registry.bind_command::<ReservePullMerge>()?;
+    registry.bind_command::<TransitionPullMerge>()?;
     registry.bind_query::<GetIssue>()?;
     registry.bind_query::<GetComment>()?;
     registry.bind_query::<ListIssues>()?;
@@ -573,7 +597,16 @@ pub(crate) fn register(registry: &mut RegistryBuilder) -> crab_cell_runtime::Res
     registry.bind_query::<GetCheckCreateSubmission>()?;
     registry.bind_query::<GetCheckUpdateSubmission>()?;
     registry.bind_query::<GetBranchProtections>()?;
-    registry.bind_query::<GetRepositoryLifecycle>()
+    registry.bind_query::<GetRepositoryLifecycle>()?;
+    registry.bind_query::<GetPull>()?;
+    registry.bind_query::<GetPullSubmission>()?;
+    registry.bind_query::<ListPulls>()?;
+    registry.bind_query::<GetPullComment>()?;
+    registry.bind_query::<ListPullComments>()?;
+    registry.bind_query::<GetPullReview>()?;
+    registry.bind_query::<ListPullReviews>()?;
+    registry.bind_query::<GetPullReviewSubmission>()?;
+    registry.bind_query::<GetPullMergeSubmission>()
 }
 
 fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlStatement {

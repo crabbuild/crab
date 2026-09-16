@@ -440,14 +440,6 @@ pub(crate) fn search_query(value: Option<&str>) -> Result<Option<String>> {
     Ok(Some(value.to_lowercase()))
 }
 
-pub(crate) fn matches_query(query: Option<&str>, fields: &[&str]) -> bool {
-    query.is_none_or(|query| {
-        fields
-            .iter()
-            .any(|field| field.to_lowercase().contains(query))
-    })
-}
-
 pub(crate) fn body(value: &str, required: bool) -> Result<()> {
     if value.len() > 65_536 || value.contains('\0') || (required && value.trim().is_empty()) {
         return Err(Error::Invalid(

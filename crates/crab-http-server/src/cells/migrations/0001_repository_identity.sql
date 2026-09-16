@@ -10,7 +10,11 @@ CREATE TABLE repository_sequences (
     last INTEGER NOT NULL CHECK (last BETWEEN 0 AND 9007199254740991)
 ) STRICT;
 
-INSERT INTO repository_sequences(kind, last) VALUES ('issue', 0), ('label', 0), ('check', 0);
+INSERT INTO repository_sequences(kind, last) VALUES
+    ('issue', 0),
+    ('label', 0),
+    ('check', 0),
+    ('pull', 0);
 
 CREATE TABLE repository_settings (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -170,4 +174,119 @@ CREATE TABLE repository_check_update_submissions (
         CHECK (result_version BETWEEN 2 AND 9007199254740991),
     FOREIGN KEY (run_number, result_version)
         REFERENCES repository_check_run_versions(run_number, version)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE repository_pull_submissions (
+    request_id BLOB PRIMARY KEY CHECK (length(request_id) = 16),
+    payload_digest BLOB NOT NULL CHECK (length(payload_digest) = 32),
+    pull_number INTEGER NOT NULL UNIQUE
+        CHECK (pull_number BETWEEN 1 AND 9007199254740991)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE repository_pulls (
+    number INTEGER PRIMARY KEY CHECK (number BETWEEN 1 AND 9007199254740991),
+    create_request_id BLOB NOT NULL UNIQUE CHECK (length(create_request_id) = 16),
+    author_issuer TEXT NOT NULL,
+    author_subject TEXT NOT NULL,
+    author_name TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    state INTEGER NOT NULL DEFAULT 0 CHECK (state BETWEEN 0 AND 2),
+    base_ref TEXT NOT NULL,
+    base_oid TEXT NOT NULL CHECK (length(base_oid) = 40),
+    head_ref TEXT NOT NULL,
+    head_oid TEXT NOT NULL CHECK (length(head_oid) = 40),
+    label_ids BLOB NOT NULL DEFAULT X'00000000',
+    assignee_subjects BLOB NOT NULL DEFAULT X'00000000',
+    pending_merge BLOB CHECK (pending_merge IS NULL OR length(pending_merge) <= 131072),
+    completed_merge BLOB CHECK (completed_merge IS NULL OR length(completed_merge) <= 131072),
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 9007199254740991),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    FOREIGN KEY (create_request_id) REFERENCES repository_pull_submissions(request_id),
+    CHECK (completed_merge IS NULL OR (state = 2 AND pending_merge IS NULL))
+) STRICT;
+
+CREATE TABLE repository_pull_comment_sequences (
+    pull_number INTEGER PRIMARY KEY,
+    last INTEGER NOT NULL CHECK (last BETWEEN 1 AND 9007199254740991),
+    FOREIGN KEY (pull_number) REFERENCES repository_pulls(number) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE repository_pull_comment_submissions (
+    pull_number INTEGER NOT NULL,
+    request_id BLOB NOT NULL CHECK (length(request_id) = 16),
+    payload_digest BLOB NOT NULL CHECK (length(payload_digest) = 32),
+    comment_number INTEGER NOT NULL CHECK (comment_number BETWEEN 1 AND 9007199254740991),
+    PRIMARY KEY (pull_number, request_id),
+    UNIQUE (pull_number, comment_number),
+    FOREIGN KEY (pull_number) REFERENCES repository_pulls(number) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE repository_pull_comments (
+    pull_number INTEGER NOT NULL,
+    number INTEGER NOT NULL CHECK (number BETWEEN 1 AND 9007199254740991),
+    author_issuer TEXT NOT NULL,
+    author_subject TEXT NOT NULL,
+    author_name TEXT NOT NULL,
+    body TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 9007199254740991),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    PRIMARY KEY (pull_number, number),
+    FOREIGN KEY (pull_number) REFERENCES repository_pulls(number) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE repository_pull_review_sequences (
+    pull_number INTEGER PRIMARY KEY,
+    last INTEGER NOT NULL CHECK (last BETWEEN 1 AND 9007199254740991),
+    FOREIGN KEY (pull_number) REFERENCES repository_pulls(number) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE repository_pull_review_submissions (
+    pull_number INTEGER NOT NULL,
+    request_id BLOB NOT NULL CHECK (length(request_id) = 16),
+    payload_digest BLOB NOT NULL CHECK (length(payload_digest) = 32),
+    review_number INTEGER NOT NULL CHECK (review_number BETWEEN 1 AND 9007199254740991),
+    PRIMARY KEY (pull_number, request_id),
+    UNIQUE (pull_number, review_number),
+    FOREIGN KEY (pull_number) REFERENCES repository_pulls(number) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE repository_pull_reviews (
+    pull_number INTEGER NOT NULL,
+    number INTEGER NOT NULL CHECK (number BETWEEN 1 AND 9007199254740991),
+    author_issuer TEXT NOT NULL,
+    author_subject TEXT NOT NULL,
+    author_name TEXT NOT NULL,
+    body TEXT NOT NULL,
+    state INTEGER NOT NULL CHECK (state BETWEEN 0 AND 2),
+    commit_oid TEXT NOT NULL CHECK (length(commit_oid) = 40),
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 9007199254740991),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    PRIMARY KEY (pull_number, number),
+    FOREIGN KEY (pull_number) REFERENCES repository_pulls(number) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE repository_pull_review_decisions (
+    pull_number INTEGER NOT NULL,
+    author_issuer TEXT NOT NULL,
+    author_subject TEXT NOT NULL,
+    review_number INTEGER NOT NULL CHECK (review_number BETWEEN 1 AND 9007199254740991),
+    author_name TEXT NOT NULL,
+    state INTEGER NOT NULL CHECK (state IN (1, 2)),
+    commit_oid TEXT NOT NULL CHECK (length(commit_oid) = 40),
+    PRIMARY KEY (pull_number, author_issuer, author_subject),
+    FOREIGN KEY (pull_number, review_number)
+        REFERENCES repository_pull_reviews(pull_number, number) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE repository_pull_merge_submissions (
+    pull_number INTEGER NOT NULL,
+    request_id BLOB NOT NULL CHECK (length(request_id) = 16),
+    payload_digest BLOB NOT NULL CHECK (length(payload_digest) = 32),
+    merge_record BLOB NOT NULL CHECK (length(merge_record) <= 131072),
+    PRIMARY KEY (pull_number, request_id),
+    FOREIGN KEY (pull_number) REFERENCES repository_pulls(number) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;

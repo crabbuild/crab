@@ -403,6 +403,90 @@ fn repository_codec_v1_pins_settings_fixtures() {
 }
 
 #[test]
+fn repository_codec_v1_pins_pull_fixtures() {
+    assert_fixture(
+        &CreatePullInput {
+            submission_id: [7; 16],
+            author: RepositoryAuthor {
+                issuer: "i".into(),
+                subject: "s".into(),
+                name: "n".into(),
+            },
+            title: "t".into(),
+            body: "b".into(),
+            base_ref: "refs/heads/main".into(),
+            base_oid: "0123456789abcdef0123456789abcdef01234567".into(),
+            head_ref: "refs/heads/feature".into(),
+            head_oid: "89abcdef0123456789abcdef0123456789abcdef".into(),
+        },
+        "000001247b227375626d697373696f6e5f6964223a5b372c372c372c372c372c372c372c372c372c372c372c372c372c372c372c375d2c22617574686f72223a7b22697373756572223a2269222c227375626a656374223a2273222c226e616d65223a226e227d2c227469746c65223a2274222c22626f6479223a2262222c22626173655f726566223a22726566732f68656164732f6d61696e222c22626173655f6f6964223a2230313233343536373839616263646566303132333435363738396162636465663031323334353637222c22686561645f726566223a22726566732f68656164732f66656174757265222c22686561645f6f6964223a2238396162636465663031323334353637383961626364656630313233343536373839616263646566227d",
+    );
+    assert_fixture(
+        &CreatePullOutcome::RequestConflict,
+        "000000112252657175657374436f6e666c69637422",
+    );
+}
+
+#[test]
+fn maximum_pull_decisions_fit_the_registered_output_bound() {
+    let author = RepositoryAuthor {
+        issuer: "🦀".repeat(512),
+        subject: "🦀".repeat(512),
+        name: "🦀".repeat(160),
+    };
+    let pull = PullRecord {
+        number: 1,
+        create_submission_id: [8; 16],
+        author: author.clone(),
+        title: "t".repeat(256),
+        body: "\u{1}".repeat(64 * 1024),
+        state: PullState::Open,
+        base_ref: "refs/heads/main".into(),
+        base_oid: "0123456789abcdef0123456789abcdef01234567".into(),
+        head_ref: "refs/heads/feature".into(),
+        head_oid: "89abcdef0123456789abcdef0123456789abcdef".into(),
+        label_ids: (1..=20).collect(),
+        assignee_subjects: (0..10).map(|index| format!("s{index}")).collect(),
+        merge_pending: None,
+        merge: None,
+        review_decisions: (1..=96)
+            .map(|review| pulls::PullReviewDecision {
+                review,
+                author: author.clone(),
+                state: ReviewState::Approved,
+                commit_oid: "89abcdef0123456789abcdef0123456789abcdef".into(),
+            })
+            .collect(),
+        version: 1,
+        created_at_ms: 1,
+        updated_at_ms: 1,
+    };
+    let mut encoder = BoundedEncoder::new(1024 * 1024).unwrap();
+    pull.encode(&mut encoder).unwrap();
+    assert!(encoder.finish().len() <= 1024 * 1024);
+}
+
+#[test]
+fn maximum_pull_child_fits_the_registered_record_bound() {
+    let comment = PullCommentRecord {
+        pull: 1,
+        number: 1,
+        author: RepositoryAuthor {
+            issuer: "🦀".repeat(512),
+            subject: "🦀".repeat(512),
+            name: "🦀".repeat(160),
+        },
+        body: "\u{1}".repeat(64 * 1024),
+        version: 1,
+        created_at_ms: 1,
+        updated_at_ms: 1,
+    };
+    let mut encoder = BoundedEncoder::new(512 * 1024).unwrap();
+    comment.encode(&mut encoder).unwrap();
+    assert!(encoder.finish().len() <= 512 * 1024);
+}
+
+#[test]
 fn maximum_utf8_label_catalog_fits_its_registered_output_bound() {
     let label = LabelRecord {
         number: 1,

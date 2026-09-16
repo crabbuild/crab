@@ -594,6 +594,11 @@ fn validate_action(action: &str) -> crate::Result<()> {
             | "repository.check.update"
             | "repository.settings.protections"
             | "repository.settings.lifecycle"
+            | "repository.pull.create"
+            | "repository.pull.update"
+            | "repository.pull.comment"
+            | "repository.pull.review"
+            | "repository.pull.merge"
     ) {
         return Err(crab_cell_runtime::Error::PeerAuthorization(
             "repository route requested an unknown action",

@@ -57,8 +57,9 @@ The system boundaries below lead to the detailed
   synchronous multi-region operation.
 - An assumption that Kubernetes deployment artifacts constitute production
   qualification.
-- A migration-aware intermediate release, old/new rolling coexistence, dual
+- Any application-data migration release, old/new rolling coexistence, dual
   writes, legacy application readers, or automatic rollback to JSON storage.
+  Future mentions of migration cover native SQLite schema/code upgrades only.
 
 ### Authority and transport boundaries
 

@@ -69,6 +69,14 @@ const REPOSITORY_COMMANDS: &[OperationDescriptor] = &[
     operation(13, 256 * 1024, 256 * 1024),
     operation(14, 128 * 1024, 128 * 1024),
     operation(15, 32, 32),
+    operation(16, 512 * 1024, 1024 * 1024),
+    operation(17, 512 * 1024, 1024 * 1024),
+    operation(18, 512 * 1024, 512 * 1024),
+    operation(19, 512 * 1024, 512 * 1024),
+    operation(20, 512 * 1024, 512 * 1024),
+    operation(21, 512 * 1024, 512 * 1024),
+    operation(22, 128 * 1024, 128 * 1024),
+    operation(23, 128 * 1024, 1024 * 1024),
 ];
 const REPOSITORY_QUERIES: &[OperationDescriptor] = &[
     operation(1, 8, 80 * 1024),
@@ -85,6 +93,15 @@ const REPOSITORY_QUERIES: &[OperationDescriptor] = &[
     operation(12, 32, 256 * 1024),
     operation(13, 8, 128 * 1024),
     operation(14, 8, 32),
+    operation(15, 4 * 1024, 1024 * 1024),
+    operation(16, 4 * 1024, 1024 * 1024),
+    operation(17, 4 * 1024, 1024 * 1024),
+    operation(18, 4 * 1024, 512 * 1024),
+    operation(19, 4 * 1024, 1024 * 1024),
+    operation(20, 4 * 1024, 512 * 1024),
+    operation(21, 4 * 1024, 1024 * 1024),
+    operation(22, 4 * 1024, 512 * 1024),
+    operation(23, 4 * 1024, 128 * 1024),
 ];
 
 struct RepositoryModule;
@@ -1297,6 +1314,8 @@ fn repository_source_digest() -> Digest {
     hasher.update(include_bytes!("cells/repository/checks.rs"));
     hasher.update(include_bytes!("cells/repository/checks_codec.rs"));
     hasher.update(include_bytes!("cells/repository/operations.rs"));
+    hasher.update(include_bytes!("cells/repository/pulls.rs"));
+    hasher.update(include_bytes!("cells/repository/pulls_codec.rs"));
     hasher.update(include_bytes!("cells/repository/settings.rs"));
     hasher.update(include_bytes!("cells/repository/settings_codec.rs"));
     Digest::from_bytes(*hasher.finalize().as_bytes())
@@ -1434,7 +1453,7 @@ mod tests {
         assert_eq!(descriptor["modules"][0]["name"], "repository");
         assert_eq!(
             descriptor["modules"][0]["code"],
-            "70b2df4f939de3457f23b2ba86b67127b398bb0d8c82693c15d880840f9e659c"
+            "853dd7a242f27d858fca174626a845e1e139c28b1f575789f8b664f9fb02cb6a"
         );
         assert_eq!(descriptor["modules"][0]["schema_min"], 1);
         assert_eq!(descriptor["modules"][0]["schema_max"], 1);
@@ -1443,14 +1462,14 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            15
+            23
         );
         assert_eq!(
             descriptor["modules"][0]["queries"]
                 .as_array()
                 .unwrap()
                 .len(),
-            14
+            23
         );
         assert_eq!(descriptor["namespaces"][0]["role"], "repository");
         assert_eq!(descriptor["namespaces"][0]["shards"], 1);

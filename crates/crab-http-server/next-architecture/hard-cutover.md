@@ -8,6 +8,13 @@ repository, and publishes each empty database through the
 [LTX control protocol](storage-protocol.md). The
 [acceptance gates](validation-and-delivery.md) must pass before traffic reopens.
 
+This is not a data migration. Every repository Cell starts from an empty SQLite
+database. Native bucket collaboration objects are disposable cutover input and
+are deleted manually while the old fleet is stopped; no code reads, converts,
+copies, inventories, or validates their application records. References below
+to migrations mean only future schema/code upgrades between already-native
+Cells.
+
 ## Accepted transition contract
 
 Use one maintenance-window stop/delete/initialize/verify/start transition for
@@ -53,8 +60,9 @@ stateDiagram-v2
 1. Remove external admission, pause scheduled work, drain accepted HTTP/Git
    mutations and stop every old process. Revoke its write credentials or prevent
    rescheduling. An ingress marker alone does not stop a paused writer.
-2. Keep the new fleet stopped. Produce an explicit backup and deletion inventory.
-   If rollback before deletion is required, verify the backup now.
+2. Keep the new fleet stopped. Produce an explicit deletion inventory. Any
+   optional operator backup is outside the new runtime and is never accepted as
+   import input.
 3. Manually delete retired collaboration `app/v1` keys and
    `.crab/http-server/v1/catalog.json`. This removes release metadata and release
    asset bytes together with the other retired application data. The allowlist
@@ -92,9 +100,10 @@ uncertain published Cell.
 
 Before step 3, operators may abandon the cutover and restart the unchanged old
 fleet. After retired application keys or the catalog are deleted, automatic
-rollback is unsupported. After any new-architecture mutation, recovery uses the
-published LTX graph, verified backups or a corrected new binary. Export back to
-old JSON is not a deliverable.
+rollback is unsupported. After any new-architecture mutation, runtime recovery
+uses only the published LTX graph or a corrected new binary. Operator backups
+may support an offline operational decision, but cannot be imported or mounted
+as a serving backend. Export back to old JSON is not a deliverable.
 
 The removed `cells import-repository` command and legacy importer modules must
 not be reintroduced without a new architecture decision. Later SQL migrations
