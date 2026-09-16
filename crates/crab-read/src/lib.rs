@@ -29,8 +29,8 @@ pub use selection::{
     DEFAULT_READINESS_CACHE_TTL_MS, ReadReplicaCandidate, ReadReplicaFallback,
     ReadReplicaProbeResult, ReadReplicaReadiness, ReadReplicaSelection, ReadRoutingPolicy,
     ReadSource, ReadStoreChoice, ReadStoreSelection, ReadStoreTarget, ReadinessCheckOptions,
-    ReadinessProbeStats, ReadyReadReplica, check_read_replica_readiness, select_read_replicas,
-    select_read_store_choice, select_ready_read_replica,
+    ReadinessProbeStats, ReadyReadReplica, check_capsule_read_replica_readiness,
+    select_read_replicas, select_read_store_choice, select_ready_read_replica,
 };
 pub use store_client::{ReadMetrics, StoreClient, XorbAvailability};
 pub use term_resolver::TermResolver;

@@ -178,6 +178,13 @@ Its error source is Tokio's `JoinError`, so diagnostic consumers can distinguish
 worker panic from task cancellation without parsing log text. The CLI preserves
 that source while retaining its internal-error diagnostic classification.
 
+Replica readiness compares the exact authenticated capsule view before reading
+and validating every cataloged shard and xorb body. Large-body hashing and
+parsing run outside the async executor; worker failures remain typed as
+`ReadError::ReadinessTask`. Product caches may skip repeated immutable-body
+validation, but must recheck the replica's authenticated view digest before
+selection.
+
 ## Boundaries
 
 Dependency preflight consumes `crab-git`'s validated pointer contracts and

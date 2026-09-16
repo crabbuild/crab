@@ -1,8 +1,7 @@
 //! Repository replication configuration, planning, and read readiness.
 //!
-//! V1 keeps writes pinned to the primary remote. Replicas are read targets
-//! only, selected after their manifest generation and referenced immutable
-//! objects are known to be present.
+//! Replicas are read targets selected only after their authenticated capsule
+//! view and every referenced immutable dependency are known to be present.
 
 pub(crate) mod discovery;
 
@@ -23,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use crab_read::{
     ReadReplicaCandidate, ReadReplicaFallback, ReadReplicaProbeResult, ReadStoreChoice,
-    ReadStoreTarget, check_read_replica_readiness, select_read_store_choice,
+    ReadStoreTarget, check_capsule_read_replica_readiness, select_read_store_choice,
 };
 pub use crab_read::{ReadRoutingPolicy, ReadSource, ReadinessCheckOptions};
 
@@ -48,10 +47,8 @@ pub use crab_types::replication::{
     ReplicationCoordinatorConsistency, ReplicationCoordinatorKind, ReplicationMode,
     ReplicationProviderKind, ReplicationRpo, WriterConfig,
 };
-#[cfg(test)]
-use crab_xet::xorb::format::MerkleHash;
 
-pub const READINESS_CACHE_VERSION: u32 = 1;
+pub const READINESS_CACHE_VERSION: u32 = 2;
 const READINESS_CACHE_INVALIDATION_VERSION: u32 = 1;
 const READ_EVENT_VERSION: u32 = 1;
 const READ_EVENT_LOG_MAX_BYTES: u64 = 1_048_576;
@@ -6426,7 +6423,7 @@ fn action(description: &str, required: bool, automated: bool) -> ReplicationActi
     }
 }
 
-/// Status for a replica relative to the primary manifest.
+/// Status for a replica relative to the primary authenticated repository view.
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct ReplicaStatus {
     pub name: String,
@@ -6527,7 +6524,14 @@ impl ReplicaFallbackClass {
             ],
         ) {
             Self::MissingObject
-        } else if contains_any(&lower, &["readiness failed", "readiness failure"]) {
+        } else if contains_any(
+            &lower,
+            &[
+                "readiness failed",
+                "readiness failure",
+                "differs from primary",
+            ],
+        ) {
             Self::ReadinessFailed
         } else {
             Self::Unknown
@@ -8847,47 +8851,6 @@ async fn replica_readiness(
     options: ReadinessCheckOptions,
 ) -> Result<ReplicaStatus> {
     let started = Instant::now();
-    let (primary_manifest, primary_etag) = read_manifest(primary_store, primary_router).await?;
-    let primary_generation = primary_manifest.generation;
-
-    let replica_prefix = replica_router.repo_prefix();
-    let now_ms = now_unix_ms();
-    if let Some(cache_age_ms) = readiness_cache_hit(
-        replica,
-        replica_prefix,
-        primary_generation,
-        &primary_etag,
-        now_ms,
-        options,
-    ) {
-        return Ok(ReplicaStatus {
-            name: replica.name.clone(),
-            provider: replica.provider,
-            url: replica.url.clone(),
-            region: replica.region.clone(),
-            backfill_required: replica.backfill,
-            read_enabled: replica.read,
-            primary_generation: Some(primary_generation),
-            replica_generation: Some(primary_generation),
-            ready: true,
-            lag_generations: Some(0),
-            last_fallback_reason: None,
-            last_fallback_class: None,
-            last_fallback_at_ms: None,
-            last_fallback_operation: None,
-            fallback_count: 0,
-            primary_fallback_bytes: 0,
-            last_selected_at_ms: None,
-            last_selected_operation: None,
-            selected_count: 0,
-            readiness_cache_hit: true,
-            readiness_cache_age_ms: Some(cache_age_ms),
-            readiness_check_latency_ms: Some(elapsed_ms(started)),
-            readiness_object_probe_count: 0,
-            readiness_object_read_count: 0,
-        });
-    }
-
     let primary_read_router = crab_storage::StoreLayout::with_global_prefix(
         primary_store.as_storage().clone(),
         primary_router.repo_prefix().to_owned(),
@@ -8898,14 +8861,93 @@ async fn replica_readiness(
         replica_router.repo_prefix().to_owned(),
         replica_router.global_prefix().to_owned(),
     );
-    let readiness = check_read_replica_readiness(
-        primary_store.as_storage(),
+    let primary_view = crab_read::capsule_protocol::open_view(
         &primary_read_router,
-        replica_store.as_storage(),
-        &replica_read_router,
-        options,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+            max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+        },
     )
     .await?;
+    let primary_generation = primary_view.root().root().generation();
+    let primary_state_digest = primary_view.state_digest();
+
+    let replica_prefix = replica_router.repo_prefix();
+    let now_ms = now_unix_ms();
+    if let Some(cache_age_ms) = readiness_cache_hit(
+        replica,
+        replica_prefix,
+        primary_generation,
+        &primary_state_digest,
+        now_ms,
+        options,
+    ) {
+        match crab_read::capsule_protocol::open_view(
+            &replica_read_router,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+                max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+            },
+        )
+        .await
+        {
+            Ok(replica_view) if replica_view.state_digest() == primary_state_digest => {
+                return Ok(ReplicaStatus {
+                    name: replica.name.clone(),
+                    provider: replica.provider,
+                    url: replica.url.clone(),
+                    region: replica.region.clone(),
+                    backfill_required: replica.backfill,
+                    read_enabled: replica.read,
+                    primary_generation: Some(primary_generation),
+                    replica_generation: Some(replica_view.root().root().generation()),
+                    ready: true,
+                    lag_generations: Some(0),
+                    last_fallback_reason: None,
+                    last_fallback_class: None,
+                    last_fallback_at_ms: None,
+                    last_fallback_operation: None,
+                    fallback_count: 0,
+                    primary_fallback_bytes: 0,
+                    last_selected_at_ms: None,
+                    last_selected_operation: None,
+                    selected_count: 0,
+                    readiness_cache_hit: true,
+                    readiness_cache_age_ms: Some(cache_age_ms),
+                    readiness_check_latency_ms: Some(elapsed_ms(started)),
+                    readiness_object_probe_count: 0,
+                    readiness_object_read_count: 0,
+                });
+            }
+            Ok(replica_view) => {
+                return Ok(status_with_readiness_stats(
+                    status_with_reason(
+                        replica,
+                        Some(primary_generation),
+                        Some(replica_view.root().root().generation()),
+                        "replica capsule view differs from primary".to_owned(),
+                    ),
+                    started,
+                    crab_read::ReadinessProbeStats::default(),
+                ));
+            }
+            Err(error) => {
+                return Ok(status_with_readiness_stats(
+                    status_with_reason(
+                        replica,
+                        Some(primary_generation),
+                        None,
+                        format!("replica capsule view unavailable: {error}"),
+                    ),
+                    started,
+                    crab_read::ReadinessProbeStats::default(),
+                ));
+            }
+        }
+    }
+
+    let readiness =
+        check_capsule_read_replica_readiness(&primary_view, &replica_read_router, options).await?;
     if let Some(reason) = readiness.reason {
         return Ok(status_with_readiness_stats(
             status_with_reason(
@@ -8924,7 +8966,7 @@ async fn replica_readiness(
             replica,
             replica_prefix,
             primary_generation,
-            &primary_etag,
+            &primary_state_digest,
             now_ms,
         );
     }
@@ -9106,7 +9148,7 @@ struct ReadinessCache {
     region: String,
     repo_prefix: String,
     generation: u64,
-    primary_etag: String,
+    primary_state_digest: String,
     written_at_ms: u64,
 }
 
@@ -9170,7 +9212,7 @@ fn readiness_cache_hit(
     replica: &ReplicaConfig,
     repo_prefix: &str,
     generation: u64,
-    primary_etag: &str,
+    primary_state_digest: &str,
     now_ms: u64,
     options: ReadinessCheckOptions,
 ) -> Option<u64> {
@@ -9192,7 +9234,7 @@ fn readiness_cache_hit(
         replica,
         repo_prefix,
         generation,
-        primary_etag,
+        primary_state_digest,
         now_ms,
         options,
     )
@@ -9203,7 +9245,7 @@ fn readiness_cache_age_ms(
     replica: &ReplicaConfig,
     repo_prefix: &str,
     generation: u64,
-    primary_etag: &str,
+    primary_state_digest: &str,
     now_ms: u64,
     options: ReadinessCheckOptions,
 ) -> Option<u64> {
@@ -9220,7 +9262,7 @@ fn readiness_cache_age_ms(
         || cache.region != replica.region
         || cache.repo_prefix != repo_prefix
         || cache.generation < generation
-        || cache.primary_etag != primary_etag
+        || cache.primary_state_digest != primary_state_digest
     {
         return None;
     }
@@ -9280,7 +9322,7 @@ fn write_readiness_cache(
     replica: &ReplicaConfig,
     repo_prefix: &str,
     generation: u64,
-    primary_etag: &str,
+    primary_state_digest: &str,
     written_at_ms: u64,
 ) {
     let path = readiness_cache_path(replica, repo_prefix);
@@ -9295,7 +9337,7 @@ fn write_readiness_cache(
         region: replica.region.clone(),
         repo_prefix: repo_prefix.to_owned(),
         generation,
-        primary_etag: primary_etag.to_owned(),
+        primary_state_digest: primary_state_digest.to_owned(),
         written_at_ms,
     };
     if let Ok(bytes) = serde_json::to_vec(&cache) {
@@ -9553,7 +9595,6 @@ pub fn project_config_path(root: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::manifest::write_manifest_cas;
     use std::collections::{BTreeMap, HashMap, HashSet};
     use std::fmt;
     use std::sync::Arc;
@@ -9561,7 +9602,6 @@ mod tests {
 
     use async_trait::async_trait;
     use bytes::Bytes;
-    use crab_xet::shard::{MDBXorbInfo, XorbChunkSequenceEntry, XorbChunkSequenceHeader};
     use futures_util::stream::BoxStream;
     use object_store::memory::InMemory;
     use object_store::{
@@ -9570,14 +9610,13 @@ mod tests {
     };
 
     use crate::metadata::manifest::{
-        Manifest, PackManifestEntry, compact_pack_index, compact_shard_index, create_manifest,
+        Manifest, PackManifestEntry, compact_pack_index, create_manifest,
     };
     use crate::metadata::segmented;
     use crab_coordination::write_coordinator::{
         CoordinatorCheckState, CoordinatorControlPlaneCheck, CoordinatorControlPlaneStatus,
         ManagedCoordinatorProvider,
     };
-    use crab_xet::shard::ShardWriter;
 
     struct TestControlPlaneBackend {
         provider: ReplicationProviderKind,
@@ -12591,7 +12630,7 @@ mod tests {
     }
 
     #[test]
-    fn readiness_cache_requires_fresh_primary_etag() {
+    fn readiness_cache_requires_fresh_primary_state() {
         let replica = test_replica();
         let cache = test_readiness_cache(&replica, "org/repo", 7, "etag-a", 1_000);
 
@@ -13209,7 +13248,7 @@ mod tests {
         replica: &ReplicaConfig,
         repo_prefix: &str,
         generation: u64,
-        primary_etag: &str,
+        primary_state_digest: &str,
         written_at_ms: u64,
     ) -> ReadinessCache {
         ReadinessCache {
@@ -13220,7 +13259,7 @@ mod tests {
             region: replica.region.clone(),
             repo_prefix: repo_prefix.to_owned(),
             generation,
-            primary_etag: primary_etag.to_owned(),
+            primary_state_digest: primary_state_digest.to_owned(),
             written_at_ms,
         }
     }
@@ -13312,43 +13351,6 @@ mod tests {
         } else {
             blake3::hash(label.as_bytes()).to_hex().to_string()
         }
-    }
-
-    fn test_shard_with_xorb(seed: u64) -> (Bytes, MerkleHash, MerkleHash) {
-        let xorb_hash = MerkleHash::from([seed, seed, seed, seed]);
-        let chunk_hash = MerkleHash::from([
-            seed.wrapping_add(1),
-            seed.wrapping_add(1),
-            seed.wrapping_add(1),
-            seed.wrapping_add(1),
-        ]);
-        let xorb = Arc::new(MDBXorbInfo {
-            metadata: XorbChunkSequenceHeader::new(xorb_hash, 1, 1024),
-            chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1024, 0)],
-        });
-        let mut writer = ShardWriter::new();
-        writer.add_xorb(xorb).expect("add xorb");
-        let (bytes, shard_hash) = writer.finalize().expect("finalize shard");
-        (Bytes::from(bytes), shard_hash, xorb_hash)
-    }
-
-    fn test_shard_with_xorbs(seed: u64, count: u64) -> (Bytes, MerkleHash, Vec<MerkleHash>) {
-        let mut writer = ShardWriter::new();
-        let mut xorb_hashes = Vec::new();
-        for offset in 0..count {
-            let value = seed.wrapping_add(offset);
-            let xorb_hash = MerkleHash::from([value, value, value, value]);
-            let chunk_value = value.wrapping_add(10_000);
-            let chunk_hash = MerkleHash::from([chunk_value, chunk_value, chunk_value, chunk_value]);
-            let xorb = Arc::new(MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1, 1024),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1024, 0)],
-            });
-            writer.add_xorb(xorb).expect("add xorb");
-            xorb_hashes.push(xorb_hash);
-        }
-        let (bytes, shard_hash) = writer.finalize().expect("finalize shard");
-        (Bytes::from(bytes), shard_hash, xorb_hashes)
     }
 
     #[tokio::test]
@@ -14008,35 +14010,67 @@ mod tests {
         );
     }
 
+    fn capsule_layout(
+        store: &Store,
+        router: &StoreLayout,
+    ) -> crab_storage::StoreLayout<crab_storage::Store> {
+        crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        )
+    }
+
+    async fn initialize_capsule_repository(
+        store: &Store,
+        router: &StoreLayout,
+    ) -> crab_write::capsule_protocol::RootSnapshot {
+        crab_write::capsule_protocol::initialize(
+            &capsule_layout(store, router),
+            &"1".repeat(64),
+            "refs/heads/main",
+        )
+        .await
+        .expect("initialize capsule repository")
+    }
+
+    async fn publish_capsule_ref(
+        store: &Store,
+        router: &StoreLayout,
+        base: crab_write::capsule_protocol::RootSnapshot,
+    ) {
+        let transaction = crab_metadata::capsule_protocol::CapsuleTransaction::for_plan(
+            base.record().digest(),
+            &"3".repeat(64),
+            vec![crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .expect("build capsule transaction");
+        let capsule =
+            crab_metadata::capsule_protocol::Capsule::build(&transaction, Vec::new(), Vec::new())
+                .expect("build capsule");
+        crab_write::capsule_protocol::publish(
+            &capsule_layout(store, router),
+            base,
+            &transaction,
+            &capsule,
+        )
+        .await
+        .expect("publish capsule ref");
+    }
+
     #[tokio::test]
-    async fn readiness_accepts_replica_after_manifest_and_referenced_pack_objects_arrive() {
+    async fn readiness_accepts_an_exact_capsule_view() {
         let (primary_store, primary_router) = memory_store_with_layout("org/repo");
         let (replica_store, replica_router) = memory_store_with_layout("org/repo");
-        let pack = test_pack_entry("pack-ready");
-        let (pack_index_hash, _index, pack_write) =
-            compact_pack_index(7, std::slice::from_ref(&pack)).expect("build pack index");
-        let mut manifest = test_manifest(7);
-        manifest.pack_index_hash = pack_index_hash;
-        manifest.seal_git_validation();
-        write_test_manifest(&primary_store, &primary_router, &manifest).await;
-        write_test_manifest(&replica_store, &replica_router, &manifest).await;
-        segmented::upload_write(&replica_store, &replica_router, &pack_write)
-            .await
-            .expect("upload pack index");
-        replica_store
-            .put(
-                &replica_router.pack_path(&pack.pack_id),
-                Bytes::from_static(b"pack"),
-            )
-            .await
-            .expect("upload pack object");
-        replica_store
-            .put(
-                &replica_router.pack_metadata_path(&pack.pack_id),
-                Bytes::from_static(b"meta"),
-            )
-            .await
-            .expect("upload pack metadata");
+        let primary_root = initialize_capsule_repository(&primary_store, &primary_router).await;
+        let replica_root = initialize_capsule_repository(&replica_store, &replica_router).await;
+        publish_capsule_ref(&primary_store, &primary_router, primary_root).await;
+        publish_capsule_ref(&replica_store, &replica_router, replica_root).await;
 
         let status = replica_readiness(
             &primary_store,
@@ -14049,42 +14083,20 @@ mod tests {
         .await
         .expect("readiness check");
 
-        assert!(status.ready);
+        assert!(status.ready, "{status:?}");
         assert_eq!(status.lag_generations, Some(0));
-        assert_eq!(status.readiness_object_read_count, 1);
-        assert_eq!(status.readiness_object_probe_count, 2);
     }
 
     #[tokio::test]
-    async fn readiness_cache_hit_skips_repeated_probes_but_deep_revalidates() {
+    async fn readiness_cache_changes_with_per_ref_capsule_state() {
         let _cache = isolated_replica_cache();
         let (primary_store, primary_router) = memory_store_with_layout("org/repo");
         let (replica_store, replica_router) = memory_store_with_layout("org/repo");
-        let replica = named_test_replica("cache-hit-revalidates");
+        let replica = named_test_replica("capsule-state-cache");
         clear_replica_test_cache(&replica);
-        let cache_pack_id = canonical_test_pack_id("cache");
-        write_pack_generation(
-            &primary_store,
-            &primary_router,
-            70,
-            "cache",
-            true,
-            true,
-            true,
-        )
-        .await;
-        write_pack_generation(
-            &replica_store,
-            &replica_router,
-            70,
-            "cache",
-            true,
-            true,
-            true,
-        )
-        .await;
-
-        let first = replica_readiness(
+        let primary_root = initialize_capsule_repository(&primary_store, &primary_router).await;
+        initialize_capsule_repository(&replica_store, &replica_router).await;
+        let initial = replica_readiness(
             &primary_store,
             &primary_router,
             &replica_store,
@@ -14093,17 +14105,8 @@ mod tests {
             ReadinessCheckOptions::default(),
         )
         .await
-        .expect("first readiness check");
-
-        assert!(first.ready);
-        assert!(!first.readiness_cache_hit);
-        assert_eq!(first.readiness_object_read_count, 1);
-        assert_eq!(first.readiness_object_probe_count, 2);
-
-        replica_store
-            .delete(&replica_router.pack_path(&cache_pack_id))
-            .await
-            .expect("remove referenced pack after cache write");
+        .expect("initial readiness check");
+        assert!(initial.ready);
 
         let cached = replica_readiness(
             &primary_store,
@@ -14115,11 +14118,65 @@ mod tests {
         )
         .await
         .expect("cached readiness check");
-
         assert!(cached.ready);
         assert!(cached.readiness_cache_hit);
-        assert_eq!(cached.readiness_object_read_count, 0);
-        assert_eq!(cached.readiness_object_probe_count, 0);
+
+        publish_capsule_ref(&primary_store, &primary_router, primary_root).await;
+        let changed = replica_readiness(
+            &primary_store,
+            &primary_router,
+            &replica_store,
+            &replica_router,
+            &replica,
+            ReadinessCheckOptions::default(),
+        )
+        .await
+        .expect("changed readiness check");
+
+        assert!(!changed.ready);
+        assert!(!changed.readiness_cache_hit);
+        assert!(
+            changed
+                .last_fallback_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("differs from primary"))
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_readiness_rechecks_the_authenticated_replica_view() {
+        let _cache = isolated_replica_cache();
+        let (primary_store, primary_router) = memory_store_with_layout("org/repo");
+        let (replica_store, replica_router) = memory_store_with_layout("org/repo");
+        let replica = named_test_replica("capsule-deep-cache");
+        clear_replica_test_cache(&replica);
+        initialize_capsule_repository(&primary_store, &primary_router).await;
+        let replica_root = initialize_capsule_repository(&replica_store, &replica_router).await;
+        let initial = replica_readiness(
+            &primary_store,
+            &primary_router,
+            &replica_store,
+            &replica_router,
+            &replica,
+            ReadinessCheckOptions::default(),
+        )
+        .await
+        .expect("initial readiness check");
+        assert!(initial.ready);
+
+        publish_capsule_ref(&replica_store, &replica_router, replica_root).await;
+        let cached = replica_readiness(
+            &primary_store,
+            &primary_router,
+            &replica_store,
+            &replica_router,
+            &replica,
+            ReadinessCheckOptions::default(),
+        )
+        .await
+        .expect("cached readiness check");
+        assert!(!cached.ready);
+        assert!(!cached.readiness_cache_hit);
 
         let deep = replica_readiness(
             &primary_store,
@@ -14131,562 +14188,7 @@ mod tests {
         )
         .await
         .expect("deep readiness check");
-
         assert!(!deep.ready);
         assert!(!deep.readiness_cache_hit);
-        assert_eq!(
-            deep.last_fallback_class,
-            Some(ReplicaFallbackClass::MissingObject)
-        );
-        assert_eq!(deep.readiness_object_read_count, 1);
-        assert_eq!(deep.readiness_object_probe_count, 1);
-    }
-
-    #[tokio::test]
-    async fn readiness_cache_misses_after_primary_manifest_generation_advances() {
-        let _cache = isolated_replica_cache();
-        let (primary_store, primary_router) = memory_store_with_layout("org/repo");
-        let (replica_store, replica_router) = memory_store_with_layout("org/repo");
-        let replica = named_test_replica("cache-primary-advanced");
-        clear_replica_test_cache(&replica);
-        write_pack_generation(
-            &primary_store,
-            &primary_router,
-            80,
-            "advanced",
-            true,
-            true,
-            true,
-        )
-        .await;
-        write_pack_generation(
-            &replica_store,
-            &replica_router,
-            80,
-            "advanced",
-            true,
-            true,
-            true,
-        )
-        .await;
-        let cached = replica_readiness(
-            &primary_store,
-            &primary_router,
-            &replica_store,
-            &replica_router,
-            &replica,
-            ReadinessCheckOptions::default(),
-        )
-        .await
-        .expect("write readiness cache");
-        assert!(cached.ready);
-
-        let (mut primary_manifest, primary_etag) = read_manifest(&primary_store, &primary_router)
-            .await
-            .expect("read primary manifest");
-        primary_manifest.generation = 81;
-        primary_manifest.seal_git_validation();
-        write_manifest_cas(
-            &primary_store,
-            &primary_router,
-            &primary_manifest,
-            &primary_etag,
-        )
-        .await
-        .expect("advance primary manifest");
-
-        let status = replica_readiness(
-            &primary_store,
-            &primary_router,
-            &replica_store,
-            &replica_router,
-            &replica,
-            ReadinessCheckOptions::default(),
-        )
-        .await
-        .expect("readiness after primary generation advance");
-
-        assert!(!status.ready);
-        assert!(!status.readiness_cache_hit);
-        assert_eq!(status.replica_generation, Some(80));
-        assert_eq!(status.lag_generations, Some(1));
-        assert_eq!(
-            status.last_fallback_class,
-            Some(ReplicaFallbackClass::StaleManifest)
-        );
-    }
-
-    #[tokio::test]
-    async fn readiness_rejects_manifest_before_pack_index_arrives() {
-        let (primary_store, primary_router) = memory_store_with_layout("org/repo");
-        let (replica_store, replica_router) = memory_store_with_layout("org/repo");
-        let mut manifest = test_manifest(8);
-        manifest.pack_index_hash = "c".repeat(64);
-        manifest.seal_git_validation();
-        write_test_manifest(&primary_store, &primary_router, &manifest).await;
-        write_test_manifest(&replica_store, &replica_router, &manifest).await;
-
-        let status = replica_readiness(
-            &primary_store,
-            &primary_router,
-            &replica_store,
-            &replica_router,
-            &test_replica(),
-            ReadinessCheckOptions::deep(),
-        )
-        .await
-        .expect("readiness check");
-
-        assert!(!status.ready);
-        assert_eq!(
-            status.last_fallback_reason.as_deref(),
-            Some("pack index missing")
-        );
-        assert_eq!(
-            status.last_fallback_class,
-            Some(ReplicaFallbackClass::MissingObject)
-        );
-        assert_eq!(status.readiness_object_read_count, 1);
-        assert_eq!(status.readiness_object_probe_count, 0);
-    }
-
-    #[tokio::test]
-    async fn readiness_rejects_manifest_before_referenced_pack_arrives() {
-        let (primary_store, primary_router) = memory_store_with_layout("org/repo");
-        let (replica_store, replica_router) = memory_store_with_layout("org/repo");
-        let pack = test_pack_entry("pack-delayed");
-        let (pack_index_hash, _index, pack_write) =
-            compact_pack_index(9, std::slice::from_ref(&pack)).expect("build pack index");
-        let mut manifest = test_manifest(9);
-        manifest.pack_index_hash = pack_index_hash;
-        manifest.seal_git_validation();
-        write_test_manifest(&primary_store, &primary_router, &manifest).await;
-        write_test_manifest(&replica_store, &replica_router, &manifest).await;
-        segmented::upload_write(&replica_store, &replica_router, &pack_write)
-            .await
-            .expect("upload pack index");
-
-        let status = replica_readiness(
-            &primary_store,
-            &primary_router,
-            &replica_store,
-            &replica_router,
-            &test_replica(),
-            ReadinessCheckOptions::deep(),
-        )
-        .await
-        .expect("readiness check");
-
-        assert!(!status.ready);
-        assert!(
-            status
-                .last_fallback_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("pack missing"))
-        );
-        assert_eq!(
-            status.last_fallback_class,
-            Some(ReplicaFallbackClass::MissingObject)
-        );
-        assert_eq!(status.readiness_object_read_count, 1);
-        assert_eq!(status.readiness_object_probe_count, 1);
-    }
-
-    #[tokio::test]
-    async fn readiness_rejects_manifest_before_referenced_pack_metadata_arrives() {
-        let (primary_store, primary_router) = memory_store_with_layout("org/repo");
-        let (replica_store, replica_router) = memory_store_with_layout("org/repo");
-        let pack = test_pack_entry("pack-metadata-delayed");
-        let (pack_index_hash, _index, pack_write) =
-            compact_pack_index(10, std::slice::from_ref(&pack)).expect("build pack index");
-        let mut manifest = test_manifest(10);
-        manifest.pack_index_hash = pack_index_hash;
-        manifest.seal_git_validation();
-        write_test_manifest(&primary_store, &primary_router, &manifest).await;
-        write_test_manifest(&replica_store, &replica_router, &manifest).await;
-        segmented::upload_write(&replica_store, &replica_router, &pack_write)
-            .await
-            .expect("upload pack index");
-        replica_store
-            .put(
-                &replica_router.pack_path(&pack.pack_id),
-                Bytes::from_static(b"pack"),
-            )
-            .await
-            .expect("upload pack object");
-
-        let status = replica_readiness(
-            &primary_store,
-            &primary_router,
-            &replica_store,
-            &replica_router,
-            &test_replica(),
-            ReadinessCheckOptions::deep(),
-        )
-        .await
-        .expect("readiness check");
-
-        assert!(!status.ready);
-        assert!(
-            status
-                .last_fallback_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("pack metadata missing"))
-        );
-        assert_eq!(
-            status.last_fallback_class,
-            Some(ReplicaFallbackClass::MissingObject)
-        );
-        assert_eq!(status.readiness_object_read_count, 1);
-        assert_eq!(status.readiness_object_probe_count, 2);
-    }
-
-    #[tokio::test]
-    async fn readiness_rejects_stale_replica_manifest_generation() {
-        let (primary_store, primary_router) = memory_store_with_layout("org/repo");
-        let (replica_store, replica_router) = memory_store_with_layout("org/repo");
-        write_test_manifest(&primary_store, &primary_router, &test_manifest(9)).await;
-        write_test_manifest(&replica_store, &replica_router, &test_manifest(8)).await;
-
-        let status = replica_readiness(
-            &primary_store,
-            &primary_router,
-            &replica_store,
-            &replica_router,
-            &test_replica(),
-            ReadinessCheckOptions::deep(),
-        )
-        .await
-        .expect("readiness check");
-
-        assert!(!status.ready);
-        assert_eq!(status.lag_generations, Some(1));
-        assert_eq!(
-            status.last_fallback_reason.as_deref(),
-            Some("replica manifest is stale")
-        );
-        assert_eq!(
-            status.last_fallback_class,
-            Some(ReplicaFallbackClass::StaleManifest)
-        );
-    }
-
-    #[tokio::test]
-    async fn readiness_rejects_manifest_before_referenced_shard_arrives() {
-        let (primary_store, primary_router) = memory_store_with_layout("org/repo");
-        let (replica_store, replica_router) = memory_store_with_layout("org/repo");
-        let shard_hash = MerkleHash::from([1u64, 2, 3, 4]).hex();
-        let (shard_index_hash, _index, write) =
-            compact_shard_index(10, &[shard_hash]).expect("build shard index");
-        let mut manifest = test_manifest(10);
-        manifest.shard_index_hash = shard_index_hash;
-        manifest.seal_git_validation();
-        write_test_manifest(&primary_store, &primary_router, &manifest).await;
-        write_test_manifest(&replica_store, &replica_router, &manifest).await;
-        segmented::upload_write(&replica_store, &replica_router, &write)
-            .await
-            .expect("upload shard index");
-
-        let status = replica_readiness(
-            &primary_store,
-            &primary_router,
-            &replica_store,
-            &replica_router,
-            &test_replica(),
-            ReadinessCheckOptions::deep(),
-        )
-        .await
-        .expect("readiness check");
-
-        assert!(!status.ready);
-        assert!(
-            status
-                .last_fallback_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("shard missing"))
-        );
-        assert_eq!(
-            status.last_fallback_class,
-            Some(ReplicaFallbackClass::MissingObject)
-        );
-        assert_eq!(status.readiness_object_read_count, 2);
-        assert_eq!(status.readiness_object_probe_count, 0);
-    }
-
-    #[tokio::test]
-    async fn readiness_rejects_manifest_before_referenced_xorb_arrives() {
-        let (primary_store, primary_router) = memory_store_with_layout("org/repo");
-        let (replica_store, replica_router) = memory_store_with_layout("org/repo");
-        let (shard_bytes, shard_hash, xorb_hash) = test_shard_with_xorb(12);
-        let (shard_index_hash, _index, write) =
-            compact_shard_index(11, &[shard_hash.hex()]).expect("build shard index");
-        let mut manifest = test_manifest(11);
-        manifest.shard_index_hash = shard_index_hash;
-        manifest.seal_git_validation();
-        write_test_manifest(&primary_store, &primary_router, &manifest).await;
-        write_test_manifest(&replica_store, &replica_router, &manifest).await;
-        segmented::upload_write(&replica_store, &replica_router, &write)
-            .await
-            .expect("upload shard index");
-        replica_store
-            .put(&replica_router.shard_path(&shard_hash), shard_bytes)
-            .await
-            .expect("upload shard");
-
-        let status = replica_readiness(
-            &primary_store,
-            &primary_router,
-            &replica_store,
-            &replica_router,
-            &test_replica(),
-            ReadinessCheckOptions::deep(),
-        )
-        .await
-        .expect("readiness check");
-
-        assert!(!status.ready);
-        assert!(
-            status
-                .last_fallback_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("xorb missing"))
-        );
-        assert!(
-            status
-                .last_fallback_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains(&xorb_hash.hex()))
-        );
-        assert_eq!(
-            status.last_fallback_class,
-            Some(ReplicaFallbackClass::MissingObject)
-        );
-        assert_eq!(status.readiness_object_read_count, 2);
-        assert_eq!(status.readiness_object_probe_count, 1);
-    }
-
-    #[tokio::test]
-    async fn readiness_reports_missing_referenced_shard() {
-        let (primary_store, primary_router) = memory_store_with_layout("org/repo");
-        let (replica_store, replica_router) = memory_store_with_layout("org/repo");
-        let shard_hash = MerkleHash::from([1u64, 2, 3, 4]).hex();
-        let (shard_index_hash, _index, write) =
-            compact_shard_index(1, &[shard_hash]).expect("build shard index");
-        segmented::upload_write(&replica_store, &replica_router, &write)
-            .await
-            .expect("upload shard index");
-
-        let mut manifest = Manifest::default_for_repo("refs/heads/main");
-        manifest.generation = 1;
-        manifest.shard_index_hash = shard_index_hash;
-        manifest.seal_git_validation();
-        write_test_manifest(&primary_store, &primary_router, &manifest).await;
-        write_test_manifest(&replica_store, &replica_router, &manifest).await;
-
-        let status = replica_readiness(
-            &primary_store,
-            &primary_router,
-            &replica_store,
-            &replica_router,
-            &test_replica(),
-            ReadinessCheckOptions::deep(),
-        )
-        .await
-        .expect("readiness check");
-        assert!(!status.ready);
-        assert!(
-            status
-                .last_fallback_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("shard missing"))
-        );
-        assert_eq!(status.readiness_object_read_count, 2);
-        assert_eq!(status.readiness_object_probe_count, 0);
-    }
-
-    #[tokio::test]
-    async fn sampled_readiness_stops_after_object_probe_limit() {
-        let _cache = isolated_replica_cache();
-        let (primary_store, primary_router) = memory_store_with_layout("org/repo");
-        let (replica_store, replica_router) = memory_store_with_layout("org/repo");
-        let packs = vec![test_pack_entry("sample-a"), test_pack_entry("sample-b")];
-        let sampled_pack_id = packs[0].pack_id.clone();
-        let (pack_index_hash, _index, pack_write) =
-            compact_pack_index(91, &packs).expect("build pack index");
-        let mut manifest = test_manifest(91);
-        manifest.pack_index_hash = pack_index_hash;
-        manifest.seal_git_validation();
-        write_test_manifest(&primary_store, &primary_router, &manifest).await;
-        write_test_manifest(&replica_store, &replica_router, &manifest).await;
-        segmented::upload_write(&replica_store, &replica_router, &pack_write)
-            .await
-            .expect("upload pack index");
-        replica_store
-            .put(
-                &replica_router.pack_path(&sampled_pack_id),
-                Bytes::from_static(b"pack"),
-            )
-            .await
-            .expect("upload sampled pack");
-
-        let status = replica_readiness(
-            &primary_store,
-            &primary_router,
-            &replica_store,
-            &replica_router,
-            &test_replica(),
-            ReadinessCheckOptions::sampled(1),
-        )
-        .await
-        .expect("sampled readiness check");
-
-        assert!(status.ready);
-        assert_eq!(status.readiness_object_read_count, 1);
-        assert_eq!(status.readiness_object_probe_count, 1);
-
-        replica_store
-            .delete(&replica_router.pack_path(&sampled_pack_id))
-            .await
-            .expect("remove sampled pack after sampled proof");
-
-        let uncached = replica_readiness(
-            &primary_store,
-            &primary_router,
-            &replica_store,
-            &replica_router,
-            &test_replica(),
-            ReadinessCheckOptions::default(),
-        )
-        .await
-        .expect("uncached readiness check");
-
-        assert!(!uncached.ready);
-        assert!(!uncached.readiness_cache_hit);
-    }
-
-    #[tokio::test]
-    async fn readiness_large_pack_inventory_probe_count_is_linear() {
-        let _cache = isolated_replica_cache();
-        let (primary_store, primary_router) = memory_store_with_layout("org/repo");
-        let (replica_store, replica_router) = memory_store_with_layout("org/repo");
-        let replica = named_test_replica("large-pack-inventory");
-        clear_replica_test_cache(&replica);
-        let packs = (0..64)
-            .map(|index| test_pack_entry(&format!("large-{index}")))
-            .collect::<Vec<_>>();
-        let (pack_index_hash, _index, pack_write) =
-            compact_pack_index(101, &packs).expect("build large pack index");
-        let mut manifest = test_manifest(101);
-        manifest.pack_index_hash = pack_index_hash;
-        manifest.seal_git_validation();
-        write_test_manifest(&primary_store, &primary_router, &manifest).await;
-        write_test_manifest(&replica_store, &replica_router, &manifest).await;
-        segmented::upload_write(&replica_store, &replica_router, &pack_write)
-            .await
-            .expect("upload large pack index");
-        for pack in &packs {
-            replica_store
-                .put(
-                    &replica_router.pack_path(&pack.pack_id),
-                    Bytes::from_static(b"pack"),
-                )
-                .await
-                .expect("upload pack object");
-            replica_store
-                .put(
-                    &replica_router.pack_metadata_path(&pack.pack_id),
-                    Bytes::from_static(b"meta"),
-                )
-                .await
-                .expect("upload pack metadata");
-        }
-
-        let status = replica_readiness(
-            &primary_store,
-            &primary_router,
-            &replica_store,
-            &replica_router,
-            &replica,
-            ReadinessCheckOptions::deep(),
-        )
-        .await
-        .expect("large pack readiness check");
-
-        assert!(status.ready);
-        assert_eq!(status.readiness_object_read_count, 1);
-        assert_eq!(status.readiness_object_probe_count, packs.len() as u64 * 2);
-        clear_replica_test_cache(&replica);
-    }
-
-    #[tokio::test]
-    async fn sampled_readiness_caps_large_xorb_inventory_without_cache() {
-        let _cache = isolated_replica_cache();
-        let (primary_store, primary_router) = memory_store_with_layout("org/repo");
-        let (replica_store, replica_router) = memory_store_with_layout("org/repo");
-        let replica = named_test_replica("large-xorb-sampled");
-        clear_replica_test_cache(&replica);
-        let (shard_bytes, shard_hash, xorb_hashes) = test_shard_with_xorbs(200, 96);
-        let (shard_index_hash, _index, write) =
-            compact_shard_index(102, &[shard_hash.hex()]).expect("build large shard index");
-        let mut manifest = test_manifest(102);
-        manifest.shard_index_hash = shard_index_hash;
-        manifest.seal_git_validation();
-        write_test_manifest(&primary_store, &primary_router, &manifest).await;
-        write_test_manifest(&replica_store, &replica_router, &manifest).await;
-        segmented::upload_write(&replica_store, &replica_router, &write)
-            .await
-            .expect("upload large shard index");
-        replica_store
-            .put(&replica_router.shard_path(&shard_hash), shard_bytes)
-            .await
-            .expect("upload large shard");
-        for xorb_hash in xorb_hashes.iter().take(8) {
-            replica_store
-                .put(
-                    &replica_router.xorb_path(xorb_hash),
-                    Bytes::from_static(b"xorb"),
-                )
-                .await
-                .expect("upload sampled xorb");
-        }
-
-        let sampled = replica_readiness(
-            &primary_store,
-            &primary_router,
-            &replica_store,
-            &replica_router,
-            &replica,
-            ReadinessCheckOptions::sampled(8),
-        )
-        .await
-        .expect("sampled large xorb readiness check");
-
-        assert!(sampled.ready);
-        assert!(!sampled.readiness_cache_hit);
-        assert_eq!(sampled.readiness_object_read_count, 2);
-        assert_eq!(sampled.readiness_object_probe_count, 8);
-
-        let exhaustive = replica_readiness(
-            &primary_store,
-            &primary_router,
-            &replica_store,
-            &replica_router,
-            &replica,
-            ReadinessCheckOptions::default(),
-        )
-        .await
-        .expect("exhaustive large xorb readiness check");
-
-        assert!(!exhaustive.ready);
-        assert!(!exhaustive.readiness_cache_hit);
-        assert_eq!(exhaustive.readiness_object_read_count, 2);
-        assert_eq!(exhaustive.readiness_object_probe_count, 9);
-        assert!(
-            exhaustive
-                .last_fallback_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("xorb missing"))
-        );
-        clear_replica_test_cache(&replica);
     }
 }

@@ -33,6 +33,10 @@ pub enum ReadError {
     #[error("term resolution task failed: {0}")]
     ResolutionTask(#[source] tokio::task::JoinError),
 
+    /// A replica-readiness verifier failed before returning its result.
+    #[error("replica readiness task failed: {0}")]
+    ReadinessTask(#[source] tokio::task::JoinError),
+
     #[error("xet runtime error: {0}")]
     Runtime(#[from] xet_runtime::RuntimeError),
 

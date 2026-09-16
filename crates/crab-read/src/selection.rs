@@ -1,11 +1,10 @@
 use std::future::Future;
+use std::io::Write;
 
-use crab_metadata::ref_journal::list_active_transactions;
-use crab_metadata::{error::MetadataError, manifest_store, manifests::Manifest};
 use crab_storage::{StorageError, Store, StoreLayout};
 use crab_types::replication::ReplicaConfig;
 use crab_xet::{
-    shard_parse::{MAX_SHARD_SIZE_BYTES, extract_chunk_entries_streaming},
+    shard_parse::{extract_chunk_entries_from_reader, strip_bloom_trailer},
     xorb::format::MerkleHash,
 };
 use object_store::path::Path as ObjectPath;
@@ -209,6 +208,8 @@ pub struct ReadinessProbeStats {
 pub struct ReadReplicaReadiness {
     pub primary_generation: u64,
     pub replica_generation: Option<u64>,
+    pub primary_state_digest: Option<String>,
+    pub replica_state_digest: Option<String>,
     pub ready: bool,
     pub lag_generations: Option<u64>,
     pub reason: Option<String>,
@@ -220,6 +221,8 @@ impl ReadReplicaReadiness {
         Self {
             primary_generation,
             replica_generation: Some(replica_generation),
+            primary_state_digest: None,
+            replica_state_digest: None,
             ready: true,
             lag_generations: Some(replica_generation.saturating_sub(primary_generation)),
             reason: None,
@@ -236,6 +239,8 @@ impl ReadReplicaReadiness {
         Self {
             primary_generation,
             replica_generation,
+            primary_state_digest: None,
+            replica_state_digest: None,
             ready: false,
             lag_generations: replica_generation
                 .map(|replica_generation| primary_generation.saturating_sub(replica_generation)),
@@ -245,162 +250,252 @@ impl ReadReplicaReadiness {
     }
 }
 
-/// Checks whether a replica has a manifest and referenced immutable objects at
-/// least as fresh as the primary manifest.
-pub async fn check_read_replica_readiness(
-    primary_store: &Store,
-    primary_router: &StoreLayout<Store>,
-    replica_store: &Store,
+/// Checks whether a replica exposes the exact authenticated capsule view and
+/// every external pointer object required by that view.
+pub async fn check_capsule_read_replica_readiness(
+    primary: &crate::capsule_protocol::CapsuleRepositoryView,
     replica_router: &StoreLayout<Store>,
     options: ReadinessCheckOptions,
 ) -> Result<ReadReplicaReadiness> {
-    let mut stats = ReadinessProbeStats::default();
-    // Capture journal visibility before the manifest, matching repository
-    // snapshot ordering without loading the primary's pack and shard indexes.
-    let primary_active = list_active_transactions(primary_store, primary_router).await?;
-    let (primary_manifest, _) =
-        manifest_store::read_manifest(primary_store, primary_router).await?;
-    let primary_generation = primary_manifest.generation;
-
-    let replica_manifest = match manifest_store::read_manifest(replica_store, replica_router).await
-    {
-        Ok((manifest, _)) => manifest,
+    let primary_generation = primary.root().root().generation();
+    let primary_state_digest = primary.state_digest();
+    let limits = crate::capsule_protocol::CapsuleReadLimits {
+        max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+        max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+    };
+    let replica = match crate::capsule_protocol::open_view(replica_router, limits).await {
+        Ok(replica) => replica,
         Err(error) => {
-            return Ok(ReadReplicaReadiness::not_ready(
+            let mut readiness = ReadReplicaReadiness::not_ready(
                 primary_generation,
                 None,
-                format!("replica manifest unavailable: {error}"),
-                stats,
-            ));
+                format!("replica capsule view unavailable: {error}"),
+                ReadinessProbeStats::default(),
+            );
+            readiness.primary_state_digest = Some(primary_state_digest);
+            return Ok(readiness);
         }
     };
-
-    if !primary_active.is_empty() {
-        return Ok(ReadReplicaReadiness::not_ready(
+    let replica_generation = replica.root().root().generation();
+    let replica_state_digest = replica.state_digest();
+    if replica_state_digest != primary_state_digest {
+        let mut readiness = ReadReplicaReadiness::not_ready(
             primary_generation,
-            Some(replica_manifest.generation),
-            "primary has uncompacted ref transactions",
-            stats,
-        ));
+            Some(replica_generation),
+            "replica capsule view differs from primary",
+            ReadinessProbeStats::default(),
+        );
+        readiness.primary_state_digest = Some(primary_state_digest);
+        readiness.replica_state_digest = Some(replica_state_digest);
+        return Ok(readiness);
     }
 
-    if replica_manifest.generation < primary_generation {
-        return Ok(ReadReplicaReadiness::not_ready(
-            primary_generation,
-            Some(replica_manifest.generation),
-            "replica manifest is stale",
-            stats,
-        ));
-    }
-
-    if let Some(reason) = referenced_object_gap(
-        replica_store,
-        replica_router,
-        &replica_manifest,
-        &mut stats,
-        options,
-    )
-    .await?
+    let mut stats = ReadinessProbeStats::default();
+    let catalog = replica.pointer_catalog()?;
+    if let Some(reason) =
+        capsule_pointer_object_gap(replica_router, &catalog, &mut stats, options).await?
     {
-        return Ok(ReadReplicaReadiness::not_ready(
+        let mut readiness = ReadReplicaReadiness::not_ready(
             primary_generation,
-            Some(replica_manifest.generation),
+            Some(replica_generation),
             reason,
             stats,
-        ));
+        );
+        readiness.primary_state_digest = Some(primary_state_digest);
+        readiness.replica_state_digest = Some(replica_state_digest);
+        return Ok(readiness);
     }
 
-    Ok(ReadReplicaReadiness::ready(
-        primary_generation,
-        replica_manifest.generation,
-        stats,
-    ))
+    let mut readiness = ReadReplicaReadiness::ready(primary_generation, replica_generation, stats);
+    readiness.primary_state_digest = Some(primary_state_digest);
+    readiness.replica_state_digest = Some(replica_state_digest);
+    Ok(readiness)
 }
 
-async fn referenced_object_gap(
-    store: &Store,
+async fn capsule_pointer_object_gap(
     router: &StoreLayout<Store>,
-    manifest: &Manifest,
+    catalog: &crab_metadata::capsule_protocol::PointerCatalog,
     stats: &mut ReadinessProbeStats,
     options: ReadinessCheckOptions,
 ) -> Result<Option<String>> {
-    if !manifest.pack_index_hash.is_empty() {
-        stats.object_read_count = stats.object_read_count.saturating_add(1);
-        let packs =
-            match manifest_store::read_bulk_pack_list(store, router, &manifest.pack_index_hash)
-                .await
-            {
-                Ok(packs) => packs,
-                Err(MetadataError::Storage {
-                    source: StorageError::NotFound { .. },
-                }) => return Ok(Some("pack index missing".to_owned())),
-                Err(error) => return Err(error.into()),
-            };
-        for pack in packs {
-            if readiness_probe_budget_exhausted(stats, options) {
-                return Ok(None);
-            }
-            let pack_path = router.pack_path(&pack.pack_id);
-            if let Some(reason) = missing_head(store, &pack_path, "pack", stats).await? {
-                return Ok(Some(reason));
-            }
-            if readiness_probe_budget_exhausted(stats, options) {
-                return Ok(None);
-            }
-            let meta_path = router.pack_metadata_path(&pack.pack_id);
-            if let Some(reason) = missing_head(store, &meta_path, "pack metadata", stats).await? {
-                return Ok(Some(reason));
-            }
+    for (hash, shard) in catalog.shards() {
+        if readiness_probe_budget_exhausted(stats, options) {
+            return Ok(None);
+        }
+        let hash = parse_merkle_hash(hash, "shard")?;
+        let path = router.shard_path(&hash);
+        if let Some(reason) = verify_shard_object(
+            router,
+            &path,
+            hash,
+            shard.encoded_size(),
+            shard.xorb_hashes(),
+            stats,
+        )
+        .await?
+        {
+            return Ok(Some(reason));
         }
     }
-
-    if !manifest.shard_index_hash.is_empty() {
-        stats.object_read_count = stats.object_read_count.saturating_add(1);
-        let shards =
-            match manifest_store::read_bulk_shard_list(store, router, &manifest.shard_index_hash)
-                .await
-            {
-                Ok(shards) => shards,
-                Err(MetadataError::Storage {
-                    source: StorageError::NotFound { .. },
-                }) => return Ok(Some("shard index missing".to_owned())),
-                Err(error) => return Err(error.into()),
-            };
-        for shard in shards {
-            if readiness_probe_budget_exhausted(stats, options) {
-                return Ok(None);
-            }
-            let shard_hash = parse_merkle_hash(&shard, "shard")?;
-            let shard_path = router.shard_path(&shard_hash);
-            stats.object_read_count = stats.object_read_count.saturating_add(1);
-            let shard_bytes = match store
-                .get_with_etag_bounded(&shard_path, MAX_SHARD_SIZE_BYTES as u64)
-                .await
-            {
-                Ok((bytes, _etag)) => bytes,
-                Err(StorageError::NotFound { .. }) => {
-                    return Ok(Some(format!("shard missing at {}", shard_path.as_ref())));
-                }
-                Err(error) => return Err(error.into()),
-            };
-            let mut xorb_hashes = Vec::new();
-            for (_chunk_hash, xorb) in extract_chunk_entries_streaming(&shard_bytes) {
-                if !xorb_hashes.contains(&xorb.xorb_hash) {
-                    xorb_hashes.push(xorb.xorb_hash);
-                }
-            }
-            for xorb_hash in xorb_hashes {
-                if readiness_probe_budget_exhausted(stats, options) {
-                    return Ok(None);
-                }
-                let xorb_path = router.xorb_path(&xorb_hash);
-                if let Some(reason) = missing_head(store, &xorb_path, "xorb", stats).await? {
-                    return Ok(Some(reason));
-                }
-            }
+    for (hash, xorb) in catalog.xorbs() {
+        if readiness_probe_budget_exhausted(stats, options) {
+            return Ok(None);
+        }
+        let hash = parse_merkle_hash(hash, "xorb")?;
+        let path = router.xorb_path(&hash);
+        if let Some(reason) = verify_xorb_object(
+            router,
+            &path,
+            hash,
+            xorb.encoded_size(),
+            xorb.body_digest(),
+            xorb.chunks(),
+            stats,
+        )
+        .await?
+        {
+            return Ok(Some(reason));
         }
     }
+    Ok(None)
+}
 
+async fn verify_shard_object(
+    router: &StoreLayout<Store>,
+    path: &ObjectPath,
+    expected_hash: MerkleHash,
+    expected_size: u64,
+    expected_xorbs: &[String],
+    stats: &mut ReadinessProbeStats,
+) -> Result<Option<String>> {
+    stats.object_read_count = stats.object_read_count.saturating_add(1);
+    let body = match router
+        .store()
+        .get_with_etag_bounded(path, expected_size)
+        .await
+    {
+        Ok((body, _)) => body,
+        Err(StorageError::NotFound { .. }) => {
+            return Ok(Some(format!("shard missing at {}", path.as_ref())));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if body.len() as u64 != expected_size {
+        return Ok(Some(format!(
+            "shard size mismatch at {}: expected {expected_size}, found {}",
+            path.as_ref(),
+            body.len()
+        )));
+    }
+    let path = path.to_string();
+    let expected_xorbs = expected_xorbs.to_vec();
+    tokio::task::spawn_blocking(move || {
+        verify_shard_body(&path, body, expected_hash, &expected_xorbs)
+    })
+    .await
+    .map_err(ReadError::ReadinessTask)?
+}
+
+fn verify_shard_body(
+    path: &str,
+    body: bytes::Bytes,
+    expected_hash: MerkleHash,
+    expected_xorbs: &[String],
+) -> Result<Option<String>> {
+    let mut hashed = crab_xet::hash::HashedWrite::new(std::io::sink());
+    hashed.write_all(&body)?;
+    if hashed.hash() != expected_hash {
+        return Ok(Some(format!("shard hash mismatch at {path}")));
+    }
+    let mut reader = std::io::Cursor::new(strip_bloom_trailer(&body));
+    let actual_xorbs = extract_chunk_entries_from_reader(&mut reader)?
+        .into_iter()
+        .map(|(_, xorb)| xorb.xorb_hash.hex())
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected_xorbs = expected_xorbs
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    if actual_xorbs != expected_xorbs {
+        return Ok(Some(format!("shard dependency closure mismatch at {path}")));
+    }
+    Ok(None)
+}
+
+async fn verify_xorb_object(
+    router: &StoreLayout<Store>,
+    path: &ObjectPath,
+    expected_hash: MerkleHash,
+    expected_size: u64,
+    expected_body_digest: &str,
+    expected_chunks: &[crab_metadata::capsule_protocol::XorbChunkEntry],
+    stats: &mut ReadinessProbeStats,
+) -> Result<Option<String>> {
+    stats.object_read_count = stats.object_read_count.saturating_add(1);
+    let body = match router
+        .store()
+        .get_with_etag_bounded(path, expected_size)
+        .await
+    {
+        Ok((body, _)) => body,
+        Err(StorageError::NotFound { .. }) => {
+            return Ok(Some(format!("xorb missing at {}", path.as_ref())));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if body.len() as u64 != expected_size {
+        return Ok(Some(format!(
+            "xorb size mismatch at {}: expected {expected_size}, found {}",
+            path.as_ref(),
+            body.len()
+        )));
+    }
+    let path = path.to_string();
+    let expected_body_digest = expected_body_digest.to_owned();
+    let expected_chunks = expected_chunks.to_vec();
+    tokio::task::spawn_blocking(move || {
+        verify_xorb_body(
+            &path,
+            body,
+            expected_hash,
+            &expected_body_digest,
+            &expected_chunks,
+        )
+    })
+    .await
+    .map_err(ReadError::ReadinessTask)?
+}
+
+fn verify_xorb_body(
+    path: &str,
+    body: bytes::Bytes,
+    expected_hash: MerkleHash,
+    expected_body_digest: &str,
+    expected_chunks: &[crab_metadata::capsule_protocol::XorbChunkEntry],
+) -> Result<Option<String>> {
+    if blake3::hash(&body).to_hex().as_str() != expected_body_digest {
+        return Ok(Some(format!("xorb body hash mismatch at {path}")));
+    }
+    let parser = crab_xet::xorb::parser::XorbParser::parse(body)?;
+    if parser.hash() != expected_hash {
+        return Ok(Some(format!("xorb identity mismatch at {path}")));
+    }
+    parser.verify_payload_digest()?;
+    if parser.num_chunks() as usize != expected_chunks.len() {
+        return Ok(Some(format!("xorb chunk count mismatch at {path}")));
+    }
+    for (index, expected) in expected_chunks.iter().enumerate() {
+        let index = u32::try_from(index).map_err(|_| ReadError::CorruptObject {
+            path: path.to_owned(),
+            reason: "xorb chunk index overflowed".to_owned(),
+        })?;
+        let actual = parser.chunk_meta(index)?;
+        if actual.hash.hex() != expected.hash()
+            || actual.uncompressed_len != expected.uncompressed_size()
+        {
+            return Ok(Some(format!("xorb chunk catalog mismatch at {path}")));
+        }
+    }
     Ok(None)
 }
 
@@ -408,9 +503,12 @@ fn readiness_probe_budget_exhausted(
     stats: &ReadinessProbeStats,
     options: ReadinessCheckOptions,
 ) -> bool {
-    options
-        .max_object_probes
-        .is_some_and(|max| stats.object_probe_count >= max)
+    options.max_object_probes.is_some_and(|max| {
+        stats
+            .object_probe_count
+            .saturating_add(stats.object_read_count)
+            >= max
+    })
 }
 
 fn parse_merkle_hash(value: &str, label: &str) -> Result<MerkleHash> {
@@ -418,22 +516,6 @@ fn parse_merkle_hash(value: &str, label: &str) -> Result<MerkleHash> {
         path: label.to_owned(),
         reason: format!("invalid {label} hash {value}: {error}"),
     })
-}
-
-async fn missing_head(
-    store: &Store,
-    path: &ObjectPath,
-    label: &str,
-    stats: &mut ReadinessProbeStats,
-) -> Result<Option<String>> {
-    stats.object_probe_count = stats.object_probe_count.saturating_add(1);
-    match store.head(path).await {
-        Ok(_) => Ok(None),
-        Err(StorageError::NotFound { .. }) => {
-            Ok(Some(format!("{label} missing at {}", path.as_ref())))
-        }
-        Err(error) => Err(error.into()),
-    }
 }
 
 /// Result of probing one replica candidate for a read operation.
@@ -666,17 +748,19 @@ impl<Store, Router> ReadStoreSelection<Store, Router> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use bytes::Bytes;
-    use crab_metadata::{
-        manifest_store::create_manifest,
-        manifests::{Manifest, PackManifestEntry, compact_pack_index},
-        ref_journal::{
-            RefJournalEdit, RefJournalTransaction, commit_ref_transaction, read_ref_head,
+    use crab_metadata::capsule_protocol::{
+        PointerCatalog, RepositoryRoot, RootRecord, ShardCatalogEntry, XorbCatalogEntry,
+        XorbChunkEntry, create_root,
+    };
+    use crab_xet::{
+        shard::{MDBXorbInfo, ShardWriter, XorbChunkSequenceEntry, XorbChunkSequenceHeader},
+        xorb::{
+            builder::{RunId, XorbBuilder},
+            format::Chunk,
         },
-        segmented_store,
     };
     use object_store::memory::InMemory;
 
@@ -868,147 +952,227 @@ mod tests {
         assert_eq!(options.max_object_probes, Some(8));
     }
 
-    #[tokio::test]
-    async fn readiness_check_accepts_replica_after_pack_objects_arrive() {
-        let (primary_store, primary_router) = memory_store_with_layout("org/repo");
-        let (replica_store, replica_router) = memory_store_with_layout("org/repo");
-        let pack_id = "a".repeat(64);
-        let pack = test_pack_entry(&pack_id);
-        let (pack_index_hash, _index, pack_write) =
-            compact_pack_index(7, std::slice::from_ref(&pack)).expect("build pack index");
-        let mut manifest = test_manifest(7);
-        manifest.pack_index_hash = pack_index_hash;
-        manifest.seal_git_validation();
-        write_test_manifest(&primary_store, &primary_router, &manifest).await;
-        write_test_manifest(&replica_store, &replica_router, &manifest).await;
-        segmented_store::upload_write(&replica_store, &replica_router, &pack_write)
-            .await
-            .expect("upload pack index");
-        replica_store
-            .put(
-                &replica_router.pack_path(&pack_id),
-                Bytes::from_static(b"pack"),
-            )
-            .await
-            .expect("upload pack object");
-        replica_store
-            .put(
-                &replica_router.pack_metadata_path(&pack_id),
-                Bytes::from_static(b"meta"),
-            )
-            .await
-            .expect("upload pack metadata");
+    async fn capsule_view(
+        router: &StoreLayout<Store>,
+        repository_id: &str,
+    ) -> crate::capsule_protocol::CapsuleRepositoryView {
+        let root =
+            RootRecord::encode(RepositoryRoot::initial(repository_id, "refs/heads/main").unwrap())
+                .unwrap();
+        create_root(router, root).await.unwrap();
+        crate::capsule_protocol::open_view(
+            router,
+            crate::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 1024 * 1024,
+                max_frontier_bytes: 1024 * 1024,
+            },
+        )
+        .await
+        .unwrap()
+    }
 
-        let readiness = check_read_replica_readiness(
-            &primary_store,
-            &primary_router,
-            &replica_store,
+    #[tokio::test]
+    async fn capsule_readiness_requires_the_exact_primary_view() {
+        let (_primary_store, primary_router) = memory_store_with_layout("org/repo");
+        let (_replica_store, replica_router) = memory_store_with_layout("org/repo");
+        let primary = capsule_view(&primary_router, &"1".repeat(64)).await;
+        capsule_view(&replica_router, &"1".repeat(64)).await;
+
+        let readiness = check_capsule_read_replica_readiness(
+            &primary,
             &replica_router,
             ReadinessCheckOptions::deep(),
         )
         .await
-        .expect("readiness check");
+        .unwrap();
 
         assert!(readiness.ready);
-        assert_eq!(readiness.primary_generation, 7);
-        assert_eq!(readiness.replica_generation, Some(7));
-        assert_eq!(readiness.stats.object_read_count, 1);
-        assert_eq!(readiness.stats.object_probe_count, 2);
-    }
-
-    #[tokio::test]
-    async fn readiness_check_reports_missing_referenced_pack() {
-        let (primary_store, primary_router) = memory_store_with_layout("org/repo");
-        let (replica_store, replica_router) = memory_store_with_layout("org/repo");
-        let pack = test_pack_entry(&"b".repeat(64));
-        let (pack_index_hash, _index, pack_write) =
-            compact_pack_index(8, std::slice::from_ref(&pack)).expect("build pack index");
-        let mut manifest = test_manifest(8);
-        manifest.pack_index_hash = pack_index_hash;
-        manifest.seal_git_validation();
-        write_test_manifest(&primary_store, &primary_router, &manifest).await;
-        write_test_manifest(&replica_store, &replica_router, &manifest).await;
-        segmented_store::upload_write(&replica_store, &replica_router, &pack_write)
-            .await
-            .expect("upload pack index");
-
-        let readiness = check_read_replica_readiness(
-            &primary_store,
-            &primary_router,
-            &replica_store,
-            &replica_router,
-            ReadinessCheckOptions::deep(),
-        )
-        .await
-        .expect("readiness check");
-
-        assert!(!readiness.ready);
-        assert_eq!(readiness.primary_generation, 8);
-        assert_eq!(readiness.replica_generation, Some(8));
-        assert!(
-            readiness
-                .reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("pack missing"))
+        assert_eq!(
+            readiness.primary_state_digest,
+            readiness.replica_state_digest
         );
-        assert_eq!(readiness.stats.object_read_count, 1);
-        assert_eq!(readiness.stats.object_probe_count, 1);
     }
 
     #[tokio::test]
-    async fn readiness_check_rejects_replica_while_primary_journal_is_uncompacted() {
-        let (primary_store, primary_router) = memory_store_with_layout("org/repo");
-        let (replica_store, replica_router) = memory_store_with_layout("org/repo");
-        let manifest = test_manifest(9);
-        write_test_manifest(&primary_store, &primary_router, &manifest).await;
-        write_test_manifest(&replica_store, &replica_router, &manifest).await;
+    async fn capsule_readiness_rejects_a_different_authenticated_view() {
+        let (_primary_store, primary_router) = memory_store_with_layout("org/repo");
+        let (_replica_store, replica_router) = memory_store_with_layout("org/repo");
+        let primary = capsule_view(&primary_router, &"1".repeat(64)).await;
+        capsule_view(&replica_router, &"2".repeat(64)).await;
 
-        let ref_name = "refs/heads/main";
-        let head = read_ref_head(&primary_store, &primary_router, ref_name)
-            .await
-            .expect("read ref head");
-        let transaction = RefJournalTransaction::new(
-            BTreeMap::from([(ref_name.to_owned(), head.visible_transaction.clone())]),
-            vec![RefJournalEdit {
-                ref_name: ref_name.to_owned(),
-                old_oid: None,
-                new_oid: Some("c".repeat(40)),
-                peeled_oid: None,
-                lock_holder: None,
-                visibility_evidence_hash: None,
-            }],
-            None,
-            Vec::new(),
-            Vec::new(),
-        )
-        .expect("build transaction");
-        commit_ref_transaction(
-            &primary_store,
-            &primary_router,
-            &transaction,
-            &[head],
-            || false,
-        )
-        .await
-        .expect("commit transaction");
-
-        let readiness = check_read_replica_readiness(
-            &primary_store,
-            &primary_router,
-            &replica_store,
+        let readiness = check_capsule_read_replica_readiness(
+            &primary,
             &replica_router,
             ReadinessCheckOptions::deep(),
         )
         .await
-        .expect("readiness check");
+        .unwrap();
 
         assert!(!readiness.ready);
-        assert_eq!(readiness.primary_generation, 9);
-        assert_eq!(readiness.replica_generation, Some(9));
         assert_eq!(
             readiness.reason.as_deref(),
-            Some("primary has uncompacted ref transactions")
+            Some("replica capsule view differs from primary")
         );
+    }
+
+    #[tokio::test]
+    async fn capsule_readiness_rejects_wrong_external_object_size() {
+        let (store, router) = memory_store_with_layout("org/repo");
+        let hash = "1".repeat(64);
+        let mut catalog = PointerCatalog::new();
+        catalog
+            .insert_xorb(
+                hash.clone(),
+                XorbCatalogEntry::new(4, "2".repeat(64), Vec::new()),
+            )
+            .unwrap();
+        let hash = parse_merkle_hash(&hash, "xorb").unwrap();
+        store
+            .put(&router.xorb_path(&hash), Bytes::from_static(b"bad"))
+            .await
+            .unwrap();
+        let mut stats = ReadinessProbeStats::default();
+
+        let gap = capsule_pointer_object_gap(
+            &router,
+            &catalog,
+            &mut stats,
+            ReadinessCheckOptions::deep(),
+        )
+        .await
+        .unwrap();
+
+        assert!(gap.is_some_and(|reason| reason.contains("size mismatch")));
+        assert_eq!(stats.object_read_count, 1);
+    }
+
+    #[tokio::test]
+    async fn capsule_readiness_rejects_same_size_corrupt_xorb() {
+        let (store, router) = memory_store_with_layout("org/repo");
+        let hash = "1".repeat(64);
+        let mut catalog = PointerCatalog::new();
+        catalog
+            .insert_xorb(
+                hash.clone(),
+                XorbCatalogEntry::new(4, "2".repeat(64), Vec::new()),
+            )
+            .unwrap();
+        let hash = parse_merkle_hash(&hash, "xorb").unwrap();
+        store
+            .put(&router.xorb_path(&hash), Bytes::from_static(b"bad!"))
+            .await
+            .unwrap();
+        let mut stats = ReadinessProbeStats::default();
+
+        let gap = capsule_pointer_object_gap(
+            &router,
+            &catalog,
+            &mut stats,
+            ReadinessCheckOptions::deep(),
+        )
+        .await
+        .unwrap();
+
+        assert!(gap.is_some_and(|reason| reason.contains("body hash mismatch")));
+        assert_eq!(stats.object_read_count, 1);
+    }
+
+    #[tokio::test]
+    async fn capsule_readiness_verifies_complete_pointer_closure() {
+        let (store, router) = memory_store_with_layout("org/repo");
+        let chunk = Chunk::new(Bytes::from_static(b"replica readiness"));
+        let mut builder = XorbBuilder::new();
+        builder.push(&chunk, RunId(1)).unwrap();
+        let xorb = builder.finalize().unwrap().pop().unwrap();
+        let mut writer = ShardWriter::new();
+        writer
+            .add_xorb(Arc::new(MDBXorbInfo {
+                metadata: XorbChunkSequenceHeader::new(xorb.hash, 1usize, chunk.data.len()),
+                chunks: vec![XorbChunkSequenceEntry::new(
+                    chunk.hash,
+                    chunk.data.len(),
+                    0u32,
+                )],
+            }))
+            .unwrap();
+        let (shard_body, shard_hash) = writer.finalize().unwrap();
+        store
+            .put(&router.xorb_path(&xorb.hash), xorb.bytes.clone())
+            .await
+            .unwrap();
+        store
+            .put(
+                &router.shard_path(&shard_hash),
+                Bytes::from(shard_body.clone()),
+            )
+            .await
+            .unwrap();
+        let mut catalog = PointerCatalog::new();
+        catalog
+            .insert_xorb(
+                xorb.hash.hex(),
+                XorbCatalogEntry::new(
+                    xorb.bytes.len() as u64,
+                    blake3::hash(&xorb.bytes).to_hex().to_string(),
+                    vec![XorbChunkEntry::new(
+                        chunk.hash.hex(),
+                        chunk.data.len() as u32,
+                    )],
+                ),
+            )
+            .unwrap();
+        catalog
+            .insert_shard(
+                shard_hash.hex(),
+                ShardCatalogEntry::new(shard_body.len() as u64, vec![xorb.hash.hex()]),
+            )
+            .unwrap();
+        let mut stats = ReadinessProbeStats::default();
+
+        let gap = capsule_pointer_object_gap(
+            &router,
+            &catalog,
+            &mut stats,
+            ReadinessCheckOptions::deep(),
+        )
+        .await
+        .unwrap();
+
+        assert!(gap.is_none());
+        assert_eq!(stats.object_read_count, 2);
+    }
+
+    #[tokio::test]
+    async fn capsule_readiness_rejects_hash_matching_invalid_shard_bytes() {
+        let (store, router) = memory_store_with_layout("org/repo");
+        let body = Bytes::from_static(b"not a shard");
+        let mut hashed = crab_xet::hash::HashedWrite::new(std::io::sink());
+        hashed.write_all(&body).unwrap();
+        let hash = hashed.hash();
+        store
+            .put(&router.shard_path(&hash), body.clone())
+            .await
+            .unwrap();
+        let mut catalog = PointerCatalog::new();
+        catalog
+            .insert_shard(
+                hash.hex(),
+                ShardCatalogEntry::new(body.len() as u64, Vec::new()),
+            )
+            .unwrap();
+        let mut stats = ReadinessProbeStats::default();
+
+        let error = capsule_pointer_object_gap(
+            &router,
+            &catalog,
+            &mut stats,
+            ReadinessCheckOptions::deep(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, ReadError::Xet(_)));
+        assert_eq!(stats.object_read_count, 1);
     }
 
     #[test]
@@ -1177,28 +1341,5 @@ mod tests {
         let store = Store::new(Arc::new(InMemory::new()));
         let router = StoreLayout::new(store.clone(), repo_prefix.to_owned());
         (store, router)
-    }
-
-    fn test_manifest(generation: u64) -> Manifest {
-        let mut manifest = Manifest::default_for_repo("refs/heads/main");
-        manifest.generation = generation;
-        manifest.seal_git_validation();
-        manifest
-    }
-
-    async fn write_test_manifest(store: &Store, router: &StoreLayout<Store>, manifest: &Manifest) {
-        create_manifest(store, router, manifest)
-            .await
-            .expect("write test manifest");
-    }
-
-    fn test_pack_entry(pack_id: &str) -> PackManifestEntry {
-        PackManifestEntry {
-            pack_id: pack_id.to_owned(),
-            size: 42,
-            content_hash: pack_id.to_owned(),
-            ref_tips: vec!["b".repeat(40)],
-            object_count: 1,
-        }
     }
 }
