@@ -2283,11 +2283,16 @@ mod tests {
         let base = initialize(&router, &"1".repeat(64), "refs/heads/main")
             .await
             .unwrap();
-        let transaction = transaction(&base, None, &"2".repeat(40));
-        let transaction_id = transaction.id().unwrap();
-        let base = publish(&router, base, &transaction, &capsule(&transaction))
-            .await
-            .unwrap();
+        let first_transaction = transaction(&base, None, &"2".repeat(40));
+        let transaction_id = first_transaction.id().unwrap();
+        let base = publish(
+            &router,
+            base,
+            &first_transaction,
+            &capsule(&first_transaction),
+        )
+        .await
+        .unwrap();
         let head = read_ref_head(&router, base.record().root(), "refs/heads/main")
             .await
             .unwrap();
@@ -2346,6 +2351,52 @@ mod tests {
             })
             .count();
         assert_eq!(puts, 3, "checkpoint, history, and root are the only writes");
+
+        let second = transaction(&published, Some(&"2".repeat(40)), &"4".repeat(40));
+        let second_id = second.id().unwrap();
+        let base = publish(&router, published, &second, &capsule(&second))
+            .await
+            .unwrap();
+        let head = read_ref_head(&router, base.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
+        let checkpoint = Checkpoint::build(
+            base.record().root().generation(),
+            base.record().digest(),
+            vec![
+                CapsuleGitPack::new(
+                    Bytes::from_static(b"PACK2"),
+                    Bytes::from_static(b"index2"),
+                    Bytes::from_static(b"reverse2"),
+                    Bytes::from_static(b"locator2"),
+                    "5".repeat(40),
+                    1,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let published = publish_ref_checkpoint(
+            &router,
+            base,
+            &checkpoint,
+            std::collections::BTreeMap::from([("refs/heads/main".to_owned(), "4".repeat(40))]),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::from([("refs/heads/main".to_owned(), second_id)]),
+            head.visible.frontier().to_vec(),
+        )
+        .await
+        .unwrap();
+        let history = published.record().root().history().unwrap();
+        let segments =
+            crab_metadata::capsule_protocol::load_history_chain(&router, history, 8, 1024 * 1024)
+                .await
+                .unwrap();
+
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].checkpoint().covered_generation(), 1);
+        assert_eq!(segments[1].checkpoint().covered_generation(), 0);
+        assert_eq!(segments[0].previous().unwrap().hash(), segments[1].hash());
     }
 
     #[tokio::test]
