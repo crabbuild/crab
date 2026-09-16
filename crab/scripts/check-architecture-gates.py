@@ -1139,7 +1139,7 @@ GIT_TAG_PEEL_FORBIDDEN_PATTERNS = (
 STORAGE_PACK_LAYOUT_REQUIRED_DELEGATIONS = {
     "crab/src/git/push.rs": ("pack_path(", "pack_metadata_path("),
     "crab/src/git/remote_helper.rs": ("pack_path(", "pack_index_path("),
-    "crab/src/read/mod.rs": ("pack_path(",),
+    "crab/src/read/mod.rs": ("crab_read::capsule_protocol::install_git_packs(",),
     "crab/src/cmd/gc/mod.rs": ("pack_path(", "pack_metadata_path("),
     "crab/src/cmd/fsck_store.rs": (
         "repo_pack_path(",
