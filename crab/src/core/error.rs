@@ -1102,6 +1102,8 @@ impl From<crab_read::ReadError> for CrabError {
             crab_read::ReadError::Storage(source) => Self::from(source),
             crab_read::ReadError::Metadata(source) => Self::from(source),
             crab_read::ReadError::RemoteGit(source) => Self::Protocol(source.to_string()),
+            crab_read::ReadError::GitWalk(source) => Self::from(source),
+            crab_read::ReadError::Lfs(source) => Self::from(source),
             crab_read::ReadError::Xet(source) => Self::from(source),
             crab_read::ReadError::Io(source) => Self::Io(source),
             crab_read::ReadError::Configuration { key, origin } => {
@@ -4092,6 +4094,24 @@ mod tests {
             maximum: 1024,
         });
         assert_eq!(error.code(), "CRAB-E0060");
+    }
+
+    #[test]
+    fn dependency_verifier_errors_keep_cli_semantics() {
+        let cancelled = CrabError::from(crab_read::ReadError::GitWalk(
+            crab_git::walk::WalkError::Cancelled,
+        ));
+        assert!(matches!(cancelled, CrabError::Cancelled));
+
+        let missing = CrabError::from(crab_read::ReadError::Lfs(
+            crab_lfs::LfsError::ObjectMissing {
+                oid: "a".repeat(64),
+            },
+        ));
+        assert!(matches!(
+            missing,
+            CrabError::LfsObjectMissing { oid } if oid == "a".repeat(64)
+        ));
     }
 
     #[test]
