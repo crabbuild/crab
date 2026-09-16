@@ -10,6 +10,9 @@ pub enum AuthServerError {
     #[error("{0}")]
     Read(#[source] Box<crab_read::ReadError>),
 
+    #[error("{0}")]
+    Write(#[source] Box<crab_write::WriteError>),
+
     #[error("authentication failed for {path}")]
     AuthFailed { path: String },
 
@@ -247,6 +250,18 @@ impl From<crab_read::ReadError> for AuthServerError {
                 example_chunk_index,
             },
             other => Self::Read(Box::new(other)),
+        }
+    }
+}
+
+impl From<crab_write::WriteError> for AuthServerError {
+    fn from(error: crab_write::WriteError) -> Self {
+        match error {
+            crab_write::WriteError::RefChanged { ref_name, path } => Self::CasConflict {
+                path: format!("{path} ({ref_name})"),
+                expected_etag: None,
+            },
+            other => Self::Write(Box::new(other)),
         }
     }
 }

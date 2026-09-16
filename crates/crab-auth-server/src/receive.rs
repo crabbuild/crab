@@ -643,7 +643,14 @@ async fn promote_pack_metadata_union(
 /// Callers must first run [`validate_staged_object_shapes`]. Staged bytes are
 /// re-read and revalidated immediately before the canonical write.
 pub async fn promote_staged_objects(store: &Store, plan: &ProtectedPushPlan) -> Result<()> {
-    for object in &plan.staged_objects {
+    promote_staged_writes(store, &plan.staged_objects).await
+}
+
+pub(super) async fn promote_staged_writes(
+    store: &Store,
+    staged_objects: &[StagedWrite],
+) -> Result<()> {
+    for object in staged_objects {
         let canonical = ObjectPath::from(object.canonical_key.clone());
         let bytes = read_verified_staged_object(store, object).await?;
         if is_pack_metadata_key(&object.canonical_key) {

@@ -2054,6 +2054,7 @@ dependencies = [
  "crab-staging",
  "crab-storage",
  "crab-types",
+ "crab-write",
  "crab-xet",
  "gix-hash",
  "gix-object",

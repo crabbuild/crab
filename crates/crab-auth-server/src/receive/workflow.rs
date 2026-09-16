@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use super::GitVisibilityPublication;
-use super::capsule::verify_capsule_candidate;
+use super::capsule::{commit_capsule_candidate, verify_capsule_candidate};
 use super::git_workspace::verify_source_push;
 use super::session::ProtectedReceivePlan;
 use super::{
@@ -222,6 +222,47 @@ async fn read_verified_receive_evidence(
     Ok(evidence.materialized)
 }
 
+async fn read_verified_capsule_receive_evidence(
+    ctx: &ReceiveContext,
+    expected_digest: &str,
+    plan: &super::ProtectedCapsulePushPlan,
+    prepare: &super::PushPrepareRecord,
+) -> Result<VerifiedCapsuleReceiveEvidence> {
+    super::validate_hash_component(expected_digest, "verified receive digest")?;
+    let body = ctx.read_verified_receive().await?;
+    if blake3::hash(&body).to_hex().as_str() != expected_digest {
+        return Err(conflict(
+            "verified capsule receive evidence changed after authorization",
+        ));
+    }
+    let evidence: VerifiedCapsuleReceiveEvidence =
+        serde_json::from_slice(&body).map_err(|error| {
+            invalid(format!(
+                "invalid verified capsule receive evidence: {error}"
+            ))
+        })?;
+    let source_plan_digest = blake3::hash(
+        &serde_json::to_vec(plan)
+            .map_err(|error| invalid(format!("capsule push-plan serialize failed: {error}")))?,
+    )
+    .to_hex()
+    .to_string();
+    if evidence.schema_version != 2
+        || evidence.repo_prefix != ctx.repo_prefix()
+        || evidence.push_id != ctx.push_id()
+        || evidence.source_plan_digest != source_plan_digest
+        || evidence.prepare_digest != prepare_digest(prepare)?
+        || evidence.base_root_digest != plan.base_root_digest
+        || evidence.transaction_id != plan.transaction_id
+        || evidence.run_hash != plan.run_hash
+    {
+        return Err(conflict(
+            "capsule source state changed after protected verification",
+        ));
+    }
+    Ok(evidence)
+}
+
 /// Prepares a protected-push receive session after view authorization.
 pub async fn prepare_receive(
     ctx: &ReceiveContext,
@@ -330,7 +371,41 @@ async fn commit_receive_inner(
     active_active_json: Option<&str>,
 ) -> Result<PushFinalizeResponse> {
     let active_active = parse_active_active_receive_config(active_active_json, repo_url)?;
-    let plan = ctx.read_plan().await?;
+    match ctx.read_plan_document().await? {
+        ProtectedReceivePlan::Manifest(plan) => {
+            commit_manifest_receive(ctx, *plan, plan_digest, active_active.as_ref()).await
+        }
+        ProtectedReceivePlan::Capsule(plan) => {
+            commit_capsule_receive(ctx, plan, plan_digest, active_active.as_ref()).await
+        }
+    }
+}
+
+async fn commit_capsule_receive(
+    ctx: &ReceiveContext,
+    plan: super::ProtectedCapsulePushPlan,
+    plan_digest: &str,
+    active_active: Option<&super::ActiveActiveReceiveConfig>,
+) -> Result<PushFinalizeResponse> {
+    super::validate_protected_capsule_plan_shape(&plan, ctx.repo_prefix(), ctx.push_id())?;
+    if active_active.is_some() {
+        return Err(invalid(
+            "protocol-v2 protected active-active finalize is not implemented",
+        ));
+    }
+    let prepare = ctx.read_prepare_record().await?;
+    read_verified_capsule_receive_evidence(ctx, plan_digest, &plan, &prepare).await?;
+    let cancel = CancellationToken::new();
+    commit_capsule_candidate(ctx, &plan, &cancel).await?;
+    Ok(PushFinalizeResponse::updated(plan.ref_updates))
+}
+
+async fn commit_manifest_receive(
+    ctx: &ReceiveContext,
+    plan: super::ProtectedPushPlan,
+    plan_digest: &str,
+    active_active: Option<&super::ActiveActiveReceiveConfig>,
+) -> Result<PushFinalizeResponse> {
     validate_push_plan_shape(&plan, ctx.repo_prefix(), ctx.push_id())?;
     if plan.mirror_plan_id.is_some() && active_active.is_some() {
         return Err(invalid(
@@ -418,7 +493,7 @@ async fn commit_receive_inner(
         ctx.router(),
         ReceiveManifestCommit {
             repo_prefix: ctx.repo_prefix(),
-            active_active: active_active.as_ref(),
+            active_active,
             plan: &plan,
             materialized: &materialized,
             manifest: &manifest,
@@ -1067,7 +1142,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verify_receive_accepts_exact_capsule_candidate() -> Result<()> {
+    async fn protected_capsule_receive_verifies_commits_and_retries() -> Result<()> {
         let ctx = capsule_context().await?;
         let source = tempfile::tempdir()?;
         run_git(["init", "--initial-branch=main"], Some(source.path()))?;
@@ -1119,7 +1194,7 @@ mod tests {
         object_ids.dedup();
         let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
             update.ref_name.clone(),
-            GitVisibilityEdit::from_replacement_objects(None, tip, object_ids),
+            GitVisibilityEdit::from_replacement_objects(None, tip.clone(), object_ids),
         )]))?;
         let capsule = Capsule::build(
             &transaction,
@@ -1152,6 +1227,26 @@ mod tests {
         assert_eq!(verified.ref_updates, plan.ref_updates);
         assert_eq!(verified.verified_changed_paths, vec!["tracked.txt"]);
         assert_eq!(verified.verified_staged_bytes, plan.run_size);
+        let response =
+            commit_receive(&ctx, "crab://bucket/org/repo", &verified.plan_digest, None).await?;
+        assert_eq!(response.ref_updates, plan.ref_updates);
+        let view = crab_read::capsule_protocol::open_view(
+            ctx.router(),
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: u64::MAX,
+                max_frontier_bytes: u64::MAX,
+            },
+        )
+        .await?;
+        assert_eq!(view.refs().get("refs/heads/main"), Some(&tip));
+        assert_eq!(
+            view.visible_ref_transactions().get("refs/heads/main"),
+            Some(&plan.transaction_id)
+        );
+
+        let retried =
+            commit_receive(&ctx, "crab://bucket/org/repo", &verified.plan_digest, None).await?;
+        assert_eq!(retried.ref_updates, plan.ref_updates);
         Ok(())
     }
 

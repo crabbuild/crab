@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use super::git_workspace::verify_capsule_git_candidate;
 use super::{
     ProtectedCapsulePushPlan, PushPrepareRecord, ReceiveContext, conflict, invalid,
-    read_verified_staged_object, strict_xorb_references_from_shard,
+    promote_staged_writes, read_verified_staged_object, strict_xorb_references_from_shard,
     validate_protected_capsule_plan_shape, validate_staged_xorb,
 };
 use crate::error::Result;
@@ -25,6 +25,90 @@ pub(super) struct VerifiedCapsuleCandidate {
     pub prepare: PushPrepareRecord,
     pub changed_paths: Vec<String>,
     pub staged_bytes: u64,
+}
+
+pub(super) async fn commit_capsule_candidate(
+    ctx: &ReceiveContext,
+    plan: &ProtectedCapsulePushPlan,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    let view = open_candidate_view(ctx).await?;
+    if capsule_is_visible(&view, plan) {
+        return Ok(());
+    }
+
+    verify_capsule_candidate(ctx, plan).await?;
+    promote_staged_writes(ctx.store(), &plan.staged_objects).await?;
+    let run = read_candidate_run(ctx, plan).await?;
+    let capsule = run
+        .capsules()
+        .first()
+        .cloned()
+        .ok_or_else(|| invalid("protected capsule run is empty"))?;
+    let transaction = capsule.transaction()?;
+    let ref_names = transaction
+        .edits()
+        .iter()
+        .map(|edit| edit.ref_name().to_owned())
+        .collect::<Vec<_>>();
+    let changes_namespace = transaction
+        .edits()
+        .iter()
+        .any(|edit| edit.expected_old().is_none() != edit.new_oid().is_none());
+    let base = view.root_snapshot().clone();
+    if changes_namespace {
+        let layout = ctx.router().clone();
+        return crab_write::with_ref_namespaces(
+            ctx.store(),
+            ctx.router(),
+            &ref_names,
+            crab_coordination::DEFAULT_PUSH_LOCK_TTL,
+            cancel,
+            |scoped| async move {
+                if scoped.is_cancelled() {
+                    return Err(crate::error::AuthServerError::from(
+                        crab_write::WriteError::Cancelled,
+                    ));
+                }
+                crab_write::capsule_protocol::validate_ref_namespace(
+                    &layout,
+                    base.record().root(),
+                    transaction.edits(),
+                )
+                .await?;
+                crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+                    .await?;
+                Ok(())
+            },
+        )
+        .await;
+    }
+    crab_write::capsule_protocol::publish(ctx.router(), base, &transaction, &capsule).await?;
+    Ok(())
+}
+
+async fn open_candidate_view(
+    ctx: &ReceiveContext,
+) -> Result<crab_read::capsule_protocol::CapsuleRepositoryView> {
+    crab_read::capsule_protocol::open_view(
+        ctx.router(),
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: MAX_PROTECTED_CAPSULE_BYTES,
+            max_frontier_bytes: MAX_PROTECTED_CAPSULE_BYTES,
+        },
+    )
+    .await
+    .map_err(Into::into)
+}
+
+fn capsule_is_visible(
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    plan: &ProtectedCapsulePushPlan,
+) -> bool {
+    plan.ref_updates.iter().all(|update| {
+        view.refs().get(&update.ref_name) == Some(&update.new_oid)
+            && view.visible_ref_transactions().get(&update.ref_name) == Some(&plan.transaction_id)
+    })
 }
 
 pub(super) async fn verify_capsule_candidate(
