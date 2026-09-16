@@ -152,7 +152,10 @@ compact v1 and references at most 64 pages of 96 segment descriptors. Its binary
 `CRBDIR01` radix tree has 256-entry leaves/branches, hashes every node and binds
 the live-page count and rolling SQLite checksum. Cold open reads bounded root
 metadata and one directory root; page bodies and descendant directory nodes fault
-on demand. Writable activation walks the authenticated directory once and streams
+on demand. Local WAL capture sends one page at a time through its compressor,
+spools the codec page index, syncs and atomically renames the cut, then validates
+its format and BLAKE3 through bounded filesystem reads. Writable activation
+walks the authenticated directory once and streams
 one big-endian eight-byte checksum per database page to a fresh local sidecar in
 64 KiB chunks. Capture clones only its pending overlay, updates the rolling
 checksum from changed pages and a truncated suffix, then applies positional

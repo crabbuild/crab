@@ -750,7 +750,9 @@ impl Worker for std::thread::JoinHandle<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    #[cfg(feature = "replica")]
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn disk_budget_reservations_resize_and_release_exact_bytes() {

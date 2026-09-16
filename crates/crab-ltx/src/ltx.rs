@@ -288,12 +288,25 @@ pub fn decode_file(bytes: &[u8]) -> Result<DecodedFile> {
     decode_file_inner(bytes, false).map(|(file, _)| file)
 }
 
+pub(crate) fn inspect_reader(reader: impl std::io::Read) -> Result<(DecodedFile, u64, [u8; 32])> {
+    let (file, _, size, digest) = decode_reader_inner(reader, false)?;
+    Ok((file, size, digest))
+}
+
 pub(crate) fn decode_file_with_pages(bytes: &[u8]) -> Result<(DecodedFile, DecodedPages)> {
     decode_file_inner(bytes, true)
 }
 
 fn decode_file_inner(bytes: &[u8], retain_pages: bool) -> Result<(DecodedFile, DecodedPages)> {
-    let mut decoder = crate::codec::Decoder::new(std::io::Cursor::new(bytes));
+    let (file, pages, _, _) = decode_reader_inner(std::io::Cursor::new(bytes), retain_pages)?;
+    Ok((file, pages))
+}
+
+fn decode_reader_inner(
+    reader: impl std::io::Read,
+    retain_pages: bool,
+) -> Result<(DecodedFile, DecodedPages, u64, [u8; 32])> {
+    let mut decoder = crate::codec::Decoder::new(reader);
     decoder.decode_header()?;
     let header = decoder.header;
     let mut pages = Vec::new();
@@ -306,12 +319,16 @@ fn decode_file_inner(bytes: &[u8], retain_pages: bool) -> Result<(DecodedFile, D
     }
     decoder.close()?;
 
+    let (size, digest) = decoder.artifact()?;
+
     Ok((
         DecodedFile {
             header,
             trailer: decoder.trailer,
         },
         pages,
+        size,
+        digest,
     ))
 }
 

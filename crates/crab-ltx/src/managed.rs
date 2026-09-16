@@ -452,9 +452,14 @@ impl ManagedDb {
         if after.txid.0 > before.txid.0 {
             for txid in before.txid.0 + 1..=after.txid.0 {
                 let path = PathBuf::from(self.db.ltx_path(0, Txid(txid), Txid(txid)));
-                let bytes = self.host.read(&path, self.limits.max_capture_bytes)?;
-                let file = ltx::decode_file(&bytes)?;
-                let info = SegmentInfo::from_decoded(&bytes, &file);
+                let file = crate::LtxHost {
+                    facilities: self.host.clone(),
+                    max_database_bytes: self.limits.max_database_bytes,
+                    max_file_bytes: self.limits.max_capture_bytes,
+                }
+                .open(&path)?;
+                let (decoded, size, digest) = ltx::inspect_reader(file)?;
+                let info = SegmentInfo::from_inspected(&decoded, size, digest);
                 self.account_capture(&info)?;
                 let segment = LocalSegment::new(path, info);
                 #[cfg(feature = "replica")]

@@ -12,13 +12,18 @@ use std::{
     collections::BTreeSet,
     io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 #[derive(Clone, Default)]
 struct Faults {
     failure: Arc<Mutex<Option<&'static str>>>,
     calls: Arc<Mutex<BTreeSet<&'static str>>>,
+    largest_read: Arc<AtomicUsize>,
+    largest_write: Arc<AtomicUsize>,
 }
 
 impl Faults {
@@ -37,10 +42,16 @@ impl Faults {
 struct File {
     inner: Box<dyn FileIo>,
     faults: Faults,
+    ltx: bool,
 }
 
 impl FileIo for File {
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if self.ltx {
+            self.faults
+                .largest_write
+                .fetch_max(bytes.len(), Ordering::Relaxed);
+        }
         if let Err(error) = self.faults.check("write_all") {
             self.inner.write_all(&bytes[..bytes.len() / 2])?;
             return Err(error);
@@ -48,6 +59,11 @@ impl FileIo for File {
         self.inner.write_all(bytes)
     }
     fn write_all_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()> {
+        if self.ltx {
+            self.faults
+                .largest_write
+                .fetch_max(bytes.len(), Ordering::Relaxed);
+        }
         if let Err(error) = self.faults.check("write_all_at") {
             self.inner.write_all_at(offset, &bytes[..bytes.len() / 2])?;
             return Err(error);
@@ -55,6 +71,9 @@ impl FileIo for File {
         self.inner.write_all_at(offset, bytes)
     }
     fn read_exact_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        if self.ltx {
+            self.faults.largest_read.fetch_max(len, Ordering::Relaxed);
+        }
         self.faults.check("read_exact_at")?;
         self.inner.read_exact_at(offset, len)
     }
@@ -86,6 +105,7 @@ impl FileSystem for Faults {
         Ok(Box::new(File {
             inner: DirectFileSystem.open(path)?,
             faults: self.clone(),
+            ltx: path.to_string_lossy().contains(".ltx"),
         }))
     }
     fn open_rw(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
@@ -93,6 +113,7 @@ impl FileSystem for Faults {
         Ok(Box::new(File {
             inner: DirectFileSystem.open_rw(path)?,
             faults: self.clone(),
+            ltx: path.to_string_lossy().contains(".ltx"),
         }))
     }
     fn create(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
@@ -100,6 +121,7 @@ impl FileSystem for Faults {
         Ok(Box::new(File {
             inner: DirectFileSystem.create(path)?,
             faults: self.clone(),
+            ltx: path.to_string_lossy().contains(".ltx"),
         }))
     }
     filesystem_operation!(file_len(path: &Path) -> u64);
@@ -136,6 +158,30 @@ fn injected<T>(result: crab_ltx::Result<T>) {
     assert!(
         matches!(result, Err(CrabError::Io(error)) if error.kind() == io::ErrorKind::StorageFull)
     );
+}
+
+#[test]
+fn capture_and_inspection_bound_each_filesystem_transfer() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let faults = Arc::new(Faults::default());
+    let host = Host::default().with_filesystem(faults.clone());
+    let mut writer = ManagedDb::open_with_host(
+        &directory.path().join("streamed.sqlite"),
+        Limits::default(),
+        host,
+    )
+    .unwrap();
+    writer
+        .transaction(|tx| {
+            tx.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES(randomblob(2000000))")
+        })
+        .unwrap();
+
+    let batch = writer.capture().unwrap();
+
+    assert!(batch.segments[0].info().size_bytes > 1_000_000);
+    assert!(faults.largest_write.load(Ordering::Relaxed) < 128 * 1024);
+    assert!(faults.largest_read.load(Ordering::Relaxed) < 128 * 1024);
 }
 
 #[cfg(feature = "replica")]

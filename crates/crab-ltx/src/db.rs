@@ -592,26 +592,6 @@ impl WalImage {
     }
 }
 
-fn write_file_atomic(
-    host: &crate::LtxHost,
-    tmp_path: &str,
-    final_path: &str,
-    data: &[u8],
-) -> Result<()> {
-    let result = (|| -> Result<()> {
-        let mut file = host.create(Path::new(tmp_path))?;
-        file.write_all(data)?;
-        file.sync_all()?;
-        drop(file);
-        host.rename(Path::new(tmp_path), Path::new(final_path))?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = host.remove_file(Path::new(tmp_path));
-    }
-    result
-}
-
 #[inline]
 fn be_u32(b: &[u8]) -> u32 {
     u32::from_be_bytes([b[0], b[1], b[2], b[3]])

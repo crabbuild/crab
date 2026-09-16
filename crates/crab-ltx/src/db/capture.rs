@@ -186,18 +186,9 @@ impl Db {
 
         let (rd_salt1, rd_salt2) = rd.salt();
 
-        // Build the page set for the encoder.
+        // Build the page stream for the encoder.
         self.host
             .check_database_size(u64::from(commit) * u64::from(self.page_size))?;
-        let pages: Vec<(u32, Vec<u8>)> = if info.snapshotting {
-            self.collect_snapshot_pages(&wal, &page_map, commit)?
-        } else {
-            self.collect_wal_pages(&wal, &page_map, info.prev_commit, commit)?
-        };
-
-        let mut checksums = self.checksums.clone();
-        checksums.apply(self.page_size, commit, &pages, self.host.max_database_bytes)?;
-        let post_checksum = checksums.checksum();
         let header = ltx::Header {
             version: ltx::VERSION,
             flags: 0,
@@ -214,11 +205,9 @@ impl Db {
             node_id: 0,
         };
 
-        // Emit a checksum-bearing cut; advance the page index only after fsync.
-        let encoded = ltx::encode_file(&header, &pages, post_checksum)?;
-
         // Atomic tmp → fsync → rename (db.go:1609-1685).
         let tmp_filename = format!("{filename}.tmp");
+        let index_filename = format!("{filename}.index.tmp");
         let parent = Path::new(&tmp_filename).parent().map(Path::to_path_buf);
         if !self.l0_dir_ready {
             if let Some(parent) = &parent {
@@ -226,19 +215,32 @@ impl Db {
             }
             self.l0_dir_ready = true;
         }
-        // On rename failure, clear the L0 cache + invalidate pos
-        // (db.go:1680-1684); the error path below does that. A directory
-        // that vanished under a ready flag is recreated once and the cut
-        // retried, so the flag saves a `mkdir` per sync without trusting it.
-        match write_file_atomic(&self.host, &tmp_filename, &filename, &encoded) {
+        // A directory that vanished under a ready flag is recreated once and
+        // the complete cut is retried. The candidate checksum index remains
+        // isolated until the output has been synced and renamed.
+        let write = || {
+            self.write_streamed_cut(
+                &tmp_filename,
+                &index_filename,
+                &filename,
+                header,
+                &wal,
+                &page_map,
+                info.snapshotting,
+                info.prev_commit,
+                commit,
+            )
+        };
+        let mut checksums = match write() {
             Err(CrabError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 if let Some(parent) = &parent {
                     self.host.create_dir_all(parent)?;
                 }
-                write_file_atomic(&self.host, &tmp_filename, &filename, &encoded)?
+                write()?
             }
             other => other?,
         };
+        let post_checksum = checksums.checksum();
         // The checksum candidate remains isolated until the cut is durable. A
         // failed local index update fences the owning ManagedDb, so partially
         // updated ephemeral state can never authorize another capture.
@@ -284,13 +286,85 @@ impl Db {
         Ok(true)
     }
 
-    pub(super) fn collect_wal_pages(
+    #[expect(clippy::too_many_arguments)]
+    fn write_streamed_cut(
         &self,
+        tmp_filename: &str,
+        index_filename: &str,
+        filename: &str,
+        header: ltx::Header,
         wal: &WalImage,
+        page_map: &HashMap<u32, i64>,
+        snapshotting: bool,
+        prev_commit: u32,
+        commit: u32,
+    ) -> Result<crate::pages::PageChecksums> {
+        let result = (|| -> Result<crate::pages::PageChecksums> {
+            let output = self.host.create(Path::new(tmp_filename))?;
+            let index = self
+                .host
+                .facilities
+                .filesystem
+                .create(Path::new(index_filename))?;
+            drop(index);
+            let index = self
+                .host
+                .facilities
+                .filesystem
+                .open_rw(Path::new(index_filename))?;
+            let mut encoder = crate::codec::Encoder::new_block_spooled(output, index);
+            encoder.encode_header(header)?;
+
+            let mut checksums = self.checksums.clone();
+            if snapshotting {
+                let lock = lock_pgno(self.page_size);
+                let pages = (1..=commit).filter(|page| *page != lock).map(|pgno| {
+                    let data = self.capture_page(wal, page_map, pgno)?;
+                    encoder.encode_page(ltx::PageHeader { pgno, flags: 0 }, &data)?;
+                    Ok((pgno, data))
+                });
+                checksums.apply_iter(
+                    self.page_size,
+                    commit,
+                    pages,
+                    self.host.max_database_bytes,
+                )?;
+            } else {
+                let pgnos = self.wal_page_numbers(page_map, prev_commit, commit);
+                let pages = pgnos.into_iter().map(|pgno| {
+                    let data = self.capture_page(wal, page_map, pgno)?;
+                    encoder.encode_page(ltx::PageHeader { pgno, flags: 0 }, &data)?;
+                    Ok((pgno, data))
+                });
+                checksums.apply_iter(
+                    self.page_size,
+                    commit,
+                    pages,
+                    self.host.max_database_bytes,
+                )?;
+            }
+            encoder.close(checksums.checksum())?;
+            let mut output = encoder.into_writer();
+            output.sync_all()?;
+            drop(output);
+            self.host.remove_file(Path::new(index_filename))?;
+            self.host
+                .rename(Path::new(tmp_filename), Path::new(filename))?;
+            Ok(checksums)
+        })();
+        if result.is_err() {
+            let _ = self.host.remove_file(Path::new(tmp_filename));
+            let _ = self.host.remove_file(Path::new(index_filename));
+        }
+        result
+    }
+
+    fn wal_page_numbers(
+        &self,
         page_map: &HashMap<u32, i64>,
         prev_commit: u32,
         commit: u32,
-    ) -> Result<Vec<(u32, Vec<u8>)>> {
+    ) -> Vec<u32> {
         let mut pgnos: Vec<u32> = page_map.keys().copied().collect();
         let lock = lock_pgno(self.page_size);
         if commit > prev_commit {
@@ -301,16 +375,19 @@ impl Db {
             }
         }
         pgnos.sort_unstable();
+        pgnos
+    }
 
-        let mut out = Vec::with_capacity(pgnos.len());
-        for pgno in pgnos {
-            let data = match page_map.get(&pgno) {
-                Some(&offset) => wal.page(offset, self.page_size)?,
-                None => self.read_db_page(pgno)?,
-            };
-            out.push((pgno, data));
+    fn capture_page(
+        &self,
+        wal: &WalImage,
+        page_map: &HashMap<u32, i64>,
+        pgno: u32,
+    ) -> Result<Vec<u8>> {
+        match page_map.get(&pgno) {
+            Some(&offset) => wal.page(offset, self.page_size),
+            None => self.read_db_page(pgno),
         }
-        Ok(out)
     }
 
     pub(super) fn collect_snapshot_pages(
@@ -322,10 +399,7 @@ impl Db {
         let lock = lock_pgno(self.page_size);
         let mut out = Vec::with_capacity(commit as usize);
         for pgno in (1..=commit).filter(|pgno| *pgno != lock) {
-            let data = match page_map.get(&pgno) {
-                Some(&offset) => wal.page(offset, self.page_size)?,
-                None => self.read_db_page(pgno)?,
-            };
+            let data = self.capture_page(wal, page_map, pgno)?;
             out.push((pgno, data));
         }
         Ok(out)
