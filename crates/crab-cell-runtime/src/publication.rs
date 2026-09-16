@@ -110,6 +110,51 @@ impl CellPublisher {
         }
     }
 
+    // Reconcile a lost activation CAS before exposing the restored handle.
+    pub(crate) async fn activate(&mut self) -> Result<()> {
+        let mut backoff = PublicationBackoff::default();
+        loop {
+            let successor = self.observed.value().activate()?;
+            match self
+                .authority
+                .transition(&self.observed, successor.clone(), Transition::Activate)
+                .await
+            {
+                Ok(activated) => {
+                    self.observed = activated;
+                    self.renew_at = std::time::Instant::now() + RENEW_INTERVAL;
+                    return Ok(());
+                }
+                Err(error) => {
+                    let current = loop {
+                        match self.authority.load(self.observed.value().cell).await {
+                            Ok(Some(current)) => break current,
+                            Ok(None) => return Err(Error::Fenced),
+                            Err(load_error) if retryable_publication_error(&load_error) => {
+                                backoff.wait(runtime_retry_hint(&load_error)).await;
+                            }
+                            Err(load_error) => return Err(load_error),
+                        }
+                    };
+                    if current.value().is_same_or_pure_renewal_of(&successor) {
+                        self.observed = current;
+                        self.renew_at = std::time::Instant::now() + RENEW_INTERVAL;
+                        return Ok(());
+                    }
+                    let still_owned = current
+                        .value()
+                        .is_same_or_pure_renewal_of(self.observed.value());
+                    if still_owned && retryable_publication_error(&error) {
+                        self.observed = current;
+                        backoff.wait(runtime_retry_hint(&error)).await;
+                        continue;
+                    }
+                    return Err(if still_owned { error } else { Error::Fenced });
+                }
+            }
+        }
+    }
+
     pub(crate) async fn prepare(
         &mut self,
         pending: &crate::PendingCommit,

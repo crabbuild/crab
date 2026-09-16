@@ -86,6 +86,7 @@ pub struct Control {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Transition {
     Renew,
+    Activate,
     Publish,
     Migrate,
     Release,
@@ -179,6 +180,22 @@ impl Control {
             .checked_add(1)
             .ok_or(Error::Control("progress overflow"))?;
         self.validate_transition(&next, Transition::Renew)?;
+        Ok(next)
+    }
+
+    // Recovery becomes externally serving only after the restored root is verified.
+    pub(crate) fn activate(&self) -> Result<Self> {
+        let mut next = self.clone();
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or(Error::Control("revision overflow"))?;
+        next.progress = next
+            .progress
+            .checked_add(1)
+            .ok_or(Error::Control("progress overflow"))?;
+        next.state = ControlState::Serving;
+        self.validate_transition(&next, Transition::Activate)?;
         Ok(next)
     }
 
@@ -312,6 +329,20 @@ impl Control {
                     || self.next_due_ms != next.next_due_ms
                 {
                     return Err(Error::Control("renew changed protected fields"));
+                }
+            }
+            Transition::Activate => {
+                if self.state != ControlState::Recovering
+                    || next.state != ControlState::Serving
+                    || self.epoch != next.epoch
+                    || self.owner != next.owner
+                    || self.root.is_none()
+                    || self.root != next.root
+                    || self.code != next.code
+                    || self.schema != next.schema
+                    || self.next_due_ms != next.next_due_ms
+                {
+                    return Err(Error::Control("invalid activation transition"));
                 }
             }
             Transition::Publish => {
@@ -662,6 +693,15 @@ mod tests {
         assert!(!skipped_progress.is_same_or_pure_renewal_of(&serving));
 
         let takeover = renewed.takeover(owner(5)).unwrap();
+
+        let activated = takeover.activate().unwrap();
+        assert_eq!(activated.state, ControlState::Serving);
+        assert_eq!(activated.root, takeover.root);
+        assert!(takeover.activate().is_ok());
+        assert!(activated.activate().is_err());
+
+        let rootless = initial();
+        assert!(rootless.activate().is_err());
 
         let mut corrupted_compaction = takeover.clone();
         corrupted_compaction.state = ControlState::Serving;

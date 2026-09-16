@@ -684,7 +684,7 @@ async fn idle_control_is_acquired_before_exact_root_restore() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(owned.value().state, ControlState::Recovering);
+    assert_eq!(owned.value().state, ControlState::Serving);
     assert_eq!(owned.value().epoch, 2);
     assert_eq!(owned.value().owner.as_ref().unwrap().session, session);
     restored.drain().await.unwrap();
@@ -747,6 +747,7 @@ async fn unchanged_dead_owner_is_taken_over_then_restored() {
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(owned.value().state, ControlState::Serving);
     assert_eq!(owned.value().epoch, 2);
     assert_eq!(owned.value().owner.as_ref().unwrap().session, session);
     restored.drain().await.unwrap();
@@ -1841,6 +1842,10 @@ async fn source_loss_takeover(store: Store, prefix: Path) {
         )
         .await
         .unwrap();
+    assert_eq!(
+        authority.load(cell).await.unwrap().unwrap().value().state,
+        ControlState::Serving
+    );
     assert_eq!(
         second
             .resolve(first_identity, first_digest, 21, 1_024)

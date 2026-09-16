@@ -987,24 +987,8 @@ fn handle_message(
                 let mut publisher = publisher;
                 let result = match activation {
                     Activation::Restored(activation) => {
-                        let RestoredActivation {
-                            database,
-                            destination,
-                            incarnation,
-                            schema,
-                            root,
-                            reservation,
-                        } = *activation;
-                        pool.activate_restored(
-                            cell,
-                            database,
-                            destination,
-                            incarnation,
-                            schema,
-                            root,
-                            reservation,
-                        )
-                        .await
+                        activate_restored_and_publish(cell, &pool, &mut publisher, *activation)
+                            .await
                     }
                     Activation::Bootstrap(activation) => {
                         bootstrap_and_publish(cell, &pool, &mut publisher, *activation).await
@@ -1162,6 +1146,39 @@ fn handle_message(
             });
         }
     }
+}
+
+async fn activate_restored_and_publish(
+    cell: CellId,
+    pool: &SqlWorkerPool,
+    publisher: &mut CellPublisher,
+    activation: RestoredActivation,
+) -> crate::Result<()> {
+    let RestoredActivation {
+        database,
+        destination,
+        incarnation,
+        schema,
+        root,
+        reservation,
+    } = activation;
+    pool.activate_restored(
+        cell,
+        database,
+        destination,
+        incarnation,
+        schema,
+        root,
+        reservation,
+    )
+    .await?;
+    if let Err(error) = publisher.activate().await {
+        return match pool.deactivate(cell).await {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(cleanup),
+        };
+    }
+    Ok(())
 }
 
 async fn bootstrap_and_publish(

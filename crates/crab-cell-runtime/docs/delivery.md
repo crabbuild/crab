@@ -101,6 +101,7 @@ Required cases are:
 | Caller cancellation | Accepted command still publishes and later resolves |
 | Lost CAS response | Exact successor is adopted; a different winner fences |
 | Source loss | Successor restores exact database and outcome from object storage |
+| Recovery state | Exact-root activation CASes `Recovering` to `Serving` before returning a handle |
 | Timeout | Admission closes; tentative local state never publishes |
 | Panic | Affected Cell fences; worker thread remains usable |
 | Drain | Accepted commands publish before SQLite close and authority release |
