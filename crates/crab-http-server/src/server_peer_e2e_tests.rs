@@ -17,6 +17,35 @@ use crate::{
 
 struct UnavailablePeer;
 
+async fn json_request(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: impl reqwest::IntoUrl,
+    body: Value,
+) -> (StatusCode, Value) {
+    let response = client
+        .request(method, url)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.bytes().await.unwrap();
+    let value = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| panic!("{status}: {}", String::from_utf8_lossy(&bytes)));
+    (status, value)
+}
+
+async fn json_get(client: &reqwest::Client, url: impl reqwest::IntoUrl) -> (StatusCode, Value) {
+    let response = client.get(url).send().await.unwrap();
+    let status = response.status();
+    let bytes = response.bytes().await.unwrap();
+    let value = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| panic!("{status}: {}", String::from_utf8_lossy(&bytes)));
+    (status, value)
+}
+
 impl PeerRoundTrip for UnavailablePeer {
     fn send(
         &self,
@@ -144,8 +173,10 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap()).unwrap(),
     )
     .unwrap();
-    ingress_publisher.publish_initial().await.unwrap();
+    let ingress_advertisement = ingress_publisher.publish_initial().await.unwrap();
     let owner_advertisement = owner_publisher.publish_initial().await.unwrap();
+    let ingress_session_dir = ingress_publisher.session_dir();
+    let owner_session_dir = owner_publisher.session_dir();
 
     let owner_runtime = runtime(owner_session);
     let owner_router = crate::cells::RepositoryCellRouter::new(
@@ -166,7 +197,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
                 endpoint: management_endpoint,
             },
         ),
-        owner_publisher.session_dir(),
+        owner_session_dir,
     )
     .unwrap();
     let local_operator = Identity {
@@ -209,6 +240,12 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             Arc::new(UnavailablePeer),
         )),
     );
+    let owner_heartbeat_stop = CancellationToken::new();
+    let owner_heartbeat_task = tokio::spawn(owner_publisher.run(
+        Arc::clone(&owner_server),
+        owner_advertisement,
+        owner_heartbeat_stop.clone(),
+    ));
     let management = management_router(Arc::clone(&owner_server));
     let (management_stop, management_done) = tokio::sync::oneshot::channel();
     let management_tls = Arc::clone(&peer_tls);
@@ -250,7 +287,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
                 endpoint: "https://localhost:2".into(),
             },
         ),
-        ingress_publisher.session_dir(),
+        ingress_session_dir,
     )
     .unwrap();
     let ingress_server = server(
@@ -260,6 +297,12 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         Some(ingress_router),
         None,
     );
+    let ingress_heartbeat_stop = CancellationToken::new();
+    let ingress_heartbeat_task = tokio::spawn(ingress_publisher.run(
+        Arc::clone(&ingress_server),
+        ingress_advertisement,
+        ingress_heartbeat_stop.clone(),
+    ));
     let public_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let public_origin = format!("http://{}", public_listener.local_addr().unwrap());
     let public_app = router(Arc::clone(&ingress_server));
@@ -273,7 +316,31 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             .unwrap();
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3 * 60))
+        .build()
+        .unwrap();
+    let source = tempfile::TempDir::new().unwrap();
+    let source_path = source.path();
+    let git_url = format!("{public_origin}/git/team/repo.git");
+    crate::server::receive_tests::success(
+        source_path,
+        &["init", "--initial-branch=main", "--object-format=sha1", "."],
+    )
+    .await;
+    std::fs::write(source_path.join("README.md"), "base\n").unwrap();
+    crate::server::receive_tests::success(source_path, &["add", "README.md"]).await;
+    crate::server::receive_tests::success(source_path, &["commit", "-m", "base"]).await;
+    let base_oid = crate::server::receive_tests::success(source_path, &["rev-parse", "HEAD"]).await;
+    crate::server::receive_tests::success(source_path, &["push", &git_url, "main"]).await;
+    crate::server::receive_tests::success(source_path, &["checkout", "-b", "feature"]).await;
+    std::fs::write(source_path.join("README.md"), "base\nfeature\n").unwrap();
+    crate::server::receive_tests::success(source_path, &["commit", "-am", "feature"]).await;
+    let feature_oid =
+        crate::server::receive_tests::success(source_path, &["rev-parse", "HEAD"]).await;
+    crate::server::receive_tests::success(source_path, &["push", &git_url, "feature"]).await;
+    eprintln!("qualified native Git main and feature pushes");
+
     let created = client
         .post(format!("{public_origin}/api/repos/team/repo/issues"))
         .header(axum::http::header::CONTENT_TYPE, "application/json")
@@ -326,6 +393,124 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     assert_eq!(assigned.status(), StatusCode::OK);
     let assigned: Value = serde_json::from_slice(&assigned.bytes().await.unwrap()).unwrap();
     assert_eq!(assigned["labels"][0]["name"], "remote");
+    eprintln!("qualified issue and label mutations");
+    let comment = json_request(
+        &client,
+        reqwest::Method::POST,
+        format!("{public_origin}/api/repos/team/repo/issues/1/comments"),
+        serde_json::json!({
+            "request_id": "00000000-0000-4000-8000-000000000004",
+            "body": "Durable issue comment"
+        }),
+    )
+    .await;
+    assert_eq!(comment.0, StatusCode::CREATED);
+    assert_eq!(comment.1["number"], 1);
+    eprintln!("qualified issue comment mutation");
+    let status = json_request(
+        &client,
+        reqwest::Method::POST,
+        format!("{public_origin}/api/repos/team/repo/statuses/{feature_oid}"),
+        serde_json::json!({
+            "request_id": "00000000-0000-4000-8000-000000000005",
+            "context": "e2e/runtime",
+            "state": "success",
+            "description": "Remote owner published the status",
+            "target_url": format!("{public_origin}/team/repo")
+        }),
+    )
+    .await;
+    assert_eq!(status.0, StatusCode::CREATED);
+    assert_eq!(status.1["context"], "e2e/runtime");
+    eprintln!("qualified commit status mutation");
+    let check = json_request(
+        &client,
+        reqwest::Method::POST,
+        format!("{public_origin}/api/repos/team/repo/check-runs"),
+        serde_json::json!({
+            "request_id": "00000000-0000-4000-8000-000000000006",
+            "head_sha": feature_oid,
+            "name": "e2e/runtime",
+            "status": "completed",
+            "conclusion": "success",
+            "details_url": format!("{public_origin}/team/repo"),
+            "output": {
+                "title": "Runtime matrix passed",
+                "summary": "Published through the remote Cell owner"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(check.0, StatusCode::CREATED);
+    assert_eq!(check.1["conclusion"], "success");
+    eprintln!("qualified check run mutation");
+    let pull = json_request(
+        &client,
+        reqwest::Method::POST,
+        format!("{public_origin}/api/repos/team/repo/pulls"),
+        serde_json::json!({
+            "request_id": "00000000-0000-4000-8000-000000000007",
+            "title": "Remote Cell pull",
+            "body": "Durable pull request",
+            "base_ref": "refs/heads/main",
+            "head_ref": "refs/heads/feature"
+        }),
+    )
+    .await;
+    assert_eq!(pull.0, StatusCode::CREATED);
+    assert_eq!(pull.1["number"], 1);
+    assert_eq!(pull.1["base_oid"], base_oid);
+    assert_eq!(pull.1["head_oid"], feature_oid);
+    eprintln!("qualified pull request mutation");
+    let pull_comment = json_request(
+        &client,
+        reqwest::Method::POST,
+        format!("{public_origin}/api/repos/team/repo/pulls/1/comments"),
+        serde_json::json!({
+            "request_id": "00000000-0000-4000-8000-000000000008",
+            "body": "Durable pull comment"
+        }),
+    )
+    .await;
+    assert_eq!(pull_comment.0, StatusCode::CREATED);
+    assert_eq!(pull_comment.1["number"], 1);
+    eprintln!("qualified pull comment mutation");
+    let release = json_request(
+        &client,
+        reqwest::Method::POST,
+        format!("{public_origin}/api/repos/team/repo/releases"),
+        serde_json::json!({
+            "request_id": "00000000-0000-4000-8000-000000000009",
+            "tag_name": "e2e-runtime",
+            "target_oid": feature_oid,
+            "title": "Runtime qualification",
+            "body": "Durable release and native Git tag",
+            "prerelease": true,
+            "draft": false
+        }),
+    )
+    .await;
+    assert_eq!(release.0, StatusCode::CREATED);
+    assert_eq!(release.1["number"], 1);
+    assert_eq!(release.1["tag_name"], "e2e-runtime");
+    eprintln!("qualified release and Git tag mutation");
+    let protections = json_request(
+        &client,
+        reqwest::Method::PUT,
+        format!("{public_origin}/api/repos/team/repo/settings/branch-protections"),
+        serde_json::json!({
+            "expected_version": 0,
+            "rules": [{
+                "branch": "main",
+                "required_approvals": 0,
+                "required_checks": ["e2e/runtime"]
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(protections.0, StatusCode::OK);
+    assert_eq!(protections.1["version"], 1);
+    eprintln!("qualified branch protection mutation");
     let listed = client
         .get(format!(
             "{public_origin}/api/repos/team/repo/issues?state=all"
@@ -349,10 +534,8 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
 
     management_stop.send(()).unwrap();
     management_task.await.unwrap();
-    directory
-        .withdraw(&owner_advertisement, crate::cells::unix_now_ms().unwrap())
-        .await
-        .unwrap();
+    owner_heartbeat_stop.cancel();
+    owner_heartbeat_task.await.unwrap().unwrap();
     let stale_owner = authority.load(target.cell_id()).await.unwrap().unwrap();
     let takeover = stale_owner
         .value()
@@ -381,6 +564,63 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     assert_eq!(restored.status(), StatusCode::OK);
     let restored: Value = serde_json::from_slice(&restored.bytes().await.unwrap()).unwrap();
     assert_eq!(restored["items"][0]["title"], "Remote Cell");
+    assert_eq!(restored["items"][0]["labels"][0]["name"], "remote");
+    let (comments_status, comments) = json_get(
+        &client,
+        format!("{public_origin}/api/repos/team/repo/issues/1/comments"),
+    )
+    .await;
+    assert_eq!(comments_status, StatusCode::OK);
+    assert_eq!(comments["items"][0]["body"], "Durable issue comment");
+    let (statuses_status, statuses) = json_get(
+        &client,
+        format!("{public_origin}/api/repos/team/repo/commits/{feature_oid}/status"),
+    )
+    .await;
+    assert_eq!(statuses_status, StatusCode::OK);
+    assert_eq!(statuses["state"], "success");
+    assert_eq!(statuses["statuses"][0]["context"], "e2e/runtime");
+    let (checks_status, checks) = json_get(
+        &client,
+        format!("{public_origin}/api/repos/team/repo/commits/{feature_oid}/check-runs"),
+    )
+    .await;
+    assert_eq!(checks_status, StatusCode::OK);
+    assert_eq!(checks["items"][0]["name"], "e2e/runtime");
+    assert_eq!(checks["items"][0]["conclusion"], "success");
+    let (restored_pull_status, restored_pull) = json_get(
+        &client,
+        format!("{public_origin}/api/repos/team/repo/pulls/1"),
+    )
+    .await;
+    assert_eq!(restored_pull_status, StatusCode::OK);
+    assert_eq!(restored_pull["title"], "Remote Cell pull");
+    assert_eq!(restored_pull["head_oid"], feature_oid);
+    assert_eq!(restored_pull["merge_requirements"]["protected"], true);
+    assert_eq!(restored_pull["merge_requirements"]["satisfied"], true);
+    let (pull_comments_status, pull_comments) = json_get(
+        &client,
+        format!("{public_origin}/api/repos/team/repo/pulls/1/comments"),
+    )
+    .await;
+    assert_eq!(pull_comments_status, StatusCode::OK);
+    assert_eq!(pull_comments["items"][0]["body"], "Durable pull comment");
+    let (releases_status, releases) = json_get(
+        &client,
+        format!("{public_origin}/api/repos/team/repo/releases"),
+    )
+    .await;
+    assert_eq!(releases_status, StatusCode::OK);
+    assert_eq!(releases["items"][0]["tag_name"], "e2e-runtime");
+    assert_eq!(releases["items"][0]["target_oid"], feature_oid);
+    let (catalog_status, catalog) = json_get(&client, format!("{public_origin}/api/repos")).await;
+    assert_eq!(catalog_status, StatusCode::OK);
+    assert_eq!(catalog["repositories"][0]["protection_version"], 1);
+    assert_eq!(
+        catalog["repositories"][0]["protected_branches"][0]["required_checks"][0],
+        "e2e/runtime"
+    );
+    eprintln!("qualified restored collaboration matrix");
     let taken_over = authority.load(target.cell_id()).await.unwrap().unwrap();
     assert_eq!(taken_over.value().root, root_after);
     assert_eq!(
@@ -416,8 +656,48 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             > taken_over.value().root.as_ref().unwrap().commit_sequence
     );
 
+    let clone = tempfile::TempDir::new().unwrap();
+    crate::server::receive_tests::success(
+        clone.path(),
+        &["clone", "--branch", "feature", &git_url, "."],
+    )
+    .await;
+    assert_eq!(
+        crate::server::receive_tests::success(clone.path(), &["rev-parse", "HEAD"]).await,
+        feature_oid
+    );
+    assert_eq!(
+        std::fs::read_to_string(clone.path().join("README.md")).unwrap(),
+        "base\nfeature\n"
+    );
+    assert_eq!(
+        crate::server::receive_tests::success(
+            clone.path(),
+            &["ls-remote", &git_url, "refs/tags/e2e-runtime"],
+        )
+        .await,
+        format!("{feature_oid}\trefs/tags/e2e-runtime")
+    );
+    eprintln!("qualified clone and tag reads after takeover");
+    let repository = ingress_server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
+    assert!(
+        repository
+            .store
+            .list_prefix(&repository.layout.repo_path("app/v1"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
     public_stop.send(()).unwrap();
     public_task.await.unwrap();
+    ingress_heartbeat_stop.cancel();
+    ingress_heartbeat_task.await.unwrap().unwrap();
+    ingress_server.receives.close();
+    ingress_server.receives.wait().await;
     ingress_server.shutdown_runtimes().await.unwrap();
     assert!(matches!(
         owner_server.shutdown_runtimes().await,

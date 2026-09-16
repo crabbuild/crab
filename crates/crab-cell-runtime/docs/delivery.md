@@ -139,6 +139,13 @@ CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX" \
 cargo test -p crab-cell-runtime --test actor \
   rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
   -- --ignored --exact
+
+CRAB_HTTP_CELL_TEST_BUCKET="$BUCKET" \
+CRAB_HTTP_CELL_TEST_ENDPOINT="$ENDPOINT" \
+CRAB_HTTP_CELL_TEST_PREFIX="$UNIQUE_PREFIX" \
+cargo test -p crab-http-server --lib \
+  server::peer_e2e_tests::rustfs_public_collaboration_reaches_remote_owner_and_publishes_ltx \
+  -- --ignored --exact --nocapture
 ```
 
 The Cell test publishes a command on one session, removes its local database,
@@ -146,13 +153,18 @@ takes over from a second session, resolves the original request from the exact
 root, and publishes the next sequence. CI runs both tests against a pinned
 RustFS image.
 
-The same CI job also runs `crab-http-server` through public HTTP, private mTLS
-forwarding to a remote owner, typed repository commands and LTX publication on
-that RustFS origin. It then stops the owner endpoint, withdraws its advertisement,
-publishes the authoritative fenced takeover, deletes the old local Cell directory,
-restores the exact root on the ingress runtime and publishes the next command.
-This combines the product network, source-loss and storage boundaries; it does
-not replace the three-Pod kill and partition matrix below.
+The same CI job also runs `crab-http-server` through public HTTP and private
+mTLS forwarding to a heartbeat-renewed remote owner. Native Git creates main
+and feature commits; public APIs then publish an issue, comment, label, status,
+check run, pull request and comment, release and Git tag, and branch protection
+through SQLite/LTX on that RustFS origin. The test stops the owner endpoint,
+withdraws its current advertisement, publishes the authoritative fenced
+takeover, deletes the old local Cell directory, and restores the exact root on
+the ingress runtime. It reads every saved product surface again, publishes the
+next sequence, clones the feature branch, resolves the release tag, and asserts
+that no retired `app/v1` collaboration object exists. This combines the product
+network, source-loss, hard-cut, and storage boundaries; it does not replace the
+three-Pod kill and partition matrix below.
 
 The shipped Kubernetes qualification script adds one real three-Pod owner-loss
 case. It reads the durable repository Cell control, maps the serving endpoint to
