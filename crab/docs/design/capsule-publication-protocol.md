@@ -656,8 +656,11 @@ normally needs two origin reads for a full authorized clone and at most 34
 while checkpoint publication is pending. The tradeoff is deliberate: simple
 incremental push remains three qualified or four readback-required operations
 at every depth, while bounded concurrent reads and background checkpointing
-absorb history. Checkpoint bytes and accumulated embedded Git packs remain a
-measured consolidation gate before release.
+absorb history. Checkpoint construction now installs and validates the pinned
+pack inventory, verifies the current ref graph with strict Git fsck, and emits
+one complete replacement pack through the same implementation used by
+`crab repack`. Checkpoint bytes still grow with the reachable Git object graph
+and remain a measured throughput and storage gate before release.
 
 These are origin-request minima, not universal guarantees. A selected object
 and its delta bases may span multiple runs; authorization or filtering may
@@ -881,8 +884,9 @@ safe while omitted required bytes violate reconstruction.
    fail-closed follow-up work.
 8. **Complete in the HTTP server:** append leaf capsules with history-flat
    foreground requests, checkpoint after 32 visible capsules, and force a
-   foreground checkpoint at 56. Shared pack consolidation and long-run hosted
-   qualification remain open.
+   foreground checkpoint at 56. Background, foreground, and manual checkpoints
+   share one strict-fsck, complete-pack consolidation path. Long-run hosted
+   qualification remains open.
 9. **Complete:** fence repository GC with one root transition, recheck object
    identity before delete, and release through another root transition.
 10. **Complete on RustFS:** live-qualify a fresh Kubernetes source with 5,000
@@ -914,8 +918,9 @@ production wiring and format freeze require these decisions to be closed:
 - **Decided for foreground publication:** per-ref heads append leaf capsules,
   maintenance starts at 32 visible capsules, receive forces a checkpoint at
   56, and the hard frontier limit is 64. This keeps incremental writes
-  history-flat; checkpoint pack
-  consolidation and the final clone-read bound remain release decisions;
+  history-flat. Checkpoints consolidate the complete reachable Git graph into
+  one verified pack; byte-growth and final clone-read bounds remain release
+  measurements;
 - whether native LFS bodies are capsule sections or retain a separately
   counted protocol;
 - the exact active-active boundary, which cannot use one object-store root as

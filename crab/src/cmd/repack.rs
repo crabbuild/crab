@@ -233,43 +233,17 @@ async fn run_capsule_repack(
             "cannot checkpoint an unborn repository".to_owned(),
         ));
     }
-    std::fs::create_dir_all(&config.workspace_root)?;
-    let workspace = tempfile::Builder::new()
-        .prefix("crab-v2-checkpoint-")
-        .tempdir_in(&config.workspace_root)?;
-    let git_dir = workspace.path().join("repository.git");
-    let init_path = git_dir.clone();
-    tokio::task::spawn_blocking(move || {
-        let output = std::process::Command::new("git")
-            .args(["init", "--bare", "--quiet"])
-            .arg(&init_path)
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_COMMON_DIR")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .output()?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(std::io::Error::other(format!(
-                "git init --bare failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )))
-        }
-    })
-    .await
-    .map_err(|error| CrabError::Internal(format!("checkpoint Git init join failed: {error}")))??;
-    check_cancelled(cancel)?;
-    crab_read::capsule_protocol::install_git_packs(&view, &git_dir, MAX_CHECKPOINT_BYTES).await?;
-    let tips = view.refs().values().cloned().collect::<Vec<_>>();
-    crate::git::pack::validate_fetched_ref_tips(&git_dir, &tips).await?;
-    let packs = crate::git::capsule_push::prepare_complete_git_packs(
-        &git_dir,
-        view.refs(),
-        2 * 1024 * 1024 * 1024,
+    let consolidated = crab_remote::checkpoint::consolidate_git_packs(
+        &view,
+        MAX_CHECKPOINT_BYTES,
+        MAX_CHECKPOINT_BYTES,
+        cancel,
     )
-    .await?;
+    .await
+    .map_err(map_checkpoint_error)?;
+    let packs_before = consolidated.source_pack_count();
+    let bytes_before = consolidated.source_pack_bytes();
+    let packs = consolidated.into_packs();
     let visibility = crab_metadata::capsule_protocol::CapsuleVisibilitySnapshot::from_index(
         &view.git_visibility_index()?,
     )?;
@@ -284,22 +258,6 @@ async fn run_capsule_repack(
         view.pointer_catalog()?,
         Some(visibility),
     )?;
-    let packs_before = view
-        .checkpoint()
-        .map_or(0, |checkpoint| checkpoint.git_packs().len())
-        + view
-            .capsules()
-            .iter()
-            .map(|capsule| capsule.git_packs().len())
-            .sum::<usize>();
-    let bytes_before = root
-        .checkpoint()
-        .map_or(0, crab_metadata::capsule_protocol::CheckpointPointer::size)
-        + root
-            .capsule_frontier()
-            .iter()
-            .map(crab_metadata::capsule_protocol::CapsulePointer::size)
-            .sum::<u64>();
     if !config.dry_run {
         check_cancelled(cancel)?;
         if view.visible_ref_transactions().is_empty() {
@@ -334,6 +292,18 @@ async fn run_capsule_repack(
         },
         elapsed: started.elapsed(),
     })
+}
+
+fn map_checkpoint_error(error: crab_remote::checkpoint::CheckpointError) -> CrabError {
+    match error {
+        crab_remote::checkpoint::CheckpointError::Cancelled => CrabError::Cancelled,
+        crab_remote::checkpoint::CheckpointError::Read(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Repack(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Pack(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Metadata(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Io(source) => source.into(),
+        other => CrabError::Internal(other.to_string()),
+    }
 }
 
 pub(crate) async fn run_bounded_repack(

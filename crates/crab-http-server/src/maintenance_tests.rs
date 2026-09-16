@@ -6,6 +6,8 @@ use crab_metadata::capsule_protocol::{
     CapsuleTransaction, CapsuleVisibilityDelta,
 };
 use crab_metadata::git_visibility::GitVisibilityEdit;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use tower::ServiceExt;
 
 const TTL: Duration = Duration::from_secs(60);
@@ -448,7 +450,148 @@ async fn another_generation_owner_keeps_publication_authority() {
     close(&server).await;
 }
 
-fn capsule(transaction: &CapsuleTransaction, old: Option<String>, new: String) -> Capsule {
+struct GitHistory {
+    oids: Vec<String>,
+    pack: CapsuleGitPack,
+}
+
+fn git_history(commit_count: usize) -> GitHistory {
+    let workspace = tempfile::tempdir().unwrap();
+    let git_dir = workspace.path().join("repository.git");
+    assert!(
+        Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&git_dir)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let tree = git_output(
+        &git_dir,
+        &["hash-object", "-t", "tree", "-w", "--stdin"],
+        b"",
+    );
+    let mut oids: Vec<String> = Vec::with_capacity(commit_count);
+    for sequence in 0..commit_count {
+        let mut arguments = vec!["commit-tree", tree.as_str()];
+        if let Some(parent) = oids.last() {
+            arguments.extend(["-p", parent.as_str()]);
+        }
+        let timestamp = format!("@{} +0000", sequence + 1);
+        let oid = git_output_with_env(
+            &git_dir,
+            &arguments,
+            format!("commit {sequence}\n").as_bytes(),
+            &timestamp,
+        );
+        oids.push(oid);
+    }
+    assert!(
+        Command::new("git")
+            .arg("--git-dir")
+            .arg(&git_dir)
+            .args(["update-ref", "refs/heads/main"])
+            .arg(oids.last().unwrap())
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .arg("--git-dir")
+            .arg(&git_dir)
+            .args(["repack", "-a", "-d", "--depth=64"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let source_pack = std::fs::read_dir(git_dir.join("objects/pack"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "pack")
+        })
+        .unwrap();
+    let pack_bytes = std::fs::read(&source_pack).unwrap();
+    let canonical_id = blake3::hash(&pack_bytes).to_hex().to_string();
+    let installed_dir = workspace.path().join("installed");
+    std::fs::create_dir_all(&installed_dir).unwrap();
+    let installed = crab_git::pack::install_pack_file_from_path(
+        &installed_dir,
+        &source_pack,
+        &canonical_id,
+        64 * 1024 * 1024,
+        true,
+    )
+    .unwrap();
+    let mut locations = crab_git::pack_locator::PackLocationIter::open(
+        &installed.idx_path,
+        &installed.rev_path,
+        pack_bytes.len() as u64,
+    )
+    .unwrap();
+    let object_count = locations.object_count();
+    let object_ids = locations
+        .by_ref()
+        .map(|location| location.unwrap().oid)
+        .collect::<Vec<_>>();
+    let kinds = crab_git::pack::object_kinds_from_git_dir(&git_dir, &object_ids).unwrap();
+    let ordered_kinds = object_ids
+        .iter()
+        .map(|oid| *kinds.get(oid).unwrap())
+        .collect::<Vec<_>>();
+    let checksum = gix_hash::ObjectId::from_hex(installed.git_sha1.as_bytes()).unwrap();
+    let locator =
+        crab_git::pack_locator::encode_pack_kind_metadata(checksum, &ordered_kinds).unwrap();
+    let pack = CapsuleGitPack::new(
+        Bytes::from(pack_bytes),
+        Bytes::from(std::fs::read(&installed.idx_path).unwrap()),
+        Bytes::from(std::fs::read(&installed.rev_path).unwrap()),
+        Bytes::from(locator),
+        installed.git_sha1,
+        object_count,
+    )
+    .unwrap();
+    GitHistory { oids, pack }
+}
+
+fn git_output(git_dir: &std::path::Path, arguments: &[&str], input: &[u8]) -> String {
+    git_output_with_env(git_dir, arguments, input, "@1 +0000")
+}
+
+fn git_output_with_env(
+    git_dir: &std::path::Path,
+    arguments: &[&str],
+    input: &[u8],
+    timestamp: &str,
+) -> String {
+    let mut child = Command::new("git")
+        .arg("--git-dir")
+        .arg(git_dir)
+        .args(arguments)
+        .env("GIT_AUTHOR_NAME", "Crab Test")
+        .env("GIT_AUTHOR_EMAIL", "crab@example.invalid")
+        .env("GIT_AUTHOR_DATE", timestamp)
+        .env("GIT_COMMITTER_NAME", "Crab Test")
+        .env("GIT_COMMITTER_EMAIL", "crab@example.invalid")
+        .env("GIT_COMMITTER_DATE", timestamp)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+fn capsule(
+    transaction: &CapsuleTransaction,
+    old: Option<String>,
+    new: String,
+    pack: Option<CapsuleGitPack>,
+) -> Capsule {
     let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
         "refs/heads/main".to_owned(),
         GitVisibilityEdit::from_replacement_objects(old, new.clone(), vec![new]),
@@ -456,17 +599,7 @@ fn capsule(transaction: &CapsuleTransaction, old: Option<String>, new: String) -
     .unwrap();
     Capsule::build(
         transaction,
-        vec![
-            CapsuleGitPack::new(
-                Bytes::from_static(b"pack"),
-                Bytes::from_static(b"index"),
-                Bytes::from_static(b"reverse"),
-                Bytes::from_static(b"locator"),
-                "4".repeat(40),
-                1,
-            )
-            .unwrap(),
-        ],
+        pack.into_iter().collect(),
         vec![CapsuleSection::new(
             CapsuleSectionKind::VisibilityDelta,
             visibility.encode().unwrap(),
@@ -479,9 +612,9 @@ async fn publish_next(
     repo: &Repository,
     base: crab_write::capsule_protocol::RootSnapshot,
     old: Option<String>,
-    sequence: u64,
+    new: String,
+    pack: Option<CapsuleGitPack>,
 ) -> (crab_write::capsule_protocol::RootSnapshot, String) {
-    let new = format!("{sequence:040x}");
     let transaction = CapsuleTransaction::new(
         base.record().digest(),
         vec![CapsuleRefEdit::new(
@@ -496,7 +629,7 @@ async fn publish_next(
         &repo.layout,
         base,
         &transaction,
-        &capsule(&transaction, old, new.clone()),
+        &capsule(&transaction, old, new.clone(), pack),
     )
     .await
     .unwrap();
@@ -505,14 +638,22 @@ async fn publish_next(
 
 #[tokio::test]
 async fn checkpoint_bounds_ref_frontier_and_next_push_starts_fresh() {
+    let history = git_history(33);
     let server = fixture().await;
     let repo = repository(&server);
     let mut base = crab_write::capsule_protocol::open_root(&repo.layout)
         .await
         .unwrap();
     let mut old = None;
-    for sequence in 1_u64..=32 {
-        let result = publish_next(&repo, base, old, sequence).await;
+    for sequence in 0..32 {
+        let result = publish_next(
+            &repo,
+            base,
+            old,
+            history.oids[sequence].clone(),
+            (sequence == 0).then(|| history.pack.clone()),
+        )
+        .await;
         base = result.0;
         let new = result.1;
         old = Some(new);
@@ -538,7 +679,7 @@ async fn checkpoint_bounds_ref_frontier_and_next_push_starts_fresh() {
             .len(),
         1
     );
-    let new = format!("{:040x}", 33);
+    let new = history.oids[32].clone();
     let transaction = CapsuleTransaction::new(
         checkpoint.record().digest(),
         vec![CapsuleRefEdit::new(
@@ -553,7 +694,7 @@ async fn checkpoint_bounds_ref_frontier_and_next_push_starts_fresh() {
         &repo.layout,
         checkpoint,
         &transaction,
-        &capsule(&transaction, old, new),
+        &capsule(&transaction, old, new, None),
     )
     .await
     .unwrap();
@@ -687,14 +828,22 @@ async fn disconnected_reader_retains_publication_until_retry_or_shutdown_drains_
 
 #[tokio::test]
 async fn lagging_checkpoint_preserves_concurrent_ref_suffix() {
+    let history = git_history(35);
     let server = fixture().await;
     let repo = repository(&server);
     let mut base = crab_write::capsule_protocol::open_root(&repo.layout)
         .await
         .unwrap();
     let mut old = None;
-    for sequence in 1_u64..=32 {
-        let result = publish_next(&repo, base, old, sequence).await;
+    for sequence in 0..32 {
+        let result = publish_next(
+            &repo,
+            base,
+            old,
+            history.oids[sequence].clone(),
+            (sequence == 0).then(|| history.pack.clone()),
+        )
+        .await;
         base = result.0;
         old = Some(result.1);
     }
@@ -722,8 +871,8 @@ async fn lagging_checkpoint_preserves_concurrent_ref_suffix() {
     )
     .unwrap();
 
-    for sequence in 33_u64..=34 {
-        let result = publish_next(&repo, base, old, sequence).await;
+    for sequence in 32..34 {
+        let result = publish_next(&repo, base, old, history.oids[sequence].clone(), None).await;
         base = result.0;
         old = Some(result.1);
     }
@@ -738,8 +887,8 @@ async fn lagging_checkpoint_preserves_concurrent_ref_suffix() {
     .await
     .unwrap();
 
-    let result = publish_next(&repo, base, old, 35).await;
-    assert_eq!(result.1, format!("{:040x}", 35));
+    let result = publish_next(&repo, base, old, history.oids[34].clone(), None).await;
+    assert_eq!(result.1, history.oids[34]);
     let view = crab_read::capsule_protocol::open_view(
         &repo.layout,
         crab_read::capsule_protocol::CapsuleReadLimits {
@@ -749,10 +898,7 @@ async fn lagging_checkpoint_preserves_concurrent_ref_suffix() {
     )
     .await
     .unwrap();
-    assert_eq!(
-        view.refs().get("refs/heads/main"),
-        Some(&format!("{:040x}", 35))
-    );
+    assert_eq!(view.refs().get("refs/heads/main"), Some(&history.oids[34]));
     assert_eq!(
         view.capsule_run_pointers()
             .iter()
@@ -766,14 +912,22 @@ async fn lagging_checkpoint_preserves_concurrent_ref_suffix() {
 
 #[tokio::test]
 async fn foreground_checkpoint_preserves_headroom_before_the_hard_bound() {
+    let history = git_history(57);
     let server = fixture().await;
     let repo = repository(&server);
     let mut base = crab_write::capsule_protocol::open_root(&repo.layout)
         .await
         .unwrap();
     let mut old = None;
-    for sequence in 1_u64..=u64::from(crate::maintenance::FOREGROUND_CAPSULE_THRESHOLD) {
-        let result = publish_next(&repo, base, old, sequence).await;
+    for sequence in 0..crate::maintenance::FOREGROUND_CAPSULE_THRESHOLD as usize {
+        let result = publish_next(
+            &repo,
+            base,
+            old,
+            history.oids[sequence].clone(),
+            (sequence == 0).then(|| history.pack.clone()),
+        )
+        .await;
         base = result.0;
         old = Some(result.1);
     }
@@ -788,7 +942,14 @@ async fn foreground_checkpoint_preserves_headroom_before_the_hard_bound() {
         .unwrap();
     let checkpoint = repo.open_view().await.unwrap();
     assert_eq!(checkpoint.ref_capsule_count("refs/heads/main"), 0);
-    let result = publish_next(&repo, checkpoint.root_snapshot().clone(), old, 57).await;
+    let result = publish_next(
+        &repo,
+        checkpoint.root_snapshot().clone(),
+        old,
+        history.oids[56].clone(),
+        None,
+    )
+    .await;
     let after = repo.open_view().await.unwrap();
     assert_eq!(after.refs().get("refs/heads/main"), Some(&result.1));
     assert_eq!(after.ref_capsule_count("refs/heads/main"), 1);

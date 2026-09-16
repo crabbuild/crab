@@ -10,7 +10,7 @@ description = "Shared remote operation lifecycle for Crab clients and services."
 
 [features]
 default = []
-publication = ["dep:crab-auth", "dep:crab-write", "dep:crab-read", "dep:crab-git", "dep:crab-remote-git", "dep:crab-xet", "dep:bytes", "dep:blake3", "dep:futures-util", "dep:gix-hash", "dep:gix-object", "dep:object_store", "dep:rand", "dep:serde", "dep:serde_json", "dep:tokio", "crab-metadata/remote-index", "dep:crab-coordination", "dep:crab-metadata", "dep:crab-storage", "dep:thiserror", "dep:tokio-util", "dep:tracing"]
+publication = ["dep:crab-auth", "dep:crab-write", "dep:crab-read", "dep:crab-git", "dep:crab-remote-git", "dep:crab-xet", "dep:bytes", "dep:blake3", "dep:futures-util", "dep:gix-hash", "dep:gix-object", "dep:object_store", "dep:rand", "dep:serde", "dep:serde_json", "dep:tempfile", "dep:tokio", "crab-metadata/remote-index", "dep:crab-coordination", "dep:crab-metadata", "dep:crab-storage", "dep:thiserror", "dep:tokio-util", "dep:tracing"]
 local = ["dep:blake3", "dep:crab-git", "dep:crab-metadata", "dep:crab-storage", "dep:fs4", "dep:futures-util", "dep:serde", "dep:serde_json", "dep:tempfile", "dep:tokio", "dep:tokio-util", "dep:thiserror", "dep:toml", "dep:tracing"]
 
 [dependencies]

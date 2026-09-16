@@ -1,17 +1,33 @@
 use std::{sync::Arc, time::Duration};
 
 use crab_storage::{Store, StoreLayout};
-use crab_write::{Result, WriteError};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 const CAPSULE_THRESHOLD: u32 = 32;
 pub(crate) const FOREGROUND_CAPSULE_THRESHOLD: u32 = 56;
 const PASS_BUDGET: Duration = Duration::from_secs(3 * 60);
+const CHECKPOINT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum Error {
+    #[error("repository checkpoint cancelled")]
+    Cancelled,
+    #[error("repository checkpoint read failed")]
+    Read(#[from] crab_read::ReadError),
+    #[error("repository Git-pack consolidation failed")]
+    Consolidation(#[from] crab_remote::checkpoint::CheckpointError),
+    #[error("repository checkpoint metadata failed")]
+    Metadata(#[from] crab_metadata::error::MetadataError),
+    #[error("repository checkpoint publication failed")]
+    Write(#[from] crab_write::WriteError),
+}
+
+pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 async fn publish(layout: &StoreLayout<Store>, cancel: &CancellationToken) -> Result<()> {
     if cancel.is_cancelled() {
-        return Err(WriteError::Cancelled);
+        return Err(Error::Cancelled);
     }
     let view = crab_read::capsule_protocol::open_view(
         layout,
@@ -20,39 +36,42 @@ async fn publish(layout: &StoreLayout<Store>, cancel: &CancellationToken) -> Res
             max_frontier_bytes: 2 * 1024 * 1024 * 1024,
         },
     )
-    .await
-    .map_err(|error| WriteError::Internal(format!("capsule checkpoint read failed: {error}")))?;
+    .await?;
     let capsule_count = view
         .capsule_run_pointers()
         .iter()
         .try_fold(0_u32, |total, pointer| {
             total.checked_add(pointer.capsule_count())
         })
-        .ok_or_else(|| WriteError::Internal("capsule checkpoint count overflowed".to_owned()))?;
+        .ok_or(crab_metadata::error::MetadataError::Internal(
+            "capsule checkpoint count overflowed".to_owned(),
+        ))?;
     if capsule_count < CAPSULE_THRESHOLD {
         return Ok(());
     }
-    let packs = view
-        .checkpoint_git_packs()
-        .map_err(|error| WriteError::Internal(format!("capsule pack read failed: {error}")))?;
+    let packs = crab_remote::checkpoint::consolidate_git_packs(
+        &view,
+        CHECKPOINT_BYTES,
+        CHECKPOINT_BYTES,
+        cancel,
+    )
+    .await?
+    .into_packs();
     if packs.is_empty() {
         return Ok(());
     }
     let visibility = crab_metadata::capsule_protocol::CapsuleVisibilitySnapshot::from_index(
-        &view
-            .git_visibility_index()
-            .map_err(|error| WriteError::Internal(format!("capsule visibility failed: {error}")))?,
+        &view.git_visibility_index()?,
     )?;
     let checkpoint = crab_metadata::capsule_protocol::Checkpoint::build_with_catalogs(
         view.root().root().generation(),
         view.root().digest(),
         packs,
-        view.pointer_catalog()
-            .map_err(|error| WriteError::Internal(format!("capsule catalog failed: {error}")))?,
+        view.pointer_catalog()?,
         Some(visibility),
     )?;
     if cancel.is_cancelled() {
-        return Err(WriteError::Cancelled);
+        return Err(Error::Cancelled);
     }
     let result = if view.visible_ref_transactions().is_empty() {
         crab_write::capsule_protocol::publish_checkpoint(
@@ -73,8 +92,8 @@ async fn publish(layout: &StoreLayout<Store>, cancel: &CancellationToken) -> Res
         .await
     };
     match result {
-        Ok(_) | Err(WriteError::CapsuleRootChanged { .. }) => Ok(()),
-        Err(error) => Err(error),
+        Ok(_) | Err(crab_write::WriteError::CapsuleRootChanged { .. }) => Ok(()),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -87,8 +106,8 @@ pub(crate) async fn run(
     let operation = async {
         let _permit = tokio::select! {
             biased;
-            () = cancel.cancelled() => return Err(WriteError::Cancelled),
-            permit = admission.acquire_owned() => permit.map_err(|_| WriteError::Cancelled)?,
+            () = cancel.cancelled() => return Err(Error::Cancelled),
+            permit = admission.acquire_owned() => permit.map_err(|_| Error::Cancelled)?,
         };
         publish(&layout, &cancel).await
     };

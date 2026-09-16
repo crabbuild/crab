@@ -439,7 +439,7 @@ pub(crate) struct Repository {
     pub layout: StoreLayout<Store>,
     pub identity: RepositoryIdentity,
     pinned: Mutex<Option<(Instant, RemoteGitRepository)>>,
-    maintenance: Mutex<Option<tokio::task::JoinHandle<crab_write::Result<()>>>>,
+    maintenance: Mutex<Option<tokio::task::JoinHandle<crate::maintenance::Result<()>>>>,
 }
 
 pub(crate) struct RepositorySet {
@@ -568,7 +568,7 @@ impl Repository {
         }
         if let Some(completed) = task.take() {
             match completed.await {
-                Ok(Ok(())) | Ok(Err(crab_write::WriteError::Cancelled)) => {}
+                Ok(Ok(())) | Ok(Err(crate::maintenance::Error::Cancelled)) => {}
                 Ok(Err(error)) => tracing::warn!(%error, "repository checkpoint failed"),
                 Err(error) => tracing::warn!(%error, "repository checkpoint task failed"),
             }
@@ -721,7 +721,7 @@ impl Server {
         for repository in self.repositories.values() {
             if let Some(task) = repository.maintenance.lock().await.take() {
                 let completed = match task.await {
-                    Ok(Ok(())) | Ok(Err(crab_write::WriteError::Cancelled)) => Ok(()),
+                    Ok(Ok(())) | Ok(Err(crate::maintenance::Error::Cancelled)) => Ok(()),
                     Ok(Err(error)) => Err(crate::Error::from(error)),
                     Err(error) => Err(crate::Error::from(error)),
                 };

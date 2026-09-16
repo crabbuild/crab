@@ -2003,6 +2003,7 @@ impl From<crab_write::WriteError> for CrabError {
             | crab_write::WriteError::CapsuleCommitUncertain { .. }
             | crab_write::WriteError::CapsuleCheckpointCommitUncertain { .. }
             | crab_write::WriteError::CapsuleMaintenanceCommitUncertain { .. }
+            | crab_write::WriteError::CapsuleHeadCommitUncertain { .. }
             | crab_write::WriteError::Worker(_)
             | crab_write::WriteError::VisibilityUnavailable { .. }
             | crab_write::WriteError::PackIdentity { .. }

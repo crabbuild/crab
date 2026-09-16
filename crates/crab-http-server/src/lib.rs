@@ -203,7 +203,7 @@ pub enum Error {
     #[error("capsule repository read failed")]
     Read(#[from] crab_read::ReadError),
     #[error("repository maintenance failed")]
-    Maintenance(#[from] crab_write::WriteError),
+    Maintenance(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("repository catalog operation failed")]
     Catalog(#[from] catalog::CatalogError),
     #[error("server metrics setup failed")]
@@ -231,3 +231,9 @@ pub enum Error {
 
 /// Server startup or lifecycle result.
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl From<maintenance::Error> for Error {
+    fn from(source: maintenance::Error) -> Self {
+        Self::Maintenance(Box::new(source))
+    }
+}

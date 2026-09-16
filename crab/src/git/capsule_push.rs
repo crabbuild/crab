@@ -634,37 +634,6 @@ async fn prepare_git_packs(
     prepare_generated_git_packs(git_dir, generated, max_input_size).await
 }
 
-pub(crate) async fn prepare_complete_git_packs(
-    git_dir: &Path,
-    refs: &BTreeMap<String, String>,
-    max_input_size: u64,
-) -> Result<Vec<crab_metadata::capsule_protocol::CapsuleGitPack>> {
-    let updates = refs
-        .iter()
-        .map(|(name, oid)| RefUpdate {
-            ref_name: name.clone(),
-            old_sha: None,
-            new_sha: oid.clone(),
-            force: false,
-        })
-        .collect::<Vec<_>>();
-    let generated = generate_push_pack_files_with_exclusions(
-        &updates,
-        None,
-        &PushPackConfig {
-            thin_packs: false,
-            max_input_size,
-            git_dir: Some(git_dir.to_owned()),
-        },
-    )
-    .await?;
-    Ok(
-        prepare_generated_git_packs(git_dir, generated, max_input_size)
-            .await?
-            .packs,
-    )
-}
-
 #[derive(Default)]
 struct PreparedGitPush {
     packs: Vec<crab_metadata::capsule_protocol::CapsuleGitPack>,
