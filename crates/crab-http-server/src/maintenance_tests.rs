@@ -24,7 +24,7 @@ impl crab_cell_runtime::PeerRoundTrip for UnavailableRoundTrip {
     }
 }
 
-async fn fixture_without_cells() -> Arc<Server> {
+pub(crate) async fn fixture_without_cells() -> Arc<Server> {
     let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
     let admission_store = store.clone();
     let layout = StoreLayout::new(store.clone(), "maintenance".into());
@@ -176,7 +176,7 @@ fn repository(server: &Server) -> Arc<Repository> {
         .unwrap()
 }
 
-async fn close(server: &Server) {
+pub(crate) async fn close(server: &Server) {
     server.cancellation.cancel();
     server.finish_maintenance().await.unwrap();
     server.shutdown_runtimes().await.unwrap();

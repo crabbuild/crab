@@ -83,6 +83,36 @@ pub(crate) async fn publish_blob(
         .unwrap();
 }
 
+pub(crate) async fn publish_blob_at_current(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    body: &[u8],
+) {
+    let base = crab_metadata::capsule_protocol::load_root(layout)
+        .await
+        .unwrap();
+    let old = base.record().root().refs().get("refs/heads/main").cloned();
+    let history = history_with_blob(body);
+    let transaction = crab_metadata::capsule_protocol::CapsuleTransaction::new(
+        base.record().digest(),
+        vec![crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+            "refs/heads/main",
+            old,
+            Some(history.oids[0].clone()),
+            None,
+        )],
+    )
+    .unwrap();
+    let capsule = crab_metadata::capsule_protocol::Capsule::build(
+        &transaction,
+        vec![history.pack],
+        Vec::new(),
+    )
+    .unwrap();
+    crab_write::capsule_protocol::publish(layout, base, &transaction, &capsule)
+        .await
+        .unwrap();
+}
+
 fn initialize(git_dir: &Path) {
     assert!(
         Command::new("git")

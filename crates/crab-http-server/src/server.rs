@@ -684,7 +684,7 @@ pub(crate) struct Server {
     pub cancellation: CancellationToken,
     pub receives: tokio_util::task::TaskTracker,
     pub auth: Option<Authentication>,
-    catalog: Option<CatalogStore>,
+    pub(crate) catalog: Option<CatalogStore>,
     catalog_healthy: AtomicBool,
     pub(crate) node_healthy: AtomicBool,
     scheduler_status: crate::cells::SchedulerStatus,
@@ -1984,7 +1984,7 @@ fn integration_api_path(path: &str) -> bool {
 
 #[cfg(test)]
 #[path = "maintenance_tests.rs"]
-mod maintenance_tests;
+pub(crate) mod maintenance_tests;
 
 #[cfg(test)]
 #[path = "server_peer_e2e_tests.rs"]
