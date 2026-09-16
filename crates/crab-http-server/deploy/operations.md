@@ -45,7 +45,7 @@ Complete these checks before the first install and every infrastructure change:
 9. Confirm the dedicated namespace pins Pod Security `enforce`, `audit`, and
    `warn` to `restricted:v1.29` or a reviewed newer policy version.
 10. Confirm the monitoring source can scrape port 8789 and ordinary peer pods cannot.
-11. Confirm the cluster can schedule two replicas in separate zones.
+11. Confirm the cluster can schedule three replicas on separate nodes across at least two zones.
 12. Confirm scratch capacity covers the largest qualified pack, LFS object, and concurrent transfers.
 13. For automated live qualification, confirm each provider has a separate
     protected GitHub environment using OIDC, required reviewers, release-tag
@@ -317,7 +317,7 @@ repository runtime shutdown.
 
 Before planned cluster or node maintenance:
 
-1. Confirm at least two ready replicas.
+1. Confirm at least three ready replicas.
 2. Confirm the PodDisruptionBudget reports one allowed disruption and retains
    `unhealthyPodEvictionPolicy: AlwaysAllow`.
 3. Confirm endpoint and ingress deregistration complete during the pre-stop delay and connection-drain timeouts preserve active streams.

@@ -106,10 +106,16 @@ management_listen = "0.0.0.0:8789"
 [cells]
 data_dir = "/var/lib/crab/cells"
 peer_advertise = "https://10.42.3.17:8789"
+peer_tls_server_name = "crab-http-server-peer"
 peer_certificate = "/run/secrets/crab-peer/tls.crt"
 peer_private_key = "/run/secrets/crab-peer/tls.key"
 peer_ca = "/run/secrets/crab-peer/ca.crt"
 ```
+
+`peer_tls_server_name` separates a stable certificate identity from the
+node-specific Pod IP. The peer client still verifies the CA chain, the server
+authentication EKU, and that DNS name; it then pins the exact enrolled leaf and
+Ed25519 key before sending the request. It does not disable TLS verification.
 
 The target may split peer traffic onto 8790 after the Helm, probe and certificate
 contracts are changed together. That is an operational isolation change, not a
@@ -118,11 +124,10 @@ distributed-process inputs; per-repository cloud credentials and a second
 storage-root configuration are not. Keep algorithm tuning as documented internal
 constants until operational evidence warrants public configuration.
 
-Pod IP advertisement and TLS verification must agree. For IP endpoints, issue
-appropriate IP SAN certificates or use a reviewed verifier that authenticates a
-fleet workload identity independently of the dial address. Never disable
-certificate verification to make Pod IPs work. A mesh may supply this transport
-identity if the application trust boundary is explicitly configured and tested.
+The Helm chart injects the Pod IP as `--peer-advertise-host`. The managed
+configuration supplies the stable TLS name and Secret paths. A signed node
+advertisement binds that IP endpoint to the leaf digest, public key, session,
+release, and fleet; a mismatched endpoint or leaf fails closed.
 
 ### Helm changes
 
@@ -140,9 +145,10 @@ available zones/nodes. Capacity must accommodate the surge and one unavailable
 node. PDB protects supported voluntary disruption flows, not involuntary crashes
 or every direct deletion.
 
-Current defaults require at least two topology domains via `minDomains: 2` and
-`DoNotSchedule`. A single-node local cluster needs an explicit local values
-profile; simply reducing replicas can leave Pods Pending.
+Current defaults require at least two zone domains and three node domains via
+`minDomains` and `DoNotSchedule`. A smaller local cluster needs an explicit
+local values profile; simply reducing replicas is rejected by the production
+chart and can leave Pods Pending.
 
 NetworkPolicy permits public traffic from the edge, peer traffic from Crab Pods
 in the expected namespace, and probes from the supported cluster sources.

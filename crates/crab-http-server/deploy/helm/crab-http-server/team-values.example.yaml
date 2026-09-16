@@ -11,6 +11,9 @@ config:
 secrets:
   existingSecret: crab-http-server
 
+cells:
+  existingSecret: crab-http-server-peer
+
 ingress:
   enabled: true
   className: nginx

@@ -217,13 +217,24 @@ spec:
       containers:
         - name: crab
           image: registry.example/crab@sha256:1234567890
+          args:
+            - --config
+            - /etc/crab/server.toml
+            - --peer-advertise-host
+            - $(CRAB_POD_IP)
           readinessProbe:
-            httpGet: { path: /ready, port: 8080 }
+            exec:
+              command: [crab-http-server, --config, /etc/crab/server.toml, healthcheck]
           volumeMounts:
             - { name: cell-cache, mountPath: /var/lib/crab }
 ```
 
-The snippet shows topology, not a complete production manifest. Supply mTLS secrets, object-store identity, resource requests, Pod disruption policy, anti-affinity, and network policy through the deployment environment.
+The snippet shows topology, not a complete production manifest. The shipped
+chart adds a Downward API Pod IP, a stable peer TLS server name, peer Secret
+mounts, exec readiness, TCP liveness, a three-replica floor, PDB `minAvailable:
+2`, and same-selector management ingress. Supply object-store identity,
+resource requests, edge ingress, and provider-specific placement through the
+deployment environment.
 
 Readiness requires:
 

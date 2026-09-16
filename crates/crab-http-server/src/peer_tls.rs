@@ -38,6 +38,7 @@ pub(crate) struct LoadedPeerTls {
     certificates: Vec<CertificateDer<'static>>,
     private_key: PrivateKeyDer<'static>,
     roots: Arc<RootCertStore>,
+    server_name: ServerName<'static>,
     signing_key: SigningKey,
     certificate: CellDigest,
     fleet: CellDigest,
@@ -65,7 +66,8 @@ impl LoadedPeerTls {
 
         let authorities = load_certificates(&cells.peer_ca)?;
         let roots = Arc::new(root_store(&authorities)?);
-        verify_own_certificate(&certificates, Arc::clone(&roots), cells)?;
+        let server_name = configured_server_name(cells)?;
+        verify_own_certificate(&certificates, Arc::clone(&roots), server_name.clone())?;
         let client_verifier = WebPkiClientVerifier::builder(Arc::clone(&roots))
             .build()
             .map_err(|source| Error::PeerTls {
@@ -87,6 +89,7 @@ impl LoadedPeerTls {
             certificates,
             private_key,
             roots,
+            server_name,
             signing_key,
             certificate,
             fleet: fleet_digest(&authorities),
@@ -117,6 +120,7 @@ impl LoadedPeerTls {
             certificates: self.certificates.clone(),
             private_key: self.private_key.clone_key(),
             roots: Arc::clone(&self.roots),
+            server_name: self.server_name.clone(),
         }
     }
 }
@@ -126,6 +130,7 @@ pub(crate) struct PeerTlsClient {
     certificates: Vec<CertificateDer<'static>>,
     private_key: PrivateKeyDer<'static>,
     roots: Arc<RootCertStore>,
+    server_name: ServerName<'static>,
 }
 
 impl Clone for PeerTlsClient {
@@ -134,6 +139,7 @@ impl Clone for PeerTlsClient {
             certificates: self.certificates.clone(),
             private_key: self.private_key.clone_key(),
             roots: Arc::clone(&self.roots),
+            server_name: self.server_name.clone(),
         }
     }
 }
@@ -154,6 +160,7 @@ impl PeerTlsClient {
             verifier,
             certificate,
             public_key,
+            server_name: self.server_name.clone(),
         });
         let mut config = ClientConfig::builder()
             .dangerous()
@@ -183,6 +190,7 @@ struct PinnedServerVerifier {
     verifier: Arc<WebPkiServerVerifier>,
     certificate: CellDigest,
     public_key: [u8; 32],
+    server_name: ServerName<'static>,
 }
 
 impl ServerCertVerifier for PinnedServerVerifier {
@@ -190,14 +198,14 @@ impl ServerCertVerifier for PinnedServerVerifier {
         &self,
         end_entity: &CertificateDer<'_>,
         intermediates: &[CertificateDer<'_>],
-        server_name: &ServerName<'_>,
+        _server_name: &ServerName<'_>,
         ocsp_response: &[u8],
         now: UnixTime,
     ) -> std::result::Result<ServerCertVerified, rustls::Error> {
         let verified = self.verifier.verify_server_cert(
             end_entity,
             intermediates,
-            server_name,
+            &self.server_name,
             ocsp_response,
             now,
         )?;
@@ -371,7 +379,7 @@ fn root_store(authorities: &[CertificateDer<'static>]) -> Result<RootCertStore> 
 fn verify_own_certificate(
     certificates: &[CertificateDer<'static>],
     roots: Arc<RootCertStore>,
-    cells: &CellsConfig,
+    server_name: ServerName<'static>,
 ) -> Result<()> {
     let leaf = &certificates[0];
     let intermediates = &certificates[1..];
@@ -388,17 +396,6 @@ fn verify_own_certificate(
             source: Box::new(source),
         })?;
 
-    let server_name = ServerName::try_from(
-        cells
-            .peer_advertise
-            .host_str()
-            .ok_or(Error::Config("cells.peer_advertise has no host"))?
-            .to_owned(),
-    )
-    .map_err(|source| Error::PeerTls {
-        context: "cells.peer_advertise host is invalid for TLS",
-        source: Box::new(source),
-    })?;
     WebPkiServerVerifier::builder(roots)
         .build()
         .map_err(|source| Error::PeerTls {
@@ -411,6 +408,18 @@ fn verify_own_certificate(
             source: Box::new(source),
         })?;
     Ok(())
+}
+
+fn configured_server_name(cells: &CellsConfig) -> Result<ServerName<'static>> {
+    let name = cells
+        .peer_tls_server_name
+        .as_deref()
+        .or_else(|| cells.peer_advertise.host_str())
+        .ok_or(Error::Config("cells.peer_advertise has no host"))?;
+    ServerName::try_from(name.to_owned()).map_err(|source| Error::PeerTls {
+        context: "Cell peer TLS server name is invalid",
+        source: Box::new(source),
+    })
 }
 
 fn tls_identity(certificates: Option<&[CertificateDer<'static>]>) -> Result<PeerTlsIdentity> {

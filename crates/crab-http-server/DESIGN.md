@@ -9,8 +9,8 @@ storage, deployment, ownership, cancellation, and recovery boundaries.
 > CAS repository catalog, shared identity state, dynamic replica refresh,
 > private probes and bounded Prometheus metrics, a local Compose profile, and
 > hardened Helm profiles for EKS/GKE/AKS. The chart includes a fresh-workload
-> catalog test, and one portable live gate can exercise two replicas and a rolling
-> replacement. Container CI also exercises one
+> catalog test, and one portable live gate can exercise three replicas and a
+> rolling replacement. Container CI also exercises one
 > abrupt native receive and an isolated complete-root cold restore. The ECS
 > Fargate profile cannot preserve the full shutdown budget. Static artifacts
 > and local RustFS do not constitute live cloud qualification. Additional
@@ -290,7 +290,7 @@ to converge, then gives Crab its complete ten-minute drain budget. The live
 gate checks provider placement, the admitted EKS Pod Identity, GKE Workload
 Identity Federation, or AKS Workload ID contract on every original and
 replacement pod, the signed chart version, every pod's readiness, public OIDC
-initiation, direct token use against two replicas, cross-replica Git and LFS,
+initiation, direct token use against three replicas, cross-replica Git and LFS,
 lock-owner publication, uninterrupted reads during rollout, and byte-identical
 state after replacement. Its JSON receipt binds the evidence to the provider,
 immutable image and chart, workload identity mechanism and ServiceAccount,

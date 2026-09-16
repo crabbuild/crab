@@ -66,6 +66,14 @@ management_listen = "0.0.0.0:8789"
 [storage]
 url = {{ required "config.storageUrl is required when config.existingConfigMap is empty" .Values.config.storageUrl | toJson }}
 
+[cells]
+data_dir = "/var/lib/crab/cells"
+peer_advertise = "https://127.0.0.1:8789"
+peer_tls_server_name = {{ required "cells.tlsServerName is required" .Values.cells.tlsServerName | toJson }}
+peer_certificate = "/run/secrets/crab/peer/tls.crt"
+peer_private_key = "/run/secrets/crab/peer/tls.key"
+peer_ca = "/run/secrets/crab/peer/ca.crt"
+
 [auth]
 issuer = {{ required "config.auth.issuer is required when config.existingConfigMap is empty" .Values.config.auth.issuer | toJson }}
 client_id = {{ required "config.auth.clientId is required when config.existingConfigMap is empty" .Values.config.auth.clientId | toJson }}
@@ -110,7 +118,7 @@ state_key_file = "/run/secrets/crab/state-key"
 {{- if and (eq .topologyKey "topology.kubernetes.io/zone") (eq (int .maxSkew) 1) (ge (int (default 0 .minDomains)) 2) (eq .whenUnsatisfiable "DoNotSchedule") -}}
 {{- $zoneReady = true -}}
 {{- end -}}
-{{- if and (eq .topologyKey "kubernetes.io/hostname") (eq (int .maxSkew) 1) (ge (int (default 0 .minDomains)) 2) (eq .whenUnsatisfiable "DoNotSchedule") -}}
+{{- if and (eq .topologyKey "kubernetes.io/hostname") (eq (int .maxSkew) 1) (ge (int (default 0 .minDomains)) 3) (eq .whenUnsatisfiable "DoNotSchedule") -}}
 {{- $hostReady = true -}}
 {{- end -}}
 {{- end -}}
@@ -118,7 +126,7 @@ state_key_file = "/run/secrets/crab/state-key"
 {{- fail "topologySpreadConstraints must hard-spread replicas across at least two zones with maxSkew 1" -}}
 {{- end -}}
 {{- if not $hostReady -}}
-{{- fail "topologySpreadConstraints must hard-spread replicas across at least two nodes with maxSkew 1" -}}
+{{- fail "topologySpreadConstraints must hard-spread replicas across at least three nodes with maxSkew 1" -}}
 {{- end -}}
 {{- end }}
 
@@ -145,6 +153,9 @@ state_key_file = "/run/secrets/crab/state-key"
   "CREDENTIAL_TYPE" "ENCRYPTION_KEY" -}}
 {{- range $index, $entry := .Values.extraEnv -}}
 {{- $name := upper (default "" $entry.name) -}}
+{{- if eq $name "CRAB_POD_IP" -}}
+{{- fail "extraEnv.CRAB_POD_IP is owned by the chart" -}}
+{{- end -}}
 {{- if hasKey $seen $name -}}
 {{- fail (printf "extraEnv[%d].name %q duplicates another environment variable" $index $entry.name) -}}
 {{- end -}}

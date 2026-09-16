@@ -179,7 +179,7 @@ The repository path needs these cases:
 3. Exercise issue, comment, label, status, check, pull, release, and settings routes
 4. Delete the owning node's local Cell files
 5. Route the next request through another node
-6. Verify the UI reads the restored state
+6. Verify the public repository API reads the restored state
 7. Exercise public Git clone, fetch, and push independently of collaboration SQLite
 8. Confirm shutdown drains both HTTP/Git work and Cell publication
 
@@ -261,7 +261,7 @@ Production readiness requires all of these gates:
 - Real RustFS source-loss recovery passes
 - Three-Pod fault qualification passes
 - Every supported node profile has measured admission envelopes
-- Repository UI and Git operations pass end to end
+- Repository API and Git operations pass end to end
 - Backup and isolated-prefix restore pass
 - Hard cutover rehearsal confirms no legacy collaboration reads
 

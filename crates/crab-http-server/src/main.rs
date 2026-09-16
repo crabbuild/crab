@@ -13,6 +13,8 @@ use tracing_subscriber::EnvFilter;
 struct Arguments {
     #[arg(long)]
     config: PathBuf,
+    #[arg(long, global = true)]
+    peer_advertise_host: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -197,7 +199,10 @@ async fn main() -> crab_http_server::Result<()> {
         .try_init()
         .map_err(|source| crab_http_server::Error::Logging { source })?;
     let arguments = Arguments::parse();
-    let config = crab_http_server::Config::read(&arguments.config)?;
+    let mut config = crab_http_server::Config::read(&arguments.config)?;
+    if let Some(host) = arguments.peer_advertise_host.as_deref() {
+        config.set_peer_advertise_host(host)?;
+    }
     match arguments.command.unwrap_or(Command::Serve) {
         Command::Serve => crab_http_server::serve(config).await,
         Command::Healthcheck => healthcheck(&config).await,
@@ -295,16 +300,15 @@ async fn healthcheck(config: &crab_http_server::Config) -> crab_http_server::Res
         .map_err(|source| crab_http_server::Error::Healthcheck { source })?;
     let authorities = reqwest::Certificate::from_pem_bundle(&std::fs::read(&config.cells.peer_ca)?)
         .map_err(|source| crab_http_server::Error::Healthcheck { source })?;
-    let url = config
-        .cells
-        .peer_advertise
-        .join("readyz")
-        .map_err(|_| crab_http_server::Error::Config("cells.peer_advertise is invalid"))?;
+    let (url, resolution) = healthcheck_target(config)?;
     let mut client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .https_only(true)
         .identity(identity)
         .tls_built_in_root_certs(false);
+    if let Some((name, address)) = resolution {
+        client = client.resolve(&name, address);
+    }
     for authority in authorities {
         client = client.add_root_certificate(authority);
     }
@@ -317,6 +321,42 @@ async fn healthcheck(config: &crab_http_server::Config) -> crab_http_server::Res
         .and_then(reqwest::Response::error_for_status)
         .map_err(|source| crab_http_server::Error::Healthcheck { source })?;
     Ok(())
+}
+
+fn healthcheck_target(
+    config: &crab_http_server::Config,
+) -> crab_http_server::Result<(url::Url, Option<(String, std::net::SocketAddr)>)> {
+    let mut url = config.cells.peer_advertise.clone();
+    let tls_name = config
+        .cells
+        .peer_tls_server_name
+        .as_deref()
+        .or_else(|| url.host_str())
+        .ok_or(crab_http_server::Error::Config(
+            "Cell peer TLS server name is invalid",
+        ))?
+        .to_owned();
+    url.set_host(Some(&tls_name))
+        .map_err(|_| crab_http_server::Error::Config("Cell peer TLS server name is invalid"))?;
+    url.set_path("/readyz");
+    let resolution = if tls_name.parse::<std::net::IpAddr>().is_err() {
+        let listen_ip = config.management_listen.ip();
+        let local_ip = if listen_ip.is_unspecified() {
+            match listen_ip {
+                std::net::IpAddr::V4(_) => std::net::Ipv4Addr::LOCALHOST.into(),
+                std::net::IpAddr::V6(_) => std::net::Ipv6Addr::LOCALHOST.into(),
+            }
+        } else {
+            listen_ip
+        };
+        Some((
+            tls_name,
+            std::net::SocketAddr::new(local_ip, config.management_listen.port()),
+        ))
+    } else {
+        None
+    };
+    Ok((url, resolution))
 }
 
 async fn repository(
@@ -398,6 +438,52 @@ mod tests {
     #[test]
     fn command_line_contract_is_valid() {
         Arguments::command().debug_assert();
+    }
+
+    #[test]
+    fn peer_advertise_host_is_a_global_option() {
+        let arguments = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "healthcheck",
+            "--peer-advertise-host",
+            "10.42.3.17",
+        ])
+        .unwrap();
+
+        assert_eq!(arguments.peer_advertise_host.as_deref(), Some("10.42.3.17"));
+    }
+
+    #[test]
+    fn healthcheck_uses_the_stable_tls_name_against_the_local_listener() {
+        let config = crab_http_server::Config {
+            listen: "127.0.0.1:8788".parse().unwrap(),
+            management_listen: "0.0.0.0:8789".parse().unwrap(),
+            storage: crab_http_server::StorageConfig {
+                url: "s3://bucket/root".into(),
+            },
+            cells: crab_http_server::CellsConfig {
+                data_dir: "/var/lib/crab/cells".into(),
+                peer_advertise: "https://10.42.3.17:8789".parse().unwrap(),
+                peer_tls_server_name: Some("crab-http-server-peer".into()),
+                peer_certificate: "/run/secrets/crab/peer/tls.crt".into(),
+                peer_private_key: "/run/secrets/crab/peer/tls.key".into(),
+                peer_ca: "/run/secrets/crab/peer/ca.crt".into(),
+            },
+            auth: None,
+        };
+
+        let (url, resolution) = healthcheck_target(&config).unwrap();
+
+        assert_eq!(url.as_str(), "https://crab-http-server-peer:8789/readyz");
+        assert_eq!(
+            resolution,
+            Some((
+                "crab-http-server-peer".into(),
+                "127.0.0.1:8789".parse().unwrap()
+            ))
+        );
     }
 
     #[test]

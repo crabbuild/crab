@@ -379,7 +379,7 @@ jobs:
             --arg image "$EXPECTED_IMAGE" \
             --arg release_tag "$RELEASE_TAG" \
             --arg source_sha "$SOURCE_SHA" \
-            '.schema == 3 and .provider == $provider and
+            '.schema == 4 and .provider == $provider and
              .namespace == $namespace and .deployment == $deployment and
              .origin == $origin and .repository == $repository and
              .image == $image and .chart == $chart and
@@ -390,7 +390,7 @@ jobs:
                (if $provider == "eks" then "eks-pod-identity"
                 elif $provider == "gke" then "gke-workload-identity-federation"
                 else "aks-workload-identity" end) and
-             .replica_count >= 2 and .zone_count >= 2 and
+             .replica_count >= 3 and .zone_count >= 2 and
              .rollout_probes >= 1 and .rollout_probe_failures == 0 and
              .checks.oidc_login_redirect == true and
              .checks.oidc_secure_flow_cookie == true and
@@ -401,9 +401,13 @@ jobs:
              .checks.cross_replica_git == true and
              .checks.cross_replica_lfs == true and
              .checks.durable_lfs_lock == true and
+             .checks.cross_replica_cell == true and
              .checks.zero_unavailable_rollout == true and
              .checks.post_rollout_clone == true and
+             .checks.post_rollout_cell_restore == true and
              (.commit | test("^[0-9a-f]{40}$")) and
+             (.status_context | length) > 0 and
+             (.check_run_id | type) == "number" and .check_run_id > 0 and
              (.payload_sha256 | test("^[0-9a-f]{64}$"))' \
             "$receipt" >/dev/null
 

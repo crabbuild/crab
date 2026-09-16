@@ -2,7 +2,7 @@ use openidconnect::IssuerUrl;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use url::Url;
+use url::{Host, Url};
 
 use serde::Deserialize;
 
@@ -32,6 +32,8 @@ pub struct StorageConfig {
 pub struct CellsConfig {
     pub data_dir: PathBuf,
     pub peer_advertise: Url,
+    #[serde(default)]
+    pub peer_tls_server_name: Option<String>,
     pub peer_certificate: PathBuf,
     pub peer_private_key: PathBuf,
     pub peer_ca: PathBuf,
@@ -90,6 +92,15 @@ impl Config {
         let config: Self = toml::from_str(&std::fs::read_to_string(path)?)?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Replaces the node-specific host advertised by the Cell peer listener.
+    pub fn set_peer_advertise_host(&mut self, host: &str) -> Result<()> {
+        self.cells
+            .peer_advertise
+            .set_host(Some(host))
+            .map_err(|_| Error::Config("Cell peer advertise host is invalid"))?;
+        self.validate()
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
@@ -163,6 +174,16 @@ fn validate_cells(cells: &CellsConfig, management_listen: SocketAddr) -> Result<
     {
         return Err(Error::Config(
             "cells.peer_advertise must be a root HTTPS URL on management_listen",
+        ));
+    }
+    if let Some(name) = cells.peer_tls_server_name.as_deref()
+        && (name.trim() != name
+            || name.is_empty()
+            || name.len() > 253
+            || !matches!(Host::parse(name), Ok(Host::Domain(_))))
+    {
+        return Err(Error::Config(
+            "cells.peer_tls_server_name must be a DNS name without a port",
         ));
     }
     Ok(())
@@ -379,6 +400,16 @@ mod tests {
         }
         let mut config = local_config("s3://bucket/repositories");
         config.cells.data_dir = "relative".into();
+        assert!(config.validate().is_err());
+
+        let mut config = local_config("s3://bucket/repositories");
+        config.cells.peer_tls_server_name = Some("crab-http-server-peer".into());
+        config.set_peer_advertise_host("10.42.3.17").unwrap();
+        assert_eq!(
+            config.cells.peer_advertise.as_str(),
+            "https://10.42.3.17:8789/"
+        );
+        config.cells.peer_tls_server_name = Some("https://peer.invalid".into());
         assert!(config.validate().is_err());
     }
 

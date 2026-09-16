@@ -376,7 +376,7 @@ identity for an existing cluster.
 | Boundary | Enforced contract |
 | --- | --- |
 | Image | Immutable digest only |
-| Availability | At least two replicas, disruption budget, and hard node/zone spread |
+| Availability | At least three replicas, disruption budget, and hard node/zone spread |
 | Container | Non-root, no Linux capabilities, read-only root, and bounded scratch |
 | Network | Public application port only, ingress NetworkPolicy, and optional TLS ingress |
 | Identity | Provider ServiceAccount integration; no static credentials or credential-source overrides in `extraEnv` |
@@ -396,7 +396,7 @@ remain unexpired because its lifecycle API cannot express the same safe
 noncurrent-age boundary.
 
 The chart rejects disruption budgets that leave no minimum replica evictable
-and requires hard placement across at least two nodes and two zones. Use atomic
+and requires hard placement across at least three nodes and two zones. Use atomic
 Helm upgrades with bounded revision history so a failed readiness rollout
 returns to the previous release state.
 
@@ -633,6 +633,7 @@ management_listen = "0.0.0.0:8789"
 [cells]
 data_dir = "/var/lib/crab/cells"
 peer_advertise = "https://node-1.internal.example:8789"
+peer_tls_server_name = "node-1.internal.example"
 peer_certificate = "/run/secrets/crab-peer/tls.crt"
 peer_private_key = "/run/secrets/crab-peer/tls.key"
 peer_ca = "/run/secrets/crab-peer/ca.crt"

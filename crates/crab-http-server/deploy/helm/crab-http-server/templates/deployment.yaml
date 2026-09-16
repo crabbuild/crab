@@ -97,12 +97,16 @@ spec:
               mountPath: /run/secrets/crab
               readOnly: true
             - name: scratch
-              mountPath: /var/lib/crab/tmp
+              mountPath: /var/lib/crab
       containers:
         - name: crab-http-server
           image: {{ include "crab-http-server.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args: ["--config", "/etc/crab/http-server/server.toml"]
+          args:
+            - --config
+            - /etc/crab/http-server/server.toml
+            - --peer-advertise-host
+            - $(CRAB_POD_IP)
           terminationMessagePolicy: FallbackToLogsOnError
           securityContext:
             allowPrivilegeEscalation: false
@@ -123,24 +127,33 @@ spec:
               containerPort: 8789
               protocol: TCP
           startupProbe:
-            httpGet:
-              path: /readyz
-              port: management
+            exec:
+              command:
+                - crab-http-server
+                - --config
+                - /etc/crab/http-server/server.toml
+                - healthcheck
             {{- toYaml .Values.startupProbe | nindent 12 }}
           readinessProbe:
-            httpGet:
-              path: /readyz
-              port: management
+            exec:
+              command:
+                - crab-http-server
+                - --config
+                - /etc/crab/http-server/server.toml
+                - healthcheck
             {{- toYaml .Values.readinessProbe | nindent 12 }}
           livenessProbe:
-            httpGet:
-              path: /healthz
+            tcpSocket:
               port: management
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- with .Values.extraEnv }}
           env:
+            - name: CRAB_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
@@ -151,7 +164,7 @@ spec:
               mountPath: /run/secrets/crab
               readOnly: true
             - name: scratch
-              mountPath: /var/lib/crab/tmp
+              mountPath: /var/lib/crab
       topologySpreadConstraints:
         {{- range .Values.topologySpreadConstraints }}
         - maxSkew: {{ .maxSkew }}
@@ -197,6 +210,15 @@ spec:
                     {{- end }}
                     - key: {{ .Values.secrets.stateKeyKey }}
                       path: state-key
+              - secret:
+                  name: {{ required "cells.existingSecret is required" .Values.cells.existingSecret }}
+                  items:
+                    - key: {{ .Values.cells.certificateKey }}
+                      path: peer/tls.crt
+                    - key: {{ .Values.cells.privateKeyKey }}
+                      path: peer/tls.key
+                    - key: {{ .Values.cells.caKey }}
+                      path: peer/ca.crt
         - name: scratch
           emptyDir:
             sizeLimit: {{ .Values.scratch.sizeLimit }}

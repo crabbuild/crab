@@ -85,6 +85,7 @@ impl IdentityFiles {
         CellsConfig {
             data_dir: self._directory.path().join("cells"),
             peer_advertise: endpoint,
+            peer_tls_server_name: None,
             peer_certificate: self.certificate.clone(),
             peer_private_key: self.private_key.clone(),
             peer_ca: self.ca.clone(),
@@ -109,6 +110,15 @@ fn identity_requires_one_ca_trusted_matching_ed25519_key() {
 }
 
 #[test]
+fn stable_tls_name_allows_a_node_specific_advertised_ip() {
+    let files = IdentityFiles::generate();
+    let mut config = files.config(Url::parse("https://10.42.3.17:8789").unwrap());
+    assert!(LoadedPeerTls::load(&config).is_err());
+    config.peer_tls_server_name = Some("localhost".into());
+    LoadedPeerTls::load(&config).unwrap();
+}
+
+#[test]
 fn fleet_digest_is_independent_of_ca_order_and_duplicates() {
     let first = IdentityFiles::generate();
     let second = IdentityFiles::generate();
@@ -126,8 +136,9 @@ async fn listener_requires_mtls_and_exposes_the_verified_leaf_identity() {
     let files = IdentityFiles::generate();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let config =
-        files.config(Url::parse(&format!("https://localhost:{}", address.port())).unwrap());
+    let mut config =
+        files.config(Url::parse(&format!("https://127.0.0.1:{}", address.port())).unwrap());
+    config.peer_tls_server_name = Some("localhost".into());
     let loaded = LoadedPeerTls::load(&config).unwrap();
     let certificate = loaded.certificate();
     let public_key = loaded.signing_key().verifying_key().to_bytes();
@@ -158,7 +169,7 @@ async fn listener_requires_mtls_and_exposes_the_verified_leaf_identity() {
     });
 
     let roots = reqwest::Certificate::from_pem_bundle(&std::fs::read(&files.ca).unwrap()).unwrap();
-    let url = format!("https://localhost:{}/identity", address.port());
+    let url = format!("https://127.0.0.1:{}/identity", address.port());
     let anonymous = client_builder(roots.clone()).build().unwrap();
     assert!(anonymous.get(&url).send().await.is_err());
 

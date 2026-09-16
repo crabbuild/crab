@@ -163,7 +163,7 @@ flowchart LR
     Provider[Generated provider values] --> Helm[Helm release]
     Team[Team image, OIDC, and ingress values] --> Helm
     Secret[OIDC secret and stable state key] --> Helm
-    Identity[Cloud workload identity] --> Pods[Two or more Crab pods]
+    Identity[Cloud workload identity] --> Pods[Three or more Crab pods]
     Helm --> Pods
     Pods --> Root[(One storage root)]
 ```
