@@ -100,6 +100,9 @@ pub(super) struct GeneratedViewPack {
     pub(super) bytes: Vec<u8>,
     pub(super) index: Vec<u8>,
     pub(super) reverse_index: Vec<u8>,
+    pub(super) locator: Vec<u8>,
+    pub(super) git_checksum: String,
+    pub(super) object_count: u64,
 }
 
 pub(super) fn generate_view_pack(filtered_git: &Path) -> Result<GeneratedViewPack> {
@@ -118,6 +121,9 @@ pub(super) fn generate_view_pack(filtered_git: &Path) -> Result<GeneratedViewPac
             bytes: Vec::new(),
             index: Vec::new(),
             reverse_index: Vec::new(),
+            locator: Vec::new(),
+            git_checksum: String::new(),
+            object_count: 0,
         });
     }
 
@@ -170,10 +176,44 @@ pub(super) fn generate_view_pack(filtered_git: &Path) -> Result<GeneratedViewPac
     let reverse_index_path = validation_pack.with_extension("rev");
     crab_git::pack_locator::write_pack_reverse_index(&index_path, &reverse_index_path)
         .map_err(crab_git::pack::PackError::from)?;
+    let index = std::fs::read(&index_path)?;
+    let reverse_index = std::fs::read(&reverse_index_path)?;
+    let mut locations = crab_git::pack_locator::PackLocationIter::open(
+        &index_path,
+        &reverse_index_path,
+        output.stdout.len() as u64,
+    )
+    .map_err(crab_git::pack::PackError::from)?;
+    let object_count = locations.object_count();
+    let object_ids = locations
+        .by_ref()
+        .map(|location| location.map(|location| location.oid))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(crab_git::pack::PackError::from)?;
+    let kinds = crab_git::object_kinds_from_git_dir(filtered_git, &object_ids)?;
+    let ordered_kinds = object_ids
+        .iter()
+        .map(|oid| {
+            kinds.get(oid).copied().ok_or_else(|| {
+                AuthServerError::Internal(
+                    "filtered view pack kind metadata omitted an object".to_owned(),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let git_checksum = locations.pack_checksum().to_string();
+    let locator = crab_git::pack_locator::encode_pack_kind_metadata(
+        locations.pack_checksum(),
+        &ordered_kinds,
+    )
+    .map_err(crab_git::pack::PackError::from)?;
     Ok(GeneratedViewPack {
         bytes: output.stdout,
-        index: std::fs::read(index_path)?,
-        reverse_index: std::fs::read(reverse_index_path)?,
+        index,
+        reverse_index,
+        locator,
+        git_checksum,
+        object_count,
     })
 }
 
