@@ -130,8 +130,11 @@ unchanged progress after 15 seconds, and local readiness plus Prometheus health,
 progress and lag use the same deadline. The shard-zero rendezvous owner performs
 bounded minute-level stale-node collection through an ETag-fenced tombstone, so
 a racing heartbeat cannot be deleted. Shutdown uses the same exact-ETag
-tombstone path to withdraw the latest local advertisement after runtime drain. Durable
-scheduler retry/fairness and multi-node activity failure qualification remain;
+tombstone path to withdraw the latest local advertisement after runtime drain. Fair
+primitive budgets and shard cursors prevent cleanup or an early Cell from starving
+later work. A failed remote schedule leaves the published root and due deadline
+unchanged and is retried in the next scan cycle. Multi-node activity failure
+qualification remains;
 all collaboration domains use typed Cell state; immutable asset bodies stay outside SQL.
 Git publication behavior remains unchanged. See
 [remaining gates](validation-and-delivery.md#verification-scope-for-the-current-implementation).

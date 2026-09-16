@@ -192,6 +192,20 @@ impl PeerRoundTrip for UnavailablePeer {
     }
 }
 
+struct CountingUnavailablePeer(Arc<AtomicUsize>);
+
+impl PeerRoundTrip for CountingUnavailablePeer {
+    fn send(
+        &self,
+        _target: CellTarget,
+        _request: Vec<u8>,
+        _remaining_ms: u32,
+    ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>> {
+        self.0.fetch_add(1, Ordering::AcqRel);
+        Box::pin(async { Err(crab_cell_runtime::Error::CellNotActive) })
+    }
+}
+
 async fn bootstrap_due_repository(
     identity: ApplicationIdentity,
     layout: &CellStorageLayout,
@@ -621,6 +635,192 @@ async fn scan_cursor_advances_when_the_cycle_budget_is_exhausted() {
     }
     assert_eq!(second_cycle, vec![1, 1]);
     runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
+    let identity = ApplicationIdentity::new(
+        TenantId::from_bytes([91; 16]),
+        ApplicationId::from_bytes([92; 16]),
+    );
+    let layout = CellStorageLayout::new(
+        Store::new(Arc::new(InMemory::new())),
+        Path::from("repository-scheduler-retry"),
+        *identity.application().as_bytes(),
+    );
+    let registry = Arc::new(crate::cells::compiled_registry().unwrap());
+    bootstrap_release_at(
+        &layout,
+        identity,
+        &registry,
+        &format!("sha256:{}", "5d".repeat(32)),
+    )
+    .await
+    .unwrap();
+
+    let remote_session = SessionId::from_bytes([93; 16]);
+    let remote_endpoint = "https://scheduler-remote.internal:8789".to_owned();
+    let remote_owner = Owner {
+        session: remote_session,
+        endpoint: remote_endpoint.clone(),
+    };
+    let remote_runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 4).unwrap(),
+        16 * 1024 * 1024,
+        remote_session,
+    )
+    .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let repository = Uuid::from_bytes([94; 16]);
+    let (target, authority) = bootstrap_due_repository(
+        identity,
+        &layout,
+        &registry,
+        &remote_runtime,
+        remote_owner.clone(),
+        directory.path(),
+        repository,
+        95,
+    )
+    .await;
+    let catalog = crab_cell_runtime::CellCatalog::new(layout.clone(), identity.tenant());
+    let proof = catalog.lookup(target.cell_id()).await.unwrap().unwrap();
+    let idle = authority.load(target.cell_id()).await.unwrap().unwrap();
+    let replica = CellReplica::new(
+        layout.clone(),
+        *target.cell_id().as_bytes(),
+        *idle.value().incarnation.as_bytes(),
+        ReplicaLimits::default(),
+    )
+    .unwrap();
+    let remote = remote_runtime
+        .acquire_idle_restored(
+            proof,
+            replica,
+            authority.clone(),
+            idle,
+            directory.path().join("remote-active.sqlite"),
+            remote_owner,
+        )
+        .await
+        .unwrap();
+    let before = authority.load(target.cell_id()).await.unwrap().unwrap();
+    assert_eq!(before.value().next_due_ms, Some(1));
+    assert_eq!(before.value().root.as_ref().unwrap().commit_sequence, 0);
+
+    let local_session = SessionId::from_bytes([96; 16]);
+    let local_endpoint = "https://scheduler-local.internal:8789".to_owned();
+    let fleet = Digest::from_bytes([97; 32]);
+    let image = Digest::from_bytes([98; 32]);
+    let certificate = Digest::from_bytes([99; 32]);
+    let node_directory =
+        NodeDirectory::new(layout.clone(), fleet, image, registry.release_digest());
+    let now_ms = super::super::unix_now_ms().unwrap();
+    let remote_key = SigningKey::from_bytes(&[100; 32]);
+    node_directory
+        .create(
+            NodeAdvertisement::sign(
+                remote_session,
+                remote_endpoint,
+                fleet,
+                certificate,
+                image,
+                registry.release_digest(),
+                &remote_key,
+                1,
+                now_ms,
+                now_ms + 15_000,
+                registry.module_digests(),
+                vec![1],
+                NodeCapacity {
+                    free_memory_bytes: 0,
+                    free_disk_bytes: 0,
+                    job_credits: 0,
+                },
+            )
+            .unwrap(),
+            now_ms,
+        )
+        .await
+        .unwrap();
+    let local_key = SigningKey::from_bytes(&[101; 32]);
+    node_directory
+        .create(
+            NodeAdvertisement::sign(
+                local_session,
+                local_endpoint.clone(),
+                fleet,
+                certificate,
+                image,
+                registry.release_digest(),
+                &local_key,
+                1,
+                now_ms,
+                now_ms + 15_000,
+                registry.module_digests(),
+                vec![1],
+                NodeCapacity {
+                    free_memory_bytes: 1024 * 1024 * 1024,
+                    free_disk_bytes: 1024 * 1024 * 1024,
+                    job_credits: 1,
+                },
+            )
+            .unwrap(),
+            now_ms,
+        )
+        .await
+        .unwrap();
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let local_runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 4).unwrap(),
+        16 * 1024 * 1024,
+        local_session,
+    )
+    .unwrap();
+    let router = RepositoryCellRouter::new(
+        identity,
+        layout.clone(),
+        Arc::clone(&registry),
+        local_runtime.clone(),
+        super::super::RepositoryCellPeer::new(
+            node_directory.clone(),
+            Arc::new(PeerSigner::new(
+                local_session,
+                registry.release_digest(),
+                local_key,
+            )),
+            Arc::new(CountingUnavailablePeer(Arc::clone(&attempts))),
+            Owner {
+                session: local_session,
+                endpoint: local_endpoint,
+            },
+        ),
+        directory.path().join("local-session"),
+    )
+    .unwrap();
+    let status = SchedulerStatus::new(now_ms).unwrap();
+    let mut scheduler = RepositoryCellScheduler::new(
+        identity,
+        layout,
+        node_directory,
+        router,
+        local_session,
+        status,
+    )
+    .unwrap();
+
+    scheduler.scan_once().await.unwrap();
+    scheduler.scan_once().await.unwrap();
+    assert_eq!(attempts.load(Ordering::Acquire), 2);
+    let after = authority.load(target.cell_id()).await.unwrap().unwrap();
+    assert_eq!(after.value().root, before.value().root);
+    assert_eq!(after.value().next_due_ms, Some(1));
+    assert_eq!(after.value().owner, before.value().owner);
+
+    remote.drain().await.unwrap();
+    remote_runtime.shutdown().await.unwrap();
+    local_runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
