@@ -36,6 +36,13 @@ and content hashes for larger metadata objects. `seal_git_validation` binds
 the semantically validated Git state to a BLAKE3 digest; readers call
 `validate_manifest_payload` before trusting refs or index pointers.
 
+Capsule protocol v2 uses one compacted root plus independently mutable ref
+heads and immutable capsule runs. Pointer catalogs keep shard/xorb payloads
+external while authenticating their identities and reconstruction closure.
+Readers that already loaded and verified a root use
+`load_pointer_catalog_from_root`; this preserves the same catalog validation
+without issuing a second mutable-root request.
+
 Payload modules cover manifests, segmented lists, pack metadata, commit-graph
 summaries, ref registries, chunk/file indexes, receipts, transactions, and
 canonical key/value codecs. Storage-backed helpers are feature-gated:

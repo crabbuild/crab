@@ -1047,10 +1047,9 @@ pub async fn run_post_fetch_shard_sync(
     metrics: Option<Arc<Metrics>>,
     emit_progress: bool,
 ) -> Result<SyncStats> {
-    let snapshot =
-        crate::metadata::manifest::read_repository_snapshot(router.store(), &router).await?;
+    let published = load_published_shards(&router).await?;
 
-    if snapshot.journal.shards.is_empty() {
+    if published.entries.is_empty() {
         debug!("post-fetch shard sync: repository has no shards, nothing to sync");
         return Ok(SyncStats::default());
     }
@@ -1121,10 +1120,9 @@ pub async fn run_post_fetch_shard_sync(
         .with_persistent_index(Arc::clone(&persistent))
         .with_shard_cache_dir(shard_cache_dir);
 
-    // The compacted manifest generation does not change until journal
-    // compaction. Do not cache an active journal shard set under that stale
-    // generation or a later fetch could incorrectly skip newly added shards.
-    if snapshot.journal.transactions.is_empty() {
+    // V1 manifest generations and v2 root generations both lag their mutable
+    // per-ref journals. Cache only a snapshot whose authority has no overlay.
+    if published.cacheable_generation {
         synchronizer = synchronizer.with_repo_cache_dir(cache_dir, repo_hash);
     }
 
@@ -1132,8 +1130,8 @@ pub async fn run_post_fetch_shard_sync(
         .sync(
             &mut chunk_index,
             &ShardList {
-                generation: snapshot.manifest.generation,
-                entries: snapshot.journal.shards,
+                generation: published.generation,
+                entries: published.entries,
             },
         )
         .await?;
@@ -1159,6 +1157,49 @@ pub async fn run_post_fetch_shard_sync(
     Ok(stats)
 }
 
+struct PublishedShards {
+    generation: u64,
+    entries: Vec<String>,
+    cacheable_generation: bool,
+}
+
+async fn load_published_shards(router: &StoreLayout) -> Result<PublishedShards> {
+    let capsule_layout = crab_storage::StoreLayout::with_global_prefix(
+        router.store().as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    match crab_metadata::capsule_protocol::load_root(&capsule_layout).await {
+        Ok(root) => {
+            let generation = root.record().root().generation();
+            let catalog = crab_metadata::capsule_protocol::load_pointer_catalog_from_root(
+                &capsule_layout,
+                &root,
+            )
+            .await?;
+            Ok(PublishedShards {
+                generation,
+                entries: catalog.shards().keys().cloned().collect(),
+                // Per-ref heads can advance without changing the compacted root
+                // generation, so this value cannot key the local generation cache.
+                cacheable_generation: false,
+            })
+        }
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        }) => {
+            let snapshot =
+                crate::metadata::manifest::read_repository_snapshot(router.store(), router).await?;
+            Ok(PublishedShards {
+                generation: snapshot.manifest.generation,
+                entries: snapshot.journal.shards,
+                cacheable_generation: snapshot.journal.transactions.is_empty(),
+            })
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -1171,6 +1212,10 @@ mod tests {
     };
     use crate::storage::StoreLayout;
     use crate::storage::store::Store;
+    use crab_metadata::capsule_protocol::{
+        Capsule, CapsuleRefEdit, CapsuleSection, CapsuleSectionKind, CapsuleTransaction,
+        PointerCatalog, ShardCatalogEntry,
+    };
     use crab_metadata::manifests::ShardList;
     use object_store::memory::InMemory;
     use tempfile::TempDir;
@@ -1191,6 +1236,57 @@ mod tests {
             generation,
             entries: entries.to_vec(),
         }
+    }
+
+    async fn publish_v2_shard(router: &StoreLayout, shard_data: &'static [u8]) -> MerkleHash {
+        let shard_hash = compute_data_hash(shard_data);
+        router
+            .store()
+            .put(
+                &router.shard_path(&shard_hash),
+                Bytes::from_static(shard_data),
+            )
+            .await
+            .unwrap();
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            router.store().as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let base =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+        let mut catalog = PointerCatalog::new();
+        catalog
+            .insert_shard(
+                shard_hash.hex(),
+                ShardCatalogEntry::new(shard_data.len() as u64, Vec::new()),
+            )
+            .unwrap();
+        let transaction = CapsuleTransaction::new(
+            base.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule = Capsule::build(
+            &transaction,
+            Vec::new(),
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::CatalogDelta,
+                catalog.encode_delta().unwrap(),
+            )],
+        )
+        .unwrap();
+        crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+            .await
+            .unwrap();
+        shard_hash
     }
 
     #[tokio::test]
@@ -1334,6 +1430,46 @@ mod tests {
             .unwrap();
 
         assert_eq!(stats.shards_downloaded, 1);
+    }
+
+    #[tokio::test]
+    async fn post_fetch_sync_reads_v2_pointer_catalog_without_manifest() {
+        let (router, cache, _dir) = setup();
+        let shard_hash = publish_v2_shard(&router, b"v2 pointer catalog shard").await;
+
+        let stats = run_post_fetch_shard_sync(router, "repo-hash", cache.root(), None, false)
+            .await
+            .unwrap();
+
+        assert_eq!(stats.shards_downloaded, 1);
+        assert!(cache.contains(&CacheKey::Shard(shard_hash)).await);
+    }
+
+    #[tokio::test]
+    async fn corrupt_v2_root_does_not_fall_back_to_v1_shards() {
+        let (router, _cache, _dir) = setup();
+        let manifest = Manifest::default_for_repo("refs/heads/main");
+        create_manifest(router.store(), &router, &manifest)
+            .await
+            .unwrap();
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            router.store().as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        router
+            .store()
+            .put(
+                &layout.capsule_root_path(),
+                Bytes::from_static(b"not a capsule root"),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            load_published_shards(&router).await,
+            Err(CrabError::CorruptObject { .. })
+        ));
     }
 
     #[tokio::test]

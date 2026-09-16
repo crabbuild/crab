@@ -40,7 +40,9 @@ pub use root::{
 };
 pub use run::{CapsuleRun, MAX_CAPSULES_PER_RUN};
 #[cfg(feature = "storage")]
-pub use store::{RootSnapshot, create_root, load_pointer_catalog, load_root};
+pub use store::{
+    RootSnapshot, create_root, load_pointer_catalog, load_pointer_catalog_from_root, load_root,
+};
 pub use transaction::{CapsuleRefEdit, CapsuleTransaction};
 pub use transaction_record::{
     CapsuleTransactionRecord, CapsuleTransactionStatus, MAX_CAPSULE_TRANSACTION_RECORD_BYTES,

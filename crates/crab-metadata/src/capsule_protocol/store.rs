@@ -159,6 +159,14 @@ pub async fn load_root(router: &StoreLayout<Store>) -> Result<RootSnapshot> {
 /// Load the complete authenticated pointer catalog named by one v2 root.
 pub async fn load_pointer_catalog(router: &StoreLayout<Store>) -> Result<PointerCatalog> {
     let snapshot = load_root(router).await?;
+    load_pointer_catalog_from_root(router, &snapshot).await
+}
+
+/// Load the complete pointer catalog from an already verified v2 root.
+pub async fn load_pointer_catalog_from_root(
+    router: &StoreLayout<Store>,
+    snapshot: &RootSnapshot,
+) -> Result<PointerCatalog> {
     let root = snapshot.record().root().clone();
     let mut catalog = if let Some(pointer) = root.checkpoint() {
         let path = router.capsule_checkpoint_path(pointer.hash());
