@@ -1165,7 +1165,6 @@ STORAGE_PACK_LAYOUT_REQUIRED_DELEGATIONS = {
         "pack_metadata_path(",
     ),
     "crates/crab-auth-server/src/view.rs": ("pack_path(", "pack_metadata_path("),
-    "crates/crab-read/src/selection.rs": ("pack_path(", "pack_metadata_path("),
 }
 STORAGE_PACK_LAYOUT_FORBIDDEN_PATTERNS = (
     'repo_path(&format!("packs/pack-',
@@ -1858,6 +1857,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-staging",
             "crab-storage",
             "crab-types",
+            "crab-write",
             "crab-xet",
             "crab-remote",
         },
