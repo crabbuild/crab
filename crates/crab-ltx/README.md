@@ -448,11 +448,15 @@ worker still drives a Tokio runtime while idle so pooled provider connections
 continue progressing. Dispatch cancellation never rolls back side effects.
 Default hosts share 32 object-store request slots, up to 16 CPU and dirty-job
 slots (each independently capped by available CPUs), and two large-recovery slots.
-`with_io_slots`, `with_job_slots`, `with_dirty_slots` and `with_recovery_slots`
-accept shared Tokio semaphores for explicit service budgets. Dirty admission
+`with_io_slots`, `with_job_slots`, `with_dirty_slots`, `with_recovery_slots` and
+`with_scratch_slots` accept shared Tokio semaphores for explicit service budgets;
+scratch permits represent one MiB each. Dirty admission
 precedes capture preparation; recovery admission is nested inside it before body
-downloads for restore, resume, bundle and compaction. Cancelled dispatched jobs
-retain their CPU/dirty/recovery reservation until the work finishes; returned
+downloads for restore, resume, bundle and compaction. Full restore/resume and
+Cell compaction reserve two database images plus 64 MiB; Cell compaction also
+reserves the exact authenticated source-index bytes. Oversized jobs fail before
+body downloads instead of waiting forever. Cancelled dispatched jobs retain
+their CPU/dirty/recovery/scratch reservation until the work finishes; returned
 roots, page maps, sparse writers and database handles do not retain it.
 Closed semaphores reject new work. These are concurrency ceilings, not byte-weighted
 memory admission, bounded caller task queues or admission for synchronous local APIs.

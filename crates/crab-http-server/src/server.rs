@@ -61,6 +61,7 @@ pub(crate) struct CellRuntimeBudget {
     node_retained_bytes: usize,
     max_active_cells: usize,
     replica_jobs: usize,
+    scratch_mebibytes: usize,
 }
 
 impl CellRuntimeBudget {
@@ -112,10 +113,20 @@ impl CellRuntimeBudget {
                 "Cell runtime has no capture and recovery job capacity",
             ));
         }
+        let scratch_mebibytes = usize::try_from(usable_disk / 3 / MIB)
+            .unwrap_or(usize::MAX)
+            .min(u32::MAX as usize)
+            .min(tokio::sync::Semaphore::MAX_PERMITS);
+        if scratch_mebibytes == 0 {
+            return Err(crate::Error::Config(
+                "Cell runtime has no temporary scratch-disk capacity",
+            ));
+        }
         Ok(Self {
             node_retained_bytes: mailbox,
             max_active_cells,
             replica_jobs,
+            scratch_mebibytes,
         })
     }
 
@@ -124,6 +135,7 @@ impl CellRuntimeBudget {
             .with_job_slots(Arc::new(Semaphore::new(self.replica_jobs)))
             .with_recovery_slots(Arc::new(Semaphore::new(self.replica_jobs)))
             .with_dirty_slots(Arc::new(Semaphore::new(self.replica_jobs)))
+            .with_scratch_slots(Arc::new(Semaphore::new(self.scratch_mebibytes)))
     }
 }
 
@@ -1357,6 +1369,7 @@ mod tests {
                 node_retained_bytes: (3 * GIB / 2 / 20) as usize,
                 max_active_cells: 1_125,
                 replica_jobs: 6,
+                scratch_mebibytes: 6_826,
             }
         );
     }
@@ -1407,6 +1420,7 @@ mod tests {
                 .unwrap();
         assert_eq!(budget.max_active_cells, 2_457);
         assert_eq!(budget.replica_jobs, 6);
+        assert_eq!(budget.scratch_mebibytes, 6_826);
     }
 
     #[test]

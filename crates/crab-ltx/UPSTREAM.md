@@ -128,8 +128,10 @@ through the runtime/server integration. Directory metadata reads use Crab's
 process-wide bounded verified-node cache, and sparse page faults coalesce
 adjacent frames into bounded range reads. Exact Cell roots can stream a verified
 database through exclusive scratch and no-clobber installation without a whole-
-database buffer. Node-wide bundle scheduling and dynamic scratch-disk admission
-remain service policy; bounded external-merge Cell compaction is implemented.
+database buffer. Node-wide bundle scheduling remains service policy. Full
+restore/resume and bounded external-merge Cell compaction now use byte-weighted
+scratch-disk admission supplied by the embedding service; active WAL,
+pending-cut, Git and LFS disk accounting remain service policy.
 Retention planning, leases, permission checks and durable HTTP responses remain
 server policy.
 The new remote modules are focused Crab adaptations of the referenced designs,

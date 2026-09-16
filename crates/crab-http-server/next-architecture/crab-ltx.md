@@ -24,7 +24,7 @@ performance and process/network fault qualification remain delivery work.
 | Remote recovery/compaction | Pinned cross-epoch inheritance, exact restore/resume, bundle locations and compaction guarded by head CAS |
 | Paged SQL | Authenticated immutable views and writable sparse activation; incremental hydration, bounded range read-ahead |
 | Failure/retention | Capture failure fences the handle; fresh-directory reactivation; exact batch/head pruning reverifies local bytes before deleting and releasing admission accounting |
-| Host facilities | Injectable filesystem/base VFS/clock/executor; shared page-fault worker/cache and I/O/job/recovery/dirty concurrency budgets; temporary reservations follow cancelled jobs but are removed from returned long-lived handles |
+| Host facilities | Injectable filesystem/base VFS/clock/executor; shared page-fault worker/cache and I/O/job/recovery/dirty concurrency budgets; one-MiB full-job scratch permits; temporary reservations follow cancelled jobs but are removed from returned long-lived handles |
 | Server wiring | All repository collaboration metadata, owner/control publication, scheduled owner-bound compaction, exact local-cut pruning, local/remote/idle/stale-owner routing, public HTTP response gating and source-loss restore are wired; immutable Release asset bodies remain object data by design |
 
 Source and usage: [crate README](../../crab-ltx/README.md),

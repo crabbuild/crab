@@ -94,9 +94,15 @@ pub struct Host {
     #[cfg(feature = "replica")]
     dirty_slots: Arc<tokio::sync::Semaphore>,
     #[cfg(feature = "replica")]
+    scratch_slots: Arc<tokio::sync::Semaphore>,
+    #[cfg(feature = "replica")]
+    scratch_capacity: u32,
+    #[cfg(feature = "replica")]
     recovery: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     #[cfg(feature = "replica")]
     dirty: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    #[cfg(feature = "replica")]
+    scratch: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
 }
 
 impl Host {
@@ -213,6 +219,18 @@ impl Host {
         self
     }
 
+    /// Shares temporary local-disk admission in one-MiB permit units.
+    ///
+    /// Configure an unused semaphore before cloning the host. Requests larger
+    /// than its initial capacity fail instead of waiting forever.
+    #[cfg(feature = "replica")]
+    #[must_use]
+    pub fn with_scratch_slots(mut self, slots: Arc<tokio::sync::Semaphore>) -> Self {
+        self.scratch_capacity = u32::try_from(slots.available_permits()).unwrap_or(u32::MAX);
+        self.scratch_slots = slots;
+        self
+    }
+
     #[cfg(feature = "replica")]
     pub(crate) async fn for_dirty(&self) -> crate::Result<Self> {
         let mut host = self.clone();
@@ -244,6 +262,35 @@ impl Host {
     }
 
     #[cfg(feature = "replica")]
+    pub(crate) async fn for_scratch(&self, bytes: u64) -> crate::Result<Self> {
+        const MIB: u64 = 1 << 20;
+        let units = bytes
+            .checked_add(MIB - 1)
+            .ok_or(crate::CrabError::Limit("scratch disk bytes"))?
+            / MIB;
+        let units =
+            u32::try_from(units).map_err(|_| crate::CrabError::Limit("scratch disk bytes"))?;
+        if units == 0 || units > self.scratch_capacity {
+            return Err(crate::CrabError::Limit("scratch disk bytes"));
+        }
+        let mut host = self.clone();
+        if let Some(permit) = &host.scratch {
+            if permit.num_permits() < units as usize {
+                return Err(crate::CrabError::Limit("scratch disk bytes"));
+            }
+            return Ok(host);
+        }
+        host.scratch = Some(Arc::new(
+            self.scratch_slots
+                .clone()
+                .acquire_many_owned(units)
+                .await
+                .map_err(|e| crate::CrabError::Other(Box::new(e)))?,
+        ));
+        Ok(host)
+    }
+
+    #[cfg(feature = "replica")]
     pub(crate) fn without_recovery(mut self) -> Self {
         self.recovery = None;
         self
@@ -252,6 +299,12 @@ impl Host {
     #[cfg(feature = "replica")]
     pub(crate) fn without_dirty(mut self) -> Self {
         self.dirty = None;
+        self
+    }
+
+    #[cfg(feature = "replica")]
+    pub(crate) fn without_scratch(mut self) -> Self {
+        self.scratch = None;
         self
     }
 
@@ -278,6 +331,7 @@ impl Host {
         let (send, receive) = tokio::sync::oneshot::channel();
         let recovery = self.recovery.clone();
         let dirty = self.dirty.clone();
+        let scratch = self.scratch.clone();
         self.executor.dispatch(Box::new(move || {
             // Dispatched work can outlive its future. Keep admission with the
             // job, not the waiter, so cancellation cannot oversubscribe the pool.
@@ -288,6 +342,7 @@ impl Host {
             // retain capacity while this closure is still being torn down.
             drop(recovery);
             drop(dirty);
+            drop(scratch);
             drop(permit);
             let _ = send.send(result);
         }))?;
@@ -308,6 +363,9 @@ impl Default for Host {
             std::sync::OnceLock::new();
         #[cfg(feature = "replica")]
         static DIRTY: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+        #[cfg(feature = "replica")]
+        static SCRATCH: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
+            std::sync::OnceLock::new();
         Self {
             filesystem: Arc::new(DirectFileSystem),
             clock: Arc::new(SystemClock),
@@ -341,9 +399,17 @@ impl Default for Host {
                 })
                 .clone(),
             #[cfg(feature = "replica")]
+            scratch_slots: SCRATCH
+                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(64 * 1024)))
+                .clone(),
+            #[cfg(feature = "replica")]
+            scratch_capacity: 64 * 1024,
+            #[cfg(feature = "replica")]
             recovery: None,
             #[cfg(feature = "replica")]
             dirty: None,
+            #[cfg(feature = "replica")]
+            scratch: None,
         }
     }
 }
@@ -650,11 +716,19 @@ mod tests {
         let jobs = Arc::new(tokio::sync::Semaphore::new(1));
         let recovery = Arc::new(tokio::sync::Semaphore::new(1));
         let dirty = Arc::new(tokio::sync::Semaphore::new(1));
+        let scratch = Arc::new(tokio::sync::Semaphore::new(1));
         let host = Host::default()
             .with_job_slots(jobs.clone())
             .with_recovery_slots(recovery.clone())
-            .with_dirty_slots(dirty.clone());
-        let scope = host.for_recovery().await.unwrap();
+            .with_dirty_slots(dirty.clone())
+            .with_scratch_slots(scratch.clone());
+        let scope = host
+            .for_recovery()
+            .await
+            .unwrap()
+            .for_scratch(1 << 20)
+            .await
+            .unwrap();
         let (started, entered) = tokio::sync::oneshot::channel();
         let (release, blocked) = std::sync::mpsc::channel();
         let task = tokio::spawn(async move {
@@ -671,6 +745,7 @@ mod tests {
         assert_eq!(jobs.available_permits(), 0);
         assert_eq!(recovery.available_permits(), 0);
         assert_eq!(dirty.available_permits(), 0);
+        assert_eq!(scratch.available_permits(), 0);
         release.send(()).unwrap();
         let _job = tokio::time::timeout(Duration::from_secs(2), jobs.acquire())
             .await
@@ -684,6 +759,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        let _scratch = tokio::time::timeout(Duration::from_secs(2), scratch.acquire())
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[cfg(feature = "replica")]
@@ -694,9 +773,11 @@ mod tests {
         let host = Host::default()
             .with_io_slots(slots.clone())
             .with_job_slots(slots.clone())
-            .with_recovery_slots(slots);
+            .with_recovery_slots(slots.clone())
+            .with_scratch_slots(slots);
         assert!(host.run(|| 1).await.is_err());
         assert!(host.io_permit().await.is_err());
         assert!(host.for_recovery().await.is_err());
+        assert!(host.for_scratch(1 << 20).await.is_err());
     }
 }

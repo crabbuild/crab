@@ -71,7 +71,8 @@ Full restore continues to verify every body and intermediate database checksum.
 | --- | --- | --- |
 | Provider operations | 32 shared process-wide permits, including retries | Caller tasks waiting for admission; total retained input bytes |
 | Codec/recovery blocking jobs | Available CPU count capped at 16, process-wide | Synchronous caller-owned SQL/capture/snapshot jobs |
-| Capture/recovery/compaction dirty work | CPU-capped shared defaults; the HTTP server instead derives 64 MiB slots from 25% of its Cell budget and CPU credits | Dynamic scratch-disk quota; measured allocator overhead |
+| Capture/recovery/compaction dirty work | CPU-capped shared defaults; the HTTP server instead derives 64 MiB slots from 25% of its Cell budget and CPU credits | Measured allocator overhead |
+| Full-job scratch | One-MiB shared permits; restore/resume reserve two images plus 64 MiB, and Cell compaction also reserves exact source-index bytes before bodies | Active WAL/pending-cut growth and unrelated Git/LFS scratch |
 | Full restore/resume/bundle/remote compaction | Shared recovery slots acquired before body downloads and nested inside dirty admission | Per-job RSS outside the configured dirty reservation; retained result buffers |
 | Paged fault driver | One shared default worker; 32 concurrent faults and 256 queued requests | SQL worker count; custom independently configured executor hosts |
 | Decoded read-ahead cache | 8 MiB payload per shared driver | SQLite caches, active fetch buffers, metadata and cache bookkeeping |
@@ -116,8 +117,9 @@ its separately derived dirty/recovery slots bound concurrent large operations.
    queues, a shared SQL executor, per-database serialization and FD/page-cache/
    native-state-derived active admission. Managed sessions own three 64 KiB-cache
    SQLite connections each. Capture/recovery/compaction share CPU- and memory-
-   derived dirty slots. Qualify the fixed native and dirty estimates, add dynamic
-   scratch-disk admission and implement explicit warm transitions. Fresh exact-
+   derived dirty slots, and full restore/compaction use byte-weighted scratch
+   admission. Qualify the fixed estimates, unify active WAL/Git/LFS disk
+   accounting and implement explicit warm transitions. Fresh exact-
    root restore is supported; reusable crash-safe local warm reopening is not.
    Every acknowledged root must survive eviction.
 4. **Retention and collection.** The HTTP runtime now owns owner/head CAS,

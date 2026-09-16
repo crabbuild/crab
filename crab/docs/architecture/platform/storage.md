@@ -262,6 +262,10 @@ units fail admission. Snapshot/restore write sequentially to exclusive scratch f
 sync file then parent before installation. At 5,000 MB, reserve two database
 sizes plus 64 MiB scratch before full recovery/compaction; sparse activation
 reserves only dirty-page/WAL budgets plus bounded metadata.
+The Host implements the full-job reservation with shared one-MiB permits.
+Cell compaction adds the exact source-index byte total to the two-image estimate.
+The server sizes this pool to one third of usable startup disk and fails an
+individually oversized request before immutable body downloads.
 
 Exact Cell-root restore now holds the Host recovery permit, fetches authenticated
 adjacent-frame runs capped at 1 MiB, writes them sequentially through the Host

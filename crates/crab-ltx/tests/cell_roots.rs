@@ -139,6 +139,23 @@ async fn prepared_root_reopens_without_a_mutable_head() {
     assert!(reopened.restore(&restored_path).await.is_err());
     assert_eq!(read_bytes.load(Ordering::SeqCst), 0);
     assert_eq!(std::fs::read(restored_path).unwrap(), expected);
+
+    let scratch = Arc::new(tokio::sync::Semaphore::new(64));
+    let limited = replica
+        .clone()
+        .with_host(Host::default().with_scratch_slots(scratch.clone()))
+        .open_root(&prepared.root())
+        .await
+        .unwrap();
+    read_bytes.store(0, Ordering::SeqCst);
+    let rejected_path = expected_dir.path().join("scratch-rejected.sqlite");
+    assert!(matches!(
+        limited.restore(&rejected_path).await,
+        Err(crab_ltx::CrabError::Limit("scratch disk bytes"))
+    ));
+    assert_eq!(scratch.available_permits(), 64);
+    assert_eq!(read_bytes.load(Ordering::SeqCst), 0);
+    assert!(!rejected_path.exists());
 }
 
 #[tokio::test]
@@ -199,6 +216,18 @@ async fn scheduled_cell_compaction_promotes_fanout_and_preserves_root() {
     assert_eq!(replica.open_root(&root).await.unwrap().segment_count(), 8);
 
     let scratch = tempfile::TempDir::new().unwrap();
+    let scratch_slots = Arc::new(tokio::sync::Semaphore::new(64));
+    let limited = replica
+        .clone()
+        .with_host(Host::default().with_scratch_slots(scratch_slots.clone()));
+    assert!(matches!(
+        limited
+            .prepare_scheduled_compaction(&root, scratch.path())
+            .await,
+        Err(crab_ltx::CrabError::Limit("scratch disk bytes"))
+    ));
+    assert_eq!(scratch_slots.available_permits(), 64);
+    assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
     let compacted = replica
         .prepare_scheduled_compaction(&root, scratch.path())
         .await

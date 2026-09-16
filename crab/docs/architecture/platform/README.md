@@ -265,8 +265,9 @@ Fleet-wide catalog migration orchestration now walks rendezvous-assigned shards,
 routes each transition through local or authenticated peer ownership, caps work
 at 16 concurrent Cells per node, and conditionally stores monotonic terminal
 progress for the activating release. Active-Cell admission reserves fixed native
-actor/task state, while capture, hydration, recovery and compaction share a
-CPU- and memory-derived dirty-job pool. Label create/edit/delete/list, issue-label validation, commit-status
+actor/task state, capture, hydration, recovery and compaction share a CPU- and
+memory-derived dirty-job pool, and full jobs reserve byte-weighted local scratch
+before immutable body reads. Label create/edit/delete/list, issue-label validation, commit-status
 create/list, versioned check-run create/update/list, Pull metadata/comments/reviews,
 durable merge intent, Release metadata/tag claims/publication intent and release-asset
 references now use the same Cell. Git refs and immutable release-asset bodies remain

@@ -638,6 +638,8 @@ impl CellReplica {
         let mut replica = self.clone();
         replica.host = self.host.for_recovery().await?;
         let graph = replica.load_graph(base).await?;
+        let scratch_bytes = compaction_scratch_bytes(&graph)?;
+        replica.host = replica.host.for_scratch(scratch_bytes).await?;
         compaction::prepare(&replica, base, graph, range, level, scratch_directory).await
     }
 
@@ -654,6 +656,8 @@ impl CellReplica {
         let mut replica = self.clone();
         replica.host = self.host.for_recovery().await?;
         let graph = replica.load_graph(base).await?;
+        let scratch_bytes = compaction_scratch_bytes(&graph)?;
+        replica.host = replica.host.for_scratch(scratch_bytes).await?;
         let segment_limit = MAX_SEGMENTS.min(replica.limits.max_segments);
         let stored_bytes = graph
             .descriptors
@@ -898,7 +902,12 @@ impl CellReplica {
             position: target,
             commit_sequence,
         };
-        let host = self.host.clone().without_recovery().without_dirty();
+        let host = self
+            .host
+            .clone()
+            .without_recovery()
+            .without_dirty()
+            .without_scratch();
         Ok(PreparedRoot {
             predecessor: base.copied(),
             verified: VerifiedRoot::from_graph(
@@ -1119,6 +1128,21 @@ struct LoadedGraph {
     aggregate: directory::Aggregate,
     document: RootDocument,
     descriptors: Vec<SegmentDescriptor>,
+}
+
+fn compaction_scratch_bytes(graph: &LoadedGraph) -> Result<u64> {
+    let base = crate::recovery::full_job_scratch_bytes(
+        graph.document.page_size,
+        graph.document.database_pages,
+    )?;
+    graph
+        .descriptors
+        .iter()
+        .try_fold(base, |total, descriptor| {
+            total
+                .checked_add(descriptor.index_length)
+                .ok_or(CrabError::Limit("scratch disk bytes"))
+        })
 }
 
 struct AppendInput {

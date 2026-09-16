@@ -8,7 +8,15 @@ use super::CellPagedDatabase;
 use crate::{CrabError, Host, Position, Result};
 
 pub(super) async fn run(database: &CellPagedDatabase, destination: &Path) -> Result<Position> {
-    let host = database.replica.host.for_recovery().await?;
+    let scratch_bytes =
+        crate::recovery::full_job_scratch_bytes(database.page_size, database.database_pages)?;
+    let host = database
+        .replica
+        .host
+        .for_recovery()
+        .await?
+        .for_scratch(scratch_bytes)
+        .await?;
     crate::recovery::reject_sidecars(destination, &host)?;
     if host.filesystem.exists(destination)? {
         return Err(io::Error::new(

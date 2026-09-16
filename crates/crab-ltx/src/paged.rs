@@ -316,9 +316,14 @@ pub(crate) fn extend(
     if previous_position != position {
         return Err(CrabError::ChecksumMismatch);
     }
-    // A returned view may live for days; it must not retain a temporary
-    // recovery reservation from the operation that constructed its page map.
-    let host = replica.host.clone().without_recovery().without_dirty();
+    // A returned view may live for days; it must not retain temporary job
+    // reservations from the operation that constructed its page map.
+    let host = replica
+        .host
+        .clone()
+        .without_recovery()
+        .without_dirty()
+        .without_scratch();
     Ok(PagedDatabase {
         replica: replica.with_host(host),
         pages: Arc::new(pages),
