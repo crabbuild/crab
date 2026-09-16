@@ -748,7 +748,7 @@ async fn download_packs_concurrent<S: PackStore + 'static>(
     Ok(installed)
 }
 
-struct FetchInstallLock {
+pub(crate) struct FetchInstallLock {
     _file: std::fs::File,
 }
 
@@ -756,7 +756,7 @@ struct FetchInstallLock {
 // Independent git/crab processes can share the same `.git/objects`
 // directory. Without this advisory lock, one process can rename a pack while
 // another process validates requested tips against the local ODB snapshot.
-async fn acquire_fetch_install_lock(pack_dir: &Path) -> Result<FetchInstallLock> {
+pub(crate) async fn acquire_fetch_install_lock(pack_dir: &Path) -> Result<FetchInstallLock> {
     let pack_dir = pack_dir.to_owned();
     tokio::task::spawn_blocking(move || -> Result<FetchInstallLock> {
         use fs4::fs_std::FileExt as LockFileExt;

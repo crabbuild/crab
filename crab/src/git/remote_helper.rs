@@ -4,7 +4,7 @@
 //! communicate with remote helpers. Commands are read line-by-line,
 //! batched until a blank line, then dispatched.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
 use std::io::Stderr;
@@ -1340,10 +1340,9 @@ async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
     _cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     tracing::debug!("responding to capabilities");
-    // Capsule-aware shallow and terminal upload-pack are advertised only after
-    // their v2 readers are wired. The ordinary fetch/push helper path remains
-    // complete and capabilities themselves require no storage probe.
-    let caps = format_capabilities_with_v2(false, true);
+    // Both terminal protocol-v2 and the classic helper fetch path resolve
+    // shallow history from the authenticated capsule repository view.
+    let caps = format_capabilities_with_v2(true, true);
     writer.write_all(caps.as_bytes()).await?;
     writer.flush().await?;
     Ok(())
@@ -1881,6 +1880,7 @@ where
             cache,
             cancel,
             options.check_connectivity,
+            options.followtags,
         )
         .await?;
     } else {
@@ -2502,6 +2502,7 @@ async fn fetch_packs(
     cache: &mut SessionCache,
     cancel: &tokio_util::sync::CancellationToken,
     check_connectivity: bool,
+    include_tags: bool,
 ) -> Result<Option<std::path::PathBuf>> {
     let raw_object_fetch = classify_raw_object_fetch(entries)?;
     if raw_object_fetch {
@@ -2527,11 +2528,34 @@ async fn fetch_packs(
         .await?;
         return Ok(None);
     }
-    if fetch_options.has_constraints() {
+    if fetch_options.filter.is_some() {
         return Err(CrabError::Protocol(
-            "shallow and filtered fetch are not yet part of the capsule-protocol protocol"
-                .to_owned(),
+            "filtered fetch requires protocol v2".to_owned(),
         ));
+    }
+    if fetch_options.deepen_relative && fetch_options.depth.is_none() {
+        return Err(CrabError::Protocol(
+            "relative deepening requires a depth".to_owned(),
+        ));
+    }
+    if fetch_options.depth.is_some() || fetch_options.deepen_relative {
+        crate::git::upload_pack_wire::with_read_admission(
+            store.as_storage(),
+            router.repo_prefix(),
+            cancel,
+            fetch_capsule_shallow_pack(
+                store,
+                router,
+                entries,
+                fetch_options,
+                config,
+                cache.capsule_view.take(),
+                include_tags,
+                cancel,
+            ),
+        )
+        .await?;
+        return Ok(None);
     }
     fetch_capsule_packs(
         store,
@@ -2612,13 +2636,7 @@ async fn fetch_capsule_packs(
             .collect::<Vec<_>>(),
     )
     .await?;
-    let repo_root = repo_root_from_git_dir(&git_dir);
-    if let Err(error) = crate::cmd::init::install_filter_driver(&repo_root) {
-        tracing::warn!(%error, "failed to install filter driver after capsule-protocol fetch");
-    }
-    if let Err(error) = crate::cmd::init::ensure_crab_dir_excluded(&repo_root) {
-        tracing::warn!(%error, "failed to exclude local Crab state after capsule-protocol fetch");
-    }
+    configure_fetched_repository(&git_dir)?;
     tracing::info!(
         installed_packs = installed.len(),
         generation = view.root().root().generation(),
@@ -2638,6 +2656,189 @@ async fn fetch_capsule_packs(
     .await
 }
 
+fn configure_fetched_repository(git_dir: &std::path::Path) -> Result<()> {
+    let repo_root = repo_root_from_git_dir(git_dir);
+    if let Err(error) = crate::cmd::init::install_filter_driver(&repo_root) {
+        tracing::warn!(%error, "failed to install filter driver after capsule-protocol fetch");
+    }
+    if let Err(error) = crate::cmd::init::ensure_crab_dir_excluded(&repo_root) {
+        tracing::warn!(%error, "failed to exclude local Crab state after capsule-protocol fetch");
+    }
+    std::fs::create_dir_all(repo_root.join(".crab"))?;
+    ensure_lazy_checkout_config_for_new_helper_repo(&repo_root);
+    Ok(())
+}
+
+async fn capsule_git_repository(
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    store: &crate::storage::store::Store,
+    router: &StoreLayout,
+    config: &crate::core::config::Config,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<crab_remote_git::RemoteGitRepository> {
+    let bucket = store.as_storage().bucket_identity();
+    let provider = format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container);
+    let identity =
+        crab_remote_git::RepositoryIdentity::new(provider, router.repo_prefix().to_owned(), 1)
+            .map_err(|error| CrabError::Protocol(error.to_string()))?;
+    view.git_repository(
+        identity,
+        Arc::new(crab_remote_git::RemoteGitRuntime::default()),
+        crab_read::upload_pack_repository_options()
+            .map_err(|error| CrabError::Protocol(error.to_string()))?,
+        capsule_fetch_maximum(config),
+        cancel,
+    )
+    .await
+    .map_err(Into::into)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "classic shallow fetch carries the pinned view, local boundary, policy, and cancellation state"
+)]
+async fn fetch_capsule_shallow_pack(
+    store: &crate::storage::store::Store,
+    router: &StoreLayout,
+    entries: &[FetchEntry],
+    fetch_options: &FetchOptions,
+    config: &crate::core::config::Config,
+    cached_view: Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
+    include_tags: bool,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    let wants = entries
+        .iter()
+        .map(|entry| {
+            gix_hash::ObjectId::from_hex(entry.sha.as_bytes()).map_err(|error| {
+                CrabError::Protocol(format!(
+                    "invalid shallow fetch ref tip {}: {error}",
+                    entry.sha
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let view = open_capsule_fetch_view(store, router, config, cached_view).await?;
+    let advertisement = crab_read::capsule_ref_advertisement(&view, &config.transfer_hide_refs);
+    let visible = advertisement
+        .refs
+        .iter()
+        .map(|entry| (entry.ref_name.as_str(), entry.sha.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    for entry in entries {
+        if visible.get(entry.ref_name.as_str()).copied() != Some(entry.sha.as_str()) {
+            return Err(CrabError::Protocol(format!(
+                "fetch ref {} at {} is not visible in the pinned capsule-protocol root",
+                entry.ref_name, entry.sha
+            )));
+        }
+    }
+    let visible_refs = advertisement
+        .refs
+        .iter()
+        .map(|reference| reference.ref_name.clone())
+        .collect::<Vec<_>>();
+    let git_dir = super::discover::discover_git_dir()?;
+    let existing_shallow = crate::git::shallow::read_shallow_file(&git_dir)
+        .await?
+        .into_iter()
+        .map(|oid| {
+            gix_hash::ObjectId::from_hex(oid.as_bytes()).map_err(|error| {
+                CrabError::Protocol(format!("invalid local shallow boundary {oid}: {error}"))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let full_depth = fetch_options.depth == Some(0);
+    let request = crab_read::UploadPackRequest {
+        wants,
+        shallow: (!full_depth)
+            .then_some(existing_shallow.clone())
+            .unwrap_or_default(),
+        deepen: (!full_depth).then_some(fetch_options.depth).flatten(),
+        deepen_relative: !full_depth && fetch_options.deepen_relative,
+        include_tags,
+        ..Default::default()
+    };
+    let repository = capsule_git_repository(&view, store, router, config, cancel).await?;
+    let visibility = view.git_visibility_index()?;
+    let plan =
+        crab_read::plan_upload_pack(&repository, &visibility, &visible_refs, &request, cancel)
+            .await?;
+    let authorization_digest =
+        visibility.authorization_digest_for_refs(visible_refs.iter().map(String::as_str));
+    let cache_key =
+        repository.generated_pack_cache_key(authorization_digest, &plan.object_ids, false);
+    let pack = repository
+        .generate_pack_cached(&plan.object_ids, cache_key, cancel)
+        .await
+        .map_err(|error| {
+            CrabError::Protocol(format!("shallow fetch pack generation failed: {error}"))
+        })?;
+    let pack_dir = git_dir.join("objects").join("pack");
+    let _install_lock = crate::git::fetch::acquire_fetch_install_lock(&pack_dir).await?;
+    let canonical_name = format!("shallow-{}", pack.checksum_hex());
+    let pack_was_present = pack_dir
+        .join(format!("pack-{canonical_name}.pack"))
+        .exists()
+        && pack_dir.join(format!("pack-{canonical_name}.idx")).exists();
+    crate::git::pack::install_pack_file_locally_with_timeout(
+        &pack_dir,
+        pack.path(),
+        &canonical_name,
+        0,
+        false,
+    )
+    .await?;
+    let apply_result = async {
+        crate::git::pack::validate_fetched_ref_tips(
+            &git_dir,
+            &entries
+                .iter()
+                .map(|entry| entry.sha.clone())
+                .collect::<Vec<_>>(),
+        )
+        .await?;
+        configure_fetched_repository(&git_dir)?;
+        let mut boundary = existing_shallow.into_iter().collect::<BTreeSet<_>>();
+        for oid in plan.unshallow {
+            boundary.remove(&oid);
+        }
+        boundary.extend(plan.shallow);
+        if full_depth || boundary.is_empty() {
+            crate::git::shallow::remove_shallow_file(&git_dir).await?;
+        } else {
+            let boundary = boundary
+                .into_iter()
+                .map(|oid| oid.to_string())
+                .collect::<Vec<_>>();
+            crate::git::shallow::write_shallow_file(&git_dir, &boundary).await?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = apply_result {
+        if !pack_was_present
+            && let Err(rollback_error) =
+                crate::git::pack::rollback_installed_pack(&pack_dir, &canonical_name).await
+        {
+            return Err(CrabError::Internal(format!(
+                "{error}; failed to roll back shallow fetch pack: {rollback_error}"
+            )));
+        }
+        return Err(error);
+    }
+    tracing::info!(
+        storage_protocol_version = 2,
+        transport = "remote-helper-fetch",
+        deepen = fetch_options.depth,
+        deepen_relative = fetch_options.deepen_relative,
+        planned_objects = pack.object_count(),
+        transferred_bytes = pack.size(),
+        "capsule-protocol shallow fetch installed generated pack"
+    );
+    Ok(())
+}
+
 fn classify_raw_object_fetch(entries: &[FetchEntry]) -> Result<bool> {
     let raw_object_count = entries
         .iter()
@@ -2649,100 +2850,6 @@ fn classify_raw_object_fetch(entries: &[FetchEntry]) -> Result<bool> {
         ));
     }
     Ok(raw_object_count > 0)
-}
-
-#[cfg(test)]
-async fn try_fetch_exact_shallow_closure(
-    store: &crate::storage::store::Store,
-    router: &StoreLayout,
-    manifest: &crate::metadata::manifest::Manifest,
-    entries: &[FetchEntry],
-    fetch_options: &FetchOptions,
-    git_dir: &std::path::Path,
-    cancel: &tokio_util::sync::CancellationToken,
-) -> Result<Option<Vec<std::path::PathBuf>>> {
-    let Some(depth) = fetch_options.depth.filter(|depth| *depth > 0) else {
-        return Ok(None);
-    };
-    if fetch_options.deepen_relative
-        || fetch_options.filter.is_some()
-        || entries.len() != 1
-        || git_dir.join("shallow").exists()
-    {
-        return Ok(None);
-    }
-    let entry = entries.first().ok_or_else(|| {
-        CrabError::Internal("exact shallow fetch has no advertised ref entry".to_owned())
-    })?;
-    let tip = gix_hash::ObjectId::from_hex(entry.sha.as_bytes()).map_err(|error| {
-        CrabError::Protocol(format!(
-            "invalid shallow fetch ref tip {}: {error}",
-            entry.sha
-        ))
-    })?;
-    let (repository, visibility) =
-        crate::git::upload_pack_wire::open_repository_with_catalog_visibility(
-            store.as_storage(),
-            router.repo_prefix(),
-            cancel,
-        )
-        .await?;
-    if repository.generation() != manifest.generation {
-        return Ok(None);
-    }
-    let operation = repository
-        .operation(crab_remote_git::OperationKind::UploadPack, cancel)
-        .await
-        .map_err(|error| {
-            CrabError::Protocol(format!("shallow fetch operation rejected: {error}"))
-        })?;
-    let selection = operation.shallow_object_closure(tip, depth).await;
-    let selection = operation
-        .finish(selection)
-        .await
-        .map_err(|error| CrabError::Protocol(format!("shallow closure lookup failed: {error}")))?;
-    let Some(selection) = selection else {
-        return Ok(None);
-    };
-    let authorization_digest = visibility.authorization_digest_for_refs([entry.ref_name.as_str()]);
-    let cache_key =
-        repository.generated_pack_cache_key(authorization_digest, &selection.object_ids, false);
-    let pack = repository
-        .generate_pack_cached(&selection.object_ids, cache_key, cancel)
-        .await
-        .map_err(|error| {
-            CrabError::Protocol(format!("shallow fetch pack generation failed: {error}"))
-        })?;
-    let pack_dir = git_dir.join("objects").join("pack");
-    tokio::fs::create_dir_all(&pack_dir).await?;
-    let canonical_name = format!("shallow-{}", pack.checksum_hex());
-    let installed = crate::git::pack::install_pack_file_locally_with_timeout(
-        &pack_dir,
-        pack.path(),
-        &canonical_name,
-        0,
-        false,
-    )
-    .await?;
-    crate::git::pack::validate_fetched_ref_tips(git_dir, &[entry.sha.clone()]).await?;
-    let boundary = selection
-        .shallow
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    if boundary.is_empty() {
-        crate::git::shallow::remove_shallow_file(git_dir).await?;
-    } else {
-        crate::git::shallow::write_shallow_file(git_dir, &boundary).await?;
-    }
-    tracing::info!(
-        depth,
-        planned_objects = selection.object_ids.len(),
-        shallow_boundaries = boundary.len(),
-        pack_bytes = pack.size(),
-        "remote-helper fetch used generation-bound shallow closure"
-    );
-    Ok(Some(vec![installed.pack_path]))
 }
 
 async fn fetch_capsule_promisor_objects(
@@ -2793,22 +2900,7 @@ async fn fetch_capsule_promisor_objects(
         config.uploadpack_allow_reachable_sha_in_want,
         filtered_promisor,
     )?;
-    let storage = store.as_storage();
-    let bucket = storage.bucket_identity();
-    let provider = format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container);
-    let identity =
-        crab_remote_git::RepositoryIdentity::new(provider, router.repo_prefix().to_owned(), 1)
-            .map_err(|error| CrabError::Protocol(error.to_string()))?;
-    let repository = view
-        .git_repository(
-            identity,
-            Arc::new(crab_remote_git::RemoteGitRuntime::default()),
-            crab_read::upload_pack_repository_options()
-                .map_err(|error| CrabError::Protocol(error.to_string()))?,
-            capsule_fetch_maximum(config),
-            cancel,
-        )
-        .await?;
+    let repository = capsule_git_repository(&view, store, router, config, cancel).await?;
     let visibility = view.git_visibility_index()?;
     let request = crab_read::UploadPackRequest {
         wants,
@@ -2929,7 +3021,6 @@ async fn install_promisor_sidecar(pack_dir: &std::path::Path, canonical_name: &s
     Ok(())
 }
 
-#[cfg(test)]
 fn ensure_lazy_checkout_config_for_new_helper_repo(repo_root: &std::path::Path) {
     let config_path = repo_root.join(".crab").join("local.toml");
     if config_path.exists() {
@@ -3273,7 +3364,7 @@ mod tests {
     async fn capabilities_response() {
         let output = run("capabilities\n").await;
         let expected = format!(
-            "fetch\npush\noption\ncheck-connectivity\nstateless-connect\nagent=crab/{}\n\n",
+            "fetch\npush\noption\ncheck-connectivity\nshallow\nstateless-connect\nagent=crab/{}\n\n",
             env!("CARGO_PKG_VERSION")
         );
         assert_eq!(output, expected);
@@ -3870,6 +3961,18 @@ mod tests {
         output.stdout
     }
 
+    fn git_object_exists(repo: &std::path::Path, object: &str) -> bool {
+        std::process::Command::new("git")
+            .args(["cat-file", "-e", object])
+            .current_dir(repo)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .status()
+            .expect("spawn git cat-file")
+            .success()
+    }
+
     fn deterministic_bytes(size: usize) -> Vec<u8> {
         let mut state = 0x9e37_79b9_7f4a_7c15u64;
         let mut data = Vec::with_capacity(size);
@@ -4210,6 +4313,175 @@ mod tests {
         (store, router, blob)
     }
 
+    async fn capsule_history_fixture() -> (
+        tempfile::TempDir,
+        crate::storage::store::Store,
+        StoreLayout,
+        Vec<String>,
+        String,
+    ) {
+        let source = tempfile::tempdir().expect("source repository");
+        run_git(source.path(), &["init", "-q", "-b", "main"]);
+        run_git(source.path(), &["config", "user.name", "Crab Tests"]);
+        run_git(
+            source.path(),
+            &["config", "user.email", "tests@crab.invalid"],
+        );
+        let mut commits = Vec::new();
+        for generation in 1..=3 {
+            std::fs::write(
+                source.path().join("history.txt"),
+                format!("generation {generation}\n"),
+            )
+            .expect("write history");
+            run_git(source.path(), &["add", "history.txt"]);
+            run_git(
+                source.path(),
+                &["commit", "-q", "-m", &format!("generation {generation}")],
+            );
+            commits.push(
+                String::from_utf8(run_git(source.path(), &["rev-parse", "HEAD"]))
+                    .expect("commit oid is utf8")
+                    .trim()
+                    .to_owned(),
+            );
+        }
+        run_git(source.path(), &["tag", "-a", "v1", "-m", "v1", &commits[1]]);
+        let tag = String::from_utf8(run_git(source.path(), &["rev-parse", "refs/tags/v1"]))
+            .expect("tag oid is utf8")
+            .trim()
+            .to_owned();
+        let store =
+            crate::storage::store::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/shallow".to_owned());
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        crab_write::capsule_protocol::initialize(&layout, &"9".repeat(64), "refs/heads/main")
+            .await
+            .expect("initialize capsule repository");
+        {
+            let git_dir = source.path().join(".git");
+            let _guard = GitEnvCwdGuard::set(source.path(), &git_dir, source.path());
+            let config = PushConfig {
+                git_dir: Some(git_dir),
+                ..PushConfig::default()
+            };
+            let specs = [
+                PushSpec {
+                    force: false,
+                    src: "refs/heads/main".to_owned(),
+                    dst: "refs/heads/main".to_owned(),
+                },
+                PushSpec {
+                    force: false,
+                    src: "refs/tags/v1".to_owned(),
+                    dst: "refs/tags/v1".to_owned(),
+                },
+            ];
+            let (result, _) = crate::git::capsule_push::run(
+                &config,
+                &specs,
+                &store,
+                &router,
+                None,
+                &[],
+                None,
+                None,
+                None,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("publish capsule history fixture");
+            assert!(result.all_ok());
+        }
+        (source, store, router, commits, tag)
+    }
+
+    #[tokio::test]
+    async fn classic_capsule_shallow_fetch_deepens_and_unshallows() {
+        let (_source, store, router, commits, tag) = capsule_history_fixture().await;
+        let target = tempfile::tempdir().expect("target repository");
+        run_git(target.path(), &["init", "-q"]);
+        let git_dir = target.path().join(".git");
+        let target_guard = GitEnvCwdGuard::set(target.path(), &git_dir, target.path());
+        let tip = commits.last().expect("history tip");
+
+        let input = format!("option depth 1\nfetch {tip} refs/heads/main\n\n");
+        let context = test_context(
+            store.clone(),
+            router.repo_prefix(),
+            target.path().join("push-state"),
+        );
+        let (output, result) =
+            run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
+        result.expect("fetch depth-one capsule history");
+        assert_eq!(output, "ok\n\n");
+        assert_eq!(
+            crate::git::shallow::read_shallow_file(&git_dir)
+                .await
+                .expect("read depth-one boundary"),
+            vec![tip.clone()]
+        );
+        assert!(!git_object_exists(target.path(), &commits[1]));
+
+        let input = format!(
+            "option depth 1\noption deepen-relative true\noption followtags true\nfetch {tip} refs/heads/main\n\n"
+        );
+        let context = test_context(
+            store.clone(),
+            router.repo_prefix(),
+            target.path().join("push-state"),
+        );
+        let (output, result) =
+            run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
+        result.expect("deepen capsule history");
+        assert_eq!(output, "ok\nok\nok\n\n");
+        assert_eq!(
+            crate::git::shallow::read_shallow_file(&git_dir)
+                .await
+                .expect("read deepened boundary"),
+            vec![commits[1].clone()]
+        );
+        assert!(git_object_exists(target.path(), &commits[1]));
+        assert!(!git_object_exists(target.path(), &commits[0]));
+        assert!(git_object_exists(target.path(), &tag));
+
+        let input = format!("option depth 0\nfetch {tip} refs/heads/main\n\n");
+        let context = test_context(
+            store.clone(),
+            router.repo_prefix(),
+            target.path().join("push-state"),
+        );
+        let (output, result) =
+            run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
+        result.expect("unshallow capsule history");
+        assert_eq!(output, "ok\n\n");
+        assert!(!git_dir.join("shallow").exists());
+        assert!(git_object_exists(target.path(), &commits[0]));
+
+        drop(target_guard);
+        let full_target = tempfile::tempdir().expect("full target repository");
+        run_git(full_target.path(), &["init", "-q"]);
+        let full_git_dir = full_target.path().join(".git");
+        let _full_guard =
+            GitEnvCwdGuard::set(full_target.path(), &full_git_dir, full_target.path());
+        let input = format!("option depth 0\nfetch {tip} refs/heads/main\n\n");
+        let context = test_context(
+            store,
+            router.repo_prefix(),
+            full_target.path().join("push-state"),
+        );
+        let (output, result) =
+            run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
+        result.expect("fetch depth-zero capsule history into a full repository");
+        assert_eq!(output, "ok\n\n");
+        assert!(!full_git_dir.join("shallow").exists());
+        assert!(git_object_exists(full_target.path(), &commits[0]));
+    }
+
     #[tokio::test]
     async fn capsule_promisor_fetch_installs_the_authorized_object() {
         let (store, router, blob) = capsule_promisor_fixture().await;
@@ -4272,6 +4544,7 @@ mod tests {
             None,
             &mut cache,
             &tokio_util::sync::CancellationToken::new(),
+            false,
             false,
         )
         .await
@@ -4785,7 +5058,7 @@ mod tests {
         let input = "capabilities\noption progress false\nlist\n";
         let output = run(input).await;
         let expected = format!(
-            "fetch\npush\noption\ncheck-connectivity\nstateless-connect\nagent=crab/{}\n\nok\n\n",
+            "fetch\npush\noption\ncheck-connectivity\nshallow\nstateless-connect\nagent=crab/{}\n\nok\n\n",
             env!("CARGO_PKG_VERSION")
         );
         assert_eq!(output, expected);

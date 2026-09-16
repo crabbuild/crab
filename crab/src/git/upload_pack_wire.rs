@@ -117,16 +117,6 @@ impl UploadPackVisibilityProof {
         }
     }
 
-    #[cfg(test)]
-    fn into_catalog(self) -> Result<GitCatalogVisibilityIndex> {
-        match self {
-            Self::Catalog(visibility) => Ok(visibility),
-            Self::Materialized(_) => Err(CrabError::Internal(
-                "catalog upload-pack proof was not returned".to_owned(),
-            )),
-        }
-    }
-
     fn object_count_for_refs(&self, refs: &[String]) -> usize {
         match self {
             Self::Materialized(visibility) => {
@@ -343,11 +333,6 @@ fn visibility_index_needs_repair(error: &RemoteGitError) -> bool {
             reason: crab_remote_git::RepositoryStateError::VisibilityProofMismatch,
         }
     )
-}
-
-#[cfg(test)]
-pub(crate) fn hidden_ref_patterns_are_valid(patterns: &[String]) -> bool {
-    compile_hidden_refs(patterns).is_ok()
 }
 
 /// Serve one terminal `stateless-connect git-upload-pack` helper session.
@@ -1188,37 +1173,6 @@ async fn open_repository_with_visibility_requirement(
         observed,
         required,
     }))
-}
-
-#[cfg(test)]
-pub(crate) async fn open_repository_with_catalog_visibility(
-    store: &crab_storage::Store,
-    prefix: &str,
-    cancellation: &CancellationToken,
-) -> Result<(RemoteGitRepository, GitCatalogVisibilityIndex)> {
-    let (repository, proof) =
-        open_repository_with_optional_catalog_visibility(store, prefix, cancellation).await?;
-    let proof = proof.ok_or_else(|| remote_error(RemoteGitError::EmptyRepository))?;
-    Ok((repository, proof))
-}
-
-#[cfg(test)]
-pub(crate) async fn open_repository_with_optional_catalog_visibility(
-    store: &crab_storage::Store,
-    prefix: &str,
-    cancellation: &CancellationToken,
-) -> Result<(RemoteGitRepository, Option<GitCatalogVisibilityIndex>)> {
-    let (repository, proof) = open_repository_with_visibility_requirement(
-        store,
-        prefix,
-        cancellation,
-        VisibilityRequirement::Catalog,
-    )
-    .await?;
-    let proof = proof
-        .map(UploadPackVisibilityProof::into_catalog)
-        .transpose()?;
-    Ok((repository, proof))
 }
 
 #[cfg(test)]
