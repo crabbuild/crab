@@ -123,6 +123,12 @@ pub enum Error {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    #[error("peer address discovery failed: {context}")]
+    PeerDiscovery {
+        context: &'static str,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     #[error("object storage preflight failed: {0}")]
     StorageProbe(&'static str),
     #[error("local staging setup failed")]

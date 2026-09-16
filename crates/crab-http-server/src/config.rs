@@ -96,9 +96,13 @@ impl Config {
 
     /// Replaces the node-specific host advertised by the Cell peer listener.
     pub fn set_peer_advertise_host(&mut self, host: &str) -> Result<()> {
+        let ipv6 = host
+            .parse::<std::net::Ipv6Addr>()
+            .ok()
+            .map(|address| format!("[{address}]"));
         self.cells
             .peer_advertise
-            .set_host(Some(host))
+            .set_host(Some(ipv6.as_deref().unwrap_or(host)))
             .map_err(|_| Error::Config("Cell peer advertise host is invalid"))?;
         self.validate()
     }
@@ -408,6 +412,11 @@ mod tests {
         assert_eq!(
             config.cells.peer_advertise.as_str(),
             "https://10.42.3.17:8789/"
+        );
+        config.set_peer_advertise_host("2001:db8::17").unwrap();
+        assert_eq!(
+            config.cells.peer_advertise.as_str(),
+            "https://[2001:db8::17]:8789/"
         );
         config.cells.peer_tls_server_name = Some("https://peer.invalid".into());
         assert!(config.validate().is_err());

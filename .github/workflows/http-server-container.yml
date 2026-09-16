@@ -55,12 +55,20 @@ jobs:
           jq empty crates/crab-http-server/deploy/ecs/task-definition.example.json
           jq --exit-status '
             .containerDefinitions[0].command[0]
-              | contains("cells release bootstrap --image \"$CRAB_HTTP_SERVER_RELEASE_IMAGE\"")
+              | contains("cells release bootstrap --image \"$CRAB_HTTP_SERVER_RELEASE_IMAGE\"") and
+                contains("--peer-advertise-host-from-ecs-metadata") and
+                contains("unset CRAB_HTTP_CONFIG CRAB_OIDC_CLIENT_SECRET CRAB_STATE_KEY CRAB_PEER_CERTIFICATE CRAB_PEER_PRIVATE_KEY CRAB_PEER_CA")
           ' crates/crab-http-server/deploy/ecs/task-definition.example.json >/dev/null
           jq --exit-status '
             [.containerDefinitions[0].environment[]
               | select(.name == "CRAB_HTTP_SERVER_RELEASE_IMAGE")]
               | length == 1
+          ' crates/crab-http-server/deploy/ecs/task-definition.example.json >/dev/null
+          jq --exit-status '
+            [.containerDefinitions[0].secrets[].name] as $names |
+            (["CRAB_HTTP_CONFIG", "CRAB_OIDC_CLIENT_SECRET", "CRAB_STATE_KEY",
+              "CRAB_PEER_CERTIFICATE", "CRAB_PEER_PRIVATE_KEY", "CRAB_PEER_CA"]
+             | all(. as $name | $names | index($name)))
           ' crates/crab-http-server/deploy/ecs/task-definition.example.json >/dev/null
           docker compose --file crates/crab-http-server/deploy/compose.yaml config --quiet
           release_manifest="${RUNNER_TEMP}/crab-http-server-release.json"

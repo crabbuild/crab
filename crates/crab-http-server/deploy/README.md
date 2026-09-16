@@ -5,7 +5,7 @@
 ```mermaid
 flowchart LR
     Client[Browser / Git / LFS] --> Edge[TLS load balancer]
-    Edge --> Replicas[2+ server replicas]
+    Edge --> Replicas[3+ server replicas]
     Replicas --> Catalog[Durable CAS catalog]
     Replicas --> State[OIDC sessions and Git tokens]
     Replicas --> Repos[Crab repositories]
@@ -20,7 +20,7 @@ flowchart LR
 | AKS | `helm/crab-http-server` | AKS Workload ID | Recommended team profile; live qualification required |
 | ECS/Fargate | `ecs/task-definition.example.json` | ECS task role | Evaluation profile; replacement grace is too short |
 
-The Kubernetes chart generates configuration from typed values, runs two or more replicas,
+The Kubernetes chart generates configuration from typed values, runs three or more replicas,
 private probes and Prometheus metrics, an optional Prometheus Operator
 `PodMonitor` and alert rules, a disruption budget, ingress isolation, optional
 Transport Layer Security (TLS) ingress, and optional autoscaling. A provider is

@@ -8,6 +8,8 @@ use crab_http_server::{RepositoryAccess, RepositoryMember};
 use serde::Deserialize;
 use tracing_subscriber::EnvFilter;
 
+mod ecs;
+
 #[derive(Parser)]
 #[command(version, about = "Serve and administer Crab repositories")]
 struct Arguments {
@@ -15,6 +17,13 @@ struct Arguments {
     config: PathBuf,
     #[arg(long, global = true)]
     peer_advertise_host: Option<String>,
+    #[arg(
+        long,
+        global = true,
+        conflicts_with = "peer_advertise_host",
+        help = "Read this task's awsvpc address from ECS metadata"
+    )]
+    peer_advertise_host_from_ecs_metadata: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -202,6 +211,8 @@ async fn main() -> crab_http_server::Result<()> {
     let mut config = crab_http_server::Config::read(&arguments.config)?;
     if let Some(host) = arguments.peer_advertise_host.as_deref() {
         config.set_peer_advertise_host(host)?;
+    } else if arguments.peer_advertise_host_from_ecs_metadata {
+        config.set_peer_advertise_host(&ecs::peer_advertise_host().await?)?;
     }
     match arguments.command.unwrap_or(Command::Serve) {
         Command::Serve => crab_http_server::serve(config).await,
@@ -453,6 +464,27 @@ mod tests {
         .unwrap();
 
         assert_eq!(arguments.peer_advertise_host.as_deref(), Some("10.42.3.17"));
+
+        let arguments = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "--peer-advertise-host-from-ecs-metadata",
+        ])
+        .unwrap();
+        assert!(arguments.peer_advertise_host_from_ecs_metadata);
+
+        assert!(
+            Arguments::try_parse_from([
+                "crab-http-server",
+                "--config",
+                "server.toml",
+                "--peer-advertise-host",
+                "10.42.3.17",
+                "--peer-advertise-host-from-ecs-metadata",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

@@ -322,9 +322,12 @@ fixable HIGH or CRITICAL vulnerabilities before publication. Existing image
 tags and chart versions fail closed instead of being replaced.
 
 ECS cannot mount Secrets Manager values as files, so its task entrypoint writes
-three protected files to disposable scratch, unsets the injected environment
-variables, and execs the same binary. Repository, catalog, and session state
-never depend on that scratch volume.
+the HTTP configuration, OIDC secret, session key, and three peer mTLS files to
+disposable scratch, unsets the injected environment variables, and execs the
+same binary. Each task discovers its task-scoped `awsvpc` address through the fixed
+task-local ECS metadata endpoint and substitutes only the configured peer
+advertise host. Repository, catalog, and session state never depend on that
+scratch volume.
 
 Fargate limits container shutdown to 120 seconds. That limit is shorter than Crab's five-minute Git and LFS budgets and ten-minute archive budget. Treat the task definition as evaluation evidence until abrupt-crash qualification proves safe replacement outcomes.
 

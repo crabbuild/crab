@@ -1024,6 +1024,7 @@ pub(crate) fn router(server: Arc<Server>) -> Router {
         .route("/auth/login", get(auth::login))
         .route("/auth/callback", get(auth::callback))
         .route("/auth/logout", post(auth::logout))
+        .route("/livez", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/api/repos", get(catalog))
         .route("/api/repos/{owner}/{name}/archive", get(archive::download))
         .route("/api/repos/{owner}/{name}/{action}", get(api::read))
@@ -1215,8 +1216,10 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
         .get("host")
         .and_then(|value| value.to_str().ok());
     let local_host = is_local_host(host);
-    let health_probe = matches!(request.uri().path(), "/healthz" | "/readyz");
-    let valid_host = (health_probe && local_host)
+    let management_probe = matches!(request.uri().path(), "/healthz" | "/readyz");
+    let load_balancer_probe = request.uri().path() == "/livez";
+    let valid_host = load_balancer_probe
+        || (management_probe && local_host)
         || server
             .auth
             .as_ref()
@@ -1719,6 +1722,17 @@ mod tests {
         let body = std::str::from_utf8(&body).unwrap();
         assert!(body.contains("crab_http_server_catalog_healthy 0"));
         assert!(body.contains("crab_http_server_requests_total{method=\"get\",outcome=\"2xx\"} 2"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/livez")
+                    .header("host", "10.42.3.17:8788")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
         server.shutdown_runtimes().await.unwrap();
     }
 }

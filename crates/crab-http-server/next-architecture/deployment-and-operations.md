@@ -159,6 +159,7 @@ TLS peer authentication.
 
 ### Readiness and termination
 
+Public `/livez` is a storage-independent load-balancer liveness check. Private
 `/healthz` checks process health without requiring object storage. `/readyz`
 checks bootstrap/catalog readiness, peer transport readiness, storage capability
 qualification and global draining/fencing state. A Pod can be ready with zero
@@ -196,7 +197,9 @@ replicas sharing an asynchronously copied bucket are not one linearizable fleet.
 The existing [ECS Fargate evaluation profile](../deploy/ecs/README.md) has a shorter
 stop timeout than the full server operation/drain budget. Preserve its documented
 qualification limitation; the new cell protocol does not make an interrupted Git
-or asset transfer complete successfully.
+or asset transfer complete successfully. The profile discovers each task's
+`awsvpc` address through the task-local ECS metadata endpoint and admits direct
+mTLS peer traffic on the management port from the task security group only.
 
 ## Lifecycle, admission, and resource limits
 

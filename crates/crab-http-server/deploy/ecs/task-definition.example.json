@@ -22,7 +22,7 @@
       "linuxParameters": { "capabilities": { "drop": ["ALL"] } },
       "entryPoint": ["/bin/sh", "-ec"],
       "command": [
-        "umask 077; printf '%s' \"$CRAB_HTTP_CONFIG\" > /var/lib/crab/tmp/server.toml; printf '%s' \"$CRAB_OIDC_CLIENT_SECRET\" > /var/lib/crab/tmp/oidc-client-secret; printf '%s' \"$CRAB_STATE_KEY\" > /var/lib/crab/tmp/state-key; unset CRAB_HTTP_CONFIG CRAB_OIDC_CLIENT_SECRET CRAB_STATE_KEY; /usr/local/bin/crab-http-server --config /var/lib/crab/tmp/server.toml cells release bootstrap --image \"$CRAB_HTTP_SERVER_RELEASE_IMAGE\"; unset CRAB_HTTP_SERVER_RELEASE_IMAGE; exec /usr/local/bin/crab-http-server --config /var/lib/crab/tmp/server.toml"
+        "umask 077; install -d -m 0700 /var/lib/crab/tmp/cells; printf '%s' \"$CRAB_HTTP_CONFIG\" > /var/lib/crab/tmp/server.toml; printf '%s' \"$CRAB_OIDC_CLIENT_SECRET\" > /var/lib/crab/tmp/oidc-client-secret; printf '%s' \"$CRAB_STATE_KEY\" > /var/lib/crab/tmp/state-key; printf '%s' \"$CRAB_PEER_CERTIFICATE\" > /var/lib/crab/tmp/peer.crt; printf '%s' \"$CRAB_PEER_PRIVATE_KEY\" > /var/lib/crab/tmp/peer.key; printf '%s' \"$CRAB_PEER_CA\" > /var/lib/crab/tmp/peer-ca.crt; unset CRAB_HTTP_CONFIG CRAB_OIDC_CLIENT_SECRET CRAB_STATE_KEY CRAB_PEER_CERTIFICATE CRAB_PEER_PRIVATE_KEY CRAB_PEER_CA; /usr/local/bin/crab-http-server --config /var/lib/crab/tmp/server.toml cells release bootstrap --image \"$CRAB_HTTP_SERVER_RELEASE_IMAGE\"; unset CRAB_HTTP_SERVER_RELEASE_IMAGE; exec /usr/local/bin/crab-http-server --config /var/lib/crab/tmp/server.toml --peer-advertise-host-from-ecs-metadata"
       ],
       "environment": [
         { "name": "AWS_REGION", "value": "us-west-2" },
@@ -45,6 +45,18 @@
         {
           "name": "CRAB_STATE_KEY",
           "valueFrom": "arn:aws:secretsmanager:us-west-2:123456789012:secret:crab-http-server-state-key"
+        },
+        {
+          "name": "CRAB_PEER_CERTIFICATE",
+          "valueFrom": "arn:aws:secretsmanager:us-west-2:123456789012:secret:crab-http-server-peer-certificate"
+        },
+        {
+          "name": "CRAB_PEER_PRIVATE_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-west-2:123456789012:secret:crab-http-server-peer-private-key"
+        },
+        {
+          "name": "CRAB_PEER_CA",
+          "valueFrom": "arn:aws:secretsmanager:us-west-2:123456789012:secret:crab-http-server-peer-ca"
         }
       ],
       "portMappings": [

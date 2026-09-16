@@ -236,6 +236,9 @@ seconds without a restart.
 Without OIDC, the server accepts loopback listeners only. This mode trusts one
 local operator and exposes every cataloged repository to that principal.
 
+The public listener exposes `GET /livez` as a storage-independent load-balancer
+liveness probe. It accepts an IP-valued `Host` because ALB health checks address
+tasks directly, returns no runtime state, and never substitutes for readiness.
 The private management listener owns `GET /healthz`, `GET /readyz`, and
 `GET /metrics`. The public listener does not expose management routes. Use
 `healthcheck` to call readiness on the configured management address.

@@ -418,7 +418,7 @@ A team release needs Level 3 or higher evidence: a user action, a real durable s
 
 Record these gates against a dedicated storage root:
 
-- Install two or more replicas across zones
+- Install three or more replicas across zones
 - Complete OIDC login when callbacks can reach either replica
 - Create a repository and observe it from every replica within five seconds
 - Push and fetch branches and tags with an independent Git client
