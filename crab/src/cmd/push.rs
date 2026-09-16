@@ -610,16 +610,16 @@ async fn run_push_once(
         .iter()
         .map(|spec| spec.dst.clone())
         .collect::<BTreeSet<_>>();
-    let capsule_view = crab_read::capsule_protocol::open_view_from_root_for_refs(
-        &capsule_layout,
-        root,
-        &requested_refs,
-        crab_read::capsule_protocol::CapsuleReadLimits {
-            max_capsule_bytes: push_config.receive_max_input_size,
-            max_frontier_bytes: push_config.receive_max_input_size,
-        },
-    )
-    .await?;
+    let capsule_view = if args.follow_tags {
+        crab_read::capsule_protocol::open_ref_view_from_root(&capsule_layout, root).await?
+    } else {
+        crab_read::capsule_protocol::open_ref_view_from_root_for_refs(
+            &capsule_layout,
+            root,
+            &requested_refs,
+        )
+        .await?
+    };
     if args.follow_tags {
         retain_missing_follow_tags(&mut specs, &explicit_destinations, capsule_view.refs());
     }

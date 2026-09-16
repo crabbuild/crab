@@ -793,7 +793,7 @@ async fn plan_replay_requires_the_same_verified_repository_identity() {
                 &[spec],
                 &store,
                 &router,
-                Some(capsule_view(&store, &router).await),
+                Some(capsule_view(&store, &router).await.into()),
                 &[],
                 None,
                 None,

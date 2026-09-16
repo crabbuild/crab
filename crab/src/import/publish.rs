@@ -180,14 +180,10 @@ pub async fn run_publish(inputs: PublishInputs) -> Result<PublishStats> {
     );
     let root = crab_write::capsule_protocol::open_root(&capsule_layout).await?;
     let requested_refs = BTreeSet::from([ref_name.clone()]);
-    let view = crab_read::capsule_protocol::open_view_from_root_for_refs(
+    let view = crab_read::capsule_protocol::open_ref_view_from_root_for_refs(
         &capsule_layout,
         root,
         &requested_refs,
-        crab_read::capsule_protocol::CapsuleReadLimits {
-            max_capsule_bytes: push_config.receive_max_input_size,
-            max_frontier_bytes: push_config.receive_max_input_size,
-        },
     )
     .await?;
 

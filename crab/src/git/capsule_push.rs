@@ -37,7 +37,7 @@ pub async fn run(
     specs: &[PushSpec],
     store: &crate::storage::store::Store,
     router: &crate::storage::StoreLayout,
-    advertised: Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
+    advertised: Option<crab_read::capsule_protocol::CapsuleRefView>,
     hidden_ref_patterns: &[String],
     staging: Option<&Arc<StagingAreaReadOnly>>,
     caching_store: Option<&crab_cache_store::CachingStore>,
@@ -45,7 +45,7 @@ pub async fn run(
     cancel: &CancellationToken,
 ) -> Result<(
     PushResult,
-    Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
+    Option<crab_read::capsule_protocol::CapsuleRefView>,
 )> {
     validate_publication_plan_context(config)?;
     let Some(plan_id) = config.mirror_plan_id.as_deref() else {
@@ -118,7 +118,7 @@ async fn run_inner(
     specs: &[PushSpec],
     store: &crate::storage::store::Store,
     router: &crate::storage::StoreLayout,
-    advertised: Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
+    advertised: Option<crab_read::capsule_protocol::CapsuleRefView>,
     hidden_ref_patterns: &[String],
     staging: Option<&Arc<StagingAreaReadOnly>>,
     caching_store: Option<&crab_cache_store::CachingStore>,
@@ -126,7 +126,7 @@ async fn run_inner(
     cancel: &CancellationToken,
 ) -> Result<(
     PushResult,
-    Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
+    Option<crab_read::capsule_protocol::CapsuleRefView>,
 )> {
     if let Some(result) = duplicate_destination_result(specs) {
         return Ok((result, advertised));
@@ -149,12 +149,15 @@ async fn run_inner(
     let view = match advertised {
         Some(view) => view,
         None => {
-            crab_read::capsule_protocol::open_view(
+            let root = crab_write::capsule_protocol::open_root(&layout).await?;
+            let requested_refs = specs
+                .iter()
+                .map(|spec| spec.dst.clone())
+                .collect::<BTreeSet<_>>();
+            crab_read::capsule_protocol::open_ref_view_from_root_for_refs(
                 &layout,
-                crab_read::capsule_protocol::CapsuleReadLimits {
-                    max_capsule_bytes: config.receive_max_input_size,
-                    max_frontier_bytes: config.receive_max_input_size,
-                },
+                root,
+                &requested_refs,
             )
             .await?
         }
@@ -1352,7 +1355,7 @@ mod tests {
             }],
             &store,
             &router,
-            Some(view),
+            Some(view.into()),
             &[],
             None,
             None,
@@ -1418,7 +1421,7 @@ mod tests {
             std::slice::from_ref(&spec),
             &store,
             &router,
-            Some(initial_view),
+            Some(initial_view.into()),
             &[],
             None,
             None,
@@ -1462,7 +1465,7 @@ mod tests {
             &[spec],
             &store,
             &router,
-            Some(committed),
+            None,
             &[],
             None,
             None,
@@ -1474,10 +1477,7 @@ mod tests {
         assert!(result.all_ok());
         assert!(committed.is_none());
         let second_requests = observer.count() - before_second;
-        assert!(
-            second_requests <= 10,
-            "incremental push used {second_requests} requests"
-        );
+        assert_eq!(second_requests, 8, "incremental push request contract");
         let committed = crab_read::capsule_protocol::open_view(&layout, limits)
             .await
             .expect("open committed second push");
@@ -1529,7 +1529,7 @@ mod tests {
             }],
             &store,
             &router,
-            Some(checkpoint_view),
+            Some(checkpoint_view.into()),
             &[],
             None,
             None,

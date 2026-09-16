@@ -267,13 +267,15 @@ ref's predecessor. The activation record is read once for all participating
 heads, so its single status selects all-old or all-new without a global marker
 scan.
 
-An explicit push does not enumerate the repository. It reads each destination
-head twice by its deterministic key, resolves only activation records named by
-those heads, and authenticates only their bounded run frontiers. Matching
-before/after head bodies and provider versions gives the same stable-snapshot
-property without work proportional to unrelated branches. If a selected head
-belongs to a multi-ref transaction, its capsule carries the complete atomic
-edit and the shared activation record still selects all-old or all-new.
+An explicit pointer-free push does not enumerate the repository or fetch
+checkpoint/capsule payloads. It reads each destination head twice by its
+deterministic key and resolves only activation records named by those heads.
+Matching before/after head bodies and provider versions gives the same stable
+ref snapshot property without work proportional to unrelated branches or
+immutable history. The writer then re-reads the selected head for its exact CAS
+token. If a selected head belongs to a multi-ref transaction, the shared
+activation record still selects all-old or all-new. Pointer publication alone
+expands to the complete authenticated payload view required for catalog reuse.
 
 This removes the root hot spot for hundreds of branches. Updates to existing
 distinct refs share no mutable key. Same-ref writers still serialize at that

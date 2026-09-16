@@ -60,6 +60,20 @@ pub fn capsule_ref_advertisement(
     )
 }
 
+/// Builds ref advertisement from one payload-free capsule ref view.
+#[must_use]
+pub fn capsule_ref_view_advertisement(
+    view: &crate::capsule_protocol::CapsuleRefView,
+    hidden_ref_patterns: &[String],
+) -> ManifestRefAdvertisement {
+    advertisement(
+        view.refs(),
+        view.peeled_refs(),
+        view.head(),
+        hidden_ref_patterns,
+    )
+}
+
 fn advertisement(
     refs: &std::collections::BTreeMap<String, String>,
     peeled_refs: &std::collections::BTreeMap<String, String>,

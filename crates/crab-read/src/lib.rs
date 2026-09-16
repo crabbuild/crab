@@ -23,7 +23,7 @@ pub use hydrator::{ReadRuntimeBuilder, ReadStoreLayout, ReconstructionStream, Sh
 pub use integrity::verify_origin_recipe;
 pub use ref_advertisement::{
     ManifestRefAdvertisement, ManifestRefEntry, capsule_ref_advertisement,
-    manifest_ref_advertisement, root_ref_advertisement,
+    capsule_ref_view_advertisement, manifest_ref_advertisement, root_ref_advertisement,
 };
 pub use selection::{
     DEFAULT_READINESS_CACHE_TTL_MS, ReadReplicaCandidate, ReadReplicaFallback,

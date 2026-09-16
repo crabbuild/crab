@@ -519,6 +519,8 @@ struct SessionCache {
     capsule_root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
     /// Materialized v2 refs and capsules retained across one Git protocol session.
     capsule_view: Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
+    /// Payload-free primary ref state retained from `list for-push`.
+    capsule_ref_view: Option<crab_read::capsule_protocol::CapsuleRefView>,
     /// A separately validated canonical-v1 repository uses its existing reader.
     legacy_v1: bool,
     metrics: Arc<Metrics>,
@@ -531,6 +533,7 @@ impl SessionCache {
             config,
             capsule_root: None,
             capsule_view: None,
+            capsule_ref_view: None,
             legacy_v1: false,
             metrics: Arc::new(Metrics::new()),
             persisted_metrics: MetricsSummary::zeroed(),
@@ -1395,6 +1398,26 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                         read_store_for_list_batch(s, prefix, remote_url, cfg, *for_push, cancel)
                             .await;
                     read_remote_refs(&read_store, &router, &cfg.transfer_hide_refs).await?
+                } else if *for_push {
+                    let hidden_ref_patterns = cache.config().transfer_hide_refs.clone();
+                    let (output, view) = match cache.capsule_ref_view.take() {
+                        Some(view) => {
+                            (list_output_from_ref_view(&view, &hidden_ref_patterns), view)
+                        }
+                        None => {
+                            let router = StoreLayout::new(s.clone(), prefix.to_owned());
+                            read_remote_refs_for_push_with_snapshot(
+                                s,
+                                &router,
+                                &hidden_ref_patterns,
+                                cache.capsule_root.take(),
+                            )
+                            .await
+                            .map_err(map_missing_capsule_root)?
+                        }
+                    };
+                    cache.capsule_ref_view = Some(view);
+                    output
                 } else {
                     let (read_store, router, hidden_ref_patterns, may_reuse_primary_root) = {
                         let cfg = cache.config();
@@ -1664,7 +1687,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                         &specs,
                         push_store,
                         &router,
-                        cache.capsule_view.take(),
+                        cache.capsule_ref_view.take(),
                         &config.transfer_hide_refs,
                         staging.reader(),
                         caching_store,
@@ -1674,7 +1697,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                     .await
                     {
                         Ok((r, view)) => {
-                            cache.capsule_view = view;
+                            cache.capsule_ref_view = view;
                             r
                         }
                         // Partial outcomes carry per-ref state the pipeline
@@ -2172,6 +2195,25 @@ async fn read_remote_refs_with_snapshot(
     Ok((list_output_from_view(&view, hidden_ref_patterns), view))
 }
 
+async fn read_remote_refs_for_push_with_snapshot(
+    store: &crate::storage::store::Store,
+    router: &StoreLayout,
+    hidden_ref_patterns: &[String],
+    root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
+) -> Result<(ListOutput, crab_read::capsule_protocol::CapsuleRefView)> {
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let root = match root {
+        Some(root) => root,
+        None => crab_write::capsule_protocol::open_root(&layout).await?,
+    };
+    let view = crab_read::capsule_protocol::open_ref_view_from_root(&layout, root).await?;
+    Ok((list_output_from_ref_view(&view, hidden_ref_patterns), view))
+}
+
 fn list_output_from_view(
     view: &crab_read::capsule_protocol::CapsuleRepositoryView,
     hidden_ref_patterns: &[String],
@@ -2194,6 +2236,33 @@ fn list_output_from_view(
         generation = root.generation(),
         head_symref = ?advertisement.head_symref,
         "read remote refs from capsule-protocol root"
+    );
+
+    ListOutput {
+        refs,
+        head_symref: advertisement.head_symref,
+    }
+}
+
+fn list_output_from_ref_view(
+    view: &crab_read::capsule_protocol::CapsuleRefView,
+    hidden_ref_patterns: &[String],
+) -> ListOutput {
+    let advertisement = crab_read::capsule_ref_view_advertisement(view, hidden_ref_patterns);
+    let refs = advertisement
+        .refs
+        .into_iter()
+        .map(|entry| RefEntry {
+            sha: entry.sha,
+            ref_name: entry.ref_name,
+            peeled: entry.peeled,
+        })
+        .collect();
+
+    tracing::debug!(
+        ref_count = view.refs().len(),
+        head_symref = ?advertisement.head_symref,
+        "read remote refs from payload-free capsule ref view"
     );
 
     ListOutput {

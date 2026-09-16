@@ -62,6 +62,54 @@ pub struct CapsuleRepositoryView {
     capsule_run_pointers: Vec<CapsulePointer>,
 }
 
+/// One authenticated root and its transaction-consistent mutable ref state.
+///
+/// This view intentionally excludes checkpoint and capsule payloads. Writers
+/// may use it for ref policy and expected-old validation, but consumers of Git
+/// objects or pointer catalogs must open a [`CapsuleRepositoryView`].
+#[derive(Debug, Clone)]
+pub struct CapsuleRefView {
+    root: crab_metadata::capsule_protocol::RootSnapshot,
+    refs: BTreeMap<String, String>,
+    peeled_refs: BTreeMap<String, String>,
+}
+
+impl CapsuleRefView {
+    /// Return the authoritative repository root captured with this ref state.
+    #[must_use]
+    pub fn root_snapshot(&self) -> &crab_metadata::capsule_protocol::RootSnapshot {
+        &self.root
+    }
+
+    /// Return refs materialized from the compacted root and captured heads.
+    #[must_use]
+    pub fn refs(&self) -> &BTreeMap<String, String> {
+        &self.refs
+    }
+
+    /// Return peeled refs materialized from the same captured heads.
+    #[must_use]
+    pub fn peeled_refs(&self) -> &BTreeMap<String, String> {
+        &self.peeled_refs
+    }
+
+    /// Return the symbolic HEAD target owned by the compacted root.
+    #[must_use]
+    pub fn head(&self) -> &str {
+        self.root.record().root().head()
+    }
+}
+
+impl From<CapsuleRepositoryView> for CapsuleRefView {
+    fn from(view: CapsuleRepositoryView) -> Self {
+        Self {
+            root: view.root,
+            refs: view.refs,
+            peeled_refs: view.peeled_refs,
+        }
+    }
+}
+
 /// Payload-free fingerprint used by background maintenance polling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapsuleRepositoryActivity {
@@ -817,8 +865,23 @@ pub async fn read_visible_refs_from_root(
     router: &StoreLayout<Store>,
     snapshot: &crab_metadata::capsule_protocol::RootSnapshot,
 ) -> Result<BTreeMap<String, String>> {
+    Ok(open_ref_view_from_root(router, snapshot.clone())
+        .await?
+        .refs)
+}
+
+/// Capture every current ref without fetching checkpoint or capsule payloads.
+pub async fn open_ref_view_from_root(
+    router: &StoreLayout<Store>,
+    snapshot: crab_metadata::capsule_protocol::RootSnapshot,
+) -> Result<CapsuleRefView> {
     let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
-    Ok(materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?.refs)
+    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?;
+    Ok(CapsuleRefView {
+        root: snapshot,
+        refs: visible.refs,
+        peeled_refs: visible.peeled_refs,
+    })
 }
 
 /// Inspect one root and every visible per-ref position without loading payloads.
@@ -853,13 +916,38 @@ pub async fn read_visible_refs_from_root_for_refs(
     snapshot: &crab_metadata::capsule_protocol::RootSnapshot,
     ref_names: &BTreeSet<String>,
 ) -> Result<BTreeMap<String, String>> {
+    Ok(
+        open_ref_view_from_root_for_refs(router, snapshot.clone(), ref_names)
+            .await?
+            .refs,
+    )
+}
+
+/// Capture only requested current refs without fetching immutable payloads.
+///
+/// The result is authoritative only for `ref_names`; absent entries represent
+/// missing or deleted selected refs rather than knowledge of sibling refs.
+pub async fn open_ref_view_from_root_for_refs(
+    router: &StoreLayout<Store>,
+    snapshot: crab_metadata::capsule_protocol::RootSnapshot,
+    ref_names: &BTreeSet<String>,
+) -> Result<CapsuleRefView> {
     let (heads, active) =
         capture_selected_ref_heads(router, snapshot.record().root(), ref_names).await?;
-    let refs = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?.refs;
-    Ok(refs
-        .into_iter()
-        .filter(|(ref_name, _)| ref_names.contains(ref_name))
-        .collect())
+    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?;
+    Ok(CapsuleRefView {
+        root: snapshot,
+        refs: visible
+            .refs
+            .into_iter()
+            .filter(|(ref_name, _)| ref_names.contains(ref_name))
+            .collect(),
+        peeled_refs: visible
+            .peeled_refs
+            .into_iter()
+            .filter(|(ref_name, _)| ref_names.contains(ref_name))
+            .collect(),
+    })
 }
 
 /// Load the immutable objects named by one already authenticated root.
@@ -872,23 +960,7 @@ pub async fn open_view_from_root(
     limits: CapsuleReadLimits,
 ) -> Result<CapsuleRepositoryView> {
     let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
-    assemble_view(router, snapshot, limits, heads, active, None).await
-}
-
-/// Load only the independently mutable ref heads needed by an explicit push.
-///
-/// The returned view is authoritative for `ref_names`. Other refs may reflect
-/// the compacted root or an atomic transaction shared with a selected ref, but
-/// callers must not use them as current values.
-pub async fn open_view_from_root_for_refs(
-    router: &StoreLayout<Store>,
-    snapshot: crab_metadata::capsule_protocol::RootSnapshot,
-    ref_names: &BTreeSet<String>,
-    limits: CapsuleReadLimits,
-) -> Result<CapsuleRepositoryView> {
-    let (heads, active) =
-        capture_selected_ref_heads(router, snapshot.record().root(), ref_names).await?;
-    assemble_view(router, snapshot, limits, heads, active, Some(ref_names)).await
+    assemble_view(router, snapshot, limits, heads, active).await
 }
 
 async fn assemble_view(
@@ -897,7 +969,6 @@ async fn assemble_view(
     limits: CapsuleReadLimits,
     heads: Vec<crab_metadata::capsule_protocol::CapsuleRefHead>,
     active: BTreeSet<String>,
-    selected_refs: Option<&BTreeSet<String>>,
 ) -> Result<CapsuleRepositoryView> {
     let mut refs = snapshot.record().root().refs().clone();
     let mut peeled_refs = snapshot.record().root().peeled_refs().clone();
@@ -1054,16 +1125,7 @@ async fn assemble_view(
     for capsule in &ordered {
         apply_capsule_refs(capsule, &mut refs, &mut peeled_refs)?;
     }
-    let refs_match = selected_refs.map_or_else(
-        || refs == expected_refs && peeled_refs == expected_peeled,
-        |selected| {
-            selected.iter().all(|name| {
-                refs.get(name) == expected_refs.get(name)
-                    && peeled_refs.get(name) == expected_peeled.get(name)
-            })
-        },
-    );
-    if !refs_match {
+    if refs != expected_refs || peeled_refs != expected_peeled {
         return Err(corrupt_path(
             "capsule-protocol ref heads",
             "materialized capsules do not match visible ref-head state",
@@ -2052,16 +2114,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn visible_ref_read_does_not_fetch_capsule_payloads() {
+    async fn ref_view_does_not_fetch_capsule_payloads() {
         let inner = Arc::new(InMemory::new());
         seed_one_capsule(inner.clone(), None).await;
         let observer = Arc::new(RecordingObserver::default());
         let store = Store::new(inner).with_storage_observer(observer.clone());
         let router = StoreLayout::new(store, "repositories/test".to_owned());
 
-        let refs = read_visible_refs(&router).await.unwrap();
+        let root = load_root(&router).await.unwrap();
+        let view = open_ref_view_from_root(&router, root).await.unwrap();
 
-        assert_eq!(refs.get("refs/heads/main"), Some(&"2".repeat(40)));
+        assert_eq!(view.refs().get("refs/heads/main"), Some(&"2".repeat(40)));
         let operations = observer
             .observations
             .lock()
@@ -2172,45 +2235,6 @@ mod tests {
 
         assert_eq!(refs.get("refs/heads/main"), Some(&"2".repeat(40)));
         assert_eq!(refs.get("refs/heads/feature"), Some(&"3".repeat(40)));
-    }
-
-    #[tokio::test]
-    async fn selected_ref_view_avoids_repository_wide_head_enumeration() {
-        let inner = Arc::new(InMemory::new());
-        seed_prepared_multi_ref(inner.clone(), true, false).await;
-        let observer = Arc::new(RecordingObserver::default());
-        let store = Store::new(inner).with_storage_observer(observer.clone());
-        let router = StoreLayout::new(store, "repositories/test".to_owned());
-        let root = load_root(&router).await.unwrap();
-
-        let view = open_view_from_root_for_refs(
-            &router,
-            root,
-            &BTreeSet::from(["refs/heads/feature".to_owned()]),
-            TEST_LIMITS,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(view.refs().get("refs/heads/feature"), Some(&"3".repeat(40)));
-        let operations = observer
-            .observations
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|observation| observation.outcome == StorageOutcome::Success)
-            .map(|observation| observation.operation)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            operations,
-            vec![
-                StorageOperation::Get,
-                StorageOperation::Get,
-                StorageOperation::Get,
-                StorageOperation::Get,
-                StorageOperation::Get,
-            ]
-        );
     }
 
     #[tokio::test]

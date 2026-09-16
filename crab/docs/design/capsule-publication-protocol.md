@@ -31,6 +31,10 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
 - foreground per-ref publication appends one leaf capsule without reading or
   rewriting history; server maintenance checkpoints after 32 visible capsules
   and writers discard the exact checkpointed prefix;
+- CLI and remote-helper push admission use a payload-free ref view; checkpoint
+  and capsule payloads remain exclusive to Git transfer, pointer-catalog, and
+  maintenance consumers, so foreground pointer-free push traffic is flat over
+  immutable history;
 - executable writer tests prove four successful checksum-qualified operations
   for first-ref creation and five for an existing ref, with one additional
   capsule readback on unqualified stores; the final root GET proves the ref

@@ -218,12 +218,13 @@ transaction identity, base-root binding, and materialized refs are verified
 before the view is returned. Git clone/fetch, pointer catalog lookup, checkout,
 and hydration consume this same view.
 
-`capsule_protocol::open_view_from_root_for_refs` is the explicit-push variant.
-It double-reads only the requested deterministic head keys and loads their
-authenticated run frontiers, avoiding repository-wide LIST and unrelated-head
-GET requests. Its non-selected ref values are not authoritative; complete
-advertisement and cross-ref pointer catalogs must continue to use `open_view`.
-Protected-push admission uses the narrower
+`capsule_protocol::open_ref_view_from_root_for_refs` is the explicit-push
+variant. It double-reads only the requested deterministic head keys without
+loading checkpoint or capsule payloads, avoiding repository-wide LIST,
+unrelated-head GET, and immutable-history GET requests. Its non-selected ref
+values are not authoritative; complete advertisement uses
+`open_ref_view_from_root`, while Git transfer and cross-ref pointer catalogs
+must continue to use `open_view`. Protected-push admission uses the narrower
 `read_visible_refs_from_root_for_refs`, which retains the same stable-head and
 atomic-activation checks but returns only requested refs and fetches no capsule
 or checkpoint payloads.
