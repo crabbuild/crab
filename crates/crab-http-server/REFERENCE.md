@@ -190,11 +190,14 @@ Do not put storage credentials in `server.toml`, source files, logs, or frontend
 Create initializes the canonical Git repository, publishes an
 `empty_cell_pending` catalog record, publishes the repository application's
 initial SQLite/LTX root, then marks the record `cell_ready`. Exact retries resume
-the same catalog UUID. Adopt authenticates the complete capsule-v2 view, verifies
-every embedded Git pack and every shard/xorb body below the configured root,
-then records `empty_cell_pending` and publishes a new empty application Cell. A
-missing or corrupt dependency leaves the catalog unchanged. Adopt never converts
-arbitrary object prefixes, and old collaboration application data is not imported.
+the same catalog UUID. Adopt authenticates the complete capsule-v2 view,
+validates every embedded Git pack, performs a bounded walk of all reachable
+refs, proves every reachable Crab pointer is represented by the authenticated
+catalog, and hashes every shard/xorb body plus every reachable LFS object below
+the configured root. It then records `empty_cell_pending` and publishes a new
+empty application Cell. A missing, corrupt, or conflicting dependency leaves
+the catalog unchanged. Adopt never converts arbitrary object prefixes, and old
+collaboration application data is not imported.
 
 ```sh
 SERVER="$HOME/Workspace/crabbuild-target/crab-http-server-dev/release/crab-http-server"

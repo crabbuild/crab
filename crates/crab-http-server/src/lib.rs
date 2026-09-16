@@ -29,6 +29,8 @@ mod server;
 mod state_stream;
 mod statuses;
 mod storage_root;
+#[cfg(test)]
+mod test_git;
 mod transfer_admission;
 
 pub use config::{

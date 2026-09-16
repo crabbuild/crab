@@ -2,7 +2,9 @@
 
 use gix_object::Kind;
 use sha2::Digest as _;
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{self, BufRead, BufReader, Read, Seek, Write};
+use std::path::Path;
+use std::process::{Command, Stdio};
 
 /// A captured blob header whose body still requires identity verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +36,62 @@ pub fn verify_blob_batch(
         )?;
     }
     finish(&mut reader, cancelled)
+}
+
+/// Stream and verify exact blob bodies from one local Git object database.
+///
+/// The object database must already be isolated from untrusted alternates.
+/// Transport is disabled, so a missing object fails instead of triggering a
+/// lazy fetch. Cancellation is cooperative between local reads.
+pub fn verify_git_dir_blobs(
+    git_dir: &Path,
+    expected: &[BlobHeader],
+    cancelled: &dyn Fn() -> bool,
+) -> io::Result<()> {
+    if expected.is_empty() {
+        return Ok(());
+    }
+    check_cancelled(cancelled)?;
+    // Feed requests from a file so a large first response cannot fill stdout
+    // while the parent is still blocked writing a many-object stdin pipe.
+    let mut input = tempfile::tempfile()?;
+    for blob in expected {
+        check_cancelled(cancelled)?;
+        writeln!(input, "{}", gix_hash::ObjectId::Sha1(blob.oid))?;
+    }
+    input.rewind()?;
+    let mut child = Command::new("git")
+        .arg("--no-replace-objects")
+        .arg("--git-dir")
+        .arg(git_dir)
+        .args(["cat-file", "--batch"])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_ALLOW_PROTOCOL", "")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .stdin(Stdio::from(input))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let operation = (|| {
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| invalid("Git blob verifier has no stdout"))?;
+        verify_blob_batch(stdout, expected, cancelled)?;
+        let status = child.wait()?;
+        if !status.success() {
+            return Err(invalid("Git blob verifier exited unsuccessfully"));
+        }
+        Ok(())
+    })();
+    if operation.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    operation
 }
 
 /// Visit small blob bodies after verifying every requested object's identity.

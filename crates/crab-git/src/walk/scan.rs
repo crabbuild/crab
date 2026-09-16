@@ -6,13 +6,14 @@ use std::path::Path;
 
 use gix_object::{Find, FindHeader};
 
-use super::{PointerBlob, Result, WalkError, walk_ref_union};
+use super::{LfsPointerBlob, PointerBlob, Result, WalkError, walk_ref_union};
 use crate::batch::BlobHeader;
 
 /// Pointer candidates and the remaining blob bodies needed for a complete scan.
 #[derive(Debug)]
 pub struct PointerScan {
     pub pointers: Vec<PointerBlob>,
+    pub lfs_pointers: Vec<LfsPointerBlob>,
     /// Must be byte-verified before candidates may become an integrity proof.
     pub unchecked_blobs: Vec<BlobHeader>,
 }
@@ -95,6 +96,13 @@ pub fn scan_pointers(
             .collect::<BTreeMap<_, _>>()
             .into_values()
             .collect(),
+        lfs_pointers: reachable
+            .lfs_pointers
+            .into_iter()
+            .map(|pointer| (pointer.oid, pointer))
+            .collect::<BTreeMap<_, _>>()
+            .into_values()
+            .collect(),
         unchecked_blobs: odb
             .unchecked_blobs
             .into_inner()
@@ -166,7 +174,7 @@ impl<T: FindHeader> FindHeader for CheckedOdb<'_, T> {
         let header = self.inner.try_header(id)?;
         if let Some(header) = &header
             && header.kind == gix_object::Kind::Blob
-            && header.size > crab_types::pointer::MAX_POINTER_SIZE as u64
+            && header.size >= crate::MAX_LFS_POINTER_SIZE as u64
         {
             let old = self
                 .unchecked_blobs

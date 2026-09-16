@@ -26,6 +26,12 @@ pub enum ReadError {
     #[error("remote Git error: {0}")]
     RemoteGit(#[from] crab_remote_git::Error),
 
+    #[error("Git dependency walk failed")]
+    GitWalk(#[from] crab_git::walk::WalkError),
+
+    #[error("LFS dependency verification failed")]
+    Lfs(#[from] crab_lfs::LfsError),
+
     #[error("xet data-plane error")]
     Xet(#[from] crab_xet::error::XetError),
 

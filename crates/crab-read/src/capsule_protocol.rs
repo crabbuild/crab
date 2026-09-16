@@ -25,6 +25,30 @@ pub struct CapsuleReadLimits {
     pub max_frontier_bytes: u64,
 }
 
+/// Bounds for a complete reachable dependency proof of one capsule view.
+#[derive(Debug, Clone, Copy)]
+pub struct CapsuleDependencyLimits {
+    /// Largest aggregate Git pack intake accepted by the temporary verifier.
+    pub max_git_bytes: u64,
+    /// Bounds for the complete reachable Git pointer scan.
+    pub pointer_scan: crab_git::walk::PointerScanLimits,
+}
+
+/// Counts returned by a complete reachable dependency proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapsuleDependencyProof {
+    /// File recipes authenticated by the complete pointer catalog.
+    pub catalog_files: u64,
+    /// Shard bodies authenticated and hash-verified by the proof.
+    pub catalog_shards: u64,
+    /// Xorb bodies authenticated and hash-verified by the proof.
+    pub catalog_xorbs: u64,
+    /// Reachable Crab pointer blobs bound to catalog file recipes.
+    pub reachable_crab_pointers: u64,
+    /// Distinct reachable LFS bodies read and hash-verified from origin.
+    pub reachable_lfs_objects: u64,
+}
+
 /// One authenticated repository root and every post-checkpoint capsule it names.
 #[derive(Debug, Clone)]
 pub struct CapsuleRepositoryView {
@@ -516,6 +540,113 @@ pub async fn install_git_packs(
     max_input_bytes: u64,
 ) -> Result<Vec<PathBuf>> {
     install_git_packs_with_candidates(view, &[], git_dir, max_input_bytes).await
+}
+
+/// Verify every Git and external content dependency reachable from one view.
+///
+/// This is a deep administrative proof, not a foreground read-path check. It
+/// validates the complete shard/xorb catalog, installs and validates all Git
+/// packs in an isolated object database, proves every reachable Crab pointer
+/// is represented by that catalog, and hashes every reachable LFS object from
+/// the origin store. Cancellation never turns a partial scan into success.
+pub async fn verify_reachable_dependencies(
+    layout: &StoreLayout<Store>,
+    view: &CapsuleRepositoryView,
+    limits: CapsuleDependencyLimits,
+    cancellation: &CancellationToken,
+) -> Result<CapsuleDependencyProof> {
+    let catalog = view.pointer_catalog()?;
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(ReadError::Cancelled),
+        result = crate::verify_capsule_pointer_catalog_objects(layout, &catalog) => {
+            result?;
+        }
+    }
+
+    let workspace = tempfile::tempdir()?;
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(ReadError::Cancelled),
+        result = install_git_packs(view, workspace.path(), limits.max_git_bytes) => {
+            result?;
+        }
+    }
+    let refs = view
+        .refs()
+        .iter()
+        .map(|(name, oid)| (name.clone(), oid.clone()))
+        .collect::<Vec<_>>();
+    let git_dir = workspace.path().to_owned();
+    let scan_cancel = cancellation.child_token();
+    let worker_cancel = scan_cancel.clone();
+    let scan = tokio::task::spawn_blocking(move || -> Result<_> {
+        let scan = crab_git::walk::scan_pointers(&git_dir, &refs, limits.pointer_scan, &|| {
+            worker_cancel.is_cancelled()
+        })?;
+        crab_git::batch::verify_git_dir_blobs(&git_dir, &scan.unchecked_blobs, &|| {
+            worker_cancel.is_cancelled()
+        })?;
+        Ok(scan)
+    });
+    let scan = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => {
+            scan_cancel.cancel();
+            return Err(ReadError::Cancelled);
+        }
+        result = scan => result
+            .map_err(|error| ReadError::Internal(format!("Git dependency scan failed: {error}")))??,
+    };
+
+    for pointer in &scan.pointers {
+        let hash = crab_types::pointer::hex_encode(&pointer.file_hash);
+        let Some(entry) = catalog.files().get(&hash) else {
+            return Err(ReadError::CorruptObject {
+                path: gix_hash::ObjectId::Sha1(pointer.oid).to_string(),
+                reason: format!("reachable Crab pointer {hash} is absent from the catalog"),
+            });
+        };
+        if entry.size() != pointer.size {
+            return Err(ReadError::CorruptObject {
+                path: gix_hash::ObjectId::Sha1(pointer.oid).to_string(),
+                reason: format!(
+                    "reachable Crab pointer {hash} declares size {}, catalog declares {}",
+                    pointer.size,
+                    entry.size()
+                ),
+            });
+        }
+    }
+
+    let lfs = crab_lfs::LfsObjectStore::new(layout.store().clone(), layout.repo_prefix());
+    let mut lfs_objects = BTreeMap::new();
+    for blob in scan.lfs_pointers {
+        if let Some(previous) = lfs_objects.insert(blob.pointer.oid, blob.pointer.size)
+            && previous != blob.pointer.size
+        {
+            return Err(ReadError::CorruptObject {
+                path: gix_hash::ObjectId::Sha1(blob.oid).to_string(),
+                reason: "reachable LFS pointers declare conflicting sizes for one object"
+                    .to_owned(),
+            });
+        }
+    }
+    for (oid, size) in &lfs_objects {
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(ReadError::Cancelled),
+            result = lfs.verify_origin(oid, *size) => result?,
+        }
+    }
+
+    Ok(CapsuleDependencyProof {
+        catalog_files: catalog.files().len() as u64,
+        catalog_shards: catalog.shards().len() as u64,
+        catalog_xorbs: catalog.xorbs().len() as u64,
+        reachable_crab_pointers: scan.pointers.len() as u64,
+        reachable_lfs_objects: lfs_objects.len() as u64,
+    })
 }
 
 /// Install the pinned view plus additional verified candidate capsules.
