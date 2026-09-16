@@ -108,6 +108,13 @@ Required cases are:
 
 Mock-only tests do not satisfy source-loss or publication proof.
 
+`tests/publication.rs` injects the ambiguous publication window at the object
+store boundary: the backend accepts the control `Update`, then the decorator
+returns a connection-reset error. The publisher must reload the exact root,
+clear the retained cut, and return the recorded outcome without invoking the
+SQL handler again. This proves local reconciliation; the three-Pod gate must
+still inject the same lost response through the deployed network path.
+
 ## Prove storage and LTX behavior
 
 `crab-ltx` evidence must cover:

@@ -2188,6 +2188,7 @@ dependencies = [
 name = "crab-cell-runtime"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "blake3",
  "bytes",
  "crab-ltx",

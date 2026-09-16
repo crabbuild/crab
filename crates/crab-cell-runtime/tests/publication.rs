@@ -1,6 +1,9 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use bytes::Bytes;
@@ -11,7 +14,11 @@ use crab_cell_runtime::{
 };
 use crab_ltx::{CellReplica, Limits, ManagedDb};
 use crab_storage::{CellStorageLayout, Store};
-use object_store::{memory::InMemory, path::Path};
+use futures_util::stream::BoxStream;
+use object_store::{
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult, memory::InMemory, path::Path,
+};
 
 const RESULT_LIMIT: usize = 1 << 20;
 
@@ -26,9 +33,12 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
+    fixture_with_store(Store::new(Arc::new(InMemory::new())))
+}
+
+fn fixture_with_store(store: Store) -> Fixture {
     let cell = CellId::from_bytes([1; 32]);
     let incarnation = IncarnationId::from_bytes([2; 16]);
-    let store = Store::new(Arc::new(InMemory::new()));
     let layout = CellStorageLayout::new(store, Path::from("runtime"), [3; 16]);
     let replica = CellReplica::new(
         layout.clone(),
@@ -56,6 +66,102 @@ fn fixture() -> Fixture {
         layout,
         replica,
         executor: CellExecutor::new(writer, cell, incarnation, 1),
+    }
+}
+
+#[derive(Debug)]
+struct LostUpdateResponseStore {
+    inner: Arc<InMemory>,
+    remaining_failures: AtomicUsize,
+    updates: AtomicUsize,
+}
+
+impl LostUpdateResponseStore {
+    fn new(inner: Arc<InMemory>) -> Self {
+        Self {
+            inner,
+            remaining_failures: AtomicUsize::new(1),
+            updates: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl fmt::Display for LostUpdateResponseStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("lost-update-response-store")
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for LostUpdateResponseStore {
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        options: PutOptions,
+    ) -> object_store::Result<PutResult> {
+        let update = matches!(&options.mode, PutMode::Update(_));
+        let result = self.inner.put_opts(location, payload, options).await?;
+        if !update {
+            return Ok(result);
+        }
+        self.updates.fetch_add(1, Ordering::SeqCst);
+        if self
+            .remaining_failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(object_store::Error::Generic {
+                store: "lost-update-response-store",
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "control CAS response lost after commit",
+                )),
+            });
+        }
+        Ok(result)
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        options: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(location, options).await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &Path,
+        options: GetOptions,
+    ) -> object_store::Result<GetResult> {
+        self.inner.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
     }
 }
 
@@ -310,6 +416,7 @@ async fn publisher_uploads_cas_and_releases_one_result() {
 
 #[tokio::test]
 async fn lost_publication_response_reconciles_without_replaying_sql() {
+    let fault_store = Arc::new(LostUpdateResponseStore::new(Arc::new(InMemory::new())));
     let Fixture {
         _directory,
         database: _,
@@ -318,35 +425,26 @@ async fn lost_publication_response_reconciles_without_replaying_sql() {
         layout,
         replica,
         mut executor,
-    } = fixture();
-    let (initial, authority, stale) = initialized_authority(&layout, cell, incarnation).await;
+    } = fixture_with_store(Store::new(fault_store.clone()));
+    let (_, authority, observed) = initialized_authority(&layout, cell, incarnation).await;
     let identity = MutationIdentity {
         request_id: RequestId::from_bytes([12; 16]),
         issued_at_ms: 100,
         expires_at_ms: 20_000,
     };
     let digest = Digest::from_bytes([13; 32]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed_calls = calls.clone();
     executor
-        .execute(identity, digest, 110, RESULT_LIMIT, |transaction| {
+        .execute(identity, digest, 110, RESULT_LIMIT, move |transaction| {
+            observed_calls.fetch_add(1, Ordering::SeqCst);
             transaction.execute("UPDATE counter SET value = value + 1", [])?;
             Ok(HandlerOutcome::Success(b"published".to_vec()))
         })
         .unwrap();
 
-    let pending = executor.pending().unwrap();
-    let prepared = replica
-        .prepare(None, pending.cuts(), pending.outcome().commit_sequence(), 1)
-        .await
-        .unwrap();
-    let winner = initial
-        .publish_prepared(&prepared, pending.next_due_ms())
-        .unwrap();
-    authority
-        .transition(&stale, winner.clone(), Transition::Publish)
-        .await
-        .unwrap();
-
-    let mut publisher = CellPublisher::new(replica, authority, stale, _directory.path().to_owned());
+    let mut publisher =
+        CellPublisher::new(replica, authority, observed, _directory.path().to_owned());
     assert!(matches!(
         publisher
             .publish_pending(&mut executor)
@@ -354,8 +452,20 @@ async fn lost_publication_response_reconciles_without_replaying_sql() {
             .unwrap(),
         StoredOutcome::Success { ref result, commit_sequence: 1 } if result == b"published"
     ));
-    assert_eq!(publisher.control().value(), &winner);
+    assert_eq!(fault_store.updates.load(Ordering::SeqCst), 1);
+    assert_eq!(fault_store.remaining_failures.load(Ordering::SeqCst), 0);
     assert!(executor.pending().is_none());
+    assert!(matches!(
+        executor
+            .execute(identity, digest, 111, RESULT_LIMIT, |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(HandlerOutcome::Success(b"replayed".to_vec()))
+            })
+            .unwrap(),
+        CommandExecution::Recorded(StoredOutcome::Success { ref result, commit_sequence: 1 })
+            if result == b"published"
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
     executor.close().unwrap();
 }
 
