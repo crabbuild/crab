@@ -85,7 +85,10 @@ flowchart LR
 The proxy shares the server's network namespace. It is the only process bound
 to Docker's published port; Crab still binds to loopback and keeps its
 unauthenticated local-trust invariant. The management listener and RustFS are
-not published to the host. A one-shot `release-init` service converges concurrent
+not published to the host. Compose creates the peer CA and leaf once in a
+persistent identity volume, so ordinary container recreation remains in the
+same Cell fleet. A partial identity volume fails closed instead of silently
+creating a different fleet. A one-shot `release-init` service converges concurrent
 first-install callers on the exact Cell descriptor and image before repository
 initialization or server startup. It resumes only its own bootstrap operation,
 admits an operator-prepared candidate without activating it, and never replaces
@@ -120,8 +123,9 @@ docker compose --file crates/crab-http-server/deploy/compose.yaml logs --follow 
 docker compose --file crates/crab-http-server/deploy/compose.yaml down
 ```
 
-`docker compose down --volumes` permanently removes the local RustFS
-volume, including the catalog and every repository. The defaults need no
+`docker compose down --volumes` permanently removes the local RustFS and peer
+identity volumes, including the catalog and every repository. The next start
+therefore creates a new, empty Cell fleet. The defaults need no
 `.env` file. These optional environment variables customize local operation:
 
 | Variable | Default | Purpose |

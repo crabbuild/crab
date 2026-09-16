@@ -83,7 +83,19 @@ services:
     command:
       - |
         umask 077
-        rm -f /identity/ca.crt /identity/peer.crt /identity/peer.key
+        present=0
+        for file in /identity/ca.crt /identity/peer.crt /identity/peer.key; do
+          if [ -e "$$file" ]; then
+            present=$$((present + 1))
+          fi
+        done
+        if [ "$$present" -eq 3 ]; then
+          exit 0
+        fi
+        if [ "$$present" -ne 0 ]; then
+          echo "The Compose peer identity volume is incomplete; remove the volume to create a new fleet." >&2
+          exit 1
+        fi
         openssl genpkey -algorithm ED25519 -out /identity/ca.key
         openssl req -x509 -new -days 7 -subj /CN=crab-compose-peer-ca -addext basicConstraints=critical,CA:TRUE -key /identity/ca.key -out /identity/ca.crt
         openssl genpkey -algorithm ED25519 -out /identity/peer.key
