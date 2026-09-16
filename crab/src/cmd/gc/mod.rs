@@ -3054,18 +3054,48 @@ async fn sweep_capsule_objects(
             .iter()
             .map(|run| layout.capsule_path(run.hash()).to_string()),
     );
+    if let Some(history) = root.history() {
+        let segments = crab_metadata::capsule_protocol::load_history_chain(
+            layout,
+            history,
+            crab_metadata::capsule_protocol::MAX_HISTORY_CHAIN_SEGMENTS,
+            crab_metadata::capsule_protocol::MAX_HISTORY_CHAIN_BYTES,
+        )
+        .await?;
+        for segment in segments {
+            reachable.insert(
+                layout
+                    .capsule_history_segment_path(segment.hash())
+                    .to_string(),
+            );
+            reachable.insert(
+                layout
+                    .capsule_checkpoint_path(segment.checkpoint().hash())
+                    .to_string(),
+            );
+            reachable.extend(
+                segment
+                    .capsule_runs()
+                    .iter()
+                    .map(|run| layout.capsule_path(run.hash()).to_string()),
+            );
+        }
+    }
     reachable.extend(coordinator_protected_keys.iter().cloned());
 
     let capsule_prefix = layout.repo_path("v2/capsules/");
     let checkpoint_prefix = layout.repo_path("v2/checkpoints/");
-    let (capsules, checkpoints) = tokio::try_join!(
+    let history_prefix = layout.repo_path("v2/history/");
+    let (capsules, checkpoints, history) = tokio::try_join!(
         store.list_prefix(&capsule_prefix),
         store.list_prefix(&checkpoint_prefix),
+        store.list_prefix(&history_prefix),
     )?;
     let cutoff = snapshot_at - grace_period.max(MIN_GRACE_PERIOD);
     let candidates = capsules
         .into_iter()
         .chain(checkpoints)
+        .chain(history)
         .filter(|object| !reachable.contains(object.location.as_ref()))
         // Per-ref publications do not register in one shared writer object.
         // Snapshot readers may still hold an older head, so even forced GC
@@ -4953,6 +4983,123 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(view.refs().get("refs/heads/main"), Some(&"2".repeat(40)));
+    }
+
+    #[tokio::test]
+    async fn capsule_protocol_gc_retains_checkpoint_history_closure() {
+        use bytes::Bytes;
+        use crab_metadata::capsule_protocol::{
+            Capsule, CapsuleGitPack, CapsuleRefEdit, CapsuleTransaction, Checkpoint,
+        };
+        use object_store::memory::InMemory;
+        use std::sync::Arc;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/v2-history-gc".to_owned());
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let base =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+        let transaction = CapsuleTransaction::new(
+            base.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let transaction_id = transaction.id().unwrap();
+        let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
+        crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+            .await
+            .unwrap();
+        let captured = crab_read::capsule_protocol::open_view(
+            &layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 1024 * 1024,
+                max_frontier_bytes: 8 * 1024 * 1024,
+            },
+        )
+        .await
+        .unwrap();
+        let historical_run = captured.capsule_run_pointers()[0].clone();
+        let checkpoint = Checkpoint::build(
+            captured.root().root().generation(),
+            captured.root().digest(),
+            vec![
+                CapsuleGitPack::new(
+                    Bytes::from_static(b"PACK"),
+                    Bytes::from_static(b"index"),
+                    Bytes::from_static(b"reverse"),
+                    Bytes::from_static(b"locator"),
+                    "3".repeat(40),
+                    1,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let root = crab_write::capsule_protocol::publish_ref_checkpoint(
+            &layout,
+            captured.root_snapshot().clone(),
+            &checkpoint,
+            captured.refs().clone(),
+            captured.peeled_refs().clone(),
+            captured.visible_ref_transactions().clone(),
+            captured.capsule_run_pointers().to_vec(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            root.record()
+                .root()
+                .compacted_ref_transactions()
+                .get("refs/heads/main"),
+            Some(&transaction_id)
+        );
+        let history = root.record().root().history().unwrap();
+        let history_path = layout.capsule_history_segment_path(history.hash());
+        let run_path = layout.capsule_path(historical_run.hash());
+        let checkpoint_path = layout.capsule_checkpoint_path(checkpoint.hash());
+        let orphan_run = layout.capsule_path(&"a".repeat(64));
+        let orphan_checkpoint = layout.capsule_checkpoint_path(&"b".repeat(64));
+        let orphan_history = layout.capsule_history_segment_path(&"c".repeat(64));
+        for path in [&orphan_run, &orphan_checkpoint, &orphan_history] {
+            store
+                .put(path, Bytes::from_static(b"orphan"))
+                .await
+                .unwrap();
+        }
+
+        let outcome = sweep_capsule_objects(
+            &GcArgs {
+                dry_run: true,
+                ..GcArgs::default()
+            },
+            &store,
+            &layout,
+            root.record().root(),
+            &[],
+            &HashSet::new(),
+            &CancellationToken::new(),
+            SystemTime::now() + Duration::from_secs(2 * 3600),
+            Duration::from_secs(3600),
+            Instant::now(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.packs_deleted, 3);
+        for path in [history_path, run_path, checkpoint_path] {
+            assert!(store.head(&path).await.is_ok());
+        }
     }
 
     #[tokio::test]

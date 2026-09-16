@@ -275,6 +275,7 @@ async fn run_capsule_repack(
                 view.refs().clone(),
                 view.peeled_refs().clone(),
                 view.visible_ref_transactions().clone(),
+                view.capsule_run_pointers().to_vec(),
             )
             .await?;
         }

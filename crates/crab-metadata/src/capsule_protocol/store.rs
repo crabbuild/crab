@@ -5,8 +5,9 @@ use futures_util::{StreamExt, TryStreamExt};
 use object_store::ObjectMeta;
 
 use crate::capsule_protocol::{
-    Capsule, CapsuleRefHead, CapsuleRun, Checkpoint, MAX_CAPSULE_REF_HEADS, MAX_ROOT_BYTES,
-    PointerCatalog, RootRecord, capsule_ref_name_key,
+    Capsule, CapsuleRefHead, CapsuleRun, Checkpoint, HistorySegment, HistorySegmentPointer,
+    MAX_CAPSULE_REF_HEADS, MAX_HISTORY_SEGMENT_BYTES, MAX_ROOT_BYTES, PointerCatalog, RootRecord,
+    capsule_ref_name_key,
 };
 use crate::error::MetadataError;
 use crate::error::Result;
@@ -97,6 +98,7 @@ impl RootSnapshot {
             || record.root().refs() != self.record.root().refs()
             || record.root().peeled_refs() != self.record.root().peeled_refs()
             || record.root().checkpoint() != self.record.root().checkpoint()
+            || record.root().history() != self.record.root().history()
             || record.root().capsule_frontier() != self.record.root().capsule_frontier()
             || record.root().compacted_ref_transactions()
                 != self.record.root().compacted_ref_transactions()
@@ -118,6 +120,7 @@ impl RootSnapshot {
             || record.root().peeled_refs() != self.record.root().peeled_refs()
             || record.root().head() != self.record.root().head()
             || record.root().checkpoint() != self.record.root().checkpoint()
+            || record.root().history() != self.record.root().history()
             || record.root().capsule_frontier() != self.record.root().capsule_frontier()
             || record.root().compacted_ref_transactions()
                 != self.record.root().compacted_ref_transactions()
@@ -156,6 +159,100 @@ pub async fn load_root(router: &StoreLayout<Store>) -> Result<RootSnapshot> {
     })
 }
 
+/// Load and verify one immutable history segment against its authenticated pointer.
+pub async fn load_history_segment(
+    router: &StoreLayout<Store>,
+    pointer: &HistorySegmentPointer,
+) -> Result<HistorySegment> {
+    let path = router.capsule_history_segment_path(pointer.hash());
+    let (bytes, _) = router
+        .store()
+        .get_with_etag_bounded(&path, pointer.size().min(MAX_HISTORY_SEGMENT_BYTES))
+        .await?;
+    let segment = HistorySegment::decode(bytes)?;
+    let actual = segment.pointer()?;
+    if &actual != pointer {
+        return Err(corrupt(
+            &path,
+            "history segment does not match its authenticated pointer",
+        ));
+    }
+    Ok(segment)
+}
+
+/// Load an authenticated newest-to-oldest history chain within caller bounds.
+pub async fn load_history_chain(
+    router: &StoreLayout<Store>,
+    newest: &HistorySegmentPointer,
+    max_segments: usize,
+    max_bytes: u64,
+) -> Result<Vec<HistorySegment>> {
+    if max_segments == 0 || max_bytes == 0 {
+        return Err(contract_error("history chain bounds must be non-zero"));
+    }
+    let mut pointer = Some(newest.clone());
+    let mut hashes = BTreeSet::new();
+    let mut total_bytes = 0_u64;
+    let mut segments = Vec::new();
+    while let Some(current) = pointer {
+        if segments.len() == max_segments {
+            return Err(contract_error("history chain exceeds its segment limit"));
+        }
+        if !hashes.insert(current.hash().to_owned()) {
+            return Err(contract_error("history chain is cyclic"));
+        }
+        total_bytes = total_bytes
+            .checked_add(current.size())
+            .ok_or_else(|| contract_error("history chain byte count overflowed"))?;
+        if total_bytes > max_bytes {
+            return Err(contract_error("history chain exceeds its byte limit"));
+        }
+        let segment = load_history_segment(router, &current).await?;
+        pointer = segment.previous().cloned();
+        segments.push(segment);
+    }
+    Ok(segments)
+}
+
+/// Load and verify one immutable checkpoint against its authenticated pointer.
+pub async fn load_checkpoint(
+    router: &StoreLayout<Store>,
+    pointer: &super::CheckpointPointer,
+) -> Result<Checkpoint> {
+    let path = router.capsule_checkpoint_path(pointer.hash());
+    let (bytes, _) = router
+        .store()
+        .get_with_etag_bounded(&path, pointer.size())
+        .await?;
+    let checkpoint = Checkpoint::decode(bytes)?;
+    let object_count = checkpoint
+        .git_packs()
+        .iter()
+        .try_fold(0_u64, |total, pack| total.checked_add(pack.object_count()))
+        .ok_or_else(|| corrupt(&path, "checkpoint object count overflowed"))?;
+    if checkpoint.hash() != pointer.hash()
+        || checkpoint.bytes().len() as u64 != pointer.size()
+        || checkpoint.covered_generation() != pointer.covered_generation()
+        || checkpoint.covered_root_digest() != pointer.covered_root_digest()
+        || checkpoint.git_packs().len() as u32 != pointer.pack_count()
+        || object_count != pointer.object_count()
+    {
+        return Err(corrupt(
+            &path,
+            "checkpoint does not match its authenticated pointer",
+        ));
+    }
+    Ok(checkpoint)
+}
+
+/// Load and verify one immutable capsule run against its authenticated pointer.
+pub async fn load_capsule_run(
+    router: &StoreLayout<Store>,
+    pointer: &super::CapsulePointer,
+) -> Result<CapsuleRun> {
+    load_run(router, pointer).await
+}
+
 /// Load the complete authenticated pointer catalog named by one v2 root.
 pub async fn load_pointer_catalog(router: &StoreLayout<Store>) -> Result<PointerCatalog> {
     let snapshot = load_root(router).await?;
@@ -169,26 +266,7 @@ pub async fn load_pointer_catalog_from_root(
 ) -> Result<PointerCatalog> {
     let root = snapshot.record().root().clone();
     let mut catalog = if let Some(pointer) = root.checkpoint() {
-        let path = router.capsule_checkpoint_path(pointer.hash());
-        let (bytes, _) = router
-            .store()
-            .get_with_etag_bounded(&path, pointer.size())
-            .await?;
-        let checkpoint = Checkpoint::decode(bytes)?;
-        let object_count = checkpoint
-            .git_packs()
-            .iter()
-            .try_fold(0_u64, |total, pack| total.checked_add(pack.object_count()))
-            .ok_or_else(|| corrupt(&path, "checkpoint object count overflowed"))?;
-        if checkpoint.hash() != pointer.hash()
-            || checkpoint.bytes().len() as u64 != pointer.size()
-            || checkpoint.covered_generation() != pointer.covered_generation()
-            || checkpoint.covered_root_digest() != pointer.covered_root_digest()
-            || checkpoint.git_packs().len() as u32 != pointer.pack_count()
-            || object_count != pointer.object_count()
-        {
-            return Err(corrupt(&path, "checkpoint does not match its root pointer"));
-        }
+        let checkpoint = load_checkpoint(router, pointer).await?;
         checkpoint.pointer_catalog()?
     } else {
         PointerCatalog::new()

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{MetadataError, Result};
 use crate::validation::{validate_content_hash, validate_sha1};
 
-use super::{valid_ref_name, valid_ref_namespace};
+use super::{HistorySegmentPointer, valid_ref_name, valid_ref_namespace};
 
 const ROOT_MAGIC: &[u8; 8] = b"CRBROOT2";
 const ROOT_VERSION: u32 = 2;
@@ -210,6 +210,8 @@ pub struct RepositoryRoot {
     peeled_refs: BTreeMap<String, String>,
     head: String,
     checkpoint: Option<CheckpointPointer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    history: Option<HistorySegmentPointer>,
     capsule_frontier: Vec<CapsulePointer>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     compacted_ref_transactions: BTreeMap<String, String>,
@@ -231,6 +233,7 @@ impl RepositoryRoot {
             peeled_refs: BTreeMap::new(),
             head: head.to_owned(),
             checkpoint: None,
+            history: None,
             capsule_frontier: Vec::new(),
             compacted_ref_transactions: BTreeMap::new(),
             delta_depth: 0,
@@ -301,6 +304,7 @@ impl RepositoryRoot {
             peeled_refs,
             head: self.head.clone(),
             checkpoint: self.checkpoint.clone(),
+            history: self.history.clone(),
             capsule_frontier,
             compacted_ref_transactions: self.compacted_ref_transactions.clone(),
             delta_depth: self
@@ -319,6 +323,7 @@ impl RepositoryRoot {
         &self,
         parent_root_digest: &str,
         checkpoint: CheckpointPointer,
+        history: Option<HistorySegmentPointer>,
     ) -> Result<Self> {
         if self.gc_fence.is_some() {
             return Err(contract_error(
@@ -332,6 +337,11 @@ impl RepositoryRoot {
                 "checkpoint does not cover the exact parent root generation",
             ));
         }
+        self.validate_history_successor(
+            parent_root_digest,
+            history.as_ref(),
+            !self.capsule_frontier.is_empty(),
+        )?;
         let root = Self {
             version: ROOT_VERSION,
             repository_id: self.repository_id.clone(),
@@ -342,6 +352,7 @@ impl RepositoryRoot {
             peeled_refs: self.peeled_refs.clone(),
             head: self.head.clone(),
             checkpoint: Some(checkpoint),
+            history,
             capsule_frontier: Vec::new(),
             compacted_ref_transactions: self.compacted_ref_transactions.clone(),
             delta_depth: 0,
@@ -357,6 +368,7 @@ impl RepositoryRoot {
         &self,
         parent_root_digest: &str,
         checkpoint: CheckpointPointer,
+        history: HistorySegmentPointer,
         refs: BTreeMap<String, String>,
         peeled_refs: BTreeMap<String, String>,
         compacted_ref_transactions: BTreeMap<String, String>,
@@ -373,6 +385,7 @@ impl RepositoryRoot {
                 "checkpoint does not cover the exact parent root generation",
             ));
         }
+        self.validate_history_successor(parent_root_digest, Some(&history), true)?;
         let root = Self {
             version: ROOT_VERSION,
             repository_id: self.repository_id.clone(),
@@ -386,6 +399,7 @@ impl RepositoryRoot {
             peeled_refs,
             head: self.head.clone(),
             checkpoint: Some(checkpoint),
+            history: Some(history),
             capsule_frontier: Vec::new(),
             compacted_ref_transactions,
             delta_depth: 0,
@@ -435,6 +449,7 @@ impl RepositoryRoot {
             peeled_refs: self.peeled_refs.clone(),
             head: self.head.clone(),
             checkpoint: self.checkpoint.clone(),
+            history: self.history.clone(),
             capsule_frontier: self.capsule_frontier.clone(),
             compacted_ref_transactions: self.compacted_ref_transactions.clone(),
             delta_depth: self.delta_depth,
@@ -499,6 +514,12 @@ impl RepositoryRoot {
         self.checkpoint.as_ref()
     }
 
+    /// Return the newest authenticated checkpoint-history segment.
+    #[must_use]
+    pub fn history(&self) -> Option<&HistorySegmentPointer> {
+        self.history.as_ref()
+    }
+
     /// Return the active exclusive GC fence, when present.
     #[must_use]
     pub fn gc_fence(&self) -> Option<&GcFence> {
@@ -523,6 +544,34 @@ impl RepositoryRoot {
         self.capsule_frontier
             .iter()
             .any(|run| run.transaction_ids.iter().any(|id| id == transaction_id))
+    }
+
+    fn validate_history_successor(
+        &self,
+        covered_root_digest: &str,
+        candidate: Option<&HistorySegmentPointer>,
+        requires_new_segment: bool,
+    ) -> Result<()> {
+        if !requires_new_segment {
+            if candidate != self.history.as_ref() {
+                return Err(contract_error(
+                    "checkpoint without new transactions must preserve history",
+                ));
+            }
+            return Ok(());
+        }
+        let candidate = candidate.ok_or_else(|| {
+            contract_error("checkpoint must retain compacted transactions in history")
+        })?;
+        if candidate.covered_root_digest() != covered_root_digest
+            || candidate.previous_segment_hash()
+                != self.history.as_ref().map(|history| history.hash())
+        {
+            return Err(contract_error(
+                "checkpoint history does not extend the exact root history",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -741,6 +790,7 @@ fn validate_root(root: &RepositoryRoot) -> Result<()> {
     if root.generation == 0 {
         if root.latest_transaction_base_digest.is_some()
             || root.checkpoint.is_some()
+            || root.history.is_some()
             || !root.capsule_frontier.is_empty()
             || !root.compacted_ref_transactions.is_empty()
         {
@@ -766,6 +816,19 @@ fn validate_root(root: &RepositoryRoot) -> Result<()> {
         if checkpoint.covered_generation > root.generation {
             return Err(contract_error(
                 "checkpoint must cover a generation before its publishing root",
+            ));
+        }
+    }
+    if root.checkpoint.is_some() != root.history.is_some() {
+        return Err(contract_error(
+            "checkpoint and retained history must be published together",
+        ));
+    }
+    if let Some(history) = &root.history {
+        super::history::validate_history_pointer(history)?;
+        if history.covered_generation() > root.generation {
+            return Err(contract_error(
+                "history segment must cover a generation before its publishing root",
             ));
         }
     }
@@ -943,9 +1006,23 @@ mod tests {
             1,
         )
         .unwrap();
+        let history = crate::capsule_protocol::HistorySegment::build(
+            pointer.clone(),
+            None,
+            crate::capsule_protocol::HistorySegmentState::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                "refs/heads/main".to_owned(),
+                BTreeMap::new(),
+                record.root().capsule_frontier().to_vec(),
+            ),
+        )
+        .unwrap()
+        .pointer()
+        .unwrap();
         let checkpoint_root = record
             .root()
-            .install_checkpoint(record.digest(), pointer)
+            .install_checkpoint(record.digest(), pointer, Some(history))
             .unwrap();
         let checkpoint_record = RootRecord::encode(checkpoint_root).unwrap();
 

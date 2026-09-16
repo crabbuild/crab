@@ -181,6 +181,7 @@ pub async fn publish_capsule_checkpoint(
             view.refs().clone(),
             view.peeled_refs().clone(),
             view.visible_ref_transactions().clone(),
+            view.capsule_run_pointers().to_vec(),
         )
         .await
     };

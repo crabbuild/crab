@@ -8,7 +8,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use futures_util::StreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use object_store::path::Path;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -127,6 +127,7 @@ impl StoreChecker {
         )
         .await?;
         let catalog = view.pointer_catalog()?;
+        verify_capsule_history(&layout, view.root().root()).await?;
         Ok(Self {
             store,
             prefix,
@@ -940,6 +941,72 @@ impl StoreChecker {
         }
         Ok(issues)
     }
+}
+
+async fn verify_capsule_history(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    root: &crab_metadata::capsule_protocol::RepositoryRoot,
+) -> Result<()> {
+    let Some(history) = root.history() else {
+        return Ok(());
+    };
+    let segments = crab_metadata::capsule_protocol::load_history_chain(
+        layout,
+        history,
+        crab_metadata::capsule_protocol::MAX_HISTORY_CHAIN_SEGMENTS,
+        crab_metadata::capsule_protocol::MAX_HISTORY_CHAIN_BYTES,
+    )
+    .await?;
+    let mut checkpoints = BTreeMap::new();
+    let mut runs = BTreeMap::new();
+    for segment in segments {
+        insert_history_pointer(
+            &mut checkpoints,
+            segment.checkpoint().hash(),
+            segment.checkpoint().clone(),
+            "checkpoint",
+        )?;
+        for run in segment.capsule_runs() {
+            insert_history_pointer(&mut runs, run.hash(), run.clone(), "capsule run")?;
+        }
+    }
+    futures_util::stream::iter(checkpoints.into_values().map(|pointer| async move {
+        crab_metadata::capsule_protocol::load_checkpoint(layout, &pointer)
+            .await
+            .map(|_| ())
+            .map_err(CrabError::from)
+    }))
+    .buffer_unordered(16)
+    .try_collect::<Vec<_>>()
+    .await?;
+    futures_util::stream::iter(runs.into_values().map(|pointer| async move {
+        crab_metadata::capsule_protocol::load_capsule_run(layout, &pointer)
+            .await
+            .map(|_| ())
+            .map_err(CrabError::from)
+    }))
+    .buffer_unordered(16)
+    .try_collect::<Vec<_>>()
+    .await?;
+    Ok(())
+}
+
+fn insert_history_pointer<T: Clone + PartialEq>(
+    pointers: &mut BTreeMap<String, T>,
+    hash: &str,
+    pointer: T,
+    kind: &str,
+) -> Result<()> {
+    if pointers
+        .insert(hash.to_owned(), pointer.clone())
+        .is_some_and(|existing| existing != pointer)
+    {
+        return Err(CrabError::CorruptObject {
+            path: hash.to_owned(),
+            reason: format!("history assigns conflicting metadata to one {kind} identity"),
+        });
+    }
+    Ok(())
 }
 
 fn validate_catalog_xorb(
@@ -1991,6 +2058,67 @@ mod tests {
             crate::cmd::fsck::IssueKind::CorruptShard { shard_hash: found, .. }
                 if found == &shard_hash.hex()
         )));
+    }
+
+    #[tokio::test]
+    async fn capsule_checker_rejects_missing_retained_history_dependency() {
+        let (store, prefix, root, _, _) = capsule_checker_fixture().await;
+        let router = StoreLayout::new(store.clone(), prefix.clone());
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let view = crab_read::capsule_protocol::open_view_from_root(
+            &layout,
+            root,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: MAX_FSCK_CAPSULE_BYTES,
+                max_frontier_bytes: MAX_FSCK_FRONTIER_BYTES,
+            },
+        )
+        .await
+        .unwrap();
+        let historical_run = view.capsule_run_pointers()[0].clone();
+        let checkpoint = crab_metadata::capsule_protocol::Checkpoint::build_with_pointer_catalog(
+            view.root().root().generation(),
+            view.root().digest(),
+            vec![
+                crab_metadata::capsule_protocol::CapsuleGitPack::new(
+                    Bytes::from_static(b"PACK"),
+                    Bytes::from_static(b"index"),
+                    Bytes::from_static(b"reverse"),
+                    Bytes::from_static(b"locator"),
+                    "3".repeat(40),
+                    1,
+                )
+                .unwrap(),
+            ],
+            view.pointer_catalog().unwrap(),
+        )
+        .unwrap();
+        let root = crab_write::capsule_protocol::publish_ref_checkpoint(
+            &layout,
+            view.root_snapshot().clone(),
+            &checkpoint,
+            view.refs().clone(),
+            view.peeled_refs().clone(),
+            view.visible_ref_transactions().clone(),
+            view.capsule_run_pointers().to_vec(),
+        )
+        .await
+        .unwrap();
+        store
+            .delete(&router.capsule_path(historical_run.hash()))
+            .await
+            .unwrap();
+
+        let error = match StoreChecker::for_capsule_repository(store, prefix, root).await {
+            Ok(_) => panic!("fsck must load every authenticated history dependency"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, CrabError::NotFound { .. }));
     }
 
     #[tokio::test]

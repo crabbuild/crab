@@ -196,6 +196,13 @@ impl<S> StoreLayout<S> {
         self.repo_path(&format!("v2/checkpoints/{partition}/{hash}"))
     }
 
+    /// Path to one immutable capsule-protocol history segment.
+    #[must_use]
+    pub fn capsule_history_segment_path(&self, hash: &str) -> ObjectPath {
+        let partition = hash.get(..GLOBAL_CONTENT_FANOUT_WIDTH).unwrap_or(hash);
+        self.repo_path(&format!("v2/history/{partition}/{hash}"))
+    }
+
     /// Prefix containing independently mutable capsule-protocol ref heads.
     #[must_use]
     pub fn capsule_ref_heads_prefix(&self) -> ObjectPath {
@@ -601,6 +608,10 @@ mod tests {
         assert_eq!(
             layout.capsule_checkpoint_path(&hash).as_ref(),
             format!("org/models/v2/checkpoints/ab/{hash}")
+        );
+        assert_eq!(
+            layout.capsule_history_segment_path(&hash).as_ref(),
+            format!("org/models/v2/history/ab/{hash}")
         );
         assert_eq!(
             layout.capsule_ref_heads_prefix().as_ref(),

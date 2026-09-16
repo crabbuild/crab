@@ -4,6 +4,7 @@ use bstr::ByteSlice;
 
 mod capsule;
 mod checkpoint;
+mod history;
 #[cfg(feature = "storage")]
 mod plan;
 mod pointer;
@@ -21,6 +22,10 @@ pub use capsule::{
     CapsuleSectionLocation,
 };
 pub use checkpoint::Checkpoint;
+pub use history::{
+    HistorySegment, HistorySegmentPointer, HistorySegmentState, MAX_HISTORY_CHAIN_BYTES,
+    MAX_HISTORY_CHAIN_SEGMENTS, MAX_HISTORY_SEGMENT_BYTES,
+};
 #[cfg(feature = "storage")]
 pub use plan::{
     CapsulePlanReceipt, ensure_capsule_plan_unattempted, prepare_capsule_plan,
@@ -41,7 +46,8 @@ pub use root::{
 pub use run::{CapsuleRun, MAX_CAPSULES_PER_RUN};
 #[cfg(feature = "storage")]
 pub use store::{
-    RootSnapshot, create_root, load_pointer_catalog, load_pointer_catalog_from_root, load_root,
+    RootSnapshot, create_root, load_capsule_run, load_checkpoint, load_history_chain,
+    load_history_segment, load_pointer_catalog, load_pointer_catalog_from_root, load_root,
 };
 pub use transaction::{CapsuleRefEdit, CapsuleTransaction};
 pub use transaction_record::{

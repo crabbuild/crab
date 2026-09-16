@@ -662,6 +662,7 @@ async fn lagging_checkpoint_preserves_concurrent_ref_suffix() {
         captured.refs().clone(),
         captured.peeled_refs().clone(),
         captured.visible_ref_transactions().clone(),
+        captured.capsule_run_pointers().to_vec(),
     )
     .await
     .unwrap();

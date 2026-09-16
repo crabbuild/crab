@@ -2,7 +2,7 @@
 
 use crab_metadata::capsule_protocol::{
     Capsule, CapsulePointer, CapsuleRun, CapsuleTransaction, Checkpoint, CheckpointPointer,
-    RepositoryRoot, RootRecord, create_root, load_root,
+    HistorySegment, HistorySegmentState, RepositoryRoot, RootRecord, create_root, load_root,
 };
 use crab_storage::{ETag, StorageError, Store, StoreLayout};
 use futures_util::future::try_join_all;
@@ -1186,21 +1186,28 @@ pub async fn publish_ref_checkpoint(
     refs: std::collections::BTreeMap<String, String>,
     peeled_refs: std::collections::BTreeMap<String, String>,
     compacted_ref_transactions: std::collections::BTreeMap<String, String>,
+    capsule_runs: Vec<CapsulePointer>,
 ) -> Result<RootSnapshot> {
     publish_checkpoint_inner(
         router,
         base,
         checkpoint,
-        Some((refs, peeled_refs, compacted_ref_transactions)),
+        Some(CheckpointRefState {
+            refs,
+            peeled_refs,
+            compacted_ref_transactions,
+            capsule_runs,
+        }),
     )
     .await
 }
 
-type CheckpointRefState = (
-    std::collections::BTreeMap<String, String>,
-    std::collections::BTreeMap<String, String>,
-    std::collections::BTreeMap<String, String>,
-);
+struct CheckpointRefState {
+    refs: std::collections::BTreeMap<String, String>,
+    peeled_refs: std::collections::BTreeMap<String, String>,
+    compacted_ref_transactions: std::collections::BTreeMap<String, String>,
+    capsule_runs: Vec<CapsulePointer>,
+}
 
 async fn publish_checkpoint_inner(
     router: &StoreLayout<Store>,
@@ -1232,11 +1239,6 @@ async fn publish_checkpoint_inner(
         })?;
     let pack_count = u32::try_from(checkpoint.git_packs().len())
         .map_err(|_| WriteError::Internal("checkpoint pack count overflowed".to_owned()))?;
-    let path = router.capsule_checkpoint_path(checkpoint.hash());
-    router
-        .store()
-        .put_if_absent_verified(&path, checkpoint.bytes().clone())
-        .await?;
     let pointer = CheckpointPointer::new(
         checkpoint.hash(),
         checkpoint.bytes().len() as u64,
@@ -1245,21 +1247,100 @@ async fn publish_checkpoint_inner(
         pack_count,
         object_count,
     )?;
+    if let Some(state) = &ref_state {
+        let retained_transactions = state
+            .capsule_runs
+            .iter()
+            .flat_map(|run| run.transaction_ids())
+            .collect::<std::collections::BTreeSet<_>>();
+        let missing = state
+            .compacted_ref_transactions
+            .iter()
+            .find(|(ref_name, transaction_id)| {
+                base.record()
+                    .root()
+                    .compacted_ref_transactions()
+                    .get(*ref_name)
+                    != Some(*transaction_id)
+                    && !retained_transactions.contains(transaction_id)
+            });
+        if let Some((ref_name, _)) = missing {
+            return Err(WriteError::CorruptObject {
+                path: "capsule-protocol checkpoint".to_owned(),
+                reason: format!(
+                    "checkpoint advances {ref_name} without retaining its transaction capsule"
+                ),
+            });
+        }
+    }
+    let history_state = match &ref_state {
+        Some(state) => Some(HistorySegmentState::new(
+            state.refs.clone(),
+            state.peeled_refs.clone(),
+            base.record().root().head().to_owned(),
+            state.compacted_ref_transactions.clone(),
+            state.capsule_runs.clone(),
+        )),
+        None if !base.record().root().capsule_frontier().is_empty() => {
+            Some(HistorySegmentState::new(
+                base.record().root().refs().clone(),
+                base.record().root().peeled_refs().clone(),
+                base.record().root().head().to_owned(),
+                base.record().root().compacted_ref_transactions().clone(),
+                base.record().root().capsule_frontier().to_vec(),
+            ))
+        }
+        None => None,
+    };
+    let history = history_state
+        .map(|state| {
+            HistorySegment::build(
+                pointer.clone(),
+                base.record().root().history().cloned(),
+                state,
+            )
+        })
+        .transpose()?;
+    let path = router.capsule_checkpoint_path(checkpoint.hash());
+    if let Some(history) = &history {
+        let history_path = router.capsule_history_segment_path(history.hash());
+        tokio::try_join!(
+            router
+                .store()
+                .put_if_absent_verified(&path, checkpoint.bytes().clone()),
+            router
+                .store()
+                .put_if_absent_verified(&history_path, history.bytes().clone()),
+        )?;
+    } else {
+        router
+            .store()
+            .put_if_absent_verified(&path, checkpoint.bytes().clone())
+            .await?;
+    }
+    let history_pointer = history.as_ref().map(HistorySegment::pointer).transpose()?;
     let is_ref_checkpoint = ref_state.is_some();
     let next = match ref_state {
-        Some((refs, peeled_refs, compacted_ref_transactions)) => {
+        Some(state) => {
+            let history_pointer = history_pointer.ok_or_else(|| {
+                WriteError::Internal(
+                    "ref checkpoint did not retain its compacted history".to_owned(),
+                )
+            })?;
             base.record().root().install_ref_checkpoint(
                 base.record().digest(),
                 pointer,
-                refs,
-                peeled_refs,
-                compacted_ref_transactions,
+                history_pointer,
+                state.refs,
+                state.peeled_refs,
+                state.compacted_ref_transactions,
             )?
         }
-        None => base
-            .record()
-            .root()
-            .install_checkpoint(base.record().digest(), pointer)?,
+        None => base.record().root().install_checkpoint(
+            base.record().digest(),
+            pointer,
+            history_pointer.or_else(|| base.record().root().history().cloned()),
+        )?,
     };
     let candidate = RootRecord::encode(next)?;
     let root_path = router.capsule_root_path();
@@ -2190,6 +2271,81 @@ mod tests {
             .count();
         assert!(request_count <= 256, "request count was {request_count}");
         assert!((request_count as f64 / 64.0) <= 4.0);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_retains_compacted_capsules_in_one_history_put() {
+        let observer = Arc::new(RecordingObserver::default());
+        let store = Store::new(Arc::new(InMemory::new()))
+            .with_immutable_write_verification(ImmutableWriteVerification::Sha256Checksum)
+            .with_storage_observer(observer.clone());
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        let base = initialize(&router, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let transaction = transaction(&base, None, &"2".repeat(40));
+        let transaction_id = transaction.id().unwrap();
+        let base = publish(&router, base, &transaction, &capsule(&transaction))
+            .await
+            .unwrap();
+        let head = read_ref_head(&router, base.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
+        let runs = head.visible.frontier().to_vec();
+        let refs =
+            std::collections::BTreeMap::from([("refs/heads/main".to_owned(), "2".repeat(40))]);
+        let positions =
+            std::collections::BTreeMap::from([("refs/heads/main".to_owned(), transaction_id)]);
+        let checkpoint = Checkpoint::build(
+            base.record().root().generation(),
+            base.record().digest(),
+            vec![
+                CapsuleGitPack::new(
+                    Bytes::from_static(b"PACK"),
+                    Bytes::from_static(b"index"),
+                    Bytes::from_static(b"reverse"),
+                    Bytes::from_static(b"locator"),
+                    "3".repeat(40),
+                    1,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        observer.observations.lock().unwrap().clear();
+
+        let published = publish_ref_checkpoint(
+            &router,
+            base,
+            &checkpoint,
+            refs.clone(),
+            std::collections::BTreeMap::new(),
+            positions.clone(),
+            runs.clone(),
+        )
+        .await
+        .unwrap();
+
+        let history = published.record().root().history().unwrap();
+        let segments =
+            crab_metadata::capsule_protocol::load_history_chain(&router, history, 8, 1024 * 1024)
+                .await
+                .unwrap();
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].refs(), &refs);
+        assert_eq!(segments[0].compacted_ref_transactions(), &positions);
+        assert_eq!(segments[0].capsule_runs(), runs);
+        let puts = observer
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|observation| {
+                observation.outcome == StorageOutcome::Success
+                    && observation.operation == StorageOperation::Put
+            })
+            .count();
+        assert_eq!(puts, 3, "checkpoint, history, and root are the only writes");
     }
 
     #[tokio::test]
