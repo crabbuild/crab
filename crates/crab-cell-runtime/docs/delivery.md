@@ -175,6 +175,16 @@ that no retired `app/v1` collaboration object exists. This combines the product
 network, source-loss, hard-cut, and storage boundaries; it does not replace the
 three-Pod kill and partition matrix below.
 
+The local Compose cluster qualification adds a real three-process owner-loss
+case on one host. It writes through node B, verifies private forwarding from A
+and C, kills B without draining, waits for B's signed session advertisement to
+expire, and requires C to restore the same root at a higher epoch before it can
+publish the next sequence. Restarted B has empty local Cell storage and must
+route to C. The script emits the exact sessions, epochs, root, sequences, and
+live admission envelopes as JSON. Because the processes share one network
+namespace, this proves process and local-disk loss but not Pod networking or
+partition behavior.
+
 The shipped Kubernetes qualification script adds one real three-Pod owner-loss
 case. It reads the durable repository Cell control, maps the serving endpoint to
 a ready Pod, force-deletes that Pod without grace, then requires a different

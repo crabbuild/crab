@@ -1,0 +1,34 @@
+{
+	admin off
+	auto_https off
+}
+
+:8090 {
+	reverse_proxy 127.0.0.1:8788 127.0.0.1:8888 127.0.0.1:8988 {
+		lb_policy round_robin
+		lb_try_duration 2s
+		lb_try_interval 100ms
+		health_uri /livez
+		health_interval 1s
+		health_timeout 1s
+		flush_interval -1
+	}
+}
+
+:8091 {
+	reverse_proxy 127.0.0.1:8788 {
+		flush_interval -1
+	}
+}
+
+:8092 {
+	reverse_proxy 127.0.0.1:8888 {
+		flush_interval -1
+	}
+}
+
+:8093 {
+	reverse_proxy 127.0.0.1:8988 {
+		flush_interval -1
+	}
+}

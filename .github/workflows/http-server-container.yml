@@ -71,6 +71,10 @@ jobs:
              | all(. as $name | $names | index($name)))
           ' crates/crab-http-server/deploy/ecs/task-definition.example.json >/dev/null
           docker compose --file crates/crab-http-server/deploy/compose.yaml config --quiet
+          docker compose \
+            --file crates/crab-http-server/deploy/compose.yaml \
+            --file crates/crab-http-server/deploy/compose.cluster.yaml \
+            config --quiet
           release_manifest="${RUNNER_TEMP}/crab-http-server-release.json"
           release_manifest_generator=crates/crab-http-server/deploy/generate-release-manifest.sh
           source_sha=0123456789abcdef0123456789abcdef01234567
@@ -128,7 +132,8 @@ jobs:
             crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
             crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-capacity-envelope.sh \
             crates/crab-http-server/deploy/helm/crab-http-server/qualification/verify-workload-identity.sh \
-            crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-workload-identity.sh
+            crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-workload-identity.sh \
+            crates/crab-http-server/tests/qualify_compose_cluster.sh
           crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-capacity-envelope.sh
           crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-workload-identity.sh
           immutable_chart=oci://registry.example.com/charts/crab-http-server@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -203,9 +208,14 @@ jobs:
             /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/verify-workload-identity.sh \
             /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-workload-identity.sh \
             /src/crates/crab-http-server/tests/qualify_lfs_locking.sh \
-            /src/crates/crab-http-server/tests/qualify_lfs_range_resume.sh
+            /src/crates/crab-http-server/tests/qualify_lfs_range_resume.sh \
+            /src/crates/crab-http-server/tests/qualify_compose_cluster.sh
           docker run --rm \
             --volume "$PWD/crates/crab-http-server/deploy/compose.Caddyfile:/etc/caddy/Caddyfile:ro" \
+            caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d \
+            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          docker run --rm \
+            --volume "$PWD/crates/crab-http-server/deploy/compose.cluster.Caddyfile:/etc/caddy/Caddyfile:ro" \
             caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d \
             caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
@@ -792,3 +802,15 @@ jobs:
           jq --exit-status \
             '.repositories | map(select(.owner == "demo" and .name == "hello")) | length == 1' \
             "${RUNNER_TEMP}/crab-http-server-repositories.json"
+
+          CRAB_HTTP_SERVER_IMAGE=crab-http-server:test \
+            CRAB_HTTP_CLUSTER_BUILD=false \
+            crates/crab-http-server/tests/qualify_compose_cluster.sh \
+            > "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json"
+          jq --exit-status \
+            '.version == 1 and
+             .owner_loss.session_before != .owner_loss.session_after and
+             .owner_loss.epoch_after > .owner_loss.epoch_before and
+             .owner_loss.sequence_after_restore == .owner_loss.sequence_before and
+             .owner_loss.sequence_continued > .owner_loss.sequence_before' \
+            "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json"

@@ -152,6 +152,54 @@ CRAB_HTTP_SERVER_IMAGE=ghcr.io/crabbuild/crab-http-server@sha256:qualified_diges
     up --detach --no-build --wait
 ```
 
+### Qualify three local Cell processes
+
+The cluster overlay runs three independent server containers and one real
+RustFS origin. Each server has its own Cell tmpfs. They share a Docker network
+namespace so every unauthenticated listener can remain on loopback; this keeps
+the same local-trust boundary as the one-node profile.
+
+```mermaid
+flowchart LR
+    Client[Qualification client] --> LB[Caddy round-robin :18880]
+    LB --> A[Node A\n127.0.0.1:8788]
+    LB --> B[Node B\n127.0.0.1:8888]
+    LB --> C[Node C\n127.0.0.1:8988]
+    A & B & C --> Origin[(RustFS)]
+    B -. SIGKILL .-> Lost[Local SQLite removed]
+    Origin -->|exact LTX root| C
+```
+
+Run the repeatable owner-loss qualification from the repository root:
+
+```sh
+crates/crab-http-server/tests/qualify_compose_cluster.sh
+```
+
+The script builds the current source by default, creates a uniquely named
+Compose project, and then:
+
+1. Records the live admission envelope from all three processes.
+2. Sends a durable issue mutation directly to node B and proves A, C, and the
+   round-robin endpoint route to B over the private mTLS peer protocol.
+3. Sends `SIGKILL` to B, destroying its local SQLite files.
+4. Waits until B's exact signed boot-session advertisement is expired.
+5. Reads through C and requires a higher epoch, a different session, and the
+   same LTX root digest.
+6. Writes a second issue through C and requires a higher commit sequence.
+7. Restarts B with empty local Cell storage and proves it routes to C.
+
+Success prints a JSON receipt containing the before/after sessions, epochs,
+root digest, commit sequences, and each process's admission envelope. The trap
+removes only the uniquely named qualification project and its volumes. Set
+`CRAB_HTTP_CLUSTER_BUILD=false` to reuse an already-built
+`CRAB_HTTP_SERVER_IMAGE`.
+
+This is real process-loss, source-loss, peer-routing, and recovery evidence. It
+is not the production three-Pod gate because the processes share one network
+namespace and it does not inject a network partition, delayed immutable upload,
+or lost control-CAS response.
+
 ## Deploy for a team
 
 Use the Helm chart on Amazon Elastic Kubernetes Service (EKS), Google Kubernetes Engine (GKE), or Azure Kubernetes Service (AKS). One chart preserves the server runtime contract across providers.
