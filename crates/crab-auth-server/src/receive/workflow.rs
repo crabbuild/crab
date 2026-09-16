@@ -621,8 +621,9 @@ mod tests {
     use crab_metadata::{
         capsule_protocol::{
             Capsule, CapsuleGitPack, CapsuleRefEdit, CapsuleRun, CapsuleSection,
-            CapsuleSectionKind, CapsuleTransaction, CapsuleVisibilityDelta, RepositoryRoot,
-            RootRecord,
+            CapsuleSectionKind, CapsuleTransaction, CapsuleVisibilityDelta, FileCatalogEntry,
+            PointerCatalog, RepositoryRoot, RootRecord, ShardCatalogEntry, XorbCatalogEntry,
+            XorbChunkEntry,
         },
         git_visibility::GitVisibilityEdit,
         manifest_store,
@@ -632,8 +633,15 @@ mod tests {
         segmented::{self, SegmentIndex, SegmentKind},
     };
     use crab_storage::{StagedWrite, Store};
+    use crab_types::pointer::Pointer;
+    use crab_xet::chunker::GearChunker;
+    use crab_xet::hash::MerkleHash;
+    use crab_xet::reconstruction::ChunkPlacementMap;
+    use crab_xet::shard::{PushShardSession, file_info_from_placements, xorb_info_from_placements};
+    use crab_xet::xorb::builder::{RunId, XorbBuilder};
     use object_store::memory::InMemory;
     use object_store::path::Path as ObjectPath;
+    use sha2::{Digest, Sha256};
 
     use super::*;
     use crate::error::AuthServerError;
@@ -684,6 +692,87 @@ mod tests {
 
     fn blake3_hex(bytes: &[u8]) -> String {
         blake3::hash(bytes).to_hex().to_string()
+    }
+
+    struct XetFixture {
+        pointer: Pointer,
+        catalog: PointerCatalog,
+        xorb_hash: MerkleHash,
+        xorb_bytes: Bytes,
+        shard_hash: MerkleHash,
+        shard_bytes: Vec<u8>,
+    }
+
+    fn xet_fixture(content: &[u8]) -> Result<XetFixture> {
+        let file_hash = MerkleHash::from(*blake3::hash(content).as_bytes());
+        let mut chunker = GearChunker::new();
+        let mut chunks = chunker.feed(content);
+        if let Some(chunk) = chunker.finalize() {
+            chunks.push(chunk);
+        }
+        let chunk_hashes = chunks.iter().map(|chunk| chunk.hash).collect::<Vec<_>>();
+        let mut builder = XorbBuilder::new();
+        for chunk in &chunks {
+            builder.push(chunk, RunId(0))?;
+        }
+        let mut xorbs = builder.finalize()?;
+        if xorbs.len() != 1 {
+            return Err(invalid("test Xet fixture did not produce exactly one xorb"));
+        }
+        let xorb = xorbs.remove(0);
+        let placements = xorb
+            .placements
+            .iter()
+            .map(|placement| (placement.chunk_hash, placement.clone()))
+            .collect::<ChunkPlacementMap>();
+        let xorb_info = Arc::new(xorb_info_from_placements(xorb.hash, &xorb.placements)?);
+        let file_info = file_info_from_placements(file_hash, &chunk_hashes, &placements)?;
+        let mut shards = PushShardSession::new();
+        shards.add_file_bundle(file_info, std::slice::from_ref(&xorb_info))?;
+        let mut shards = shards.finalize()?;
+        if shards.len() != 1 {
+            return Err(invalid(
+                "test Xet fixture did not produce exactly one shard",
+            ));
+        }
+        let (shard_bytes, shard_hash) = shards.remove(0);
+        let mut catalog = PointerCatalog::new();
+        let mut catalog_chunks = xorb.placements.iter().collect::<Vec<_>>();
+        catalog_chunks.sort_by_key(|placement| placement.chunk_index);
+        catalog.insert_xorb(
+            xorb.hash.hex(),
+            XorbCatalogEntry::new(
+                xorb.bytes.len() as u64,
+                blake3_hex(&xorb.bytes),
+                catalog_chunks
+                    .into_iter()
+                    .map(|placement| {
+                        XorbChunkEntry::new(placement.chunk_hash.hex(), placement.uncompressed_size)
+                    })
+                    .collect(),
+            ),
+        )?;
+        catalog.insert_shard(
+            shard_hash.hex(),
+            ShardCatalogEntry::new(shard_bytes.len() as u64, vec![xorb.hash.hex()]),
+        )?;
+        catalog.insert_file(
+            file_hash.hex(),
+            FileCatalogEntry::new(content.len() as u64, shard_hash.hex()),
+        )?;
+        catalog.encode()?;
+        Ok(XetFixture {
+            pointer: Pointer {
+                file_hash: file_hash.into(),
+                size: content.len() as u64,
+                shard_hint: None,
+            },
+            catalog,
+            xorb_hash: xorb.hash,
+            xorb_bytes: xorb.bytes,
+            shard_hash,
+            shard_bytes,
+        })
     }
 
     fn ref_update() -> PushRefUpdate {
@@ -1283,7 +1372,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn protected_capsule_view_push_preserves_hidden_source_paths() -> Result<()> {
+    async fn protected_capsule_view_push_preserves_hidden_paths_and_dependencies() -> Result<()> {
         let ctx = capsule_context().await?;
         let temp = tempfile::tempdir()?;
         let source = temp.path().join("source");
@@ -1413,8 +1502,34 @@ mod tests {
         )
         .await?;
 
+        let xet_content = b"protected view Xet content\n";
+        let xet = xet_fixture(xet_content)?;
+        ctx.store()
+            .put_exact(
+                &view_router.xorb_path(&xet.xorb_hash),
+                xet.xorb_bytes.clone(),
+            )
+            .await?;
+        ctx.store()
+            .put_exact(
+                &view_router.shard_path(&xet.shard_hash),
+                Bytes::from(xet.shard_bytes.clone()),
+            )
+            .await?;
+        let lfs_content = b"protected view LFS content\n";
+        let lfs_oid = <[u8; 32]>::from(Sha256::digest(lfs_content));
+        let lfs_pointer = crab_git::lfs_pointer::LfsPointer {
+            oid: lfs_oid,
+            size: lfs_content.len() as u64,
+            extensions: Vec::new(),
+        };
         std::fs::write(filtered.join("src/app.txt"), b"allowed v2\n")?;
-        run_git(["add", "src/app.txt"], Some(&filtered))?;
+        std::fs::write(filtered.join("src/model.bin"), xet.pointer.serialize())?;
+        std::fs::write(filtered.join("src/asset.lfs"), lfs_pointer.serialize())?;
+        run_git(
+            ["add", "src/app.txt", "src/model.bin", "src/asset.lfs"],
+            Some(&filtered),
+        )?;
         run_git(["commit", "-m", "allowed update"], Some(&filtered))?;
         let view_new = run_git_capture(["-C", path_str(&filtered)?, "rev-parse", "HEAD"])?
             .trim()
@@ -1472,10 +1587,16 @@ mod tests {
         let candidate = Capsule::build(
             &candidate_transaction,
             vec![candidate_pack],
-            vec![CapsuleSection::new(
-                CapsuleSectionKind::VisibilityDelta,
-                candidate_visibility.encode()?,
-            )],
+            vec![
+                CapsuleSection::new(
+                    CapsuleSectionKind::VisibilityDelta,
+                    candidate_visibility.encode()?,
+                ),
+                CapsuleSection::new(
+                    CapsuleSectionKind::CatalogDelta,
+                    xet.catalog.encode_delta()?,
+                ),
+            ],
         )?;
         let run = CapsuleRun::leaf(candidate)?;
         let run_object = staged_object(
@@ -1483,6 +1604,11 @@ mod tests {
             run.bytes(),
         );
         put_staged(&ctx, &run_object, run.bytes().to_vec()).await?;
+        let lfs_key =
+            crab_lfs::LfsObjectStore::object_path_for_prefix(ctx.router().repo_prefix(), &lfs_oid)
+                .to_string();
+        let lfs_object = staged_object(lfs_key.clone(), lfs_content);
+        put_staged(&ctx, &lfs_object, lfs_content.to_vec()).await?;
         let plan = super::super::ProtectedCapsulePushPlan {
             schema_version: crab_remote::protected::PROTECTED_CAPSULE_PUSH_PLAN_SCHEMA_VERSION,
             repo_prefix: ctx.repo_prefix().to_owned(),
@@ -1493,12 +1619,15 @@ mod tests {
             run_hash: run.hash().to_owned(),
             run_size: run.bytes().len() as u64,
             ref_updates: vec![update],
-            staged_objects: vec![run_object],
+            staged_objects: vec![run_object, lfs_object],
         };
         write_plan(&ctx, &plan).await?;
 
         let verified = verify_receive(&ctx).await?;
-        assert_eq!(verified.verified_changed_paths, vec!["src/app.txt"]);
+        assert_eq!(
+            verified.verified_changed_paths,
+            vec!["src/app.txt", "src/asset.lfs", "src/model.bin"]
+        );
         commit_receive(&ctx, "crab://bucket/org/repo", &verified.plan_digest, None).await?;
         commit_receive(&ctx, "crab://bucket/org/repo", &verified.plan_digest, None).await?;
 
@@ -1542,6 +1671,63 @@ mod tests {
             ])?,
             "classified\n"
         );
+        let final_pointer = run_git_capture([
+            "--git-dir",
+            path_str(&final_git)?,
+            "show",
+            &format!("{final_oid}:src/model.bin"),
+        ])?;
+        assert_eq!(Pointer::parse(final_pointer.as_bytes())?, xet.pointer);
+        let final_lfs_pointer = run_git_capture([
+            "--git-dir",
+            path_str(&final_git)?,
+            "show",
+            &format!("{final_oid}:src/asset.lfs"),
+        ])?;
+        assert_eq!(
+            crab_git::lfs_pointer::LfsPointer::parse(final_lfs_pointer.as_bytes())
+                .map_err(|error| invalid(error.to_string()))?,
+            lfs_pointer
+        );
+        let source_catalog = source_view.pointer_catalog()?;
+        assert!(
+            source_catalog
+                .files()
+                .contains_key(&MerkleHash::from(xet.pointer.file_hash).hex())
+        );
+        crab_read::verify_capsule_pointer_catalog_objects(ctx.router(), &source_catalog).await?;
+        let local_cache = Arc::new(crab_cache::LocalCache::with_limits(
+            temp.path().join("read-cache"),
+            1024 * 1024,
+            Some(1024 * 1024),
+        ));
+        let caching = crab_cache_store::CachingStore::new_with_local_cache(
+            ctx.store().clone(),
+            crab_cache_store::CacheConfig::default(),
+            local_cache,
+        )?;
+        let hydrator =
+            crab_read::ReadRuntimeBuilder::new(caching, ctx.router().clone(), 2).build()?;
+        let lookup = crab_metadata::file_index_lookup::SharedFileIndexLookup::new_for_storage(
+            ctx.store(),
+            ctx.repo_prefix(),
+        );
+        let hydrated = temp.path().join("hydrated-model.bin");
+        hydrator
+            .reconstruct_to_writer_with_cancel(
+                &xet.pointer,
+                std::fs::File::create(&hydrated)?,
+                Some(&lookup),
+                &CancellationToken::new(),
+            )
+            .await?;
+        lookup.close().await?;
+        assert_eq!(std::fs::read(hydrated)?, xet_content);
+        let (stored_lfs, _) = ctx
+            .store()
+            .get_with_etag_bounded(&ObjectPath::from(lfs_key), lfs_content.len() as u64)
+            .await?;
+        assert_eq!(stored_lfs.as_ref(), lfs_content);
         Ok(())
     }
 
