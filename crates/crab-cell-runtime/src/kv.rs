@@ -432,10 +432,7 @@ mod tests {
 
     #[test]
     fn embedded_kv_migration_matches_normative_contract() {
-        assert_eq!(
-            KV_SCHEMA,
-            include_str!("../../../crab/docs/architecture/platform/contracts/kv.sql")
-        );
+        assert_eq!(KV_SCHEMA, include_str!("../docs/contracts/kv.sql"));
     }
 
     #[test]

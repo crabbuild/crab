@@ -1120,7 +1120,7 @@ mod tests {
     fn embedded_workflow_migration_matches_normative_contract() {
         assert_eq!(
             WORKFLOW_SCHEMA,
-            include_str!("../../../crab/docs/architecture/platform/contracts/workflow.sql")
+            include_str!("../docs/contracts/workflow.sql")
         );
     }
 

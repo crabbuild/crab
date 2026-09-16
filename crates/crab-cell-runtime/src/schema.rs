@@ -102,7 +102,7 @@ mod tests {
     fn embedded_runtime_migration_matches_normative_contract() {
         assert_eq!(
             RUNTIME_SCHEMA,
-            include_str!("../../../crab/docs/architecture/platform/contracts/runtime.sql")
+            include_str!("../docs/contracts/runtime.sql")
         );
     }
 }
