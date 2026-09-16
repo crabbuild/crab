@@ -163,7 +163,7 @@ jobs:
         run: exit 1
 
   cell-runtime-rustfs:
-    name: Cell and LTX RustFS source-loss recovery
+    name: Server, Cell and LTX RustFS recovery
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -177,6 +177,9 @@ jobs:
       CRAB_CELL_TEST_BUCKET: crab-cell-runtime
       CRAB_CELL_TEST_ENDPOINT: http://127.0.0.1:9000
       CRAB_CELL_TEST_PREFIX: cell-${{ github.run_id }}-${{ github.run_attempt }}
+      CRAB_HTTP_CELL_TEST_BUCKET: crab-cell-runtime
+      CRAB_HTTP_CELL_TEST_ENDPOINT: http://127.0.0.1:9000
+      CRAB_HTTP_CELL_TEST_PREFIX: server-${{ github.run_id }}-${{ github.run_attempt }}
       RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
 
     steps:
@@ -225,6 +228,9 @@ jobs:
             rustfs_roundtrip -- --ignored --exact --nocapture
           cargo test -p crab-cell-runtime --locked --test actor \
             rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
+            -- --ignored --exact --nocapture
+          cargo test -p crab-http-server --locked --lib \
+            server::peer_e2e_tests::rustfs_public_collaboration_reaches_remote_owner_and_publishes_ltx \
             -- --ignored --exact --nocapture
 
   binary-contracts:

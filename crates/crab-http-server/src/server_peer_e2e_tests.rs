@@ -5,7 +5,7 @@ use super::*;
 use crab_cell_runtime::{
     ApplicationId, ApplicationIdentity, CellAuthority, Digest, NodeDirectory, SessionId, TenantId,
 };
-use crab_storage::CellStorageLayout;
+use crab_storage::{CellStorageLayout, ObjectStoreCredentials, build_explicit_store};
 use object_store::{memory::InMemory, path::Path as ObjectPath};
 use serde_json::Value;
 
@@ -32,8 +32,38 @@ impl PeerRoundTrip for UnavailablePeer {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn public_collaboration_requests_reach_remote_owner_over_mtls_and_publish_ltx() {
-    let store = Store::new(Arc::new(InMemory::new()));
-    let repository = repository(store.clone()).await;
+    public_collaboration_remote_owner(
+        Store::new(Arc::new(InMemory::new())),
+        "memory",
+        "remote-owner",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires an isolated pre-created RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_public_collaboration_reaches_remote_owner_and_publishes_ltx() {
+    let required = |name| std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
+    let bucket = required("CRAB_HTTP_CELL_TEST_BUCKET");
+    let store = build_explicit_store(
+        &bucket,
+        ObjectStoreCredentials::Aws {
+            access_key_id: required("AWS_ACCESS_KEY_ID"),
+            secret_access_key: required("AWS_SECRET_ACCESS_KEY"),
+            session_token: None,
+            region: "us-east-1".into(),
+        },
+        Some(&required("CRAB_HTTP_CELL_TEST_ENDPOINT")),
+        true,
+    )
+    .unwrap();
+    public_collaboration_remote_owner(store, &bucket, &required("CRAB_HTTP_CELL_TEST_PREFIX"))
+        .await;
+}
+
+async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &str) {
+    let repository_prefix = format!("{root}/repository");
+    let repository = repository(store.clone(), bucket, repository_prefix).await;
     let repository_id = repository.id;
     let identity = ApplicationIdentity::new(
         TenantId::from_bytes([2; 16]),
@@ -41,7 +71,7 @@ async fn public_collaboration_requests_reach_remote_owner_over_mtls_and_publish_
     );
     let cell_layout = CellStorageLayout::new(
         store.clone(),
-        ObjectPath::from("remote-owner-cells"),
+        ObjectPath::from(format!("{root}/cells")),
         *identity.application().as_bytes(),
     );
     let registry = Arc::new(crate::cells::compiled_registry().unwrap());
@@ -325,8 +355,8 @@ async fn public_collaboration_requests_reach_remote_owner_over_mtls_and_publish_
     owner_server.shutdown_runtimes().await.unwrap();
 }
 
-async fn repository(store: Store) -> Arc<Repository> {
-    let layout = StoreLayout::new(store.clone(), "remote-owner".into());
+async fn repository(store: Store, bucket: &str, prefix: String) -> Arc<Repository> {
+    let layout = StoreLayout::new(store.clone(), prefix.clone());
     crab_write::initialize::initialize_repository(&store, &layout, "refs/heads/main")
         .await
         .unwrap();
@@ -335,14 +365,14 @@ async fn repository(store: Store) -> Arc<Repository> {
         config: RepositoryConfig {
             owner: "team".into(),
             name: "repo".into(),
-            bucket: "memory".into(),
-            prefix: "remote-owner".into(),
+            bucket: bucket.into(),
+            prefix: prefix.clone(),
             default_branch: "main".into(),
             description: String::new(),
             members: Vec::new(),
             protected_branches: Vec::new(),
         },
-        identity: RepositoryIdentity::new("memory", "remote-owner", 1).unwrap(),
+        identity: RepositoryIdentity::new(bucket, prefix.as_str(), 1).unwrap(),
         store,
         layout,
         pinned: Mutex::new(None),

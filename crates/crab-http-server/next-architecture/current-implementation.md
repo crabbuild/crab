@@ -66,6 +66,9 @@ CAS, malformed indexes/heads, range corruption and paged SQLite. Pinned RustFS
 CI covers LTX publication, source loss, SQL readback and remote compaction. It
 also runs the Cell actor through first-owner publication, local database loss,
 second-session exact-root takeover, replay resolution and continued publication.
+The server-level RustFS case additionally sends public repository HTTP through
+an ingress node, private mTLS and the remote Cell owner before verifying the
+published root changed.
 The server's static repository module now calls the managed runtime indirectly
 through typed `CellClient` commands and queries. Its schema owns repository
 identity, issue/comment/label/status/check/settings/Pull/Release sequences and rows; integration tests prove replay,

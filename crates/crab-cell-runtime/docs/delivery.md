@@ -145,6 +145,11 @@ takes over from a second session, resolves the original request from the exact
 root, and publishes the next sequence. CI runs both tests against a pinned
 RustFS image.
 
+The same CI job also runs `crab-http-server` through public HTTP, private mTLS
+forwarding to a remote owner, typed repository commands and LTX publication on
+that RustFS origin. This combines the product network and storage boundaries;
+it does not replace the three-Pod kill and partition matrix below.
+
 ## Prove each primitive through recovery
 
 Primitive tests require more than procedure-level SQL assertions.
