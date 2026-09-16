@@ -76,13 +76,24 @@ async fn activate_runtime(
 async fn node_byte_reservation_rejects_overcommit_and_releases_capacity() {
     let session = SessionId::from_bytes([40; 16]);
     let runtime = CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 1_024, session).unwrap();
+    assert_eq!(
+        runtime.snapshot(),
+        crab_cell_runtime::CellRuntimeSnapshot {
+            active_cells: 0,
+            active_cell_capacity: 1,
+            node_retained_bytes_available: 1_024,
+            node_retained_bytes_capacity: 1_024,
+        }
+    );
     let held = runtime.try_reserve_node_bytes(1_024).unwrap();
+    assert_eq!(runtime.snapshot().node_retained_bytes_available, 0);
 
     assert!(matches!(
         runtime.try_reserve_node_bytes(1),
         Err(crab_cell_runtime::Error::Capacity("node retained bytes"))
     ));
     drop(held);
+    assert_eq!(runtime.snapshot().node_retained_bytes_available, 1_024);
     let released = runtime.try_reserve_node_bytes(1_024).unwrap();
     drop(released);
 
@@ -472,6 +483,8 @@ async fn runtime_shutdown_drains_accepted_work_and_releases_all_owners() {
     let (runtime, handle, pool) = activate_runtime(&fixture, 16 * 1024 * 1024).await;
     let second_fixture = fixture_for(b"repository-2");
     let second = bootstrap_on(&runtime, &second_fixture, SessionId::from_bytes([4; 16])).await;
+    assert_eq!(runtime.snapshot().active_cells, 2);
+    assert_eq!(runtime.snapshot().active_cell_capacity, 10);
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let mutation = {
@@ -524,6 +537,7 @@ async fn runtime_shutdown_drains_accepted_work_and_releases_all_owners() {
         .unwrap()
         .unwrap()
         .unwrap();
+    assert_eq!(runtime.snapshot().active_cells, 0);
     assert!(matches!(
         runtime.shutdown().await,
         Err(crab_cell_runtime::Error::RuntimeClosed)

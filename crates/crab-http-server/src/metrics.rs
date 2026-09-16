@@ -48,6 +48,10 @@ struct MetricsInner {
     scheduler_healthy: Gauge,
     scheduler_progress: Gauge,
     scheduler_lag_seconds: Gauge,
+    cell_active: Gauge,
+    cell_capacity: Gauge,
+    cell_retained_bytes_available: Gauge,
+    cell_retained_bytes_capacity: Gauge,
     draining: Gauge,
     receive_workers: Gauge,
     catalog_refresh_failures: Counter,
@@ -73,6 +77,10 @@ pub(crate) struct RuntimeSnapshot {
     pub(crate) scheduler_healthy: bool,
     pub(crate) scheduler_progress: u64,
     pub(crate) scheduler_lag_seconds: f64,
+    pub(crate) cell_active: usize,
+    pub(crate) cell_capacity: usize,
+    pub(crate) cell_retained_bytes_available: usize,
+    pub(crate) cell_retained_bytes_capacity: usize,
     pub(crate) draining: bool,
     pub(crate) receive_workers: usize,
     pub(crate) admission_available: [usize; ADMISSION_COUNT],
@@ -110,6 +118,22 @@ impl Metrics {
                 ),
                 scheduler_lag_seconds: recorder.register_gauge(
                     &Key::from_static_name("crab_http_server_scheduler_lag_seconds"),
+                    &METADATA,
+                ),
+                cell_active: recorder.register_gauge(
+                    &Key::from_static_name("crab_http_server_active_cells"),
+                    &METADATA,
+                ),
+                cell_capacity: recorder.register_gauge(
+                    &Key::from_static_name("crab_http_server_cell_capacity"),
+                    &METADATA,
+                ),
+                cell_retained_bytes_available: recorder.register_gauge(
+                    &Key::from_static_name("crab_http_server_cell_retained_available_bytes"),
+                    &METADATA,
+                ),
+                cell_retained_bytes_capacity: recorder.register_gauge(
+                    &Key::from_static_name("crab_http_server_cell_retained_capacity_bytes"),
                     &METADATA,
                 ),
                 draining: recorder.register_gauge(
@@ -171,6 +195,14 @@ impl Metrics {
         self.inner
             .scheduler_lag_seconds
             .set(snapshot.scheduler_lag_seconds);
+        self.inner.cell_active.set(snapshot.cell_active as f64);
+        self.inner.cell_capacity.set(snapshot.cell_capacity as f64);
+        self.inner
+            .cell_retained_bytes_available
+            .set(snapshot.cell_retained_bytes_available as f64);
+        self.inner
+            .cell_retained_bytes_capacity
+            .set(snapshot.cell_retained_bytes_capacity as f64);
         self.inner.draining.set(f64::from(snapshot.draining));
         self.inner
             .receive_workers
@@ -442,6 +474,26 @@ fn describe_metrics(recorder: &impl Recorder) {
     );
     describe_gauge(
         recorder,
+        "crab_http_server_active_cells",
+        "SQLite Cells currently open in this process.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_http_server_cell_capacity",
+        "Maximum SQLite Cells admitted concurrently by this process.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_http_server_cell_retained_available_bytes",
+        "Available bytes in the Cell runtime's shared retained-work budget.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_http_server_cell_retained_capacity_bytes",
+        "Configured bytes in the Cell runtime's shared retained-work budget.",
+    );
+    describe_gauge(
+        recorder,
         "crab_http_server_draining",
         "Whether graceful shutdown has started.",
     );
@@ -514,6 +566,10 @@ mod tests {
             scheduler_healthy: true,
             scheduler_progress: 3,
             scheduler_lag_seconds: 0.25,
+            cell_active: 5,
+            cell_capacity: 1_125,
+            cell_retained_bytes_available: 4_096,
+            cell_retained_bytes_capacity: 16_384,
             draining: false,
             receive_workers: 1,
             admission_available: [16, 3, 8, 1],
@@ -545,6 +601,10 @@ mod tests {
         assert!(rendered.contains("crab_http_server_scheduler_healthy 1"));
         assert!(rendered.contains("crab_http_server_scheduler_progress 3"));
         assert!(rendered.contains("crab_http_server_scheduler_lag_seconds 0.25"));
+        assert!(rendered.contains("crab_http_server_active_cells 5"));
+        assert!(rendered.contains("crab_http_server_cell_capacity 1125"));
+        assert!(rendered.contains("crab_http_server_cell_retained_available_bytes 4096"));
+        assert!(rendered.contains("crab_http_server_cell_retained_capacity_bytes 16384"));
         assert!(rendered.contains("crab_http_server_repositories 2"));
         assert!(
             rendered

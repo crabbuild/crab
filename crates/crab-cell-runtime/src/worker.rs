@@ -588,6 +588,14 @@ impl SqlWorkerPool {
             active: self.inner.active.clone(),
         })
     }
+
+    pub(crate) fn active_cells(&self) -> usize {
+        self.inner.active.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn active_cell_capacity(&self) -> usize {
+        self.inner.max_active_cells
+    }
 }
 
 struct PoolInner {

@@ -206,6 +206,7 @@ Monitor these platform and application signals:
 | `crab_http_server_requests_total` and request duration | Error rate or tail duration changes from the recorded baseline |
 | Response-body errors and aborts | A stream fails after headers or a client/proxy disconnects early |
 | Admission available permits | A class remains saturated instead of returning to capacity |
+| Cell active/capacity and retained-byte gauges | Active Cells approach capacity or retained bytes stay exhausted after traffic settles |
 | `crab_http_server_transfer_admission_rejections_total` | `capacity` grows under shared-slot pressure, or `coordination` grows when storage-backed admission fails |
 | `crab_http_server_catalog_healthy` | Any pod reports `0` |
 | `crab_http_server_catalog_refresh_failures_total` | The counter increases |

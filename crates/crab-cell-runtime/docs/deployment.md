@@ -75,6 +75,14 @@ Advertisements expire after 15 seconds. A node with no scheduler progress for 15
 
 Local admission remains authoritative. An advertisement cannot force a node to accept work after its measured budget is exhausted.
 
+The private Prometheus endpoint exports `crab_http_server_active_cells`,
+`crab_http_server_cell_capacity`, and the available and configured
+`crab_http_server_cell_retained_available_bytes` and
+`crab_http_server_cell_retained_capacity_bytes` gauges. Use these node-wide
+values with process RSS, file-descriptor, local-volume, latency, and object-store
+telemetry during capacity qualification. They are independently sampled
+observations, not a replacement for runtime admission.
+
 ## Size node profiles and admission
 
 The runtime derives active-Cell limits from measured resources. Profile names are operator guidance, not fixed performance claims.

@@ -44,6 +44,18 @@ pub struct CellRuntime {
     inner: Arc<RuntimeInner>,
 }
 
+/// Instantaneous node-level Cell and retained-byte admission counters.
+///
+/// Values are sampled independently and are intended for operations and
+/// capacity qualification, not for admission decisions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellRuntimeSnapshot {
+    pub active_cells: usize,
+    pub active_cell_capacity: usize,
+    pub node_retained_bytes_available: usize,
+    pub node_retained_bytes_capacity: usize,
+}
+
 /// Opaque node-wide byte reservation held until it is dropped.
 #[must_use = "dropping the reservation immediately releases its capacity"]
 pub struct NodeByteReservation {
@@ -59,6 +71,7 @@ pub struct MigratedCell {
 pub(super) struct RuntimeInner {
     sender: mpsc::Sender<Message>,
     node_bytes: Arc<Semaphore>,
+    node_byte_capacity: usize,
     shutting_down: AtomicBool,
     session: SessionId,
     pool: SqlWorkerPool,
@@ -97,6 +110,7 @@ impl CellRuntime {
             inner: Arc::new(RuntimeInner {
                 sender,
                 node_bytes: Arc::new(Semaphore::new(node_retained_bytes)),
+                node_byte_capacity: node_retained_bytes,
                 shutting_down: AtomicBool::new(false),
                 session,
                 pool,
@@ -134,6 +148,17 @@ impl CellRuntime {
     #[must_use]
     pub fn is_shutting_down(&self) -> bool {
         self.inner.shutting_down.load(Ordering::Acquire)
+    }
+
+    /// Samples node-wide Cell and retained-byte admission without blocking.
+    #[must_use]
+    pub fn snapshot(&self) -> CellRuntimeSnapshot {
+        CellRuntimeSnapshot {
+            active_cells: self.inner.pool.active_cells(),
+            active_cell_capacity: self.inner.pool.active_cell_capacity(),
+            node_retained_bytes_available: self.inner.node_bytes.available_permits(),
+            node_retained_bytes_capacity: self.inner.node_byte_capacity,
+        }
     }
 
     /// Reserves node-wide bytes for native work retained outside a Cell mailbox.

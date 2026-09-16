@@ -1085,12 +1085,17 @@ fn management_router(server: Arc<Server>) -> Router {
 
 async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
     let scheduler_now_ms = crate::cells::unix_now_ms().unwrap_or(0);
+    let cells = server.cell_runtime.snapshot();
     let body = server.metrics.render(crate::metrics::RuntimeSnapshot {
         repositories: server.repositories.len(),
         catalog_healthy: server.catalog_healthy.load(Ordering::Acquire),
         scheduler_healthy: server.scheduler_status.is_healthy(scheduler_now_ms),
         scheduler_progress: server.scheduler_status.progress(),
         scheduler_lag_seconds: server.scheduler_status.lag_ms(scheduler_now_ms) as f64 / 1_000.0,
+        cell_active: cells.active_cells,
+        cell_capacity: cells.active_cell_capacity,
+        cell_retained_bytes_available: cells.node_retained_bytes_available,
+        cell_retained_bytes_capacity: cells.node_retained_bytes_capacity,
         draining: server.cancellation.is_cancelled(),
         receive_workers: server.receives.len(),
         admission_available: [
