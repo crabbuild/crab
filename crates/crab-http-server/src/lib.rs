@@ -107,6 +107,12 @@ pub async fn repository_cell_status(config: &Config, owner: &str, name: &str) ->
     cells::repository_status(config, owner, name).await
 }
 
+/// Reports whether one exact node boot session has a currently valid advertisement.
+pub async fn cell_node_status(config: &Config, session: &str) -> Result<Vec<u8>> {
+    config.validate()?;
+    cells::node_status(config, session).await
+}
+
 /// Startup and server lifecycle errors with their original sources retained.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

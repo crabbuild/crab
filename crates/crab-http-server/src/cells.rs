@@ -418,6 +418,35 @@ pub(crate) async fn repository_status(config: &Config, owner: &str, name: &str) 
 }
 
 #[derive(Serialize)]
+struct NodeStatus {
+    version: u8,
+    session: String,
+    live: bool,
+    observed_at_ms: i64,
+}
+
+pub(crate) async fn node_status(config: &Config, session: &str) -> Result<Vec<u8>> {
+    let session = decode_session(session)?;
+    let startup = verify_startup_release(config).await?;
+    let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
+    let directory = NodeDirectory::new(
+        startup.layout,
+        peer_tls.fleet(),
+        startup.image,
+        startup.registry.release_digest(),
+    );
+    let observed_at_ms = unix_now_ms()?;
+    let live = directory.is_live(session, observed_at_ms).await?;
+    serde_json::to_vec_pretty(&NodeStatus {
+        version: 1,
+        session: status_hex(session.as_bytes()),
+        live,
+        observed_at_ms,
+    })
+    .map_err(Error::from)
+}
+
+#[derive(Serialize)]
 struct MigrationStatusPage {
     version: u8,
     operation: String,
@@ -609,28 +638,39 @@ fn encode_migration_status(
 }
 
 fn decode_cell_cursor(value: &str) -> Result<CellId> {
-    if value.len() != 64 {
-        return Err(Error::Config(
-            "release migration cursor must be a lowercase Cell ID",
-        ));
+    decode_hex(
+        value,
+        "release migration cursor must be a lowercase Cell ID",
+    )
+    .map(CellId::from_bytes)
+}
+
+fn decode_session(value: &str) -> Result<SessionId> {
+    let bytes = decode_hex(
+        value,
+        "node session must be 32 lowercase hexadecimal characters",
+    )?;
+    if bytes == [0; 16] {
+        return Err(Error::Config("node session must not be zero"));
     }
-    let mut bytes = [0; 32];
+    Ok(SessionId::from_bytes(bytes))
+}
+
+fn decode_hex<const N: usize>(value: &str, error: &'static str) -> Result<[u8; N]> {
+    if value.len() != N * 2 {
+        return Err(Error::Config(error));
+    }
+    let mut bytes = [0; N];
     let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
     if !remainder.is_empty() {
-        return Err(Error::Config(
-            "release migration cursor must be a lowercase Cell ID",
-        ));
+        return Err(Error::Config(error));
     }
     for (output, pair) in bytes.iter_mut().zip(pairs) {
-        let high = image_nibble(pair[0]).ok_or(Error::Config(
-            "release migration cursor must be a lowercase Cell ID",
-        ))?;
-        let low = image_nibble(pair[1]).ok_or(Error::Config(
-            "release migration cursor must be a lowercase Cell ID",
-        ))?;
+        let high = image_nibble(pair[0]).ok_or(Error::Config(error))?;
+        let low = image_nibble(pair[1]).ok_or(Error::Config(error))?;
         *output = (high << 4) | low;
     }
-    Ok(CellId::from_bytes(bytes))
+    Ok(bytes)
 }
 
 fn status_hex(bytes: &[u8]) -> String {
@@ -696,21 +736,7 @@ fn image_digest(image: &str) -> Result<Digest> {
     let value = image
         .strip_prefix("sha256:")
         .ok_or(Error::Config("selected Cell image digest is invalid"))?;
-    if value.len() != 64 {
-        return Err(Error::Config("selected Cell image digest is invalid"));
-    }
-    let mut bytes = [0; 32];
-    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
-    if !remainder.is_empty() {
-        return Err(Error::Config("selected Cell image digest is invalid"));
-    }
-    for (output, pair) in bytes.iter_mut().zip(pairs) {
-        let high =
-            image_nibble(pair[0]).ok_or(Error::Config("selected Cell image digest is invalid"))?;
-        let low =
-            image_nibble(pair[1]).ok_or(Error::Config("selected Cell image digest is invalid"))?;
-        *output = (high << 4) | low;
-    }
+    let bytes = decode_hex(value, "selected Cell image digest is invalid")?;
     if bytes == [0; 32] {
         return Err(Error::Config("selected Cell image digest is zero"));
     }
@@ -1496,6 +1522,23 @@ mod tests {
     const ROLLOVER_NAMESPACE: NamespaceId = NamespaceId::from_bytes([31; 16]);
     const ROLLOVER_PREDECESSOR: Digest = Digest::from_bytes([32; 32]);
     const ROLLOVER_SQL: &str = "CREATE TABLE rollover(value BLOB NOT NULL)";
+
+    #[test]
+    fn node_session_parser_accepts_only_nonzero_canonical_hex() {
+        assert_eq!(
+            decode_session("11111111111111111111111111111111").unwrap(),
+            SessionId::from_bytes([0x11; 16])
+        );
+        for invalid in [
+            "",
+            "1111111111111111111111111111111",
+            "111111111111111111111111111111111",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "00000000000000000000000000000000",
+        ] {
+            assert!(decode_session(invalid).is_err(), "accepted {invalid}");
+        }
+    }
 
     struct RolloverModule;
 

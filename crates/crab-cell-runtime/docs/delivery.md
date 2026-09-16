@@ -179,7 +179,10 @@ The shipped Kubernetes qualification script adds one real three-Pod owner-loss
 case. It reads the durable repository Cell control, maps the serving endpoint to
 a ready Pod, force-deletes that Pod without grace, then requires a different
 session at a higher epoch to restore the public status and publish a second
-status visible through another replica. That case is not evidence until its
+status visible through another replica. Before takeover traffic, it queries the
+old boot session through `cells node --session SESSION --json` until the signed
+advertisement is no longer live; Pod deletion alone is not expiry evidence.
+That case is not evidence until its
 signed provider receipt exists, and it does not replace the remaining partition
 and commit-window faults. Browser E2E is intentionally outside this gate.
 

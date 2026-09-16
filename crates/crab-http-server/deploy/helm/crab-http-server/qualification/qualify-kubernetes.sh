@@ -840,6 +840,27 @@ jq --exit-status --arg uid "$owner_pod_uid" '
   [.items[] | select(.metadata.deletionTimestamp == null) | .metadata.uid] |
   index($uid) == null
 ' "$pods_json" >/dev/null
+owner_advertisement_status="${work_dir}/owner-advertisement-expired.json"
+owner_advertisement_expired=false
+inspection_pod="$(jq --raw-output '
+  first(.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name)
+' "$pods_json")"
+for _attempt in $(seq 1 60); do
+  if kubectl --namespace "$namespace" exec "$inspection_pod" -- \
+      crab-http-server --config /etc/crab/http-server/server.toml \
+        cells node --session "$owner_session_before" --json \
+        > "$owner_advertisement_status" &&
+    jq --exit-status \
+      --arg session "$owner_session_before" '
+      .version == 1 and .session == $session and .live == false and
+      .observed_at_ms >= 0
+    ' "$owner_advertisement_status" >/dev/null; then
+    owner_advertisement_expired=true
+    break
+  fi
+  sleep 2
+done
+$owner_advertisement_expired
 check_placement
 check_workload_identity
 check_pod_health
@@ -946,6 +967,8 @@ jq --null-input \
   --arg owner_pod_uid "$owner_pod_uid" \
   --arg owner_session_before "$owner_session_before" \
   --arg owner_session_after "$(jq --raw-output '.owner.session' "$control_after")" \
+  --argjson owner_advertisement_observed_at_ms \
+    "$(jq --raw-output '.observed_at_ms' "$owner_advertisement_status")" \
   --arg root_digest_before "$(jq --raw-output '.root.digest' "$control_before")" \
   --arg root_digest_after "$(jq --raw-output '.root.digest' "$control_after")" \
   --argjson owner_epoch_before "$owner_epoch_before" \
@@ -964,7 +987,7 @@ jq --null-input \
   --slurpfile capacity_before_traffic "$capacity_before_traffic" \
   --slurpfile capacity_after_rollout "$capacity_after_rollout" \
   --slurpfile capacity_after_owner_loss "$capacity_after_owner_loss" \
-  '{schema: 6, provider: $provider, namespace: $namespace, deployment: $deployment,
+  '{schema: 7, provider: $provider, namespace: $namespace, deployment: $deployment,
     origin: $origin, image: $image, chart: $chart,
     qualification_source: {release_tag: $release_tag, commit: $source_sha},
     workload_identity: {
@@ -979,6 +1002,8 @@ jq --null-input \
       deleted_pod_uid: $owner_pod_uid,
       session_before: $owner_session_before,
       session_after: $owner_session_after,
+      previous_advertisement_expired: true,
+      advertisement_observed_at_ms: $owner_advertisement_observed_at_ms,
       epoch_before: $owner_epoch_before,
       epoch_after: $owner_epoch_after,
       root_digest_before: $root_digest_before,
@@ -1012,6 +1037,7 @@ jq --null-input \
       post_rollout_clone: true,
       post_rollout_cell_restore: true,
       abrupt_owner_loss: true,
+      owner_advertisement_expired: true,
       owner_loss_exact_root_restore: true,
       owner_loss_publication_continues: true
     },

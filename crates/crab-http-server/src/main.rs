@@ -64,6 +64,13 @@ enum CellsCommand {
         #[arg(long)]
         name: String,
     },
+    /// Report whether one exact node boot session is currently live.
+    Node {
+        #[arg(long)]
+        session: String,
+        #[arg(long, required = true)]
+        json: bool,
+    },
     /// Inspect or administer compiled Cell releases.
     Release {
         #[command(subcommand)]
@@ -255,6 +262,13 @@ async fn cells(
         }
         CellsCommand::Status { owner, name } => {
             crab_http_server::repository_cell_status(config, &owner, &name).await?
+        }
+        CellsCommand::Node {
+            session,
+            json: true,
+        } => crab_http_server::cell_node_status(config, &session).await?,
+        CellsCommand::Node { json: false, .. } => {
+            return Err(crab_http_server::Error::Config("--json is required"));
         }
         CellsCommand::Release {
             command: CellReleaseCommand::Inspect { json: true },
@@ -689,6 +703,43 @@ mod tests {
                 "status",
                 "--owner",
                 "team",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn cell_node_status_requires_an_exact_session_and_json() {
+        let arguments = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "node",
+            "--session",
+            "11111111111111111111111111111111",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Some(Command::Cells {
+                command: CellsCommand::Node {
+                    session,
+                    json: true
+                }
+            }) if session == "11111111111111111111111111111111"
+        ));
+
+        assert!(
+            Arguments::try_parse_from([
+                "crab-http-server",
+                "--config",
+                "server.toml",
+                "cells",
+                "node",
+                "--session",
+                "11111111111111111111111111111111",
             ])
             .is_err()
         );
