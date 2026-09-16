@@ -1,17 +1,16 @@
 # SQLite runtime and application data model
 
-[Design index](README.md) · Repository issue/comment/label/status/check/settings schema implemented; remaining domains proposed.
+[Design index](README.md) · All repository collaboration domains use the implemented Cell schema and typed runtime path.
 
 The SQL transaction and WAL boundaries here feed the
 [publication coordinator](storage-protocol.md#commit-publication-and-response-gating).
 The [crab-ltx implementation](crab-ltx.md#implemented-state) supplies local capture,
-snapshot and exact restore, plus optional remote transport, immutable views and
-writable sparse SQL with checksum-seeded continuation. Full restoration remains
-the initial server activation policy; sparse support is a library capability,
-not yet a wired AppCell workflow. The fixed SQL worker executor, repository
-identity, issue/comment/label/status/check/settings schema, typed operations, publication barrier and public
-HTTP adapter are implemented. Pulls, releases, outbox/workflow
-tables and their route cuts remain proposed.
+snapshot and exact restore, plus remote transport, immutable views and writable
+sparse SQL with checksum-seeded continuation. Cell takeover opens the exact root
+through that writable sparse path. The fixed SQL worker executor, repository
+identity, complete collaboration schema, typed operations, publication barrier,
+durable effects and public HTTP adapters are implemented. Pull merge and Release
+publication keep canonical Git and asset writes as explicit external effects.
 Restore and takeover follow [recovery rules](recovery-and-retention.md);
 the [hard cut](hard-cutover.md) creates these tables empty and deletes old
 application documents instead of importing them.
@@ -236,15 +235,15 @@ Display name is intentionally excluded from the domain digest to preserve the
 existing identity rule. The original display name and timestamp remain in the
 atomically created visible row returned by every later replay.
 
-### Remaining domain tables
+### Implemented domain tables
 
-| Domain | Required relational content | Important invariants |
+| Domain | Relational content | Important invariants |
 | --- | --- | --- |
-| PRs | `pulls`, `pull_comments`, `pull_reviews`, review comments if supported | Base/head refs, recorded OIDs, method, state, version, immutable merge intent |
-| Assignments | `issue_assignees`, `pull_assignees` | Distinct stable subjects; resolve against current membership |
-| Pull labels | relational pull-to-label selection | Validate active label IDs transactionally when Pull records move into SQLite |
-| Checks | `check_runs`, `check_outputs`, supported annotation rows | Existing state transitions, revision checks, bounded output and request replay |
-| Releases | `releases`, `release_assets`, tag/name claims and upload reservations | Tag identity, asset integrity, metadata tombstones, uniqueness rules |
+| PRs | `repository_pulls`, comments, reviews, decisions and merge submissions | Base/head refs, recorded OIDs, method, state, version, immutable merge intent |
+| Assignments | Bounded stable-subject vectors on issue and Pull rows | Distinct subjects; resolve against current membership |
+| Pull labels | Bounded label ID vectors on Pull rows | Validate active label IDs transactionally |
+| Checks | Immutable check versions plus create/update submission ledgers | State transitions, revision checks, bounded output and request replay |
+| Releases | Release rows, assets, tag claims and upload reservations | Tag identity, asset integrity, publication intent, tombstones and uniqueness |
 | Retry state | Domain-specific permanent submission/claim tables; `sys_requests` remains runtime-owned and bounded | Preserve actor/content conflicts and allocated IDs even for incomplete operations |
 | Replication metadata | Managed capture control tables | Reserved names; never mistaken for user/domain tables |
 

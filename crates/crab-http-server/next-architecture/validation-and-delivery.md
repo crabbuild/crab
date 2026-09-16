@@ -164,8 +164,9 @@ the new member; broad CI and cross-platform results must be recorded separately.
 
 This does **not** complete phase 2's external golden/interoperability, fuzz,
 filesystem fault and measured-resource qualification. The server now proves
-owner/control CAS, output barriers, local source-loss restore, two-node routing
-and typed issue/comment/label/status/check/settings browser API flows in automated tests. Real RustFS
+owner/control CAS, output barriers, local source-loss restore, pending Pull merge
+and Release publication continuation, two-node routing and typed collaboration
+browser API flows in automated tests. Real RustFS
 browser workflows, process/network fault injection and Kubernetes operations
 remain unqualified. Validate design links/anchors alongside runtime changes; do
 not infer those deployment gates from library tests.

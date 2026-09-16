@@ -1394,16 +1394,22 @@ mod tests {
     use super::repository::{
         BranchProtectionRecord, BranchProtectionSettings, CheckAnnotationRecord, CheckOutputRecord,
         CheckReportInput, CheckRunKey, CheckStepRecord, CheckSubmissionKey, CommentKey,
-        CommentPage, CommitStatusCatalog, CreateCheckRun, CreateCheckRunInput,
-        CreateCheckRunOutcome, CreateComment, CreateCommentInput, CreateCommentOutcome,
-        CreateCommitStatus, CreateCommitStatusInput, CreateCommitStatusOutcome, CreateIssue,
-        CreateIssueInput, CreateIssueOutcome, CreateLabel, CreateLabelInput, CreateLabelOutcome,
-        GetBranchProtections, GetCheckRun, GetCheckUpdateSubmission, GetComment, GetIssue,
+        CommentPage, CommitStatusCatalog, CompleteReleasePublication,
+        CompleteReleasePublicationInput, CompleteReleasePublicationOutcome, CreateCheckRun,
+        CreateCheckRunInput, CreateCheckRunOutcome, CreateComment, CreateCommentInput,
+        CreateCommentOutcome, CreateCommitStatus, CreateCommitStatusInput,
+        CreateCommitStatusOutcome, CreateIssue, CreateIssueInput, CreateIssueOutcome, CreateLabel,
+        CreateLabelInput, CreateLabelOutcome, CreatePull, CreatePullInput, CreatePullOutcome,
+        CreateRelease, CreateReleaseInput, CreateReleaseOutcome, GetBranchProtections, GetCheckRun,
+        GetCheckUpdateSubmission, GetComment, GetIssue, GetPull, GetRelease,
         GetRepositoryLifecycle, IssuePage, LabelCatalog, ListComments, ListCommentsInput,
-        ListCommitStatuses, ListIssues, ListIssuesInput, ListLabels, ReplaceBranchProtections,
-        ReplaceBranchProtectionsInput, ReplaceBranchProtectionsOutcome, ReplaceRepositoryLifecycle,
+        ListCommitStatuses, ListIssues, ListIssuesInput, ListLabels, MergeMethod, PullMerge,
+        PullMergeTransition, PullState, ReplaceBranchProtections, ReplaceBranchProtectionsInput,
+        ReplaceBranchProtectionsOutcome, ReplaceRepositoryLifecycle,
         ReplaceRepositoryLifecycleInput, ReplaceRepositoryLifecycleOutcome, RepositoryAuthor,
-        RepositoryLifecycleRecord, UpdateCheckRun, UpdateCheckRunInput, UpdateCheckRunOutcome,
+        RepositoryLifecycleRecord, ReservePullMerge, ReservePullMergeInput,
+        ReservePullMergeOutcome, TransitionPullMerge, TransitionPullMergeInput,
+        TransitionPullMergeOutcome, UpdateCheckRun, UpdateCheckRunInput, UpdateCheckRunOutcome,
         UpdateComment, UpdateCommentInput, UpdateCommentOutcome, UpdateIssue, UpdateIssueInput,
         UpdateIssueOutcome,
     };
@@ -3107,6 +3113,91 @@ mod tests {
             ReplaceRepositoryLifecycleOutcome::Updated(lifecycle.clone())
         );
 
+        let pull = first_client
+            .command::<CreatePull>(
+                &target,
+                mutation(26),
+                CreatePullInput {
+                    submission_id: [26; 16],
+                    author: status_input.author.clone(),
+                    title: "Recover pending merge".into(),
+                    body: "The merge intent must survive local source loss.".into(),
+                    base_ref: "refs/heads/main".into(),
+                    base_oid: "1111111111111111111111111111111111111111".into(),
+                    head_ref: "refs/heads/feature".into(),
+                    head_oid: "2222222222222222222222222222222222222222".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let CreatePullOutcome::Created(pull_record) = &pull.output else {
+            panic!("successful pull command returned a rejection outcome");
+        };
+        let merge = PullMerge {
+            request_id: [27; 16],
+            author: status_input.author.clone(),
+            method: MergeMethod::MergeCommit,
+            pull_version: pull_record.version,
+            base_oid: pull_record.base_oid.clone(),
+            head_oid: pull_record.head_oid.clone(),
+            commit_oid: "3333333333333333333333333333333333333333".into(),
+            message: "Merge feature".into(),
+            created_at_ms: pull_record.created_at_ms,
+        };
+        let reserved_merge = first_client
+            .command::<ReservePullMerge>(
+                &target,
+                mutation(27),
+                ReservePullMergeInput {
+                    pull: pull_record.number,
+                    merge: merge.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            reserved_merge.output,
+            ReservePullMergeOutcome::Reserved(Box::new(merge.clone()))
+        );
+        let pending_merge = first_client
+            .command::<TransitionPullMerge>(
+                &target,
+                mutation(28),
+                TransitionPullMergeInput {
+                    pull: pull_record.number,
+                    merge: merge.clone(),
+                    transition: PullMergeTransition::Begin,
+                },
+            )
+            .await
+            .unwrap();
+        let TransitionPullMergeOutcome::Applied(pending_pull) = &pending_merge.output else {
+            panic!("merge begin returned a rejection outcome");
+        };
+        assert_eq!(pending_pull.merge_pending.as_ref(), Some(&merge));
+
+        let release = first_client
+            .command::<CreateRelease>(
+                &target,
+                mutation(29),
+                CreateReleaseInput {
+                    submission_id: [29; 16],
+                    author: status_input.author.clone(),
+                    tag_name: "v1.0.0".into(),
+                    target_oid: merge.commit_oid.clone(),
+                    title: "Version 1.0.0".into(),
+                    body: "The publication intent must survive local source loss.".into(),
+                    prerelease: false,
+                    draft: false,
+                },
+            )
+            .await
+            .unwrap();
+        let CreateReleaseOutcome::PublicationPending(release_record) = &release.output else {
+            panic!("non-draft release did not retain a publication intent");
+        };
+        assert!(release_record.publication_pending.is_some());
+
         assert_eq!(
             first_client
                 .query::<ListIssues>(
@@ -3304,6 +3395,63 @@ mod tests {
                 .unwrap()
                 .output,
             lifecycle
+        );
+        assert_eq!(
+            second_client
+                .query::<GetPull>(&target, Some(pending_merge.receipt), pull_record.number,)
+                .await
+                .unwrap()
+                .output,
+            Some(pending_pull.as_ref().clone())
+        );
+        let completed_merge = second_client
+            .command::<TransitionPullMerge>(
+                &target,
+                mutation(30),
+                TransitionPullMergeInput {
+                    pull: pull_record.number,
+                    merge: merge.clone(),
+                    transition: PullMergeTransition::Complete,
+                },
+            )
+            .await
+            .unwrap();
+        let TransitionPullMergeOutcome::Applied(completed_pull) = completed_merge.output else {
+            panic!("merge completion returned a rejection outcome");
+        };
+        assert_eq!(completed_pull.state, PullState::Merged);
+        assert_eq!(completed_pull.merge.as_ref(), Some(&merge));
+        assert!(completed_pull.merge_pending.is_none());
+
+        assert_eq!(
+            second_client
+                .query::<GetRelease>(&target, Some(release.receipt), release_record.number)
+                .await
+                .unwrap()
+                .output,
+            Some(release_record.as_ref().clone())
+        );
+        let published_release = second_client
+            .command::<CompleteReleasePublication>(
+                &target,
+                mutation(31),
+                CompleteReleasePublicationInput {
+                    number: release_record.number,
+                    expected_version: 0,
+                    tag_oid: merge.commit_oid,
+                },
+            )
+            .await
+            .unwrap();
+        let CompleteReleasePublicationOutcome::Completed(published) = published_release.output
+        else {
+            panic!("release publication completion returned a rejection outcome");
+        };
+        assert!(!published.draft);
+        assert!(published.publication_pending.is_none());
+        assert_eq!(
+            published.tag_oid.as_deref(),
+            Some("3333333333333333333333333333333333333333")
         );
         assert_eq!(
             second_client
