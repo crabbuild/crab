@@ -97,11 +97,6 @@ fn validate_publication_plan_context(config: &PushConfig) -> Result<()> {
     let Some(plan_id) = config.mirror_plan_id.as_deref() else {
         return Ok(());
     };
-    if config.active_active_replication.is_some() {
-        return Err(CrabError::Protocol(
-            "mirror plan receipts are not supported by active-active finalize".to_owned(),
-        ));
-    }
     if plan_id.len() != 64
         || !plan_id
             .bytes()
@@ -580,6 +575,9 @@ async fn publish_capsule(
             .keys()
             .map(|hash| layout.shard_path(hash).to_string()),
     );
+    if let Some(plan_id) = transaction.plan_id() {
+        uploaded_objects.insert(layout.capsule_plan_intent_path(plan_id).to_string());
+    }
     let plan = crate::replication::plan_active_active_capsule_push(
         replication,
         config.active_active_writer.as_deref(),
@@ -1076,16 +1074,14 @@ mod tests {
     }
 
     #[test]
-    fn active_active_mirror_plan_fails_closed_before_publication() {
+    fn active_active_mirror_plan_passes_protocol_validation() {
         let config = PushConfig {
             mirror_plan_id: Some("a".repeat(64)),
             active_active_replication: Some(active_active_replication()),
             ..PushConfig::default()
         };
 
-        let error = validate_publication_plan_context(&config).unwrap_err();
-
-        assert!(error.to_string().contains("active-active finalize"));
+        validate_publication_plan_context(&config).unwrap();
     }
 
     #[tokio::test]
@@ -1147,6 +1143,69 @@ mod tests {
         assert_eq!(repair.materialization_gaps.len(), 1);
         assert_eq!(repair.materialization_gaps[0].region, "us-west-2");
         assert!(repair.materialization_gaps[0].capsule_publication.is_some());
+    }
+
+    #[tokio::test]
+    async fn active_active_mirror_commit_publishes_receipt_and_replicates_intent() {
+        let store = crab_storage::Store::new(Arc::new(InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(store, "repositories/test".to_owned());
+        let base =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+        let plan_id = "a".repeat(64);
+        let transaction = crab_metadata::capsule_protocol::CapsuleTransaction::for_plan(
+            base.record().digest(),
+            &plan_id,
+            vec![crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule =
+            crab_metadata::capsule_protocol::Capsule::build(&transaction, Vec::new(), Vec::new())
+                .unwrap();
+        let coordinator = Arc::new(crab_coordination::InMemoryWriteCoordinator::new());
+        let config = PushConfig {
+            mirror_plan_id: Some(plan_id.clone()),
+            active_active_replication: Some(active_active_replication()),
+            active_active_writer: Some("east".to_owned()),
+            active_active_coordinator: Some(crate::git::push::ActiveActiveWriteCoordinator::new(
+                coordinator.clone(),
+            )),
+            ..PushConfig::default()
+        };
+
+        let attempt = publish_capsule(
+            &config,
+            &layout,
+            base,
+            &transaction,
+            &capsule,
+            &crab_metadata::capsule_protocol::PointerCatalog::new(),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(matches!(attempt, CapsulePublishAttempt::Committed(Some(_))));
+        let receipt = crab_metadata::capsule_protocol::resolve_capsule_plan_receipt(
+            layout.store(),
+            &layout,
+            &plan_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(receipt.transaction(), &transaction);
+        let repair = coordinator.repair_snapshot().await.unwrap();
+        assert!(
+            repair.materialization_gaps[0]
+                .uploaded_objects
+                .contains(&layout.capsule_plan_intent_path(&plan_id).to_string())
+        );
     }
 
     #[test]

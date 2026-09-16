@@ -8136,12 +8136,39 @@ async fn apply_active_active_repair_action(
                 crab_read::verify_capsule_pointer_catalog_objects(&target_layout, &catalog)
                     .await?;
                 let root = crab_write::capsule_protocol::open_root(&target_layout).await?;
-                crab_write::capsule_protocol::materialize_coordinated_repair(
+                let repaired = crab_write::capsule_protocol::materialize_coordinated_repair(
                     &target_layout,
                     root,
                     descriptor,
                 )
                 .await?;
+                if let Some(plan_id) = transaction.plan_id() {
+                    let intent = crab_metadata::capsule_protocol::read_capsule_plan_intent(
+                        target_layout.store(),
+                        &target_layout,
+                        plan_id,
+                    )
+                    .await?
+                    .ok_or_else(|| CrabError::CorruptObject {
+                        path: target_layout.capsule_plan_intent_path(plan_id).to_string(),
+                        reason: "coordinated mirror transaction has no durable plan intent"
+                            .to_owned(),
+                    })?;
+                    if intent.transaction() != &transaction {
+                        return Err(CrabError::CorruptObject {
+                            path: target_layout.capsule_plan_intent_path(plan_id).to_string(),
+                            reason: "mirror plan intent does not match the coordinated transaction"
+                                .to_owned(),
+                        });
+                    }
+                    crab_metadata::capsule_protocol::publish_capsule_plan_repair_receipt(
+                        target_layout.store(),
+                        &target_layout,
+                        &intent,
+                        repaired.activation_id(),
+                    )
+                    .await?;
+                }
                 return Ok(());
             }
             let (manifest, _) = read_manifest(&source_store, &source_router).await?;

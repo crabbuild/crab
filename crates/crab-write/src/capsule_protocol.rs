@@ -259,6 +259,27 @@ pub struct CoordinatedPreparedCapsulePublication {
     plan_intent: Option<crab_metadata::capsule_protocol::CapsulePlanReceipt>,
 }
 
+/// Regional visibility proof produced while replaying a coordinator decision.
+#[derive(Debug)]
+pub struct CoordinatedRepairOutcome {
+    root: RootSnapshot,
+    activation_id: String,
+}
+
+impl CoordinatedRepairOutcome {
+    /// Return the root snapshot against which the repaired transaction was applied.
+    #[must_use]
+    pub fn root(&self) -> &RootSnapshot {
+        &self.root
+    }
+
+    /// Return the committed regional activation that made the transaction visible.
+    #[must_use]
+    pub fn activation_id(&self) -> &str {
+        &self.activation_id
+    }
+}
+
 impl CoordinatedPreparedCapsulePublication {
     /// Return the exact immutable publication that the coordinator must commit.
     #[must_use]
@@ -345,7 +366,7 @@ pub async fn materialize_coordinated_repair(
     router: &StoreLayout<Store>,
     base: RootSnapshot,
     descriptor: &crab_coordination::write_coordinator::CoordinatedCapsulePublication,
-) -> Result<RootSnapshot> {
+) -> Result<CoordinatedRepairOutcome> {
     let (run, capsule, transaction) = load_coordinated_publication(router, descriptor).await?;
     let path = router.capsule_path(&descriptor.run_hash);
     let snapshots = try_join_all(
@@ -358,7 +379,11 @@ pub async fn materialize_coordinated_repair(
     if snapshots.iter().all(|snapshot| {
         ref_state_contains_transaction(&snapshot.visible, &descriptor.transaction_id)
     }) {
-        return Ok(base);
+        let activation_id = visible_transaction_activation(router, &snapshots, descriptor).await?;
+        return Ok(CoordinatedRepairOutcome {
+            root: base,
+            activation_id,
+        });
     }
     for (edit, snapshot) in transaction.edits().iter().zip(&snapshots) {
         if snapshot.visible.oid() != edit.expected_old() {
@@ -390,7 +415,86 @@ pub async fn materialize_coordinated_repair(
     let refs = prepared.into_iter().map(|(prepared, _)| prepared).collect();
     let activation_id = activation_id(&descriptor.transaction_id);
     commit_multi_ref(router, &descriptor.transaction_id, &activation_id, refs).await?;
-    Ok(base)
+    Ok(CoordinatedRepairOutcome {
+        root: base,
+        activation_id,
+    })
+}
+
+async fn visible_transaction_activation(
+    router: &StoreLayout<Store>,
+    snapshots: &[RefHeadSnapshot],
+    descriptor: &crab_coordination::write_coordinator::CoordinatedCapsulePublication,
+) -> Result<String> {
+    let mut activations = snapshots
+        .iter()
+        .filter_map(|snapshot| snapshot.head.prepared_activation_id())
+        .collect::<std::collections::BTreeSet<_>>();
+    if activations.len() == 1 {
+        let activation_id = activations
+            .pop_first()
+            .map(str::to_owned)
+            .ok_or_else(|| WriteError::Internal("regional activation disappeared".to_owned()))?;
+        if committed_activation_matches(router, &activation_id, &descriptor.transaction_id).await? {
+            return Ok(activation_id);
+        }
+    }
+    for metadata in router
+        .store()
+        .list_prefix(&router.capsule_committed_transactions_prefix())
+        .await?
+    {
+        let (body, _) = router
+            .store()
+            .get_with_etag_bounded(
+                &metadata.location,
+                crab_metadata::capsule_protocol::MAX_CAPSULE_TRANSACTION_RECORD_BYTES,
+            )
+            .await?;
+        let record = crab_metadata::capsule_protocol::CapsuleTransactionRecord::decode(&body)?;
+        if router.capsule_committed_transaction_path(record.activation_id()) != metadata.location {
+            return Err(WriteError::CorruptObject {
+                path: metadata.location.to_string(),
+                reason: "committed transaction marker key does not match its activation".to_owned(),
+            });
+        }
+        if record.status() == crab_metadata::capsule_protocol::CapsuleTransactionStatus::Committed
+            && record.transaction_id() == descriptor.transaction_id
+        {
+            return Ok(record.activation_id().to_owned());
+        }
+    }
+    Err(WriteError::CorruptObject {
+        path: "capsule-protocol coordinated repair".to_owned(),
+        reason: format!(
+            "visible transaction {} has no unique regional activation",
+            descriptor.transaction_id
+        ),
+    })
+}
+
+async fn committed_activation_matches(
+    router: &StoreLayout<Store>,
+    activation_id: &str,
+    transaction_id: &str,
+) -> Result<bool> {
+    let path = router.capsule_committed_transaction_path(activation_id);
+    let (body, _) = match router
+        .store()
+        .get_with_etag_bounded(
+            &path,
+            crab_metadata::capsule_protocol::MAX_CAPSULE_TRANSACTION_RECORD_BYTES,
+        )
+        .await
+    {
+        Ok(record) => record,
+        Err(StorageError::NotFound { .. }) => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let record = crab_metadata::capsule_protocol::CapsuleTransactionRecord::decode(&body)?;
+    Ok(record.activation_id() == activation_id
+        && record.transaction_id() == transaction_id
+        && record.status() == crab_metadata::capsule_protocol::CapsuleTransactionStatus::Committed)
 }
 
 /// Load the authenticated pointer delta from one coordinator-bound capsule run.
@@ -1771,6 +1875,113 @@ mod tests {
         assert_eq!(
             head.visible.transaction_id(),
             Some(descriptor.transaction_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn coordinated_repair_publishes_plan_receipt_for_fresh_activation() {
+        let source = StoreLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            "repositories/test".to_owned(),
+        );
+        let target = StoreLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            "repositories/test".to_owned(),
+        );
+        let source_base = initialize(&source, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let target_base = initialize(&target, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let plan_id = "9".repeat(64);
+        let planned_transaction = CapsuleTransaction::for_plan(
+            source_base.record().digest(),
+            &plan_id,
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let prepared = prepare_coordinated_publication(
+            &source,
+            source_base,
+            &planned_transaction,
+            &capsule(&planned_transaction),
+        )
+        .await
+        .unwrap();
+        let descriptor = prepared.descriptor().clone();
+        for path in [
+            source.capsule_path(&descriptor.run_hash),
+            source.capsule_plan_intent_path(&plan_id),
+        ] {
+            let (body, _) = source.store().get_with_etag(&path).await.unwrap();
+            target
+                .store()
+                .put_if_absent_verified(&path, body)
+                .await
+                .unwrap();
+        }
+        let aborted = crab_metadata::capsule_protocol::CapsuleTransactionRecord::preparing(
+            descriptor.activation_id.clone(),
+            descriptor.transaction_id.clone(),
+        )
+        .unwrap()
+        .abort()
+        .unwrap();
+        target
+            .store()
+            .create_strict(
+                &target.capsule_transaction_path(&descriptor.activation_id),
+                aborted.encode().unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let repaired = materialize_coordinated_repair(&target, target_base.clone(), &descriptor)
+            .await
+            .unwrap();
+        assert_ne!(repaired.activation_id(), descriptor.activation_id);
+        let later = transaction(&target_base, Some(&"2".repeat(40)), &"3".repeat(40));
+        publish(&target, target_base.clone(), &later, &capsule(&later))
+            .await
+            .unwrap();
+        let recovered = materialize_coordinated_repair(&target, target_base, &descriptor)
+            .await
+            .unwrap();
+        assert_eq!(recovered.activation_id(), repaired.activation_id());
+        let intent = crab_metadata::capsule_protocol::read_capsule_plan_intent(
+            target.store(),
+            &target,
+            &plan_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let receipt = crab_metadata::capsule_protocol::publish_capsule_plan_repair_receipt(
+            target.store(),
+            &target,
+            &intent,
+            recovered.activation_id(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(receipt.activation_id(), descriptor.activation_id);
+        assert_eq!(receipt.committed_activation_id(), recovered.activation_id());
+        assert_eq!(
+            crab_metadata::capsule_protocol::resolve_capsule_plan_receipt(
+                target.store(),
+                &target,
+                &plan_id,
+            )
+            .await
+            .unwrap(),
+            Some(receipt)
         );
     }
 

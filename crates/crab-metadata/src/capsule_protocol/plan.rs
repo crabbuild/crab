@@ -7,7 +7,7 @@ use crate::validation::validate_content_hash;
 
 use super::{CapsuleTransaction, CapsuleTransactionRecord, CapsuleTransactionStatus};
 
-const CAPSULE_PLAN_VERSION: u32 = 1;
+const CAPSULE_PLAN_VERSION: u32 = 2;
 const MAX_CAPSULE_PLAN_BYTES: u64 = 64 * 1024;
 
 /// Immutable binding between one reviewed plan and its capsule commit marker.
@@ -18,6 +18,8 @@ pub struct CapsulePlanReceipt {
     repo_prefix: String,
     plan_id: String,
     activation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    committed_activation_id: Option<String>,
     transaction: CapsuleTransaction,
 }
 
@@ -30,6 +32,14 @@ impl CapsulePlanReceipt {
     #[must_use]
     pub fn activation_id(&self) -> &str {
         &self.activation_id
+    }
+
+    /// Return the activation that durably committed the reviewed transaction.
+    #[must_use]
+    pub fn committed_activation_id(&self) -> &str {
+        self.committed_activation_id
+            .as_deref()
+            .unwrap_or(&self.activation_id)
     }
 
     #[must_use]
@@ -82,6 +92,7 @@ pub async fn prepare_capsule_plan(
         repo_prefix: router.repo_prefix().to_owned(),
         plan_id: plan_id.to_owned(),
         activation_id: activation_id.to_owned(),
+        committed_activation_id: None,
         transaction: transaction.clone(),
     };
     validate(router, &intent)?;
@@ -104,6 +115,52 @@ pub async fn publish_capsule_plan_receipt(
     )
     .await?;
     Ok(intent.clone())
+}
+
+/// Publish a terminal receipt when coordinator repair used a fresh activation.
+pub async fn publish_capsule_plan_repair_receipt(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    intent: &CapsulePlanReceipt,
+    committed_activation_id: &str,
+) -> Result<CapsulePlanReceipt> {
+    validate(router, intent)?;
+    validate_content_hash(
+        committed_activation_id,
+        "committed activation id",
+        "capsule mirror plan receipt",
+    )?;
+    let mut receipt = intent.clone();
+    receipt.committed_activation_id = (committed_activation_id != intent.activation_id)
+        .then(|| committed_activation_id.to_owned());
+    validate_commit(store, router, &receipt).await?;
+    write_exact(
+        store,
+        &router.capsule_plan_receipt_path(receipt.plan_id()),
+        &receipt,
+    )
+    .await?;
+    Ok(receipt)
+}
+
+/// Read and validate the immutable intent for one attempted capsule plan.
+pub async fn read_capsule_plan_intent(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    plan_id: &str,
+) -> Result<Option<CapsulePlanReceipt>> {
+    validate_content_hash(plan_id, "plan id", "capsule mirror plan intent")?;
+    let intent = read_optional(store, &router.capsule_plan_intent_path(plan_id)).await?;
+    if let Some(intent) = &intent {
+        validate(router, intent)?;
+        if intent.plan_id() != plan_id || intent.committed_activation_id.is_some() {
+            return Err(corrupt(
+                "capsule mirror plan intent",
+                "intent identity or activation state is invalid",
+            ));
+        }
+    }
+    Ok(intent)
 }
 
 /// Resolve historical commitment and repair a missing terminal receipt.
@@ -156,7 +213,7 @@ async fn commit_is_visible(
     router: &StoreLayout<Store>,
     receipt: &CapsulePlanReceipt,
 ) -> Result<bool> {
-    let path = router.capsule_transaction_path(receipt.activation_id());
+    let path = router.capsule_transaction_path(receipt.committed_activation_id());
     let (body, _) = match store
         .get_with_etag_bounded(&path, super::MAX_CAPSULE_TRANSACTION_RECORD_BYTES)
         .await
@@ -166,7 +223,7 @@ async fn commit_is_visible(
         Err(error) => return Err(error.into()),
     };
     let record = CapsuleTransactionRecord::decode(&body)?;
-    if record.activation_id() != receipt.activation_id()
+    if record.activation_id() != receipt.committed_activation_id()
         || record.transaction_id() != receipt.transaction.id()?
     {
         return Err(corrupt(
@@ -221,6 +278,19 @@ fn validate(router: &StoreLayout<Store>, receipt: &CapsulePlanReceipt) -> Result
         "activation id",
         "capsule mirror plan receipt",
     )?;
+    if let Some(committed_activation_id) = &receipt.committed_activation_id {
+        validate_content_hash(
+            committed_activation_id,
+            "committed activation id",
+            "capsule mirror plan receipt",
+        )?;
+        if committed_activation_id == &receipt.activation_id {
+            return Err(corrupt(
+                "capsule mirror plan receipt",
+                "receipt redundantly names its intended activation as repaired",
+            ));
+        }
+    }
     if receipt.transaction.plan_id() != Some(receipt.plan_id.as_str()) {
         return Err(corrupt(
             "capsule mirror plan receipt",
