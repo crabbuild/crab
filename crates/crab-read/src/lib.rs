@@ -31,6 +31,7 @@ pub use selection::{
     ReadSource, ReadStoreChoice, ReadStoreSelection, ReadStoreTarget, ReadinessCheckOptions,
     ReadinessProbeStats, ReadyReadReplica, check_capsule_read_replica_readiness,
     select_read_replicas, select_read_store_choice, select_ready_read_replica,
+    verify_capsule_pointer_catalog_objects,
 };
 pub use store_client::{ReadMetrics, StoreClient, XorbAvailability};
 pub use term_resolver::TermResolver;

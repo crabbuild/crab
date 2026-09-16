@@ -110,6 +110,44 @@ pub async fn publish(
     transaction: &CapsuleTransaction,
     capsule: &Capsule,
 ) -> Result<RootSnapshot> {
+    let prepared = prepare_publication(router, base, transaction, capsule).await?;
+    publish_prepared(router, prepared).await
+}
+
+/// Immutable capsule bytes and exact per-ref successors ready for publication.
+#[derive(Debug)]
+pub struct PreparedCapsulePublication {
+    base: RootSnapshot,
+    transaction: CapsuleTransaction,
+    run: CapsuleRun,
+    refs: Vec<PreparedRefHead>,
+}
+
+impl PreparedCapsulePublication {
+    /// Return the exact coordinator payload that authorizes this publication.
+    pub fn coordinated_publication(
+        &self,
+    ) -> Result<crab_coordination::write_coordinator::CoordinatedCapsulePublication> {
+        let transaction_id = self.transaction.id()?;
+        Ok(
+            crab_coordination::write_coordinator::CoordinatedCapsulePublication {
+                base_root_digest: self.base.record().digest().to_owned(),
+                transaction_id: transaction_id.clone(),
+                activation_id: coordinated_activation_id(&transaction_id, self.run.hash()),
+                run_hash: self.run.hash().to_owned(),
+                run_size: self.run.bytes().len() as u64,
+            },
+        )
+    }
+}
+
+/// Upload one immutable capsule run and capture exact CAS bases for its refs.
+pub async fn prepare_publication(
+    router: &StoreLayout<Store>,
+    base: RootSnapshot,
+    transaction: &CapsuleTransaction,
+    capsule: &Capsule,
+) -> Result<PreparedCapsulePublication> {
     validate_capsule_binding(&base, transaction, capsule)?;
     let transaction_id = transaction.id()?;
     let snapshots = try_join_all(
@@ -140,35 +178,47 @@ pub async fn publish(
             prepare_ref_successor(snapshot, edit, &transaction_id, capsule.clone())
         })
         .collect::<Result<Vec<_>>>()?;
-    let mut runs = std::collections::BTreeMap::new();
-    for (_, run) in &prepared {
-        match runs.get(run.hash()) {
-            Some(existing) if existing != run => {
-                return Err(WriteError::Internal(
-                    "capsule run hash names conflicting bodies".to_owned(),
-                ));
-            }
-            Some(_) => {}
-            None => {
-                runs.insert(run.hash().to_owned(), run.clone());
-            }
-        }
+    let run = prepared
+        .first()
+        .map(|(_, run)| run.clone())
+        .ok_or_else(|| WriteError::Internal("capsule publication has no refs".to_owned()))?;
+    if prepared.iter().any(|(_, candidate)| candidate != &run) {
+        return Err(WriteError::Internal(
+            "one capsule publication produced conflicting ref runs".to_owned(),
+        ));
     }
-    try_join_all(runs.into_values().map(|run| async move {
-        let path = router.capsule_path(run.hash());
-        router
-            .store()
-            .put_if_absent_verified(&path, run.bytes().clone())
-            .await
-    }))
-    .await?;
-    let prepared = prepared
+    let path = router.capsule_path(run.hash());
+    router
+        .store()
+        .put_if_absent_verified(&path, run.bytes().clone())
+        .await?;
+    let refs = prepared
         .into_iter()
         .map(|(prepared, _)| prepared)
         .collect::<Vec<_>>();
 
-    if prepared.len() == 1 && transaction.plan_id().is_none() {
-        let prepared = prepared
+    Ok(PreparedCapsulePublication {
+        base,
+        transaction: transaction.clone(),
+        run,
+        refs,
+    })
+}
+
+async fn publish_prepared(
+    router: &StoreLayout<Store>,
+    prepared: PreparedCapsulePublication,
+) -> Result<RootSnapshot> {
+    let PreparedCapsulePublication {
+        base,
+        transaction,
+        refs,
+        ..
+    } = prepared;
+    let transaction_id = transaction.id()?;
+
+    if refs.len() == 1 && transaction.plan_id().is_none() {
+        let prepared = refs
             .into_iter()
             .next()
             .ok_or_else(|| WriteError::Internal("single-ref publication disappeared".to_owned()))?;
@@ -182,14 +232,14 @@ pub async fn publish(
             crab_metadata::capsule_protocol::prepare_capsule_plan(
                 router.store(),
                 router,
-                transaction,
+                &transaction,
                 &activation_id,
             )
             .await?,
         ),
         None => None,
     };
-    commit_multi_ref(router, &transaction_id, &activation_id, prepared).await?;
+    commit_multi_ref(router, &transaction_id, &activation_id, refs).await?;
     if let Some(intent) = plan_intent {
         crab_metadata::capsule_protocol::publish_capsule_plan_receipt(
             router.store(),
@@ -199,6 +249,237 @@ pub async fn publish(
         .await?;
     }
     Ok(base)
+}
+
+/// Prepared v2 publication whose immutable bytes and optional plan intent are durable.
+#[derive(Debug)]
+pub struct CoordinatedPreparedCapsulePublication {
+    prepared: PreparedCapsulePublication,
+    descriptor: crab_coordination::write_coordinator::CoordinatedCapsulePublication,
+    plan_intent: Option<crab_metadata::capsule_protocol::CapsulePlanReceipt>,
+}
+
+impl CoordinatedPreparedCapsulePublication {
+    /// Return the exact immutable publication that the coordinator must commit.
+    #[must_use]
+    pub fn descriptor(
+        &self,
+    ) -> &crab_coordination::write_coordinator::CoordinatedCapsulePublication {
+        &self.descriptor
+    }
+}
+
+/// Prepare immutable bytes before an external coordinator commits the ref edits.
+pub async fn prepare_coordinated_publication(
+    router: &StoreLayout<Store>,
+    base: RootSnapshot,
+    transaction: &CapsuleTransaction,
+    capsule: &Capsule,
+) -> Result<CoordinatedPreparedCapsulePublication> {
+    let prepared = prepare_publication(router, base, transaction, capsule).await?;
+    let descriptor = prepared.coordinated_publication()?;
+    let plan_intent = match transaction.plan_id() {
+        Some(_) => Some(
+            crab_metadata::capsule_protocol::prepare_capsule_plan(
+                router.store(),
+                router,
+                transaction,
+                &descriptor.activation_id,
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    Ok(CoordinatedPreparedCapsulePublication {
+        prepared,
+        descriptor,
+        plan_intent,
+    })
+}
+
+/// Materialize one already-committed coordinator decision in a writer region.
+pub async fn materialize_coordinated_publication(
+    router: &StoreLayout<Store>,
+    publication: CoordinatedPreparedCapsulePublication,
+) -> Result<RootSnapshot> {
+    let CoordinatedPreparedCapsulePublication {
+        prepared,
+        descriptor,
+        plan_intent,
+    } = publication;
+    let PreparedCapsulePublication {
+        base,
+        transaction,
+        refs,
+        ..
+    } = prepared;
+    let transaction_id = transaction.id()?;
+    if transaction_id != descriptor.transaction_id
+        || base.record().digest() != descriptor.base_root_digest
+    {
+        return Err(WriteError::CorruptObject {
+            path: "capsule-protocol coordinated publication".to_owned(),
+            reason: "prepared publication no longer matches its coordinator descriptor".to_owned(),
+        });
+    }
+    commit_multi_ref(
+        router,
+        &descriptor.transaction_id,
+        &descriptor.activation_id,
+        refs,
+    )
+    .await?;
+    if let Some(intent) = plan_intent {
+        crab_metadata::capsule_protocol::publish_capsule_plan_receipt(
+            router.store(),
+            router,
+            &intent,
+        )
+        .await?;
+    }
+    Ok(base)
+}
+
+/// Replay one coordinator-authorized v2 publication from immutable regional bytes.
+pub async fn materialize_coordinated_repair(
+    router: &StoreLayout<Store>,
+    base: RootSnapshot,
+    descriptor: &crab_coordination::write_coordinator::CoordinatedCapsulePublication,
+) -> Result<RootSnapshot> {
+    let (run, capsule, transaction) = load_coordinated_publication(router, descriptor).await?;
+    let path = router.capsule_path(&descriptor.run_hash);
+    let snapshots = try_join_all(
+        transaction
+            .edits()
+            .iter()
+            .map(|edit| read_ref_head(router, base.record().root(), edit.ref_name())),
+    )
+    .await?;
+    if snapshots.iter().all(|snapshot| {
+        ref_state_contains_transaction(&snapshot.visible, &descriptor.transaction_id)
+    }) {
+        return Ok(base);
+    }
+    for (edit, snapshot) in transaction.edits().iter().zip(&snapshots) {
+        if snapshot.visible.oid() != edit.expected_old() {
+            return Err(WriteError::RefChanged {
+                ref_name: edit.ref_name().to_owned(),
+                path: router
+                    .capsule_ref_head_path(&crab_metadata::capsule_protocol::capsule_ref_name_key(
+                        edit.ref_name(),
+                    ))
+                    .to_string(),
+            });
+        }
+    }
+    let prepared = transaction
+        .edits()
+        .iter()
+        .zip(snapshots)
+        .map(|(edit, snapshot)| {
+            prepare_ref_successor(snapshot, edit, &descriptor.transaction_id, capsule.clone())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if prepared.iter().any(|(_, candidate)| candidate != &run) {
+        return Err(WriteError::CorruptObject {
+            path: path.to_string(),
+            reason: "regional ref successor does not reproduce the coordinated capsule run"
+                .to_owned(),
+        });
+    }
+    let refs = prepared.into_iter().map(|(prepared, _)| prepared).collect();
+    let activation_id = activation_id(&descriptor.transaction_id);
+    commit_multi_ref(router, &descriptor.transaction_id, &activation_id, refs).await?;
+    Ok(base)
+}
+
+/// Load the authenticated pointer delta from one coordinator-bound capsule run.
+pub async fn coordinated_pointer_catalog_delta(
+    router: &StoreLayout<Store>,
+    descriptor: &crab_coordination::write_coordinator::CoordinatedCapsulePublication,
+) -> Result<Option<crab_metadata::capsule_protocol::PointerCatalog>> {
+    let (_, capsule, _) = load_coordinated_publication(router, descriptor).await?;
+    Ok(capsule.pointer_catalog_delta()?)
+}
+
+/// Load the exact ref transaction authenticated by a coordinator-bound run.
+pub async fn coordinated_transaction(
+    router: &StoreLayout<Store>,
+    descriptor: &crab_coordination::write_coordinator::CoordinatedCapsulePublication,
+) -> Result<CapsuleTransaction> {
+    let (_, _, transaction) = load_coordinated_publication(router, descriptor).await?;
+    Ok(transaction)
+}
+
+async fn load_coordinated_publication(
+    router: &StoreLayout<Store>,
+    descriptor: &crab_coordination::write_coordinator::CoordinatedCapsulePublication,
+) -> Result<(CapsuleRun, Capsule, CapsuleTransaction)> {
+    if descriptor.activation_id
+        != coordinated_activation_id(&descriptor.transaction_id, &descriptor.run_hash)
+    {
+        return Err(WriteError::CorruptObject {
+            path: "capsule-protocol coordinated publication".to_owned(),
+            reason: "coordinator activation identity does not match its transaction and run"
+                .to_owned(),
+        });
+    }
+    let path = router.capsule_path(&descriptor.run_hash);
+    let (bytes, _) = router
+        .store()
+        .get_with_etag_bounded(&path, descriptor.run_size)
+        .await?;
+    if bytes.len() as u64 != descriptor.run_size
+        || blake3::hash(&bytes).to_hex().as_str() != descriptor.run_hash
+    {
+        return Err(WriteError::CorruptObject {
+            path: path.to_string(),
+            reason: "coordinator capsule run identity does not match regional bytes".to_owned(),
+        });
+    }
+    let run = CapsuleRun::decode(bytes)?;
+    let capsule = run
+        .capsules()
+        .first()
+        .cloned()
+        .ok_or_else(|| WriteError::CorruptObject {
+            path: path.to_string(),
+            reason: "coordinator capsule run contains no publication".to_owned(),
+        })?;
+    if run.capsules().len() != 1
+        || run.level() != 0
+        || capsule.transaction_id() != descriptor.transaction_id
+        || capsule.base_root_digest() != descriptor.base_root_digest
+    {
+        return Err(WriteError::CorruptObject {
+            path: path.to_string(),
+            reason: "coordinator descriptor does not bind this leaf capsule run".to_owned(),
+        });
+    }
+    let transaction = capsule.transaction()?;
+    if transaction.id()? != descriptor.transaction_id
+        || transaction.base_root_digest() != descriptor.base_root_digest
+    {
+        return Err(WriteError::CorruptObject {
+            path: path.to_string(),
+            reason: "coordinator descriptor does not bind the capsule transaction".to_owned(),
+        });
+    }
+    Ok((run, capsule, transaction))
+}
+
+fn ref_state_contains_transaction(
+    state: &crab_metadata::capsule_protocol::CapsuleRefState,
+    transaction_id: &str,
+) -> bool {
+    state.transaction_id() == Some(transaction_id)
+        || state.checkpoint_transaction_id() == Some(transaction_id)
+        || state.frontier().iter().any(|pointer| {
+            pointer
+                .transaction_ids()
+                .iter()
+                .any(|candidate| candidate == transaction_id)
+        })
 }
 
 /// Recheck the complete Git ref namespace inside the caller's conflict-domain lease.
@@ -677,6 +958,13 @@ fn activation_id(transaction_id: &str) -> String {
     let mut hasher = blake3::Hasher::new_derive_key("crab capsule activation id v2");
     hasher.update(transaction_id.as_bytes());
     hasher.update(uuid::Uuid::now_v7().as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+fn coordinated_activation_id(transaction_id: &str, run_hash: &str) -> String {
+    let mut hasher = blake3::Hasher::new_derive_key("crab coordinated capsule activation v2");
+    hasher.update(transaction_id.as_bytes());
+    hasher.update(run_hash.as_bytes());
     hasher.finalize().to_hex().to_string()
 }
 
@@ -1373,6 +1661,117 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn coordinated_publication_separates_immutable_prepare_from_visibility() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        initialize(&router, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let base = open_root(&router).await.unwrap();
+        let transaction = transaction(&base, None, &"2".repeat(40));
+        let prepared = prepare_coordinated_publication(
+            &router,
+            base.clone(),
+            &transaction,
+            &capsule(&transaction),
+        )
+        .await
+        .unwrap();
+        let descriptor = prepared.descriptor().clone();
+
+        let before = read_ref_head(&router, base.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
+        assert_eq!(before.visible.oid(), None);
+        assert_eq!(descriptor.transaction_id, transaction.id().unwrap());
+        assert_eq!(descriptor.base_root_digest, base.record().digest());
+
+        materialize_coordinated_publication(&router, prepared)
+            .await
+            .unwrap();
+
+        let after = read_ref_head(&router, base.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
+        assert_eq!(
+            after.visible.oid(),
+            Some("2222222222222222222222222222222222222222")
+        );
+        let (record, _) = router
+            .store()
+            .get_with_etag_bounded(
+                &router.capsule_transaction_path(&descriptor.activation_id),
+                crab_metadata::capsule_protocol::MAX_CAPSULE_TRANSACTION_RECORD_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            crab_metadata::capsule_protocol::CapsuleTransactionRecord::decode(&record)
+                .unwrap()
+                .status(),
+            crab_metadata::capsule_protocol::CapsuleTransactionStatus::Committed
+        );
+    }
+
+    #[tokio::test]
+    async fn coordinated_repair_replays_verified_run_and_is_idempotent() {
+        let source = StoreLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            "repositories/test".to_owned(),
+        );
+        let target = StoreLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            "repositories/test".to_owned(),
+        );
+        let source_base = initialize(&source, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let target_base = initialize(&target, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let transaction = transaction(&source_base, None, &"2".repeat(40));
+        let prepared = prepare_coordinated_publication(
+            &source,
+            source_base,
+            &transaction,
+            &capsule(&transaction),
+        )
+        .await
+        .unwrap();
+        let descriptor = prepared.descriptor().clone();
+        let source_path = source.capsule_path(&descriptor.run_hash);
+        let (run, _) = source
+            .store()
+            .get_with_etag_bounded(&source_path, descriptor.run_size)
+            .await
+            .unwrap();
+        target
+            .store()
+            .put_if_absent_verified(&target.capsule_path(&descriptor.run_hash), run)
+            .await
+            .unwrap();
+
+        materialize_coordinated_repair(&target, target_base.clone(), &descriptor)
+            .await
+            .unwrap();
+        materialize_coordinated_repair(&target, target_base.clone(), &descriptor)
+            .await
+            .unwrap();
+
+        let head = read_ref_head(&target, target_base.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
+        assert_eq!(
+            head.visible.oid(),
+            Some("2222222222222222222222222222222222222222")
+        );
+        assert_eq!(
+            head.visible.transaction_id(),
+            Some(descriptor.transaction_id.as_str())
+        );
     }
 
     #[tokio::test]

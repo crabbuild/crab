@@ -6660,11 +6660,14 @@ pub struct ActiveActiveBucketGcProtection {
 pub struct ActiveActiveRepairAction {
     pub operation_id: String,
     pub manifest_generation: u64,
+    pub commit_sequence: u64,
     pub region: String,
     pub writer: WriterConfig,
     pub source_region: String,
     pub refs: Vec<CoordinatedRefUpdate>,
     pub uploaded_objects: Vec<String>,
+    pub capsule_publication:
+        Option<crab_coordination::write_coordinator::CoordinatedCapsulePublication>,
 }
 
 /// Repair plan for committed active-active transactions not materialized everywhere.
@@ -6757,6 +6760,29 @@ pub fn plan_active_active_push(
     })
 }
 
+/// Build a coordinator request bound to one exact protocol-v2 capsule run.
+pub fn plan_active_active_capsule_push(
+    replication: &ReplicationConfig,
+    preferred_writer: Option<&str>,
+    publication: crab_coordination::write_coordinator::CoordinatedCapsulePublication,
+    refs: Vec<CoordinatedRefUpdate>,
+    uploaded_objects: Vec<String>,
+) -> Result<ActiveActivePushPlan> {
+    let plan = coordination_active_active::plan_active_active_capsule_push(
+        &active_active_coordination_config(replication),
+        preferred_writer,
+        publication,
+        refs,
+        uploaded_objects,
+    )
+    .map_err(CrabError::from)?;
+    Ok(ActiveActivePushPlan {
+        writer: writer_from_coordination(plan.writer),
+        coordinator_url: plan.coordinator_url,
+        request: plan.request,
+    })
+}
+
 /// Plan regional manifest repairs from a coordinator snapshot.
 pub fn plan_active_active_repair(
     replication: &ReplicationConfig,
@@ -6781,11 +6807,13 @@ fn active_active_repair_plan_from_coordination(
             .map(|action| ActiveActiveRepairAction {
                 operation_id: action.operation_id,
                 manifest_generation: action.manifest_generation,
+                commit_sequence: action.commit_sequence,
                 region: action.region,
                 writer: writer_from_coordination(action.writer),
                 source_region: action.source_region,
                 refs: action.refs,
                 uploaded_objects: action.uploaded_objects,
+                capsule_publication: action.capsule_publication,
             })
             .collect(),
     }
@@ -8068,6 +8096,54 @@ async fn apply_active_active_repair_action(
         biased;
         () = cancel.cancelled() => Err(CrabError::Cancelled),
         result = async {
+            if let Some(descriptor) = action.capsule_publication.as_ref() {
+                verify_repair_uploaded_objects_present(
+                    &target_store,
+                    &action.uploaded_objects,
+                    &source_prefix,
+                    &target_prefix,
+                )
+                .await?;
+                let target_layout = crab_storage::StoreLayout::with_global_prefix(
+                    target_store.as_storage().clone(),
+                    target_router.repo_prefix().to_owned(),
+                    target_router.global_prefix().to_owned(),
+                );
+                let transaction = crab_write::capsule_protocol::coordinated_transaction(
+                    &target_layout,
+                    descriptor,
+                )
+                .await?;
+                validate_coordinated_repair_refs(action, &transaction)?;
+                let view = crab_read::capsule_protocol::open_view(
+                    &target_layout,
+                    crab_read::capsule_protocol::CapsuleReadLimits {
+                        max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+                        max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+                    },
+                )
+                .await?;
+                let mut catalog = view.pointer_catalog()?;
+                if let Some(delta) =
+                    crab_write::capsule_protocol::coordinated_pointer_catalog_delta(
+                        &target_layout,
+                        descriptor,
+                    )
+                    .await?
+                {
+                    catalog.apply(&delta)?;
+                }
+                crab_read::verify_capsule_pointer_catalog_objects(&target_layout, &catalog)
+                    .await?;
+                let root = crab_write::capsule_protocol::open_root(&target_layout).await?;
+                crab_write::capsule_protocol::materialize_coordinated_repair(
+                    &target_layout,
+                    root,
+                    descriptor,
+                )
+                .await?;
+                return Ok(());
+            }
             let (manifest, _) = read_manifest(&source_store, &source_router).await?;
             if manifest.generation < action.manifest_generation {
                 return Err(CrabError::Configuration {
@@ -8111,6 +8187,32 @@ async fn apply_active_active_repair_action(
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), _) | (Ok(()), Err(error)) => Err(error),
     }
+}
+
+fn validate_coordinated_repair_refs(
+    action: &ActiveActiveRepairAction,
+    transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
+) -> Result<()> {
+    let mut coordinated = action.refs.clone();
+    coordinated.sort_by(|left, right| left.name.cmp(&right.name));
+    let matches = coordinated.len() == transaction.edits().len()
+        && coordinated
+            .iter()
+            .zip(transaction.edits())
+            .all(|(authorized, edit)| {
+                !authorized.force
+                    && authorized.name == edit.ref_name()
+                    && authorized.expected.as_deref() == edit.expected_old()
+                    && authorized.new.as_deref() == edit.new_oid()
+            });
+    if matches {
+        return Ok(());
+    }
+    Err(CrabError::CorruptObject {
+        path: format!("coordinator/transactions/{}", action.operation_id),
+        reason: "coordinator ref edits do not match the authenticated capsule transaction"
+            .to_owned(),
+    })
 }
 
 async fn replicate_git_visibility_index(
@@ -8239,7 +8341,14 @@ async fn verify_repair_uploaded_objects_present(
         let target_key = repair_object_key_for_target_prefix(key, source_prefix, target_prefix)?;
         let path = ObjectPath::from(target_key.as_str());
         match target_store.head(&path).await {
-            Ok(_) => {}
+            Ok(metadata) => {
+                if let Some(oid) = lfs_oid_for_repair_key(&target_key, target_prefix)? {
+                    crab_lfs::LfsObjectStore::new(target_store.as_storage().clone(), target_prefix)
+                        .verify_origin(&oid, metadata.size)
+                        .await
+                        .map_err(CrabError::from)?;
+                }
+            }
             Err(CrabError::NotFound { .. }) => {
                 return Err(CrabError::Configuration {
                     key: "replication.repair.object".into(),
@@ -8252,6 +8361,47 @@ async fn verify_repair_uploaded_objects_present(
         }
     }
     Ok(())
+}
+
+fn lfs_oid_for_repair_key(key: &str, repo_prefix: &str) -> Result<Option<[u8; 32]>> {
+    let lfs_prefix = format!("{}/lfs/objects/", repo_prefix.trim_end_matches('/'));
+    let Some(relative) = key.strip_prefix(&lfs_prefix) else {
+        return Ok(None);
+    };
+    let parts = relative.split('/').collect::<Vec<_>>();
+    if parts.len() != 3
+        || parts[0].len() != 2
+        || parts[1].len() != 2
+        || parts[2].len() != 64
+        || !parts[2].starts_with(parts[0])
+        || parts[2].get(2..4) != Some(parts[1])
+    {
+        return Err(CrabError::CorruptObject {
+            path: key.to_owned(),
+            reason: "coordinator LFS object key is not canonical".to_owned(),
+        });
+    }
+    let mut oid = [0_u8; 32];
+    for (index, pair) in parts[2].as_bytes().chunks_exact(2).enumerate() {
+        let pair = std::str::from_utf8(pair).map_err(|_| CrabError::CorruptObject {
+            path: key.to_owned(),
+            reason: "coordinator LFS object key is not UTF-8 hexadecimal".to_owned(),
+        })?;
+        oid[index] = u8::from_str_radix(pair, 16).map_err(|_| CrabError::CorruptObject {
+            path: key.to_owned(),
+            reason: "coordinator LFS object key is not lowercase hexadecimal".to_owned(),
+        })?;
+    }
+    if parts[2]
+        .bytes()
+        .any(|byte| !byte.is_ascii_digit() && !matches!(byte, b'a'..=b'f'))
+    {
+        return Err(CrabError::CorruptObject {
+            path: key.to_owned(),
+            reason: "coordinator LFS object key is not lowercase hexadecimal".to_owned(),
+        });
+    }
+    Ok(Some(oid))
 }
 
 fn repair_object_key_for_target_prefix(
@@ -12370,6 +12520,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn repair_lfs_key_requires_canonical_sha256_layout() {
+        let oid = "ab".repeat(32);
+        assert_eq!(
+            lfs_oid_for_repair_key(
+                &format!("target/repo/lfs/objects/ab/ab/{oid}"),
+                "target/repo"
+            )
+            .unwrap(),
+            Some([0xab; 32])
+        );
+        assert!(
+            lfs_oid_for_repair_key(
+                &format!("target/repo/lfs/objects/ff/ab/{oid}"),
+                "target/repo"
+            )
+            .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn repair_materialization_refuses_missing_transaction_object() {
         let store = Store::new(Arc::new(InMemory::new()));
@@ -12385,6 +12555,27 @@ mod tests {
 
         assert!(matches!(err, CrabError::Configuration { .. }));
         assert!(err.to_string().contains("target/repo/packs/pack-a.pack"));
+    }
+
+    #[tokio::test]
+    async fn repair_materialization_hashes_lfs_body_before_ref_visibility() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let oid = "00".repeat(32);
+        let key = format!("target/repo/lfs/objects/00/00/{oid}");
+        store
+            .put(
+                &ObjectPath::from(key.as_str()),
+                Bytes::from_static(b"corrupt"),
+            )
+            .await
+            .unwrap();
+
+        let err =
+            verify_repair_uploaded_objects_present(&store, &[key], "target/repo", "target/repo")
+                .await
+                .unwrap_err();
+
+        assert!(err.to_string().contains("corrupt"));
     }
 
     #[tokio::test]
@@ -12561,6 +12752,7 @@ mod tests {
         crab_coordination::write_coordinator::CoordinatorMaterializationGap {
             operation_id: operation_id.to_owned(),
             manifest_generation: 42,
+            commit_sequence: 1,
             region: region.to_owned(),
             writer: "west".into(),
             source_region: "us-west-2".into(),
@@ -12571,6 +12763,7 @@ mod tests {
                 false,
             )],
             uploaded_objects: vec!["xorbs/aa/object".into()],
+            capsule_publication: None,
         }
     }
 

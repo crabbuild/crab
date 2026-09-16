@@ -58,7 +58,10 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
   and p99 927 ms. Those results do not qualify the current leaf/checkpoint
   implementation; the same workload must be rerun before release.
 
-The hard cutover never falls back after a v2 root is selected. The remote
+The hard cutover never falls back after a v2 root is selected. Direct
+active-active pushes place the linearizable coordinator between immutable
+capsule preparation and regional per-ref materialization; repair replays the
+exact coordinator-bound capsule in commit-sequence order. The remote
 helper still recognizes a separately initialized canonical-v1 repository at
 admission for current SDK read interoperability; it does not combine formats
 or redirect v1 writes into v2. Major terminal Git, HTTP, protected/app, mirror,

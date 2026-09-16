@@ -47,6 +47,7 @@ pub async fn run(
     PushResult,
     Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
 )> {
+    validate_publication_plan_context(config)?;
     let Some(plan_id) = config.mirror_plan_id.as_deref() else {
         return run_inner(
             config,
@@ -62,15 +63,6 @@ pub async fn run(
         )
         .await;
     };
-    if plan_id.len() != 64
-        || !plan_id
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    {
-        return Err(CrabError::Protocol(
-            "mirror plan identity must be 64 lowercase hexadecimal characters".to_owned(),
-        ));
-    }
     let layout = crab_storage::StoreLayout::with_global_prefix(
         store.as_storage().clone(),
         router.repo_prefix().to_owned(),
@@ -101,6 +93,27 @@ pub async fn run(
     .await
 }
 
+fn validate_publication_plan_context(config: &PushConfig) -> Result<()> {
+    let Some(plan_id) = config.mirror_plan_id.as_deref() else {
+        return Ok(());
+    };
+    if config.active_active_replication.is_some() {
+        return Err(CrabError::Protocol(
+            "mirror plan receipts are not supported by active-active finalize".to_owned(),
+        ));
+    }
+    if plan_id.len() != 64
+        || !plan_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(CrabError::Protocol(
+            "mirror plan identity must be 64 lowercase hexadecimal characters".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "push pipeline dependencies are explicit"
@@ -123,10 +136,10 @@ async fn run_inner(
     if let Some(result) = duplicate_destination_result(specs) {
         return Ok((result, advertised));
     }
-    if config.protected_push.is_some() || config.active_active_replication.is_some() {
+    if config.protected_push.is_some() {
         return Err(CrabError::Configuration {
             key: "capsule-protocol push coordination".to_owned(),
-            origin: "protected and active-active publication require a protocol-v2 authorization commit adapter"
+            origin: "protected publication requires a protocol-v2 authorization commit adapter"
                 .to_owned(),
         });
     }
@@ -355,96 +368,117 @@ async fn run_inner(
             .into_iter()
             .collect::<Vec<_>>()
     };
-    let publication: Result<Option<()>> = async {
-        // LFS bytes share the ref visibility boundary with Git and Xet data.
-        // Publishing them here also covers mirror batches that own hook stdin.
-        crate::lfs::publication::publish_reachable(
-            store.as_storage().clone(),
-            router.repo_prefix().to_owned(),
-            common_git_dir.clone(),
-            lfs_tips,
-            lfs_remote_tips,
-            cancel,
-        )
-        .await?;
-        let pointer_delta = super::xet_publication::prepare_delta(
-            &layout,
-            &base,
-            &prepared.pointers,
-            staging,
-            caching_store,
-            metrics,
-            cancel,
-        )
-        .await?;
-        let transaction = match config.mirror_plan_id.as_deref() {
-            Some(plan_id) => crab_metadata::capsule_protocol::CapsuleTransaction::for_plan(
-                base.record().digest(),
-                plan_id,
-                edits,
-            )?,
-            None => crab_metadata::capsule_protocol::CapsuleTransaction::new(
-                base.record().digest(),
-                edits,
-            )?,
-        };
-        let mut sections = Vec::with_capacity(2);
-        if !pointer_delta.is_empty() {
-            sections.push(crab_metadata::capsule_protocol::CapsuleSection::new(
-                crab_metadata::capsule_protocol::CapsuleSectionKind::CatalogDelta,
-                pointer_delta.encode_delta()?,
-            ));
-        }
-        if let Some(visibility_delta) = visibility_delta {
-            sections.push(crab_metadata::capsule_protocol::CapsuleSection::new(
-                crab_metadata::capsule_protocol::CapsuleSectionKind::VisibilityDelta,
-                visibility_delta.encode()?,
-            ));
-        }
-        let capsule = crab_metadata::capsule_protocol::Capsule::build(
-            &transaction,
-            prepared.packs,
-            sections,
-        )?;
-        check_cancelled(cancel)?;
-        let result = if changes_namespace {
-            let commit_layout = layout.clone();
-            crab_write::with_ref_namespaces(
-                layout.store(),
-                &layout,
-                &ref_names,
-                config.lock_ttl,
+    let publication: Result<Option<Option<crab_coordination::write_coordinator::CommitOutcome>>> =
+        async {
+            // LFS bytes share the ref visibility boundary with Git and Xet data.
+            // Publishing them here also covers mirror batches that own hook stdin.
+            let lfs_objects = crate::lfs::publication::publish_reachable_objects(
+                store.as_storage().clone(),
+                router.repo_prefix().to_owned(),
+                common_git_dir.clone(),
+                lfs_tips,
+                lfs_remote_tips,
                 cancel,
-                |scoped| async move {
-                    if scoped.is_cancelled() {
-                        return Err(crab_write::WriteError::Cancelled);
-                    }
-                    crab_write::capsule_protocol::validate_ref_namespace(
-                        &commit_layout,
-                        base.record().root(),
-                        transaction.edits(),
-                    )
-                    .await?;
-                    crab_write::capsule_protocol::publish(
-                        &commit_layout,
-                        base,
-                        &transaction,
-                        &capsule,
-                    )
-                    .await
-                },
             )
-            .await
-        } else {
-            crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule).await
-        };
-        match result {
-            Ok(_) => Ok(Some(())),
-            Err(crab_write::WriteError::RefChanged { .. }) => Ok(None),
-            Err(error) => Err(error.into()),
+            .await?;
+            let pointer_delta = super::xet_publication::prepare_delta(
+                &layout,
+                &base,
+                &prepared.pointers,
+                staging,
+                caching_store,
+                metrics,
+                cancel,
+            )
+            .await?;
+            if let Some(replication) = config.active_active_replication.as_ref() {
+                crate::replication::register_active_active_coordinator_for_repo(
+                    store,
+                    router,
+                    replication,
+                )
+                .await?;
+            }
+            let transaction = match config.mirror_plan_id.as_deref() {
+                Some(plan_id) => crab_metadata::capsule_protocol::CapsuleTransaction::for_plan(
+                    base.record().digest(),
+                    plan_id,
+                    edits,
+                )?,
+                None => crab_metadata::capsule_protocol::CapsuleTransaction::new(
+                    base.record().digest(),
+                    edits,
+                )?,
+            };
+            let mut sections = Vec::with_capacity(2);
+            if !pointer_delta.is_empty() {
+                sections.push(crab_metadata::capsule_protocol::CapsuleSection::new(
+                    crab_metadata::capsule_protocol::CapsuleSectionKind::CatalogDelta,
+                    pointer_delta.encode_delta()?,
+                ));
+            }
+            if let Some(visibility_delta) = visibility_delta {
+                sections.push(crab_metadata::capsule_protocol::CapsuleSection::new(
+                    crab_metadata::capsule_protocol::CapsuleSectionKind::VisibilityDelta,
+                    visibility_delta.encode()?,
+                ));
+            }
+            let capsule = crab_metadata::capsule_protocol::Capsule::build(
+                &transaction,
+                prepared.packs,
+                sections,
+            )?;
+            check_cancelled(cancel)?;
+            let result = if changes_namespace {
+                let commit_layout = layout.clone();
+                crab_write::with_ref_namespaces(
+                    layout.store(),
+                    &layout,
+                    &ref_names,
+                    config.lock_ttl,
+                    cancel,
+                    |scoped| async move {
+                        if scoped.is_cancelled() {
+                            return Err(CrabError::Cancelled);
+                        }
+                        crab_write::capsule_protocol::validate_ref_namespace(
+                            &commit_layout,
+                            base.record().root(),
+                            transaction.edits(),
+                        )
+                        .await?;
+                        publish_capsule(
+                            config,
+                            &commit_layout,
+                            base,
+                            &transaction,
+                            &capsule,
+                            &pointer_delta,
+                            &lfs_objects,
+                        )
+                        .await
+                    },
+                )
+                .await
+            } else {
+                publish_capsule(
+                    config,
+                    &layout,
+                    base,
+                    &transaction,
+                    &capsule,
+                    &pointer_delta,
+                    &lfs_objects,
+                )
+                .await
+            };
+            match result {
+                Ok(CapsulePublishAttempt::Committed(outcome)) => Ok(Some(outcome)),
+                Ok(CapsulePublishAttempt::RefChanged) => Ok(None),
+                Err(error) => Err(error),
+            }
         }
-    }
-    .await;
+        .await;
     let release = match gc_writer {
         Some(writer) => writer.release().await,
         None => Ok(()),
@@ -460,11 +494,15 @@ async fn run_inner(
             return Err(error);
         }
     };
-    if committed.is_some() {
+    if let Some(active_active_commit) = committed {
         for ref_name in ref_names {
             outcomes.insert(ref_name, RefPushOutcome::Ok);
         }
-        return Ok((PushResult::new(outcomes), None));
+        let result = match active_active_commit {
+            Some(outcome) => PushResult::new(outcomes).with_active_active_commit(outcome.into()),
+            None => PushResult::new(outcomes),
+        };
+        return Ok((result, None));
     }
     for ref_name in ref_names {
         outcomes.insert(
@@ -473,6 +511,117 @@ async fn run_inner(
         );
     }
     Ok((PushResult::new(outcomes), None))
+}
+
+enum CapsulePublishAttempt {
+    Committed(Option<crab_coordination::write_coordinator::CommitOutcome>),
+    RefChanged,
+}
+
+async fn publish_capsule(
+    config: &PushConfig,
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    base: crab_metadata::capsule_protocol::RootSnapshot,
+    transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
+    capsule: &crab_metadata::capsule_protocol::Capsule,
+    pointer_delta: &crab_metadata::capsule_protocol::PointerCatalog,
+    lfs_objects: &[String],
+) -> Result<CapsulePublishAttempt> {
+    let Some(replication) = config.active_active_replication.as_ref() else {
+        return match crab_write::capsule_protocol::publish(layout, base, transaction, capsule).await
+        {
+            Ok(_) => Ok(CapsulePublishAttempt::Committed(None)),
+            Err(crab_write::WriteError::RefChanged { .. }) => Ok(CapsulePublishAttempt::RefChanged),
+            Err(error) => Err(error.into()),
+        };
+    };
+    let coordinator =
+        config
+            .active_active_coordinator
+            .as_ref()
+            .ok_or_else(|| CrabError::Configuration {
+                key: "replication.coordinator".to_owned(),
+                origin: "protocol-v2 active-active push requires a live coordinator".to_owned(),
+            })?;
+    let prepared = crab_write::capsule_protocol::prepare_coordinated_publication(
+        layout,
+        base,
+        transaction,
+        capsule,
+    )
+    .await?;
+    let descriptor = prepared.descriptor().clone();
+    let refs = transaction
+        .edits()
+        .iter()
+        .map(
+            |edit| crab_coordination::write_coordinator::CoordinatedRefUpdate {
+                name: edit.ref_name().to_owned(),
+                expected: edit.expected_old().map(str::to_owned),
+                new: edit.new_oid().map(str::to_owned),
+                // Git force policy was already evaluated. Consensus must still
+                // compare the exact old value authenticated by the transaction.
+                force: false,
+            },
+        )
+        .collect::<Vec<_>>();
+    let mut uploaded_objects = BTreeSet::new();
+    uploaded_objects.insert(layout.capsule_path(&descriptor.run_hash).to_string());
+    uploaded_objects.extend(
+        pointer_delta
+            .xorbs()
+            .keys()
+            .map(|hash| layout.xorb_path(hash).to_string()),
+    );
+    uploaded_objects.extend(lfs_objects.iter().cloned());
+    uploaded_objects.extend(
+        pointer_delta
+            .shards()
+            .keys()
+            .map(|hash| layout.shard_path(hash).to_string()),
+    );
+    let plan = crate::replication::plan_active_active_capsule_push(
+        replication,
+        config.active_active_writer.as_deref(),
+        descriptor,
+        refs,
+        uploaded_objects.into_iter().collect(),
+    )?;
+    let mut outcome = match crab_coordination::write_coordinator::commit_uploaded_push_refs(
+        coordinator.as_ref(),
+        plan.request.clone(),
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(crab_coordination::CoordinationError::NonFastForward { .. }) => {
+            return Ok(CapsulePublishAttempt::RefChanged);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    match crab_write::capsule_protocol::materialize_coordinated_publication(layout, prepared).await
+    {
+        Ok(_) => {
+            match coordinator
+                .as_ref()
+                .mark_region_materialized(&outcome.operation_id, &plan.request.region)
+                .await
+            {
+                Ok(state) => outcome.state = state,
+                Err(error) => tracing::warn!(
+                    %error,
+                    operation_id = %outcome.operation_id,
+                    "protocol-v2 coordinator commit succeeded; materialization acknowledgement requires repair"
+                ),
+            }
+        }
+        Err(error) => tracing::warn!(
+            %error,
+            operation_id = %outcome.operation_id,
+            "protocol-v2 coordinator commit succeeded; local capsule materialization requires repair"
+        ),
+    }
+    Ok(CapsulePublishAttempt::Committed(Some(outcome)))
 }
 
 fn prepare_visibility_delta(
@@ -895,6 +1044,109 @@ mod tests {
         crab_write::capsule_protocol::publish(layout, root, &transaction, &capsule)
             .await
             .expect("publish ref transaction");
+    }
+
+    fn active_active_replication() -> crate::replication::ReplicationConfig {
+        crate::replication::ReplicationConfig {
+            primary: None,
+            mode: crate::replication::ReplicationMode::ActiveActive,
+            coordinator: Some(crate::replication::ReplicationCoordinatorConfig {
+                kind: crate::replication::ReplicationCoordinatorKind::Managed,
+                url: "dynamodb://test".to_owned(),
+                region: "us-east-1".to_owned(),
+                failover_regions: vec!["us-west-2".to_owned()],
+                consistency: crate::replication::ReplicationCoordinatorConsistency::Linearizable,
+            }),
+            writers: vec![
+                crate::replication::WriterConfig {
+                    name: "east".to_owned(),
+                    url: "crab://east/test".to_owned(),
+                    region: "us-east-1".to_owned(),
+                    enabled: true,
+                },
+                crate::replication::WriterConfig {
+                    name: "west".to_owned(),
+                    url: "crab://west/test".to_owned(),
+                    region: "us-west-2".to_owned(),
+                    enabled: true,
+                },
+            ],
+            replicas: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn active_active_mirror_plan_fails_closed_before_publication() {
+        let config = PushConfig {
+            mirror_plan_id: Some("a".repeat(64)),
+            active_active_replication: Some(active_active_replication()),
+            ..PushConfig::default()
+        };
+
+        let error = validate_publication_plan_context(&config).unwrap_err();
+
+        assert!(error.to_string().contains("active-active finalize"));
+    }
+
+    #[tokio::test]
+    async fn active_active_capsule_commit_materializes_local_ref_and_retains_repair_proof() {
+        let store = crab_storage::Store::new(Arc::new(InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(store, "repositories/test".to_owned());
+        let base =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+        let transaction = crab_metadata::capsule_protocol::CapsuleTransaction::new(
+            base.record().digest(),
+            vec![crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule =
+            crab_metadata::capsule_protocol::Capsule::build(&transaction, Vec::new(), Vec::new())
+                .unwrap();
+        let coordinator = Arc::new(crab_coordination::InMemoryWriteCoordinator::new());
+        let config = PushConfig {
+            active_active_replication: Some(active_active_replication()),
+            active_active_writer: Some("east".to_owned()),
+            active_active_coordinator: Some(crate::git::push::ActiveActiveWriteCoordinator::new(
+                coordinator.clone(),
+            )),
+            ..PushConfig::default()
+        };
+        let attempt = publish_capsule(
+            &config,
+            &layout,
+            base,
+            &transaction,
+            &capsule,
+            &crab_metadata::capsule_protocol::PointerCatalog::new(),
+            &[],
+        )
+        .await
+        .unwrap();
+        let CapsulePublishAttempt::Committed(Some(outcome)) = attempt else {
+            panic!("active-active capsule publication did not commit");
+        };
+        assert_eq!(outcome.commit_sequence, 1);
+        let view = crab_read::capsule_protocol::open_view(
+            &layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 1024 * 1024,
+                max_frontier_bytes: 1024 * 1024,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(view.refs().get("refs/heads/main"), Some(&"2".repeat(40)));
+        let repair = coordinator.repair_snapshot().await.unwrap();
+        assert_eq!(repair.materialization_gaps.len(), 1);
+        assert_eq!(repair.materialization_gaps[0].region, "us-west-2");
+        assert!(repair.materialization_gaps[0].capsule_publication.is_some());
     }
 
     #[test]

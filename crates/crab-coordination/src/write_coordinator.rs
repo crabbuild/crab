@@ -33,6 +33,71 @@ pub struct CoordinatedRefUpdate {
     pub force: bool,
 }
 
+/// Exact immutable protocol-v2 publication authorized by a coordinator commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CoordinatedCapsulePublication {
+    pub base_root_digest: String,
+    pub transaction_id: String,
+    pub activation_id: String,
+    pub run_hash: String,
+    pub run_size: u64,
+}
+
+pub(crate) fn validate_coordinated_capsule_publication(
+    publication: &CoordinatedCapsulePublication,
+) -> Result<()> {
+    for (key, value) in [
+        ("base_root_digest", publication.base_root_digest.as_str()),
+        ("transaction_id", publication.transaction_id.as_str()),
+        ("activation_id", publication.activation_id.as_str()),
+        ("run_hash", publication.run_hash.as_str()),
+    ] {
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return Err(CoordinationError::Configuration {
+                key: format!("replication.active_active.capsule.{key}"),
+                origin: format!(
+                    "capsule {key} must be a 64-character lowercase hexadecimal digest"
+                ),
+            });
+        }
+    }
+    if publication.run_size == 0 {
+        return Err(CoordinationError::Configuration {
+            key: "replication.active_active.capsule.run_size".into(),
+            origin: "capsule run size must be greater than zero".into(),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_commit_request(request: &CommitRequest) -> Result<()> {
+    let Some(publication) = request.capsule_publication.as_ref() else {
+        return Ok(());
+    };
+    validate_coordinated_capsule_publication(publication)?;
+    if request.manifest_generation != 0 {
+        return Err(CoordinationError::Configuration {
+            key: "replication.active_active.capsule".into(),
+            origin: "protocol-v2 capsule commits must not name a v1 manifest generation".into(),
+        });
+    }
+    if !request
+        .uploaded_objects
+        .iter()
+        .any(|key| key.rsplit('/').next() == Some(publication.run_hash.as_str()))
+    {
+        return Err(CoordinationError::Configuration {
+            key: "replication.active_active.capsule.run_hash".into(),
+            origin: "coordinator GC protection must include the exact capsule run".into(),
+        });
+    }
+    Ok(())
+}
+
 /// Active-active commit request sent to the coordinator.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CommitRequest {
@@ -40,6 +105,8 @@ pub struct CommitRequest {
     pub writer: String,
     pub region: String,
     pub manifest_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capsule_publication: Option<CoordinatedCapsulePublication>,
     pub refs: Vec<CoordinatedRefUpdate>,
     #[serde(default)]
     pub uploaded_objects: Vec<String>,
@@ -55,6 +122,8 @@ pub struct CommitOutcome {
     pub writer: String,
     pub region: String,
     pub manifest_generation: u64,
+    #[serde(default)]
+    pub commit_sequence: u64,
     pub state: PushTransactionState,
 }
 
@@ -123,11 +192,14 @@ impl CoordinatorGcSafetySnapshot {
 pub struct CoordinatorMaterializationGap {
     pub operation_id: String,
     pub manifest_generation: u64,
+    pub commit_sequence: u64,
     pub region: String,
     pub writer: String,
     pub source_region: String,
     pub refs: Vec<CoordinatedRefUpdate>,
     pub uploaded_objects: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capsule_publication: Option<CoordinatedCapsulePublication>,
 }
 
 /// Coordinator snapshot used by repair workers to rematerialize regional manifests.
@@ -157,6 +229,8 @@ pub struct CoordinatorRepoState {
     pub completed_operations: BTreeMap<String, CoordinatorCompletedOperationRecord>,
     #[serde(default)]
     pub next_completed_sequence: u64,
+    #[serde(default)]
+    pub next_commit_sequence: u64,
 }
 
 impl Default for CoordinatorRepoState {
@@ -169,6 +243,7 @@ impl Default for CoordinatorRepoState {
             transactions: BTreeMap::new(),
             completed_operations: BTreeMap::new(),
             next_completed_sequence: 1,
+            next_commit_sequence: 1,
         }
     }
 }
@@ -737,6 +812,7 @@ where
     }
 
     pub async fn begin(&self, request: CommitRequest) -> Result<PushTransactionState> {
+        validate_commit_request(&request)?;
         self.mutate_state(|state| {
             ensure_versioned_state_healthy(self.provider, state)?;
             if let Some(record) = state.transactions.get(&request.operation_id) {
@@ -769,6 +845,7 @@ where
     }
 
     pub async fn commit(&self, request: CommitRequest) -> Result<CommitOutcome> {
+        validate_commit_request(&request)?;
         self.mutate_state(|state| {
             ensure_versioned_state_healthy(self.provider, state)?;
             let (materialized_regions, transaction_epoch) =
@@ -819,12 +896,14 @@ where
                 }
             }
 
+            let commit_sequence = next_commit_sequence(&mut state.next_commit_sequence)?;
             let outcome = CommitOutcome {
                 operation_id: request.operation_id.clone(),
                 coordinator_epoch: transaction_epoch,
                 writer: request.writer.clone(),
                 region: request.region.clone(),
                 manifest_generation: request.manifest_generation,
+                commit_sequence,
                 state: PushTransactionState::Committed,
             };
             state.transactions.insert(
@@ -960,17 +1039,23 @@ where
                 materialization_gaps.push(CoordinatorMaterializationGap {
                     operation_id: operation_id.clone(),
                     manifest_generation: record.request.manifest_generation,
+                    commit_sequence: record
+                        .outcome
+                        .as_ref()
+                        .map_or(0, |outcome| outcome.commit_sequence),
                     region,
                     writer: record.request.writer.clone(),
                     source_region: record.request.region.clone(),
                     refs: record.request.refs.clone(),
                     uploaded_objects: record.request.uploaded_objects.clone(),
+                    capsule_publication: record.request.capsule_publication.clone(),
                 });
             }
         }
         materialization_gaps.sort_by(|left, right| {
-            left.operation_id
-                .cmp(&right.operation_id)
+            left.commit_sequence
+                .cmp(&right.commit_sequence)
+                .then_with(|| left.operation_id.cmp(&right.operation_id))
                 .then_with(|| left.region.cmp(&right.region))
         });
         Ok(CoordinatorRepairSnapshot {
@@ -1236,6 +1321,7 @@ impl InMemoryWriteCoordinator {
     }
 
     pub async fn begin(&self, request: CommitRequest) -> Result<PushTransactionState> {
+        validate_commit_request(&request)?;
         let mut state = self.state.lock().await;
         ensure_versioned_state_healthy("in-memory", &state)?;
         if let Some(record) = state.transactions.get(&request.operation_id) {
@@ -1266,6 +1352,7 @@ impl InMemoryWriteCoordinator {
     }
 
     pub async fn commit(&self, request: CommitRequest) -> Result<CommitOutcome> {
+        validate_commit_request(&request)?;
         let mut state = self.state.lock().await;
         ensure_versioned_state_healthy("in-memory", &state)?;
 
@@ -1317,12 +1404,14 @@ impl InMemoryWriteCoordinator {
             }
         }
 
+        let commit_sequence = next_commit_sequence(&mut state.next_commit_sequence)?;
         let outcome = CommitOutcome {
             operation_id: request.operation_id.clone(),
             coordinator_epoch: transaction_epoch,
             writer: request.writer.clone(),
             region: request.region.clone(),
             manifest_generation: request.manifest_generation,
+            commit_sequence,
             state: PushTransactionState::Committed,
         };
         state.transactions.insert(
@@ -1448,17 +1537,23 @@ impl InMemoryWriteCoordinator {
                 materialization_gaps.push(CoordinatorMaterializationGap {
                     operation_id: operation_id.clone(),
                     manifest_generation: record.request.manifest_generation,
+                    commit_sequence: record
+                        .outcome
+                        .as_ref()
+                        .map_or(0, |outcome| outcome.commit_sequence),
                     region,
                     writer: record.request.writer.clone(),
                     source_region: record.request.region.clone(),
                     refs: record.request.refs.clone(),
                     uploaded_objects: record.request.uploaded_objects.clone(),
+                    capsule_publication: record.request.capsule_publication.clone(),
                 });
             }
         }
         materialization_gaps.sort_by(|left, right| {
-            left.operation_id
-                .cmp(&right.operation_id)
+            left.commit_sequence
+                .cmp(&right.commit_sequence)
+                .then_with(|| left.operation_id.cmp(&right.operation_id))
                 .then_with(|| left.region.cmp(&right.region))
         });
         Ok(CoordinatorRepairSnapshot {
@@ -1847,6 +1942,22 @@ fn next_completed_sequence(next_completed_sequence: &mut u64) -> u64 {
     let sequence = (*next_completed_sequence).max(1);
     *next_completed_sequence = sequence.saturating_add(1);
     sequence
+}
+
+fn next_commit_sequence(next_commit_sequence: &mut u64) -> Result<u64> {
+    let sequence = (*next_commit_sequence).max(1);
+    *next_commit_sequence =
+        sequence
+            .checked_add(1)
+            .ok_or_else(|| {
+                CoordinationError::Configuration {
+            key: "replication.coordinator.commit_sequence".to_owned(),
+            origin:
+                "coordinator commit sequence is exhausted; fence writes and migrate authority state"
+                    .to_owned(),
+        }
+            })?;
+    Ok(sequence)
 }
 
 #[must_use]
@@ -2402,6 +2513,24 @@ mod tests {
 
         assert!(request.uploaded_objects.is_empty());
         assert!(request.target_regions.is_empty());
+        assert!(request.capsule_publication.is_none());
+    }
+
+    #[test]
+    fn commit_outcome_defaults_pre_sequence_records() {
+        let outcome: CommitOutcome = serde_json::from_str(
+            r#"{
+                "operation_id": "op-1",
+                "coordinator_epoch": 2,
+                "writer": "east",
+                "region": "us-east-1",
+                "manifest_generation": 7,
+                "state": "committed"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.commit_sequence, 0);
     }
 
     #[test]
@@ -2596,6 +2725,40 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn repair_snapshot_orders_exact_capsule_publications_by_commit_sequence() {
+        let coordinator = InMemoryWriteCoordinator::new();
+        coordinator.seed_ref("refs/heads/main", "abc").await;
+        let mut first = request("op-z");
+        first.manifest_generation = 0;
+        first.target_regions = vec!["us-east-1".to_owned()];
+        first.capsule_publication = Some(CoordinatedCapsulePublication {
+            base_root_digest: "1".repeat(64),
+            transaction_id: "2".repeat(64),
+            activation_id: "3".repeat(64),
+            run_hash: "4".repeat(64),
+            run_size: 1024,
+        });
+        first.uploaded_objects = vec![format!("repo/v2/capsules/44/{}", "4".repeat(64))];
+        let first_outcome = coordinator.commit(first.clone()).await.unwrap();
+
+        let mut second = request("op-a");
+        second.refs[0].expected = Some("bcd".to_owned());
+        second.refs[0].new = Some("cde".to_owned());
+        second.target_regions = vec!["us-east-1".to_owned()];
+        let second_outcome = coordinator.commit(second).await.unwrap();
+        let snapshot = coordinator.repair_snapshot().await.unwrap();
+
+        assert_eq!(first_outcome.commit_sequence, 1);
+        assert_eq!(second_outcome.commit_sequence, 2);
+        assert_eq!(snapshot.materialization_gaps[0].operation_id, "op-z");
+        assert_eq!(
+            snapshot.materialization_gaps[0].capsule_publication,
+            first.capsule_publication
+        );
+        assert_eq!(snapshot.materialization_gaps[2].operation_id, "op-a");
+    }
+
     #[test]
     fn completed_operation_record_requires_terminal_state() {
         let err = coordinator_completed_operation_record(
@@ -2619,6 +2782,7 @@ mod tests {
             writer: request.writer.clone(),
             region: request.region.clone(),
             manifest_generation: request.manifest_generation,
+            commit_sequence: 9,
             state: PushTransactionState::Materialized,
         };
 
@@ -2726,6 +2890,7 @@ mod tests {
             writer: "writer-a".to_owned(),
             region: "us-west-2".to_owned(),
             manifest_generation: 9,
+            capsule_publication: None,
             refs: vec![CoordinatedRefUpdate {
                 name: "refs/heads/main".to_owned(),
                 expected: Some("abc".to_owned()),

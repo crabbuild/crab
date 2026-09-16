@@ -37097,6 +37097,7 @@ mod tests {
             writer: "east".to_owned(),
             region: "us-east-1".to_owned(),
             manifest_generation: 0,
+            capsule_publication: None,
             refs: vec![CoordinatedRefUpdate {
                 name: "refs/heads/main".to_owned(),
                 expected: None,

@@ -312,6 +312,24 @@ pub async fn check_capsule_read_replica_readiness(
     Ok(readiness)
 }
 
+/// Verify every shard and xorb body authenticated by one capsule catalog.
+pub async fn verify_capsule_pointer_catalog_objects(
+    router: &StoreLayout<Store>,
+    catalog: &crab_metadata::capsule_protocol::PointerCatalog,
+) -> Result<ReadinessProbeStats> {
+    let mut stats = ReadinessProbeStats::default();
+    if let Some(reason) =
+        capsule_pointer_object_gap(router, catalog, &mut stats, ReadinessCheckOptions::deep())
+            .await?
+    {
+        return Err(ReadError::CorruptObject {
+            path: "capsule-protocol pointer catalog".to_owned(),
+            reason,
+        });
+    }
+    Ok(stats)
+}
+
 async fn capsule_pointer_object_gap(
     router: &StoreLayout<Store>,
     catalog: &crab_metadata::capsule_protocol::PointerCatalog,
