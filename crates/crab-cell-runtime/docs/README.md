@@ -13,24 +13,9 @@ Crab stores each repository's collaboration state in one SQLite **Cell**. A Cell
 
 The public HTTP server owns authentication and repository policy. The runtime owns deterministic execution, SQLite state, publication, and takeover.
 
-```mermaid
-flowchart LR
-    Client[Browser or Git client]
-    Http[crab-http-server<br/>public routes and auth]
-    Router[Repository Cell router]
-    Registry[Compiled Rust registry]
-    Actor[Cell actor<br/>single writer]
-    SQLite[(SQLite + WAL)]
-    LTX[crab-ltx<br/>immutable roots]
-    Store[(Object store)]
-    Peer[Authenticated peer route]
+![Crab Cell runtime request, ownership, execution, and storage architecture](diagram/system-architecture.svg)
 
-    Client --> Http --> Router
-    Router --> Registry --> Actor --> SQLite
-    Actor --> LTX --> Store
-    Router -. another node owns Cell .-> Peer
-    Peer --> Registry
-```
+The direct green route is local execution. The orange route is the single authenticated peer hop when another node owns the Cell. Both converge on the same registry, actor, SQLite, and LTX publication path.
 
 The dependency direction follows the same boundary:
 
