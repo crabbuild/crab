@@ -480,21 +480,28 @@ impl CapsuleRepositoryView {
     pub fn git_visibility_index(
         &self,
     ) -> Result<crab_metadata::git_visibility::GitVisibilityIndex> {
-        let mut refs = self
+        let mut index = self
             .checkpoint
             .as_ref()
             .map(Checkpoint::visibility_snapshot)
             .transpose()?
             .flatten()
-            .map(|snapshot| snapshot.refs().clone())
-            .unwrap_or_default();
+            .map(|snapshot| snapshot.to_index(0, &"0".repeat(64), &"0".repeat(64)))
+            .transpose()?
+            .unwrap_or(crab_metadata::git_visibility::GitVisibilityIndex::new(
+                0,
+                "",
+                "0".repeat(64),
+                BTreeMap::new(),
+            )?);
 
         for capsule in &self.capsules {
-            apply_capsule_visibility(capsule, &mut refs)?;
+            apply_capsule_visibility_index(capsule, &mut index)?;
         }
 
         let packs = self.git_pack_manifest_entries()?;
         let manifest = self.git_manifest(&packs)?;
+        let refs = index.ref_closures();
         if refs.keys().ne(manifest.refs.keys())
             || manifest.refs.iter().any(|(name, tip)| {
                 refs.get(name)
@@ -510,13 +517,12 @@ impl CapsuleRepositoryView {
                 "materialized visibility does not cover the pinned root",
             ));
         }
-        crab_metadata::git_visibility::GitVisibilityIndex::new(
+        index.bind_identity(
             manifest.generation,
-            manifest.pack_index_hash,
-            manifest.git_validation_digest,
-            refs,
-        )
-        .map_err(Into::into)
+            &manifest.pack_index_hash,
+            &manifest.git_validation_digest,
+        )?;
+        Ok(index)
     }
 
     /// Materialize visibility after one candidate capsule without publishing it.
@@ -1586,6 +1592,26 @@ fn apply_capsule_visibility(
     capsule: &Capsule,
     refs: &mut BTreeMap<String, Vec<String>>,
 ) -> Result<()> {
+    let pack_index_hash = if refs.is_empty() {
+        String::new()
+    } else {
+        "0".repeat(64)
+    };
+    let mut index = crab_metadata::git_visibility::GitVisibilityIndex::new(
+        0,
+        pack_index_hash,
+        "0".repeat(64),
+        std::mem::take(refs),
+    )?;
+    apply_capsule_visibility_index(capsule, &mut index)?;
+    *refs = index.ref_closures();
+    Ok(())
+}
+
+fn apply_capsule_visibility_index(
+    capsule: &Capsule,
+    index: &mut crab_metadata::git_visibility::GitVisibilityIndex,
+) -> Result<()> {
     let transaction = capsule.transaction()?;
     let delta = capsule.visibility_delta()?;
     let mut evidence = delta.map(|delta| delta.edits().clone()).unwrap_or_default();
@@ -1597,7 +1623,7 @@ fn apply_capsule_visibility(
                     "deleted ref has visibility evidence",
                 ));
             }
-            refs.remove(edit.ref_name());
+            index.remove_ref(edit.ref_name());
             continue;
         };
         let visibility = evidence.remove(edit.ref_name()).ok_or_else(|| {
@@ -1612,28 +1638,15 @@ fn apply_capsule_visibility(
                 "visibility evidence does not match its ref edit",
             ));
         }
-        let prior = match edit.expected_old() {
-            Some(expected_old) => {
-                if visibility.old_oid.as_deref() != Some(expected_old) {
-                    return Err(corrupt_path(
-                        "capsule Git visibility",
-                        "visibility evidence does not match the expected old ref",
-                    ));
-                }
-                refs.get(edit.ref_name()).map(Vec::as_slice)
-            }
-            None if visibility.replaces => None,
-            None => visibility.old_oid.as_deref().and_then(|old_oid| {
-                refs.values()
-                    .find(|objects| {
-                        objects
-                            .binary_search_by(|oid| oid.as_str().cmp(old_oid))
-                            .is_ok()
-                    })
-                    .map(Vec::as_slice)
-            }),
-        };
-        refs.insert(edit.ref_name().to_owned(), visibility.apply(prior)?);
+        if let Some(expected_old) = edit.expected_old()
+            && visibility.old_oid.as_deref() != Some(expected_old)
+        {
+            return Err(corrupt_path(
+                "capsule Git visibility",
+                "visibility evidence does not match the expected old ref",
+            ));
+        }
+        index.apply_ref_edit(edit.ref_name().to_owned(), &visibility)?;
     }
     if !evidence.is_empty() {
         return Err(corrupt_path(
@@ -2406,6 +2419,56 @@ mod tests {
             BTreeMap::from([("refs/heads/main".to_owned(), vec![tip])])
         );
         assert!(view.refs().is_empty());
+    }
+
+    #[test]
+    fn capsule_visibility_retains_incremental_fetch_transition() {
+        let old_tip = "a".repeat(40);
+        let new_tip = "b".repeat(40);
+        let added = "c".repeat(40);
+        let transaction = CapsuleTransaction::new(
+            &"1".repeat(64),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                Some(old_tip.clone()),
+                Some(new_tip.clone()),
+                None,
+            )],
+        )
+        .unwrap();
+        let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            "refs/heads/main".to_owned(),
+            GitVisibilityEdit::from_delta_objects(
+                Some(old_tip),
+                new_tip.clone(),
+                vec![added, new_tip],
+                Vec::new(),
+            ),
+        )]))
+        .unwrap();
+        let capsule = Capsule::build(
+            &transaction,
+            Vec::new(),
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::VisibilityDelta,
+                visibility.encode().unwrap(),
+            )],
+        )
+        .unwrap();
+        let mut index = crab_metadata::git_visibility::GitVisibilityIndex::new(
+            0,
+            "0".repeat(64),
+            "0".repeat(64),
+            BTreeMap::from([("refs/heads/main".to_owned(), vec!["a".repeat(40)])]),
+        )
+        .unwrap();
+
+        apply_capsule_visibility_index(&capsule, &mut index).unwrap();
+
+        assert_eq!(
+            index.incremental_objects("refs/heads/main", &[0xbb; 20], &[[0xaa; 20]]),
+            Some(vec![[0xbb; 20], [0xcc; 20]])
+        );
     }
 
     #[test]

@@ -642,6 +642,15 @@ base is a client-proven common have. Crab then writes one response pack:
 - a self-contained pack when thin-pack negotiation is absent;
 - a thin pack only when every omitted base is a proven common have.
 
+Checkpoint visibility snapshots retain the complete incremental transition
+history needed to prove an exact prior tip-to-current-tip object delta.
+Checkpoint publication MUST NOT collapse that
+proof to final ref closures: doing so forces an incremental fetch to walk the
+complete reachable graph and turns one small fetch into per-object pack-range
+reads. The checkpoint snapshot is authenticated with the checkpoint and is
+rebound to the current pack identity only after its history and final closures
+validate.
+
 `git pull` adds no remote storage protocol. It performs this fetch and then Git
 merges or rebases locally.
 

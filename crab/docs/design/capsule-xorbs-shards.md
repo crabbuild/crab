@@ -852,6 +852,10 @@ Implemented:
     check, but do not define causality by themselves: a force-push sequence
     such as `A -> B -> A -> C` must not make the final `A -> C` capsule eligible
     before the intervening transactions.
+11. Checkpoints preserve authenticated incremental Git visibility history as
+    well as final ref closures. Fetch planning therefore remains proportional
+    to the selected ref transition after consolidation instead of falling back
+    to a complete object walk.
 
 ### 16.1 V1 product-parity inventory
 
@@ -864,7 +868,7 @@ explicit `not yet part of the capsule protocol` error is a parity blocker.
 | Surface | Current v2 state | Work required for parity | Acceptance proof |
 | --- | --- | --- | --- |
 | Repository initialization and ordinary single-/multi-ref push | Implemented with per-ref heads, transaction records, and bounded batched run compaction | Complete the fresh 5,000-push RustFS replay, then qualify provider conditional-write and uncertain-response behavior | Flat request/latency distributions through 5,000 same-ref pushes with periodic fetch/checkpoint, plus concurrent same-ref and disjoint-ref pushes on S3, GCS, and Azure; fresh clone and fsck after every run |
-| Full clone, fetch, pull, and ref advertisement | Implemented for complete repository views | Bound full-view read amplification as ref count grows; add derived indexes only if measurements require them | Repositories with thousands of refs; exact refs, byte-identical checkout, strict fsck, bounded requests and memory |
+| Full clone, fetch, pull, and ref advertisement | Implemented for complete repository views; checkpoint snapshots retain exact incremental transition history so post-checkpoint fetch does not fall back to a repository-wide object walk | Re-run the fresh 5,000-push qualification with fetch every 500 pushes; bound full-view read amplification as ref count grows; add derived indexes only if measurements require them | Repositories with thousands of refs; exact refs, byte-identical checkout, strict fsck, bounded requests and memory; post-checkpoint incremental fetch request count remains proportional to its selected delta |
 | Shallow, deepen, unshallow, filtered/partial, and raw-object/promisor fetch | Filtered transfer uses terminal Git protocol-v2. The classic helper advertises shallow support, pins one authenticated capsule view, uses the same canonical upload-pack planner for shallow/deepen/unshallow, generates a self-contained pack, serializes local installation, and transactionally updates `.git/shallow`; relative deepening and follow-tags are covered by an end-to-end helper test. Raw-OID recovery uses the same pinned view and authorization proof, then atomically installs the selected pack plus `.promisor` sidecar. RustFS qualification covers the initial filter matrix and lazy retrieval | Complete released-shape, older-Git, hosted-provider, interrupted-resume, hidden-ref, cancellation, and adversarial transport qualification | Git compatibility matrix for every fetch mode, including lazy recovery after process restart, interrupted installation, hidden-only objects, and adversarial missing objects |
 | Explicit tag push | Uses the ordinary ref transaction; `crab push --follow-tags` adds only missing reachable annotated tags, and `--no-incremental` publishes the full outgoing Git/LFS closure | Complete hosted-provider and adversarial multi-ref qualification | Annotated/lightweight tag creation, replacement, deletion, atomic branch-plus-tag push, follow-tags missing-only behavior, and full-closure clone/fsck |
 | Managed/protected push and active-active publication | Direct and protected active-active pushes bind the exact v2 base root, transaction, activation, capsule run, ref edits, and verified dependency closure in coordinator truth, materialize per-ref heads after consensus, preserve coordinator metadata in the client result, and retain ordered regional repair records. Active-active mirror plans replicate their immutable intent and repair terminal receipts after a replacement regional activation. Protected admission selects v2 authority before any v1 compatibility read, double-reads only the destination ref heads, resolves transaction-consistent per-ref state without repository-wide LIST or capsule payload downloads, fails closed on corrupt v2 metadata, and persists the exact root digest plus authorized old OIDs. The client stages the thin capsule and its Xet/LFS dependencies under the authorization grant without mutating GC or ref state. Direct-source verification binds the staged run, Git closure and visibility, changed paths, Crab shard/xorb closure, LFS bodies, and complete staged-object inventory. Finalize revalidates its evidence, promotes immutable dependencies, registers verified shard roots, and recognizes the exact already-visible transaction on retry. Path-scoped v2 views publish native capsules with authenticated Git visibility, external xorb/shard catalog entries, LFS dependencies, GC roots, and a fail-closed readiness record. Protected filtered pushes deterministically synthesize source commits, preserve hidden paths, carry required view-local shard/xorb bodies into source storage, and retry against the same source transaction. The integration path proves pointer identity, byte-identical Xet reconstruction through the published source catalog, and LFS body equality | Complete RustFS, Crab Auth, and managed-provider active-active qualification | Deny/allow/stale-policy races, pointer and LFS view pushes, lost responses, regional failover, ordered repair, receipt recovery, and all-old/all-new multi-ref visibility |
@@ -1090,6 +1094,18 @@ negative evidence, not a passing qualification. Batched ref-run compaction now
 supersedes that implementation and has deterministic writer, checkpoint-race,
 catalog-replay, request-budget, and active-active repair tests; the complete
 5,000-push live replay remains required.
+
+The successor `v2-k8s-5000-20260916-codex4` run verified seed checkpoint
+convergence and the first incremental publication, then exposed a read-path
+amplification defect after the next checkpoint. Push 1 completed in 1.349
+seconds and checkpoint publication converged, but its one-commit fetch issued
+944,000 range GETs and read 4,797,001,471 bytes before cancellation. The
+checkpoint visibility snapshot had retained final ref closures but discarded
+the exact incremental transition history, so upload-pack fell back to a full
+object walk. Visibility snapshot v3 now authenticates that history across
+checkpoint publication and unit tests prove exact incremental selection after
+round-trip; this is negative evidence until a fresh installed-binary replay
+demonstrates bounded live request and byte counts.
 
 This qualifies the earlier ordinary RustFS whole-object path. The current
 batched-run/checkpoint implementation still requires a fresh 5,000-push replay.

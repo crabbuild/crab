@@ -226,6 +226,14 @@ struct GitVisibilityTransition {
     objects: GitVisibilityClosure,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GitVisibilityCheckpointTransition {
+    pub(crate) from_oid: String,
+    pub(crate) to_oid: String,
+    pub(crate) objects: Vec<String>,
+}
+
 impl GitVisibilityClosure {
     fn from_positions(positions: Vec<u32>, object_count: usize) -> Result<Self> {
         let bitmap_len = object_count.div_ceil(8);
@@ -1265,8 +1273,70 @@ impl GitVisibilityIndex {
         self.refs.values().map(GitVisibilityClosure::len).sum()
     }
 
-    #[cfg(feature = "storage")]
-    fn remove_ref(&mut self, name: &str) {
+    pub(crate) fn checkpoint_history(
+        &self,
+    ) -> BTreeMap<String, Vec<GitVisibilityCheckpointTransition>> {
+        self.incremental_history
+            .iter()
+            .map(|(name, transitions)| {
+                let transitions = transitions
+                    .iter()
+                    .map(|transition| {
+                        let mut objects = transition
+                            .objects
+                            .positions()
+                            .into_iter()
+                            .filter_map(|position| usize::try_from(position).ok())
+                            .filter_map(|position| self.objects.get(position))
+                            .map(encode_oid)
+                            .collect::<Vec<_>>();
+                        objects.sort_unstable();
+                        GitVisibilityCheckpointTransition {
+                            from_oid: encode_oid(&transition.from_oid),
+                            to_oid: encode_oid(&transition.to_oid),
+                            objects,
+                        }
+                    })
+                    .collect();
+                (name.clone(), transitions)
+            })
+            .collect()
+    }
+
+    pub(crate) fn restore_checkpoint_history(
+        &mut self,
+        history: &BTreeMap<String, Vec<GitVisibilityCheckpointTransition>>,
+    ) -> Result<()> {
+        let mut restored = BTreeMap::new();
+        for (name, transitions) in history {
+            let mut restored_transitions = Vec::with_capacity(transitions.len());
+            for transition in transitions {
+                validate_sorted_oids(&transition.objects, "checkpoint history")?;
+                let positions = transition
+                    .objects
+                    .iter()
+                    .map(|oid| {
+                        let oid = decode_oid(oid)?;
+                        self.positions
+                            .get(&oid)
+                            .copied()
+                            .ok_or_else(|| corrupt("checkpoint history object is absent"))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                restored_transitions.push(GitVisibilityTransition {
+                    from_oid: decode_oid(&transition.from_oid)?,
+                    to_oid: decode_oid(&transition.to_oid)?,
+                    objects: GitVisibilityClosure::from_positions(positions, self.objects.len())?,
+                });
+            }
+            restored.insert(name.clone(), restored_transitions);
+        }
+        self.incremental_history = restored;
+        self.validate()
+    }
+
+    /// Remove one ref and every transition whose authority depends on it.
+    pub fn remove_ref(&mut self, name: &str) {
         self.refs.remove(name);
         self.transitions.remove(name);
         self.incremental_history.remove(name);
@@ -1277,7 +1347,26 @@ impl GitVisibilityIndex {
         self.apply_edit_with_base(name, edit, None)
     }
 
-    #[cfg(any(feature = "storage", test))]
+    /// Apply one authenticated ref visibility edit while retaining incremental history.
+    pub fn apply_ref_edit(&mut self, name: String, edit: &GitVisibilityEdit) -> Result<()> {
+        let base_ref = if self.refs.contains_key(&name) || edit.replaces {
+            None
+        } else {
+            edit.old_oid
+                .as_deref()
+                .map(decode_oid)
+                .transpose()?
+                .and_then(|old_oid| {
+                    self.positions.get(&old_oid).and_then(|position| {
+                        self.refs.iter().find_map(|(name, closure)| {
+                            closure.contains(*position).then(|| name.clone())
+                        })
+                    })
+                })
+        };
+        self.apply_edit_with_base(name, edit, base_ref.as_deref())
+    }
+
     fn apply_edit_with_base(
         &mut self,
         name: String,
@@ -1389,8 +1478,8 @@ impl GitVisibilityIndex {
         Ok(())
     }
 
-    #[cfg(any(feature = "storage", test))]
-    fn bind_identity(
+    /// Bind a materialized proof to its exact immutable repository identity.
+    pub fn bind_identity(
         &mut self,
         generation: u64,
         pack_index_hash: &str,
