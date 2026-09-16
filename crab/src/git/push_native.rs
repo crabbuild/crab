@@ -1042,6 +1042,26 @@ fn collect_followtag_specs(
     Ok(extra_specs)
 }
 
+/// Find locally reachable annotated tags for a command-layer push.
+pub(crate) fn collect_followtag_candidates(
+    explicit_specs: &[PushSpec],
+    git_dir_override: Option<&Path>,
+) -> Result<Vec<PushSpec>> {
+    let git_dirs = resolve_native_git_dirs(git_dir_override)?;
+    let src_refs = explicit_specs
+        .iter()
+        .filter(|spec| !spec.src.is_empty())
+        .map(|spec| spec.src.as_str())
+        .collect::<Vec<_>>();
+    let resolved_shas = resolve_refs(&src_refs, &git_dirs)?;
+    Ok(
+        collect_followtag_specs(explicit_specs, &resolved_shas, &BTreeMap::new(), &git_dirs)?
+            .into_iter()
+            .map(|tag| tag.spec)
+            .collect(),
+    )
+}
+
 /// Phase 1: Incremental pointer discovery.
 ///
 /// When `incremental` is true and push state has a last-pushed SHA for
@@ -1799,6 +1819,31 @@ mod tests {
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0].spec.dst, "refs/tags/v1");
         assert_eq!(tags[0].sha, tag_oid);
+    }
+
+    #[test]
+    fn command_followtag_candidates_reuse_annotated_tag_reachability() {
+        let fixture = TinyGitFixture::new();
+        fixture.commit_text("a.txt", "one");
+        TinyGitFixture::run_git(
+            &fixture.work_tree,
+            &["tag", "-a", "v1", "-m", "version one"],
+        );
+        TinyGitFixture::run_git(&fixture.work_tree, &["tag", "private"]);
+        fixture.commit_text("a.txt", "two");
+
+        let tags =
+            collect_followtag_candidates(&[main_push_spec()], Some(fixture.git_dir.as_path()))
+                .expect("discover command follow-tag candidates");
+
+        assert_eq!(
+            tags,
+            [PushSpec {
+                force: false,
+                src: "refs/tags/v1".to_owned(),
+                dst: "refs/tags/v1".to_owned(),
+            }]
+        );
     }
 
     #[tokio::test]

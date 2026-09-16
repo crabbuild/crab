@@ -161,6 +161,14 @@ struct PushAttemptFailure {
     agent_integration_lock: bool,
 }
 
+struct RetryablePushContext<'a> {
+    repo_root: &'a Path,
+    remote_name: &'a str,
+    remote_url: &'a str,
+    repo_prefix: &'a str,
+    integration: Option<PushIntegrationSummary>,
+}
+
 #[derive(Debug)]
 pub(crate) struct PushTarget {
     pub(crate) remote: String,
@@ -444,7 +452,7 @@ async fn run_push_once(
     };
 
     // Resolve refspecs.
-    let specs = resolve_push_specs(&args.refspecs, &remote_name, args.force)?;
+    let mut specs = resolve_push_specs(&args.refspecs, &remote_name, args.force)?;
     if specs.is_empty() {
         if mode == OutputMode::Text {
             println!("Everything up-to-date");
@@ -480,6 +488,19 @@ async fn run_push_once(
         return Ok(PushAttempt::Done(summary));
     }
 
+    let explicit_destinations = specs
+        .iter()
+        .map(|spec| spec.dst.clone())
+        .collect::<BTreeSet<_>>();
+    if args.follow_tags {
+        specs.extend(crate::git::push_native::collect_followtag_candidates(
+            &specs,
+            explicit_context
+                .as_ref()
+                .map(|context| context.per_worktree_git_dir.as_path()),
+        )?);
+    }
+
     info!(
         remote = %remote_name,
         specs = specs.len(),
@@ -490,7 +511,7 @@ async fn run_push_once(
     let push_state = PushState::load(&repo_root);
 
     // Dry-run: print what would be pushed and return.
-    if args.dry_run {
+    if args.dry_run && !args.follow_tags {
         print_dry_run(&remote_name, &remote_url, &specs);
         let integration =
             push_integration_summary(args, integration_retries, integration_retry_stages);
@@ -512,37 +533,13 @@ async fn run_push_once(
         }));
     }
 
-    let retryable_setup_failure =
-        |error: CrabError, stage: PushFailureStage| -> Result<PushAttempt> {
-            let Some(result) = push_result_from_retryable_error(&specs, &error, stage) else {
-                return Err(error);
-            };
-            let elapsed = start.elapsed();
-            if let Err(err) = record_push_audit_event(
-                &repo_root.join(default_log_path()),
-                Some(&remote_url),
-                &parsed_url.repo_path,
-                &specs,
-                &result,
-                Some(elapsed.as_millis() as u64),
-            ) {
-                warn!(%err, "failed to append push audit event");
-            }
-            Ok(PushAttempt::Failed(Box::new(PushAttemptFailure {
-                repo_root: repo_root.clone(),
-                remote_name: remote_name.clone(),
-                remote_url: remote_url.clone(),
-                specs: specs.clone(),
-                result,
-                elapsed,
-                integration: push_integration_summary(
-                    args,
-                    integration_retries,
-                    integration_retry_stages,
-                ),
-                agent_integration_lock: false,
-            })))
-        };
+    let retryable = RetryablePushContext {
+        repo_root: &repo_root,
+        remote_name: &remote_name,
+        remote_url: &remote_url,
+        repo_prefix: &parsed_url.repo_path,
+        integration: push_integration_summary(args, integration_retries, integration_retry_stages),
+    };
 
     // Build push config from resolved Config + CLI overrides.
     let mut push_config = PushConfig::from_config(&config);
@@ -562,7 +559,12 @@ async fn run_push_once(
     )
     .await
     {
-        return retryable_setup_failure(error, PushFailureStage::StoreResolve);
+        return retryable.fail(
+            error,
+            PushFailureStage::StoreResolve,
+            &specs,
+            start.elapsed(),
+        );
     }
     if matches!(
         config.auth.provider,
@@ -574,21 +576,18 @@ async fn run_push_once(
                 .to_owned(),
         });
     }
-    if args.follow_tags || args.no_incremental {
-        return Err(CrabError::Configuration {
-            key: "capsule-protocol push options".to_owned(),
-            origin:
-                "--follow-tags and --no-incremental are not part of the protocol-v2 hard cutover"
-                    .to_owned(),
-        });
-    }
     let selection = match StoreResolver::new(&config, &parsed_url, cancel)
         .write_store("push")
         .await
     {
         Ok(selection) => selection,
         Err(error) => {
-            return retryable_setup_failure(error, PushFailureStage::StoreResolve);
+            return retryable.fail(
+                error,
+                PushFailureStage::StoreResolve,
+                &specs,
+                start.elapsed(),
+            );
         }
     };
     let store = selection.store;
@@ -621,6 +620,30 @@ async fn run_push_once(
         },
     )
     .await?;
+    if args.follow_tags {
+        retain_missing_follow_tags(&mut specs, &explicit_destinations, capsule_view.refs());
+    }
+    if args.dry_run {
+        print_dry_run(&remote_name, &remote_url, &specs);
+        let integration =
+            push_integration_summary(args, integration_retries, integration_retry_stages);
+        return Ok(PushAttempt::Done(PushSummaryPayload {
+            refs_pushed: 0,
+            refs: Vec::new(),
+            duration_ms: start.elapsed().as_millis() as u64,
+            remote_url,
+            integration_retries: integration.as_ref().map(|summary| summary.retries),
+            integration_retry_limit: integration.as_ref().map(|summary| summary.retry_limit),
+            integration_retry_stages: integration
+                .as_ref()
+                .filter(|summary| !summary.retry_stages.is_empty())
+                .map(|summary| summary.retry_stages.clone()),
+            operation_id: None,
+            coordinator_epoch: None,
+            writer_region: None,
+            commit_state: None,
+        }));
+    }
     let staging =
         crate::git::push_staging::PushStaging::open(repo_root.join(".crab").join("staging"))
             .await?;
@@ -638,7 +661,9 @@ async fn run_push_once(
     .await
     {
         Ok((result, _)) => result,
-        Err(error) => return retryable_setup_failure(error, PushFailureStage::Discovery),
+        Err(error) => {
+            return retryable.fail(error, PushFailureStage::Discovery, &specs, start.elapsed());
+        }
     };
 
     if result.all_ok() {
@@ -844,6 +869,50 @@ fn push_result_from_retryable_error(
     .then(|| push_result_from_error(specs, error).with_failure_stage(stage))
 }
 
+impl RetryablePushContext<'_> {
+    fn fail(
+        &self,
+        error: CrabError,
+        stage: PushFailureStage,
+        specs: &[PushSpec],
+        elapsed: Duration,
+    ) -> Result<PushAttempt> {
+        let Some(result) = push_result_from_retryable_error(specs, &error, stage) else {
+            return Err(error);
+        };
+        if let Err(err) = record_push_audit_event(
+            &self.repo_root.join(default_log_path()),
+            Some(self.remote_url),
+            self.repo_prefix,
+            specs,
+            &result,
+            Some(elapsed.as_millis() as u64),
+        ) {
+            warn!(%err, "failed to append push audit event");
+        }
+        Ok(PushAttempt::Failed(Box::new(PushAttemptFailure {
+            repo_root: self.repo_root.to_owned(),
+            remote_name: self.remote_name.to_owned(),
+            remote_url: self.remote_url.to_owned(),
+            specs: specs.to_vec(),
+            result,
+            elapsed,
+            integration: self.integration.clone(),
+            agent_integration_lock: false,
+        })))
+    }
+}
+
+fn retain_missing_follow_tags(
+    specs: &mut Vec<PushSpec>,
+    explicit_destinations: &BTreeSet<String>,
+    remote_refs: &BTreeMap<String, String>,
+) {
+    specs.retain(|spec| {
+        explicit_destinations.contains(&spec.dst) || !remote_refs.contains_key(&spec.dst)
+    });
+}
+
 fn push_result_from_reason(specs: &[PushSpec], reason: PushRejectReason) -> PushResult {
     let outcomes = specs
         .iter()
@@ -866,6 +935,7 @@ fn integration_retry_delay(attempt: u32) -> Duration {
 }
 
 fn apply_push_cli_overrides(args: &PushArgs, push_config: &mut PushConfig) {
+    push_config.force_full_graph = args.no_incremental;
     if let Some(upload_concurrency) = args.upload_concurrency {
         push_config.upload_concurrency = effective_push_upload_concurrency(upload_concurrency);
     }
@@ -1685,6 +1755,42 @@ mod tests {
     }
 
     #[test]
+    fn follow_tags_preserves_explicit_refs_and_only_adds_missing_tags() {
+        let mut specs = vec![
+            PushSpec {
+                force: false,
+                src: "refs/heads/main".to_owned(),
+                dst: "refs/heads/main".to_owned(),
+            },
+            PushSpec {
+                force: false,
+                src: "refs/tags/existing".to_owned(),
+                dst: "refs/tags/existing".to_owned(),
+            },
+            PushSpec {
+                force: false,
+                src: "refs/tags/missing".to_owned(),
+                dst: "refs/tags/missing".to_owned(),
+            },
+        ];
+        let explicit = BTreeSet::from(["refs/heads/main".to_owned()]);
+        let remote = BTreeMap::from([
+            ("refs/heads/main".to_owned(), "a".repeat(40)),
+            ("refs/tags/existing".to_owned(), "b".repeat(40)),
+        ]);
+
+        retain_missing_follow_tags(&mut specs, &explicit, &remote);
+
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| spec.dst.as_str())
+                .collect::<Vec<_>>(),
+            ["refs/heads/main", "refs/tags/missing"]
+        );
+    }
+
+    #[test]
     fn push_args_reject_removed_jobs_flag() {
         let err = PushArgs::try_parse_from(["crab-push", "--jobs", "4"])
             .expect_err("push --jobs was a no-op and should stay removed");
@@ -1823,6 +1929,17 @@ mod tests {
         apply_push_cli_overrides(&args, &mut config);
 
         assert_eq!(config.lock_wait, Duration::ZERO);
+    }
+
+    #[test]
+    fn no_incremental_requests_full_outgoing_graph() {
+        let mut args = test_push_args();
+        args.no_incremental = true;
+        let mut config = PushConfig::default();
+
+        apply_push_cli_overrides(&args, &mut config);
+
+        assert!(config.force_full_graph);
     }
 
     #[test]
