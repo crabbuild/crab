@@ -24,7 +24,7 @@ use crab_cell_runtime::{
     register_workflow, register_workflow_activities,
 };
 use crab_ltx::{CellReplica, Limits};
-use crab_storage::{CellStorageLayout, Store};
+use crab_storage::{CellStorageLayout, ObjectStoreCredentials, Store, build_explicit_store};
 use object_store::{memory::InMemory, path::Path};
 
 const WORKFLOW_MODULE: &str = "workflow-api-test";
@@ -673,6 +673,37 @@ async fn typed_workflow_namespace_publishes_rejects_reads_and_survives_restore()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn native_activity_heartbeats_and_recovers_after_node_loss() {
+    native_activity_failover(
+        Store::new(Arc::new(InMemory::new())),
+        Path::from("activity-runtime"),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires an isolated pre-created RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_native_activity_recovers_after_node_and_source_loss() {
+    let required = |name| std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
+    let store = build_explicit_store(
+        &required("CRAB_CELL_TEST_BUCKET"),
+        ObjectStoreCredentials::Aws {
+            access_key_id: required("AWS_ACCESS_KEY_ID"),
+            secret_access_key: required("AWS_SECRET_ACCESS_KEY"),
+            session_token: None,
+            region: "us-east-1".into(),
+        },
+        Some(&required("CRAB_CELL_TEST_ENDPOINT")),
+        true,
+    )
+    .unwrap();
+    let prefix = Path::from(format!(
+        "{}/activity-runtime",
+        required("CRAB_CELL_TEST_PREFIX")
+    ));
+    native_activity_failover(store, prefix).await;
+}
+
+async fn native_activity_failover(store: Store, prefix: Path) {
     HEARTBEAT_OBSERVED.store(false, Ordering::Release);
     FAILOVER_ACTIVITY_ENTERED.store(false, Ordering::Release);
     FAILOVER_ACTIVITY_BLOCKED.store(true, Ordering::Release);
@@ -705,8 +736,7 @@ async fn native_activity_heartbeats_and_recovers_after_node_loss() {
     .unwrap();
     let cell = target.cell_id();
     let incarnation = IncarnationId::from_bytes([23; 16]);
-    let store = Store::new(Arc::new(InMemory::new()));
-    let layout = CellStorageLayout::new(store, Path::from("activity-runtime"), [22; 16]);
+    let layout = CellStorageLayout::new(store, prefix, [22; 16]);
     let replica = CellReplica::new(
         layout.clone(),
         *cell.as_bytes(),
@@ -871,24 +901,37 @@ async fn native_activity_heartbeats_and_recovers_after_node_loss() {
     let failover_registry = registry.clone();
     let failover_client = CellClient::local(registry.clone(), handle.clone());
     let failover_target = target.clone();
-    let failover_reservation = blocking_pool.try_reserve().unwrap();
-    let first_attempt = tokio::spawn(async move {
-        failover_registry
-            .run_activity_once(
-                failover_client,
-                &failover_target,
-                5_000,
-                failover_reservation,
-            )
-            .await
-    });
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while !FAILOVER_ACTIVITY_ENTERED.load(Ordering::Acquire) {
-            tokio::task::yield_now().await;
+    let failover_pool = blocking_pool.clone();
+    let mut first_attempt = tokio::spawn(async move {
+        loop {
+            let outcome = failover_registry
+                .run_activity_once(
+                    failover_client.clone(),
+                    &failover_target,
+                    5_000,
+                    failover_pool.try_reserve().unwrap(),
+                )
+                .await;
+            match outcome {
+                Ok(ActivityRunOutcome::Retrying { .. }) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                outcome => return outcome,
+            }
         }
-    })
-    .await
-    .unwrap();
+    });
+    tokio::select! {
+        outcome = &mut first_attempt => {
+            panic!("failover activity exited before entering its handler: {outcome:?}");
+        }
+        entered = tokio::time::timeout(Duration::from_secs(30), async {
+            while !FAILOVER_ACTIVITY_ENTERED.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        }) => {
+            entered.unwrap();
+        }
+    }
     first_attempt.abort();
     assert!(first_attempt.await.unwrap_err().is_cancelled());
     assert_eq!(FAILOVER_ACTIVITY_ATTEMPTS.load(Ordering::Acquire), 1);

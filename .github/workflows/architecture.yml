@@ -229,6 +229,9 @@ jobs:
           cargo test -p crab-cell-runtime --locked --test actor \
             rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
             -- --ignored --exact --nocapture
+          cargo test -p crab-cell-runtime --locked --test workflow_api \
+            rustfs_native_activity_recovers_after_node_and_source_loss \
+            -- --ignored --exact --nocapture
           cargo test -p crab-http-server --locked --lib \
             server::peer_e2e_tests::rustfs_public_collaboration_reaches_remote_owner_and_publishes_ltx \
             -- --ignored --exact --nocapture

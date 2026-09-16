@@ -144,7 +144,10 @@ cargo test -p crab-cell-runtime --test actor \
 The Cell test publishes a command on one session, removes its local database,
 takes over from a second session, resolves the original request from the exact
 root, and publishes the next sequence. CI runs both tests against a pinned
-RustFS image.
+RustFS image. The same job interrupts an in-flight native workflow activity,
+removes the first node's SQLite file, restores the workflow Cell on a second
+session, reclaims the expired lease, and publishes exactly one completed
+workflow result from the authoritative root.
 
 The same CI job also runs `crab-http-server` through public HTTP, private mTLS
 forwarding to a remote owner, typed repository commands and LTX publication on
