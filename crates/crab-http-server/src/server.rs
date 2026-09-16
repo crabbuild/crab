@@ -1367,7 +1367,7 @@ async fn materialize_catalog(
     for record in document.repositories {
         let store = catalog.root().store.clone();
         let prefix = catalog.root().repository_prefix(&record.prefix)?;
-        let layout = StoreLayout::new(store.clone(), prefix.clone());
+        let layout = catalog.root().repository_layout(prefix.clone());
         let root = crab_metadata::capsule_protocol::load_root(&layout)
             .await
             .map_err(|source| crate::Error::Settings {

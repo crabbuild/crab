@@ -1,7 +1,7 @@
 use crab_git::url::{ObjectUrl, UrlForm};
 use crab_storage::{
     StaticEnvStoreTarget, StaticEnvStoreUrlForm, StaticEnvStoreUrlParts, StorageProviderKind,
-    Store, build_static_env_target_store, static_env_target_selection_for_provider,
+    Store, StoreLayout, build_static_env_target_store, static_env_target_selection_for_provider,
 };
 
 use crate::{Error, Result, StorageConfig};
@@ -62,6 +62,16 @@ impl StorageRoot {
         Ok(format!("{}/{}", self.prefix, relative))
     }
 
+    pub(crate) fn repository_layout(&self, repository_prefix: String) -> StoreLayout<Store> {
+        // The workload identity and backup boundary are the configured root.
+        // Shared immutable data must not escape to bucket-root `.crab/`.
+        StoreLayout::with_global_prefix(
+            self.store.clone(),
+            repository_prefix,
+            format!("{}/.crab", self.prefix),
+        )
+    }
+
     pub(crate) fn path(&self, relative: &str) -> object_store::path::Path {
         object_store::path::Path::from(format!("{}/{}", self.prefix, relative))
     }
@@ -76,5 +86,36 @@ impl StorageRoot {
             provider_namespace: "memory:test".to_owned(),
             bucket_label: "memory".to_owned(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use object_store::memory::InMemory;
+
+    use super::*;
+
+    #[test]
+    fn repository_layout_keeps_shared_objects_inside_the_configured_root() {
+        let root = StorageRoot::memory(Store::new(Arc::new(InMemory::new())), "repositories");
+        let repository_prefix = root.repository_prefix("team/project").unwrap();
+        let layout = root.repository_layout(repository_prefix);
+
+        assert_eq!(layout.repo_prefix(), "repositories/team/project");
+        assert_eq!(layout.global_prefix(), "repositories/.crab");
+        assert!(
+            layout
+                .xorb_path(&"0123456789abcdef")
+                .as_ref()
+                .starts_with("repositories/.crab/xorbs/")
+        );
+        assert!(
+            layout
+                .shard_path(&"fedcba9876543210")
+                .as_ref()
+                .starts_with("repositories/.crab/shards/")
+        );
     }
 }

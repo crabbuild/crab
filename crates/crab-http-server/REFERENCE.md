@@ -120,7 +120,9 @@ CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-http-server-dev" \
 
 The process configuration selects listeners, one physical storage root, and
 optional identity. Repositories are durable catalog records below that root;
-they are not repeated in every pod's configuration.
+they are not repeated in every pod's configuration. Shared xorbs, shards, and
+their ref registry live below the same root in `.crab/`, so the configured root
+is also the workload-identity and backup boundary.
 
 ```toml
 listen = "127.0.0.1:8788"
@@ -1405,7 +1407,7 @@ Current local and CI evidence includes:
 - OIDC redirects and signed-token validation, key rotation, membership isolation, token scope, revocation, Origin checks, and CSRF rejection
 - Browser light, dark, desktop, narrow-screen, keyboard, conflict, and automated Web Content Accessibility Guidelines (WCAG) A/AA checks
 - Container build, non-root identity, stop signal, health command, storage-aware repository readiness, private metrics scrape, Prometheus-validated baseline alerts, runtime inspection, strict Helm lint, and Kubernetes schema validation
-- Complete-root RustFS cold copy into an isolated prefix, exact key/size comparison, byte hashing of every object, and independent restored Git, issue, and LFS reads
+- Complete-root RustFS cold copy into an isolated bucket, exact key/size comparison, byte hashing of every object including shared `.crab/` state, and independent restored Git, issue, and LFS reads
 - LFS partial download and byte-identical range resume through the Compose Caddy/server/RustFS stack, including safe full-response fallback for multiple ranges
 - Stock Git LFS lock, list, verify-on-push, and unlock against the Compose Caddy/server/RustFS stack
 - Native Git rejection when another subject owns a changed path, including a change-and-revert history whose final tree matches the original

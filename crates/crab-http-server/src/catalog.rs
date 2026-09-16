@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use bytes::Bytes;
-use crab_storage::{ETag, StorageError, StoreLayout};
+use crab_storage::{ETag, StorageError};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -206,7 +206,7 @@ impl CatalogStore {
         let runtime = record.runtime_config(&self.root, &default_branch)?;
         crate::config::validate_repository(&runtime)
             .map_err(|_| CatalogError::Invalid("repository record failed validation"))?;
-        let layout = StoreLayout::new(self.root.store.clone(), runtime.prefix.clone());
+        let layout = self.root.repository_layout(runtime.prefix.clone());
         crab_write::capsule_protocol::initialize(
             &layout,
             blake3::hash(record.id.as_bytes()).to_hex().as_ref(),
@@ -239,7 +239,7 @@ impl CatalogStore {
         let runtime = record.runtime_config(&self.root, "main")?;
         crate::config::validate_repository(&runtime)
             .map_err(|_| CatalogError::Invalid("repository record failed validation"))?;
-        let layout = StoreLayout::new(self.root.store.clone(), runtime.prefix);
+        let layout = self.root.repository_layout(runtime.prefix);
         crab_metadata::capsule_protocol::load_root(&layout).await?;
         self.insert(record).await
     }
@@ -428,17 +428,13 @@ mod tests {
     #[tokio::test]
     async fn adopted_repository_requires_empty_cell_and_ready_transition_is_idempotent() {
         let catalog = catalog();
-        let layout = StoreLayout::new(
-            catalog.root.store.clone(),
-            catalog.root.repository_prefix("team/project").unwrap(),
-        );
-        crab_write::initialize::initialize_repository(
-            &catalog.root.store,
-            &layout,
-            "refs/heads/main",
-        )
-        .await
-        .unwrap();
+        let layout = catalog
+            .root
+            .repository_layout(catalog.root.repository_prefix("team/project").unwrap());
+        let repository_id = blake3::hash(b"team-project").to_hex().to_string();
+        crab_write::capsule_protocol::initialize(&layout, &repository_id, "refs/heads/main")
+            .await
+            .unwrap();
         let runtime = catalog
             .adopt_repository(
                 "team".into(),

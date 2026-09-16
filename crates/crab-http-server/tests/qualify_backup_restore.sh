@@ -16,9 +16,11 @@ proxy_id="$("${compose[@]}" ps --quiet proxy)"
 rustfs_id="$("${compose[@]}" ps --quiet rustfs)"
 source_stopped=false
 suffix="${work_dir##*.}"
-restore_prefix="restore-${suffix}"
+source_bucket="crab-http-server"
+restore_bucket="crab-http-server-restore-${suffix,,}"
 restore_server="crab-http-server-restore-${suffix}"
 restore_proxy="crab-http-server-restore-proxy-${suffix}"
+global_probe="repositories/.crab/http-server/v1/backup-probe/${suffix}"
 
 if [ -z "$server_id" ] || [ -z "$proxy_id" ] || [ -z "$rustfs_id" ]; then
   echo "The Compose server, proxy, and RustFS services must be running." >&2
@@ -28,6 +30,14 @@ fi
 cleanup() {
   result=$?
   docker rm --force "$restore_proxy" "$restore_server" >/dev/null 2>&1 || true
+  if declare -p aws_cli >/dev/null 2>&1; then
+    "${aws_cli[@]}" s3 rm "s3://${source_bucket}/${global_probe}" \
+      --only-show-errors >/dev/null 2>&1 || true
+    "${aws_cli[@]}" s3 rm "s3://${restore_bucket}/" --recursive \
+      --only-show-errors >/dev/null 2>&1 || true
+    "${aws_cli[@]}" s3api delete-bucket --bucket "$restore_bucket" \
+      >/dev/null 2>&1 || true
+  fi
   if $source_stopped; then
     "${compose[@]}" up --detach --no-build --wait --wait-timeout 120 \
       server proxy >/dev/null 2>&1 || true
@@ -83,48 +93,70 @@ aws_cli=(
   --entrypoint aws bucket-init
   --endpoint-url http://rustfs:9000
 )
-"${aws_cli[@]}" s3 cp s3://crab-http-server/repositories/ \
-  "s3://crab-http-server/${restore_prefix}/" --recursive --only-show-errors
-"${aws_cli[@]}" s3api list-objects-v2 --bucket crab-http-server \
+printf 'The root-scoped shared namespace must survive restore.\n' > "${work_dir}/global-probe"
+"${aws_cli[@]}" s3 cp "${work_dir}/global-probe" \
+  "s3://${source_bucket}/${global_probe}" --only-show-errors
+"${aws_cli[@]}" s3api create-bucket --bucket "$restore_bucket" >/dev/null
+"${aws_cli[@]}" s3 cp "s3://${source_bucket}/repositories/" \
+  "s3://${restore_bucket}/repositories/" --recursive --only-show-errors
+"${aws_cli[@]}" s3api list-objects-v2 --bucket "$source_bucket" \
   --prefix repositories/ --output json > "${work_dir}/source-objects.json"
-"${aws_cli[@]}" s3api list-objects-v2 --bucket crab-http-server \
-  --prefix "${restore_prefix}/" --output json > "${work_dir}/restored-objects.json"
-printf 'Copied complete storage root into isolated prefix %s\n' "$restore_prefix"
+"${aws_cli[@]}" s3api list-objects-v2 --bucket "$restore_bucket" \
+  --prefix repositories/ --output json > "${work_dir}/restored-objects.json"
+printf 'Copied complete configured storage root into isolated bucket %s\n' \
+  "$restore_bucket"
 
 jq --exit-status '(.IsTruncated // false) == false' \
   "${work_dir}/source-objects.json" "${work_dir}/restored-objects.json" >/dev/null
-jq --arg prefix 'repositories/' \
-  '[.Contents[]? | {key: (.Key | ltrimstr($prefix)), size: .Size}] | sort_by(.key)' \
+jq \
+  '[.Contents[]? | {key: .Key, size: .Size}] | sort_by(.key)' \
   "${work_dir}/source-objects.json" > "${work_dir}/source-manifest.json"
-jq --arg prefix "${restore_prefix}/" \
-  '[.Contents[]? | {key: (.Key | ltrimstr($prefix)), size: .Size}] | sort_by(.key)' \
+jq \
+  '[.Contents[]? | {key: .Key, size: .Size}] | sort_by(.key)' \
   "${work_dir}/restored-objects.json" > "${work_dir}/restored-manifest.json"
 cmp "${work_dir}/source-manifest.json" "${work_dir}/restored-manifest.json"
 
 jq --exit-status \
-  'any(.[]; .key == ".crab/http-server/v1/catalog.json")' \
+  'any(.[]; .key == "repositories/.crab/http-server/v1/catalog.json")' \
   "${work_dir}/source-manifest.json" >/dev/null
 jq --exit-status \
-  'any(.[]; .key == "cells/v1/identity.json") and
-   any(.[]; (.key | startswith("cells/v1/apps/")) and (.key | endswith("/control.json"))) and
-   any(.[]; (.key | startswith("cells/v1/apps/")) and (.key | contains("/objects/")) and (.key | endswith(".root")))' \
+  'any(.[]; .key == "repositories/cells/v1/identity.json") and
+   any(.[]; (.key | startswith("repositories/cells/v1/apps/")) and (.key | endswith("/control.json"))) and
+   any(.[]; (.key | startswith("repositories/cells/v1/apps/")) and (.key | contains("/objects/")) and (.key | endswith(".root")))' \
   "${work_dir}/source-manifest.json" >/dev/null
+jq --exit-status --arg probe "$global_probe" \
+  'any(.[]; .key == $probe)' "${work_dir}/source-manifest.json" >/dev/null
 object_count="$(jq 'length' "${work_dir}/source-manifest.json")"
 test "$object_count" -gt 0
-jq --exit-status \
-  'all(.[]; .key | length > 0 and (contains("\n") or contains("\r") | not))' \
-  "${work_dir}/source-manifest.json" >/dev/null
-jq --raw-output '.[].key' "${work_dir}/source-manifest.json" \
-  > "${work_dir}/object-keys.txt"
-verified_objects="$(
-  "${compose[@]}" run --rm --no-deps \
-    --interactive=false --no-TTY \
-    --entrypoint /bin/bash \
-    --volume "${hash_script}:/qualification/hash-objects.sh:ro" \
-    --volume "${work_dir}:/evidence:ro" \
-    bucket-init /qualification/hash-objects.sh \
-      crab-http-server repositories "$restore_prefix" /evidence/object-keys.txt
-)"
+object_digest() {
+  local object_uri="$1"
+  local digest
+  if ! digest="$(
+    "${aws_cli[@]}" s3 cp "$object_uri" - --only-show-errors \
+      | shasum -a 256 | awk '{print $1}'
+  )"; then
+    echo "Could not hash object ${object_uri}." >&2
+    return 1
+  fi
+  if [[ ! "$digest" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "Object hash was invalid for ${object_uri}." >&2
+    return 1
+  fi
+  printf '%s' "$digest"
+}
+verified_objects=0
+while IFS= read -r -d '' key; do
+  source_digest="$(object_digest \
+    "s3://${source_bucket}/${key}")"
+  restored_digest="$(object_digest \
+    "s3://${restore_bucket}/${key}")"
+  if [ "$source_digest" != "$restored_digest" ]; then
+    echo "Restored object differs from source: ${key}" >&2
+    exit 1
+  fi
+  verified_objects=$((verified_objects + 1))
+done < <(jq --join-output '.[] | .key, "\u0000"' \
+  "${work_dir}/source-manifest.json")
 test "$verified_objects" -eq "$object_count"
 printf 'Verified %s restored object bodies byte-for-byte\n' "$verified_objects"
 
@@ -141,7 +173,7 @@ peer_private_key = "/run/secrets/crab-peer/peer.key"
 peer_ca = "/run/secrets/crab-peer/ca.crt"
 
 [storage]
-url = "s3://crab-http-server/${restore_prefix}"
+url = "s3://${restore_bucket}/repositories"
 EOF
 chmod 0644 "${work_dir}/restore.server.toml"
 
@@ -239,6 +271,9 @@ curl --fail --silent --show-error --output "${work_dir}/lfs-restored" \
 cmp "${work_dir}/lfs-source" "${work_dir}/lfs-restored"
 
 docker rm --force "$restore_proxy" "$restore_server" >/dev/null
+"${aws_cli[@]}" s3 rm "s3://${source_bucket}/${global_probe}" --only-show-errors
+"${aws_cli[@]}" s3 rm "s3://${restore_bucket}/" --recursive --only-show-errors
+"${aws_cli[@]}" s3api delete-bucket --bucket "$restore_bucket" >/dev/null
 "${compose[@]}" up --detach --no-build --wait --wait-timeout 120 server proxy
 source_stopped=false
 trap - EXIT
