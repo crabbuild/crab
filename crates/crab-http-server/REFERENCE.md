@@ -1484,7 +1484,7 @@ The remaining production gaps include:
 
 - Broader abrupt-crash coverage beyond the qualified in-flight native-push boundary, plus a portable client recovery token (native Git can only recover an identical wire request through the server-side plan receipt)
 - Journal or visibility-receipt reconstruction when verified evidence is missing; missing standard Git `.idx` and `.rev` sidecars are repaired from the verified canonical pack during catalog maintenance
-- Hosted-provider and sustained-load qualification of the bounded background dependency scrub, including exact request/byte accounting and lease-loss fault injection. Deployment-wide owner election prevents healthy replicas from repeating deep reads; the 10-second readiness probe intentionally validates Git serving rather than redownloading every large external object
+- Hosted-provider and sustained-load qualification of the bounded background dependency scrub, including exact request/byte accounting and provider-level lease-loss behavior. Deterministic local fault injection proves that renewal loss during a paused dependency scan cancels the old owner before report publication and preserves the successor lease. Deployment-wide owner election prevents healthy replicas from repeating deep reads; the 10-second readiness probe intentionally validates Git serving rather than redownloading every large external object
 - Protected-view writer coexistence with shared namespace guarantees
 - Production throughput and provider-level admission qualification
 - Browser membership administration, membership audit history, provider back-channel logout, and immediate provider revocation

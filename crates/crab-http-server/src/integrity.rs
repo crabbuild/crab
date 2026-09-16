@@ -484,6 +484,16 @@ async fn coordinated_cycle(
     root: &crate::storage_root::StorageRoot,
     locks: &mut crab_coordination::PushLockAcquireContext,
 ) -> Result<Duration> {
+    coordinated_cycle_with_lease(server, root, locks, server.cancellation.child_token(), None).await
+}
+
+async fn coordinated_cycle_with_lease(
+    server: &Arc<Server>,
+    root: &crate::storage_root::StorageRoot,
+    locks: &mut crab_coordination::PushLockAcquireContext,
+    cancellation: CancellationToken,
+    renewal_interval: Option<Duration>,
+) -> Result<Duration> {
     let stored = read_report(root).await?;
     let expected = stored.as_ref().map(|(_, etag)| etag.clone());
     let previous = match stored.as_ref().map(|(body, _)| decode_report(body)) {
@@ -517,8 +527,12 @@ async fn coordinated_cycle(
         }
         Err(error) => return Err(error.into()),
     };
-    let cancellation = server.cancellation.child_token();
-    let lease = crab_coordination::RenewingPushLock::start(lock, &cancellation);
+    let lease = match renewal_interval {
+        Some(interval) => {
+            crab_coordination::RenewingPushLock::start_with_interval(lock, &cancellation, interval)
+        }
+        None => crab_coordination::RenewingPushLock::start(lock, &cancellation),
+    };
     let repositories = server.repositories.values();
     let result = async {
         scrub_cycle(server, &repositories, &cancellation).await?;
