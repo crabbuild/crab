@@ -1,6 +1,6 @@
 # Celld architecture and Rust integration
 
-[Design index](README.md) · Local crate and repository issue/comment/label/status/check server slice implemented.
+[Design index](README.md) · Local crate and repository issue/comment/label/status/check/settings server slice implemented.
 
 Reuse of Celld's replication source is selected and approved. The dedicated
 [crab-ltx design](crab-ltx.md) specifies the pinned import, attribution,

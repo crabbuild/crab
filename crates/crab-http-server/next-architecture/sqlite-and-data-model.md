@@ -1,6 +1,6 @@
 # SQLite runtime and application data model
 
-[Design index](README.md) · Repository issue/comment/label/status/check schema implemented; remaining domains proposed.
+[Design index](README.md) · Repository issue/comment/label/status/check/settings schema implemented; remaining domains proposed.
 
 The SQL transaction and WAL boundaries here feed the
 [publication coordinator](storage-protocol.md#commit-publication-and-response-gating).
@@ -9,7 +9,7 @@ snapshot and exact restore, plus optional remote transport, immutable views and
 writable sparse SQL with checksum-seeded continuation. Full restoration remains
 the initial server activation policy; sparse support is a library capability,
 not yet a wired AppCell workflow. The fixed SQL worker executor, repository
-identity, issue/comment/label/status/check schema, typed operations, publication barrier and public
+identity, issue/comment/label/status/check/settings schema, typed operations, publication barrier and public
 HTTP adapter are implemented. Pulls, releases, outbox/workflow
 tables and their route cuts remain proposed.
 Restore and takeover follow [recovery rules](recovery-and-retention.md);

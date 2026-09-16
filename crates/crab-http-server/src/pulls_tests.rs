@@ -312,13 +312,11 @@ async fn pull_request_merge_methods_use_canonical_ref_publication() {
         .repositories
         .get_mut(&("team".into(), "repo".into()))
         .unwrap();
-    let protected_branches = vec![crate::BranchProtection {
+    repository.config.protected_branches = vec![crate::BranchProtection {
         branch: "main".into(),
         required_approvals: 0,
         required_checks: vec![],
     }];
-    repository.config.protected_branches = protected_branches.clone();
-    repository.protections = RwLock::new(BranchProtections::configured(&protected_branches));
     let stop = CancellationToken::new();
     let stopped = stop.clone();
     let app = router(Arc::clone(&server));

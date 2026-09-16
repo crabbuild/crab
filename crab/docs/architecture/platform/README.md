@@ -255,7 +255,7 @@ the catalog application ready; `repository adopt` performs the same empty-Cell
 publication for an existing canonical Git repository. Serving fails before
 listener bind when any cataloged repository is pending initialization or lacks a published root,
 and request routing never authorizes an empty bootstrap. The complete public
-issue/comment/label/status/check route group now uses typed Cell commands and queries. The runtime
+issue/comment/label/status/check/settings route group now uses typed Cell commands and queries. The runtime
 now declares bounded predecessor-code compatibility in the compiled Rust
 registry. It can execute typed local and peer operations for those declared
 code/schema pairs, publish either one verified `N→N+1` SQL migration or one
@@ -337,14 +337,14 @@ body, authenticates the live node session before dispatch, and returns a strict
 Protobuf reply. A stale receiving node can reauthorize and forward those same
 signed operation bytes once more, with a reduced deadline and maximum hop count
 of two. The outbound client never follows redirects or trusts a control-record
-endpoint without the matching live advertisement. The issue/comment/label/status/check product
+endpoint without the matching live advertisement. The issue/comment/label/status/check/settings product
 routes construct this capability, acquire idle Cells through exact-root restore
 and preserve the public browser JSON contract. A two-node acceptance test starts
 the public listener on an ingress node and the mandatory mTLS management listener
 on a distinct owner node, creates an issue and label through the ingress, assigns
 the label, reads both back through the public API, and proves that the owner advanced the published LTX
 root. Other product domains do not yet use it. The server now compiles and binds
-the internal issue/comment/label/status/check operation set: create and update commands plus
+the internal issue/comment/label/status/check/settings operation set: create and update commands plus
 get and bounded list queries for discussions, and create/update/delete/list
 operations for labels. Stable codecs include issue label and assignee selections;
 SQLite owns repository identity, sequences, issues, comments, active labels,
@@ -390,7 +390,7 @@ selected descriptor bytes and complete Cell inventory before binding either
 listener. A candidate binary is eligible while its exact digest is `prepared` or
 `activating`; a steady server requires its exact `ready.current`. Compose, Helm
 and the ECS evaluation task execute bootstrap before first start. The server
-constructs one repository router before readiness; every public issue/comment/label/status/check
+constructs one repository router before readiness; every public issue/comment/label/status/check/settings
 route now invokes it.
 `cells release activate --strategy maintenance --expected-revision N` verifies
 this binary's prepared descriptor, CASes only that operation from `prepared` to

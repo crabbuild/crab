@@ -24,7 +24,7 @@ use crab_remote_git::{
 };
 use crab_storage::{StorageError, Store, StoreLayout};
 use serde_json::json;
-use tokio::sync::{Mutex, RwLock, Semaphore};
+use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use uuid::Uuid;
@@ -224,8 +224,6 @@ pub(crate) struct Repository {
     pub store: Store,
     pub layout: StoreLayout<Store>,
     pub identity: RepositoryIdentity,
-    pub(crate) protections: RwLock<BranchProtections>,
-    pub(crate) lifecycle: RwLock<RepositoryLifecycle>,
     pinned: Mutex<Option<(Instant, RemoteGitRepository)>>,
     maintenance: Mutex<Option<tokio::task::JoinHandle<crab_write::Result<()>>>>,
 }
@@ -329,12 +327,20 @@ impl RepositoryIndex {
 }
 
 impl Repository {
-    pub(crate) async fn branch_protections(&self) -> app::Result<BranchProtections> {
-        repository_settings::refresh(self).await
+    pub(crate) async fn branch_protections(
+        &self,
+        server: &Server,
+        actor: &auth::Identity,
+    ) -> app::Result<BranchProtections> {
+        repository_settings::load(server, self, actor).await
     }
 
-    pub(crate) async fn lifecycle(&self) -> app::Result<RepositoryLifecycle> {
-        repository_settings::refresh_lifecycle(self).await
+    pub(crate) async fn lifecycle(
+        &self,
+        server: &Server,
+        actor: &auth::Identity,
+    ) -> app::Result<RepositoryLifecycle> {
+        repository_settings::load_lifecycle(server, self, actor).await
     }
 
     pub(crate) async fn invalidate(&self) {
@@ -779,7 +785,6 @@ async fn materialize_catalog(
                     "catalog repository HEAD must name a branch",
                 ))?;
         let entry = record.runtime_config(catalog.root(), default_branch)?;
-        let configured_protections = BranchProtections::configured(&entry.protected_branches);
         let repository = Repository {
             id: record.id,
             layout,
@@ -790,23 +795,9 @@ async fn materialize_catalog(
             )?,
             config: entry.clone(),
             store,
-            protections: RwLock::new(configured_protections),
-            lifecycle: RwLock::new(RepositoryLifecycle::active()),
             pinned: Mutex::new(None),
             maintenance: Mutex::new(None),
         };
-        let protections = repository_settings::load(&repository)
-            .await
-            .map_err(|source| crate::Error::Settings {
-                source: Box::new(source),
-            })?;
-        *repository.protections.write().await = protections;
-        let lifecycle = repository_settings::load_lifecycle(&repository)
-            .await
-            .map_err(|source| crate::Error::Settings {
-                source: Box::new(source),
-            })?;
-        *repository.lifecycle.write().await = lifecycle;
         repositories.insert(
             (entry.owner.clone(), entry.name.clone()),
             Arc::new(repository),
@@ -1087,6 +1078,7 @@ async fn catalog(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
 ) -> app::Result<Json<serde_json::Value>> {
+    let actor = app::actor(&principal)?;
     let mut repositories = Vec::new();
     for repository in server
         .repositories
@@ -1094,8 +1086,8 @@ async fn catalog(
         .into_iter()
         .filter(|repository| principal.can_read(&repository.config))
     {
-        let protections = repository.branch_protections().await?;
-        let lifecycle = repository.lifecycle().await?;
+        let protections = repository.branch_protections(&server, &actor).await?;
+        let lifecycle = repository.lifecycle(&server, &actor).await?;
         repositories.push(json!({
             "owner": repository.config.owner, "name": repository.config.name,
             "description": repository.config.description,
@@ -1259,7 +1251,8 @@ async fn archived_mutation_response(
         .repositories
         .get(&(owner.to_owned(), name.to_owned()))
         .filter(|repository| principal.can_read(&repository.config))?;
-    match repository.lifecycle().await {
+    let actor = app::actor(principal).ok()?;
+    match repository.lifecycle(server, &actor).await {
         Ok(lifecycle) if lifecycle.archived => Some(app::Error::Archived.into_response()),
         Ok(_) => None,
         Err(error) => Some(error.into_response()),

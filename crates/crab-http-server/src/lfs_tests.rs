@@ -628,9 +628,19 @@ async fn archived_repository_rejects_lfs_writes_and_keeps_reads_available() {
         .repositories
         .get(&("team".into(), "repo".into()))
         .unwrap();
-    repository_settings::replace_lifecycle(&repository, 0, true)
-        .await
-        .unwrap();
+    repository_settings::replace_lifecycle(
+        &server,
+        &repository,
+        &crate::auth::Identity {
+            issuer: "urn:crab:local".into(),
+            subject: "operator".into(),
+            name: "Local operator".into(),
+        },
+        0,
+        true,
+    )
+    .await
+    .unwrap();
     let batch = |operation| {
         Body::from(json!({"operation":operation,"objects":[{"oid":HELLO,"size":5}]}).to_string())
     };

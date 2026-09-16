@@ -229,8 +229,6 @@ impl Harness {
             store: store.clone(),
             layout: StoreLayout::new(store, "test".into()),
             identity: RepositoryIdentity::new("test", "test", 1).unwrap(),
-            protections: RwLock::new(BranchProtections::configured(&protected_branches)),
-            lifecycle: RwLock::new(RepositoryLifecycle::active()),
             pinned: Mutex::new(None),
             maintenance: Mutex::new(None),
         };

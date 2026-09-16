@@ -427,8 +427,9 @@ async fn publish_attempt<'a>(
         ));
     }
     let has_branch = refs.keys().any(|name| name.starts_with("refs/heads/"));
+    let actor = principal.identity().ok_or(ReceiveError::Forbidden)?;
     let protections = entry
-        .branch_protections()
+        .branch_protections(server, &actor)
         .await
         .map_err(|error| ReceiveError::Settings(Box::new(error)))?;
     let protected = input.publication == Publication::NativePush
@@ -500,6 +501,7 @@ async fn publish_attempt<'a>(
     };
     let outcome = if changed_path_hashes.is_empty() {
         commit_prepared(
+            server,
             principal,
             entry,
             artifacts,
@@ -535,6 +537,7 @@ async fn publish_attempt<'a>(
                     return Err(ReceiveError::Locked);
                 }
                 commit_prepared(
+                    server,
                     principal,
                     entry,
                     artifacts,
@@ -632,6 +635,7 @@ async fn recover_native_plan(
 }
 
 async fn commit_prepared(
+    server: &Server,
     principal: &Principal,
     entry: &Repository,
     artifacts: crab_remote::prepare::Artifacts<'_>,
@@ -643,8 +647,9 @@ async fn commit_prepared(
     if !principal.can_write(&entry.config) {
         return Err(ReceiveError::Forbidden);
     }
+    let actor = principal.identity().ok_or(ReceiveError::Forbidden)?;
     if entry
-        .lifecycle()
+        .lifecycle(server, &actor)
         .await
         .map_err(|error| ReceiveError::Settings(Box::new(error)))?
         .archived

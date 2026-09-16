@@ -16,6 +16,12 @@ pub(crate) use operations::{
     CreateCommitStatus, CreateLabel, DeleteLabel, GetCommitStatusSubmission, ListComments,
     ListCommitStatuses, ListIssues, ListLabels, UpdateComment, UpdateIssue, UpdateLabel,
 };
+pub(crate) use settings::{
+    BranchProtectionRecord, BranchProtectionSettings, GetBranchProtections, GetRepositoryLifecycle,
+    ReplaceBranchProtections, ReplaceBranchProtectionsInput, ReplaceBranchProtectionsOutcome,
+    ReplaceRepositoryLifecycle, ReplaceRepositoryLifecycleInput, ReplaceRepositoryLifecycleOutcome,
+    RepositoryLifecycleRecord,
+};
 
 const MAX_NUMBER: u64 = 9_007_199_254_740_991;
 const MAX_LIST_ITEMS: usize = 50;
@@ -539,6 +545,8 @@ impl Query for GetComment {
 mod checks;
 mod checks_codec;
 mod operations;
+mod settings;
+mod settings_codec;
 
 pub(crate) fn register(registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
     registry.bind_command::<CreateIssue>()?;
@@ -551,6 +559,8 @@ pub(crate) fn register(registry: &mut RegistryBuilder) -> crab_cell_runtime::Res
     registry.bind_command::<CreateCommitStatus>()?;
     registry.bind_command::<CreateCheckRun>()?;
     registry.bind_command::<UpdateCheckRun>()?;
+    registry.bind_command::<ReplaceBranchProtections>()?;
+    registry.bind_command::<ReplaceRepositoryLifecycle>()?;
     registry.bind_query::<GetIssue>()?;
     registry.bind_query::<GetComment>()?;
     registry.bind_query::<ListIssues>()?;
@@ -561,7 +571,9 @@ pub(crate) fn register(registry: &mut RegistryBuilder) -> crab_cell_runtime::Res
     registry.bind_query::<ListCheckRuns>()?;
     registry.bind_query::<GetCheckRun>()?;
     registry.bind_query::<GetCheckCreateSubmission>()?;
-    registry.bind_query::<GetCheckUpdateSubmission>()
+    registry.bind_query::<GetCheckUpdateSubmission>()?;
+    registry.bind_query::<GetBranchProtections>()?;
+    registry.bind_query::<GetRepositoryLifecycle>()
 }
 
 fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlStatement {

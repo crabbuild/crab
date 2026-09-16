@@ -357,6 +357,52 @@ fn repository_codec_v1_pins_check_fixtures() {
 }
 
 #[test]
+fn repository_codec_v1_pins_settings_fixtures() {
+    let settings = BranchProtectionSettings {
+        version: 1,
+        rules: vec![BranchProtectionRecord {
+            branch: "main".into(),
+            required_approvals: 2,
+            required_checks: vec!["ci".into()],
+        }],
+    };
+    assert_fixture(
+        &settings,
+        "000000000000000100000001000000046d61696e0200000001000000026369",
+    );
+    assert_fixture(
+        &ReplaceBranchProtectionsInput {
+            expected_version: 0,
+            rules: settings.rules.clone(),
+        },
+        "000000000000000000000001000000046d61696e0200000001000000026369",
+    );
+    assert_fixture(
+        &ReplaceBranchProtectionsOutcome::Updated(settings),
+        "01000000000000000100000001000000046d61696e0200000001000000026369",
+    );
+    assert_fixture(&ReplaceBranchProtectionsOutcome::Conflict, "02");
+    let lifecycle = RepositoryLifecycleRecord {
+        version: 1,
+        archived: true,
+    };
+    assert_fixture(&lifecycle, "000000000000000101");
+    assert_fixture(
+        &ReplaceRepositoryLifecycleInput {
+            expected_version: 0,
+            archived: true,
+        },
+        "000000000000000001",
+    );
+    assert_fixture(
+        &ReplaceRepositoryLifecycleOutcome::Updated(lifecycle),
+        "01000000000000000101",
+    );
+    assert_fixture(&ReplaceRepositoryLifecycleOutcome::Conflict, "02");
+    assert_fixture(&ReplaceRepositoryLifecycleOutcome::Unchanged, "03");
+}
+
+#[test]
 fn maximum_utf8_label_catalog_fits_its_registered_output_bound() {
     let label = LabelRecord {
         number: 1,

@@ -1048,7 +1048,7 @@ ready record with a missing control/root fails verification rather than
 bootstrapping again. `serve` verifies this state and root for every repository
 before binding either listener.
 
-The router and authenticated issue/comment/label/status/check HTTP routes are integration-qualified
+The router and authenticated issue/comment/label/status/check/settings HTTP routes are integration-qualified
 for explicit bootstrap, local reuse, clean idle release, source-independent
 exact-root restoration and stable submission replay. Old collaboration objects
 are not read by serving or maintenance code.

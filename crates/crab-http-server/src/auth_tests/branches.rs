@@ -196,8 +196,18 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
         catalog["repositories"][0]["protected_branches"][1]["branch"],
         "feature/policy"
     );
-    let persisted = crate::repository_settings::load(&repo).await.unwrap();
-    assert_eq!(persisted, repo.branch_protections().await.unwrap());
+    let actor = crate::auth::Identity {
+        issuer: h.provider.issuer.clone(),
+        subject: "alice-id".into(),
+        name: "Alice".into(),
+    };
+    let persisted = crate::repository_settings::load(&h.server, &repo, &actor)
+        .await
+        .unwrap();
+    assert_eq!(
+        persisted,
+        repo.branch_protections(&h.server, &actor).await.unwrap()
+    );
 
     crate::server::receive_tests::success(source.path(), &["checkout", "-b", "feature/policy"])
         .await;
@@ -246,31 +256,21 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
         format!("{policy_commit}\trefs/heads/feature/policy")
     );
 
-    let external = Repository {
-        id: uuid::Uuid::from_bytes([2; 16]),
-        config: repo.config.clone(),
-        store: repo.store.clone(),
-        layout: repo.layout.clone(),
-        identity: repo.identity.clone(),
-        protections: RwLock::new(BranchProtections {
-            version: 2,
-            rules: repo.config.protected_branches.clone(),
-        }),
-        lifecycle: RwLock::new(RepositoryLifecycle::active()),
-        pinned: Mutex::new(None),
-        maintenance: Mutex::new(None),
-    };
     let mut external_rules = repo.config.protected_branches.clone();
     external_rules.push(crate::BranchProtection {
         branch: "feature/policy".into(),
         required_approvals: 1,
         required_checks: vec![],
     });
-    let external_policy = crate::repository_settings::replace(&external, 2, external_rules)
-        .await
-        .unwrap();
-    assert_eq!(external_policy.version, 3);
-    assert_eq!(repo.protections.read().await.version, 2);
+    let external_policy = set_branch_protections(
+        &h,
+        &alice,
+        csrf,
+        json!({"expected_version":2,"rules":external_rules}),
+    )
+    .await;
+    assert_eq!(external_policy.0, StatusCode::OK, "{}", external_policy.1);
+    assert_eq!(external_policy.1["version"], 3);
 
     std::fs::write(source.path().join("POLICY.md"), "changed elsewhere\n").unwrap();
     crate::server::receive_tests::success(source.path(), &["add", "POLICY.md"]).await;
@@ -286,7 +286,6 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
         String::from_utf8_lossy(&rejected.stderr)
             .contains("protected branch requires a pull request")
     );
-    assert_eq!(repo.protections.read().await.version, 3);
     let catalog = h.json("/api/repos", &alice).await;
     assert_eq!(catalog["repositories"][0]["protection_version"], 3);
     crate::server::receive_tests::success(source.path(), &["checkout", "main"]).await;
@@ -515,7 +514,7 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
     assert_eq!(catalog["repositories"][0]["archive_version"], 1);
     assert_eq!(catalog["repositories"][0]["archived"], true);
     assert_eq!(
-        crate::repository_settings::load_lifecycle(&repo)
+        crate::repository_settings::load_lifecycle(&h.server, &repo, &actor)
             .await
             .unwrap(),
         crate::repository_settings::RepositoryLifecycle {

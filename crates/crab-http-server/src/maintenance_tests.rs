@@ -26,7 +26,7 @@ impl crab_cell_runtime::PeerRoundTrip for UnavailableRoundTrip {
     }
 }
 
-pub(super) async fn fixture() -> Arc<Server> {
+async fn fixture_without_cells() -> Arc<Server> {
     let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
     let admission_store = store.clone();
     let layout = StoreLayout::new(store.clone(), "maintenance".into());
@@ -51,8 +51,6 @@ pub(super) async fn fixture() -> Arc<Server> {
                 identity: RepositoryIdentity::new("memory", "maintenance", 1).unwrap(),
                 store,
                 layout,
-                protections: RwLock::new(BranchProtections::configured(&[])),
-                lifecycle: RwLock::new(RepositoryLifecycle::active()),
                 pinned: Mutex::new(None),
                 maintenance: Mutex::new(None),
             },
@@ -82,6 +80,89 @@ pub(super) async fn fixture() -> Arc<Server> {
             .unwrap(),
         metrics: crate::metrics::Metrics::new().unwrap(),
     })
+}
+
+pub(super) async fn fixture() -> Arc<Server> {
+    static CELL_DIRS: std::sync::OnceLock<std::sync::Mutex<Vec<tempfile::TempDir>>> =
+        std::sync::OnceLock::new();
+
+    let mut server = fixture_without_cells().await;
+    server.cell_runtime.shutdown().await.unwrap();
+    let repository = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
+    let identity = crab_cell_runtime::ApplicationIdentity::new(
+        crab_cell_runtime::TenantId::from_bytes([31; 16]),
+        crab_cell_runtime::ApplicationId::from_bytes([32; 16]),
+    );
+    let layout = crab_storage::CellStorageLayout::new(
+        repository.store.clone(),
+        object_store::path::Path::from("maintenance-test-cells"),
+        *identity.application().as_bytes(),
+    );
+    let registry = Arc::new(crate::cells::compiled_registry().unwrap());
+    crate::cells::bootstrap_release_at(
+        &layout,
+        identity,
+        &registry,
+        &format!("sha256:{}", "b".repeat(64)),
+    )
+    .await
+    .unwrap();
+    let cell_dir = tempfile::TempDir::new().unwrap();
+    crate::cells::initialize_repository_at(
+        &layout,
+        identity,
+        &registry,
+        cell_dir.path(),
+        "https://initializer.test:8081".into(),
+        repository.id,
+    )
+    .await
+    .unwrap();
+    let cell_session = crab_cell_runtime::SessionId::from_bytes([33; 16]);
+    let cell_runtime = crab_cell_runtime::CellRuntime::new(
+        crab_cell_runtime::SqlWorkerPool::new(1, 16).unwrap(),
+        16 * 1024 * 1024,
+        cell_session,
+    )
+    .unwrap();
+    let router = crate::cells::RepositoryCellRouter::new(
+        identity,
+        layout.clone(),
+        Arc::clone(&registry),
+        cell_runtime.clone(),
+        crate::cells::RepositoryCellPeer::new(
+            crab_cell_runtime::NodeDirectory::new(
+                layout,
+                crab_cell_runtime::Digest::from_bytes([34; 32]),
+                crab_cell_runtime::Digest::from_bytes([35; 32]),
+                registry.release_digest(),
+            ),
+            Arc::new(crab_cell_runtime::PeerSigner::new(
+                cell_session,
+                registry.release_digest(),
+                ed25519_dalek::SigningKey::from_bytes(&[36; 32]),
+            )),
+            Arc::new(UnavailableRoundTrip),
+            crab_cell_runtime::Owner {
+                session: cell_session,
+                endpoint: "https://server.test:8081".into(),
+            },
+        ),
+        cell_dir.path().to_path_buf(),
+    )
+    .unwrap();
+    CELL_DIRS
+        .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+        .lock()
+        .unwrap()
+        .push(cell_dir);
+    let mutable = Arc::get_mut(&mut server).unwrap();
+    mutable.cell_runtime = cell_runtime;
+    mutable.repository_cells = Some(router);
+    server
 }
 
 fn repository(server: &Server) -> Arc<Repository> {

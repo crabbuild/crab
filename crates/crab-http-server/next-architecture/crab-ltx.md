@@ -1,12 +1,12 @@
 # crab-ltx: reuse of Celld's SQLite replication engine
 
-[Design index](README.md) · Local/remote library and issue/comment/label/status/check HTTP integration implemented.
+[Design index](README.md) · Local/remote library and issue/comment/label/status/check/settings HTTP integration implemented.
 
 [crab-ltx](../../crab-ltx/README.md) now implements the embedded local SQLite
 WAL-to-LTX mechanics and optional `replica` transport/paged reads. The Cargo member contains a pinned, modified source
 integration of `celld-ltx`, not a Git dependency or separate daemon.
 The HTTP server consumes it through `crab-cell-runtime`: repository issue,
-comment, label, commit-status and check-run commands publish LTX before success, cold activation restores the exact
+comment, label, commit-status, check-run and repository-policy commands publish LTX before success, cold activation restores the exact
 published root, and public routes use the owner-aware typed client. Remaining
 domain adapters, fleet-scale takeover and complete operational qualification
 remain delivery work.
@@ -25,7 +25,7 @@ remain delivery work.
 | Paged SQL | Authenticated immutable views and writable sparse activation; incremental hydration, bounded range read-ahead |
 | Failure/retention | Capture failure fences the handle; fresh-directory reactivation; exact batch/head pruning reverifies local bytes before deleting and releasing admission accounting |
 | Host facilities | Injectable filesystem/base VFS/clock/executor; shared page-fault worker/cache and I/O/job/recovery concurrency budgets |
-| Server wiring | Repository issue/comment/label/status/check SQL, owner/control publication, scheduled owner-bound compaction, exact local-cut pruning, local/remote/idle/stale-owner routing, public HTTP response gating and source-loss restore are wired; remaining collaboration domains are not |
+| Server wiring | Repository issue/comment/label/status/check/settings SQL, owner/control publication, scheduled owner-bound compaction, exact local-cut pruning, local/remote/idle/stale-owner routing, public HTTP response gating and source-loss restore are wired; remaining collaboration domains are not |
 
 Source and usage: [crate README](../../crab-ltx/README.md),
 [public API](../../crab-ltx/src/lib.rs),

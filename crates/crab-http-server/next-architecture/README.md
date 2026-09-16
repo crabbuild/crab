@@ -2,7 +2,7 @@
 
 Status: target server architecture. Local and optional remote `crab-ltx`
 mechanics are implemented, and the server now has a statically registered
-repository issue/comment/label/status/check module proven through local LTX publication and
+repository issue/comment/label/status/check/settings module proven through local LTX publication and
 source-loss restore. Label create/edit/delete/list, issue label assignment and
 commit-status create/latest/replay and versioned check-run create/update/replay now share one repository transaction boundary;
 Pull metadata consumes the same Cell label, status and check catalogs while its own
@@ -37,7 +37,7 @@ cursor view of pending and failed Cells.
 Configured multi-node quorum and the remaining product-domain route cuts are not
 yet integrated. New repository creation and adoption explicitly publish an empty
 Cell and mark the catalog ready. Startup
-rejects every missing or rootless repository Cell. The issue/comment/label/status/check HTTP group
+rejects every missing or rootless repository Cell. The issue/comment/label/status/check/settings HTTP group
 now uses the release-aware router, which reuses local handles, selects
 authenticated remote owners and restores idle Cells without request-time empty
 bootstrap.

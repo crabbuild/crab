@@ -345,8 +345,6 @@ async fn repository(store: Store) -> Arc<Repository> {
         identity: RepositoryIdentity::new("memory", "remote-owner", 1).unwrap(),
         store,
         layout,
-        protections: RwLock::new(BranchProtections::configured(&[])),
-        lifecycle: RwLock::new(RepositoryLifecycle::active()),
         pinned: Mutex::new(None),
         maintenance: Mutex::new(None),
     })

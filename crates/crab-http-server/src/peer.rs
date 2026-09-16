@@ -647,21 +647,21 @@ fn authorize_repository(
 
     let authorized = match request.operation() {
         Some(peer_wire::peer_request::Operation::Mutate(mutation)) => {
-            access >= RepositoryAccess::Write
-                && match mutation.operation.as_ref() {
-                    Some(peer_wire::mutation_request::Operation::CellCommand(command)) => {
-                        required_mutation_action(command.command_id)
-                            .is_some_and(|action| request.permits(action))
-                    }
-                    _ => false,
+            match mutation.operation.as_ref() {
+                Some(peer_wire::mutation_request::Operation::CellCommand(command)) => {
+                    required_mutation_action(command.command_id).is_some_and(|action| {
+                        request.permits(action) && access >= required_mutation_access(action)
+                    })
                 }
+                _ => false,
+            }
         }
         Some(peer_wire::peer_request::Operation::Read(read)) => match read.operation {
             Some(peer_wire::read_request::Operation::Describe(true)) => {
                 // Remote commands must bind the active incarnation before mutation.
                 // This preflight exposes no product rows and must not grant query access.
                 (access >= RepositoryAccess::Read && request.permits("repository.read"))
-                    || (access >= RepositoryAccess::Write && permits_repository_mutation(request))
+                    || permits_repository_mutation(request, access)
             }
             Some(peer_wire::read_request::Operation::CellQuery(_)) => {
                 access >= RepositoryAccess::Read && request.permits("repository.read")
@@ -669,7 +669,7 @@ fn authorize_repository(
             _ => false,
         },
         Some(peer_wire::peer_request::Operation::Resolve(_)) => {
-            access >= RepositoryAccess::Write && permits_repository_mutation(request)
+            permits_repository_mutation(request, access)
         }
         _ => false,
     };
@@ -679,7 +679,7 @@ fn authorize_repository(
     Ok(())
 }
 
-fn permits_repository_mutation(request: &VerifiedPeerRequest) -> bool {
+fn permits_repository_mutation(request: &VerifiedPeerRequest, access: RepositoryAccess) -> bool {
     [
         "repository.issue.create",
         "repository.comment.create",
@@ -691,9 +691,20 @@ fn permits_repository_mutation(request: &VerifiedPeerRequest) -> bool {
         "repository.status.create",
         "repository.check.create",
         "repository.check.update",
+        "repository.settings.protections",
+        "repository.settings.lifecycle",
     ]
     .iter()
-    .any(|action| request.permits(action))
+    .any(|action| request.permits(action) && access >= required_mutation_access(action))
+}
+
+fn required_mutation_access(action: &str) -> RepositoryAccess {
+    match action {
+        "repository.settings.protections" | "repository.settings.lifecycle" => {
+            RepositoryAccess::Admin
+        }
+        _ => RepositoryAccess::Write,
+    }
 }
 
 const fn required_mutation_action(command_id: u32) -> Option<&'static str> {
@@ -708,6 +719,8 @@ const fn required_mutation_action(command_id: u32) -> Option<&'static str> {
         11 => Some("repository.status.create"),
         12 => Some("repository.check.create"),
         13 => Some("repository.check.update"),
+        14 => Some("repository.settings.protections"),
+        15 => Some("repository.settings.lifecycle"),
         _ => None,
     }
 }
@@ -942,6 +955,22 @@ mod tests {
             let request = verified(command, vec![action.into()]);
             assert!(
                 authorize_repository(&repository(), Some("https://issuer.example"), &request)
+                    .is_ok()
+            );
+        }
+        for (command, action) in [
+            (14, "repository.settings.protections"),
+            (15, "repository.settings.lifecycle"),
+        ] {
+            let request = verified(command, vec![action.into()]);
+            assert!(
+                authorize_repository(&repository(), Some("https://issuer.example"), &request)
+                    .is_err()
+            );
+            let mut administrator = repository();
+            administrator.members[0].access = RepositoryAccess::Admin;
+            assert!(
+                authorize_repository(&administrator, Some("https://issuer.example"), &request)
                     .is_ok()
             );
         }

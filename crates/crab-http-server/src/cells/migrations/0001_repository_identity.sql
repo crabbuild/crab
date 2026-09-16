@@ -12,6 +12,19 @@ CREATE TABLE repository_sequences (
 
 INSERT INTO repository_sequences(kind, last) VALUES ('issue', 0), ('label', 0), ('check', 0);
 
+CREATE TABLE repository_settings (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    protections_version INTEGER NOT NULL DEFAULT 0
+        CHECK (protections_version BETWEEN 0 AND 9007199254740991),
+    protections BLOB CHECK (protections IS NULL OR length(protections) <= 65536),
+    lifecycle_version INTEGER NOT NULL DEFAULT 0
+        CHECK (lifecycle_version BETWEEN 0 AND 9007199254740991),
+    archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
+    CHECK ((protections_version = 0) = (protections IS NULL))
+) STRICT;
+
+INSERT INTO repository_settings(singleton) VALUES (1);
+
 CREATE TABLE repository_label_submissions (
     request_id BLOB PRIMARY KEY CHECK (length(request_id) = 16),
     payload_digest BLOB NOT NULL CHECK (length(payload_digest) = 32),

@@ -67,6 +67,8 @@ const REPOSITORY_COMMANDS: &[OperationDescriptor] = &[
     operation(11, 8 * 1024, 8 * 1024),
     operation(12, 256 * 1024, 256 * 1024),
     operation(13, 256 * 1024, 256 * 1024),
+    operation(14, 128 * 1024, 128 * 1024),
+    operation(15, 32, 32),
 ];
 const REPOSITORY_QUERIES: &[OperationDescriptor] = &[
     operation(1, 8, 80 * 1024),
@@ -81,6 +83,8 @@ const REPOSITORY_QUERIES: &[OperationDescriptor] = &[
     operation(10, 64, 256 * 1024),
     operation(11, 32, 256 * 1024),
     operation(12, 32, 256 * 1024),
+    operation(13, 8, 128 * 1024),
+    operation(14, 8, 32),
 ];
 
 struct RepositoryModule;
@@ -1293,6 +1297,8 @@ fn repository_source_digest() -> Digest {
     hasher.update(include_bytes!("cells/repository/checks.rs"));
     hasher.update(include_bytes!("cells/repository/checks_codec.rs"));
     hasher.update(include_bytes!("cells/repository/operations.rs"));
+    hasher.update(include_bytes!("cells/repository/settings.rs"));
+    hasher.update(include_bytes!("cells/repository/settings_codec.rs"));
     Digest::from_bytes(*hasher.finalize().as_bytes())
 }
 
@@ -1337,16 +1343,20 @@ mod tests {
     use serde_json::Value;
 
     use super::repository::{
-        CheckAnnotationRecord, CheckOutputRecord, CheckReportInput, CheckRunKey, CheckStepRecord,
-        CheckSubmissionKey, CommentKey, CommentPage, CommitStatusCatalog, CreateCheckRun,
-        CreateCheckRunInput, CreateCheckRunOutcome, CreateComment, CreateCommentInput,
-        CreateCommentOutcome, CreateCommitStatus, CreateCommitStatusInput,
-        CreateCommitStatusOutcome, CreateIssue, CreateIssueInput, CreateIssueOutcome, CreateLabel,
-        CreateLabelInput, CreateLabelOutcome, GetCheckRun, GetCheckUpdateSubmission, GetComment,
-        GetIssue, IssuePage, LabelCatalog, ListComments, ListCommentsInput, ListCommitStatuses,
-        ListIssues, ListIssuesInput, ListLabels, RepositoryAuthor, UpdateCheckRun,
-        UpdateCheckRunInput, UpdateCheckRunOutcome, UpdateComment, UpdateCommentInput,
-        UpdateCommentOutcome, UpdateIssue, UpdateIssueInput, UpdateIssueOutcome,
+        BranchProtectionRecord, BranchProtectionSettings, CheckAnnotationRecord, CheckOutputRecord,
+        CheckReportInput, CheckRunKey, CheckStepRecord, CheckSubmissionKey, CommentKey,
+        CommentPage, CommitStatusCatalog, CreateCheckRun, CreateCheckRunInput,
+        CreateCheckRunOutcome, CreateComment, CreateCommentInput, CreateCommentOutcome,
+        CreateCommitStatus, CreateCommitStatusInput, CreateCommitStatusOutcome, CreateIssue,
+        CreateIssueInput, CreateIssueOutcome, CreateLabel, CreateLabelInput, CreateLabelOutcome,
+        GetBranchProtections, GetCheckRun, GetCheckUpdateSubmission, GetComment, GetIssue,
+        GetRepositoryLifecycle, IssuePage, LabelCatalog, ListComments, ListCommentsInput,
+        ListCommitStatuses, ListIssues, ListIssuesInput, ListLabels, ReplaceBranchProtections,
+        ReplaceBranchProtectionsInput, ReplaceBranchProtectionsOutcome, ReplaceRepositoryLifecycle,
+        ReplaceRepositoryLifecycleInput, ReplaceRepositoryLifecycleOutcome, RepositoryAuthor,
+        RepositoryLifecycleRecord, UpdateCheckRun, UpdateCheckRunInput, UpdateCheckRunOutcome,
+        UpdateComment, UpdateCommentInput, UpdateCommentOutcome, UpdateIssue, UpdateIssueInput,
+        UpdateIssueOutcome,
     };
     use super::*;
 
@@ -1424,7 +1434,7 @@ mod tests {
         assert_eq!(descriptor["modules"][0]["name"], "repository");
         assert_eq!(
             descriptor["modules"][0]["code"],
-            "00817144d1e7cae1c9c423163f48c0dbebe0adb57888b027fe6690d545c1a0d2"
+            "70b2df4f939de3457f23b2ba86b67127b398bb0d8c82693c15d880840f9e659c"
         );
         assert_eq!(descriptor["modules"][0]["schema_min"], 1);
         assert_eq!(descriptor["modules"][0]["schema_max"], 1);
@@ -1433,14 +1443,14 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            13
+            15
         );
         assert_eq!(
             descriptor["modules"][0]["queries"]
                 .as_array()
                 .unwrap()
                 .len(),
-            12
+            14
         );
         assert_eq!(descriptor["namespaces"][0]["role"], "repository");
         assert_eq!(descriptor["namespaces"][0]["shards"], 1);
@@ -2996,6 +3006,49 @@ mod tests {
         assert_eq!(replayed_running_detail.run.version, 2);
         assert_eq!(replayed_running_detail.output.title, "Tests running");
 
+        let protection_settings = BranchProtectionSettings {
+            version: 1,
+            rules: vec![BranchProtectionRecord {
+                branch: "main".into(),
+                required_approvals: 2,
+                required_checks: vec!["ci/test".into()],
+            }],
+        };
+        let protections = first_client
+            .command::<ReplaceBranchProtections>(
+                &target,
+                mutation(24),
+                ReplaceBranchProtectionsInput {
+                    expected_version: 0,
+                    rules: protection_settings.rules.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            protections.output,
+            ReplaceBranchProtectionsOutcome::Updated(protection_settings.clone())
+        );
+        let lifecycle = RepositoryLifecycleRecord {
+            version: 1,
+            archived: true,
+        };
+        let archived = first_client
+            .command::<ReplaceRepositoryLifecycle>(
+                &target,
+                mutation(25),
+                ReplaceRepositoryLifecycleInput {
+                    expected_version: 0,
+                    archived: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            archived.output,
+            ReplaceRepositoryLifecycleOutcome::Updated(lifecycle.clone())
+        );
+
         assert_eq!(
             first_client
                 .query::<ListIssues>(
@@ -3177,6 +3230,22 @@ mod tests {
                 .unwrap()
                 .output,
             Some(completed_detail.as_ref().clone())
+        );
+        assert_eq!(
+            second_client
+                .query::<GetBranchProtections>(&target, Some(protections.receipt), ())
+                .await
+                .unwrap()
+                .output,
+            Some(protection_settings)
+        );
+        assert_eq!(
+            second_client
+                .query::<GetRepositoryLifecycle>(&target, Some(archived.receipt), ())
+                .await
+                .unwrap()
+                .output,
+            lifecycle
         );
         assert_eq!(
             second_client

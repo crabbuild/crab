@@ -1,16 +1,26 @@
-use crab_storage::StorageError;
+use crab_cell_runtime::{Committed, InvocationError, MutationIdentity, Observed, RequestId};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{
     BranchProtection,
     app::{Error, Result},
-    app_storage,
+    auth::Identity,
+    cells::{
+        RepositoryCell, RepositoryCellRouter,
+        repository::{
+            BranchProtectionRecord, BranchProtectionSettings, GetBranchProtections,
+            GetRepositoryLifecycle, ReplaceBranchProtections, ReplaceBranchProtectionsInput,
+            ReplaceBranchProtectionsOutcome, ReplaceRepositoryLifecycle,
+            ReplaceRepositoryLifecycleInput, ReplaceRepositoryLifecycleOutcome,
+            RepositoryLifecycleRecord,
+        },
+    },
     config::valid_branch_protections,
-    server::Repository,
+    server::{Repository, Server},
 };
 
-const BRANCH_PROTECTIONS: &str = "app/v1/settings/branch-protections.json";
-const REPOSITORY_LIFECYCLE: &str = "app/v1/settings/repository.json";
+const MAX_NUMBER: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -24,15 +34,6 @@ pub(crate) struct BranchProtections {
 pub(crate) struct RepositoryLifecycle {
     pub version: u64,
     pub archived: bool,
-}
-
-impl RepositoryLifecycle {
-    pub(crate) fn active() -> Self {
-        Self {
-            version: 0,
-            archived: false,
-        }
-    }
 }
 
 impl BranchProtections {
@@ -49,171 +50,200 @@ impl BranchProtections {
     }
 }
 
-pub(crate) async fn load(repo: &Repository) -> Result<BranchProtections> {
-    let Some((settings, _)) =
-        app_storage::read::<BranchProtections>(repo, BRANCH_PROTECTIONS).await?
-    else {
-        return Ok(BranchProtections::configured(
-            &repo.config.protected_branches,
-        ));
-    };
-    validate_stored(&settings)?;
-    Ok(settings)
-}
-
-pub(crate) async fn refresh(repo: &Repository) -> Result<BranchProtections> {
-    let current = load(repo).await?;
-    let mut effective = repo.protections.write().await;
-    // A load started before a successful local replacement can finish afterward.
-    // Keep that delayed snapshot from rolling policy back to an older version.
-    if current.version >= effective.version && *effective != current {
-        *effective = current.clone();
-    }
-    Ok(effective.clone())
+pub(crate) async fn load(
+    server: &Server,
+    repo: &Repository,
+    actor: &Identity,
+) -> Result<BranchProtections> {
+    let routed = route(server, repo, actor, "repository.read").await?;
+    let stored = query_output(
+        routed
+            .client
+            .query::<GetBranchProtections>(&routed.target, None, ())
+            .await,
+    )?;
+    stored.map_or_else(
+        || {
+            Ok(BranchProtections::configured(
+                &repo.config.protected_branches,
+            ))
+        },
+        branch_protections,
+    )
 }
 
 pub(crate) async fn replace(
+    server: &Server,
     repo: &Repository,
+    actor: &Identity,
     expected_version: u64,
     rules: Vec<BranchProtection>,
 ) -> Result<BranchProtections> {
-    if !valid_branch_protections(&rules) {
+    if expected_version >= MAX_NUMBER || !valid_branch_protections(&rules) {
         return Err(Error::Invalid(
             "Protection rules require at most 100 unique valid branches, 0–20 approvals, and at most 50 unique check names",
         ));
     }
-    let mut effective = repo.protections.write().await;
-    let stored = app_storage::read::<BranchProtections>(repo, BRANCH_PROTECTIONS).await?;
-    let current = match &stored {
-        Some((settings, _)) => {
-            validate_stored(settings)?;
-            settings.clone()
-        }
-        None if effective.version == 0 => effective.clone(),
-        None => return Err(Error::Conflict),
-    };
-    if current != *effective {
-        *effective = current.clone();
+    let routed = route(server, repo, actor, "repository.settings.protections").await?;
+    match command_output(
+        routed
+            .client
+            .command::<ReplaceBranchProtections>(
+                &routed.target,
+                mutation_identity()?,
+                ReplaceBranchProtectionsInput {
+                    expected_version,
+                    rules: rules.into_iter().map(protection_record).collect(),
+                },
+            )
+            .await,
+    )? {
+        ReplaceBranchProtectionsOutcome::Updated(settings) => branch_protections(settings),
+        ReplaceBranchProtectionsOutcome::Conflict => Err(Error::Conflict),
     }
-    if current.version != expected_version || current.version >= app_storage::MAX_NUMBER - 1 {
-        return Err(Error::Conflict);
-    }
-    let proposed = BranchProtections {
-        version: current.version + 1,
-        rules,
-    };
-    match stored {
-        Some((_, etag)) => {
-            match app_storage::update(repo, BRANCH_PROTECTIONS, &proposed, etag).await {
-                Ok(()) => {}
-                Err(Error::Storage(StorageError::StateConflict { .. })) => {
-                    return Err(Error::Conflict);
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        None => {
-            let existing =
-                app_storage::create_or_read(repo, BRANCH_PROTECTIONS, proposed.clone()).await?;
-            if existing != proposed {
-                validate_stored(&existing)?;
-                *effective = existing;
-                return Err(Error::Conflict);
-            }
-        }
-    }
-    *effective = proposed.clone();
-    Ok(proposed)
 }
 
-pub(crate) async fn load_lifecycle(repo: &Repository) -> Result<RepositoryLifecycle> {
-    let Some((lifecycle, _)) =
-        app_storage::read::<RepositoryLifecycle>(repo, REPOSITORY_LIFECYCLE).await?
-    else {
-        return Ok(RepositoryLifecycle::active());
-    };
-    validate_lifecycle(&lifecycle)?;
-    Ok(lifecycle)
-}
-
-pub(crate) async fn refresh_lifecycle(repo: &Repository) -> Result<RepositoryLifecycle> {
-    let current = load_lifecycle(repo).await?;
-    let mut effective = repo.lifecycle.write().await;
-    // A load started before a successful local replacement can finish afterward.
-    // Keep that delayed snapshot from rolling lifecycle state back.
-    if current.version >= effective.version && *effective != current {
-        *effective = current;
-    }
-    Ok(effective.clone())
+pub(crate) async fn load_lifecycle(
+    server: &Server,
+    repo: &Repository,
+    actor: &Identity,
+) -> Result<RepositoryLifecycle> {
+    let routed = route(server, repo, actor, "repository.read").await?;
+    repository_lifecycle(query_output(
+        routed
+            .client
+            .query::<GetRepositoryLifecycle>(&routed.target, None, ())
+            .await,
+    )?)
 }
 
 pub(crate) async fn replace_lifecycle(
+    server: &Server,
     repo: &Repository,
+    actor: &Identity,
     expected_version: u64,
     archived: bool,
 ) -> Result<RepositoryLifecycle> {
-    let mut effective = repo.lifecycle.write().await;
-    let stored = app_storage::read::<RepositoryLifecycle>(repo, REPOSITORY_LIFECYCLE).await?;
-    let current = match &stored {
-        Some((lifecycle, _)) => {
-            validate_lifecycle(lifecycle)?;
-            lifecycle.clone()
-        }
-        None if effective.version == 0 => effective.clone(),
-        None => return Err(Error::Conflict),
-    };
-    if current != *effective {
-        *effective = current.clone();
-    }
-    if current.version != expected_version || current.version >= app_storage::MAX_NUMBER - 1 {
+    if expected_version >= MAX_NUMBER {
         return Err(Error::Conflict);
     }
-    if current.archived == archived {
-        return Err(Error::Invalid("Repository lifecycle is unchanged"));
-    }
-    let proposed = RepositoryLifecycle {
-        version: current.version + 1,
-        archived,
-    };
-    match stored {
-        Some((_, etag)) => {
-            match app_storage::update(repo, REPOSITORY_LIFECYCLE, &proposed, etag).await {
-                Ok(()) => {}
-                Err(Error::Storage(StorageError::StateConflict { .. })) => {
-                    return Err(Error::Conflict);
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        None => {
-            let existing =
-                app_storage::create_or_read(repo, REPOSITORY_LIFECYCLE, proposed.clone()).await?;
-            if existing != proposed {
-                validate_lifecycle(&existing)?;
-                *effective = existing;
-                return Err(Error::Conflict);
-            }
+    let routed = route(server, repo, actor, "repository.settings.lifecycle").await?;
+    match command_output(
+        routed
+            .client
+            .command::<ReplaceRepositoryLifecycle>(
+                &routed.target,
+                mutation_identity()?,
+                ReplaceRepositoryLifecycleInput {
+                    expected_version,
+                    archived,
+                },
+            )
+            .await,
+    )? {
+        ReplaceRepositoryLifecycleOutcome::Updated(lifecycle) => repository_lifecycle(lifecycle),
+        ReplaceRepositoryLifecycleOutcome::Conflict => Err(Error::Conflict),
+        ReplaceRepositoryLifecycleOutcome::Unchanged => {
+            Err(Error::Invalid("Repository lifecycle is unchanged"))
         }
     }
-    *effective = proposed.clone();
-    Ok(proposed)
 }
 
-fn validate_stored(settings: &BranchProtections) -> Result<()> {
+async fn route(
+    server: &Server,
+    repository: &Repository,
+    principal: &Identity,
+    action: &'static str,
+) -> Result<RepositoryCell> {
+    let router: &RepositoryCellRouter = server
+        .repository_cells
+        .as_ref()
+        .ok_or(Error::CellUnavailable)?;
+    router
+        .route(repository.id, principal, action)
+        .await
+        .map_err(|error| match error {
+            crate::Error::Cell(source) => Error::Cell(source),
+            source => Error::Repository(source),
+        })
+}
+
+fn protection_record(rule: BranchProtection) -> BranchProtectionRecord {
+    BranchProtectionRecord {
+        branch: rule.branch,
+        required_approvals: rule.required_approvals,
+        required_checks: rule.required_checks,
+    }
+}
+
+fn branch_protections(settings: BranchProtectionSettings) -> Result<BranchProtections> {
+    let settings = BranchProtections {
+        version: settings.version,
+        rules: settings
+            .rules
+            .into_iter()
+            .map(|rule| BranchProtection {
+                branch: rule.branch,
+                required_approvals: rule.required_approvals,
+                required_checks: rule.required_checks,
+            })
+            .collect(),
+    };
     if settings.version == 0
-        || settings.version >= app_storage::MAX_NUMBER
+        || settings.version >= MAX_NUMBER
         || !valid_branch_protections(&settings.rules)
     {
-        return Err(Error::Invalid(
-            "Stored branch protection settings are invalid",
+        return Err(Error::CellContract(
+            "Cell returned invalid branch protections",
         ));
     }
-    Ok(())
+    Ok(settings)
 }
 
-fn validate_lifecycle(lifecycle: &RepositoryLifecycle) -> Result<()> {
-    if lifecycle.version == 0 || lifecycle.version >= app_storage::MAX_NUMBER {
-        return Err(Error::Invalid("Stored repository settings are invalid"));
+fn repository_lifecycle(record: RepositoryLifecycleRecord) -> Result<RepositoryLifecycle> {
+    if record.version >= MAX_NUMBER {
+        return Err(Error::CellContract(
+            "Cell returned an invalid repository lifecycle",
+        ));
     }
-    Ok(())
+    Ok(RepositoryLifecycle {
+        version: record.version,
+        archived: record.archived,
+    })
+}
+
+fn mutation_identity() -> Result<MutationIdentity> {
+    let now_ms = crate::cells::unix_now_ms().map_err(Error::Repository)?;
+    let expires_at_ms = now_ms
+        .checked_add(60_000)
+        .ok_or(Error::CellContract("Cell request expiry overflowed"))?;
+    Ok(MutationIdentity {
+        request_id: RequestId::from_bytes(Uuid::now_v7().into_bytes()),
+        issued_at_ms: now_ms,
+        expires_at_ms,
+    })
+}
+
+fn command_output<T>(result: std::result::Result<Committed<T>, InvocationError<T>>) -> Result<T> {
+    match result {
+        Ok(committed) => Ok(committed.output),
+        Err(InvocationError::Rejected(committed)) => Ok(committed.output),
+        Err(InvocationError::Pending(_)) => Err(Error::CellPending),
+        Err(InvocationError::InvalidPublishedResult { source, .. }) => Err(Error::Cell(*source)),
+        Err(InvocationError::NotStarted(source)) => Err(Error::Cell(source)),
+    }
+}
+
+fn query_output<T>(result: std::result::Result<Observed<T>, InvocationError<T>>) -> Result<T> {
+    match result {
+        Ok(observed) => Ok(observed.output),
+        Err(InvocationError::Rejected(_)) => Err(Error::CellContract(
+            "Cell query returned a durable rejection",
+        )),
+        Err(InvocationError::Pending(_)) => Err(Error::CellContract(
+            "Cell query returned pending mutation evidence",
+        )),
+        Err(InvocationError::InvalidPublishedResult { source, .. }) => Err(Error::Cell(*source)),
+        Err(InvocationError::NotStarted(source)) => Err(Error::Cell(source)),
+    }
 }
