@@ -26,6 +26,12 @@ multipart sessions recorded in the shared staging journal. `--repair` aborts
 such a session only after reacquiring its lease and matching its exact provider
 endpoint, container, and object key.
 
+For a protocol-v2 repository, the check is pinned to one authenticated root.
+It validates the checkpoint and capsule frontier, embedded Git packs and
+indexes, the complete pointer catalog, every referenced shard recipe, and each
+external xorb body and chunk identity. The command fails closed if a checking
+phase cannot complete; an object-store error cannot produce a clean result.
+
 For conceptual background, see [Integrity Check](/docs/cli/diagnostics/integrity-check).
 
 ## Options

@@ -1,10 +1,11 @@
 //! Shared publication mechanics; authentication and product policy stay with callers.
+pub mod capsule_protocol;
 pub mod catalog;
 pub mod generation;
 pub mod initialize;
 pub mod journal;
 mod namespace;
-pub use namespace::with_ref_namespace;
+pub use namespace::{with_ref_namespace, with_ref_namespaces};
 
 /// Failure while preparing or publishing canonical Git metadata.
 #[derive(Debug, thiserror::Error)]
@@ -24,6 +25,40 @@ pub enum WriteError {
     VisibilityUnavailable { generation: u64 },
     #[error("ref {ref_name} no longer matches its expected old value at {path}")]
     RefChanged { ref_name: String, path: String },
+    #[error("capsule-protocol root changed at {path}")]
+    CapsuleRootChanged { path: String },
+    #[error("capsule-protocol root is fenced for GC by {fence_id}")]
+    CapsuleGcFenced {
+        fence_id: String,
+        expires_at_unix: u64,
+    },
+    #[error(
+        "capsule-protocol transaction {transaction_id} may have committed; reconcile exact root evidence before retrying"
+    )]
+    CapsuleCommitUncertain {
+        transaction_id: String,
+        #[source]
+        source: Box<crab_storage::StorageError>,
+        verification: Option<Box<WriteError>>,
+    },
+    #[error(
+        "capsule-protocol checkpoint {checkpoint_hash} may have committed; reconcile exact root evidence before retrying"
+    )]
+    CapsuleCheckpointCommitUncertain {
+        checkpoint_hash: String,
+        #[source]
+        source: Box<crab_storage::StorageError>,
+        verification: Option<Box<WriteError>>,
+    },
+    #[error(
+        "capsule-protocol maintenance transition {fence_id} may have committed; reconcile exact root evidence before retrying"
+    )]
+    CapsuleMaintenanceCommitUncertain {
+        fence_id: String,
+        #[source]
+        source: Box<crab_storage::StorageError>,
+        verification: Option<Box<WriteError>>,
+    },
     #[error("publication coordination failed")]
     Coordination(#[from] crab_coordination::CoordinationError),
     #[error("publication storage operation failed")]

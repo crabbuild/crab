@@ -2558,7 +2558,7 @@ pub enum FfOutcome {
 /// clients that don't have the old tip locally hit this path; the
 /// caller should fall back to the commit-graph summary ancestry.
 #[must_use]
-fn is_missing_object_error(stderr: &str) -> bool {
+pub(super) fn is_missing_object_error(stderr: &str) -> bool {
     stderr.contains("Not a valid commit name")
         || stderr.contains("not our ref")
         || stderr.contains("bad revision")
@@ -2951,6 +2951,9 @@ pub struct PushConfig {
     /// Explicit git directory for callers that publish a repository
     /// other than the process current directory.
     pub git_dir: Option<PathBuf>,
+    /// Include the complete outgoing Git and LFS closure instead of excluding
+    /// objects reachable from current remote tips.
+    pub force_full_graph: bool,
     /// Validated internal mirror-plan identity for durable commit attribution.
     pub mirror_plan_id: Option<String>,
     pub protected_push: Option<ProtectedPushSession>,
@@ -3022,6 +3025,7 @@ impl Default for PushConfig {
             active_active_coordinator: None,
             perf_phase_sink: None,
             git_dir: None,
+            force_full_graph: false,
             mirror_plan_id: None,
             protected_push: None,
         }
@@ -3075,6 +3079,7 @@ impl PushConfig {
             active_active_coordinator: None,
             perf_phase_sink: None,
             git_dir: None,
+            force_full_graph: false,
             mirror_plan_id: None,
             protected_push: None,
         }
@@ -3624,6 +3629,20 @@ fn uncertain_commit_identity(error: &CrabError) -> Option<&str> {
         return None;
     };
     let source = io_error.get_ref()?;
+    if let Some(write_error) = source.downcast_ref::<crab_write::WriteError>() {
+        return match write_error {
+            crab_write::WriteError::CapsuleCommitUncertain { transaction_id, .. } => {
+                Some(transaction_id)
+            }
+            crab_write::WriteError::CapsuleCheckpointCommitUncertain {
+                checkpoint_hash, ..
+            } => Some(checkpoint_hash),
+            crab_write::WriteError::CapsuleMaintenanceCommitUncertain { fence_id, .. } => {
+                Some(fence_id)
+            }
+            _ => None,
+        };
+    }
     match source.downcast_ref::<crab_metadata::error::MetadataError>()? {
         crab_metadata::error::MetadataError::RefJournalCommitUncertain {
             transaction_id, ..
@@ -18194,7 +18213,7 @@ fn visibility_base_oid(git_dir: &Path, new_oid: &str) -> Result<Option<String>> 
     Ok(parents.into_iter().next())
 }
 
-fn enumerate_visibility_difference(
+pub(crate) fn enumerate_visibility_difference(
     git_dir: &Path,
     include: &str,
     exclude: Option<&str>,
@@ -18867,9 +18886,16 @@ mod tests {
     }
 
     async fn initialize_test_repository(store: &Store, router: &StoreLayout) {
-        crate::cmd::init::initialize_remote_repository_store(store, router, "refs/heads/main")
+        crate::core::remote_layout::initialize(store, router)
             .await
             .expect("initialize canonical test repository");
+        crate::metadata::manifest::create_manifest(
+            store,
+            router,
+            &Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .expect("initialize canonical v1 test manifest");
     }
 
     async fn ensure_test_layout(store: &Store, router: &StoreLayout) {

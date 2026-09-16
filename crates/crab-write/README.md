@@ -21,6 +21,16 @@ Some(manifest): ready        None: capture fresh state and try another pass
 A commit error may be uncertain; resolve that outcome before proceeding or
 reporting rejection. Read readiness is a separate result from ref durability.
 
+Protocol v2 uses `capsule_protocol::publish` instead of the v1 journal. A
+single-ref push commits by conditionally replacing only that ref head. A
+multi-ref push creates a unique preparing transaction record, conditionally
+prepares each edited head, wins a commit-vs-abort CAS on that record, and
+creates an immutable committed marker. A competing writer may abort a still
+preparing attempt, but cannot abort a committed one; a committed record with a
+missing marker is repaired before its prepared state is used. The repository
+root changes only for checkpoint and maintenance work, so distinct existing
+refs share no foreground mutable object.
+
 ## Initialization
 
 `initialize::initialize_repository` owns canonical empty-repository creation for

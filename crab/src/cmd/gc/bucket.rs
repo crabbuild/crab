@@ -130,6 +130,8 @@ const GLOBAL_PREFIX: &str = ".crab";
 const FILE_INDEX_GC_BATCH_SIZE: usize = 4_096;
 const SHARD_REPAIR_BUDGET_BYTES: u64 = 128 * 1024 * 1024;
 const SHARD_REPAIR_UNIT_BYTES: u64 = 1024 * 1024;
+const MAX_CAPSULE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_CAPSULE_FRONTIER_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 /// Closure sidecars are capped at 128 MiB; two permits keep concurrent
 /// readers below a 256 MiB body budget even when the LIST concurrency is high.
 const CLOSURE_READ_PARALLELISM: usize = 2;
@@ -502,8 +504,7 @@ async fn run_bucket_gc_under_maintenance(
             store,
             coordinator_protected_keys,
             registry,
-            roots.repo_prefixes,
-            roots.root_identity,
+            roots,
             resume_phase,
             cancel,
             &mut outcome,
@@ -524,8 +525,7 @@ async fn run_bucket_gc_under_maintenance(
         store,
         coordinator_protected_keys,
         registry,
-        roots.repo_prefixes,
-        roots.root_identity,
+        roots,
         None,
         cancel,
         &mut outcome,
@@ -546,13 +546,17 @@ async fn run_bucket_gc_streaming(
     store: &Store,
     coordinator_protected_keys: &HashSet<String>,
     registry: &RefRegistry,
-    repo_prefixes: Vec<String>,
-    root_identity: String,
+    roots: BucketRootSnapshot,
     resume_phase: Option<super::journal::GcRunPhase>,
     cancel: &CancellationToken,
     outcome: &mut BucketGcOutcome,
     sweep_lease: Option<&crate::maintenance::GcSweepLease>,
 ) -> Result<BucketGcOutcome> {
+    let BucketRootSnapshot {
+        repo_prefixes,
+        root_identity,
+        capsule_shards,
+    } = roots;
     let snapshot_at = match resume_phase {
         Some(super::journal::GcRunPhase::Planning | super::journal::GcRunPhase::Deleting) => {
             let run_id = args.resume_run_id.as_deref().ok_or_else(|| {
@@ -660,7 +664,14 @@ async fn run_bucket_gc_streaming(
     let mut root_reader =
         DurableMarkReader::new_keys(store.clone(), journal.marks_prefix(), "referenced-shards");
     if resume_phase != Some(super::journal::GcRunPhase::Deleting) {
-        write_bucket_root_marks(store, registry, args.list_concurrency, &journal).await?;
+        write_bucket_root_marks(
+            store,
+            registry,
+            args.list_concurrency,
+            &capsule_shards,
+            &journal,
+        )
+        .await?;
         root_reader =
             DurableMarkReader::new_keys(store.clone(), journal.marks_prefix(), "referenced-shards");
     }
@@ -1048,6 +1059,45 @@ async fn execute_bucket_journal(
 struct BucketRootSnapshot {
     repo_prefixes: Vec<String>,
     root_identity: String,
+    capsule_shards: HashMap<String, Vec<String>>,
+}
+
+struct CapsuleRepositoryRoots {
+    root_digest: String,
+    shard_hashes: Vec<String>,
+}
+
+async fn capsule_repository_roots(
+    store: &Store,
+    repo_prefix: &str,
+) -> Result<Option<CapsuleRepositoryRoots>> {
+    let storage = store.as_storage().clone();
+    let router = crab_storage::StoreLayout::new(storage, repo_prefix.to_owned());
+    let root = match crab_metadata::capsule_protocol::load_root(&router).await {
+        Ok(root) => root,
+        Err(error) => {
+            let error = CrabError::from(error);
+            if matches!(error, CrabError::NotFound { .. }) {
+                return Ok(None);
+            }
+            return Err(error);
+        }
+    };
+    let view = crab_read::capsule_protocol::open_view_from_root(
+        &router,
+        root,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: MAX_CAPSULE_BYTES,
+            max_frontier_bytes: MAX_CAPSULE_FRONTIER_BYTES,
+        },
+    )
+    .await?;
+    let root_digest = view.state_digest();
+    let catalog = view.pointer_catalog()?;
+    Ok(Some(CapsuleRepositoryRoots {
+        root_digest,
+        shard_hashes: catalog.shards().keys().cloned().collect(),
+    }))
 }
 
 #[derive(Default)]
@@ -1118,6 +1168,7 @@ async fn bucket_root_snapshot_streaming(
 ) -> Result<BucketRootSnapshot> {
     let mut repo_prefixes = registry.repos.keys().cloned().collect::<Vec<_>>();
     repo_prefixes.sort_unstable();
+    let mut capsule_shards = HashMap::new();
     let mut digest = RootDigest::default();
     digest.add("registry-schema", &registry.schema_version.to_string());
     digest.add("registry-generation", &registry.generation.to_string());
@@ -1148,6 +1199,17 @@ async fn bucket_root_snapshot_streaming(
     )
     .await?;
     for repo_prefix in &repo_prefixes {
+        if let Some(roots) = capsule_repository_roots(store, repo_prefix).await? {
+            digest.add(
+                "capsule-root",
+                &format!("{repo_prefix}\0{}", roots.root_digest),
+            );
+            for hash in &roots.shard_hashes {
+                digest.add("capsule-shard", &format!("{repo_prefix}\0{hash}"));
+            }
+            capsule_shards.insert(repo_prefix.clone(), roots.shard_hashes);
+            continue;
+        }
         let mut visit = |hash: String| {
             let result = MerkleHash::from_hex(&hash)
                 .map_err(|error| CrabError::CorruptObject {
@@ -1180,6 +1242,7 @@ async fn bucket_root_snapshot_streaming(
     Ok(BucketRootSnapshot {
         repo_prefixes,
         root_identity: digest.finish(),
+        capsule_shards,
     })
 }
 
@@ -1187,6 +1250,7 @@ async fn write_bucket_root_marks(
     store: &Store,
     registry: &RefRegistry,
     concurrency: usize,
+    capsule_shards: &HashMap<String, Vec<String>>,
     journal: &super::journal::GcRunJournal,
 ) -> Result<()> {
     let marks = Arc::new(tokio::sync::Mutex::new(DurableMarkWriter::new_keys(
@@ -1221,6 +1285,12 @@ async fn write_bucket_root_marks(
     let mut repo_prefixes = registry.repos.keys().cloned().collect::<Vec<_>>();
     repo_prefixes.sort_unstable();
     for repo_prefix in repo_prefixes {
+        if let Some(shard_hashes) = capsule_shards.get(&repo_prefix) {
+            for hash in shard_hashes {
+                marks.lock().await.add(&hash).await?;
+            }
+            continue;
+        }
         let marks_for_visit = Arc::clone(&marks);
         let mut visit = move |hash: String| {
             let marks = Arc::clone(&marks_for_visit);
@@ -1241,13 +1311,17 @@ async fn repository_referenced_shards(
     registry: &RefRegistry,
     concurrency: usize,
 ) -> Result<HashMap<String, HashSet<String>>> {
-    let storage = store.clone().into_storage();
     let parallelism = concurrency.max(1);
     futures_util::stream::iter(registry.repos.iter().map(|(repo_prefix, current)| {
-        let storage = storage.clone();
+        let store = store.clone();
         let repo_prefix = repo_prefix.clone();
         let mut shards = current.iter().cloned().collect::<HashSet<_>>();
         async move {
+            if let Some(roots) = capsule_repository_roots(&store, &repo_prefix).await? {
+                shards.extend(roots.shard_hashes);
+                return Ok::<_, CrabError>((repo_prefix, shards));
+            }
+            let storage = store.into_storage();
             let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.clone());
             crab_metadata::layout_descriptor::read_canonical_layout(&storage, &router).await?;
             let mut history = crab_metadata::manifest_store::stream_manifest_history(
@@ -1267,11 +1341,10 @@ async fn repository_referenced_shards(
                 .await?;
                 shards.extend(historical);
             }
-            Ok::<_, crab_metadata::error::MetadataError>((repo_prefix, shards))
+            Ok::<_, CrabError>((repo_prefix, shards))
         }
     }))
     .buffer_unordered(parallelism)
-    .map(|result| result.map_err(CrabError::from))
     .try_collect()
     .await
 }
@@ -1282,7 +1355,7 @@ fn ensure_registry_complete_for_destructive_gc(registry: &RefRegistry) -> Result
     }
     Err(CrabError::Configuration {
         key: "gc.bucket.ref_registry_completeness".into(),
-        origin: "destructive bucket garbage collection requires a schema-current ref-registry produced by a complete manifest backfill; run registry repair before retrying"
+        origin: "destructive bucket garbage collection requires a schema-current ref-registry produced by a complete repository-root scan; run registry repair before retrying"
             .into(),
     })
 }
@@ -1309,7 +1382,7 @@ fn ensure_active_active_bucket_gc_proof(
 /// If the registry doesn't exist and `force` is false, returns an error
 /// advising the user to use `--force`. If `force` is true, returns an
 /// explicitly incomplete registry. Dry-run can inspect it, but destructive
-/// GC still fails closed until a manifest backfill establishes coverage.
+/// GC still fails closed until a repository-root scan establishes coverage.
 pub async fn load_ref_registry(store: &Store, force: bool) -> Result<RefRegistry> {
     let storage = store.as_storage().clone();
     let router = crab_storage::StoreLayout::new(storage.clone(), String::new());
@@ -2442,10 +2515,10 @@ pub async fn deregister_repo(store: &Store, repo_prefix: &str) -> Result<()> {
     }
 }
 
-/// Rebuild the bucket ref-registry from every discoverable repo manifest.
+/// Rebuild the bucket ref-registry from every discoverable repository root.
 ///
 /// This is the explicit administrative proof required before destructive
-/// bucket GC. Any unreadable manifest or shard index aborts the repair; a
+/// bucket GC. Any unreadable root or shard index aborts the repair; a
 /// partial scan is never marked complete.
 pub async fn repair_ref_registry(store: &Store) -> Result<(usize, usize)> {
     use futures_util::StreamExt;
@@ -2453,30 +2526,66 @@ pub async fn repair_ref_registry(store: &Store) -> Result<(usize, usize)> {
     let cancel = CancellationToken::new();
     let lease = crate::maintenance::GcSweepLease::acquire(store, GLOBAL_PREFIX, &cancel).await?;
     let result = async {
-        let mut manifests = store.inner().list(None);
-        let mut repo_prefixes = Vec::new();
-        while let Some(item) = manifests.next().await {
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum RootKind {
+            Capsule,
+            Manifest,
+        }
+
+        let mut objects = store.inner().list(None);
+        let mut repositories = HashMap::<String, RootKind>::new();
+        while let Some(item) = objects.next().await {
             let meta = item.map_err(CrabError::from)?;
             let location = meta.location.as_ref();
-            let Some(repo_prefix) = location.strip_suffix("/manifest") else {
+            let discovered = location
+                .strip_suffix("/v2/root")
+                .map(|prefix| (prefix, RootKind::Capsule))
+                .or_else(|| {
+                    location
+                        .strip_suffix("/manifest")
+                        .map(|prefix| (prefix, RootKind::Manifest))
+                });
+            let Some((repo_prefix, kind)) = discovered else {
                 continue;
             };
             if repo_prefix.is_empty() || repo_prefix.starts_with(".crab/") {
                 continue;
             }
-            repo_prefixes.push(repo_prefix.to_owned());
+            if repositories
+                .insert(repo_prefix.to_owned(), kind)
+                .is_some_and(|existing| existing != kind)
+            {
+                return Err(CrabError::CorruptObject {
+                    path: repo_prefix.to_owned(),
+                    reason: "repository exposes both a capsule root and a legacy manifest"
+                        .to_owned(),
+                });
+            }
         }
-        repo_prefixes.sort();
-        repo_prefixes.dedup();
 
-        let mut repos = std::collections::HashMap::with_capacity(repo_prefixes.len());
+        let mut repo_prefixes = repositories.keys().cloned().collect::<Vec<_>>();
+        repo_prefixes.sort_unstable();
+        let mut repos = HashMap::with_capacity(repo_prefixes.len());
         let mut shard_count = 0usize;
         for repo_prefix in &repo_prefixes {
-            let router = StoreLayout::new(store.clone(), repo_prefix.clone());
-            crate::core::remote_layout::open(store, &router).await?;
-            let snapshot =
-                crate::metadata::manifest::read_repository_snapshot(store, &router).await?;
-            let shards = snapshot.journal.shards;
+            let shards = match repositories[repo_prefix] {
+                RootKind::Capsule => {
+                    capsule_repository_roots(store, repo_prefix)
+                        .await?
+                        .ok_or_else(|| CrabError::NotFound {
+                            path: format!("{repo_prefix}/v2/root"),
+                        })?
+                        .shard_hashes
+                }
+                RootKind::Manifest => {
+                    let router = StoreLayout::new(store.clone(), repo_prefix.clone());
+                    crate::core::remote_layout::open(store, &router).await?;
+                    crate::metadata::manifest::read_repository_snapshot(store, &router)
+                        .await?
+                        .journal
+                        .shards
+                }
+            };
             shard_count = shard_count.checked_add(shards.len()).ok_or_else(|| {
                 CrabError::Internal("ref-registry repair shard count overflow".to_owned())
             })?;
@@ -2485,12 +2594,14 @@ pub async fn repair_ref_registry(store: &Store) -> Result<(usize, usize)> {
 
         let storage = store.clone().into_storage();
         let router = crab_storage::StoreLayout::new(storage.clone(), String::new());
-        crab_metadata::ref_registry::repair_ref_registry_from_manifests(&storage, &router, repos)
-            .await?;
+        crab_metadata::ref_registry::replace_ref_registry_from_repository_roots(
+            &storage, &router, repos,
+        )
+        .await?;
         info!(
             repos = repo_prefixes.len(),
             shards = shard_count,
-            "ref-registry manifest backfill complete"
+            "ref-registry repository-root scan complete"
         );
         Ok((repo_prefixes.len(), shard_count))
     }
@@ -2571,7 +2682,7 @@ mod tests {
         {
             repos.entry(repo.clone()).or_default();
         }
-        crab_metadata::ref_registry::repair_ref_registry_from_manifests(
+        crab_metadata::ref_registry::replace_ref_registry_from_repository_roots(
             &storage,
             &bucket_router,
             repos,
@@ -2612,6 +2723,61 @@ mod tests {
             .await
             .unwrap();
         }
+    }
+
+    async fn publish_capsule_pointer_catalog(store: &Store, repo: &str) -> (String, String) {
+        use crab_metadata::capsule_protocol::{
+            Capsule, CapsuleRefEdit, CapsuleSection, CapsuleSectionKind, CapsuleTransaction,
+            PointerCatalog, ShardCatalogEntry, XorbCatalogEntry, XorbChunkEntry,
+        };
+
+        let router = crab_storage::StoreLayout::new(store.as_storage().clone(), repo.to_owned());
+        let base =
+            crab_write::capsule_protocol::initialize(&router, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+        let xorb_hash = "a".repeat(64);
+        let shard_hash = "b".repeat(64);
+        let mut catalog = PointerCatalog::new();
+        catalog
+            .insert_xorb(
+                xorb_hash.clone(),
+                XorbCatalogEntry::new(
+                    1,
+                    "c".repeat(64),
+                    vec![XorbChunkEntry::new("d".repeat(64), 1)],
+                ),
+            )
+            .unwrap();
+        catalog
+            .insert_shard(
+                shard_hash.clone(),
+                ShardCatalogEntry::new(1, vec![xorb_hash.clone()]),
+            )
+            .unwrap();
+        let transaction = CapsuleTransaction::new(
+            base.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule = Capsule::build(
+            &transaction,
+            Vec::new(),
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::CatalogDelta,
+                catalog.encode_delta().unwrap(),
+            )],
+        )
+        .unwrap();
+        crab_write::capsule_protocol::publish(&router, base, &transaction, &capsule)
+            .await
+            .unwrap();
+        (shard_hash, xorb_hash)
     }
 
     #[test]
@@ -3011,6 +3177,65 @@ mod tests {
         assert!(registry.is_complete_for_destructive_gc());
         assert!(registry.complete_repos.contains("org/a"));
         assert!(registry.complete_repos.contains("org/b"));
+    }
+
+    #[tokio::test]
+    async fn registry_repair_and_bucket_marks_preserve_capsule_catalog_shards() {
+        use crab_metadata::capsule_protocol::{Capsule, CapsuleRefEdit, CapsuleTransaction};
+
+        let store = memory_store();
+        let repo = "org/v2";
+        let (shard_hash, _) = publish_capsule_pointer_catalog(&store, repo).await;
+
+        let (repos, shards) = repair_ref_registry(&store).await.unwrap();
+
+        assert_eq!((repos, shards), (1, 1));
+        let registry = load_ref_registry(&store, false).await.unwrap();
+        assert_eq!(registry.repos[repo], vec![shard_hash.clone()]);
+        assert!(registry.is_complete_for_destructive_gc());
+        let roots = bucket_root_snapshot_streaming(&store, &registry, 4, &HashSet::new())
+            .await
+            .unwrap();
+        let layout = crab_storage::StoreLayout::new(store.as_storage().clone(), repo.to_owned());
+        let base = crab_write::capsule_protocol::open_root(&layout)
+            .await
+            .unwrap();
+        let transaction = CapsuleTransaction::new(
+            base.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                Some("2".repeat(40)),
+                Some("3".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
+        crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+            .await
+            .unwrap();
+        let moved_roots = bucket_root_snapshot_streaming(&store, &registry, 4, &HashSet::new())
+            .await
+            .unwrap();
+        assert_ne!(roots.root_identity, moved_roots.root_identity);
+
+        let journal = super::super::journal::GcRunJournal::start(
+            store.clone(),
+            GLOBAL_PREFIX,
+            "bucket",
+            GLOBAL_PREFIX,
+            SystemTime::now(),
+            Duration::from_secs(3600),
+            true,
+        )
+        .await
+        .unwrap();
+        write_bucket_root_marks(&store, &registry, 4, &roots.capsule_shards, &journal)
+            .await
+            .unwrap();
+        let mut reader =
+            DurableMarkReader::new_keys(store, journal.marks_prefix(), "referenced-shards");
+        assert!(reader.contains(&shard_hash).await.unwrap());
     }
 
     #[tokio::test]

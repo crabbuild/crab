@@ -138,12 +138,31 @@ pub(crate) struct RemoteGitPackedEntry {
     pub(crate) bytes: Bytes,
 }
 
+#[derive(Default)]
+pub(crate) struct ReaderLookupSources {
+    preferred_pack_indexes: Option<Vec<GitPackInventoryEntry>>,
+    inline_locators: Option<Arc<HashMap<[u8; 20], GitObjectLocator>>>,
+}
+
+impl ReaderLookupSources {
+    pub(crate) fn new(
+        preferred_pack_indexes: Option<impl IntoIterator<Item = GitPackInventoryEntry>>,
+        inline_locators: Option<Arc<HashMap<[u8; 20], GitObjectLocator>>>,
+    ) -> Self {
+        Self {
+            preferred_pack_indexes: preferred_pack_indexes.map(|packs| packs.into_iter().collect()),
+            inline_locators,
+        }
+    }
+}
+
 /// Reads Git objects directly from immutable Crab packs in object storage.
 pub(crate) struct RemoteGitReader {
     store: Store,
     repo_prefix: String,
     inventory: HashMap<MerkleHash, GitPackInventoryEntry>,
     preferred_pack_indexes: Option<HashMap<MerkleHash, GitPackInventoryEntry>>,
+    inline_locators: Option<Arc<HashMap<[u8; 20], GitObjectLocator>>>,
     limits: ReaderLimits,
     runtime: Arc<RemoteGitRuntime>,
     identity: RepositoryIdentity,
@@ -164,7 +183,7 @@ impl RemoteGitReader {
             store,
             repo_prefix,
             inventory,
-            None::<[GitPackInventoryEntry; 0]>,
+            ReaderLookupSources::default(),
             limits,
             runtime,
             identity,
@@ -176,7 +195,7 @@ impl RemoteGitReader {
         store: Store,
         repo_prefix: impl Into<String>,
         inventory: impl IntoIterator<Item = GitPackInventoryEntry>,
-        preferred_pack_indexes: Option<impl IntoIterator<Item = GitPackInventoryEntry>>,
+        lookup_sources: ReaderLookupSources,
         limits: ReaderLimits,
         runtime: Arc<RemoteGitRuntime>,
         identity: RepositoryIdentity,
@@ -191,7 +210,7 @@ impl RemoteGitReader {
                 });
             }
         }
-        let preferred_pack_indexes = if let Some(packs) = preferred_pack_indexes {
+        let preferred_pack_indexes = if let Some(packs) = lookup_sources.preferred_pack_indexes {
             let mut preferred = HashMap::new();
             for pack in packs {
                 if canonical.get(&pack.pack_id) != Some(&pack)
@@ -211,6 +230,7 @@ impl RemoteGitReader {
             repo_prefix: repo_prefix.into(),
             inventory: canonical,
             preferred_pack_indexes,
+            inline_locators: lookup_sources.inline_locators,
             limits,
             runtime,
             identity,
@@ -374,6 +394,19 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<Vec<GitObjectLookup>> {
+        if let Some(locators) = &self.inline_locators {
+            tracing::debug!(object_count = requested.len(), "remote Git locator lookup");
+            return Ok(requested
+                .iter()
+                .map(|oid| {
+                    locators
+                        .get(oid)
+                        .copied()
+                        .map(GitObjectLookup::Hit)
+                        .unwrap_or(GitObjectLookup::Miss)
+                })
+                .collect());
+        }
         if !session.is_available() {
             // Canonical snapshot inspection must not open or repair mutable
             // acceleration state, including for a single requested object.
@@ -3472,7 +3505,7 @@ mod tests {
             Store::new(Arc::clone(&store)),
             "org/repo",
             [base_inventory, tail_inventory],
-            Some([tail_inventory]),
+            ReaderLookupSources::new(Some([tail_inventory]), None),
             ReaderLimits::default(),
             Arc::clone(&runtime),
             identity.clone(),
@@ -3499,7 +3532,7 @@ mod tests {
             Store::new(Arc::clone(&store)),
             "org/repo",
             [base_inventory],
-            Some([]),
+            ReaderLookupSources::new(Some([]), None),
             ReaderLimits::default(),
             Arc::clone(&runtime),
             identity,

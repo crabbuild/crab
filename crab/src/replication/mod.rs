@@ -8352,6 +8352,19 @@ pub type ReadStoreSelection = crab_read::ReadStoreSelection<Store, StoreLayout>;
 pub struct WriteStoreSelection {
     pub store: Store,
     pub router: StoreLayout,
+    pub capsule_root: crab_metadata::capsule_protocol::RootSnapshot,
+}
+
+async fn validate_capsule_store(store: &Store, router: &StoreLayout) -> Result<()> {
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    crab_write::capsule_protocol::open_root(&layout)
+        .await
+        .map(|_| ())
+        .map_err(Into::into)
 }
 
 struct SelectedReadReplicaStore {
@@ -8432,10 +8445,8 @@ impl<'a> StoreResolver<'a> {
         let ReadSource::Replica { name } = &selection.source else {
             return Ok(selection);
         };
-        if let Err(error) =
-            crate::core::remote_layout::open(&selection.store, &selection.router).await
-        {
-            tracing::warn!(replica = %name, error = %error, "replica does not expose canonical v1 layout; using primary");
+        if let Err(error) = validate_capsule_store(&selection.store, &selection.router).await {
+            tracing::warn!(replica = %name, error = %error, "replica does not expose a protocol-v2 root; using primary");
             if let Some(replica) = replication
                 .replicas
                 .iter()
@@ -8449,7 +8460,7 @@ impl<'a> StoreResolver<'a> {
                     None,
                     None,
                     Some(format!(
-                        "replica canonical layout validation failed: {error}"
+                        "replica protocol-v2 root validation failed: {error}"
                     )),
                 );
             }
@@ -8463,7 +8474,7 @@ impl<'a> StoreResolver<'a> {
 
     /// Selects the primary store for write-class operations.
     pub async fn write_store(&self, operation: &str) -> Result<WriteStoreSelection> {
-        let store = crate::auth::build_repository_url_store(
+        let (store, capsule_root) = crate::auth::build_repository_url_store_with_root(
             self.config,
             self.primary_url.clone(),
             operation,
@@ -8471,7 +8482,11 @@ impl<'a> StoreResolver<'a> {
         )
         .await?;
         let router = StoreLayout::new(store.clone(), self.primary_url.repo_path.clone());
-        Ok(WriteStoreSelection { store, router })
+        Ok(WriteStoreSelection {
+            store,
+            router,
+            capsule_root,
+        })
     }
 }
 
@@ -8742,13 +8757,11 @@ pub async fn replica_statuses_with_options(
         match build_replica_store(replica, &primary_url.repo_path) {
             Ok((replica_store, replica_prefix)) => {
                 let replica_router = StoreLayout::new(replica_store.clone(), replica_prefix);
-                if let Err(error) =
-                    crate::core::remote_layout::open(&replica_store, &replica_router).await
-                {
+                if let Err(error) = validate_capsule_store(&replica_store, &replica_router).await {
                     statuses.push(status_with_events(
                         failed_status(
                             replica,
-                            format!("replica canonical layout validation failed: {error}"),
+                            format!("replica protocol-v2 root validation failed: {error}"),
                         ),
                         replica,
                         replica_router.repo_prefix(),
@@ -13663,19 +13676,9 @@ mod tests {
                 reason: "compaction rewrites remote storage layout state and must target primary storage",
             },
             CliStoreOperationClassification {
-                operation: "fsck",
-                class: "primary-maintenance",
-                reason: "fsck must inspect primary authority state; repair mode may mutate only that authority",
-            },
-            CliStoreOperationClassification {
                 operation: "gc",
                 class: "primary-maintenance",
                 reason: "garbage collection and registry deregistration delete primary-authority objects",
-            },
-            CliStoreOperationClassification {
-                operation: "repack",
-                class: "primary-maintenance",
-                reason: "repack rewrites remote pack state and must not derive authority from a replica",
             },
         ]
     }

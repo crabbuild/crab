@@ -34,6 +34,7 @@ gix-hash = { workspace = true, features = ["sha1"] }
 gix-ignore = { workspace = true }
 gix-object = { workspace = true }
 object_store = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "io-util"] }
 tokio-util = { workspace = true, features = ["rt"] }
@@ -44,5 +45,4 @@ xet-runtime = { workspace = true }
 
 [dev-dependencies]
 slatedb = { version = "=0.15.0", features = ["wal_disable", "zstd"] }
-tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

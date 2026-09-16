@@ -186,12 +186,154 @@ pub async fn run_repack(
     config: &RepackConfig,
     cancel: &CancellationToken,
 ) -> Result<RepackOutcome> {
-    match run_repack_with_budget(store, prefix, config, cancel, None).await? {
-        RepackRunResult::Completed { outcome, .. } => Ok(outcome),
-        RepackRunResult::Deferred { .. } => Err(CrabError::Internal(
-            "unbounded repack unexpectedly exceeded a maintenance budget".to_owned(),
-        )),
+    run_capsule_repack(store, prefix, config, cancel, None).await
+}
+
+/// Checkpoint a repository using an already authenticated protocol-v2 root.
+pub async fn run_repack_from_root(
+    store: &Store,
+    prefix: &str,
+    root: crab_metadata::capsule_protocol::RootSnapshot,
+    config: &RepackConfig,
+    cancel: &CancellationToken,
+) -> Result<RepackOutcome> {
+    run_capsule_repack(store, prefix, config, cancel, Some(root)).await
+}
+
+async fn run_capsule_repack(
+    store: &Store,
+    prefix: &str,
+    config: &RepackConfig,
+    cancel: &CancellationToken,
+    root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
+) -> Result<RepackOutcome> {
+    const MAX_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+    let started = Instant::now();
+    check_cancelled(cancel)?;
+    let router = StoreLayout::new(store.clone(), prefix.to_owned());
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let limits = crab_read::capsule_protocol::CapsuleReadLimits {
+        max_capsule_bytes: MAX_CHECKPOINT_BYTES,
+        max_frontier_bytes: MAX_CHECKPOINT_BYTES,
+    };
+    let view = match root {
+        Some(root) => {
+            crab_read::capsule_protocol::open_view_from_root(&layout, root, limits).await?
+        }
+        None => crab_read::capsule_protocol::open_view(&layout, limits).await?,
+    };
+    let root = view.root().root();
+    if view.refs().is_empty() {
+        return Err(CrabError::Protocol(
+            "cannot checkpoint an unborn repository".to_owned(),
+        ));
     }
+    std::fs::create_dir_all(&config.workspace_root)?;
+    let workspace = tempfile::Builder::new()
+        .prefix("crab-v2-checkpoint-")
+        .tempdir_in(&config.workspace_root)?;
+    let git_dir = workspace.path().join("repository.git");
+    let init_path = git_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        let output = std::process::Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&init_path)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!(
+                "git init --bare failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )))
+        }
+    })
+    .await
+    .map_err(|error| CrabError::Internal(format!("checkpoint Git init join failed: {error}")))??;
+    check_cancelled(cancel)?;
+    crab_read::capsule_protocol::install_git_packs(&view, &git_dir, MAX_CHECKPOINT_BYTES).await?;
+    let tips = view.refs().values().cloned().collect::<Vec<_>>();
+    crate::git::pack::validate_fetched_ref_tips(&git_dir, &tips).await?;
+    let packs = crate::git::capsule_push::prepare_complete_git_packs(
+        &git_dir,
+        view.refs(),
+        2 * 1024 * 1024 * 1024,
+    )
+    .await?;
+    let visibility = crab_metadata::capsule_protocol::CapsuleVisibilitySnapshot::from_index(
+        &view.git_visibility_index()?,
+    )?;
+    let pack_sizes = packs
+        .iter()
+        .map(crab_metadata::capsule_protocol::CapsuleGitPack::pack_size)
+        .collect::<Vec<_>>();
+    let checkpoint = crab_metadata::capsule_protocol::Checkpoint::build_with_catalogs(
+        root.generation(),
+        view.root().digest(),
+        packs,
+        view.pointer_catalog()?,
+        Some(visibility),
+    )?;
+    let packs_before = view
+        .checkpoint()
+        .map_or(0, |checkpoint| checkpoint.git_packs().len())
+        + view
+            .capsules()
+            .iter()
+            .map(|capsule| capsule.git_packs().len())
+            .sum::<usize>();
+    let bytes_before = root
+        .checkpoint()
+        .map_or(0, crab_metadata::capsule_protocol::CheckpointPointer::size)
+        + root
+            .capsule_frontier()
+            .iter()
+            .map(crab_metadata::capsule_protocol::CapsulePointer::size)
+            .sum::<u64>();
+    if !config.dry_run {
+        check_cancelled(cancel)?;
+        if view.visible_ref_transactions().is_empty() {
+            crab_write::capsule_protocol::publish_checkpoint(
+                &layout,
+                view.root_snapshot().clone(),
+                &checkpoint,
+            )
+            .await?;
+        } else {
+            crab_write::capsule_protocol::publish_ref_checkpoint(
+                &layout,
+                view.root_snapshot().clone(),
+                &checkpoint,
+                view.refs().clone(),
+                view.peeled_refs().clone(),
+                view.visible_ref_transactions().clone(),
+            )
+            .await?;
+        }
+    }
+    Ok(RepackOutcome {
+        packs_before,
+        packs_after: checkpoint.git_packs().len(),
+        bytes_before,
+        bytes_after: pack_sizes.iter().sum(),
+        bytes_read: bytes_before,
+        bytes_written: if config.dry_run {
+            0
+        } else {
+            checkpoint.bytes().len() as u64
+        },
+        elapsed: started.elapsed(),
+    })
 }
 
 pub(crate) async fn run_bounded_repack(
@@ -1375,6 +1517,20 @@ mod tests {
 
     use super::*;
 
+    async fn run_legacy_test_repack(
+        store: &Store,
+        prefix: &str,
+        config: &RepackConfig,
+        cancel: &CancellationToken,
+    ) -> Result<RepackOutcome> {
+        match run_repack_with_budget(store, prefix, config, cancel, None).await? {
+            RepackRunResult::Completed { outcome, .. } => Ok(outcome),
+            RepackRunResult::Deferred { .. } => Err(CrabError::Internal(
+                "unbounded legacy test repack unexpectedly deferred".to_owned(),
+            )),
+        }
+    }
+
     fn budget_pack(size: u64, object_count: u64) -> PackManifestEntry {
         PackManifestEntry {
             pack_id: format!("{object_count:064x}"),
@@ -1722,7 +1878,7 @@ mod tests {
         )
         .await?;
 
-        let outcome = run_repack(
+        let outcome = run_legacy_test_repack(
             &store,
             prefix,
             &RepackConfig {
@@ -1860,7 +2016,7 @@ mod tests {
         manifest.seal_git_validation();
         crate::metadata::manifest::create_manifest(&store, &router, &manifest).await?;
 
-        let outcome = run_repack(
+        let outcome = run_legacy_test_repack(
             &store,
             prefix,
             &RepackConfig {

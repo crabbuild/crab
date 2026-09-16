@@ -47,6 +47,25 @@ use crate::retry::{RetryPolicy, retry};
 /// the pair together because `PutMode::Update` consumes both.
 pub type ETag = object_store::UpdateVersion;
 
+/// Integrity evidence available after an acknowledged immutable PUT.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ImmutableWriteVerification {
+    /// The provider contract is not sufficient; stream the stored body back.
+    #[default]
+    ReadbackRequired,
+    /// The provider accepted the request's explicit SHA-256 checksum.
+    Sha256Checksum,
+}
+
+/// Result of a create-only immutable write whose occupied key is returned to the caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImmutableCreateOutcome {
+    /// This call created and verified the requested bytes.
+    Created,
+    /// The key was already occupied; these bounded bytes remain untrusted.
+    Existing(Bytes),
+}
+
 /// Bounded-memory byte stream returned by object reads.
 pub type StorageByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'static>>;
 
@@ -65,6 +84,7 @@ pub struct Store {
     /// explicit identity — typically tests and the in-memory store.
     identity: BucketIdentity,
     target_identity: Option<[u8; 32]>,
+    immutable_write_verification: ImmutableWriteVerification,
     /// Optional parallel handle to the same underlying store viewed
     /// as a [`object_store::signer::Signer`]. Populated by storage
     /// provider builders for S3 backends (the only backend that
@@ -137,6 +157,7 @@ impl Store {
             retry: RetryPolicy::DEFAULT,
             identity: BucketIdentity::local_unset(),
             target_identity: None,
+            immutable_write_verification: ImmutableWriteVerification::ReadbackRequired,
             signer: None,
             multipart: None,
             multipart_identity: None,
@@ -146,6 +167,26 @@ impl Store {
             read_byte_observer: None,
             read_request_observer: None,
         }
+    }
+
+    /// Attach provider-qualified immutable-write integrity evidence.
+    ///
+    /// Callers must propagate this only from the provider builder that enabled
+    /// the corresponding request checksum. Endpoint names and ETags are not
+    /// qualification evidence.
+    #[must_use]
+    pub fn with_immutable_write_verification(
+        mut self,
+        verification: ImmutableWriteVerification,
+    ) -> Self {
+        self.immutable_write_verification = verification;
+        self
+    }
+
+    /// Return the proof available after a successful immutable PUT.
+    #[must_use]
+    pub fn immutable_write_verification(&self) -> ImmutableWriteVerification {
+        self.immutable_write_verification
     }
 
     /// Wraps `inner` with a custom retry policy.
@@ -160,6 +201,7 @@ impl Store {
             retry,
             identity: BucketIdentity::local_unset(),
             target_identity: None,
+            immutable_write_verification: ImmutableWriteVerification::ReadbackRequired,
             signer: None,
             multipart: None,
             multipart_identity: None,
@@ -524,6 +566,99 @@ impl Store {
             async move { self.put_once(&path, bytes, &expected_hash).await }
         })
         .await
+    }
+
+    /// Writes immutable bytes and proves that the acknowledged object has exact content.
+    ///
+    /// A provider-qualified SHA-256 request checksum proves a newly created
+    /// object's transfer integrity without another request. Other providers
+    /// stream the object back and verify its BLAKE3 digest. An existing object
+    /// was already read and verified by [`Self::put_if_absent`].
+    pub async fn put_if_absent_verified(&self, path: &Path, bytes: Bytes) -> Result<bool> {
+        let expected_hash = *blake3::hash(&bytes).as_bytes();
+        let maximum = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let created = self.put_if_absent(path, bytes).await?;
+        if !created
+            || self.immutable_write_verification == ImmutableWriteVerification::Sha256Checksum
+        {
+            return Ok(created);
+        }
+        let readback_path = self.write_path(path);
+        let (stored, _) = self.get_with_etag_bounded(&readback_path, maximum).await?;
+        let actual_hash = *blake3::hash(&stored).as_bytes();
+        if actual_hash != expected_hash {
+            return Err(StorageError::CorruptObject {
+                path: path.to_string(),
+                reason: format!(
+                    "expected blake3 {}, got {}",
+                    hex_lower(&expected_hash),
+                    hex_lower(&actual_hash)
+                ),
+            });
+        }
+        Ok(created)
+    }
+
+    /// Creates and verifies immutable bytes, or returns the occupied key's bounded body.
+    ///
+    /// This is for logical content-addresses whose valid encodings may differ. Callers
+    /// must authenticate every [`ImmutableCreateOutcome::Existing`] body against their
+    /// logical identity before referencing it. Mutable CAS objects must use
+    /// [`Self::create_strict`] or [`Self::update`].
+    pub async fn create_or_read_immutable(
+        &self,
+        path: &Path,
+        bytes: Bytes,
+        max_existing_bytes: u64,
+    ) -> Result<ImmutableCreateOutcome> {
+        if self.staging_writes.is_some() {
+            return Err(StorageError::Internal(
+                "logical immutable create is unavailable for staged writes".to_owned(),
+            ));
+        }
+        let expected_hash = *blake3::hash(&bytes).as_bytes();
+        let created = retry(&self.retry, || {
+            let path = path.clone();
+            let bytes = bytes.clone();
+            async move {
+                match self
+                    .inner
+                    .put_opts(&path, bytes.into(), PutOptions::from(PutMode::Create))
+                    .await
+                {
+                    Ok(_) => Ok(true),
+                    Err(error) => {
+                        let mapped = map_object_store_error(error, path.as_ref());
+                        if matches!(mapped, StorageError::StateConflict { .. }) {
+                            Ok(false)
+                        } else {
+                            Err(mapped)
+                        }
+                    }
+                }
+            }
+        })
+        .await?;
+        if !created {
+            let (existing, _) = self.get_with_etag_bounded(path, max_existing_bytes).await?;
+            return Ok(ImmutableCreateOutcome::Existing(existing));
+        }
+        if self.immutable_write_verification == ImmutableWriteVerification::ReadbackRequired {
+            let maximum = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            let (stored, _) = self.get_with_etag_bounded(path, maximum).await?;
+            let actual_hash = *blake3::hash(&stored).as_bytes();
+            if actual_hash != expected_hash {
+                return Err(StorageError::CorruptObject {
+                    path: path.to_string(),
+                    reason: format!(
+                        "expected blake3 {}, got {}",
+                        hex_lower(&expected_hash),
+                        hex_lower(&actual_hash)
+                    ),
+                });
+            }
+        }
+        Ok(ImmutableCreateOutcome::Created)
     }
 
     /// Writes `bytes` at `path` iff nothing exists there yet.
@@ -3398,6 +3533,38 @@ mod tests {
 
         assert!(store.put_if_absent(&path, body.clone()).await.unwrap());
         assert!(!store.put_if_absent(&path, body).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn logical_immutable_create_returns_different_existing_encoding() {
+        let store = memory_store();
+        let path = Path::from("blobs/logical-content-address");
+        let existing = Bytes::from_static(b"existing valid encoding");
+        store.put(&path, existing.clone()).await.unwrap();
+
+        let outcome = store
+            .create_or_read_immutable(&path, Bytes::from_static(b"alternate valid encoding"), 1024)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, ImmutableCreateOutcome::Existing(existing));
+    }
+
+    #[tokio::test]
+    async fn logical_immutable_create_rejects_oversized_existing_body() {
+        let store = memory_store();
+        let path = Path::from("blobs/oversized-logical-content-address");
+        store
+            .put(&path, Bytes::from_static(b"too large"))
+            .await
+            .unwrap();
+
+        let error = store
+            .create_or_read_immutable(&path, Bytes::from_static(b"candidate"), 4)
+            .await
+            .expect_err("existing bodies remain bounded");
+
+        assert!(matches!(error, StorageError::CorruptObject { .. }));
     }
 
     #[tokio::test]

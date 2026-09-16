@@ -5,6 +5,7 @@ pub mod connectivity;
 pub mod delta_reconstruct;
 pub mod discover;
 
+pub(crate) mod capsule_push;
 #[cfg(feature = "gix-worktree")]
 pub mod checkout;
 pub mod fetch;
@@ -32,6 +33,7 @@ pub mod upload_pack_wire;
 pub mod url;
 pub mod worktree;
 pub mod worktree_hydration;
+pub(crate) mod xet_publication;
 
 #[cfg(feature = "gix-facade")]
 pub use crab_git::facade;

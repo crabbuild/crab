@@ -1,5 +1,6 @@
 //! Read and hydration orchestration over Crab storage, metadata, cache, and Xet data.
 
+pub mod capsule_protocol;
 pub mod dependency_proof;
 mod error;
 mod fetch_admission;
@@ -21,7 +22,8 @@ pub use fetch_admission::{
 pub use hydrator::{ReadRuntimeBuilder, ReadStoreLayout, ReconstructionStream, ShardHydrator};
 pub use integrity::verify_origin_recipe;
 pub use ref_advertisement::{
-    ManifestRefAdvertisement, ManifestRefEntry, manifest_ref_advertisement,
+    ManifestRefAdvertisement, ManifestRefEntry, capsule_ref_advertisement,
+    manifest_ref_advertisement, root_ref_advertisement,
 };
 pub use selection::{
     DEFAULT_READINESS_CACHE_TTL_MS, ReadReplicaCandidate, ReadReplicaFallback,
