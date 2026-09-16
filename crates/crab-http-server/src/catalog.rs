@@ -29,6 +29,10 @@ pub enum CatalogError {
     Initialize(#[from] crab_write::WriteError),
     #[error("repository metadata validation failed")]
     Metadata(#[from] crab_metadata::error::MetadataError),
+    #[error("repository content validation failed")]
+    Read(#[from] crab_read::ReadError),
+    #[error("repository validation workspace failed")]
+    Io(#[from] std::io::Error),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -240,7 +244,23 @@ impl CatalogStore {
         crate::config::validate_repository(&runtime)
             .map_err(|_| CatalogError::Invalid("repository record failed validation"))?;
         let layout = self.root.repository_layout(runtime.prefix);
-        crab_metadata::capsule_protocol::load_root(&layout).await?;
+        let view = crab_read::capsule_protocol::open_view(
+            &layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+                max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+            },
+        )
+        .await?;
+        let pointer_catalog = view.pointer_catalog()?;
+        crab_read::verify_capsule_pointer_catalog_objects(&layout, &pointer_catalog).await?;
+        let workspace = tempfile::tempdir()?;
+        crab_read::capsule_protocol::install_git_packs(
+            &view,
+            workspace.path(),
+            2 * 1024 * 1024 * 1024,
+        )
+        .await?;
         self.insert(record).await
     }
 
@@ -422,7 +442,81 @@ mod tests {
                 vec![],
             )
             .await;
-        assert!(matches!(result, Err(CatalogError::Metadata(_))));
+        assert!(matches!(result, Err(CatalogError::Read(_))));
+    }
+
+    #[tokio::test]
+    async fn adopt_rejects_a_v2_root_with_missing_scoped_pointer_data() {
+        let catalog = catalog();
+        let layout = catalog
+            .root
+            .repository_layout(catalog.root.repository_prefix("team/project").unwrap());
+        let base = crab_write::capsule_protocol::initialize(
+            &layout,
+            &blake3::hash(b"team-project").to_hex().to_string(),
+            "refs/heads/main",
+        )
+        .await
+        .unwrap();
+        let mut pointers = crab_metadata::capsule_protocol::PointerCatalog::new();
+        pointers
+            .insert_xorb(
+                "1".repeat(64),
+                crab_metadata::capsule_protocol::XorbCatalogEntry::new(
+                    1,
+                    "2".repeat(64),
+                    vec![crab_metadata::capsule_protocol::XorbChunkEntry::new(
+                        "3".repeat(64),
+                        1,
+                    )],
+                ),
+            )
+            .unwrap();
+        let transaction = crab_metadata::capsule_protocol::CapsuleTransaction::new(
+            base.record().digest(),
+            vec![crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("4".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule = crab_metadata::capsule_protocol::Capsule::build(
+            &transaction,
+            vec![
+                crab_metadata::capsule_protocol::CapsuleGitPack::new(
+                    Bytes::from_static(b"pack"),
+                    Bytes::from_static(b"index"),
+                    Bytes::from_static(b"reverse"),
+                    Bytes::from_static(b"locator"),
+                    "5".repeat(40),
+                    1,
+                )
+                .unwrap(),
+            ],
+            vec![crab_metadata::capsule_protocol::CapsuleSection::new(
+                crab_metadata::capsule_protocol::CapsuleSectionKind::CatalogDelta,
+                pointers.encode_delta().unwrap(),
+            )],
+        )
+        .unwrap();
+        crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+            .await
+            .unwrap();
+
+        let result = catalog
+            .adopt_repository(
+                "team".into(),
+                "project".into(),
+                "team/project".into(),
+                String::new(),
+                vec![],
+            )
+            .await;
+
+        assert!(matches!(result, Err(CatalogError::Read(_))));
+        assert!(catalog.load().await.unwrap().0.repositories.is_empty());
     }
 
     #[tokio::test]
