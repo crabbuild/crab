@@ -82,12 +82,14 @@ remote with `recover apply --restore-packs`; apply verifies the planned Blake3
 identity, size, Git pack header, and trailing SHA-1 before uploading the pack
 body and metadata sidecar.
 `recover apply --repair-remote` stages verified file bytes into the repository
-staging area and pushes manifest-selected branch refs through the normal Crab
-push pipeline, so xorb uploads, shard/index writes, manifest CAS, ref CAS, and
-push audit logging stay on the canonical path. `recover apply
---rebuild-file-index` rebuilds `file_index_db` from durable shard objects and
-only reports planned file-index mappings as repaired when the rebuilt database
-returns the expected shard hash. Pack-list-only entries still carry
+staging area and pushes selected branch refs through the normal Crab push
+pipeline, so xorb uploads, shard/index writes, authoritative ref publication,
+and push audit logging stay on the canonical path. For a v2 repository,
+`recover apply --rebuild-file-index` verifies planned mappings against the
+authenticated checkpoint-and-capsule pointer catalog; it does not create or
+write legacy SlateDB metadata. When no v2 root exists, the command rebuilds
+`file_index_db` from durable shard objects and verifies the expected shard hash.
+Pack-list-only entries still carry
 item-specific operator follow-up actions because a pack list alone does not
 provide pack bytes. This is separate from the internal inflight-operation
 recovery described in [crab recovery](recovery.md).
@@ -174,9 +176,11 @@ uploads the pack body and metadata sidecar, and reports successful items as
 together, shard, xorb, and pack objects are restored before the file-index
 rebuild verifies planned mappings.
 
-With `--rebuild-file-index`, apply rebuilds `file_index_db` from `.crab/shards/`
-using the same metadb rebuild path as `crab metadb rebuild --db file_index`,
-then checks each planned file-index mapping and reports exact matches as
-`metadata_repaired`. Pack inventory items without verified backup bodies are
+With `--rebuild-file-index`, apply selects repository authority first. A
+present v2 root is opened and authenticated, and exact file-to-shard matches
+are verified in its complete pointer catalog without acquiring a legacy writer
+or creating `file_index_db`. Only a repository without a v2 root uses the
+SlateDB rebuild path. A corrupt v2 root fails closed instead of falling back.
+Exact matches are reported as `metadata_repaired`. Pack inventory items without verified backup bodies are
 still skipped with explanatory messages and do not perform direct pack writes.
 Concurrent applies to the same restore root are rejected by an advisory lock.

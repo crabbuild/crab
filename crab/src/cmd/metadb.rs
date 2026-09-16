@@ -2447,8 +2447,10 @@ async fn run_rebuild_in(
     Ok(())
 }
 
-/// Rebuild `file_index_db` for the current repository and verify that
-/// selected file-to-shard mappings are present afterwards.
+/// Verify selected file-to-shard mappings through the repository's authority.
+///
+/// V2 reads the authenticated pointer catalog without creating legacy state;
+/// repositories without a v2 root rebuild and query `file_index_db`.
 pub(crate) async fn rebuild_file_index_for_current_repo_and_verify(
     entries: &[(MerkleHash, MerkleHash)],
 ) -> Result<Vec<bool>> {
@@ -2456,6 +2458,14 @@ pub(crate) async fn rebuild_file_index_for_current_repo_and_verify(
     let (store, repo_prefix, bucket_identity, config) = resolve_repo_store(&cancel).await?;
     let storage = crate::storage::Store::new(Arc::clone(&store));
     let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.clone());
+    let capsule_layout = crab_storage::StoreLayout::with_global_prefix(
+        storage.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    if let Some(root) = capsule_owner_root(&capsule_layout).await? {
+        return verify_capsule_file_index(&capsule_layout, root, entries).await;
+    }
     let gc_writer = crate::maintenance::GcWriterLeases::acquire(
         &storage,
         router.global_prefix(),
@@ -2505,6 +2515,41 @@ pub(crate) async fn rebuild_file_index_for_current_repo_and_verify(
         (Ok(result), Ok(())) => Ok(result),
         (Err(error), _) | (Ok(_), Err(error)) => Err(error),
     }
+}
+
+async fn verify_capsule_file_index(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    root: crab_metadata::capsule_protocol::RootSnapshot,
+    entries: &[(MerkleHash, MerkleHash)],
+) -> Result<Vec<bool>> {
+    let view = crab_read::capsule_protocol::open_view_from_root(
+        layout,
+        root,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+            max_frontier_bytes: CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+        },
+    )
+    .await?;
+    Ok(capsule_file_index_matches(
+        &view.pointer_catalog()?,
+        entries,
+    ))
+}
+
+fn capsule_file_index_matches(
+    catalog: &crab_metadata::capsule_protocol::PointerCatalog,
+    entries: &[(MerkleHash, MerkleHash)],
+) -> Vec<bool> {
+    entries
+        .iter()
+        .map(|(file_hash, expected_shard)| {
+            catalog
+                .files()
+                .get(&file_hash.hex())
+                .is_some_and(|entry| entry.shard_hash() == expected_shard.hex())
+        })
+        .collect()
 }
 
 async fn close_rebuild_guard<T>(guard: MetaDbGuard, result: Result<T>) -> Result<T> {
@@ -4595,6 +4640,59 @@ mod tests {
             capsule_owner_root(&layout).await,
             Err(CrabError::CorruptObject { .. })
         ));
+    }
+
+    #[test]
+    fn capsule_file_index_verification_uses_authenticated_mapping() {
+        let file_hash = MerkleHash::from([1; 32]);
+        let expected_shard = MerkleHash::from([2; 32]);
+        let other_shard = MerkleHash::from([3; 32]);
+        let mut catalog = crab_metadata::capsule_protocol::PointerCatalog::new();
+        catalog
+            .insert_file(
+                file_hash.hex(),
+                crab_metadata::capsule_protocol::FileCatalogEntry::new(42, expected_shard.hex()),
+            )
+            .expect("insert file catalog entry");
+
+        assert_eq!(
+            capsule_file_index_matches(
+                &catalog,
+                &[
+                    (file_hash, expected_shard),
+                    (file_hash, other_shard),
+                    (MerkleHash::from([4; 32]), expected_shard),
+                ],
+            ),
+            vec![true, false, false]
+        );
+    }
+
+    #[tokio::test]
+    async fn capsule_file_index_verification_does_not_create_legacy_metadata() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let storage = crab_storage::Store::new(Arc::clone(&inner));
+        let layout = crab_storage::StoreLayout::new(storage, "org/v2-recover".to_owned());
+        let root =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .expect("initialize capsule root");
+
+        let verified = verify_capsule_file_index(
+            &layout,
+            root,
+            &[(MerkleHash::from([1; 32]), MerkleHash::from([2; 32]))],
+        )
+        .await
+        .expect("verify capsule catalog");
+
+        assert_eq!(verified, vec![false]);
+        let legacy_objects = inner
+            .list(Some(&ObjectPath::from("org/v2-recover/file_index_db")))
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("list legacy metadata prefix");
+        assert!(legacy_objects.is_empty());
     }
 
     #[tokio::test]
