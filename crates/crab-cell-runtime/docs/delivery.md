@@ -316,6 +316,31 @@ kubectl --namespace crab exec POD -- \
   cells metrics > metrics-before.prom
 ```
 
+Run the bounded HTTP harness from a dedicated load generator. Each `--target`
+has the form `NAME=CONCURRENCY@/PATH`; repeated targets run simultaneously.
+Redirect stdout to retain its versioned JSON receipt. Put private cookies or
+authorization values in a mode-0600 header file, never in command arguments.
+
+```bash
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-load-generator \
+  cargo run -p crab-http-server --release --example qualify_http_load --locked -- \
+  --base-url https://git.example.com \
+  --target 'refs=4@/api/repos/team/project/refs' \
+  --target 'commits=8@/api/repos/team/project/commits?rev=main&limit=20' \
+  --target 'readme=4@/api/repos/team/project/file?rev=main&path_hex=524541444d452e6d64' \
+  --duration-seconds 300 \
+  --warmup-seconds 15 \
+  --header-file /secure/load-headers \
+  > http-load.json
+```
+
+The harness fully consumes each body and reports 2xx responses, admission
+rejections, unexpected responses, transport/body-limit failures, bytes,
+throughput, and all-response plus successful-response latency percentiles. It
+checks `/livez` before and after traffic. HTTP 429 is an expected overload
+signal; any other non-2xx response, transport failure, oversized body, or
+unhealthy liveness check makes the command fail after writing the receipt.
+
 The report separates CPU-bounded blocking jobs, dirty-memory-bounded jobs, and
 the two-slot full-recovery ceiling. Store the report with the immutable image
 digest, profile, workload parameters, and live measurements. Reject a receipt

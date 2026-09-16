@@ -144,8 +144,9 @@ its separately derived dirty/recovery slots bound concurrent large operations.
    retention.
 5. **Measured node qualification.** Define hardware and service SLOs, then prove
    capacity under realistic database sizes, skew, write amplification, object
-   storage latency, simultaneous takeover, compaction and failures. Metrics
-   export and a production load harness remain service integration work.
+   storage latency, simultaneous takeover, compaction and failures. The server
+   exports bounded runtime metrics and ships a read-traffic JSON load harness;
+   sustained mutation, residency, takeover and compaction matrix receipts remain.
 
 These gaps prevent claiming full Celld operational/performance parity or a
 production-ready 10K-database backend. Celld's bounded restore concurrency and

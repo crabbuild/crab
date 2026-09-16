@@ -1335,6 +1335,28 @@ python3 crates/crab-http-server/tests/verify_live.py \
 
 For an authenticated server, add `--cookies /path/to/private_cookies.txt` with a private Netscape-format cookie file. Never commit that file.
 
+Run repeatable concurrent HTTP qualification with the Rust load generator:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-load-generator" \
+  cargo run -p crab-http-server --release --example qualify_http_load --locked -- \
+  --base-url http://127.0.0.1:8788 \
+  --target 'refs=4@/api/repos/team/project/refs' \
+  --target 'commits=8@/api/repos/team/project/commits?rev=main&limit=20' \
+  --duration-seconds 60 \
+  --warmup-seconds 5 \
+  > http-load.json
+```
+
+Each target declares its own concurrency and all targets run together. The
+versioned JSON receipt includes successful responses, HTTP 429 admission
+rejections, unexpected responses, response bytes, throughput, and p50/p95/p99
+latency. The generator fully consumes every body, bounds response bytes, checks
+`/livez` before and after traffic, and exits unsuccessfully on 5xx, unexpected
+non-429 status, transport/body-limit failure, or unhealthy liveness. Use
+`--header-file /secure/load-headers` for one private HTTP header per line; the
+tool neither prints nor stores those values.
+
 ### Read the executable evidence map
 
 | Contract | Primary source | Executable evidence |
@@ -1342,6 +1364,7 @@ For an authenticated server, add `--cookies /path/to/private_cookies.txt` with a
 | Route composition, Host checks, request correlation, readiness, metrics, and shutdown | `src/server.rs`, `src/metrics.rs` | Server, metrics, authentication, and maintenance tests |
 | OIDC, membership, sessions, tokens, and CSRF | `src/auth.rs` | `src/auth_tests.rs` and `src/auth_tests/git_tokens.rs` |
 | Repository reads and raw paths | `src/api.rs` | `tests/verify_live.py` and frontend navigation tests |
+| HTTP capacity and overload behavior | server admission and public routes | `examples/qualify_http_load.rs`, its self-hosted tests, and retained JSON receipts |
 | Git protocol version 2 fetch | `src/git.rs` | `tests/verify_git_transport.py` and protocol CI |
 | Native receive, changed-path validation, and recovery | `src/receive.rs`, `src/receive/publish.rs`, `crab-git::receive_plan` | `src/receive_tests.rs` and `src/receive_fault_tests.rs` |
 | LFS transfer, range-resume, file-lock, and authoritative receive contracts | `src/lfs.rs`, `src/receive/publish.rs` | `src/lfs_tests.rs`, `src/receive_tests.rs`, `src/auth_tests/git_tokens.rs`, `tests/qualify_lfs_range_resume.sh`, and `tests/qualify_lfs_locking.sh` |
