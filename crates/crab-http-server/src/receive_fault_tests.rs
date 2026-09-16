@@ -90,8 +90,10 @@ impl ObjectStore for FaultStore {
             return Err(disconnected());
         }
         if matches!(self.fault, Fault::ReadinessAfterMarker)
-            && self.committed.load(std::sync::atomic::Ordering::SeqCst)
             && location.as_ref() == self.root_path
+            && self
+                .committed
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
             return Err(disconnected());
         }

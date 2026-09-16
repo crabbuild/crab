@@ -543,7 +543,6 @@ async fn publish_attempt(
         // A later admin update can repair an unavailable control-plane root.
         tracing::error!(%head, %error, "first branch committed but HEAD retargeting failed");
     }
-    entry.schedule_maintenance(server).await;
     // Acknowledge known ref commitment even if read indexes remain pending.
     // A lost acknowledgement is indeterminate; matching refs cannot prove it.
     let _readiness = crab_remote::publication::finish_committed(async {
@@ -554,6 +553,7 @@ async fn publish_attempt(
         Ok::<_, crate::Error>(repository.generation())
     })
     .await;
+    entry.schedule_maintenance(server).await;
     let mut bytes = Vec::new();
     if request.report_status {
         receive_wire::report(&mut bytes, &request.updates, None, None)?;
@@ -605,7 +605,6 @@ async fn recover_native_plan(
         tracing::error!(%plan_id, "native receive plan receipt does not match the wire request");
         return Err(original);
     }
-    entry.schedule_maintenance(server).await;
     // The receipt proves the ref visibility boundary. Index readiness remains
     // best-effort and cannot turn a recovered commit into a rejection.
     let _readiness = crab_remote::publication::finish_committed(async {
@@ -616,6 +615,7 @@ async fn recover_native_plan(
         Ok::<_, crate::Error>(repository.generation())
     })
     .await;
+    entry.schedule_maintenance(server).await;
     let mut bytes = Vec::new();
     if request.report_status {
         receive_wire::report(&mut bytes, &request.updates, None, None)?;
