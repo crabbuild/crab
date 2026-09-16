@@ -480,18 +480,6 @@ impl Db {
 
         self.host
             .check_database_size(u64::from(commit) * u64::from(self.page_size))?;
-        let pages = self.collect_snapshot_pages(&wal, &page_map, commit)?;
-
-        // A snapshot tracks the rolling post-apply checksum (MinTXID==1, no
-        // NoChecksum flag) — compute it the way decode_file verifies it.
-        let lock = lock_pgno(self.page_size);
-        let mut rolling: crate::Checksum = crate::CHECKSUM_FLAG;
-        for (p, d) in &pages {
-            if *p != lock {
-                rolling = crate::CHECKSUM_FLAG | (rolling ^ ltx::checksum_page(*p, d));
-            }
-        }
-
         let header = ltx::Header {
             version: ltx::VERSION,
             flags: 0,
@@ -508,8 +496,20 @@ impl Db {
             node_id: 0,
         };
 
-        let encoded = ltx::encode_file(&header, &pages, rolling)?;
-        w.write_all(&encoded)?;
+        // A snapshot tracks the rolling post-apply checksum (MinTXID==1, no
+        // NoChecksum flag). Encode each page as it is read so callers can back
+        // the writer with a bounded scratch file instead of a database-sized
+        // resident buffer.
+        let lock = lock_pgno(self.page_size);
+        let mut rolling: crate::Checksum = crate::CHECKSUM_FLAG;
+        let mut encoder = crate::codec::Encoder::new_block(w);
+        encoder.encode_header(header)?;
+        for pgno in (1..=commit).filter(|page| *page != lock) {
+            let data = self.capture_page(&wal, &page_map, pgno)?;
+            rolling = crate::CHECKSUM_FLAG | (rolling ^ ltx::checksum_page(pgno, &data));
+            encoder.encode_page(ltx::PageHeader { pgno, flags: 0 }, &data)?;
+        }
+        encoder.close(rolling)?;
 
         Ok(Pos::new(pos.txid, rolling))
     }

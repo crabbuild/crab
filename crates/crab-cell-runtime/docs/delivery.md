@@ -119,8 +119,8 @@ still inject the same lost response through the deployed network path.
 
 `crab-ltx` evidence must cover:
 
-- Managed capture streams pages and codec indexes to atomic local files, then
-  validates format and BLAKE3 without a database-sized resident buffer
+- Managed capture and explicit snapshots stream pages to atomic local files,
+  then validate format and BLAKE3 without a database-sized resident buffer
 - Pending cuts stay owned until the exact root is confirmed
 - Destination capacity is reserved before full restore downloads
 - Sparse hydration verifies directory, frame, and page checksums

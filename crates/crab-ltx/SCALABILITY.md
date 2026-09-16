@@ -46,7 +46,7 @@ does not imply that all of those bytes must reside on local disk.
 | Cell-root appends reloaded every historical index and rebuilt every locator | Authenticated radix copy-on-write reads changed leaves/ancestors, prunes truncated subtrees and reuses untouched digests | `cell_roots::changed_cut_loads_only_touched_directory_nodes` stays below 100 KiB of origin reads after changing one page in a 20 MB database; `truncate_regrow_cannot_reuse_old_locator` restores newly written bytes after shrink/regrowth |
 | Initial Cell roots materialized every final locator and encoded directory node | K-way ordered index merge with suffix truncation fences; each 256-page leaf uploads before the next and only radix summaries remain resident | `cell_replica::directory::tests::streamed_tree_matches_canonical_root_without_retaining_objects` matches the canonical 70,000-page root and `cell_roots::initial_streaming_directory_merges_truncation_and_regrowth` restores the newest bytes from a multi-cut initial root |
 | Writable Cell activation and each cut allocated/cloned/scanned one checksum per page | Authenticated directory leaves stream to a local 8-byte/page file in 64 KiB chunks; capture keeps a changed-page overlay, maintains the aggregate incrementally and persists positional updates only after sealing the LTX cut | `cell_roots::exact_cell_root_opens_sparse_writer_and_publishes_incrementally` checks the disk index and successor restore; `host_hooks::cell_checksum_write_failure_fences_after_sealing_the_cut` proves a partial index update cannot keep serving |
-| Managed capture retained every decoded page, encoded the complete LTX in memory, then reread it as one buffer | Capture feeds one page at a time through the encoder, spools the codec index, atomically syncs/renames the output, and derives validated metadata plus BLAKE3 through bounded reads | `host_hooks::capture_and_inspection_bound_each_filesystem_transfer` captures an incompressible multi-megabyte cut and asserts every LTX filesystem transfer stays below 128 KiB; the full capture, fault, checkpoint, restore, and publication suites exercise the canonical path |
+| Managed capture and explicit snapshots retained every decoded page, encoded the complete LTX in memory, then reread it as one buffer | Capture feeds one page at a time through the encoder and spools its codec index; snapshots stream to a same-directory scratch file. Both sync, validate metadata plus BLAKE3 through bounded reads, and install atomically without replacement | `host_hooks::capture_and_inspection_bound_each_filesystem_transfer` captures and snapshots incompressible multi-megabyte data while asserting every LTX filesystem transfer stays below 128 KiB; the full capture, fault, checkpoint, restore, and publication suites exercise the canonical paths |
 | Partial compaction downloaded unrelated bodies | Verify the original indexed plan; fetch only selected bodies; authenticate regenerated indexes; compare independently reduced page bytes; verify replacement indexed state | `publication::range_compaction_does_not_download_unselected_bodies`: before, 2,026,087 downloaded bytes; after, under 100,000; restored bytes identical |
 | Long-lived Cell writers exhausted local/remote segment admission | Reverify and prune each exact local batch only after authoritative root confirmation; before later appends, schedule a bounded eight-input level promotion or a pressure-triggered full replacement through the owner CAS | `host_hooks::remote::captured_pruning_retries_after_removal_but_failed_parent_sync`, `cell_roots::scheduled_cell_compaction_promotes_fanout_and_preserves_root`, and `actor::dispatcher_compacts_before_segment_admission_is_exhausted` |
 | Independent replicas multiplied remote/recovery work | Shared I/O, CPU-job and large-recovery admission; ordered concurrent input/index reads | `replica::io` tests overlap two cohorts while enforcing one three-request ceiling and preserving input order |
@@ -109,12 +109,14 @@ its separately derived dirty/recovery slots bound concurrent large operations.
    claiming the 5 GB/10K target; do not add an implicit fallback reader.
 2. **Streaming large-database operations.** Managed WAL capture now encodes
    directly to an atomic local file with a spooled codec index, and validates
-   segment metadata and BLAKE3 without rereading the whole cut into memory.
+   segment metadata and BLAKE3 without rereading the whole cut into memory;
+   explicit snapshots use the same bounded page pipeline and an atomically
+   installed scratch file.
    Cell capture checksum updates are incremental and disk-backed, but a large
-   truncation still reads its removed checksum suffix. Standalone snapshot,
-   recovery, and compaction paths can hold database-sized decoded buffers, and
-   Cell append preparation still retains each admitted capture body and sidecar;
-   Cell exact-root compaction is scratch-backed and streaming. Replace those
+   truncation still reads its removed checksum suffix. Standalone recovery and
+   compaction paths can hold database-sized decoded buffers, and Cell append
+   preparation still retains each admitted capture body and sidecar; Cell
+   exact-root compaction is scratch-backed and streaming. Replace those
    remaining resident paths, then qualify 5 GB incompressible data and low-disk
    failures. Keep cryptographic body/index binding and exact output verification.
 3. **Resident lifecycle and SQL scheduling.** The server has bounded activation

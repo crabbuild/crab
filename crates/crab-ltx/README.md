@@ -154,7 +154,9 @@ the live-page count and rolling SQLite checksum. Cold open reads bounded root
 metadata and one directory root; page bodies and descendant directory nodes fault
 on demand. Local WAL capture sends one page at a time through its compressor,
 spools the codec page index, syncs and atomically renames the cut, then validates
-its format and BLAKE3 through bounded filesystem reads. Writable activation
+its format and BLAKE3 through bounded filesystem reads. Explicit snapshots use
+the same page pipeline and a synced same-directory scratch file, then install
+without replacing an existing destination. Writable activation
 walks the authenticated directory once and streams
 one big-endian eight-byte checksum per database page to a fresh local sidecar in
 64 KiB chunks. Capture clones only its pending overlay, updates the rolling

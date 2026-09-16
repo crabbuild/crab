@@ -378,7 +378,7 @@ impl Db {
         pgnos
     }
 
-    fn capture_page(
+    pub(super) fn capture_page(
         &self,
         wal: &WalImage,
         page_map: &HashMap<u32, i64>,
@@ -388,21 +388,6 @@ impl Db {
             Some(&offset) => wal.page(offset, self.page_size),
             None => self.read_db_page(pgno),
         }
-    }
-
-    pub(super) fn collect_snapshot_pages(
-        &self,
-        wal: &WalImage,
-        page_map: &HashMap<u32, i64>,
-        commit: u32,
-    ) -> Result<Vec<(u32, Vec<u8>)>> {
-        let lock = lock_pgno(self.page_size);
-        let mut out = Vec::with_capacity(commit as usize);
-        for pgno in (1..=commit).filter(|pgno| *pgno != lock) {
-            let data = self.capture_page(wal, page_map, pgno)?;
-            out.push((pgno, data));
-        }
-        Ok(out)
     }
 
     pub(super) fn read_db_page(&self, pgno: u32) -> Result<Vec<u8>> {

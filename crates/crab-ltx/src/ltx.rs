@@ -332,34 +332,6 @@ fn decode_reader_inner(
     ))
 }
 
-pub fn encode_file(
-    header: &Header,
-    pages: &[(u32, Vec<u8>)],
-    post_apply_checksum: Checksum,
-) -> Result<Vec<u8>> {
-    encode_file_inner(header, pages, post_apply_checksum)
-}
-
-fn encode_file_inner(
-    header: &Header,
-    pages: &[(u32, Vec<u8>)],
-    post_apply_checksum: Checksum,
-) -> Result<Vec<u8>> {
-    let mut encoder = crate::codec::Encoder::new_block(Vec::new());
-    encoder.encode_header(*header)?;
-    for (page_number, data) in pages {
-        encoder.encode_page(
-            PageHeader {
-                pgno: *page_number,
-                flags: 0,
-            },
-            data,
-        )?;
-    }
-    encoder.close(post_apply_checksum)?;
-    Ok(encoder.writer)
-}
-
 fn u16_be(b: &[u8]) -> u16 {
     u16::from_be_bytes([b[0], b[1]])
 }

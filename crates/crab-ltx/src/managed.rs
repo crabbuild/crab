@@ -524,15 +524,27 @@ impl ManagedDb {
     fn snapshot_inner(&mut self, destination: &Path) -> Result<(LocalSegment, CaptureBatch)> {
         let batch = self.capture_inner()?;
         self.local_disk.try_grow(self.limits.max_file_bytes)?;
-        let mut bytes = Vec::new();
-        let pos: Position = self.db.snapshot_to_writer(&mut bytes)?.into();
+        let (mut scratch, mut output) =
+            SnapshotScratch::create(&self.host, destination, self.limits.max_file_bytes)?;
+        let pos: Position = self.db.snapshot_to_writer(&mut output)?.into();
         if pos != batch.position {
             return Err(CrabError::ChecksumMismatch);
         }
-        let file = ltx::decode_file(&bytes)?;
-        let info = SegmentInfo::from_decoded(&bytes, &file);
+        output.sync_all()?;
+        drop(output);
+        let file = crate::LtxHost {
+            facilities: self.host.clone(),
+            max_database_bytes: self.limits.max_database_bytes,
+            max_file_bytes: self.limits.max_file_bytes,
+        }
+        .open(&scratch.path)?;
+        let (decoded, size, digest) = ltx::inspect_reader(file)?;
+        let info = SegmentInfo::from_inspected(&decoded, size, digest);
         self.account(&info)?;
-        self.host.filesystem.persist_new(destination, &bytes)?;
+        self.host
+            .filesystem
+            .persist_file_new(&scratch.path, destination)?;
+        scratch.installed = true;
         let segment = LocalSegment::new(destination.to_owned(), info);
         #[cfg(feature = "replica")]
         self.retained.push(segment.clone());
@@ -613,6 +625,70 @@ impl ManagedDb {
             .checked_add(wal_bytes)
             .ok_or(CrabError::Limit("local disk bytes"))?;
         self.local_disk.resize(live)
+    }
+}
+
+struct SnapshotScratch {
+    filesystem: std::sync::Arc<dyn crate::environment::FileSystem>,
+    path: PathBuf,
+    installed: bool,
+}
+
+impl SnapshotScratch {
+    fn create(
+        host: &crate::Host,
+        destination: &Path,
+        max_file_bytes: u64,
+    ) -> Result<(Self, crate::HostFile)> {
+        let parent = destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let filename = destination
+            .file_name()
+            .ok_or(CrabError::InvalidState("missing snapshot filename"))?;
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        for _ in 0..16 {
+            let mut scratch_name = filename.to_owned();
+            scratch_name.push(format!(
+                ".crab-snapshot-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            let path = parent.join(scratch_name);
+            let ltx_host = crate::LtxHost {
+                facilities: host.clone(),
+                max_database_bytes: max_file_bytes,
+                max_file_bytes,
+            };
+            match ltx_host.create(&path) {
+                Ok(file) => {
+                    return Ok((
+                        Self {
+                            filesystem: host.filesystem.clone(),
+                            path,
+                            installed: false,
+                        },
+                        file,
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "snapshot scratch namespace exhausted",
+        )
+        .into())
+    }
+}
+
+impl Drop for SnapshotScratch {
+    fn drop(&mut self) {
+        if !self.installed {
+            let _ = self.filesystem.remove_file(&self.path);
+        }
     }
 }
 

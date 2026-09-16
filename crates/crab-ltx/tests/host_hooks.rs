@@ -182,6 +182,15 @@ fn capture_and_inspection_bound_each_filesystem_transfer() {
     assert!(batch.segments[0].info().size_bytes > 1_000_000);
     assert!(faults.largest_write.load(Ordering::Relaxed) < 128 * 1024);
     assert!(faults.largest_read.load(Ordering::Relaxed) < 128 * 1024);
+
+    faults.largest_read.store(0, Ordering::Relaxed);
+    faults.largest_write.store(0, Ordering::Relaxed);
+    let (snapshot, _) = writer
+        .snapshot(&directory.path().join("streamed-snapshot.ltx"))
+        .unwrap();
+    assert!(snapshot.info().size_bytes > 1_000_000);
+    assert!(faults.largest_write.load(Ordering::Relaxed) < 128 * 1024);
+    assert!(faults.largest_read.load(Ordering::Relaxed) < 128 * 1024);
 }
 
 #[cfg(feature = "replica")]
@@ -424,6 +433,7 @@ fn snapshot_and_compaction_installation_are_injectable_and_never_clobber() {
     let destination = directory.path().join("snapshot.ltx");
     faults.arm(Some("persist_new"));
     injected(host.compact(&plan, &destination));
+    faults.arm(Some("persist_file_new"));
     injected(writer.snapshot(&destination));
     assert!(!destination.exists());
     faults.arm(None);
