@@ -26,13 +26,14 @@ Browser                    Native Git / Git LFS
 ```
 
 The server owns HTTP policy and application workflows. Shared crates own Git
-reading, validation, publication, Cell execution, and storage mechanics. Issue
-and comment routes use typed Rust commands against one SQLite/LTX Cell per
-repository. The remote-owner path is verified from the public HTTP listener through
-the private mTLS listener to an advanced LTX root; the remaining application
-domains are still being cut over. The server uses
-writable temporary space for pack/index preparation; it creates no Git checkout
-or local Git object database.
+reading, validation, publication, Cell execution, and storage mechanics. Issues,
+comments, Labels, commit statuses, check runs, branch protections, repository
+lifecycle, Pull requests, reviews, and Release metadata use typed Rust commands
+against one SQLite/LTX Cell per repository. The remote-owner path is verified
+from the public HTTP listener through the private mTLS listener to an advanced
+LTX root. No serving route reads or writes the retired collaboration object
+trees. The server uses writable temporary space for pack/index preparation; it
+creates no Git checkout or local Git object database.
 
 ## Build and run
 
