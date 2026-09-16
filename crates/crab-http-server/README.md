@@ -74,6 +74,8 @@ credentials. Then create a cataloged repository and start:
   repository create --owner team --name project --prefix team/project
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
   storage-probe
+"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
+  cells capacity --json
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml serve
 ```
 
@@ -92,7 +94,8 @@ The server refuses startup for pending, missing or rootless repository Cells.
 `storage-probe` fails unless the workload can read and list the configured
 root, perform conditional coordination writes, create and delete an object,
 and observe that deletion. `serve` runs the same preflight before binding its
-listeners.
+listeners. `cells capacity --json` reports the resource-derived Cell admission
+envelope without claiming that the node has met a throughput target.
 
 The bucket or container must already exist. `repository adopt` can publish an
 existing canonical repository; it does not convert arbitrary objects into a

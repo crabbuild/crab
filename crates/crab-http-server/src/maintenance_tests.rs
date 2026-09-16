@@ -79,6 +79,7 @@ async fn fixture_without_cells() -> Arc<Server> {
         node_healthy: AtomicBool::new(false),
         scheduler_status: crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap())
             .unwrap(),
+        cell_capacity: super::test_cell_capacity_report(),
         metrics: crate::metrics::Metrics::new().unwrap(),
     })
 }

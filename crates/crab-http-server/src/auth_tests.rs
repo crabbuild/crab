@@ -328,6 +328,7 @@ impl Harness {
                 crate::cells::unix_now_ms().unwrap(),
             )
             .unwrap(),
+            cell_capacity: super::test_cell_capacity_report(),
             metrics: crate::metrics::Metrics::new().unwrap(),
         });
         let app = router(Arc::clone(&server));

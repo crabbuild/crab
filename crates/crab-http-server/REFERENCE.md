@@ -202,6 +202,7 @@ SERVER="$HOME/Workspace/crabbuild-target/crab-http-server-dev/release/crab-http-
 "$SERVER" --config /secure/server.toml repository list
 "$SERVER" --config /secure/server.toml cells status \
   --owner your-team --name your-project
+"$SERVER" --config /secure/server.toml cells capacity --json --live
 "$SERVER" --config /secure/server.toml repository set-members \
   --owner your-team --name your-project \
   --members-file /secure/members.toml
@@ -222,6 +223,15 @@ versioned JSON includes the Cell and incarnation IDs, lifecycle state, epoch,
 revision, serving session and endpoint, exact LTX root, code/schema pair, and
 next scheduler deadline. It reads object-store authority directly; it does not
 open SQLite, acquire ownership, or extend a lease.
+
+`cells capacity --json --live` is a read-only mTLS request to the running
+process. It reports that process's retained startup memory limit, free Cell
+volume bytes, available file descriptors, CPU-derived job credits, and the
+resulting active-Cell, retained-byte, local-disk, scratch, blocking-job,
+dirty-job and full-recovery admission limits. The full-recovery limit stays at
+two even when the node can run more blocking or capture jobs. Omitting `--live`
+calculates a preflight envelope for the command process. Both are qualification
+inputs, not measured performance evidence.
 
 Membership is supplied separately so the shared server configuration stays
 small and secret-independent:

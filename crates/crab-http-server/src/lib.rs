@@ -36,6 +36,12 @@ pub use config::{
 };
 pub use server::{probe_storage, serve};
 
+/// Returns the resource-derived Cell admission envelope for this process.
+pub fn cell_capacity(config: &Config) -> Result<Vec<u8>> {
+    config.validate()?;
+    server::cell_capacity_report(&config.cells.data_dir)
+}
+
 /// Returns the canonical release descriptor compiled into this server binary.
 pub fn cell_release_descriptor() -> Result<Vec<u8>> {
     Ok(cells::compiled_registry()?.release_bytes().to_vec())

@@ -18,12 +18,12 @@ flowchart TB
     Auth[.crab/http-server/v1/auth/]
     Repositories[Cataloged repository prefixes]
     Git[Git, refs, packs, manifests, LFS]
-    App[app/v1 issues, pulls, releases, settings]
+    Cells[cells/v1 SQLite roots and LTX objects]
     Root --> Catalog
     Root --> Auth
     Root --> Repositories
     Repositories --> Git
-    Repositories --> App
+    Repositories --> Cells
     Pod[Pod scratch] -. disposable .-> Repositories
 ```
 
@@ -159,6 +159,9 @@ kubectl --namespace crab logs deployment/crab-http-server \
   --all-pods=true --since=10m
 kubectl --namespace crab exec deployment/crab-http-server -- \
   crab-http-server --config /etc/crab/http-server/server.toml repository list
+kubectl --namespace crab exec deployment/crab-http-server -- \
+  crab-http-server --config /etc/crab/http-server/server.toml \
+  cells capacity --json --live
 helm test crab-http-server --namespace crab --logs --timeout 3m
 ```
 
@@ -222,6 +225,13 @@ ingress. Alert thresholds need a workload baseline; start with catalog health,
 new catalog-refresh failures, sustained zero local admission permits, repeated
 deployment-wide admission rejections, response-body errors, and unexpected
 drain state.
+
+Before a capacity qualification run, save `cells capacity --json --live` from
+every pod. It records the running server's startup memory, disk, descriptor and CPU inputs and
+the resulting active-Cell, retained-byte, blocking-job, dirty-job, recovery-job
+and scratch budgets. Treat it as admission evidence only: latency, throughput,
+RSS, descriptors, local bytes and object-store cost still require a measured
+workload receipt.
 
 ## Roll back a failed release
 

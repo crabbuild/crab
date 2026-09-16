@@ -50,6 +50,13 @@ enum Command {
 
 #[derive(Subcommand)]
 enum CellsCommand {
+    /// Print the resource-derived Cell admission envelope.
+    Capacity {
+        #[arg(long, required = true)]
+        json: bool,
+        #[arg(long, help = "Read the running server's startup envelope")]
+        live: bool,
+    },
     /// Print the durable control state for one repository Cell.
     Status {
         #[arg(long)]
@@ -235,6 +242,17 @@ async fn cells(
     command: CellsCommand,
 ) -> crab_http_server::Result<()> {
     let bytes = match command {
+        CellsCommand::Capacity {
+            json: true,
+            live: true,
+        } => live_capacity(config).await?,
+        CellsCommand::Capacity {
+            json: true,
+            live: false,
+        } => crab_http_server::cell_capacity(config)?,
+        CellsCommand::Capacity { json: false, .. } => {
+            return Err(crab_http_server::Error::Config("--json is required"));
+        }
         CellsCommand::Status { owner, name } => {
             crab_http_server::repository_cell_status(config, &owner, &name).await?
         }
@@ -315,13 +333,30 @@ async fn cells(
 }
 
 async fn healthcheck(config: &crab_http_server::Config) -> crab_http_server::Result<()> {
+    management_get(config, "/readyz").await?;
+    Ok(())
+}
+
+async fn live_capacity(config: &crab_http_server::Config) -> crab_http_server::Result<Vec<u8>> {
+    Ok(management_get(config, "/capacity")
+        .await?
+        .bytes()
+        .await
+        .map_err(|source| crab_http_server::Error::Healthcheck { source })?
+        .to_vec())
+}
+
+async fn management_get(
+    config: &crab_http_server::Config,
+    path: &'static str,
+) -> crab_http_server::Result<reqwest::Response> {
     let mut identity = std::fs::read(&config.cells.peer_certificate)?;
     identity.extend_from_slice(&std::fs::read(&config.cells.peer_private_key)?);
     let identity = reqwest::Identity::from_pem(&identity)
         .map_err(|source| crab_http_server::Error::Healthcheck { source })?;
     let authorities = reqwest::Certificate::from_pem_bundle(&std::fs::read(&config.cells.peer_ca)?)
         .map_err(|source| crab_http_server::Error::Healthcheck { source })?;
-    let (url, resolution) = healthcheck_target(config)?;
+    let (url, resolution) = management_target(config, path)?;
     let mut client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .https_only(true)
@@ -340,12 +375,12 @@ async fn healthcheck(config: &crab_http_server::Config) -> crab_http_server::Res
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
-        .map_err(|source| crab_http_server::Error::Healthcheck { source })?;
-    Ok(())
+        .map_err(|source| crab_http_server::Error::Healthcheck { source })
 }
 
-fn healthcheck_target(
+fn management_target(
     config: &crab_http_server::Config,
+    path: &'static str,
 ) -> crab_http_server::Result<(url::Url, Option<(String, std::net::SocketAddr)>)> {
     let mut url = config.cells.peer_advertise.clone();
     let tls_name = config
@@ -359,7 +394,7 @@ fn healthcheck_target(
         .to_owned();
     url.set_host(Some(&tls_name))
         .map_err(|_| crab_http_server::Error::Config("Cell peer TLS server name is invalid"))?;
-    url.set_path("/readyz");
+    url.set_path(path);
     let resolution = if tls_name.parse::<std::net::IpAddr>().is_err() {
         let listen_ip = config.management_listen.ip();
         let local_ip = if listen_ip.is_unspecified() {
@@ -516,9 +551,18 @@ mod tests {
             auth: None,
         };
 
-        let (url, resolution) = healthcheck_target(&config).unwrap();
+        let (url, resolution) = management_target(&config, "/readyz").unwrap();
 
         assert_eq!(url.as_str(), "https://crab-http-server-peer:8789/readyz");
+        assert_eq!(
+            resolution,
+            Some((
+                "crab-http-server-peer".into(),
+                "127.0.0.1:8789".parse().unwrap()
+            ))
+        );
+        let (url, resolution) = management_target(&config, "/capacity").unwrap();
+        assert_eq!(url.as_str(), "https://crab-http-server-peer:8789/capacity");
         assert_eq!(
             resolution,
             Some((
@@ -557,6 +601,59 @@ mod tests {
                 "cells",
                 "release",
                 "inspect",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn cell_capacity_requires_the_json_contract() {
+        let arguments = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "capacity",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Some(Command::Cells {
+                command: CellsCommand::Capacity {
+                    json: true,
+                    live: false
+                }
+            })
+        ));
+
+        let live = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "capacity",
+            "--json",
+            "--live",
+        ])
+        .unwrap();
+        assert!(matches!(
+            live.command,
+            Some(Command::Cells {
+                command: CellsCommand::Capacity {
+                    json: true,
+                    live: true
+                }
+            })
+        ));
+
+        assert!(
+            Arguments::try_parse_from([
+                "crab-http-server",
+                "--config",
+                "server.toml",
+                "cells",
+                "capacity",
             ])
             .is_err()
         );

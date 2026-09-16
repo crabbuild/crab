@@ -119,9 +119,15 @@ old collaboration application data is not imported.
 Inspect or stop the stack without deleting repositories:
 
 ```sh
+docker compose --file crates/crab-http-server/deploy/compose.yaml exec server \
+  crab-http-server --config /etc/crab/server.toml cells capacity --json --live
 docker compose --file crates/crab-http-server/deploy/compose.yaml logs --follow server proxy
 docker compose --file crates/crab-http-server/deploy/compose.yaml down
 ```
+
+The capacity report is the server's resource-derived admission envelope, not a
+benchmark result. Record it beside live RSS, file-descriptor, latency, local
+disk and RustFS measurements when qualifying a node profile.
 
 `docker compose down --volumes` permanently removes the local RustFS and peer
 identity volumes, including the catalog and every repository. The next start

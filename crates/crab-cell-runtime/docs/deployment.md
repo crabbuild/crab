@@ -155,6 +155,7 @@ The administrative commands operate through the existing server binary:
 
 ```text
 crab-http-server --config config.toml cells release inspect --json
+crab-http-server --config config.toml cells capacity --json --live
 crab-http-server --config config.toml cells release bootstrap --image sha256:1234567890
 crab-http-server --config config.toml cells release prepare \
   --expected-revision 7 --image sha256:1234567890
@@ -168,6 +169,42 @@ crab-http-server --config config.toml cells status --owner team --name repositor
 The repository status command reads the durable control object without opening
 the Cell or changing ownership. Use its versioned JSON to map a serving endpoint
 to a fleet member during takeover qualification.
+
+The capacity command with `--live` reads the startup envelope retained by the
+running server: process memory limit, free local disk, file descriptor limit,
+CPU-derived job credits, and the resulting admission budgets. Without `--live`,
+it calculates a preflight envelope for the short-lived command process instead.
+Neither mode claims a throughput result. Capture the live report before every
+capacity run and compare it with the node-wide gauges during the workload.
+
+```json
+{
+  "version": 1,
+  "resources": {
+    "memory_bytes": 2147483648,
+    "free_disk_bytes": 53687091200,
+    "available_file_descriptors": 1048570,
+    "job_credits": 2
+  },
+  "admission": {
+    "active_cells": 2457,
+    "retained_bytes": 80530636,
+    "blocking_jobs": 2,
+    "dirty_jobs": 2,
+    "recovery_jobs": 2,
+    "scratch_bytes": 14316208128,
+    "local_disk_bytes": 28632416256,
+    "disk_reserve_bytes": 10737418240
+  },
+  "reservations": {
+    "active_cell_page_cache_bytes": 196608,
+    "active_cell_native_bytes": 65536,
+    "active_cell_file_descriptors": 8,
+    "dirty_job_memory_bytes": 67108864,
+    "maximum_recovery_jobs": 2
+  }
+}
+```
 
 Compatible activation follows this state machine:
 

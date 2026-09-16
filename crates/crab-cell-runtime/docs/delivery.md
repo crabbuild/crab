@@ -244,6 +244,22 @@ Qualify each node profile separately:
 | Medium | Mixed repository sizes, sustained command target, sparse takeover |
 | Large | Maximum active-Cell target, 5,000 MB restore, compaction and renewal load |
 
+Before starting traffic, capture the exact resource-derived envelope from every
+node. A profile label or Kubernetes request is not evidence of the resources
+visible to the process.
+
+```bash
+kubectl --namespace crab exec POD -- \
+  crab-http-server --config /etc/crab/http-server/server.toml \
+  cells capacity --json --live > capacity-before.json
+```
+
+The report separates CPU-bounded blocking jobs, dirty-memory-bounded jobs, and
+the two-slot full-recovery ceiling. Store the report with the immutable image
+digest, profile, workload parameters, and live measurements. Reject a receipt
+when its observed active-Cell capacity or retained-byte capacity differs from
+the corresponding private metrics sample taken before traffic.
+
 Measure:
 
 - Resident set size per active Cell and per workload class
