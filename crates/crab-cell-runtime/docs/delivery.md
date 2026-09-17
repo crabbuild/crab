@@ -348,6 +348,7 @@ CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-load-generator \
   --target 'commits=8@/api/repos/team/project/commits?rev=main&limit=20' \
   --target 'readme=4@/api/repos/team/project/file?rev=main&path_hex=524541444d452e6d64' \
   --mutation 'issues=16@/api/repos/team/disposable-load/issues|/secure/new-issue.json' \
+  --aggregate-requests-per-second 1000 \
   --duration-seconds 300 \
   --warmup-seconds 15 \
   --header-file /secure/load-headers \
@@ -359,7 +360,10 @@ rejections, unexpected responses, transport/body-limit failures, bytes,
 throughput, and all-response plus successful-response latency percentiles. It
 checks `/livez` before and after traffic. HTTP 429 is an expected overload
 signal; any other non-2xx response, transport failure, oversized body, or
-unhealthy liveness check makes the command fail after writing the receipt.
+unhealthy liveness check makes the command fail after writing the receipt. A
+fixed aggregate-rate run also fails when successful responses fall below 95%
+of its configured request count, so 429 responses cannot satisfy the 1,000 TPS
+capacity target.
 
 The report separates CPU-bounded blocking jobs, dirty-memory-bounded jobs, and
 the two-slot full-recovery ceiling. Store the report with the immutable image

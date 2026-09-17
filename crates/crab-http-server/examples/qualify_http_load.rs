@@ -10,12 +10,16 @@ use clap::Parser;
 use futures_util::StreamExt as _;
 use reqwest::{Client, Method, StatusCode, header::CONTENT_TYPE};
 use serde::Serialize;
-use tokio::{sync::Barrier, task::JoinSet};
+use tokio::{
+    sync::{Barrier, Mutex},
+    task::JoinSet,
+};
 use url::Url;
 use uuid::Uuid;
 
-const REPORT_SCHEMA: u32 = 1;
+const REPORT_SCHEMA: u32 = 2;
 const MAX_LATENCY_MS: u64 = 60_000;
+const MINIMUM_TARGET_PERCENT: u64 = 95;
 
 #[path = "qualify_http_load/config.rs"]
 mod config;
@@ -77,6 +81,13 @@ struct Arguments {
     /// Unmeasured warmup duration for every worker.
     #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u64).range(0..=300))]
     warmup_seconds: u64,
+
+    /// Optional aggregate request rate shared by every target and worker.
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(u32).range(1..=100_000)
+    )]
+    aggregate_requests_per_second: Option<u32>,
 
     /// Optional file containing one Authorization, Cookie, or other header per line.
     #[arg(long)]
@@ -280,12 +291,48 @@ struct QualificationReport {
     base_url: String,
     configured_duration_ms: u64,
     warmup_ms: u64,
+    aggregate_requests_per_second: Option<u32>,
+    minimum_success_percent: Option<u64>,
+    minimum_successful_responses: Option<u64>,
+    target_rate_qualified: Option<bool>,
     max_response_bytes: u64,
     health_before: HealthReport,
     health_after: HealthReport,
     targets: Vec<TargetReport>,
     aggregate: TrafficReport,
     qualified: bool,
+}
+
+struct RateGate {
+    interval: Duration,
+    next: Mutex<Instant>,
+}
+
+impl RateGate {
+    fn new(requests_per_second: u32) -> Self {
+        Self {
+            interval: Duration::from_secs_f64(1.0 / f64::from(requests_per_second)),
+            next: Mutex::new(Instant::now()),
+        }
+    }
+
+    async fn wait(&self, deadline: Instant) -> bool {
+        let scheduled = {
+            let mut next = self.next.lock().await;
+            let now = Instant::now();
+            if *next < now {
+                *next = now;
+            }
+            if *next >= deadline {
+                return false;
+            }
+            let scheduled = *next;
+            *next = next.checked_add(self.interval).unwrap_or(deadline);
+            scheduled
+        };
+        tokio::time::sleep_until(tokio::time::Instant::from_std(scheduled)).await;
+        true
+    }
 }
 
 #[derive(Serialize)]
@@ -432,6 +479,7 @@ async fn main() -> Result<(), Error> {
         Duration::from_secs(arguments.warmup_seconds),
         Duration::from_secs(arguments.duration_seconds),
         arguments.max_response_bytes,
+        arguments.aggregate_requests_per_second,
     )
     .await?;
     let health_after = check_health(&client, &health_url, arguments.max_response_bytes).await?;
@@ -451,15 +499,30 @@ async fn main() -> Result<(), Error> {
             }
         })
         .collect::<Vec<_>>();
+    let minimum_successful_responses = arguments
+        .aggregate_requests_per_second
+        .map(|rate| minimum_successful_responses(rate, arguments.duration_seconds));
+    let target_rate_qualified = target_rate_qualified(
+        aggregate.successful_responses,
+        arguments.aggregate_requests_per_second,
+        arguments.duration_seconds,
+    );
     let qualified = health_before.status == StatusCode::OK.as_u16()
         && health_after.status == StatusCode::OK.as_u16()
-        && aggregate.qualified();
+        && aggregate.qualified()
+        && target_rate_qualified.unwrap_or(true);
     let report = QualificationReport {
         schema_version: REPORT_SCHEMA,
         started_at_ms,
         base_url: arguments.base_url.to_string(),
         configured_duration_ms: arguments.duration_seconds.saturating_mul(1_000),
         warmup_ms: arguments.warmup_seconds.saturating_mul(1_000),
+        aggregate_requests_per_second: arguments.aggregate_requests_per_second,
+        minimum_success_percent: arguments
+            .aggregate_requests_per_second
+            .map(|_| MINIMUM_TARGET_PERCENT),
+        minimum_successful_responses,
+        target_rate_qualified,
         max_response_bytes: arguments.max_response_bytes,
         health_before,
         health_after,
@@ -497,12 +560,14 @@ async fn run_load(
     warmup: Duration,
     duration: Duration,
     max_bytes: u64,
+    aggregate_requests_per_second: Option<u32>,
 ) -> Result<Vec<WorkerStats>, Error> {
     let workers = targets
         .iter()
         .map(|target| target.spec.concurrency)
         .sum::<usize>();
     let barrier = Arc::new(Barrier::new(workers));
+    let rate = aggregate_requests_per_second.map(|rate| Arc::new(RateGate::new(rate)));
     let mut tasks = JoinSet::new();
     for (index, target) in targets.iter().enumerate() {
         for _ in 0..target.spec.concurrency {
@@ -514,6 +579,7 @@ async fn run_load(
                 warmup,
                 duration,
                 max_bytes,
+                rate.clone(),
             ));
         }
     }
@@ -535,10 +601,16 @@ async fn run_worker(
     warmup: Duration,
     duration: Duration,
     max_bytes: u64,
+    rate: Option<Arc<RateGate>>,
 ) -> (usize, WorkerStats) {
     barrier.wait().await;
     let warmup_deadline = Instant::now() + warmup;
     while Instant::now() < warmup_deadline {
+        if let Some(rate) = &rate
+            && !rate.wait(warmup_deadline).await
+        {
+            break;
+        }
         let _ = request(&client, &target, max_bytes).await;
     }
     barrier.wait().await;
@@ -546,10 +618,35 @@ async fn run_worker(
     let deadline = started + duration;
     let mut stats = WorkerStats::default();
     while Instant::now() < deadline {
+        if let Some(rate) = &rate
+            && !rate.wait(deadline).await
+        {
+            break;
+        }
         stats.record(request(&client, &target, max_bytes).await);
+    }
+    if Instant::now() < deadline {
+        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
     }
     stats.elapsed = started.elapsed();
     (index, stats)
+}
+
+fn minimum_successful_responses(requests_per_second: u32, duration_seconds: u64) -> u64 {
+    u64::from(requests_per_second)
+        .saturating_mul(duration_seconds)
+        .saturating_mul(MINIMUM_TARGET_PERCENT)
+        .saturating_add(99)
+        / 100
+}
+
+fn target_rate_qualified(
+    successful_responses: u64,
+    requests_per_second: Option<u32>,
+    duration_seconds: u64,
+) -> Option<bool> {
+    requests_per_second
+        .map(|rate| successful_responses >= minimum_successful_responses(rate, duration_seconds))
 }
 
 async fn request(client: &Client, target: &ResolvedTarget, max_bytes: u64) -> RequestOutcome {

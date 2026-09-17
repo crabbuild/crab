@@ -1353,15 +1353,19 @@ CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-load-generator" \
   --target 'refs=4@/api/repos/team/project/refs' \
   --target 'commits=8@/api/repos/team/project/commits?rev=main&limit=20' \
   --mutation 'issues=8@/api/repos/team/disposable-load/issues|/secure/new-issue.json' \
+  --aggregate-requests-per-second 1000 \
   --duration-seconds 60 \
   --warmup-seconds 5 \
   > http-load.json
 ```
 
 Each read or mutation target declares its own concurrency and all targets run together. The
-versioned JSON receipt includes successful responses, HTTP 429 admission
+versioned JSON receipt includes the configured aggregate rate, its minimum
+successful-response count, successful responses, HTTP 429 admission
 rejections, unexpected responses, response bytes, throughput, and p50/p95/p99
-latency. The generator fully consumes every body, bounds response bytes, checks
+latency. A fixed-rate run fails qualification when it delivers less than 95%
+of the configured successful request count; admission rejections therefore do
+not masquerade as sustained target throughput. The generator fully consumes every body, bounds response bytes, checks
 `/livez` before and after traffic, and exits unsuccessfully on 5xx, unexpected
 non-429 status, transport/body-limit failure, or unhealthy liveness. Use
 `--header-file /secure/load-headers` for one private HTTP header per line; the

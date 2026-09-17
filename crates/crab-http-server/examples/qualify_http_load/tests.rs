@@ -110,6 +110,7 @@ async fn load_runner_counts_success_and_admission_without_false_failure() {
         Duration::ZERO,
         Duration::from_millis(50),
         1024,
+        None,
     )
     .await
     .unwrap();
@@ -157,6 +158,7 @@ async fn load_runner_rejects_server_errors_and_oversized_bodies() {
         Duration::ZERO,
         Duration::from_millis(50),
         2,
+        None,
     )
     .await
     .unwrap();
@@ -213,6 +215,7 @@ async fn mutation_load_runner_sends_unique_request_ids() {
         Duration::ZERO,
         Duration::from_millis(50),
         1024,
+        None,
     )
     .await
     .unwrap();
@@ -223,5 +226,54 @@ async fn mutation_load_runner_sends_unique_request_ids() {
         stats[0].successful_responses
     );
     assert!(stats[0].qualified());
+    server.abort();
+}
+
+#[tokio::test]
+async fn aggregate_rate_is_shared_across_workers_and_targets() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/first", get(|| async { "first" }))
+                .route("/second", get(|| async { "second" })),
+        )
+        .await
+    });
+    let origin = Url::parse(&format!("http://{address}/")).unwrap();
+    let targets = [
+        TargetSpec::from_str("first=2@/first").unwrap(),
+        TargetSpec::from_str("second=2@/second").unwrap(),
+    ]
+    .into_iter()
+    .map(|spec| ResolvedTarget {
+        url: origin.join(&spec.path).unwrap(),
+        spec,
+        method: LoadMethod::Get,
+        body_template: None,
+    })
+    .collect::<Vec<_>>();
+
+    let started = Instant::now();
+    let stats = run_load(
+        Client::new(),
+        &targets,
+        Duration::ZERO,
+        Duration::from_millis(250),
+        1024,
+        Some(20),
+    )
+    .await
+    .unwrap();
+    let responses = stats.iter().map(|stats| stats.responses).sum::<u64>();
+
+    assert!((4..=6).contains(&responses));
+    assert!(stats.iter().all(|stats| stats.responses > 0));
+    assert!(started.elapsed() >= Duration::from_millis(240));
+    assert_eq!(minimum_successful_responses(1_000, 60), 57_000);
+    assert_eq!(target_rate_qualified(56_999, Some(1_000), 60), Some(false));
+    assert_eq!(target_rate_qualified(57_000, Some(1_000), 60), Some(true));
     server.abort();
 }

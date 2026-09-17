@@ -1351,6 +1351,11 @@ The 1,000 TPS target is aggregate per node, not per repository. A result must
 state transaction size, changed pages, follower count, database distribution,
 object-store latency, and failure injection.
 
+Use `qualify_http_load --aggregate-requests-per-second 1000` for the bounded
+request schedule. Its schema-v2 receipt rejects a run whose successful response
+count is below 95% of the configured aggregate rate; 429 responses remain
+visible admission evidence but do not count toward the target throughput.
+
 ## Deliver in dependency order
 
 Each phase has a usable exit criterion. Do not enable the fleet response path
