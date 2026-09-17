@@ -83,7 +83,7 @@ impl StateStreamCancellation {
 /// Each call to [`Self::emit`] performs one actor-ordered query at or beyond
 /// the previous receipt. The mutable borrow prevents two chunks from being
 /// released out of order; the deadline and cancellation capability bound the
-/// retained stream state.
+/// retained stream state. Dropping the stream is equivalent to cancellation.
 pub struct CellStateStream<Q: Query> {
     client: CellClient,
     target: CellTarget,
@@ -194,6 +194,12 @@ impl<Q: Query> CellStateStream<Q> {
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.closed || self.cancellation.is_cancelled()
+    }
+}
+
+impl<Q: Query> Drop for CellStateStream<Q> {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
     }
 }
 

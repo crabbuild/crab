@@ -417,6 +417,18 @@ async fn state_stream_advances_receipts_and_cancellation_is_terminal() {
     ));
     assert!(stream.is_closed());
 
+    let dropped_cancellation = {
+        let dropped_stream = client
+            .open_state_stream::<StreamQuery>(
+                &target,
+                std::time::Instant::now() + std::time::Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+        dropped_stream.cancellation()
+    };
+    assert!(dropped_cancellation.is_cancelled());
+
     assert!(matches!(
         client
             .open_state_stream::<StreamQuery>(&target, std::time::Instant::now())
