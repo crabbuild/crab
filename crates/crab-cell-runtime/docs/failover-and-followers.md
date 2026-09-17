@@ -151,11 +151,11 @@ recovery path.
 
 | Working now | Still gated before fleet durability may serve traffic |
 | --- | --- |
-| Strict frame codec plus capacity-aware deterministic selection, authoritative enrollment, activation, coverage, and recovery claims | Failure-domain-aware automatic recruitment, epoch rotation, and recovery-only startup |
-| Crash-safe, node-budgeted follower store plus authenticated remote append/seal/tail transport | Live shipper batching and startup listener ordering |
+| Strict frame codec plus capacity-aware deterministic selection, authoritative enrollment, activation, coverage, recovery claims, and object-covered epoch rotation | Failure-domain-aware automatic recruitment and recovery-only startup |
+| Crash-safe, node-budgeted follower store plus authenticated remote append/seal/tail/retire transport | Live shipper batching and startup listener ordering |
 | Write-all durability gate with contiguous object watermark | Actor submission and response-gate integration |
 | Complete-witness grouping, immutable recovery manifests, and post-pin session seal CAS | Automated dead-session inventory and recovery scheduling |
-| Cell control attachment and takeover consumption of overlays | Graceful drain, retention retirement, and live multi-node proof |
+| Cell control attachment and takeover consumption of overlays | Graceful drain, obsolete-marker collection, and live multi-node proof |
 
 The session record now owns one CAS-protected log epoch, its exact sorted member
 set, activation bit, contiguous object watermark, and renewable recovery claim.
@@ -165,11 +165,13 @@ and seal against the same node-level disk budget used by Cell work, reserves
 existing bytes on restart, and NACKs before writing when capacity is exhausted.
 The directory now filters live peers by protocol, pressure, and the exact
 shared-disk capacity advertised by their follower stores, then rendezvous-ranks
-the full one- or two-member ensemble before its CAS enrollment. Automatic
-recruitment with failure-domain metadata, epoch rotation, recovery-only startup,
-actor submission, and automated session recovery remain gated. Fleet proof is
-not activated, so current responses stay on the existing exact-root path until
-those remaining gates are complete.
+the full one- or two-member ensemble before its CAS enrollment. Rotation closes
+the old gate only after every issued sequence is object-covered, best-effort
+retires old lanes behind durable append fences, and CASes a fresh inactive
+epoch. Automatic recruitment with failure-domain metadata, recovery-only
+startup, actor submission, automated session recovery, and obsolete-marker
+collection remain gated. Fleet proof is not activated, so current responses
+stay on the existing exact-root path until those remaining gates are complete.
 
 ## Use one multiplexed log per owner session
 
@@ -449,10 +451,10 @@ evictable read cache until the session record proves the bytes are covered.
 
 ```text
 <cell-data>/followers/<leader-session>/<log-epoch>/
-  meta.json
+  retired
   chunks/
-    0000000000000001-0000000000004096.log
-    0000000000004097-open.log
+    00000000000000000001-00000000000000004096.log
+    open.log
 ```
 
 Each record in a chunk contains magic, sequence, encoded-frame length, the
@@ -486,23 +488,27 @@ digest. A duplicate sequence with different bytes is corruption and
 quarantines that leader lane. A future sequence returns `expected_sequence`
 without filling the gap.
 
-Followers delete only chunks at or below `covered_through`, and only after the
-new base metadata is atomically installed. `covered_through` comes from an
-object-store root or bundle proof, never from leader memory.
+Followers delete only chunks at or below `covered_through`. Whole-epoch
+retirement first fsyncs the eight-byte `retired` watermark and its directory,
+then removes the chunks. The marker permanently rejects old-epoch appends and
+lets recovery prove that the now-empty lane was fully object-covered even if
+the leader crashes before its rotation CAS. `covered_through` comes from the
+authoritative session record, never from leader memory.
 
 ## Use bounded ordered peer streams
 
-The existing private mTLS listener gains three node-log operations:
+The existing private mTLS listener gains four node-log operations:
 
 | Operation | Direction | Purpose |
 | --- | --- | --- |
 | `OpenAppendStream` | Leader to selected follower | Long-lived ordered batches and ordered acknowledgements |
 | `SealFragment` | Recoverer to follower | Stop appends for one leader/log epoch and return retained range |
 | `ReadTail` | Recoverer from follower | Stream the sealed retained range with checksums |
+| `RetireFragment` | Live leader to follower | Persist an append fence and delete one fully object-covered epoch |
 
 The peer descriptor remains message-only; no public service is generated. The
 HTTP server maps messages onto private routes such as
-`/internal/cells/v1/node-log/stream`, `/seal`, and `/tail`.
+`/internal/cells/v1/node-log/.../append`, `/seal`, `/tail`, and `/retire`.
 
 Initial protocol bounds are compile-time contracts:
 
@@ -542,13 +548,17 @@ Changing members uses a barrier:
 1. Stop assigning new fleet tickets to the old shipper
 2. Wait until every submitted sequence is covered by an exact object-store
    proof
-3. CAS the session record to the next log epoch and new member set
-4. Open new follower lanes with sequence one
-5. Allow old followers to truncate the covered epoch
+3. While the old authority is still verifiable, ask reachable old followers to
+   persist the exact covered watermark and remove that lane
+4. CAS the session record to the next log epoch and new member set
+5. Open new follower lanes with sequence one
 
 If a member fails, in-flight writes can still complete through object-store
 publication. The owner must not silently shrink the current write-all set while
-uncovered entries exist.
+uncovered entries exist. An unreachable old follower does not block rotation:
+it retains inert data, rejects future appends after the authority CAS, and is
+collected later. A successful retirement response with any other watermark is
+a protocol error and blocks the CAS.
 
 ## Release responses through one gate
 

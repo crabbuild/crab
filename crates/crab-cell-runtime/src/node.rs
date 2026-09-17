@@ -4,7 +4,10 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
-use crate::{Digest, Error, NodeLogPhase, NodeLogStatus, NodeRecoveryClaim, Result, SessionId};
+use crate::{
+    Digest, Error, NodeLogPhase, NodeLogRotationBarrier, NodeLogStatus, NodeRecoveryClaim, Result,
+    SessionId,
+};
 
 const MAX_NODE_BYTES: u64 = 64 * 1024;
 const MAX_ENDPOINT_BYTES: usize = 512;
@@ -598,6 +601,26 @@ impl NodeDirectory {
         Ok(log.clone())
     }
 
+    /// Verifies the leader may retire this member's fully object-covered epoch.
+    pub async fn authorize_log_retire(
+        &self,
+        leader: SessionId,
+        member: SessionId,
+        log_epoch: u64,
+        covered_through: u64,
+        now_ms: i64,
+    ) -> Result<NodeLogStatus> {
+        let log = self
+            .authorize_log_append(leader, member, log_epoch, now_ms)
+            .await?;
+        if log.tiered_through() != covered_through {
+            return Err(Error::PeerAuthorization(
+                "node-log retire watermark differs from authority",
+            ));
+        }
+        Ok(log)
+    }
+
     /// Verifies a live claimant may seal or read this follower's failed-owner lane.
     pub async fn authorize_log_recovery(
         &self,
@@ -1045,6 +1068,52 @@ impl NodeDirectory {
             .checked_add(1)
             .ok_or(Error::Node("node session generation overflow"))?;
         next.log = Some(log);
+        self.update_advertisement(observed, next, now_ms).await
+    }
+
+    /// CASes a fully object-covered old epoch to a newly selected inactive epoch.
+    pub async fn rotate_log(
+        &self,
+        observed: &VersionedNodeAdvertisement,
+        barrier: &NodeLogRotationBarrier,
+        required_follower_bytes: u64,
+        live_node_limit: usize,
+        now_ms: i64,
+    ) -> Result<VersionedNodeAdvertisement> {
+        self.validate(&observed.advertisement, now_ms)?;
+        let current = observed
+            .advertisement
+            .log
+            .as_ref()
+            .ok_or(Error::Node("node session has no enrolled log"))?;
+        if barrier.leader_session() != observed.advertisement.session
+            || barrier.log_epoch() != current.epoch()
+            || barrier.members() != current.members()
+            || barrier.covered_through() != current.tiered_through()
+        {
+            return Err(Error::Node("node-log rotation barrier differs"));
+        }
+        let members = self
+            .select_log_members(
+                observed.advertisement.session,
+                required_follower_bytes,
+                now_ms,
+                live_node_limit,
+            )
+            .await?;
+        if members.is_empty() {
+            return Err(Error::Node("node-log follower ensemble is unavailable"));
+        }
+        let next_epoch = current
+            .epoch()
+            .checked_add(1)
+            .ok_or(Error::Node("node-log epoch overflow"))?;
+        let mut next = observed.advertisement.clone();
+        next.generation = next
+            .generation
+            .checked_add(1)
+            .ok_or(Error::Node("node session generation overflow"))?;
+        next.log = Some(NodeLogStatus::open(next.session, next_epoch, members)?);
         self.update_advertisement(observed, next, now_ms).await
     }
 

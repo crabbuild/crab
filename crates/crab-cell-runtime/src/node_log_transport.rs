@@ -18,6 +18,14 @@ pub struct SealRequest {
     pub log_epoch: u64,
 }
 
+/// Leader-authorized deletion of one fully object-covered follower lane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetireRequest {
+    pub leader_session: SessionId,
+    pub log_epoch: u64,
+    pub covered_through: u64,
+}
+
 /// Bounded read of one already sealed follower tail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TailRequest {
@@ -41,6 +49,12 @@ pub trait NodeLogTransport: Send + Sync {
         &'a self,
         member: SessionId,
         request: SealRequest,
+    ) -> BoxFuture<'a, Result<FollowerReceipt>>;
+
+    fn retire<'a>(
+        &'a self,
+        member: SessionId,
+        request: RetireRequest,
     ) -> BoxFuture<'a, Result<FollowerReceipt>>;
 
     fn tail<'a>(
@@ -101,6 +115,23 @@ impl NodeLogTransport for LocalFollowerTransport {
             self.validate_member(member)?;
             self.store
                 .seal(request.leader_session, request.log_epoch)
+                .await
+        })
+    }
+
+    fn retire<'a>(
+        &'a self,
+        member: SessionId,
+        request: RetireRequest,
+    ) -> BoxFuture<'a, Result<FollowerReceipt>> {
+        Box::pin(async move {
+            self.validate_member(member)?;
+            self.store
+                .retire(
+                    request.leader_session,
+                    request.log_epoch,
+                    request.covered_through,
+                )
                 .await
         })
     }

@@ -1,9 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use futures_util::future::join_all;
 use tokio::sync::Notify;
 
-use crate::{Error, Result, SessionId};
+use crate::{
+    Error, NodeDirectory, NodeLogTransport, Result, RetireRequest, SessionId,
+    VersionedNodeAdvertisement,
+};
 
 const MAX_TICKET_FRAMES: u64 = 1_024;
 
@@ -177,6 +181,43 @@ pub struct DurabilityProof {
     source: DurabilitySource,
 }
 
+/// Proof that one gate stopped issuance after every old-epoch ticket became object-covered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodeLogRotationBarrier {
+    leader_session: SessionId,
+    log_epoch: u64,
+    members: Vec<SessionId>,
+    covered_through: u64,
+}
+
+/// New authoritative enrollment and inactive durability gate after rotation.
+pub struct RotatedNodeLog {
+    pub enrollment: VersionedNodeAdvertisement,
+    pub gate: DurabilityGate,
+}
+
+impl NodeLogRotationBarrier {
+    #[must_use]
+    pub const fn leader_session(&self) -> SessionId {
+        self.leader_session
+    }
+
+    #[must_use]
+    pub const fn log_epoch(&self) -> u64 {
+        self.log_epoch
+    }
+
+    #[must_use]
+    pub fn members(&self) -> &[SessionId] {
+        &self.members
+    }
+
+    #[must_use]
+    pub const fn covered_through(&self) -> u64 {
+        self.covered_through
+    }
+}
+
 impl DurabilityProof {
     #[must_use]
     pub const fn ticket(&self) -> CommitTicket {
@@ -209,6 +250,7 @@ struct GateState {
     tiered_through: u64,
     next_sequence: u64,
     fleet_active: bool,
+    rotating: bool,
     fenced: bool,
 }
 
@@ -241,6 +283,7 @@ impl DurabilityGate {
                 tiered_through: 0,
                 next_sequence: 1,
                 fleet_active: false,
+                rotating: false,
                 fenced: false,
             })),
             changed: Arc::new(Notify::new()),
@@ -255,6 +298,9 @@ impl DurabilityGate {
         let mut state = self.lock()?;
         if state.fenced {
             return Err(Error::Fenced);
+        }
+        if state.rotating {
+            return Err(Error::Node("node log is rotating"));
         }
         let first_sequence = state.next_sequence;
         let last_sequence = first_sequence
@@ -277,6 +323,9 @@ impl DurabilityGate {
         if state.fenced {
             return Err(Error::Fenced);
         }
+        if state.rotating {
+            return Err(Error::Node("node log is rotating"));
+        }
         state.fleet_active = true;
         drop(state);
         self.changed.notify_waiters();
@@ -288,6 +337,9 @@ impl DurabilityGate {
         let mut state = self.lock()?;
         if state.fenced {
             return Err(Error::Fenced);
+        }
+        if state.rotating {
+            return Err(Error::Node("node log is rotating"));
         }
         let next_sequence = state.next_sequence;
         let current = state
@@ -322,6 +374,31 @@ impl DurabilityGate {
     #[must_use]
     pub fn tiered_through(&self) -> u64 {
         self.lock().map_or(0, |state| state.tiered_through)
+    }
+
+    /// Stops ticket issuance after the entire old epoch is object-covered.
+    pub fn begin_rotation(&self) -> Result<NodeLogRotationBarrier> {
+        let mut state = self.lock()?;
+        if state.fenced {
+            return Err(Error::Fenced);
+        }
+        let issued_through = state.next_sequence.saturating_sub(1);
+        if state.tiered_through != issued_through {
+            return Err(Error::PendingPublication);
+        }
+        state.rotating = true;
+        state.fleet_active = false;
+        let mut members = state.members.iter().copied().collect::<Vec<_>>();
+        members.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        let barrier = NodeLogRotationBarrier {
+            leader_session: state.leader_session,
+            log_epoch: state.log_epoch,
+            members,
+            covered_through: state.tiered_through,
+        };
+        drop(state);
+        self.changed.notify_waiters();
+        Ok(barrier)
     }
 
     /// Waits until either complete durability path covers the whole ticket.
@@ -378,6 +455,61 @@ impl DurabilityGate {
             .lock()
             .map_err(|_| Error::Node("node-log durability gate poisoned"))
     }
+}
+
+/// Best-effort retires old follower lanes before CASing a newly selected log epoch.
+///
+/// Unreachable followers may retain inert data, but cannot block rotation.
+/// A CAS failure leaves the old gate closed to new tickets. Retrying is safe:
+/// the barrier and follower retire markers are exact and idempotent.
+pub async fn rotate_node_log(
+    directory: &NodeDirectory,
+    transport: Arc<dyn NodeLogTransport>,
+    observed: &VersionedNodeAdvertisement,
+    gate: &DurabilityGate,
+    required_follower_bytes: u64,
+    live_node_limit: usize,
+    now_ms: i64,
+) -> Result<RotatedNodeLog> {
+    let barrier = gate.begin_rotation()?;
+    let retirements = join_all(barrier.members().iter().map(|member| {
+        let transport = Arc::clone(&transport);
+        let member = *member;
+        let request = RetireRequest {
+            leader_session: barrier.leader_session(),
+            log_epoch: barrier.log_epoch(),
+            covered_through: barrier.covered_through(),
+        };
+        async move { transport.retire(member, request).await }
+    }))
+    .await;
+    let expected_base = barrier.covered_through().saturating_add(1);
+    for receipt in retirements.into_iter().flatten() {
+        if receipt.base_sequence != expected_base
+            || receipt.durable_through != barrier.covered_through()
+        {
+            return Err(Error::Node("follower retire receipt differs"));
+        }
+    }
+    let enrollment = directory
+        .rotate_log(
+            observed,
+            &barrier,
+            required_follower_bytes,
+            live_node_limit,
+            now_ms,
+        )
+        .await?;
+    let log = enrollment
+        .advertisement()
+        .log()
+        .ok_or(Error::Node("rotated node session lost its log"))?;
+    let gate = DurabilityGate::new(
+        enrollment.advertisement().session(),
+        log.epoch(),
+        log.members().iter().copied(),
+    )?;
+    Ok(RotatedNodeLog { enrollment, gate })
 }
 
 fn validate_ticket(state: &GateState, ticket: CommitTicket) -> Result<()> {
@@ -451,6 +583,31 @@ mod tests {
         );
         assert_eq!(gate.prove_object(first).unwrap(), 2);
         assert_eq!(gate.tiered_through(), 2);
+    }
+
+    #[tokio::test]
+    async fn rotation_waits_for_object_coverage_and_closes_the_old_gate() {
+        let gate = DurabilityGate::new(session(1), 2, [session(4), session(3)]).unwrap();
+        let ticket = gate.issue(2).unwrap();
+
+        assert!(matches!(
+            gate.begin_rotation(),
+            Err(Error::PendingPublication)
+        ));
+        gate.prove_object(ticket).unwrap();
+        let barrier = gate.begin_rotation().unwrap();
+        assert_eq!(barrier.leader_session(), session(1));
+        assert_eq!(barrier.log_epoch(), 2);
+        assert_eq!(barrier.members(), [session(3), session(4)]);
+        assert_eq!(barrier.covered_through(), 2);
+        assert_eq!(gate.begin_rotation().unwrap(), barrier);
+        assert!(gate.issue(1).is_err());
+        assert!(gate.activate_fleet().is_err());
+        assert!(gate.acknowledge(session(3), 2).is_err());
+        assert_eq!(
+            gate.prove(ticket).await.unwrap().source(),
+            DurabilitySource::Object
+        );
     }
 
     #[tokio::test]

@@ -1221,6 +1221,10 @@ fn management_router(server: Arc<Server>) -> Router {
             post(crate::peer::seal_node_log).layer(axum::extract::DefaultBodyLimit::max(0)),
         )
         .route(
+            "/internal/cells/v1/node-log/{leader}/{epoch}/retire/{covered_through}",
+            post(crate::peer::retire_node_log).layer(axum::extract::DefaultBodyLimit::max(0)),
+        )
+        .route(
             "/internal/cells/v1/node-log/{leader}/{epoch}/recovery/{claimant}/tail/{first}",
             post(crate::peer::tail_node_log).layer(axum::extract::DefaultBodyLimit::max(0)),
         )

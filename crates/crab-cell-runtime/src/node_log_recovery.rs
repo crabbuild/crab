@@ -383,7 +383,9 @@ mod tests {
     use futures_util::future::BoxFuture;
 
     use super::*;
-    use crate::{AppendRequest, FollowerStore, LocalFollowerTransport, NodeLogTransport};
+    use crate::{
+        AppendRequest, FollowerStore, LocalFollowerTransport, NodeLogTransport, RetireRequest,
+    };
 
     struct FailingFirstTransport {
         failed: SessionId,
@@ -413,6 +415,14 @@ mod tests {
                 });
             }
             self.good.seal(member, request)
+        }
+
+        fn retire<'a>(
+            &'a self,
+            member: SessionId,
+            request: RetireRequest,
+        ) -> BoxFuture<'a, Result<crate::FollowerReceipt>> {
+            self.good.retire(member, request)
         }
 
         fn tail<'a>(

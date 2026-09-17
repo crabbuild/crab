@@ -282,3 +282,50 @@ async fn append_reserves_capacity_before_writing_and_seal_accounts_for_marker() 
     assert_eq!(store.available_bytes(), 0);
     database.close().unwrap();
 }
+
+#[tokio::test]
+async fn retire_requires_full_coverage_and_persists_an_append_fence() {
+    let limits = crab_ltx::Limits::default();
+    let source = tempfile::TempDir::new().unwrap();
+    let mut database = ManagedDb::open(&source.path().join("cell.sqlite"), limits).unwrap();
+    database
+        .transaction(|transaction| transaction.execute_batch("CREATE TABLE values_(v)"))
+        .unwrap();
+    let capture = database.capture().unwrap();
+    let encoded = frame(1, capture.segments.first().unwrap(), limits);
+    let required = RECORD_HEADER_BYTES as u64 + encoded.len() as u64;
+    let leader = SessionId::from_bytes([1; 16]);
+    let root = tempfile::TempDir::new().unwrap();
+    let store = FollowerStore::open(
+        root.path().to_owned(),
+        limits,
+        crab_ltx::DiskBudget::new(required + 8),
+    )
+    .unwrap();
+    store
+        .append(leader, 2, vec![encoded.clone()], 0)
+        .await
+        .unwrap();
+
+    assert!(store.retire(leader, 2, 0).await.is_err());
+    assert_eq!(store.retained_bytes(), required);
+    assert_eq!(
+        store.retire(leader, 2, 1).await.unwrap(),
+        FollowerReceipt {
+            base_sequence: 2,
+            durable_through: 1,
+        }
+    );
+    assert_eq!(store.retained_bytes(), 8);
+    assert_eq!(store.retire(leader, 2, 1).await.unwrap().durable_through, 1);
+    assert!(store.retire(leader, 2, 2).await.is_err());
+    assert!(store.append(leader, 2, vec![encoded], 1).await.is_err());
+    assert_eq!(store.seal(leader, 2).await.unwrap().durable_through, 1);
+
+    drop(store);
+    let reopened =
+        FollowerStore::open(root.path().to_owned(), limits, crab_ltx::DiskBudget::new(8)).unwrap();
+    assert_eq!(reopened.retained_bytes(), 8);
+    assert_eq!(reopened.seal(leader, 2).await.unwrap().durable_through, 1);
+    database.close().unwrap();
+}

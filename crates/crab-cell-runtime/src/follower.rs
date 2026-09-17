@@ -145,16 +145,51 @@ impl FollowerStore {
             let retained = retained
                 .lock()
                 .map_err(|_| Error::Node("follower disk reservation lock poisoned"))?;
-            retained.try_grow(8)?;
             let mut state = lock
                 .lock()
                 .map_err(|_| Error::Node("follower lane lock poisoned"))?;
+            let directory = lane_directory(&root, lane);
+            if !directory.join("sealed").exists() && !directory.join("retired").exists() {
+                retained.try_grow(8)?;
+            }
             let result = seal_sync(&root, lane, limits, &mut state);
             let resize = directory_bytes(&root)
                 .and_then(|bytes| retained.resize(bytes).map_err(Error::from));
             if result.is_err() {
                 *state = None;
             }
+            settle_disk_reservation(result, resize)
+        })
+        .await
+        .map_err(Error::FollowerWorkerJoin)?
+    }
+
+    /// Retires one fully object-covered lane and keeps a durable append fence.
+    pub async fn retire(
+        &self,
+        leader: SessionId,
+        epoch: u64,
+        covered_through: u64,
+    ) -> Result<FollowerReceipt> {
+        let lane = Lane { leader, epoch };
+        let lock = self.lane_lock(lane)?;
+        let root = self.root.clone();
+        let limits = self.limits;
+        let retained = Arc::clone(&self.retained);
+        tokio::task::spawn_blocking(move || {
+            let retained = retained
+                .lock()
+                .map_err(|_| Error::Node("follower disk reservation lock poisoned"))?;
+            let mut state = lock
+                .lock()
+                .map_err(|_| Error::Node("follower lane lock poisoned"))?;
+            if !lane_directory(&root, lane).join("retired").exists() {
+                retained.try_grow(8)?;
+            }
+            let result = retire_sync(&root, lane, covered_through, limits);
+            let resize = directory_bytes(&root)
+                .and_then(|bytes| retained.resize(bytes).map_err(Error::from));
+            *state = None;
             settle_disk_reservation(result, resize)
         })
         .await
@@ -277,6 +312,9 @@ fn append_sync(
     let directory = lane_directory(root, lane);
     let chunks = directory.join("chunks");
     ensure_lane_directories(root, lane)?;
+    if directory.join("retired").exists() {
+        return Err(Error::Node("follower lane is retired"));
+    }
     if directory.join("sealed").exists() {
         return Err(Error::Node("follower lane is sealed"));
     }
@@ -373,6 +411,14 @@ fn seal_sync(
     validate_lane(lane)?;
     let directory = lane_directory(root, lane);
     let chunks = directory.join("chunks");
+    let retired = directory.join("retired");
+    if retired.exists() {
+        let covered_through = read_watermark(&retired, "follower retire marker is invalid")?;
+        return Ok(FollowerReceipt {
+            base_sequence: covered_through.saturating_add(1),
+            durable_through: covered_through,
+        });
+    }
     if state.is_none() {
         let retained = scan_lane(&chunks, lane, limits)?;
         *state = Some(LaneMemory {
@@ -391,7 +437,7 @@ fn seal_sync(
     let base_sequence = state.records.keys().next().copied().unwrap_or(0);
     let marker = directory.join("sealed");
     if marker.exists() {
-        let stored = read_sealed_marker(&marker)?;
+        let stored = read_watermark(&marker, "follower seal marker is invalid")?;
         if stored != durable_through {
             return Err(Error::Node("follower seal watermark differs"));
         }
@@ -410,6 +456,49 @@ fn seal_sync(
     })
 }
 
+fn retire_sync(
+    root: &Path,
+    lane: Lane,
+    covered_through: u64,
+    limits: crab_ltx::Limits,
+) -> Result<FollowerReceipt> {
+    validate_lane(lane)?;
+    ensure_lane_directories(root, lane)?;
+    let directory = lane_directory(root, lane);
+    let chunks = directory.join("chunks");
+    let retained = scan_lane(&chunks, lane, limits)?;
+    let durable_through = retained.keys().next_back().copied().unwrap_or(0);
+    if durable_through > covered_through {
+        return Err(Error::Node("follower lane has uncovered records"));
+    }
+    let marker = directory.join("retired");
+    if marker.exists() {
+        if read_watermark(&marker, "follower retire marker is invalid")? != covered_through {
+            return Err(Error::Node("follower retire watermark differs"));
+        }
+    } else {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)?;
+        file.write_all(&covered_through.to_le_bytes())?;
+        file.sync_all()?;
+        sync_directory(&directory)?;
+    }
+    if chunks.exists() {
+        std::fs::remove_dir_all(&chunks)?;
+    }
+    let sealed = directory.join("sealed");
+    if sealed.exists() {
+        std::fs::remove_file(sealed)?;
+    }
+    sync_directory(&directory)?;
+    Ok(FollowerReceipt {
+        base_sequence: covered_through.saturating_add(1),
+        durable_through: covered_through,
+    })
+}
+
 fn read_tail_sync(
     root: &Path,
     lane: Lane,
@@ -424,7 +513,7 @@ fn read_tail_sync(
     }
     let retained = scan_lane(&directory.join("chunks"), lane, limits)?;
     let durable_through = retained.keys().next_back().copied().unwrap_or(0);
-    if read_sealed_marker(&marker)? != durable_through {
+    if read_watermark(&marker, "follower seal marker is invalid")? != durable_through {
         return Err(Error::Node("follower seal watermark differs"));
     }
     if retained.is_empty() || first_sequence < *retained.keys().next().unwrap_or(&u64::MAX) {
@@ -509,13 +598,13 @@ fn scan_lane(
     Ok(records)
 }
 
-fn read_sealed_marker(path: &Path) -> Result<u64> {
+fn read_watermark(path: &Path, invalid: &'static str) -> Result<u64> {
     let bytes = std::fs::read(path)?;
     let watermark = bytes
         .as_slice()
         .try_into()
         .map(u64::from_le_bytes)
-        .map_err(|_| Error::Node("follower seal marker is invalid"))?;
+        .map_err(|_| Error::Node(invalid))?;
     Ok(watermark)
 }
 

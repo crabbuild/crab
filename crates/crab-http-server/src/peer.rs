@@ -598,6 +598,44 @@ pub(crate) async fn seal_node_log(
     }
 }
 
+pub(crate) async fn retire_node_log(
+    State(server): State<Arc<Server>>,
+    ConnectInfo(identity): ConnectInfo<PeerTlsIdentity>,
+    AxumPath((leader, epoch, covered_through)): AxumPath<(String, u64, u64)>,
+) -> Response {
+    let (Some(receiver), Some(store), Some(_transport)) = (
+        server.peer_receiver.as_ref(),
+        server.follower_store.as_ref(),
+        server.node_log_transport.as_ref(),
+    ) else {
+        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let leader = match decode_session(&leader) {
+        Ok(leader) => leader,
+        Err(()) => return peer_http_error(StatusCode::BAD_REQUEST),
+    };
+    let now_ms = match now_ms() {
+        Ok(now_ms) => now_ms,
+        Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    if !authenticated_session(receiver, leader, &identity, now_ms).await {
+        return peer_http_error(StatusCode::UNAUTHORIZED);
+    }
+    if receiver
+        .directory
+        .authorize_log_retire(leader, receiver.session, epoch, covered_through, now_ms)
+        .await
+        .is_err()
+    {
+        return peer_http_error(StatusCode::FORBIDDEN);
+    }
+    match store.retire(leader, epoch, covered_through).await {
+        Ok(receipt) => follower_receipt_response(receipt),
+        Err(CellError::Node(_)) | Err(CellError::Ltx(_)) => peer_http_error(StatusCode::CONFLICT),
+        Err(_) => peer_http_error(StatusCode::SERVICE_UNAVAILABLE),
+    }
+}
+
 pub(crate) async fn tail_node_log(
     State(server): State<Arc<Server>>,
     ConnectInfo(identity): ConnectInfo<PeerTlsIdentity>,

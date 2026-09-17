@@ -1,16 +1,54 @@
 use std::sync::Arc;
 
+use bytes::Bytes;
 use crab_storage::{CellStorageLayout, Store};
 use ed25519_dalek::SigningKey;
+use futures_util::future::BoxFuture;
 use object_store::{memory::InMemory, path::Path};
 
 use super::*;
 use crate::{
-    ApplicationId, CellTarget, NamespaceId, PeerOperation, PeerPrincipal, PeerSigner, TenantId,
-    peer_wire,
+    AppendRequest, ApplicationId, CellTarget, NamespaceId, NodeLogTransport, PeerOperation,
+    PeerPrincipal, PeerSigner, RetireRequest, SealRequest, TailRequest, TenantId, peer_wire,
 };
 
 const NOW_MS: i64 = 1_000_000;
+
+struct UnavailableFollowerTransport;
+
+impl NodeLogTransport for UnavailableFollowerTransport {
+    fn append<'a>(
+        &'a self,
+        _member: SessionId,
+        _request: AppendRequest,
+    ) -> BoxFuture<'a, Result<crate::FollowerReceipt>> {
+        Box::pin(async { Err(Error::Node("injected unavailable follower")) })
+    }
+
+    fn seal<'a>(
+        &'a self,
+        _member: SessionId,
+        _request: SealRequest,
+    ) -> BoxFuture<'a, Result<crate::FollowerReceipt>> {
+        Box::pin(async { Err(Error::Node("injected unavailable follower")) })
+    }
+
+    fn retire<'a>(
+        &'a self,
+        _member: SessionId,
+        _request: RetireRequest,
+    ) -> BoxFuture<'a, Result<crate::FollowerReceipt>> {
+        Box::pin(async { Err(Error::Node("injected unavailable follower")) })
+    }
+
+    fn tail<'a>(
+        &'a self,
+        _member: SessionId,
+        _request: TailRequest,
+    ) -> BoxFuture<'a, Result<Vec<Bytes>>> {
+        Box::pin(async { Err(Error::Node("injected unavailable follower")) })
+    }
+}
 
 fn advertisement(key: &SigningKey, progress: u64, issued_at_ms: i64) -> NodeAdvertisement {
     advertisement_for(SessionId::from_bytes([1; 16]), key, progress, issued_at_ms)
@@ -299,7 +337,42 @@ async fn node_log_enrollment_activation_and_coverage_are_authoritative() {
         .await
         .unwrap();
     assert_eq!(covered.advertisement().log().unwrap().tiered_through(), 27);
-    assert!(directory.withdraw(&covered, NOW_MS + 1_003).await.is_err());
+    directory
+        .authorize_log_retire(leader, first, 4, 27, NOW_MS + 1_003)
+        .await
+        .unwrap();
+    let gate = crate::DurabilityGate::new(leader, 4, [first, second]).unwrap();
+    let ticket = gate.issue(27).unwrap();
+    gate.prove_object(ticket).unwrap();
+    let rotated = crate::rotate_node_log(
+        &directory,
+        Arc::new(UnavailableFollowerTransport),
+        &covered,
+        &gate,
+        1,
+        3,
+        NOW_MS + 1_003,
+    )
+    .await
+    .unwrap();
+    let rotated_log = rotated.enrollment.advertisement().log().unwrap();
+    assert_eq!(rotated_log.epoch(), 5);
+    assert_eq!(rotated_log.phase(), NodeLogPhase::Open);
+    assert!(!rotated_log.active());
+    assert_eq!(rotated_log.tiered_through(), 0);
+    assert_eq!(rotated.gate.issue(1).unwrap().first_sequence(), 1);
+    assert!(
+        directory
+            .authorize_log_retire(leader, first, 4, 27, NOW_MS + 1_004)
+            .await
+            .is_err()
+    );
+    assert!(
+        directory
+            .withdraw(&rotated.enrollment, NOW_MS + 1_005)
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]

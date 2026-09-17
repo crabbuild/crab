@@ -95,15 +95,16 @@ pub use node::{
     SealedNodeLog, VersionedNodeAdvertisement,
 };
 pub use node_log::{
-    CommitTicket, DurabilityGate, DurabilityProof, DurabilitySource, RecoveredCellTail,
-    RecoveryBase, build_recovery_overlays,
+    CommitTicket, DurabilityGate, DurabilityProof, DurabilitySource, NodeLogRotationBarrier,
+    RecoveredCellTail, RecoveryBase, RotatedNodeLog, build_recovery_overlays, rotate_node_log,
 };
 pub use node_log_recovery::{
     CompletedNodeRecovery, NodeLogRecovery, RecoveryCell, RecoveryCoordinator, SealedSession,
 };
 pub use node_log_state::{NodeLogPhase, NodeLogStatus, NodeRecoveryClaim};
 pub use node_log_transport::{
-    AppendRequest, LocalFollowerTransport, NodeLogTransport, SealRequest, TailRequest,
+    AppendRequest, LocalFollowerTransport, NodeLogTransport, RetireRequest, SealRequest,
+    TailRequest,
 };
 pub use peer::{
     EffectPeerClient, MAX_PEER_REQUEST_BYTES, MigrationPeerClient, PeerAuthorizer,

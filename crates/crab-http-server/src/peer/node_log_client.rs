@@ -4,7 +4,7 @@ use axum::http::{StatusCode, header};
 use bytes::Bytes;
 use crab_cell_runtime::{
     AppendRequest, Error as CellError, FollowerReceipt, NodeDirectory, NodeLogTransport,
-    SealRequest, SessionId, TailRequest,
+    RetireRequest, SealRequest, SessionId, TailRequest,
 };
 use futures_util::{StreamExt, future::BoxFuture};
 use serde::Deserialize;
@@ -105,6 +105,29 @@ impl NodeLogHttpTransport {
         decode_receipt(response).await
     }
 
+    async fn retire_inner(
+        &self,
+        member: SessionId,
+        request: RetireRequest,
+    ) -> crab_cell_runtime::Result<FollowerReceipt> {
+        let remote = self.remote(member).await?;
+        let path = format!(
+            "internal/cells/v1/node-log/{}/{}/retire/{}",
+            encode_session(request.leader_session),
+            request.log_epoch,
+            request.covered_through
+        );
+        let response = remote
+            .client
+            .post(remote.endpoint.join(&path).map_err(transport_error)?)
+            .header(header::CACHE_CONTROL, "no-store")
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(transport_unknown)?;
+        decode_receipt(response).await
+    }
+
     async fn tail_inner(
         &self,
         member: SessionId,
@@ -177,6 +200,14 @@ impl NodeLogTransport for NodeLogHttpTransport {
         request: SealRequest,
     ) -> BoxFuture<'a, crab_cell_runtime::Result<FollowerReceipt>> {
         Box::pin(self.seal_inner(member, request))
+    }
+
+    fn retire<'a>(
+        &'a self,
+        member: SessionId,
+        request: RetireRequest,
+    ) -> BoxFuture<'a, crab_cell_runtime::Result<FollowerReceipt>> {
+        Box::pin(self.retire_inner(member, request))
     }
 
     fn tail<'a>(
