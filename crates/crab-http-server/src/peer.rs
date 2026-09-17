@@ -768,9 +768,8 @@ pub(crate) async fn seal_node_log(
         Ok(now_ms) => now_ms,
         Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
     };
-    if !receiver_is_current(receiver, now_ms).await {
-        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
-    }
+    // Recovery must work before this follower publishes a new boot session.
+    // The recovery claim below binds the request to its persisted physical node.
     if !authenticated_session(receiver, claimant, &identity, now_ms).await {
         return peer_http_error(StatusCode::UNAUTHORIZED);
     }
@@ -849,9 +848,8 @@ pub(crate) async fn tail_node_log(
         Ok(now_ms) => now_ms,
         Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
     };
-    if !receiver_is_current(receiver, now_ms).await {
-        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
-    }
+    // Recovery must work before this follower publishes a new boot session.
+    // The recovery claim below binds the request to its persisted physical node.
     if !authenticated_session(receiver, claimant, &identity, now_ms).await {
         return peer_http_error(StatusCode::UNAUTHORIZED);
     }

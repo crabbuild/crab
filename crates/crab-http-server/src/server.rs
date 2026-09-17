@@ -664,6 +664,10 @@ pub(crate) struct Server {
 }
 
 impl Server {
+    pub(crate) fn accepts_application_peers(&self) -> bool {
+        self.node_healthy.load(Ordering::Acquire) && !self.cancellation.is_cancelled()
+    }
+
     pub(crate) async fn acquire_transfer(
         &self,
         cancellation: &CancellationToken,
@@ -746,7 +750,6 @@ pub async fn serve(config: Config) -> Result<()> {
         },
     )?;
     let transfer_admission = transfer_admission(&catalog);
-    probe_storage_contract(&catalog, &transfer_admission).await?;
     let startup = crate::cells::verify_startup_release(&config).await?;
     crate::cells::verify_repository_cells(&startup.layout, startup.identity, repository_cells)
         .await?;
@@ -791,8 +794,6 @@ pub async fn serve(config: Config) -> Result<()> {
     .map_err(|source| crate::Error::LocalStaging {
         source: Box::new(source),
     })?;
-    // A pod must prove the complete storage contract before it owns any socket;
-    // otherwise incomplete cloud permissions can look partially started.
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
     let metrics = crate::metrics::Metrics::new()?;
@@ -865,30 +866,6 @@ pub async fn serve(config: Config) -> Result<()> {
         scheduler_status.clone(),
     )?
     .with_node_recovery(Arc::clone(&node_log_transport));
-    let _advertised = match node_publisher.publish_initial().await {
-        Ok(advertised) => advertised,
-        Err(error) => {
-            if let Err(shutdown_error) = cell_runtime.shutdown().await {
-                tracing::warn!(error = %shutdown_error, "Cell runtime startup cleanup failed");
-            }
-            return Err(error);
-        }
-    };
-    let node_lease = match node_publisher.lease_guard() {
-        Ok(lease) => lease,
-        Err(error) => {
-            if let Err(shutdown_error) = cell_runtime.shutdown().await {
-                tracing::warn!(error = %shutdown_error, "Cell runtime startup cleanup failed");
-            }
-            return Err(error);
-        }
-    };
-    if let Err(error) = cell_runtime.install_node_lease(node_lease.clone()) {
-        if let Err(shutdown_error) = cell_runtime.shutdown().await {
-            tracing::warn!(error = %shutdown_error, "Cell runtime startup cleanup failed");
-        }
-        return Err(error.into());
-    }
     let durability_application = startup.identity.application();
     let server = Arc::new(Server {
         repositories: repositories.into(),
@@ -911,17 +888,69 @@ pub async fn serve(config: Config) -> Result<()> {
         app_admission: Semaphore::new(APP_ADMISSION_CAPACITY),
         maintenance_admission: Arc::new(Semaphore::new(MAINTENANCE_ADMISSION_CAPACITY)),
         auth,
-        catalog: Some(catalog),
+        catalog: Some(catalog.clone()),
         catalog_healthy: AtomicBool::new(true),
-        node_healthy: AtomicBool::new(true),
+        node_healthy: AtomicBool::new(false),
         scheduler_status,
         cell_capacity,
         metrics,
     });
-    let app = router(Arc::clone(&server));
     let management = management_router(Arc::clone(&server));
-    tracing::info!(address = %listener.local_addr()?, "public listener started");
     tracing::info!(address = %management_listener.local_addr()?, "management listener started");
+    let recovery_shutdown = CancellationToken::new();
+    let management_shutdown = recovery_shutdown.clone();
+    let mut management_listener = tokio::spawn(async move {
+        axum::serve(
+            peer_tls.listener(management_listener),
+            management.into_make_service_with_connect_info::<crate::peer_tls::PeerTlsIdentity>(),
+        )
+        .with_graceful_shutdown(management_shutdown.cancelled_owned())
+        .await
+    });
+    let startup_result = {
+        let startup = async {
+            // Recovery is reachable before the comprehensive object-store probe.
+            // Application peer routes remain gated until all startup tasks exist.
+            probe_storage_contract(&catalog, &server.transfer_admission).await?;
+            node_publisher.publish_initial().await?;
+            let node_lease = node_publisher.lease_guard()?;
+            server.cell_runtime.install_node_lease(node_lease.clone())?;
+            Ok::<_, crate::Error>(node_lease)
+        };
+        tokio::pin!(startup);
+        tokio::select! {
+            result = &mut startup => result,
+            result = &mut management_listener => {
+                cancellation.cancel();
+                let listener_error = match listener_task_result(result) {
+                    Ok(()) => crate::Error::Config("management listener stopped during startup"),
+                    Err(error) => error,
+                };
+                if let Err(shutdown_error) = server.shutdown_runtimes().await {
+                    tracing::warn!(error = %shutdown_error, "runtime startup cleanup failed");
+                }
+                return Err(listener_error);
+            }
+        }
+    };
+    let node_lease = match startup_result {
+        Ok(node_lease) => node_lease,
+        Err(error) => {
+            cancellation.cancel();
+            recovery_shutdown.cancel();
+            if tokio::time::timeout(Duration::from_secs(5), &mut management_listener)
+                .await
+                .is_err()
+            {
+                management_listener.abort();
+                let _ = management_listener.await;
+            }
+            if let Err(shutdown_error) = server.shutdown_runtimes().await {
+                tracing::warn!(error = %shutdown_error, "runtime startup cleanup failed");
+            }
+            return Err(error);
+        }
+    };
     let signal_cancellation = cancellation.clone();
     let signal = tokio::spawn(async move {
         shutdown_signal().await;
@@ -983,33 +1012,42 @@ pub async fn serve(config: Config) -> Result<()> {
     });
     let scheduler_cancellation = cancellation.clone();
     let scheduler = tokio::spawn(async move { cell_scheduler.run(scheduler_cancellation).await });
+    server.node_healthy.store(true, Ordering::Release);
+    let app = router(Arc::clone(&server));
+    tracing::info!(address = %listener.local_addr()?, "public listener started");
     let public_shutdown = cancellation.clone();
-    let management_shutdown = cancellation.clone();
-    let listeners = async {
-        tokio::try_join!(
-            axum::serve(listener, app).with_graceful_shutdown(public_shutdown.cancelled_owned()),
-            axum::serve(
-                peer_tls.listener(management_listener),
-                management
-                    .into_make_service_with_connect_info::<crate::peer_tls::PeerTlsIdentity>(),
-            )
-            .with_graceful_shutdown(management_shutdown.cancelled_owned()),
-        )
+    let public = async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(public_shutdown.cancelled_owned())
+            .await
     };
-    tokio::pin!(listeners);
-    let (listener_result, shutdown_deadline) = tokio::select! {
-        result = &mut listeners => {
+    tokio::pin!(public);
+    let mut management_result = None;
+    let (public_result, shutdown_deadline) = tokio::select! {
+        result = &mut public => {
+            server.node_healthy.store(false, Ordering::Release);
             cancellation.cancel();
             (Ok(result), Instant::now() + SHUTDOWN_DEADLINE)
         }
+        result = &mut management_listener => {
+            server.node_healthy.store(false, Ordering::Release);
+            cancellation.cancel();
+            management_result = Some(match listener_task_result(result) {
+                Ok(()) => Err(crate::Error::Config("management listener stopped unexpectedly")),
+                Err(error) => Err(error),
+            });
+            let deadline = Instant::now() + SHUTDOWN_DEADLINE;
+            (before_shutdown_deadline(deadline, &mut public).await, deadline)
+        }
         () = cancellation.cancelled() => {
+            server.node_healthy.store(false, Ordering::Release);
             signal.abort();
             let deadline = Instant::now() + SHUTDOWN_DEADLINE;
-            (before_shutdown_deadline(deadline, &mut listeners).await, deadline)
+            (before_shutdown_deadline(deadline, &mut public).await, deadline)
         }
     };
     signal.abort();
-    let result = listener_result?;
+    let result = public_result?;
     before_shutdown_deadline(shutdown_deadline, async move {
         let _cancel_heartbeat_on_drop = node_shutdown.clone().drop_guard();
         if let Err(error) = refresh.await {
@@ -1049,9 +1087,15 @@ pub async fn serve(config: Config) -> Result<()> {
             Ok(()) => Ok(()),
             Err(error) => Err(error.into()),
         };
+        recovery_shutdown.cancel();
+        let management = match management_result {
+            Some(result) => result,
+            None => listener_task_result(management_listener.await),
+        };
         result
             .map(|_| ())
             .map_err(crate::Error::from)
+            .and(management)
             .and(heartbeat)
             .and(lease_watch)
             .and(scheduler)
@@ -1062,6 +1106,12 @@ pub async fn serve(config: Config) -> Result<()> {
             .and(runtimes)
     })
     .await?
+}
+
+fn listener_task_result(
+    result: std::result::Result<std::io::Result<()>, tokio::task::JoinError>,
+) -> Result<()> {
+    result.map_err(crate::Error::from)?.map_err(Into::into)
 }
 
 async fn collect_retired_follower_lanes(
@@ -1353,11 +1403,7 @@ pub(crate) fn router(server: Arc<Server>) -> Router {
 }
 
 fn management_router(server: Arc<Server>) -> Router {
-    Router::new()
-        .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
-        .route("/readyz", get(readiness))
-        .route("/capacity", get(render_capacity))
-        .route("/metrics", get(render_metrics))
+    let application = Router::new()
         .route(
             "/internal/cells/v1/forward",
             post(crate::peer::forward).layer(axum::extract::DefaultBodyLimit::max(
@@ -1371,18 +1417,41 @@ fn management_router(server: Arc<Server>) -> Router {
             )),
         )
         .route(
+            "/internal/cells/v1/node-log/{leader}/{epoch}/retire/{covered_through}",
+            post(crate::peer::retire_node_log).layer(axum::extract::DefaultBodyLimit::max(0)),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            Arc::clone(&server),
+            application_peer_admission,
+        ));
+    let recovery = Router::new()
+        .route(
             "/internal/cells/v1/node-log/{leader}/{epoch}/recovery/{claimant}/seal",
             post(crate::peer::seal_node_log).layer(axum::extract::DefaultBodyLimit::max(0)),
         )
         .route(
-            "/internal/cells/v1/node-log/{leader}/{epoch}/retire/{covered_through}",
-            post(crate::peer::retire_node_log).layer(axum::extract::DefaultBodyLimit::max(0)),
-        )
-        .route(
             "/internal/cells/v1/node-log/{leader}/{epoch}/recovery/{claimant}/tail/{first}",
             post(crate::peer::tail_node_log).layer(axum::extract::DefaultBodyLimit::max(0)),
-        )
+        );
+    Router::new()
+        .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
+        .route("/readyz", get(readiness))
+        .route("/capacity", get(render_capacity))
+        .route("/metrics", get(render_metrics))
+        .merge(application)
+        .merge(recovery)
         .with_state(server)
+}
+
+async fn application_peer_admission(
+    State(server): State<Arc<Server>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !server.accepts_application_peers() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    next.run(request).await
 }
 
 async fn render_capacity(State(server): State<Arc<Server>>) -> Response {
@@ -1460,7 +1529,7 @@ async fn check_readiness(server: &Server) -> Result<()> {
     if server.catalog.is_some() && server.peer_receiver.is_none() {
         return Err(crate::Error::Config("Cell peer receiver is unavailable"));
     }
-    if !server.node_healthy.load(Ordering::Acquire) {
+    if !server.accepts_application_peers() {
         return Err(crate::Error::Config("Cell node advertisement is unhealthy"));
     }
     if !server
@@ -2103,6 +2172,49 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), expected, "{path}");
         }
+        for path in [
+            "/internal/cells/v1/forward",
+            "/internal/cells/v1/node-log/leader/1/append",
+            "/internal/cells/v1/node-log/leader/1/retire/0",
+        ] {
+            let response = management
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+        }
+        let recovery = management
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/internal/cells/v1/node-log/leader/1/recovery/claimant/seal")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(recovery.status(), StatusCode::SERVICE_UNAVAILABLE);
+        server.node_healthy.store(true, Ordering::Release);
+        let admitted = management
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/internal/cells/v1/forward")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(admitted.status(), StatusCode::SERVICE_UNAVAILABLE);
         let response = management
             .clone()
             .oneshot(

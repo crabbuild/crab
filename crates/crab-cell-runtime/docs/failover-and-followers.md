@@ -152,10 +152,10 @@ recovery path.
 | Working now | Remaining target gaps |
 | --- | --- |
 | Strict frame codec plus capacity- and failure-domain-aware deterministic selection, retrying automatic enrollment, activation, coverage, recovery claims, object-covered epoch rotation, and clean log close | None for this slice |
-| Crash-safe, node-budgeted follower store under a persisted physical `NodeId`, authenticated remote append/seal/tail/retire transport, and a bounded node-wide batched shipper | Recovery-only startup listener ordering |
+| Crash-safe, node-budgeted follower store under a persisted physical `NodeId`, authenticated remote append/seal/tail/retire transport, a bounded node-wide batched shipper, and a recovery-first management-listener lifecycle | Startup follower-lane scrub and quarantine |
 | Authoritative create and refresh drive a terminal monotonic node-lease guard; admission, actor dispatch, Cell-control CAS, durability proof, and output acceptance all check it | Fleet-proof watermarks for future streamed Cell responses |
 | Write-all durability gate, first-fsynced-batch activation, actor cut submission, fleet-first command release, object fallback, and contiguous authoritative object watermark | A dual-head actor that can begin the next command before prior fleet-proven cuts finish object publication |
-| Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | Recovery-only startup listener ordering |
+| Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | Early schema-migration response release |
 | Cell control attachment and takeover consumption of overlays; server drain closes a fully object-covered epoch before session withdrawal; grace-aged retired follower lanes are deleted only after authority stops naming their epoch | Live multi-node proof |
 
 The session record now owns one CAS-protected log epoch, its exact sorted member
@@ -183,7 +183,7 @@ instead of being assumed independent. Rotation closes
 the old gate only after every issued sequence is object-covered, best-effort
 retires old lanes behind durable append fences, and CASes a fresh inactive
 epoch. Recruitment retries while the node remains healthy and leaves a
-one-node fleet on the object path. Recovery-only startup listener ordering,
+one-node fleet on the object path. Startup follower-lane scrub and quarantine,
 early schema-migration response release, and dual-head actor continuation
 remain gated. The preferred
 shard-zero scanner now inventories expired active node
@@ -953,12 +953,11 @@ Clean node shutdown is broader:
 A crash at any step leaves `open` or `recovering` state and returns to the same
 dead-session recovery path.
 
-The runtime now exposes `close_node_log` for steps 3 through 5. It stops ticket
-issuance only after every issued sequence is object-covered, best-effort writes
-exact retire fences to reachable followers, and CAS-clears the session log.
-That clear makes later appends unauthorized and allows exact session
-withdrawal. The server still must call it between actor drain and lease
-withdrawal.
+The runtime's shutdown path calls `close_node_log` for steps 3 through 5. It
+stops ticket issuance only after every issued sequence is object-covered,
+best-effort writes exact retire fences to reachable followers, and CAS-clears
+the session log. That clear makes later appends unauthorized and allows exact
+session withdrawal.
 
 ## Start and stop in recovery-safe order
 
@@ -978,9 +977,19 @@ Serving follower recovery before application readiness allows a fleet-wide
 restart to recover from surviving disks without circularly waiting for every
 node to become fully ready.
 
-Shutdown closes application admission first and follower recovery last. A
-follower must not discard the only surviving fragment merely because its own
-application runtime is draining.
+The server now starts the mTLS management listener before the object-store
+probe and session publication. Middleware returns `503` from append, retire,
+and ordinary peer-forward routes until the session lease, watchdog, recovery
+sweep, shipper, actors, and schedulers are installed. Seal and tail remain
+available to an authenticated live claimant: the dead leader's recovery claim
+authorizes that claimant against this node's persisted physical `NodeId`, so a
+fresh local boot-session advertisement is not a recovery prerequisite.
+
+Shutdown closes public and application-peer admission first. It then drains
+accepted work, closes the Cell runtime and node-log epoch, withdraws the node
+heartbeat, and only then cancels the recovery listener. A follower must not
+discard the only surviving fragment merely because its own application runtime
+is draining.
 
 ## Bound resources and backpressure
 
