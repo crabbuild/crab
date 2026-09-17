@@ -306,6 +306,10 @@ async fn decode_tail_page(response: reqwest::Response) -> crab_cell_runtime::Res
         return Err(CellError::Peer("follower tail media type is invalid"));
     }
     let body = read_bounded(response, MAX_HTTP_BODY_BYTES).await?;
+    decode_tail_body(&body)
+}
+
+fn decode_tail_body(body: &[u8]) -> crab_cell_runtime::Result<TailPage> {
     let next = u64::from_le_bytes(
         body.get(..8)
             .ok_or(CellError::Peer("follower tail header is truncated"))?
@@ -335,6 +339,9 @@ async fn decode_tail_page(response: reqwest::Response) -> crab_cell_runtime::Res
                 .try_into()
                 .map_err(|_| CellError::Peer("follower tail length is invalid"))?,
         );
+        if length == 0 {
+            return Err(CellError::Peer("follower tail frame is empty"));
+        }
         let length = usize::try_from(length)
             .map_err(|_| CellError::Peer("follower tail frame length is invalid"))?;
         let frame_end = length_end
@@ -439,7 +446,7 @@ mod tests {
             next_sequence: Some(9),
         })
         .unwrap();
-        let parsed = decode_tail_bytes(&page).unwrap();
+        let parsed = decode_tail_body(&page).unwrap();
         assert_eq!(parsed.next_sequence, Some(9));
         assert_eq!(
             parsed.frames,
@@ -447,23 +454,23 @@ mod tests {
         );
     }
 
-    fn decode_tail_bytes(body: &[u8]) -> crab_cell_runtime::Result<TailPage> {
-        let next = u64::from_le_bytes(body[..8].try_into().unwrap());
-        let count = u32::from_le_bytes(body[8..12].try_into().unwrap()) as usize;
-        let mut cursor = 12;
-        let mut frames = Vec::new();
-        for _ in 0..count {
-            let length = u64::from_le_bytes(body[cursor..cursor + 8].try_into().unwrap()) as usize;
-            cursor += 8;
-            frames.push(Bytes::copy_from_slice(&body[cursor..cursor + length]));
-            cursor += length;
-        }
-        if cursor != body.len() {
-            return Err(CellError::Peer("test tail bytes have trailing data"));
-        }
-        Ok(TailPage {
-            next_sequence: (next != 0).then_some(next),
-            frames,
-        })
+    #[test]
+    fn tail_body_rejects_untrusted_shapes_before_recovery() {
+        let mut too_many = vec![0_u8; 12];
+        too_many[8..12].copy_from_slice(&(MAX_TAIL_PAGE_FRAMES as u32 + 1).to_le_bytes());
+        assert!(decode_tail_body(&too_many).is_err());
+
+        let mut empty = vec![0_u8; 20];
+        empty[8..12].copy_from_slice(&1_u32.to_le_bytes());
+        assert!(decode_tail_body(&empty).is_err());
+
+        let mut trailing = vec![0_u8; 13];
+        trailing[8..12].copy_from_slice(&0_u32.to_le_bytes());
+        assert!(decode_tail_body(&trailing).is_err());
+
+        let mut truncated = vec![0_u8; 20];
+        truncated[8..12].copy_from_slice(&1_u32.to_le_bytes());
+        truncated[12..20].copy_from_slice(&4_u64.to_le_bytes());
+        assert!(decode_tail_body(&truncated).is_err());
     }
 }
