@@ -1365,13 +1365,14 @@ async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
     _store: &crate::storage::store::Store,
     _router: &StoreLayout,
-    cache: &mut SessionCache,
+    _cache: &mut SessionCache,
     _cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     tracing::debug!("responding to capabilities");
-    // Both terminal protocol-v2 and the classic helper fetch path resolve
-    // shallow history from the authenticated capsule repository view.
-    let caps = format_capabilities_with_v2(true, !cache.legacy_v1);
+    // The terminal upload-pack wire serves both authenticated capsule roots
+    // and verified legacy manifests. Advertising it for legacy repositories
+    // preserves clone/fetch without pretending the legacy store is v2.
+    let caps = format_capabilities_with_v2(true, true);
     writer.write_all(caps.as_bytes()).await?;
     writer.flush().await?;
     Ok(())
@@ -3543,7 +3544,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_repository_capabilities_do_not_advertise_terminal_v2() {
+    async fn legacy_repository_capabilities_advertise_compatible_terminal_wire() {
         let push_state_root = tempfile::tempdir().expect("push state tempdir");
         let store = crate::storage::store::Store::new(std::sync::Arc::new(
             object_store::memory::InMemory::new(),
@@ -3563,7 +3564,7 @@ mod tests {
         .await;
 
         result.expect("legacy capabilities response");
-        assert!(!output.lines().any(|line| line == "stateless-connect"));
+        assert!(output.lines().any(|line| line == "stateless-connect"));
     }
 
     #[tokio::test]

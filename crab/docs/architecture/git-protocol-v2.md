@@ -68,7 +68,9 @@ authorization boundary and is not part of the bucket-only deployment promise.
 
 The helper advertises `stateless-connect` only after it can open a single
 manifest generation with matching pack-index, locator, and all-object
-visibility coverage. The session supports:
+visibility coverage. Verified legacy v1 manifests use this same terminal wire
+with `capsule_root` absent; that transport compatibility does not create or
+select a v2 authority. The session supports:
 
 - protocol-v2 capability advertisement;
 - `ls-refs` with ref prefixes, symrefs, peeled tags, unborn HEAD, and hidden
