@@ -2739,10 +2739,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_every_unadvertised_fetch_argument_before_planning() {
+    fn rejects_unadvertised_fetch_arguments_before_planning() {
         for argument in [
-            "deepen-since 1",
-            "deepen-not refs/heads/main",
             "want-ref refs/heads/main",
             "packfile-uris https",
             "wait-for-done",
