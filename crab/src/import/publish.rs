@@ -89,11 +89,8 @@ pub struct PublishInputs {
 /// Counters the publish stage folds into the final `ImportSummary`.
 ///
 /// `bytes_uploaded` is sourced from the [`Metrics`] snapshot delta
-/// across the push. `xorbs_uploaded` and `shards_uploaded` are
-/// reserved for future wiring — the push pipeline does not yet expose
-/// dedicated counters for those totals, so they report `0`. Callers
-/// that render these fields should prefer `bytes_uploaded` for actual
-/// throughput reporting today.
+/// across the push. Xorb and shard counts come from the push pipeline's
+/// origin-verified transfer summary and count only newly written payloads.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PublishStats {
     /// Count of `ok` ref outcomes returned by the capsule publisher.
@@ -106,11 +103,9 @@ pub struct PublishStats {
     /// measured as the delta between a `before` and `after`
     /// [`Metrics::snapshot`]. `0` when no metrics handle is provided.
     pub bytes_uploaded: u64,
-    /// Xorbs uploaded this publish. Currently always `0` — see the
-    /// type-level note on counter scope.
+    /// Xorbs uploaded this publish, excluding origin-reused payloads.
     pub xorbs_uploaded: u64,
-    /// Shards uploaded this publish. Currently always `0` — see the
-    /// type-level note on counter scope.
+    /// Shards uploaded this publish, excluding origin-reused payloads.
     pub shards_uploaded: u64,
     /// Commit OID of the HEAD this publish pushed; mirrors
     /// [`PublishInputs::head_commit_oid`].
@@ -215,19 +210,20 @@ pub async fn run_publish(inputs: PublishInputs) -> Result<PublishStats> {
 
     let (refs_pushed, refs_failed, failure_messages) = summarize_outcomes(&result);
 
-    // Translate metrics deltas into `PublishStats` — see the type
-    // docstring for why `xorbs_uploaded` / `shards_uploaded` remain zero.
+    // Translate metrics deltas and the push transfer summary into
+    // `PublishStats`. The latter is origin-verified and excludes reuse.
     let bytes_uploaded = match (bytes_before, metrics.as_deref()) {
         (Some(before), Some(m)) => m.snapshot().bytes_uploaded.saturating_sub(before),
         _ => 0,
     };
+    let transfer_stats = result.transfer_stats.unwrap_or_default();
 
     let stats = PublishStats {
         refs_pushed,
         refs_failed,
         bytes_uploaded,
-        xorbs_uploaded: 0,
-        shards_uploaded: 0,
+        xorbs_uploaded: transfer_stats.xorbs_uploaded,
+        shards_uploaded: transfer_stats.shards_uploaded,
         head_commit_oid: head_commit_oid.clone(),
         branch: branch.clone(),
     };

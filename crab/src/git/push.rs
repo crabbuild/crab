@@ -3837,6 +3837,20 @@ pub struct PushResult {
     pub active_active_commit: Option<PushCommitMetadata>,
     /// Pipeline stage responsible for a rejected batch, when known.
     pub failure_stage: Option<PushFailureStage>,
+    /// Immutable payloads uploaded by this push. `None` for rejected pushes
+    /// that did not enter the transfer pipeline.
+    pub transfer_stats: Option<PushTransferStats>,
+}
+
+/// Counts of newly uploaded immutable payloads for one push.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PushTransferStats {
+    /// Number of xorb payloads written to the origin.
+    pub xorbs_uploaded: u64,
+    /// Number of shard payloads written to the origin.
+    pub shards_uploaded: u64,
+    /// Bytes in newly uploaded xorb payloads.
+    pub xorb_bytes_uploaded: u64,
 }
 
 /// Coordinator metadata attached to a successful active-active push.
@@ -3883,6 +3897,7 @@ impl PushResult {
             outcomes,
             active_active_commit: None,
             failure_stage: None,
+            transfer_stats: None,
         }
     }
 
@@ -3900,6 +3915,12 @@ impl PushResult {
     #[must_use]
     pub fn with_failure_stage(mut self, stage: PushFailureStage) -> Self {
         self.failure_stage = Some(stage);
+        self
+    }
+
+    #[must_use]
+    pub fn with_transfer_stats(mut self, stats: PushTransferStats) -> Self {
+        self.transfer_stats = Some(stats);
         self
     }
 
@@ -4143,6 +4164,8 @@ pub struct PushPipeline {
     connectivity_frontier_tips: tokio::sync::Mutex<Vec<String>>,
     /// Shard hashes uploaded in step 9, consumed by step 11 for shard-list CAS.
     uploaded_shard_hashes: tokio::sync::Mutex<Vec<MerkleHash>>,
+    /// Number of shard payloads that were not already verified on the origin.
+    uploaded_shards: std::sync::atomic::AtomicU64,
     /// Set of chunk hashes classified as "new" (class C) by step 4.
     /// Step 5 only packs chunks in this set. `None` means classification did
     /// not run and every pinned recipe chunk must be packed.
@@ -6682,6 +6705,7 @@ impl PushPipeline {
             prepared_git_pack: tokio::sync::Mutex::new(None),
             connectivity_frontier_tips: tokio::sync::Mutex::new(Vec::new()),
             uploaded_shard_hashes: tokio::sync::Mutex::new(Vec::new()),
+            uploaded_shards: std::sync::atomic::AtomicU64::new(0),
             new_chunk_hashes: tokio::sync::Mutex::new(None),
             planned_xorb_bytes: std::sync::atomic::AtomicU64::new(0),
             planned_git_bytes: std::sync::atomic::AtomicU64::new(0),
@@ -12823,6 +12847,10 @@ impl PushPipeline {
         )
         .await?;
         let skipped_shards = existing_shards.verified.len();
+        self.uploaded_shards.store(
+            shard_count.saturating_sub(skipped_shards) as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         let store_for_shards = store.clone();
         futures_util::stream::iter(
@@ -16880,6 +16908,14 @@ impl PushPipeline {
             }
             PushResult::new(outcomes)
         };
+        let transfer_stats = PushTransferStats {
+            xorbs_uploaded: upload_summary.uploaded_xorbs,
+            shards_uploaded: self
+                .uploaded_shards
+                .load(std::sync::atomic::Ordering::Relaxed),
+            xorb_bytes_uploaded: upload_summary.uploaded_bytes,
+        };
+        let result = result.with_transfer_stats(transfer_stats);
         Ok(match active_active_commit {
             Some(commit) => result.with_active_active_commit(commit),
             None => result,
@@ -23101,6 +23137,17 @@ mod tests {
     fn push_result_all_ok_on_empty() {
         let result = PushResult::empty();
         assert!(result.all_ok());
+    }
+
+    #[test]
+    fn push_result_retains_transfer_stats() {
+        let stats = PushTransferStats {
+            xorbs_uploaded: 2,
+            shards_uploaded: 3,
+            xorb_bytes_uploaded: 4096,
+        };
+        let result = PushResult::empty().with_transfer_stats(stats);
+        assert_eq!(result.transfer_stats, Some(stats));
     }
 
     #[test]
