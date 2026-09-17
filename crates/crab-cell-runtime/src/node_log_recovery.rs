@@ -533,6 +533,7 @@ mod tests {
     struct FailingFirstTransport {
         failed: NodeId,
         good: LocalFollowerTransport,
+        gap: bool,
     }
 
     struct FleetTransport {
@@ -653,6 +654,33 @@ mod tests {
                 return Box::pin(async { Err(Error::Node("injected follower read failure")) });
             }
             self.good.tail(member, request)
+        }
+
+        fn tail_page<'a>(
+            &'a self,
+            member: NodeId,
+            request: TailRequest,
+        ) -> BoxFuture<'a, Result<crate::FollowerTailPage>> {
+            if member == self.failed {
+                return Box::pin(async { Err(Error::Node("injected follower read failure")) });
+            }
+            let good = self.good.clone();
+            let gap = self.gap;
+            Box::pin(async move {
+                let mut page = good.tail_page(member, request).await?;
+                if gap {
+                    let count = u64::try_from(page.frames.len())
+                        .map_err(|_| Error::Node("test page frame count overflow"))?;
+                    page.next_sequence = Some(
+                        request
+                            .first_sequence
+                            .checked_add(count)
+                            .and_then(|next| next.checked_add(1))
+                            .ok_or(Error::Node("test page sequence overflow"))?,
+                    );
+                }
+                Ok(page)
+            })
         }
     }
 
@@ -789,7 +817,8 @@ mod tests {
             .unwrap();
         let transport: Arc<dyn NodeLogTransport> = Arc::new(FailingFirstTransport {
             failed,
-            good: local,
+            good: local.clone(),
+            gap: false,
         });
         let recovery = NodeLogRecovery::new(
             transport,
@@ -803,6 +832,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(recovery.ensure_sealed().await.unwrap().frames.len(), 1);
+
+        let gapped: Arc<dyn NodeLogTransport> = Arc::new(FailingFirstTransport {
+            failed,
+            good: local,
+            gap: true,
+        });
+        let recovery = NodeLogRecovery::new(
+            gapped,
+            NodeId::from_bytes([1; 16]),
+            leader,
+            3,
+            vec![good],
+            0,
+            true,
+            limits,
+        )
+        .unwrap();
+        assert!(recovery.ensure_sealed().await.is_err());
         database.close().unwrap();
     }
 
