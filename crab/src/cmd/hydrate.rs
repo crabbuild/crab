@@ -601,26 +601,6 @@ pub struct HydrationRuntime {
     file_concurrency: usize,
 }
 
-struct RestoreAvailability {
-    origin: crate::storage::Store,
-    orchestrator: Arc<crate::tier::restore::RestoreOrchestrator>,
-}
-
-#[async_trait::async_trait]
-impl crab_read::XorbAvailability for RestoreAvailability {
-    async fn ensure_available(&self, path: &object_store::path::Path) -> crab_read::Result<()> {
-        crate::cmd::hydrate_restore::resolve_xorb_with_class_probe(
-            &self.origin,
-            path,
-            Some(&self.orchestrator),
-            true,
-        )
-        .await
-        .map(|_| ())
-        .map_err(crab_read::ReadError::availability)
-    }
-}
-
 /// Tag for the hydrate-path concurrency controller. `'static` because
 /// `AdaptiveConcurrencyController` stores the tag for logging.
 const MAX_HYDRATE_FILE_CONCURRENCY: usize = 4;
@@ -772,15 +752,29 @@ impl HydrationRuntime {
     /// Attach archive restore handling for direct xorb fetches.
     #[must_use]
     pub fn with_restore(
-        mut self,
+        self,
         orchestrator: Option<Arc<crate::tier::restore::RestoreOrchestrator>>,
         auto_restore: bool,
     ) -> Self {
-        if auto_restore && let Some(orchestrator) = orchestrator.clone() {
-            let availability = Arc::new(RestoreAvailability {
-                origin: crate::storage::Store::from_storage(self.store.origin().clone()),
+        let enabled = auto_restore && orchestrator.is_some();
+        self.with_restore_gate(orchestrator, auto_restore, enabled)
+    }
+
+    /// Attach class probing even when restoration is disabled, so archived
+    /// reads fail with the typed restore error instead of a raw GET failure.
+    #[must_use]
+    pub(crate) fn with_restore_gate(
+        mut self,
+        orchestrator: Option<Arc<crate::tier::restore::RestoreOrchestrator>>,
+        auto_restore: bool,
+        enabled: bool,
+    ) -> Self {
+        if enabled {
+            let availability = Arc::new(crate::cmd::hydrate_restore::RestoreAvailability::new(
+                crate::storage::Store::from_storage(self.store.origin().clone()),
                 orchestrator,
-            });
+                auto_restore,
+            ));
             self.canonical = self.canonical.with_availability(availability);
         }
         self
@@ -2155,6 +2149,8 @@ async fn configured_hydrator(
         if let crate::replication::ReadSource::Replica { name } = &selection.source {
             debug!(replica = %name, "selected read replica for hydrate");
         }
+        let restore_store = selection.store.clone();
+        let restore_repo_prefix = selection.router.repo_prefix().to_owned();
         let caching_store = crab_cache_store::CachingStore::new(selection.store, &config.cache)?;
         let mut hydrator =
             crate::read::build_cli_hydrator(caching_store, selection.router, config)?;
@@ -2165,24 +2161,35 @@ async fn configured_hydrator(
                 origin: "hydrate --restore".into(),
             });
         }
-        if requested_restore && config.tier.enabled {
-            let mut options = crate::tier::runtime::restore_options_from_config(config)?;
-            if let Some(tier) = &restore_flags.restore_tier {
-                options.tier = crate::tier::runtime::parse_restore_tier(tier)?;
-            }
-            if let Some(days) = restore_flags.restore_duration_days {
-                options.duration = Duration::from_secs(u64::from(days) * 86_400);
-            }
-            let backend = crate::tier::runtime::build_restore_backend(config, &parsed).await?;
-            let orchestrator = Arc::new(crate::tier::restore::RestoreOrchestrator::with_options(
-                backend,
-                config.tier.restore_max_concurrency,
-                Duration::from_secs(config.tier.restore_timeout_secs),
-                options,
-            ));
-            hydrator = hydrator.with_restore(Some(orchestrator), true);
+        if config.tier.enabled {
+            let orchestrator = if requested_restore {
+                let mut options = crate::tier::runtime::restore_options_from_config(config)?;
+                if let Some(tier) = &restore_flags.restore_tier {
+                    options.tier = crate::tier::runtime::parse_restore_tier(tier)?;
+                }
+                if let Some(days) = restore_flags.restore_duration_days {
+                    options.duration = Duration::from_secs(u64::from(days) * 86_400);
+                }
+                let backend = crate::tier::runtime::build_restore_backend_for_store(
+                    config,
+                    &restore_store,
+                    &restore_repo_prefix,
+                )
+                .await?;
+                Some(Arc::new(
+                    crate::tier::restore::RestoreOrchestrator::with_options(
+                        backend,
+                        config.tier.restore_max_concurrency,
+                        Duration::from_secs(config.tier.restore_timeout_secs),
+                        options,
+                    ),
+                ))
+            } else {
+                None
+            };
+            hydrator = hydrator.with_restore_gate(orchestrator, requested_restore, true);
         } else {
-            hydrator = hydrator.with_restore(None, false);
+            hydrator = hydrator.with_restore_gate(None, false, false);
         }
         error::check_cancelled(cancel)?;
         return Ok(Box::new(hydrator));

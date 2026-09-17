@@ -2104,7 +2104,15 @@ async fn resolve_mount_read_context_from_remote_url(
             return None;
         }
     };
-    build_mount_read_context(&config, layout, pinned_lookup)
+    let restore_availability = crate::cmd::hydrate_restore::build_restore_availability(
+        &config,
+        layout.store(),
+        layout.repo_prefix(),
+        config.hydrate.auto_restore,
+    )
+    .await
+    .ok()?;
+    build_mount_read_context(&config, layout, pinned_lookup, restore_availability)
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -2153,6 +2161,7 @@ fn build_mount_read_context(
     config: &crate::core::config::Config,
     layout: crate::storage::StoreLayout,
     pinned_lookup: Option<crab_metadata::file_index_lookup::SharedFileIndexLookup>,
+    restore_availability: Option<std::sync::Arc<dyn crab_read::XorbAvailability>>,
 ) -> Option<crate::vfs::MountReadContext> {
     let origin = layout.store().as_storage().clone();
     let store_layout = crab_storage::StoreLayout::with_global_prefix(
@@ -2164,6 +2173,10 @@ fn build_mount_read_context(
     let hydrator = crate::read::build_shared_hydrator(caching_store, layout, config).ok()?;
     let hydrator = match pinned_lookup {
         Some(lookup) => hydrator.with_file_index_lookup(lookup),
+        None => hydrator,
+    };
+    let hydrator = match restore_availability {
+        Some(availability) => hydrator.with_availability(availability),
         None => hydrator,
     };
 
@@ -2378,6 +2391,14 @@ async fn build_mount_components(
 
     let cancel = CancellationToken::new();
 
+    // A Crab URL requires the authenticated v2 read context. Continuing with
+    // stub resolvers would let a mount start successfully and fail only when a
+    // pointer is first opened, hiding corrupt or unavailable repository state.
+    let read_context = require_remote_mount_read_context(
+        &source,
+        resolve_mount_read_context_from_config(crab_dir).await,
+    )?;
+
     let config = PipelineConfig {
         source,
         git_dir: git_dir.clone(),
@@ -2386,9 +2407,6 @@ async fn build_mount_components(
         cache_dir: crab_dir.to_path_buf(),
         cancel_token: cancel,
     };
-
-    // Attempt to construct a StoreLayout from the crab remote config.
-    let read_context = resolve_mount_read_context_from_config(crab_dir).await;
 
     let mut builder = MountPipelineBuilder::new(config);
     if let Some(context) = read_context {
@@ -2431,6 +2449,20 @@ async fn resolve_mount_read_context_from_config(
     let url_str = read_remote_url_from_crab_dir(crab_dir).ok()?;
 
     resolve_mount_read_context_from_remote_url(&url_str).await
+}
+
+#[cfg(any(feature = "fuse", feature = "nfs"))]
+fn require_remote_mount_read_context(
+    source: &str,
+    context: Option<crate::vfs::MountReadContext>,
+) -> Result<Option<crate::vfs::MountReadContext>> {
+    if source.trim_start().starts_with("crab://") && context.is_none() {
+        return Err(CrabError::Configuration {
+            key: "object-store read layout unavailable for remote mount".into(),
+            origin: "crab mount".into(),
+        });
+    }
+    Ok(context)
 }
 
 // ---------------------------------------------------------------------------
@@ -6138,6 +6170,30 @@ mod tests {
         assert!(
             err_msg.contains(".git directory not found"),
             "expected .git not found error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn remote_mount_without_read_context_fails_closed() {
+        let result = require_remote_mount_read_context("crab://bucket/repo", None);
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("remote mounts must not start with stub readers"),
+        };
+        assert!(matches!(
+            error,
+            CrabError::Configuration { ref key, ref origin }
+                if key == "object-store read layout unavailable for remote mount"
+                    && origin == "crab mount"
+        ));
+    }
+
+    #[test]
+    fn local_mount_without_read_context_keeps_local_fallback() {
+        assert!(
+            require_remote_mount_read_context("/tmp/local-repo", None)
+                .expect("local mounts may use the Git object database")
+                .is_none()
         );
     }
 

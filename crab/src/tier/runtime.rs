@@ -78,6 +78,37 @@ pub async fn build_restore_backend(
     }
 }
 
+/// Build the restore backend for the store that actually owns a read view.
+///
+/// Managed repositories do not expose their physical bucket in the logical
+/// `crab://` URL.  Using the resolved store identity keeps restore requests on
+/// the same provider and bucket as the authenticated v2 read path.
+pub async fn build_restore_backend_for_store(
+    config: &Config,
+    store: &crate::storage::Store,
+    repo_prefix: &str,
+) -> Result<Arc<dyn RestoreBackend>> {
+    let identity = store.bucket_identity();
+    if identity.cloud == StorageProviderKind::Local || identity.container.is_empty() {
+        return Err(CrabError::TierProviderUnsupported {
+            provider: "local storage has no archive restore backend".into(),
+        });
+    }
+
+    let url = CrabUrl {
+        bucket: identity.container,
+        repo_path: repo_prefix.to_owned(),
+    };
+    match identity.cloud {
+        StorageProviderKind::S3 => build_s3_restore_backend(config, &url),
+        StorageProviderKind::Gcs => build_gcs_restore_backend(&url).await,
+        StorageProviderKind::Azure => build_azure_restore_backend(config, &url),
+        StorageProviderKind::Local => Err(CrabError::TierProviderUnsupported {
+            provider: "local storage has no archive restore backend".into(),
+        }),
+    }
+}
+
 /// Probe bucket state required by lifecycle planning.
 pub async fn probe_bucket(
     config: &Config,
