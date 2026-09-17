@@ -153,6 +153,7 @@ recovery path.
 | --- | --- |
 | Strict frame codec plus capacity-aware deterministic selection, authoritative enrollment, activation, coverage, recovery claims, object-covered epoch rotation, and clean log close | Failure-domain-aware automatic recruitment |
 | Crash-safe, node-budgeted follower store under a persisted physical `NodeId`, authenticated remote append/seal/tail/retire transport, and a bounded node-wide batched shipper | Recovery-only startup listener ordering |
+| Authoritative create and refresh drive a terminal monotonic node-lease guard; its watchdog independently marks the server unhealthy and closes admission at expiry | Actor dispatch and output-gate lease checks |
 | Write-all durability gate with contiguous object watermark | Actor submission and response-gate integration |
 | Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | Recovery-only startup listener ordering |
 | Cell control attachment and takeover consumption of overlays | Server drain wiring, obsolete-marker collection, and live multi-node proof |
@@ -189,6 +190,13 @@ the remaining gates are complete.
 An active predecessor log cannot be converted directly from a session fence
 into Cell takeover authority: only the coordinator's successful post-seal
 result carries `NodeTakeoverProof`.
+
+The HTTP node publisher now arms a process-wide monotonic lease guard only
+after its session create succeeds and advances it only after an authoritative
+refresh. Expiry and refresh failure are terminal: both mark the node unhealthy
+and cancel the server, and a late refresh cannot revive the process. Fleet
+proof remains disabled until actor dispatch and output acceptance check this
+same guard.
 
 ## Use one multiplexed log per owner session
 

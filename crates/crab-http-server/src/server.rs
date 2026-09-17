@@ -865,6 +865,15 @@ pub async fn serve(config: Config) -> Result<()> {
             return Err(error);
         }
     };
+    let node_lease = match node_publisher.lease_guard() {
+        Ok(lease) => lease,
+        Err(error) => {
+            if let Err(shutdown_error) = cell_runtime.shutdown().await {
+                tracing::warn!(error = %shutdown_error, "Cell runtime startup cleanup failed");
+            }
+            return Err(error);
+        }
+    };
     let server = Arc::new(Server {
         repositories: repositories.into(),
         runtime: Arc::clone(&runtime),
@@ -912,6 +921,13 @@ pub async fn serve(config: Config) -> Result<()> {
         node_publisher
             .run(node_server, advertised, heartbeat_shutdown)
             .await
+    });
+    let lease_server = Arc::clone(&server);
+    let lease_cancellation = cancellation.clone();
+    let lease_watch = tokio::spawn(async move {
+        node_lease.wait_fenced().await;
+        lease_server.node_healthy.store(false, Ordering::Release);
+        lease_cancellation.cancel();
     });
     let release_cancellation = cancellation.clone();
     let compiled_release = registry.release_digest();
@@ -974,10 +990,15 @@ pub async fn serve(config: Config) -> Result<()> {
             Ok(result) => result,
             Err(error) => Err(error.into()),
         };
+        let lease_watch = match lease_watch.await {
+            Ok(()) => Ok(()),
+            Err(error) => Err(error.into()),
+        };
         result
             .map(|_| ())
             .map_err(crate::Error::from)
             .and(heartbeat)
+            .and(lease_watch)
             .and(scheduler)
             .and(release_watch)
             .and(maintenance)

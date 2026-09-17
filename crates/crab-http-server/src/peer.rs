@@ -3,7 +3,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, atomic::Ordering},
+    sync::{Arc, OnceLock, atomic::Ordering},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -34,7 +34,7 @@ pub(crate) use node_log_client::NodeLogHttpTransport;
 
 const PROTOBUF_MEDIA_TYPE: &str = "application/x-protobuf";
 const NODE_LOG_MEDIA_TYPE: &str = "application/x-crab-node-log";
-const ADVERTISEMENT_LIFETIME_MS: i64 = 15_000;
+const ADVERTISEMENT_LIFETIME_MS: i64 = 10_000;
 const ADVERTISEMENT_EXPIRY_MARGIN_MS: i64 = 1_000;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
 const HEARTBEAT_RETRY: Duration = Duration::from_millis(500);
@@ -86,6 +86,7 @@ pub(crate) struct NodePublisher {
     data_dir: PathBuf,
     scheduler: crate::cells::SchedulerStatus,
     follower_store: Option<crab_cell_runtime::FollowerStore>,
+    lease: OnceLock<crab_cell_runtime::NodeLeaseGuard>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,6 +137,7 @@ impl NodePublisher {
             data_dir,
             scheduler,
             follower_store: None,
+            lease: OnceLock::new(),
         })
     }
 
@@ -149,13 +151,28 @@ impl NodePublisher {
 
     pub(crate) async fn publish_initial(&self) -> crate::Result<VersionedNodeAdvertisement> {
         let now_ms = now_ms()?;
-        Ok(self
+        let published = self
             .directory
             .create(
                 self.advertisement(self.scheduler.progress(), now_ms, false)?,
                 now_ms,
             )
-            .await?)
+            .await?;
+        let lease = crab_cell_runtime::NodeLeaseGuard::new(
+            now_ms,
+            published.advertisement().expires_at_ms(),
+        )?;
+        self.lease
+            .set(lease)
+            .map_err(|_| crate::Error::Config("node lease was initialized twice"))?;
+        Ok(published)
+    }
+
+    pub(crate) fn lease_guard(&self) -> crate::Result<crab_cell_runtime::NodeLeaseGuard> {
+        self.lease
+            .get()
+            .cloned()
+            .ok_or(crate::Error::Config("node lease is not initialized"))
     }
 
     pub(crate) fn session_dir(&self) -> PathBuf {
@@ -178,6 +195,7 @@ impl NodePublisher {
         mut observed: VersionedNodeAdvertisement,
         shutdown: CancellationToken,
     ) -> crate::Result<()> {
+        let lease = self.lease_guard()?;
         let mut draining = false;
         let heartbeat = 'heartbeat: loop {
             tokio::select! {
@@ -190,6 +208,14 @@ impl NodePublisher {
                 let next = self.advertisement(self.scheduler.progress(), now_ms, draining)?;
                 match self.directory.refresh(&observed, next, now_ms).await {
                     Ok(next) => {
+                        if let Err(error) =
+                            lease.renew(now_ms, next.advertisement().expires_at_ms())
+                        {
+                            lease.fence();
+                            server.node_healthy.store(false, Ordering::Release);
+                            server.cancellation.cancel();
+                            break 'heartbeat Err(error.into());
+                        }
                         observed = next;
                         break;
                     }
@@ -199,6 +225,7 @@ impl NodePublisher {
                             .expires_at_ms()
                             .saturating_sub(ADVERTISEMENT_EXPIRY_MARGIN_MS);
                         if now_ms >= retry_deadline {
+                            lease.fence();
                             server.node_healthy.store(false, Ordering::Release);
                             server.cancellation.cancel();
                             break 'heartbeat Err(error.into());
@@ -214,6 +241,7 @@ impl NodePublisher {
                 }
             }
         };
+        lease.fence();
         if heartbeat.is_err() && !shutdown.is_cancelled() {
             shutdown.cancelled().await;
         }
@@ -1510,6 +1538,7 @@ mod tests {
         let publisher = publisher.with_follower_store(follower_store);
 
         let published = publisher.publish_initial().await.unwrap();
+        publisher.lease_guard().unwrap().check().unwrap();
         assert_eq!(
             published.advertisement().capacity().log_protocol,
             crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION
