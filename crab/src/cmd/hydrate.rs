@@ -865,6 +865,25 @@ impl HydrationRuntime {
             .await
     }
 
+    /// Reconstruct a file using a caller-captured immutable file-index view.
+    pub(crate) async fn reconstruct_to_path_with_lookup(
+        &self,
+        ptr: &Pointer,
+        dest: &std::path::Path,
+        file_index_lookup: &SharedFileIndexLookup,
+    ) -> Result<u64> {
+        let file = std::fs::File::create(dest).map_err(error::CrabError::Io)?;
+        self.reconstruct_to_open_file(
+            ptr,
+            file,
+            dest,
+            None,
+            Some(file_index_lookup),
+            CancellationToken::new(),
+        )
+        .await
+    }
+
     /// Reconstruct a file from its pointer into an arbitrary blocking writer.
     pub async fn reconstruct_to_writer<W>(&self, ptr: &Pointer, writer: W) -> Result<u64>
     where
@@ -872,6 +891,25 @@ impl HydrationRuntime {
     {
         self.reconstruct_to_writer_with(ptr, writer, None, &CancellationToken::new())
             .await
+    }
+
+    /// Reconstruct a file into a writer using a caller-captured immutable file-index view.
+    pub(crate) async fn reconstruct_to_writer_with_lookup<W>(
+        &self,
+        ptr: &Pointer,
+        writer: W,
+        file_index_lookup: &SharedFileIndexLookup,
+    ) -> Result<u64>
+    where
+        W: Write + Send + 'static,
+    {
+        self.reconstruct_to_writer_with(
+            ptr,
+            writer,
+            Some(file_index_lookup),
+            &CancellationToken::new(),
+        )
+        .await
     }
 
     async fn reconstruct_to_writer_with<W>(

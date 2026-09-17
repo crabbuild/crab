@@ -76,7 +76,7 @@ pub(super) async fn commit_capsule_candidate(
     }
     let capsule = verified.publication;
     let transaction = capsule.transaction()?;
-    if capsule_is_visible(&view, &transaction) {
+    if capsule_is_visible(view.refs(), view.visible_ref_transactions(), &transaction) {
         let Some(active_active) = active_active else {
             return Ok(None);
         };
@@ -292,28 +292,24 @@ async fn commit_active_active_candidate(
 
 async fn open_candidate_view(
     ctx: &ReceiveContext,
-) -> Result<crab_read::capsule_protocol::CapsuleRepositoryView> {
-    crab_read::capsule_protocol::open_view(
-        ctx.router(),
-        crab_read::capsule_protocol::CapsuleReadLimits {
-            max_capsule_bytes: MAX_PROTECTED_CAPSULE_BYTES,
-            max_frontier_bytes: MAX_PROTECTED_CAPSULE_BYTES,
-        },
-    )
-    .await
-    .map_err(Into::into)
+) -> Result<crab_read::capsule_protocol::CapsuleRefView> {
+    let root = crab_metadata::capsule_protocol::load_root(ctx.router()).await?;
+    crab_read::capsule_protocol::open_ref_view_from_root(ctx.router(), root)
+        .await
+        .map_err(Into::into)
 }
 
 fn capsule_is_visible(
-    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    refs: &BTreeMap<String, String>,
+    visible_ref_transactions: &BTreeMap<String, String>,
     transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
 ) -> bool {
     let Ok(transaction_id) = transaction.id() else {
         return false;
     };
     transaction.edits().iter().all(|edit| {
-        view.refs().get(edit.ref_name()).map(String::as_str) == edit.new_oid()
-            && view.visible_ref_transactions().get(edit.ref_name()) == Some(&transaction_id)
+        refs.get(edit.ref_name()).map(String::as_str) == edit.new_oid()
+            && visible_ref_transactions.get(edit.ref_name()) == Some(&transaction_id)
     })
 }
 
@@ -446,7 +442,11 @@ pub(super) async fn verify_capsule_candidate(
             }
         };
     let publication_transaction = publication.transaction()?;
-    if !capsule_is_visible(&source_view, &publication_transaction) {
+    if !capsule_is_visible(
+        source_view.refs(),
+        source_view.visible_ref_transactions(),
+        &publication_transaction,
+    ) {
         validate_ref_heads(&prepare.source_ref_updates, source_view.refs())?;
     }
     let mut replication_objects = replication_objects;

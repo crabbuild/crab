@@ -168,7 +168,7 @@ pub(crate) async fn publish_default_branch(
             let entry = Arc::clone(&leased_entry);
             async move {
                 check_cancelled(&cancel)?;
-                let view = entry.open_view().await?;
+                let view = entry.open_ref_view().await?;
                 if view.head() != expected_head {
                     return Err(ReceiveError::DefaultBranchChanged);
                 }
@@ -361,7 +361,9 @@ async fn publish_attempt(
     if !principal.can_write(&entry.config) {
         return Err(ReceiveError::Forbidden);
     }
-    let mut view = entry.open_view().await?;
+    let (mut view, mut repository) = entry
+        .open_capsule_repository(server, RepositoryOptions::default(), cancel)
+        .await?;
     for _ in 0..2 {
         if request.updates.iter().all(|update| {
             view.ref_capsule_count(&update.name) < crate::maintenance::FOREGROUND_CAPSULE_THRESHOLD
@@ -369,7 +371,9 @@ async fn publish_attempt(
             break;
         }
         entry.checkpoint_now(server, cancel).await?;
-        view = entry.open_view().await?;
+        (view, repository) = entry
+            .open_capsule_repository(server, RepositoryOptions::default(), cancel)
+            .await?;
     }
     if request.updates.iter().any(|update| {
         view.ref_capsule_count(&update.name) >= crate::maintenance::FOREGROUND_CAPSULE_THRESHOLD
@@ -381,15 +385,6 @@ async fn publish_attempt(
     }
     let refs = view.refs().clone();
     let visibility = view.git_visibility_index()?;
-    let repository = view
-        .git_repository(
-            entry.identity.clone(),
-            Arc::clone(&server.runtime),
-            RepositoryOptions::default(),
-            super::MAX_BODY,
-            cancel,
-        )
-        .await?;
     let has_branch = refs.keys().any(|name| name.starts_with("refs/heads/"));
     let actor = principal.identity().ok_or(ReceiveError::Forbidden)?;
     let initial_head = (!has_branch)

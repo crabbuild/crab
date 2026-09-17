@@ -2065,7 +2065,46 @@ async fn resolve_mount_read_context_from_remote_url(
             crate::storage::StoreLayout::new(resolved.store, resolved.repository_prefix)
         }
     };
-    build_mount_read_context(&config, layout)
+    let read_layout = crab_storage::StoreLayout::with_global_prefix(
+        layout.store().as_storage().clone(),
+        layout.repo_prefix().to_owned(),
+        layout.global_prefix().to_owned(),
+    );
+    let pinned_lookup = match crab_metadata::capsule_protocol::load_root(&read_layout).await {
+        Ok(root) => {
+            let maximum = if config.uploadpack_max_egress_bytes == 0 {
+                u64::MAX
+            } else {
+                config.uploadpack_max_egress_bytes
+            };
+            let view = crab_read::capsule_protocol::open_view_from_root_with_control(
+                &read_layout,
+                root,
+                crab_read::capsule_protocol::CapsuleReadLimits {
+                    max_capsule_bytes: maximum,
+                    max_frontier_bytes: maximum,
+                },
+            )
+            .await
+            .ok()?;
+            let catalog = view.pointer_catalog().ok()?;
+            Some(
+                crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
+                    read_layout.clone(),
+                    &catalog,
+                )
+                .ok()?,
+            )
+        }
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        }) => None,
+        Err(error) => {
+            warn!(error = %error, "v2 mount read view could not be authenticated");
+            return None;
+        }
+    };
+    build_mount_read_context(&config, layout, pinned_lookup)
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -2113,6 +2152,7 @@ where
 fn build_mount_read_context(
     config: &crate::core::config::Config,
     layout: crate::storage::StoreLayout,
+    pinned_lookup: Option<crab_metadata::file_index_lookup::SharedFileIndexLookup>,
 ) -> Option<crate::vfs::MountReadContext> {
     let origin = layout.store().as_storage().clone();
     let store_layout = crab_storage::StoreLayout::with_global_prefix(
@@ -2122,6 +2162,10 @@ fn build_mount_read_context(
     );
     let caching_store = crab_cache_store::CachingStore::new(origin, &config.cache).ok()?;
     let hydrator = crate::read::build_shared_hydrator(caching_store, layout, config).ok()?;
+    let hydrator = match pinned_lookup {
+        Some(lookup) => hydrator.with_file_index_lookup(lookup),
+        None => hydrator,
+    };
 
     Some(crate::vfs::MountReadContext {
         store_layout,

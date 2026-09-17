@@ -609,6 +609,19 @@ impl Repository {
         .map_err(Into::into)
     }
 
+    pub(crate) async fn open_ref_view(
+        &self,
+    ) -> Result<crab_read::capsule_protocol::CapsuleRefView> {
+        let root = crab_metadata::capsule_protocol::load_root(&self.layout)
+            .await
+            .map_err(|source| crate::Error::Settings {
+                source: Box::new(source),
+            })?;
+        crab_read::capsule_protocol::open_ref_view_from_root(&self.layout, root)
+            .await
+            .map_err(Into::into)
+    }
+
     pub(crate) async fn open_capsule_repository(
         &self,
         server: &Server,
@@ -618,9 +631,23 @@ impl Repository {
         crab_read::capsule_protocol::CapsuleRepositoryView,
         RemoteGitRepository,
     )> {
-        let view = self.open_view().await?;
+        let root = crab_metadata::capsule_protocol::load_root(&self.layout)
+            .await
+            .map_err(|source| crate::Error::Settings {
+                source: Box::new(source),
+            })?;
+        let view = crab_read::capsule_protocol::open_view_from_root_with_control(
+            &self.layout,
+            root,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+                max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+            },
+        )
+        .await?;
         let repository = view
-            .git_repository(
+            .git_repository_from_store(
+                self.layout.clone(),
                 self.identity.clone(),
                 Arc::clone(&server.runtime),
                 options,

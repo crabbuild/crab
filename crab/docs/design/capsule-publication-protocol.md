@@ -90,9 +90,10 @@ activation. The remote
 helper still recognizes a separately initialized canonical-v1 repository at
 admission for current SDK read interoperability; it does not combine formats
 or redirect v1 writes into v2. Major terminal Git, HTTP, protected/app, mirror,
-import, and large-file paths now use v2. Active-active external consensus, S3
-gateway, migration/history recovery, and the remaining parity inventory in the
-companion design stay release blockers. No unsupported operation may
+import, migration, and large-file paths now use v2. Active-active external
+consensus, S3 gateway, migration/history recovery qualification, and the
+remaining parity inventory in the companion design stay release blockers. No
+unsupported operation may
 reinterpret a v2 repository as v1 or publish partial state.
 
 ## 1. Decision summary
@@ -699,12 +700,14 @@ capsule bytes into Git's object database.
 ### 10.5 Checkout and file hydration
 
 Git pack transfer reconstructs the committed Git objects, including Crab
-pointer objects. Checkout, hydrate, mount, and repository browsing resolve file
-recipes through the pinned checkpoint plus frontier, load independently
-addressed shards and xorbs through the pinned catalog, validate shard, xorb,
-chunk, and file hashes, and either reproduce the exact file bytes or return an
-error. Native LFS traffic remains outside these budgets until section 18's LFS
-protocol decision is closed.
+pointer objects. Checkout, hydrate, mount, repository browsing, and remote
+`download`/`export` resolve file recipes through the pinned checkpoint plus
+frontier, load independently addressed shards and xorbs through the pinned
+catalog, validate shard, xorb, chunk, and file hashes, and either reproduce the
+exact file bytes or return an error. Remote snapshot reads use the authenticated
+control suffix and selective checkpoint ranges, while their snapshot handle
+retains the captured file-to-shard catalog. Native LFS traffic remains outside
+these budgets until section 18's LFS protocol decision is closed.
 
 ### 10.6 Read request budgets
 

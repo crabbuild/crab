@@ -73,6 +73,16 @@ pub struct MigrateImportOptions<'a> {
     pub from_crab: bool,
 }
 
+/// Options for converting regular Git blobs to Crab pointers across history.
+pub struct CrabMigrateImportOptions<'a> {
+    pub include: &'a [String],
+    pub exclude: &'a [String],
+    pub above: Option<u64>,
+    pub everything: bool,
+    pub yes: bool,
+    pub verbose: bool,
+}
+
 pub struct MigrateExportOptions<'a> {
     pub include: &'a str,
     pub exclude: Option<&'a str>,
@@ -82,6 +92,13 @@ pub struct MigrateExportOptions<'a> {
     pub yes: bool,
     pub verbose: bool,
     pub to_crab: bool,
+}
+
+/// Options for converting Crab pointers back to regular Git blobs across history.
+pub struct CrabMigrateExportOptions<'a> {
+    pub include: &'a [String],
+    pub yes: bool,
+    pub verbose: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -452,18 +469,36 @@ fn save_ref_state(scope: &RefStateScope) -> Result<Vec<(String, String)>> {
     };
 
     let output = output.map_err(|e| mig_err(format!("failed to save ref state: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(mig_err(format!(
+            "failed to save ref state: {}",
+            stderr.trim()
+        )));
+    }
     let mut state = Vec::new();
 
-    if output.status.success() {
-        let text = String::from_utf8_lossy(&output.stdout);
-        for line in text.lines() {
-            if let Some((refname, hash)) = line.split_once(' ') {
-                state.push((refname.to_owned(), hash.to_owned()));
-            }
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        if let Some((refname, hash)) = line.split_once(' ') {
+            state.push((refname.to_owned(), hash.to_owned()));
         }
     }
 
     Ok(state)
+}
+
+fn with_ref_rollback<T, F>(original_refs: &[(String, String)], operation: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T>,
+{
+    match operation() {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            restore_ref_state(original_refs);
+            Err(error)
+        }
+    }
 }
 
 fn restore_ref_state(state: &[(String, String)]) {
@@ -642,6 +677,19 @@ fn import_source_size(content: &[u8], from_crab: bool) -> Option<u64> {
     } else {
         Some(content.len() as u64)
     }
+}
+
+fn import_source_size_for_target(
+    content: &[u8],
+    from_crab: bool,
+    target: ImportTarget,
+) -> Option<u64> {
+    if target == ImportTarget::Crab
+        && (is_lfs_pointer(content) || parse_crab_pointer(content).is_some())
+    {
+        return None;
+    }
+    import_source_size(content, from_crab)
 }
 
 fn lfs_pointer_for_content(
@@ -1396,24 +1444,94 @@ fn migrate_import_with_store_options(
     options: MigrateImportOptions<'_>,
     store: Option<Arc<LfsObjectStore>>,
 ) -> Result<()> {
+    let includes = options
+        .include
+        .map(str::to_owned)
+        .into_iter()
+        .collect::<Vec<_>>();
+    let excludes = options
+        .exclude
+        .map(str::to_owned)
+        .into_iter()
+        .collect::<Vec<_>>();
+    migrate_import_with_target(options, store, ImportTarget::Lfs, &includes, &excludes)
+}
+
+/// Rewrite selected history, replacing matching regular blobs with Crab pointers.
+pub fn migrate_import_to_crab_with_options(options: CrabMigrateImportOptions<'_>) -> Result<()> {
+    if options.include.is_empty() {
+        return Err(mig_err(
+            "migrate import requires at least one include pattern",
+        ));
+    }
+    let above = options.above.map(|value| value.to_string());
+    let core = MigrateImportOptions {
+        include: options.include.first().map(String::as_str),
+        exclude: options.exclude.first().map(String::as_str),
+        above: above.as_deref(),
+        fixup: false,
+        no_rewrite: false,
+        no_rewrite_files: Vec::new(),
+        message: None,
+        object_map: None,
+        refs: MigrateRefSelection {
+            everything: options.everything,
+            ..MigrateRefSelection::default()
+        },
+        yes: options.yes,
+        verbose: options.verbose,
+        from_crab: false,
+    };
+    migrate_import_with_target(
+        core,
+        None,
+        ImportTarget::Crab,
+        options.include,
+        options.exclude,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportTarget {
+    Lfs,
+    Crab,
+}
+
+fn migrate_import_with_target(
+    options: MigrateImportOptions<'_>,
+    store: Option<Arc<LfsObjectStore>>,
+    target: ImportTarget,
+    include_patterns: &[String],
+    exclude_patterns: &[String],
+) -> Result<()> {
     if options.no_rewrite {
+        if target != ImportTarget::Lfs {
+            return Err(mig_err(
+                "migrate import --no-rewrite is only available for Git LFS",
+            ));
+        }
         return migrate_import_no_rewrite(options, store);
     }
 
     require_clean_working_tree(options.yes)?;
-    validate_import_filters(&options)?;
+    if target == ImportTarget::Lfs {
+        validate_import_filters(&options)?;
+    }
 
     let repo_root = std::env::current_dir()
         .map_err(|e| mig_err(format!("failed to get current directory: {e}")))?;
 
-    let remote_store = match store {
-        Some(s) => Some(s),
-        None => crate::cmd::lfs::store_setup::resolve_lfs_remote_sync()
-            .ok()
-            .map(|ctx| ctx.store),
+    let remote_store = match target {
+        ImportTarget::Lfs => match store {
+            Some(s) => Some(s),
+            None => crate::cmd::lfs::store_setup::resolve_lfs_remote_sync()
+                .ok()
+                .map(|ctx| ctx.store),
+        },
+        ImportTarget::Crab => None,
     };
 
-    let matcher = PathMatcher::new(options.include, options.exclude);
+    let matcher = PathMatcher::from_patterns(include_patterns, exclude_patterns);
     let threshold = parse_size_threshold(options.above)?;
     let fixup_matcher = if options.fixup {
         Some(FixupMatcher::open(&repo_root)?)
@@ -1439,6 +1557,9 @@ fn migrate_import_with_store_options(
 
     // Scan commits to find which marks are referenced by matching paths.
     let mut marks_to_convert: HashSet<u64> = HashSet::new();
+    let mut mark_to_path: HashMap<u64, String> = HashMap::new();
+    let mut mark_usage: HashMap<u64, (bool, bool)> = HashMap::new();
+    let mut selected_mark_paths: HashSet<(u64, String)> = HashSet::new();
     let mut tracking_patterns: HashSet<String> = HashSet::new();
     let mut verbose_entries = Vec::new();
     for commit in &stream.commits {
@@ -1448,25 +1569,36 @@ fn migrate_import_with_store_options(
                 && let Some(mark_num) = dataref.strip_prefix(':')
                 && let Ok(m) = mark_num.parse::<u64>()
                 && let Some(&blob_idx) = mark_to_blob.get(&m)
-                && let Some(source_size) =
-                    import_source_size(&stream.blobs[blob_idx].data, options.from_crab)
-                && should_import_path(
+                && let Some(source_size) = import_source_size_for_target(
+                    &stream.blobs[blob_idx].data,
+                    options.from_crab,
+                    target,
+                )
+            {
+                let selected = should_import_path(
                     path,
                     source_size,
                     &matcher,
                     threshold,
                     fixup_matcher.as_ref(),
-                )
-            {
-                marks_to_convert.insert(m);
-                if options.verbose {
-                    verbose_entries.push(VerboseMigrationEntry {
-                        commit: commit_label.clone(),
-                        path: path.clone(),
-                    });
-                }
-                if !options.fixup {
-                    add_tracking_pattern(&mut tracking_patterns, options.include, path);
+                );
+                let usage = mark_usage.entry(m).or_default();
+                if selected {
+                    usage.0 = true;
+                    marks_to_convert.insert(m);
+                    mark_to_path.entry(m).or_insert_with(|| path.clone());
+                    selected_mark_paths.insert((m, path.clone()));
+                    if options.verbose {
+                        verbose_entries.push(VerboseMigrationEntry {
+                            commit: commit_label.clone(),
+                            path: path.clone(),
+                        });
+                    }
+                    if !options.fixup {
+                        add_tracking_patterns(&mut tracking_patterns, include_patterns, path);
+                    }
+                } else {
+                    usage.1 = true;
                 }
             }
         }
@@ -1478,15 +1610,17 @@ fn migrate_import_with_store_options(
         let commit_label = commit_verbose_label(commit);
         for op in &commit.file_ops {
             if let FileOpKind::ModifyInline { path, data, .. } = &op.kind
-                && import_source_size(data, options.from_crab).is_some_and(|source_size| {
-                    should_import_path(
-                        path,
-                        source_size,
-                        &matcher,
-                        threshold,
-                        fixup_matcher.as_ref(),
-                    )
-                })
+                && import_source_size_for_target(data, options.from_crab, target).is_some_and(
+                    |source_size| {
+                        should_import_path(
+                            path,
+                            source_size,
+                            &matcher,
+                            threshold,
+                            fixup_matcher.as_ref(),
+                        )
+                    },
+                )
             {
                 has_inline = true;
                 if options.verbose {
@@ -1502,44 +1636,104 @@ fn migrate_import_with_store_options(
     if marks_to_convert.is_empty() && !has_inline {
         eprintln!(
             "migrate import: no files matched {}",
-            import_filter_label(&options)
+            migration_filter_label(include_patterns, exclude_patterns, options.above)
         );
         return Ok(());
     }
 
-    let crab_source = if options.from_crab {
+    if target == ImportTarget::Crab && options.from_crab {
+        return Err(mig_err(
+            "migrate import to Crab cannot use --from-crab; Crab pointers are already the target format",
+        ));
+    }
+
+    let crab_source = if target == ImportTarget::Lfs && options.from_crab {
         let hydrator = resolve_crab_hydrator("migrate-import-from-crab")?;
         let lfs_dir = crate::lfs::config::LfsConfig::resolve_storage_dir(&repo_root)?;
         Some((hydrator, lfs_dir))
     } else {
         None
     };
+    let crab_staging = (target == ImportTarget::Crab)
+        .then(open_migrate_staging)
+        .transpose()?;
 
     // Phase 3: Replace blob content with LFS pointers, upload originals.
     let mut converted_count = 0u64;
+    let mixed_marks: HashSet<u64> = mark_usage
+        .iter()
+        .filter_map(|(mark, (selected, other))| (*selected && *other).then_some(*mark))
+        .collect();
+    let mut converted_mark_data: HashMap<u64, Vec<u8>> = HashMap::new();
 
     for blob in &mut stream.blobs {
         if !marks_to_convert.contains(&blob.mark) {
             continue;
         }
 
-        blob.data = if let Some((hydrator, lfs_dir)) = crab_source.as_ref() {
-            lfs_pointer_for_crab_content(&blob.data, hydrator, remote_store.as_ref(), lfs_dir)?
+        let mixed = mixed_marks.contains(&blob.mark);
+        let source = if mixed {
+            blob.data.clone()
         } else {
-            lfs_pointer_for_content(
-                &blob.data,
-                remote_store.as_ref(),
-                &format!("blob (mark :{})", blob.mark),
-            )?
+            std::mem::take(&mut blob.data)
         };
+        let converted = match target {
+            ImportTarget::Lfs => {
+                if let Some((hydrator, lfs_dir)) = crab_source.as_ref() {
+                    lfs_pointer_for_crab_content(&source, hydrator, remote_store.as_ref(), lfs_dir)?
+                } else {
+                    lfs_pointer_for_content(
+                        &source,
+                        remote_store.as_ref(),
+                        &format!("blob (mark :{})", blob.mark),
+                    )?
+                }
+            }
+            ImportTarget::Crab => crab_pointer_for_content(
+                crab_staging
+                    .as_ref()
+                    .ok_or_else(|| mig_err("Crab migration staging was not initialized"))?,
+                mark_to_path
+                    .get(&blob.mark)
+                    .map(String::as_str)
+                    .unwrap_or("migrate-history-blob"),
+                source,
+            )?,
+        };
+        if mixed {
+            converted_mark_data.insert(blob.mark, converted);
+        } else {
+            blob.data = converted;
+        }
         converted_count += 1;
     }
 
     // Handle inline data in commits.
     for commit in &mut stream.commits {
         for op in &mut commit.file_ops {
+            let mixed_modify = match &op.kind {
+                FileOpKind::Modify { dataref, path, .. } => dataref
+                    .strip_prefix(':')
+                    .and_then(|mark| mark.parse::<u64>().ok())
+                    .filter(|mark| mixed_marks.contains(mark))
+                    .filter(|mark| selected_mark_paths.contains(&(*mark, path.clone()))),
+                _ => None,
+            };
+            if let Some(mark) = mixed_modify
+                && let Some(data) = converted_mark_data.get(&mark)
+                && let FileOpKind::Modify { mode, path, .. } = &op.kind
+            {
+                op.kind = FileOpKind::ModifyInline {
+                    mode: mode.clone(),
+                    path: path.clone(),
+                    data: data.clone(),
+                };
+                continue;
+            }
+
             if let FileOpKind::ModifyInline { path, data, .. } = &mut op.kind
-                && let Some(source_size) = import_source_size(data, options.from_crab)
+                && let Some(source_size) =
+                    import_source_size_for_target(data, options.from_crab, target)
                 && should_import_path(
                     path,
                     source_size,
@@ -1548,17 +1742,33 @@ fn migrate_import_with_store_options(
                     fixup_matcher.as_ref(),
                 )
             {
-                *data = if let Some((hydrator, lfs_dir)) = crab_source.as_ref() {
-                    lfs_pointer_for_crab_content(data, hydrator, remote_store.as_ref(), lfs_dir)?
-                } else {
-                    lfs_pointer_for_content(
-                        data,
-                        remote_store.as_ref(),
-                        &format!("inline blob for {path}"),
-                    )?
+                *data = match target {
+                    ImportTarget::Lfs => {
+                        if let Some((hydrator, lfs_dir)) = crab_source.as_ref() {
+                            lfs_pointer_for_crab_content(
+                                data,
+                                hydrator,
+                                remote_store.as_ref(),
+                                lfs_dir,
+                            )?
+                        } else {
+                            lfs_pointer_for_content(
+                                data,
+                                remote_store.as_ref(),
+                                &format!("inline blob for {path}"),
+                            )?
+                        }
+                    }
+                    ImportTarget::Crab => crab_pointer_for_content(
+                        crab_staging
+                            .as_ref()
+                            .ok_or_else(|| mig_err("Crab migration staging was not initialized"))?,
+                        path,
+                        std::mem::take(data),
+                    )?,
                 };
                 if !options.fixup {
-                    add_tracking_pattern(&mut tracking_patterns, options.include, path);
+                    add_tracking_patterns(&mut tracking_patterns, include_patterns, path);
                 }
                 converted_count += 1;
             }
@@ -1567,45 +1777,73 @@ fn migrate_import_with_store_options(
 
     // Phase 4: Inject .gitattributes into each commit.
     let mut next_mark = find_max_mark(&stream) + 1;
-    let tracking_lines = tracking_lines_for_patterns(&tracking_patterns);
+    let tracking_lines = match target {
+        ImportTarget::Lfs => tracking_lines_for_patterns(&tracking_patterns),
+        ImportTarget::Crab => crab_tracking_lines_for_patterns(&tracking_patterns),
+    };
     inject_gitattributes_for_import(&mut stream, &tracking_lines, &mark_to_blob, &mut next_mark);
 
     // Phase 5: Serialize and run fast-import.
     let mut output_buf = Vec::new();
     write_stream(&mut output_buf, &stream)?;
 
-    let import_marks = match run_fast_import(&output_buf, options.object_map.is_some()) {
-        Ok(marks) => marks,
-        Err(e) => {
-            restore_ref_state(&original_refs);
-            return Err(e);
+    with_ref_rollback(&original_refs, || {
+        let import_marks = run_fast_import(&output_buf, options.object_map.is_some())?;
+
+        if let Some(path) = options.object_map {
+            write_object_map(path, &stream, import_marks.as_ref())?;
         }
-    };
 
-    if let Some(path) = options.object_map {
-        write_object_map(path, &stream, import_marks.as_ref())?;
-    }
+        // Phase 6: Update .gitattributes in the working tree.
+        let mut sorted_patterns: Vec<&String> = tracking_patterns.iter().collect();
+        sorted_patterns.sort();
+        for pattern in sorted_patterns {
+            match target {
+                ImportTarget::Lfs => {
+                    crate::lfs::track::track(pattern, &repo_root)?;
+                }
+                ImportTarget::Crab => {
+                    crate::cmd::track::run_track_in(pattern, &repo_root)?;
+                }
+            }
+        }
 
-    // Phase 6: Update .gitattributes in the working tree.
-    let mut sorted_patterns: Vec<&String> = tracking_patterns.iter().collect();
-    sorted_patterns.sort();
-    for pattern in sorted_patterns {
-        crate::lfs::track::track(pattern, &repo_root)?;
-    }
+        if let Some(staging) = crab_staging {
+            crate::cmd::lfs::block_on_runtime(async move {
+                staging.close().await.map_err(CrabError::from)
+            })?;
+        }
 
-    // Phase 7: Reset working tree to match the rewritten HEAD.
-    let _ = Command::new("git")
-        .args(["checkout", "--force", "HEAD"])
-        .output();
+        // Phase 7: Reset working tree to match the rewritten HEAD.
+        let checkout = Command::new("git")
+            .args(["checkout", "--force", "HEAD"])
+            .output()
+            .map_err(|error| mig_err(format!("failed to reset working tree: {error}")))?;
+        if !checkout.status.success() {
+            let stderr = String::from_utf8_lossy(&checkout.stderr);
+            return Err(mig_err(format!(
+                "failed to reset working tree: {}",
+                stderr.trim()
+            )));
+        }
+        Ok(())
+    })?;
 
     if options.verbose {
         print_verbose_migrations(&verbose_entries);
     }
 
-    eprintln!("migrate import: history rewritten successfully");
+    eprintln!(
+        "migrate import: history rewritten successfully{}",
+        if target == ImportTarget::Crab {
+            " to Crab pointers"
+        } else {
+            ""
+        }
+    );
     eprintln!(
         "  converted {converted_count} blob(s) matching {}",
-        import_filter_label(&options)
+        migration_filter_label(include_patterns, exclude_patterns, options.above)
     );
     if let Some(exclude) = options.exclude {
         eprintln!("  excluded paths matching \"{exclude}\"");
@@ -1754,26 +1992,6 @@ fn validate_import_no_rewrite_options(options: &MigrateImportOptions<'_>) -> Res
     Ok(())
 }
 
-fn import_filter_label(options: &MigrateImportOptions<'_>) -> String {
-    if options.fixup {
-        return "files tracked by .gitattributes filter=lfs".to_owned();
-    }
-
-    let mut parts = Vec::new();
-    if let Some(include) = options.include {
-        parts.push(format!("pattern \"{include}\""));
-    } else {
-        parts.push("all paths".to_owned());
-    }
-    if let Some(exclude) = options.exclude {
-        parts.push(format!("excluding \"{exclude}\""));
-    }
-    if let Some(above) = options.above {
-        parts.push(format!("at least {above}"));
-    }
-    parts.join(", ")
-}
-
 fn normalize_no_rewrite_path(input: &str) -> Result<String> {
     let path = Path::new(input);
     if path.is_absolute() {
@@ -1892,12 +2110,34 @@ impl FixupMatcher {
     }
 }
 
-fn add_tracking_pattern(patterns: &mut HashSet<String>, include: Option<&str>, path: &str) {
-    if let Some(include) = include {
-        patterns.insert(include.to_owned());
-    } else {
+fn add_tracking_patterns(patterns: &mut HashSet<String>, includes: &[String], path: &str) {
+    if includes.is_empty() {
         patterns.insert(tracking_pattern_for_path(path));
+    } else {
+        patterns.extend(includes.iter().cloned());
     }
+}
+
+#[cfg(test)]
+fn add_tracking_pattern(patterns: &mut HashSet<String>, include: Option<&str>, path: &str) {
+    let includes = include.map(str::to_owned).into_iter().collect::<Vec<_>>();
+    add_tracking_patterns(patterns, &includes, path);
+}
+
+fn migration_filter_label(includes: &[String], excludes: &[String], above: Option<&str>) -> String {
+    let mut parts = Vec::new();
+    if includes.is_empty() {
+        parts.push("all paths".to_owned());
+    } else {
+        parts.push(format!("patterns {}", includes.join(", ")));
+    }
+    if !excludes.is_empty() {
+        parts.push(format!("excluding {}", excludes.join(", ")));
+    }
+    if let Some(above) = above {
+        parts.push(format!("at least {above}"));
+    }
+    parts.join(", ")
 }
 
 fn tracking_pattern_for_path(path: &str) -> String {
@@ -2254,30 +2494,41 @@ pub fn migrate_export_with_options(options: MigrateExportOptions<'_>) -> Result<
     let mut output_buf = Vec::new();
     write_stream(&mut output_buf, &stream)?;
 
-    let import_marks = match run_fast_import(&output_buf, options.object_map.is_some()) {
-        Ok(marks) => marks,
-        Err(e) => {
-            restore_ref_state(&original_refs);
-            return Err(e);
+    with_ref_rollback(&original_refs, || {
+        let import_marks = run_fast_import(&output_buf, options.object_map.is_some())?;
+
+        if let Some(path) = options.object_map {
+            write_object_map(path, &stream, import_marks.as_ref())?;
         }
-    };
 
-    if let Some(path) = options.object_map {
-        write_object_map(path, &stream, import_marks.as_ref())?;
-    }
+        // Phase 6: Update working tree .gitattributes.
+        if options.to_crab {
+            crate::lfs::track::untrack(options.include, &repo_root)?;
+            crate::cmd::track::run_track_in(options.include, &repo_root)?;
+        } else {
+            crate::lfs::track::append_untrack_override(options.include, &repo_root)?;
+        }
 
-    // Phase 6: Update working tree .gitattributes.
-    if options.to_crab {
-        crate::lfs::track::untrack(options.include, &repo_root)?;
-        crate::cmd::track::run_track_in(options.include, &repo_root)?;
-    } else {
-        crate::lfs::track::append_untrack_override(options.include, &repo_root)?;
-    }
+        if let Some(staging) = crab_staging {
+            crate::cmd::lfs::block_on_runtime(async move {
+                staging.close().await.map_err(CrabError::from)
+            })?;
+        }
 
-    // Phase 7: Reset working tree.
-    let _ = Command::new("git")
-        .args(["checkout", "--force", "HEAD"])
-        .output();
+        // Phase 7: Reset working tree.
+        let checkout = Command::new("git")
+            .args(["checkout", "--force", "HEAD"])
+            .output()
+            .map_err(|error| mig_err(format!("failed to reset working tree: {error}")))?;
+        if !checkout.status.success() {
+            let stderr = String::from_utf8_lossy(&checkout.stderr);
+            return Err(mig_err(format!(
+                "failed to reset working tree: {}",
+                stderr.trim()
+            )));
+        }
+        Ok(())
+    })?;
 
     if options.verbose {
         print_verbose_migrations(&verbose_entries);
@@ -2302,6 +2553,193 @@ pub fn migrate_export_with_options(options: MigrateExportOptions<'_>) -> Result<
     eprintln!("  scope: {}", refs.scope_label);
 
     Ok(())
+}
+
+/// Rewrite selected history, replacing matching Crab pointers with full files.
+pub fn migrate_export_crab_with_options(options: CrabMigrateExportOptions<'_>) -> Result<()> {
+    if options.include.is_empty() {
+        return Err(mig_err(
+            "migrate export requires at least one include pattern",
+        ));
+    }
+    require_clean_working_tree(options.yes)?;
+
+    let repo_root = std::env::current_dir()
+        .map_err(|e| mig_err(format!("failed to get current directory: {e}")))?;
+    let matcher = PathMatcher::from_patterns(options.include, &[]);
+    let refs = resolve_ref_selection(&MigrateRefSelection {
+        everything: true,
+        ..MigrateRefSelection::default()
+    })?;
+    let original_refs = save_ref_state(&refs.state_scope)?;
+    let raw_stream = run_fast_export(&refs.revision_args)?;
+    let mut stream = parse_export_stream(&raw_stream)?;
+    let mark_to_blob: HashMap<u64, usize> = stream
+        .blobs
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.mark, i))
+        .collect();
+
+    let mut marks_to_convert: HashSet<u64> = HashSet::new();
+    let mut mark_usage: HashMap<u64, (bool, bool)> = HashMap::new();
+    let mut selected_mark_paths: HashSet<(u64, String)> = HashSet::new();
+    let mut verbose_entries = Vec::new();
+    for commit in &stream.commits {
+        let commit_label = commit_verbose_label(commit);
+        for op in &commit.file_ops {
+            if let FileOpKind::Modify { dataref, path, .. } = &op.kind
+                && let Some(mark_str) = dataref.strip_prefix(':')
+                && let Ok(mark) = mark_str.parse::<u64>()
+                && let Some(&blob_idx) = mark_to_blob.get(&mark)
+                && parse_crab_pointer(&stream.blobs[blob_idx].data).is_some()
+            {
+                let selected = matcher.matches(path);
+                let usage = mark_usage.entry(mark).or_default();
+                if selected {
+                    usage.0 = true;
+                    marks_to_convert.insert(mark);
+                    selected_mark_paths.insert((mark, path.clone()));
+                    if options.verbose {
+                        verbose_entries.push(VerboseMigrationEntry {
+                            commit: commit_label.clone(),
+                            path: path.clone(),
+                        });
+                    }
+                } else {
+                    usage.1 = true;
+                }
+            }
+        }
+    }
+
+    let mut inline_paths = Vec::new();
+    for commit in &stream.commits {
+        let commit_label = commit_verbose_label(commit);
+        for op in &commit.file_ops {
+            if let FileOpKind::ModifyInline { path, data, .. } = &op.kind
+                && matcher.matches(path)
+                && parse_crab_pointer(data).is_some()
+            {
+                inline_paths.push(path.clone());
+                if options.verbose {
+                    verbose_entries.push(VerboseMigrationEntry {
+                        commit: commit_label.clone(),
+                        path: path.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    if marks_to_convert.is_empty() && inline_paths.is_empty() {
+        eprintln!(
+            "migrate export: no Crab pointers matched patterns {}",
+            options.include.join(", ")
+        );
+        return Ok(());
+    }
+
+    let hydrator = resolve_crab_hydrator("migrate-export")?;
+    let mixed_marks: HashSet<u64> = mark_usage
+        .iter()
+        .filter_map(|(mark, (selected, other))| (*selected && *other).then_some(*mark))
+        .collect();
+    let mut hydrated_mark_data: HashMap<u64, Vec<u8>> = HashMap::new();
+    for blob in &mut stream.blobs {
+        if marks_to_convert.contains(&blob.mark) {
+            let pointer = parse_crab_pointer(&blob.data)
+                .ok_or_else(|| mig_err("matched Crab blob became unparsable"))?;
+            let hydrated = hydrate_crab_content(&hydrator, &pointer)?;
+            if mixed_marks.contains(&blob.mark) {
+                hydrated_mark_data.insert(blob.mark, hydrated);
+            } else {
+                blob.data = hydrated;
+            }
+        }
+    }
+    for commit in &mut stream.commits {
+        for op in &mut commit.file_ops {
+            let mixed_modify = match &op.kind {
+                FileOpKind::Modify { dataref, path, .. } => dataref
+                    .strip_prefix(':')
+                    .and_then(|mark| mark.parse::<u64>().ok())
+                    .filter(|mark| mixed_marks.contains(mark))
+                    .filter(|mark| selected_mark_paths.contains(&(*mark, path.clone()))),
+                _ => None,
+            };
+            if let Some(mark) = mixed_modify
+                && let Some(data) = hydrated_mark_data.get(&mark)
+                && let FileOpKind::Modify { mode, path, .. } = &op.kind
+            {
+                op.kind = FileOpKind::ModifyInline {
+                    mode: mode.clone(),
+                    path: path.clone(),
+                    data: data.clone(),
+                };
+                continue;
+            }
+
+            if let FileOpKind::ModifyInline { path, data, .. } = &mut op.kind
+                && matcher.matches(path)
+                && let Some(pointer) = parse_crab_pointer(data)
+            {
+                *data = hydrate_crab_content(&hydrator, &pointer)?;
+            }
+        }
+    }
+
+    for include in options.include {
+        let attrs_line = format!("{include} filter=crab diff=crab merge=crab -text");
+        remove_gitattributes_for_export(&mut stream, &attrs_line, &mark_to_blob);
+    }
+    let patterns = options.include.iter().cloned().collect::<HashSet<_>>();
+    let mut next_mark = find_max_mark(&stream) + 1;
+    let untrack_lines = untrack_lines_for_patterns(&patterns);
+    inject_gitattributes_for_import(&mut stream, &untrack_lines, &mark_to_blob, &mut next_mark);
+
+    let mut output_buf = Vec::new();
+    write_stream(&mut output_buf, &stream)?;
+    with_ref_rollback(&original_refs, || {
+        run_fast_import(&output_buf, false)?;
+
+        for include in options.include {
+            crate::cmd::track::run_untrack_in(include, &repo_root)?;
+        }
+        let checkout = Command::new("git")
+            .args(["checkout", "--force", "HEAD"])
+            .output()
+            .map_err(|error| mig_err(format!("failed to reset working tree: {error}")))?;
+        if !checkout.status.success() {
+            let stderr = String::from_utf8_lossy(&checkout.stderr);
+            return Err(mig_err(format!(
+                "failed to reset working tree: {}",
+                stderr.trim()
+            )));
+        }
+        Ok(())
+    })?;
+    if options.verbose {
+        print_verbose_migrations(&verbose_entries);
+    }
+    eprintln!(
+        "migrate export: history rewritten successfully from Crab pointers ({} converted)",
+        marks_to_convert.len() + inline_paths.len()
+    );
+    eprintln!("  patterns: {}", options.include.join(", "));
+    eprintln!("  scope: {}", refs.scope_label);
+    Ok(())
+}
+
+fn hydrate_crab_content(
+    hydrator: &crate::cmd::hydrate::HydrationRuntime,
+    pointer: &Pointer,
+) -> Result<Vec<u8>> {
+    crate::cmd::lfs::block_on_runtime(async {
+        hydrator
+            .reconstruct_from_pointer(&pointer.serialize())
+            .await
+    })
 }
 
 /// Resolve the original content for an LFS pointer blob.
@@ -2973,21 +3411,33 @@ fn take_lfs_objects_entry(entries: &mut Vec<MigrateInfoEntry>) -> Option<Migrate
 }
 
 struct PathMatcher {
-    include: Option<Box<dyn Fn(&str) -> bool>>,
-    exclude: Option<Box<dyn Fn(&str) -> bool>>,
+    include: Vec<Box<dyn Fn(&str) -> bool>>,
+    exclude: Vec<Box<dyn Fn(&str) -> bool>>,
 }
 
 impl PathMatcher {
     fn new(include: Option<&str>, exclude: Option<&str>) -> Self {
+        let includes = include.map(str::to_owned).into_iter().collect::<Vec<_>>();
+        let excludes = exclude.map(str::to_owned).into_iter().collect::<Vec<_>>();
+        Self::from_patterns(&includes, &excludes)
+    }
+
+    fn from_patterns(includes: &[String], excludes: &[String]) -> Self {
         Self {
-            include: include.map(glob_matches_factory),
-            exclude: exclude.map(glob_matches_factory),
+            include: includes
+                .iter()
+                .map(|pattern| glob_matches_factory(pattern))
+                .collect(),
+            exclude: excludes
+                .iter()
+                .map(|pattern| glob_matches_factory(pattern))
+                .collect(),
         }
     }
 
     fn matches(&self, path: &str) -> bool {
-        let included = self.include.as_ref().is_none_or(|matcher| matcher(path));
-        let excluded = self.exclude.as_ref().is_some_and(|matcher| matcher(path));
+        let included = self.include.is_empty() || self.include.iter().any(|matcher| matcher(path));
+        let excluded = self.exclude.iter().any(|matcher| matcher(path));
         included && !excluded
     }
 }
@@ -3328,6 +3778,22 @@ mod tests {
 
         assert!(matcher.matches("data/file.bin"));
         assert!(!matcher.matches("data/file.tmp"));
+    }
+
+    #[test]
+    fn path_matcher_accepts_multiple_includes_and_excludes() {
+        let matcher = PathMatcher::from_patterns(
+            &[
+                "models/*.bin".to_owned(),
+                "weights/*.safetensors".to_owned(),
+            ],
+            &["models/private.bin".to_owned()],
+        );
+
+        assert!(matcher.matches("models/public.bin"));
+        assert!(matcher.matches("weights/latest.safetensors"));
+        assert!(!matcher.matches("models/private.bin"));
+        assert!(!matcher.matches("README.md"));
     }
 
     #[test]

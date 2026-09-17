@@ -78,6 +78,7 @@ pub struct CapsuleRefView {
     root: crab_metadata::capsule_protocol::RootSnapshot,
     refs: BTreeMap<String, String>,
     peeled_refs: BTreeMap<String, String>,
+    visible_ref_transactions: BTreeMap<String, String>,
 }
 
 impl CapsuleRefView {
@@ -99,6 +100,12 @@ impl CapsuleRefView {
         &self.peeled_refs
     }
 
+    /// Return the transaction identity visible at each captured ref.
+    #[must_use]
+    pub fn visible_ref_transactions(&self) -> &BTreeMap<String, String> {
+        &self.visible_ref_transactions
+    }
+
     /// Return the symbolic HEAD target owned by the compacted root.
     #[must_use]
     pub fn head(&self) -> &str {
@@ -112,6 +119,7 @@ impl From<CapsuleRepositoryView> for CapsuleRefView {
             root: view.root,
             refs: view.refs,
             peeled_refs: view.peeled_refs,
+            visible_ref_transactions: view.visible_ref_transactions,
         }
     }
 }
@@ -1362,6 +1370,7 @@ pub async fn open_ref_view_from_root(
         root: snapshot,
         refs: visible.refs,
         peeled_refs: visible.peeled_refs,
+        visible_ref_transactions: visible.transactions,
     })
 }
 
@@ -1425,6 +1434,11 @@ pub async fn open_ref_view_from_root_for_refs(
             .collect(),
         peeled_refs: visible
             .peeled_refs
+            .into_iter()
+            .filter(|(ref_name, _)| ref_names.contains(ref_name))
+            .collect(),
+        visible_ref_transactions: visible
+            .transactions
             .into_iter()
             .filter(|(ref_name, _)| ref_names.contains(ref_name))
             .collect(),

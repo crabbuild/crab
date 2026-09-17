@@ -1,10 +1,16 @@
 use std::future::Future;
 use std::io::Write;
 
+use crab_metadata::manifest_store;
+use crab_metadata::manifests::Manifest;
+use crab_metadata::ref_journal::list_active_transactions;
 use crab_storage::{StorageError, Store, StoreLayout};
 use crab_types::replication::ReplicaConfig;
 use crab_xet::{
-    shard_parse::{extract_chunk_entries_from_reader, strip_bloom_trailer},
+    shard_parse::{
+        MAX_SHARD_SIZE_BYTES, extract_chunk_entries_from_reader, extract_chunk_entries_streaming,
+        strip_bloom_trailer,
+    },
     xorb::format::MerkleHash,
 };
 use object_store::path::Path as ObjectPath;
@@ -203,7 +209,7 @@ pub struct ReadinessProbeStats {
     pub object_read_count: u64,
 }
 
-/// Object-level readiness proof for one replica against a primary manifest.
+/// Object-level readiness proof for one replica against a primary view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadReplicaReadiness {
     pub primary_generation: u64,
@@ -224,7 +230,7 @@ impl ReadReplicaReadiness {
             primary_state_digest: None,
             replica_state_digest: None,
             ready: true,
-            lag_generations: Some(replica_generation.saturating_sub(primary_generation)),
+            lag_generations: Some(primary_generation.saturating_sub(replica_generation)),
             reason: None,
             stats,
         }
@@ -247,6 +253,188 @@ impl ReadReplicaReadiness {
             reason: Some(reason.into()),
             stats,
         }
+    }
+}
+
+/// Check a legacy v1 replica when neither side has a capsule-v2 root.
+///
+/// This is the compatibility boundary for repositories that have not been
+/// cut over yet. It verifies the manifest generation, active-transaction
+/// quiescence, pack/shard indexes, and every referenced immutable object before
+/// a caller routes a read to the replica. The returned state tokens are the
+/// manifest ETags so the caller can safely reuse the existing readiness cache.
+pub async fn check_legacy_read_replica_readiness(
+    primary_store: &Store,
+    primary_router: &StoreLayout<Store>,
+    replica_store: &Store,
+    replica_router: &StoreLayout<Store>,
+    options: ReadinessCheckOptions,
+) -> Result<ReadReplicaReadiness> {
+    let mut stats = ReadinessProbeStats::default();
+    let primary_active = list_active_transactions(primary_store, primary_router).await?;
+    let (primary_manifest, primary_etag) =
+        manifest_store::read_manifest(primary_store, primary_router).await?;
+    let primary_generation = primary_manifest.generation;
+    let (replica_manifest, replica_etag) =
+        match manifest_store::read_manifest(replica_store, replica_router).await {
+            Ok(value) => value,
+            Err(error) => {
+                let mut readiness = ReadReplicaReadiness::not_ready(
+                    primary_generation,
+                    None,
+                    format!("replica manifest unavailable: {error}"),
+                    stats,
+                );
+                readiness.primary_state_digest = Some(primary_etag);
+                return Ok(readiness);
+            }
+        };
+    if !primary_active.is_empty() {
+        let mut readiness = ReadReplicaReadiness::not_ready(
+            primary_generation,
+            Some(replica_manifest.generation),
+            "primary has uncompacted ref transactions",
+            stats,
+        );
+        readiness.primary_state_digest = Some(primary_etag);
+        readiness.replica_state_digest = Some(replica_etag);
+        return Ok(readiness);
+    }
+    if replica_manifest.generation < primary_generation {
+        let mut readiness = ReadReplicaReadiness::not_ready(
+            primary_generation,
+            Some(replica_manifest.generation),
+            "replica manifest is stale",
+            stats,
+        );
+        readiness.primary_state_digest = Some(primary_etag);
+        readiness.replica_state_digest = Some(replica_etag);
+        return Ok(readiness);
+    }
+    if let Some(reason) = referenced_legacy_object_gap(
+        replica_store,
+        replica_router,
+        &replica_manifest,
+        &mut stats,
+        options,
+    )
+    .await?
+    {
+        let mut readiness = ReadReplicaReadiness::not_ready(
+            primary_generation,
+            Some(replica_manifest.generation),
+            reason,
+            stats,
+        );
+        readiness.primary_state_digest = Some(primary_etag);
+        readiness.replica_state_digest = Some(replica_etag);
+        return Ok(readiness);
+    }
+    let mut readiness =
+        ReadReplicaReadiness::ready(primary_generation, replica_manifest.generation, stats);
+    readiness.primary_state_digest = Some(primary_etag);
+    readiness.replica_state_digest = Some(replica_etag);
+    Ok(readiness)
+}
+
+async fn referenced_legacy_object_gap(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    manifest: &Manifest,
+    stats: &mut ReadinessProbeStats,
+    options: ReadinessCheckOptions,
+) -> Result<Option<String>> {
+    if !manifest.pack_index_hash.is_empty() {
+        stats.object_read_count = stats.object_read_count.saturating_add(1);
+        let packs =
+            match manifest_store::read_bulk_pack_list(store, router, &manifest.pack_index_hash)
+                .await
+            {
+                Ok(packs) => packs,
+                Err(crab_metadata::error::MetadataError::Storage {
+                    source: StorageError::NotFound { .. },
+                }) => return Ok(Some("pack index missing".to_owned())),
+                Err(error) => return Err(error.into()),
+            };
+        for pack in packs {
+            if readiness_probe_budget_exhausted(stats, options) {
+                return Ok(None);
+            }
+            let pack_path = router.pack_path(&pack.pack_id);
+            if let Some(reason) = missing_legacy_head(store, &pack_path, "pack", stats).await? {
+                return Ok(Some(reason));
+            }
+            if readiness_probe_budget_exhausted(stats, options) {
+                return Ok(None);
+            }
+            let metadata_path = router.pack_metadata_path(&pack.pack_id);
+            if let Some(reason) =
+                missing_legacy_head(store, &metadata_path, "pack metadata", stats).await?
+            {
+                return Ok(Some(reason));
+            }
+        }
+    }
+    if !manifest.shard_index_hash.is_empty() {
+        stats.object_read_count = stats.object_read_count.saturating_add(1);
+        let shards =
+            match manifest_store::read_bulk_shard_list(store, router, &manifest.shard_index_hash)
+                .await
+            {
+                Ok(shards) => shards,
+                Err(crab_metadata::error::MetadataError::Storage {
+                    source: StorageError::NotFound { .. },
+                }) => return Ok(Some("shard index missing".to_owned())),
+                Err(error) => return Err(error.into()),
+            };
+        for shard in shards {
+            if readiness_probe_budget_exhausted(stats, options) {
+                return Ok(None);
+            }
+            let shard_hash = parse_merkle_hash(&shard, "shard")?;
+            let shard_path = router.shard_path(&shard_hash);
+            stats.object_read_count = stats.object_read_count.saturating_add(1);
+            let shard_bytes = match store
+                .get_with_etag_bounded(&shard_path, MAX_SHARD_SIZE_BYTES as u64)
+                .await
+            {
+                Ok((bytes, _)) => bytes,
+                Err(StorageError::NotFound { .. }) => {
+                    return Ok(Some(format!("shard missing at {}", shard_path.as_ref())));
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let xorb_hashes = extract_chunk_entries_streaming(&shard_bytes)
+                .into_iter()
+                .map(|(_, xorb)| xorb.xorb_hash)
+                .collect::<std::collections::BTreeSet<_>>();
+            for xorb_hash in xorb_hashes {
+                if readiness_probe_budget_exhausted(stats, options) {
+                    return Ok(None);
+                }
+                let xorb_path = router.xorb_path(&xorb_hash);
+                if let Some(reason) = missing_legacy_head(store, &xorb_path, "xorb", stats).await? {
+                    return Ok(Some(reason));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+async fn missing_legacy_head(
+    store: &Store,
+    path: &ObjectPath,
+    label: &str,
+    stats: &mut ReadinessProbeStats,
+) -> Result<Option<String>> {
+    stats.object_probe_count = stats.object_probe_count.saturating_add(1);
+    match store.head(path).await {
+        Ok(_) => Ok(None),
+        Err(StorageError::NotFound { .. }) => {
+            Ok(Some(format!("{label} missing at {}", path.as_ref())))
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -1195,6 +1383,9 @@ mod tests {
 
     #[test]
     fn probe_result_conversion_keeps_readiness_shape_owned() {
+        let lagging = ReadReplicaReadiness::ready(9, 8, ReadinessProbeStats::default());
+        assert_eq!(lagging.lag_generations, Some(1));
+
         let ready = ReadReplicaProbeResult::from_readiness(
             "west",
             "org/repo",

@@ -75,7 +75,7 @@ pub async fn run_init(url: &str, cancel: &CancellationToken) -> Result<()> {
 /// Initialize a crab repository rooted at `root`.
 ///
 /// Creates `{root}/crab.toml` and `{root}/.crab/local.toml`. The command entry
-/// point publishes the canonical remote layout and generation-0 manifest
+/// point publishes the canonical v2 repository root and generation-0 ref authority
 /// after this local setup succeeds.
 ///
 /// # Errors
@@ -95,7 +95,7 @@ pub async fn run_init_in(url: &str, root: &Path, cancel: &CancellationToken) -> 
 /// # Errors
 ///
 /// Returns a configuration, authentication, storage, or cancellation error
-/// when the remote cannot be opened or its initial manifest cannot be created.
+/// when the remote cannot be opened or its v2 root cannot be created.
 pub async fn initialize_remote_repository(
     url: &str,
     root: &Path,
@@ -444,7 +444,7 @@ async fn run_init_inner(
             prefix = %prefix,
             host = %host,
             repo_path = %path,
-            "remote per-repo prefix is materialized by manifest creation",
+            "remote per-repo prefix is materialized by v2 root creation",
         );
     }
 

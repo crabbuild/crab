@@ -1139,7 +1139,9 @@ GIT_TAG_PEEL_FORBIDDEN_PATTERNS = (
 STORAGE_PACK_LAYOUT_REQUIRED_DELEGATIONS = {
     "crab/src/git/push.rs": ("pack_path(", "pack_metadata_path("),
     "crab/src/git/remote_helper.rs": ("pack_path(", "pack_index_path("),
-    "crab/src/read/mod.rs": ("crab_read::capsule_protocol::install_git_packs(",),
+    # Snapshot readers use the range-backed v2 installer; pack naming and
+    # selection remain owned by crab-read.
+    "crab/src/read/mod.rs": ("crab_read::capsule_protocol::install_git_packs_from_store(",),
     "crab/src/cmd/gc/mod.rs": ("pack_path(", "pack_metadata_path("),
     "crab/src/cmd/fsck_store.rs": (
         "repo_pack_path(",

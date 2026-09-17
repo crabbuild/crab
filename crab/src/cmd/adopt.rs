@@ -32,7 +32,7 @@ use crab_types::pointer::{Pointer, is_pointer};
 pub struct AdoptArgs {
     /// Glob patterns to match (e.g. `*.bin`, `*.safetensors`).
     pub patterns: Vec<String>,
-    /// Rewrite git history (requires `--force`). Currently unimplemented.
+    /// Rewrite git history (requires `--force`).
     pub rewrite_history: bool,
     /// Required with `--rewrite-history`.
     pub force: bool,
@@ -67,8 +67,8 @@ struct DryRunOutput {
 pub async fn run_adopt(args: &AdoptArgs, cancel: &CancellationToken) -> Result<()> {
     check_cancelled(cancel)?;
 
-    // History rewrite mode: validate guards, then return "not yet implemented".
-    // This is a stretch goal — the HEAD-only mode covers the primary use case.
+    // History rewrite mode is deliberately explicit because it replaces every
+    // selected commit and requires a force-push afterward.
     if args.rewrite_history {
         // Guard: --force is required for history rewrite.
         if !args.force {
@@ -93,33 +93,24 @@ pub async fn run_adopt(args: &AdoptArgs, cancel: &CancellationToken) -> Result<(
             });
         }
 
-        // Guard: git-filter-repo must be installed.
-        let filter_repo_check = std::process::Command::new("which")
-            .arg("git-filter-repo")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        match filter_repo_check {
-            Ok(s) if s.success() => {}
-            _ => {
-                eprintln!("git-filter-repo is not installed.");
-                eprintln!("Install: pip install git-filter-repo");
+        let cwd = std::env::current_dir()?;
+        let repo_root = discover_repo_root(&cwd)?;
+        let patterns = resolve_patterns(&args.patterns, &repo_root)?;
+        if patterns.is_empty() {
+            if !args.mode.is_machine() {
                 eprintln!(
-                    "Or use the default HEAD-only mode: crab adopt (without --rewrite-history)"
+                    "No patterns to rewrite. Specify --pattern or configure [track] in crab.toml"
                 );
-                return Err(CrabError::Configuration {
-                    key: "rewrite-history".into(),
-                    origin: "git-filter-repo not found. Install it or use HEAD-only mode (crab adopt without --rewrite-history).".into(),
-                });
             }
+            return Ok(());
         }
 
-        // TODO(stretch): Implement history rewrite using git-filter-repo --blob-callback.
-        // The HEAD-only mode (default) covers 90%+ of use cases. History rewrite
-        // would replace matching blobs across all commits with pointer content.
-        return Err(CrabError::Configuration {
-            key: "rewrite-history".into(),
-            origin: "--rewrite-history is not yet implemented. Use the default HEAD-only mode (crab adopt without --rewrite-history).".into(),
+        return crate::cmd::migrate::run_migrate_import(&crate::cmd::migrate::MigrateImportArgs {
+            include: patterns,
+            exclude: Vec::new(),
+            above: 0,
+            dry_run: args.dry_run,
+            everything: true,
         });
     }
 

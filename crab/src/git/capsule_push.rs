@@ -1372,6 +1372,7 @@ mod tests {
 
     #[tokio::test]
     async fn real_git_incremental_push_round_trips_with_bounded_requests() {
+        let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
         let source = tempfile::tempdir().expect("source repository");
         git(source.path(), &["init", "-b", "main"]);
         git(source.path(), &["config", "user.name", "Crab Test"]);

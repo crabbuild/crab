@@ -1448,6 +1448,7 @@ mod tests {
 
     #[test]
     fn synthesized_literals_cover_extensionless_and_pattern_paths() {
+        let _git_env = git_env_guard();
         let tmp = TempDir::new().unwrap();
         let status = Command::new("git")
             .args(["init", "--initial-branch=main"])

@@ -896,7 +896,7 @@ enum Cmd {
         /// Glob patterns to adopt (e.g. `*.bin`, `*.safetensors`).
         #[arg(long, short)]
         pattern: Vec<String>,
-        /// Rewrite git history (requires --force). Not yet implemented.
+        /// Rewrite git history (requires --force) with Crab's built-in fast-export/import engine.
         #[arg(long)]
         rewrite_history: bool,
         /// Required with --rewrite-history.

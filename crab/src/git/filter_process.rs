@@ -2773,6 +2773,7 @@ mod tests {
 
     #[test]
     fn full_clean_session() {
+        let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
         let mut input = build_handshake_input();
 
         // Send a clean command.
@@ -3644,6 +3645,7 @@ size 1048576\n";
 
     #[tokio::test]
     async fn lfs_pointer_non_lazy_smudge_downloads_content() {
+        let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
         use crate::core::config::{CheckoutConfig, Config};
         use crab_git::lfs_pointer::LfsPointer;
         use crab_storage::{RetryPolicy, Store};

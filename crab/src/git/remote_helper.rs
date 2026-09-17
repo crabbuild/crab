@@ -1276,15 +1276,19 @@ async fn handle_option<W: tokio::io::AsyncWrite + Unpin>(
                     .await?;
             }
         },
-        "followtags" => match value {
+        "followtags" | "include-tag" => match value {
             "true" => {
                 options.followtags = true;
-                tracing::debug!(followtags = true, "follow-tags mode enabled");
+                tracing::debug!(followtags = true, option = key, "follow-tags mode enabled");
                 writer.write_all(b"ok\n").await?;
             }
             "false" => {
                 options.followtags = false;
-                tracing::debug!(followtags = false, "follow-tags mode disabled");
+                tracing::debug!(
+                    followtags = false,
+                    option = key,
+                    "follow-tags mode disabled"
+                );
                 writer.write_all(b"ok\n").await?;
             }
             // Same reasoning as `atomic`: git only ever sends the
@@ -1292,7 +1296,11 @@ async fn handle_option<W: tokio::io::AsyncWrite + Unpin>(
             // bug the pusher deserves to see.
             other => {
                 let msg = format!("invalid followtags value: {other}");
-                tracing::warn!(value = other, "invalid followtags option value");
+                tracing::warn!(
+                    value = other,
+                    option = key,
+                    "invalid followtags option value"
+                );
                 writer
                     .write_all(format!("error {msg}\n").as_bytes())
                     .await?;
@@ -1339,13 +1347,13 @@ async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
     _store: &crate::storage::store::Store,
     _router: &StoreLayout,
-    _cache: &mut SessionCache,
+    cache: &mut SessionCache,
     _cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     tracing::debug!("responding to capabilities");
     // Both terminal protocol-v2 and the classic helper fetch path resolve
     // shallow history from the authenticated capsule repository view.
-    let caps = format_capabilities_with_v2(true, true);
+    let caps = format_capabilities_with_v2(true, !cache.legacy_v1);
     writer.write_all(caps.as_bytes()).await?;
     writer.flush().await?;
     Ok(())
@@ -3484,6 +3492,30 @@ mod tests {
             env!("CARGO_PKG_VERSION")
         );
         assert_eq!(output, expected);
+    }
+
+    #[tokio::test]
+    async fn legacy_repository_capabilities_do_not_advertise_terminal_v2() {
+        let push_state_root = tempfile::tempdir().expect("push state tempdir");
+        let store = crate::storage::store::Store::new(std::sync::Arc::new(
+            object_store::memory::InMemory::new(),
+        ));
+        initialize_test_remote(&store, "remote-helper-legacy-capabilities").await;
+        let mut context = test_context(
+            store,
+            "remote-helper-legacy-capabilities",
+            push_state_root.path().to_path_buf(),
+        );
+        context.cache.legacy_v1 = true;
+        let (output, result) = run_with_context(
+            "capabilities\n",
+            context,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+
+        result.expect("legacy capabilities response");
+        assert!(!output.lines().any(|line| line == "stateless-connect"));
     }
 
     #[tokio::test]
@@ -6392,21 +6424,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn helper_options_default_followtags_is_false() {
-        let opts = HelperOptions::default();
-        assert!(!opts.followtags);
-    }
-
-    // --- unsupported include-tag parsing ---
-
-    #[tokio::test]
-    async fn option_include_tag_is_unsupported() {
+    async fn option_include_tag_uses_the_same_tag_inclusion_contract() {
         let mut options = HelperOptions::default();
-        let mut writer: Vec<u8> = Vec::new();
+        let mut writer = Vec::new();
+
         handle_option("include-tag", "true", &mut options, &mut writer)
             .await
             .unwrap();
-        assert_eq!(String::from_utf8(writer).unwrap(), "unsupported\n");
+        handle_option("include-tag", "false", &mut options, &mut writer)
+            .await
+            .unwrap();
+
+        assert!(!options.followtags);
+        assert_eq!(String::from_utf8(writer).unwrap(), "ok\nok\n");
+    }
+
+    #[tokio::test]
+    async fn helper_options_default_followtags_is_false() {
+        let opts = HelperOptions::default();
+        assert!(!opts.followtags);
     }
 
     // --- read_remote_refs from manifest ---

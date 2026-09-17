@@ -102,12 +102,16 @@ crab adopt --rewrite-history --force
 **Requirements:**
 - `--force` flag is mandatory (safety gate)
 - Working tree must be clean (no uncommitted changes)
-- `git-filter-repo` must be installed
+- The repository needs a writable `.crab/staging` directory; no external
+  history-rewrite tool is required
 
 **What it does:**
-1. Rewrites all commits, replacing matching blobs with pointer blobs
-2. Stages original content as xorbs
-3. Produces a new history where large files were never committed inline
+1. Streams all refs through Git's built-in fast-export/fast-import engine
+2. Replaces only matching paths with verified pointer blobs (shared Git blobs
+   referenced by an unselected path are rewritten inline only for the selected
+   path)
+3. Stages every converted version as deduplicated xorbs/shards
+4. Produces a new history where selected large files were never committed inline
 
 **After rewriting:**
 ```bash
@@ -121,9 +125,8 @@ git push --force-with-lease origin main
 
 **Cons:**
 - Rewrites shared history — all collaborators must re-clone or `git fetch --all && git reset --hard origin/main`
-- Requires `--force-push` to remote
+- Requires a force push to the remote
 - Cannot be undone once pushed
-- Requires `git-filter-repo` installed
 
 **When to use:** Only for repos where you control all collaborators and can
 coordinate a re-clone, or for repos that haven't been shared yet.
@@ -167,7 +170,7 @@ crab adopt -j 16  # use 16 threads for chunking
 For a team migrating an existing repo to Crab:
 
 ```bash
-# 1. Initialize Crab
+# 1. Ensure the repository has a writable Crab staging directory
 crab init crab://my-bucket/my-repo
 
 # 2. Preview what would be adopted

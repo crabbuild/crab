@@ -22,7 +22,8 @@ use tokio_util::sync::CancellationToken;
 
 use crab_read::{
     ReadReplicaCandidate, ReadReplicaFallback, ReadReplicaProbeResult, ReadStoreChoice,
-    ReadStoreTarget, check_capsule_read_replica_readiness, select_read_store_choice,
+    ReadStoreTarget, check_capsule_read_replica_readiness, check_legacy_read_replica_readiness,
+    select_read_store_choice,
 };
 pub use crab_read::{ReadRoutingPolicy, ReadSource, ReadinessCheckOptions};
 
@@ -8536,16 +8537,25 @@ pub struct WriteStoreSelection {
     pub capsule_root: crab_metadata::capsule_protocol::RootSnapshot,
 }
 
-async fn validate_capsule_store(store: &Store, router: &StoreLayout) -> Result<()> {
+async fn validate_read_replica_store(store: &Store, router: &StoreLayout) -> Result<()> {
     let layout = crab_storage::StoreLayout::with_global_prefix(
         store.as_storage().clone(),
         router.repo_prefix().to_owned(),
         router.global_prefix().to_owned(),
     );
-    crab_write::capsule_protocol::open_root(&layout)
-        .await
-        .map(|_| ())
-        .map_err(Into::into)
+    match crab_metadata::capsule_protocol::load_root(&layout).await {
+        Ok(_) => Ok(()),
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        }) => {
+            // Before cutover, v1 replicas have no capsule root. Revalidate the
+            // manifest instead of rejecting a healthy legacy read target.
+            crate::metadata::manifest::read_manifest(store, router)
+                .await
+                .map(|_| ())
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 struct SelectedReadReplicaStore {
@@ -8626,8 +8636,8 @@ impl<'a> StoreResolver<'a> {
         let ReadSource::Replica { name } = &selection.source else {
             return Ok(selection);
         };
-        if let Err(error) = validate_capsule_store(&selection.store, &selection.router).await {
-            tracing::warn!(replica = %name, error = %error, "replica does not expose a protocol-v2 root; using primary");
+        if let Err(error) = validate_read_replica_store(&selection.store, &selection.router).await {
+            tracing::warn!(replica = %name, error = %error, "replica read-layout validation failed; using primary");
             if let Some(replica) = replication
                 .replicas
                 .iter()
@@ -8640,9 +8650,7 @@ impl<'a> StoreResolver<'a> {
                     ReplicaReadOutcome::Fallback,
                     None,
                     None,
-                    Some(format!(
-                        "replica protocol-v2 root validation failed: {error}"
-                    )),
+                    Some(format!("replica read-layout validation failed: {error}")),
                 );
             }
             return Ok(ReadStoreSelection::primary(
@@ -8938,11 +8946,13 @@ pub async fn replica_statuses_with_options(
         match build_replica_store(replica, &primary_url.repo_path) {
             Ok((replica_store, replica_prefix)) => {
                 let replica_router = StoreLayout::new(replica_store.clone(), replica_prefix);
-                if let Err(error) = validate_capsule_store(&replica_store, &replica_router).await {
+                if let Err(error) =
+                    validate_read_replica_store(&replica_store, &replica_router).await
+                {
                     statuses.push(status_with_events(
                         failed_status(
                             replica,
-                            format!("replica protocol-v2 root validation failed: {error}"),
+                            format!("replica read-layout validation failed: {error}"),
                         ),
                         replica,
                         replica_router.repo_prefix(),
@@ -9038,12 +9048,125 @@ async fn replica_readiness(
         replica_router.repo_prefix().to_owned(),
         replica_router.global_prefix().to_owned(),
     );
-    let primary_view = crab_read::capsule_protocol::open_view(
+    let limits = crab_read::capsule_protocol::CapsuleReadLimits {
+        max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+        max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+    };
+    let primary_root = match crab_metadata::capsule_protocol::load_root(&primary_read_router).await
+    {
+        Ok(root) => Some(root),
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        }) => None,
+        Err(error) => return Err(error.into()),
+    };
+    let Some(primary_root) = primary_root else {
+        // A repository without v2 authority is still a supported v1 read
+        // target. Keep its manifest/index readiness contract until cutover.
+        let readiness = check_legacy_read_replica_readiness(
+            primary_store.as_storage(),
+            &primary_read_router,
+            replica_store.as_storage(),
+            &replica_read_router,
+            options,
+        )
+        .await?;
+        let Some(primary_state_digest) = readiness.primary_state_digest.as_deref() else {
+            return Err(CrabError::Configuration {
+                key: "replication.readiness".into(),
+                origin: "legacy readiness omitted its manifest state token".into(),
+            });
+        };
+        let primary_generation = readiness.primary_generation;
+        let replica_prefix = replica_router.repo_prefix();
+        let now_ms = now_unix_ms();
+        if let Some(cache_age_ms) = readiness_cache_hit(
+            replica,
+            replica_prefix,
+            primary_generation,
+            primary_state_digest,
+            now_ms,
+            options,
+        ) {
+            return Ok(ReplicaStatus {
+                name: replica.name.clone(),
+                provider: replica.provider,
+                url: replica.url.clone(),
+                region: replica.region.clone(),
+                backfill_required: replica.backfill,
+                read_enabled: replica.read,
+                primary_generation: Some(primary_generation),
+                replica_generation: Some(primary_generation),
+                ready: true,
+                lag_generations: Some(0),
+                last_fallback_reason: None,
+                last_fallback_class: None,
+                last_fallback_at_ms: None,
+                last_fallback_operation: None,
+                fallback_count: 0,
+                primary_fallback_bytes: 0,
+                last_selected_at_ms: None,
+                last_selected_operation: None,
+                selected_count: 0,
+                readiness_cache_hit: true,
+                readiness_cache_age_ms: Some(cache_age_ms),
+                readiness_check_latency_ms: Some(elapsed_ms(started)),
+                readiness_object_probe_count: 0,
+                readiness_object_read_count: 0,
+            });
+        }
+        if let Some(reason) = readiness.reason {
+            return Ok(status_with_readiness_stats(
+                status_with_reason(
+                    replica,
+                    Some(readiness.primary_generation),
+                    readiness.replica_generation,
+                    reason,
+                ),
+                started,
+                readiness.stats,
+            ));
+        }
+        if options.max_object_probes.is_none() {
+            write_readiness_cache(
+                replica,
+                replica_prefix,
+                primary_generation,
+                primary_state_digest,
+                now_ms,
+            );
+        }
+        return Ok(ReplicaStatus {
+            name: replica.name.clone(),
+            provider: replica.provider,
+            url: replica.url.clone(),
+            region: replica.region.clone(),
+            backfill_required: replica.backfill,
+            read_enabled: replica.read,
+            primary_generation: Some(primary_generation),
+            replica_generation: readiness.replica_generation,
+            ready: true,
+            lag_generations: readiness.lag_generations,
+            last_fallback_reason: None,
+            last_fallback_class: None,
+            last_fallback_at_ms: None,
+            last_fallback_operation: None,
+            fallback_count: 0,
+            primary_fallback_bytes: 0,
+            last_selected_at_ms: None,
+            last_selected_operation: None,
+            selected_count: 0,
+            readiness_cache_hit: false,
+            readiness_cache_age_ms: None,
+            readiness_check_latency_ms: Some(elapsed_ms(started)),
+            readiness_object_probe_count: readiness.stats.object_probe_count,
+            readiness_object_read_count: readiness.stats.object_read_count,
+        });
+    };
+    let primary_view = crab_read::capsule_protocol::open_view_from_root(
         &primary_read_router,
-        crab_read::capsule_protocol::CapsuleReadLimits {
-            max_capsule_bytes: 2 * 1024 * 1024 * 1024,
-            max_frontier_bytes: 2 * 1024 * 1024 * 1024,
-        },
+        primary_root,
+        limits,
     )
     .await?;
     let primary_generation = primary_view.root().root().generation();
@@ -13510,6 +13633,31 @@ mod tests {
         create_manifest(store, router, manifest)
             .await
             .expect("write test manifest");
+    }
+
+    #[tokio::test]
+    async fn read_replica_validation_accepts_legacy_manifest_without_capsule_root() {
+        let (store, router) = memory_store_with_layout("org/repo");
+        write_test_manifest(&store, &router, &test_manifest(7)).await;
+
+        validate_read_replica_store(&store, &router)
+            .await
+            .expect("legacy manifest validates a pre-cutover replica");
+    }
+
+    #[tokio::test]
+    async fn read_replica_validation_does_not_downgrade_a_corrupt_capsule_root() {
+        let (store, router) = memory_store_with_layout("org/repo");
+        write_test_manifest(&store, &router, &test_manifest(7)).await;
+        store
+            .put(
+                &router.capsule_root_path(),
+                Bytes::from_static(b"corrupt capsule root"),
+            )
+            .await
+            .expect("write corrupt root fixture");
+
+        assert!(validate_read_replica_store(&store, &router).await.is_err());
     }
 
     async fn write_pack_generation(

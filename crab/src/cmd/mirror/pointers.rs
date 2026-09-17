@@ -149,7 +149,9 @@ mod tests {
                 .unwrap();
             assert!(git.status.success());
             let odb = gix_odb::at(path.join("objects")).unwrap();
-            let bytes = vec![b'x'; crab_types::pointer::MAX_POINTER_SIZE + 1];
+            // Pointer scans decode bodies below the LFS boundary directly and
+            // defer only blobs that are large enough to be skipped entirely.
+            let bytes = vec![b'x'; crab_git::MAX_LFS_POINTER_SIZE];
             let oid = odb.write_buf(gix_object::Kind::Blob, &bytes).unwrap();
             let refs = BTreeMap::from([("refs/tags/blob".to_owned(), oid.to_string())]);
             let mut runner = CacheCheckingRunner {

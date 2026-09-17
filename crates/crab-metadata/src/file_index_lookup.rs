@@ -735,6 +735,10 @@ fn spawn_shard_parse(
 }
 
 enum LookupSource {
+    Static {
+        router: crab_storage::StoreLayout<crab_storage::Store>,
+        entries: Arc<HashMap<MerkleHash, MerkleHash>>,
+    },
     Current {
         store: crab_storage::Store,
         repo_prefix: String,
@@ -751,6 +755,16 @@ enum LookupSource {
 impl LookupSource {
     async fn open(&self) -> Result<FileIndexLookupSession> {
         match self {
+            Self::Static { router, entries } => Ok(FileIndexLookupSession {
+                static_entries: Some(Arc::clone(entries)),
+                reader: None,
+                anchor: None,
+                storage: router.store().clone(),
+                router: router.clone(),
+                parsers: tokio_util::task::TaskTracker::new(),
+                manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
+                limits: FileIndexLookupLimits::CURRENT_STATE,
+            }),
             Self::Current {
                 store,
                 repo_prefix,
@@ -789,6 +803,47 @@ pub struct SharedFileIndexLookup {
 }
 
 impl SharedFileIndexLookup {
+    /// Lazily resolve files from an already authenticated pointer catalog.
+    ///
+    /// This binds the lookup to the catalog captured by a caller's immutable
+    /// v2 view. Lookups never open the mutable file-index database or widen to
+    /// a later repository state.
+    pub fn for_pointer_catalog(
+        router: crab_storage::StoreLayout<crab_storage::Store>,
+        catalog: &crate::capsule_protocol::PointerCatalog,
+    ) -> Result<Self> {
+        let entries = catalog
+            .files()
+            .iter()
+            .map(|(file_hash, entry)| {
+                Ok((
+                    MerkleHash::from_hex(file_hash).map_err(|source| {
+                        MetadataError::CorruptObject {
+                            path: "capsule-protocol pointer catalog".to_owned(),
+                            reason: format!("invalid file hash {file_hash}: {source}"),
+                        }
+                    })?,
+                    MerkleHash::from_hex(entry.shard_hash()).map_err(|source| {
+                        MetadataError::CorruptObject {
+                            path: "capsule-protocol pointer catalog".to_owned(),
+                            reason: format!("invalid shard hash {}: {source}", entry.shard_hash()),
+                        }
+                    })?,
+                ))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+        Ok(Self {
+            inner: Arc::new(SharedFileIndexLookupInner {
+                source: LookupSource::Static {
+                    router,
+                    entries: Arc::new(entries),
+                },
+                session: tokio::sync::RwLock::new(tokio::sync::OnceCell::new()),
+                closed: AtomicBool::new(false),
+            }),
+        })
+    }
+
     /// Lazily resolve files from one captured immutable shard-index root without writes.
     ///
     /// The caller must bind the root and generation to this repository layout
@@ -1772,5 +1827,30 @@ mod tests {
             .await
             .expect_err("closed clone must reject future lookups");
         assert!(matches!(err, MetadataError::Internal(_)));
+    }
+
+    #[tokio::test]
+    async fn shared_lookup_from_pointer_catalog_never_reads_latest_index() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let storage = crab_storage::Store::new(Arc::clone(&store));
+        let router = crab_storage::StoreLayout::new(storage, "org/pinned".to_owned());
+        let file_hash = hash_from_seed(91);
+        let shard_hash = hash_from_seed(92);
+        let mut catalog = crate::capsule_protocol::PointerCatalog::new();
+        catalog
+            .insert_file(
+                file_hash.hex(),
+                crate::capsule_protocol::FileCatalogEntry::new(16, shard_hash.hex()),
+            )
+            .unwrap();
+
+        let lookup = SharedFileIndexLookup::for_pointer_catalog(router, &catalog).unwrap();
+        assert_eq!(lookup.lookup(&file_hash).await.unwrap(), Some(shard_hash));
+        assert_eq!(
+            lookup.lookup(&hash_from_seed(93)).await.unwrap(),
+            None,
+            "the captured catalog is authoritative for this mount"
+        );
+        lookup.close().await.unwrap();
     }
 }

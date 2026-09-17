@@ -130,6 +130,7 @@ pub struct SnapshotReader {
     requested_revision: String,
     resolved_revision: String,
     git_dir: PathBuf,
+    file_index_lookup: Option<crab_metadata::file_index_lookup::SharedFileIndexLookup>,
 }
 
 /// Materialization strategy for an entry selected from a snapshot.
@@ -203,7 +204,7 @@ impl RepositoryReader {
     pub async fn snapshot(&self, revision: Option<&str>) -> Result<SnapshotReader> {
         check_cancelled(&self.inner.cancel)?;
         let requested = revision.unwrap_or(DEFAULT_REV).to_owned();
-        let (resolved_revision, git_dir) = match self.inner.git_dir.as_ref() {
+        let (resolved_revision, git_dir, file_index_lookup) = match self.inner.git_dir.as_ref() {
             Some(git_dir) => {
                 let git_dir_for_task = git_dir.clone();
                 let requested_for_task = requested.clone();
@@ -214,7 +215,7 @@ impl RepositoryReader {
                 .map_err(|join_err| {
                     CrabError::Internal(format!("resolve revision task failed: {join_err}"))
                 })??;
-                (resolved, git_dir.clone())
+                (resolved, git_dir.clone(), None)
             }
             None => self.inner.remote_snapshot_git_dir(&requested).await?,
         };
@@ -224,6 +225,7 @@ impl RepositoryReader {
             requested_revision: requested,
             resolved_revision,
             git_dir,
+            file_index_lookup,
         })
     }
 
@@ -353,7 +355,15 @@ impl SnapshotReader {
 
         if let Ok(ptr) = Pointer::parse(&blob_bytes) {
             let remote = self.repo.inner.remote().await?;
-            return remote.hydrator.reconstruct_to_path(&ptr, dest).await;
+            return match self.file_index_lookup.as_ref() {
+                Some(lookup) => {
+                    remote
+                        .hydrator
+                        .reconstruct_to_path_with_lookup(&ptr, dest, lookup)
+                        .await
+                }
+                None => remote.hydrator.reconstruct_to_path(&ptr, dest).await,
+            };
         }
 
         if !blob_bytes.is_empty()
@@ -390,7 +400,15 @@ impl SnapshotReader {
 
         if let Ok(ptr) = Pointer::parse(&blob_bytes) {
             let remote = self.repo.inner.remote().await?;
-            return remote.hydrator.reconstruct_to_writer(&ptr, writer).await;
+            return match self.file_index_lookup.as_ref() {
+                Some(lookup) => {
+                    remote
+                        .hydrator
+                        .reconstruct_to_writer_with_lookup(&ptr, writer, lookup)
+                        .await
+                }
+                None => remote.hydrator.reconstruct_to_writer(&ptr, writer).await,
+            };
         }
 
         if !blob_bytes.is_empty()
@@ -467,7 +485,15 @@ impl Inner {
         Ok(Arc::clone(ctx))
     }
 
-    async fn remote_snapshot_git_dir(&self, rev: &str) -> Result<(String, PathBuf)> {
+    async fn remote_snapshot_git_dir(
+        &self,
+        rev: &str,
+    ) -> Result<(
+        String,
+        PathBuf,
+        Option<crab_metadata::file_index_lookup::SharedFileIndexLookup>,
+    )> {
+        let remote = self.remote().await?;
         let view = self.read_remote_capsule_view().await?;
         let resolved = resolve_remote_rev(view.refs(), view.peeled_refs(), view.head(), rev)
             .ok_or_else(|| CrabError::NotFound {
@@ -479,8 +505,26 @@ impl Inner {
         } else {
             self.config.uploadpack_max_egress_bytes
         };
-        crab_read::capsule_protocol::install_git_packs(&view, &git_dir, maximum).await?;
-        Ok((resolved, git_dir))
+        let read_layout = crab_storage::StoreLayout::with_global_prefix(
+            remote.router.store().as_storage().clone(),
+            remote.router.repo_prefix().to_owned(),
+            remote.router.global_prefix().to_owned(),
+        );
+        crab_read::capsule_protocol::install_git_packs_from_store(
+            &view,
+            remote.caching_store.origin(),
+            &read_layout,
+            &git_dir,
+            maximum,
+        )
+        .await?;
+        let catalog = view.pointer_catalog()?;
+        let file_index_lookup =
+            crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
+                read_layout,
+                &catalog,
+            )?;
+        Ok((resolved, git_dir, Some(file_index_lookup)))
     }
 
     async fn remote_git_dir(&self) -> Result<PathBuf> {
@@ -510,14 +554,18 @@ impl Inner {
             remote.router.repo_prefix().to_owned(),
             remote.router.global_prefix().to_owned(),
         );
-        Ok(crab_read::capsule_protocol::open_view(
-            &layout,
-            crab_read::capsule_protocol::CapsuleReadLimits {
-                max_capsule_bytes: maximum,
-                max_frontier_bytes: maximum,
-            },
+        let root = crab_metadata::capsule_protocol::load_root(&layout).await?;
+        Ok(
+            crab_read::capsule_protocol::open_view_from_root_with_control(
+                &layout,
+                root,
+                crab_read::capsule_protocol::CapsuleReadLimits {
+                    max_capsule_bytes: maximum,
+                    max_frontier_bytes: maximum,
+                },
+            )
+            .await?,
         )
-        .await?)
     }
 }
 
