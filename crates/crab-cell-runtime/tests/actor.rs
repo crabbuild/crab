@@ -256,6 +256,53 @@ impl NodeLogTransport for TestNodeTransport {
     }
 }
 
+struct LostAckFollowerTransport {
+    inner: crab_cell_runtime::LocalFollowerTransport,
+    acknowledged_once: AtomicBool,
+}
+
+impl NodeLogTransport for LostAckFollowerTransport {
+    fn append<'a>(
+        &'a self,
+        member: NodeId,
+        request: AppendRequest,
+    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<FollowerReceipt>> {
+        Box::pin(async move {
+            let receipt = self.inner.append(member, request).await?;
+            if !self.acknowledged_once.swap(true, Ordering::AcqRel) {
+                return Ok(receipt);
+            }
+            Err(crab_cell_runtime::Error::Node(
+                "injected follower acknowledgement loss",
+            ))
+        })
+    }
+
+    fn seal<'a>(
+        &'a self,
+        member: NodeId,
+        request: SealRequest,
+    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<FollowerReceipt>> {
+        self.inner.seal(member, request)
+    }
+
+    fn tail<'a>(
+        &'a self,
+        member: NodeId,
+        request: TailRequest,
+    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<Vec<Bytes>>> {
+        self.inner.tail(member, request)
+    }
+
+    fn retire<'a>(
+        &'a self,
+        member: NodeId,
+        request: RetireRequest,
+    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<FollowerReceipt>> {
+        self.inner.retire(member, request)
+    }
+}
+
 async fn fence_session(
     layout: &CellStorageLayout,
     session: SessionId,
@@ -335,6 +382,7 @@ async fn fence_log_session(
     session: SessionId,
     claimant: SessionId,
     member: SessionId,
+    tiered_through: u64,
 ) -> crab_cell_runtime::FencedNodeSession {
     let fleet = Digest::from_bytes([90; 32]);
     let image = Digest::from_bytes([91; 32]);
@@ -384,7 +432,13 @@ async fn fence_log_session(
         .await
         .unwrap();
     let enrolled = directory.recruit_log(&leader, 1, 1, 2, 2).await.unwrap();
-    directory.activate_log(&enrolled, 3).await.unwrap();
+    let enrolled = directory.activate_log(&enrolled, 3).await.unwrap();
+    if tiered_through != 0 {
+        directory
+            .advance_log_coverage(&enrolled, tiered_through, 4)
+            .await
+            .unwrap();
+    }
     if claimant != member {
         directory
             .create(
@@ -923,6 +977,225 @@ async fn fleet_proof_retains_owner_when_object_publication_fails_first() {
         runtime.shutdown().await,
         Err(crab_cell_runtime::Error::PendingPublication)
     ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lost_ack_suffix_recovers_an_ambiguous_command_without_reexecution() {
+    let store = Arc::new(PausingStore::new(Arc::new(InMemory::new())));
+    let object_store: Arc<dyn ObjectStore> = store.clone();
+    let fixture = fixture_with_limits_and_store(
+        b"lost-ack-recovery",
+        Limits::default(),
+        Store::new(object_store),
+    );
+    let leader = SessionId::from_bytes([126; 16]);
+    let follower = SessionId::from_bytes([127; 16]);
+    let member = NodeId::from_bytes(*follower.as_bytes());
+    let successor = SessionId::from_bytes([128; 16]);
+    let runtime = CellRuntime::new_with_replica_host_requiring_node_lease(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        2 * 1024 * 1024,
+        leader,
+        ReplicaHost::default(),
+    )
+    .unwrap();
+    let lease = NodeLeaseGuard::new(0, 60_000).unwrap();
+    runtime.install_node_lease(lease.clone()).unwrap();
+    let follower_directory = tempfile::TempDir::new().unwrap();
+    let follower_store = crab_cell_runtime::FollowerStore::open(
+        follower_directory.path().to_owned(),
+        Limits::default(),
+        DiskBudget::new(1 << 30),
+    )
+    .unwrap();
+    let transport: Arc<dyn NodeLogTransport> = Arc::new(LostAckFollowerTransport {
+        inner: crab_cell_runtime::LocalFollowerTransport::new(member, follower_store.clone()),
+        acknowledged_once: AtomicBool::new(false),
+    });
+    let gate =
+        DurabilityGate::new(leader, NodeId::from_bytes(*leader.as_bytes()), 1, [member]).unwrap();
+    let shipper =
+        NodeLogShipper::new(gate.clone(), Arc::clone(&transport), Limits::default()).unwrap();
+    runtime
+        .install_node_durability(
+            fixture.target.application(),
+            Arc::new(NodeDurability::new(
+                gate,
+                shipper,
+                Arc::new(TestNodeAuthority::default()),
+                Arc::clone(&transport),
+                lease,
+            )),
+        )
+        .unwrap();
+    let handle = bootstrap_on(&runtime, &fixture, leader).await;
+    let first = handle
+        .execute(
+            identity(126),
+            Digest::from_bytes([126; 32]),
+            20,
+            1_024,
+            1_024,
+            |transaction| {
+                transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                Ok(HandlerOutcome::Success(b"published".to_vec()))
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.commit_sequence(), 1);
+    let authority = CellAuthority::new(fixture.layout.clone());
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let current = authority
+                .load(fixture.target.cell_id())
+                .await
+                .unwrap()
+                .unwrap();
+            if current.value().root.as_ref().unwrap().commit_sequence == 1
+                && runtime.stats().unpublished_node_log_bytes() == 0
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let request_identity = identity(127);
+    let operation_digest = Digest::from_bytes([127; 32]);
+    store.fail_puts();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        handle.execute(
+            request_identity,
+            operation_digest,
+            21,
+            1_024,
+            1_024,
+            |transaction| {
+                transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                Ok(HandlerOutcome::Success(b"ambiguous".to_vec()))
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        result,
+        Err(crab_cell_runtime::Error::OutcomeUnknown {
+            request_id,
+            operation_digest: digest,
+            ..
+        }) if request_id == request_identity.request_id && digest == operation_digest
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(2), store.wait_until_failed())
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while runtime.stats().active_cells() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(follower_store.retained_bytes() > 0);
+    store.allow_puts();
+    assert!(runtime.shutdown().await.is_err());
+
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let stale = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stale.value().root.as_ref().unwrap().commit_sequence, 1);
+    let fenced = fence_log_session(&fixture.layout, leader, successor, follower, 1).await;
+    let recovery = crab_cell_runtime::NodeLogRecovery::from_fenced(
+        Arc::clone(&transport),
+        &fenced,
+        Limits::default(),
+    )
+    .unwrap();
+    let manifests =
+        crab_cell_runtime::RecoveryManifestStore::new(fixture.layout.clone(), Limits::default());
+    let coordinator = crab_cell_runtime::RecoveryCoordinator::new(recovery, manifests.clone());
+    let inventory = crab_cell_runtime::recoverable_cells(&catalog, &authority, leader, 10)
+        .await
+        .unwrap();
+    let directory = crab_cell_runtime::NodeDirectory::new(
+        fixture.layout.clone(),
+        Digest::from_bytes([90; 32]),
+        Digest::from_bytes([91; 32]),
+        Digest::from_bytes([92; 32]),
+    );
+    let completed = coordinator
+        .recover_and_seal(&directory, fenced, inventory, 10_002)
+        .await
+        .unwrap();
+    let attached = completed.controls.into_iter().next().unwrap();
+    let successor_runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        2 * 1024 * 1024,
+        successor,
+    )
+    .unwrap();
+    let restored = successor_runtime
+        .takeover_restored(
+            proof,
+            fixture.replica.clone(),
+            authority,
+            attached,
+            completed.takeover,
+            manifests,
+            fixture._directory.path().join("lost-ack-successor.sqlite"),
+            Owner {
+                session: successor,
+                endpoint: "https://lost-ack-successor.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let replayed = restored
+        .execute(
+            request_identity,
+            operation_digest,
+            30,
+            1_024,
+            1_024,
+            |transaction| {
+                transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                Ok(HandlerOutcome::Success(b"executed-twice".to_vec()))
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        replayed,
+        StoredOutcome::Success {
+            ref result,
+            commit_sequence: 2
+        } if result == b"ambiguous"
+    ));
+    let value = restored
+        .query(64, 64, |connection| {
+            let value = connection
+                .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+            Ok(value.to_be_bytes().to_vec())
+        })
+        .await
+        .unwrap();
+    assert_eq!(i64::from_be_bytes(value.try_into().unwrap()), 2);
+    restored.drain().await.unwrap();
+    successor_runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -1709,7 +1982,7 @@ async fn takeover_consumes_pinned_recovery_before_serving() {
     let manifests =
         crab_cell_runtime::RecoveryManifestStore::new(fixture.layout.clone(), Limits::default());
     let successor = SessionId::from_bytes([42; 16]);
-    let fenced = fence_log_session(&fixture.layout, leader, successor, follower).await;
+    let fenced = fence_log_session(&fixture.layout, leader, successor, follower, 0).await;
     assert!(matches!(
         fenced.direct_takeover(),
         Err(crab_cell_runtime::Error::PendingPublication)

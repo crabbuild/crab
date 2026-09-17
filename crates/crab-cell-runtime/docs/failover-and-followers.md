@@ -790,6 +790,14 @@ The queue preserves these ordering rules:
   SQLite but preserves the owner record, so session-expiry takeover seals and
   replays the log instead of misclassifying the Cell as cleanly `Idle`.
 
+Object coverage may advance while an older frame is still waiting in the
+node-wide shipper. Followers therefore verify every received frame and reject
+conflicting local duplicates, but treat a locally absent prefix at or below
+the authoritative `covered_through` watermark as a no-op. They must fsync every
+later frame in the same batch. Without this rule, an object-first proof for
+sequence `N` could make a queued `[N, N+1]` append look like a sequence gap and
+silently disable fleet durability for the valid `N+1` suffix.
+
 This model is narrower than a general asynchronous publication graph. It adds
 one ordered queue and two monotonic positions because they directly remove the
 hot-Cell object-store stall. It does not add configurable queue policies,
@@ -922,10 +930,25 @@ The remaining-delivery proof matrix is small and specific:
 - Client cancellation, deadline, proof failure, and producer failure return
   every buffer, snapshot, and admission permit.
 
-No streaming API is exposed yet, so the runtime must not add a generic stream
-scheduler before the first Rust caller exists. When that caller is added, the
-API and the gate above ship together. The dual-watermark publication queue
-remains unchanged.
+The streaming gate is an accepted remaining product delivery, with one narrow
+trigger: the first Rust API whose producer can observe mutable Cell state after
+the response head. The API and gate above must ship together. It is not a
+prerequisite for the existing bounded Cell API, and it does not change the
+dual-watermark publication queue.
+
+The current server stream audit explains that boundary:
+
+| Current or future output | State source after response head | Decision |
+| --- | --- | --- |
+| Release asset and LFS download | Immutable object selected by digest and size | Pin identity before the head; no per-chunk Cell gate |
+| Repository archive and Git pack | One fixed repository snapshot or fetch plan | Keep snapshot/operation lifetime through the body |
+| SQL, KV, Queue, and Workflow response | None; runtime returns one bounded value | Existing actor proof gates the complete value |
+| Future SSE, live query, or incremental Cell renderer | May read a newer Cell head for each chunk | Phase 8 per-output watermark gate is mandatory |
+
+This deferral avoids a second speculative queue, stream scheduler, and public
+API with no caller. It does not weaken the contract: introducing a
+state-observing body without the phase 8 gate is a correctness regression, not
+an optional optimization.
 
 Authentication, routing, and malformed-request errors produced before Cell
 execution do not need a Cell durability proof.
@@ -1411,6 +1434,8 @@ below.
 - Return a fleet proof while blocking every object upload, kill the owner, delete
   its disk, take over, and resolve the exact request outcome
 - Race object proof and fleet proof in both orders
+- Advance object coverage while its frame remains queued, then retain and
+  recover the uncovered suffix
 - Gate reads and business-error outputs behind an earlier unproven commit
 - Kill recovery after each overlay attachment and resume from another node
 - Recover a multi-cut transaction and interleaved cuts from 1,000 Cells
@@ -1459,7 +1484,7 @@ until the recovery gate is complete.
 | 5 | Dual object/fleet durability gate with one in-flight publication per Cell | Fleet-first response survives owner and disk loss |
 | 6 | Ensemble rotation, graceful drain, startup recovery-only listener, GC | Member loss and rolling restart matrix |
 | 7 | Bounded logical/published-head pipeline for hot Cells | Consecutive commands no longer wait for object publication; queue bounds and crash recovery hold |
-| 8 | Per-output watermark gate for the first Rust state-observing stream API | Head and chunks wait for the state they reveal; fencing and cancellation release no later bytes or resources |
+| 8 | Accepted remaining delivery: per-output watermark gate shipped atomically with the first Rust state-observing stream API | Head and chunks wait for the state they reveal; fencing and cancellation release no later bytes or resources |
 | 9 | Real RustFS and Kubernetes qualification at target load | Signed receipts with zero lost acknowledged outcomes |
 
 Phases 1 through 4 may ship with object-only responses. Phase 5 is the first

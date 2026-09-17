@@ -30,7 +30,8 @@ Each layer has one owner and one primary evidence surface.
 | Release control | `src/release.rs`, `src/release_progress.rs` | release unit tests and server command tests |
 | Backup pins | `src/backup.rs`, `crab-ltx::CellReplica::reachable_objects` | runtime pin tests and server create/verify command tests |
 | Immutable retention | `src/retention.rs`, `crab-storage::Store::list_stream` | mark/sweep tests and server maintenance-fence tests |
-| Follower mechanics | `src/follower.rs`, `src/node_log.rs`, `src/node_log_recovery.rs` | verified-frame, torn-tail, dual-proof, and seal/gather unit tests |
+| Follower mechanics | `src/follower.rs`, `src/node_log.rs`, `src/node_log_recovery.rs` | verified-frame, object-covered queued-prefix, lost-ACK suffix, torn-tail, dual-proof, and seal/gather tests |
+| State-observing streams | Not exposed | Remaining: first Rust caller and per-output watermark gate ship together |
 | Product composition | `crab-http-server/src/cells/` | server route, restore, and lifecycle tests |
 
 Celld-style follower durability is connected to product command and schema-

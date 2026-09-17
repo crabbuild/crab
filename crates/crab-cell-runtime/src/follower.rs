@@ -731,6 +731,12 @@ fn append_sync(
             }
             continue;
         }
+        // Object publication can advance while this frame is still queued for
+        // shipping. Its authoritative coverage makes a missing prefix safe to
+        // skip; the follower must still persist every uncovered suffix frame.
+        if sequence <= covered_through {
+            continue;
+        }
         if sequence != durable_through.saturating_add(1) {
             return Err(Error::Node("follower append has a sequence gap"));
         }
