@@ -87,7 +87,7 @@ pub trait NodeLogTransport: Send + Sync {
             let next_sequence = (count < frames.len()).then(|| {
                 request
                     .first_sequence
-                    .saturating_add(u64::try_from(count).map_or(u64::MAX, |count| count))
+                    .saturating_add(u64::try_from(count).unwrap_or(u64::MAX))
             });
             Ok(FollowerTailPage {
                 frames: frames.into_iter().take(count).collect(),
