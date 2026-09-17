@@ -436,13 +436,22 @@ fn nibble(value: u8) -> Result<u8> {
 mod tests {
     use std::sync::Arc;
 
-    use object_store::{memory::InMemory, path::Path};
+    use object_store::{ObjectStoreExt, memory::InMemory, path::Path};
 
     use super::*;
     use crate::{RecoveryBase, build_recovery_overlays};
 
-    #[tokio::test]
-    async fn pinned_manifest_reopens_exact_overlay_and_prepares_successor() {
+    struct RecoveryFixture {
+        inner: Arc<InMemory>,
+        layout: CellStorageLayout,
+        replica: crab_ltx::CellReplica,
+        manifests: RecoveryManifestStore,
+        pinned: PinnedRecoveryCell,
+        base: crab_ltx::RootRef,
+        final_position: crab_ltx::Position,
+    }
+
+    async fn recovery_fixture() -> RecoveryFixture {
         let limits = crab_ltx::Limits::default();
         let directory = tempfile::TempDir::new().unwrap();
         let mut database =
@@ -451,7 +460,8 @@ mod tests {
             .transaction(|transaction| transaction.execute_batch("CREATE TABLE values_(v)"))
             .unwrap();
         let first = database.capture().unwrap();
-        let store = crab_storage::Store::new(Arc::new(InMemory::new()));
+        let inner = Arc::new(InMemory::new());
+        let store = crab_storage::Store::new(inner.clone());
         let application = [3; 16];
         let cell = [4; 32];
         let incarnation = [5; 16];
@@ -493,29 +503,56 @@ mod tests {
             limits,
         )
         .unwrap();
-        let manifests = RecoveryManifestStore::new(layout, limits);
-        let pinned = manifests
+        let manifests = RecoveryManifestStore::new(layout.clone(), limits);
+        let mut pinned = manifests
             .pin(SessionId::from_bytes([1; 16]), 2, recovered)
             .await
             .unwrap();
-        assert_eq!(pinned.len(), 1);
-        let overlay = manifests
+        database.close().unwrap();
+        RecoveryFixture {
+            inner,
+            layout,
+            replica,
+            manifests,
+            pinned: pinned.pop().unwrap(),
+            base,
+            final_position: tail.position,
+        }
+    }
+
+    async fn load_error(fixture: &RecoveryFixture, recovery: &RecoveryOverlayRef) -> Error {
+        match fixture
+            .manifests
+            .load_overlay(fixture.pinned.cell, fixture.pinned.incarnation, recovery)
+            .await
+        {
+            Ok(_) => panic!("corrupt recovery input must not load"),
+            Err(error) => error,
+        }
+    }
+
+    #[tokio::test]
+    async fn pinned_manifest_reopens_exact_overlay_and_prepares_successor() {
+        let fixture = recovery_fixture().await;
+        let overlay = fixture
+            .manifests
             .load_overlay(
-                CellId::from_bytes(cell),
-                IncarnationId::from_bytes(incarnation),
-                &pinned[0].recovery,
+                fixture.pinned.cell,
+                fixture.pinned.incarnation,
+                &fixture.pinned.recovery,
             )
             .await
             .unwrap();
-        let prepared = replica
+        let prepared = fixture
+            .replica
             .prepare_recovered_overlay(&overlay, 1)
             .await
             .unwrap();
-        assert_eq!(prepared.predecessor(), Some(base));
-        assert_eq!(prepared.root().position, tail.position);
+        assert_eq!(prepared.predecessor(), Some(fixture.base));
+        assert_eq!(prepared.root().position, fixture.final_position);
         let mut control = crate::Control::initial(
-            CellId::from_bytes(cell),
-            IncarnationId::from_bytes(incarnation),
+            fixture.pinned.cell,
+            fixture.pinned.incarnation,
             crate::Owner {
                 session: SessionId::from_bytes([1; 16]),
                 endpoint: "https://dead.internal:8081".into(),
@@ -525,8 +562,10 @@ mod tests {
         )
         .unwrap();
         control.state = crate::ControlState::Serving;
-        control.root = Some(runtime_root(base));
-        let attached = control.attach_recovery(pinned[0].recovery.clone()).unwrap();
+        control.root = Some(runtime_root(fixture.base));
+        let attached = control
+            .attach_recovery(fixture.pinned.recovery.clone())
+            .unwrap();
         let takeover = attached
             .takeover(crate::Owner {
                 session: SessionId::from_bytes([13; 16]),
@@ -536,7 +575,104 @@ mod tests {
         let published = takeover.publish_recovery(&prepared, None).unwrap();
         assert_eq!(published.state, crate::ControlState::Recovering);
         assert!(published.recovery.is_none());
-        assert_eq!(published.root.unwrap().txid, tail.position.txid);
-        database.close().unwrap();
+        assert_eq!(published.root.unwrap().txid, fixture.final_position.txid);
+    }
+
+    #[tokio::test]
+    async fn load_overlay_rejects_corrupt_manifest_bytes() {
+        let fixture = recovery_fixture().await;
+        let recovery = &fixture.pinned.recovery;
+        let path = fixture.layout.node_log_recovery_path(
+            recovery.leader_session.as_bytes(),
+            recovery.log_epoch,
+            recovery.manifest_digest.as_bytes(),
+        );
+        fixture
+            .inner
+            .put(&path, Bytes::from_static(b"corrupt manifest").into())
+            .await
+            .unwrap();
+
+        let error = load_error(&fixture, recovery).await;
+
+        assert!(matches!(
+            error,
+            Error::Node("recovery manifest digest differs")
+        ));
+    }
+
+    #[tokio::test]
+    async fn load_overlay_rejects_self_consistent_manifest_metadata_change() {
+        let fixture = recovery_fixture().await;
+        let mut recovery = fixture.pinned.recovery.clone();
+        let original_path = fixture.layout.node_log_recovery_path(
+            recovery.leader_session.as_bytes(),
+            recovery.log_epoch,
+            recovery.manifest_digest.as_bytes(),
+        );
+        let (body, _) = fixture
+            .layout
+            .store()
+            .get_with_etag_bounded(&original_path, MAX_MANIFEST_BYTES)
+            .await
+            .unwrap();
+        let mut raw: RawManifest = serde_json::from_slice(&body).unwrap();
+        raw.cells[0].final_commit_sequence = "3".into();
+        let changed = serde_json::to_vec(&raw).unwrap();
+        let digest = *blake3::hash(&changed).as_bytes();
+        let changed_path = fixture.layout.node_log_recovery_path(
+            recovery.leader_session.as_bytes(),
+            recovery.log_epoch,
+            &digest,
+        );
+        fixture
+            .layout
+            .store()
+            .put(&changed_path, Bytes::from(changed))
+            .await
+            .unwrap();
+        recovery.manifest_digest = Digest::from_bytes(digest);
+
+        let error = load_error(&fixture, &recovery).await;
+
+        assert!(matches!(
+            error,
+            Error::Node("recovery control pointer differs from manifest")
+        ));
+    }
+
+    #[tokio::test]
+    async fn load_overlay_rejects_corrupt_bundle_bytes() {
+        let fixture = recovery_fixture().await;
+        let recovery = &fixture.pinned.recovery;
+        let manifest_path = fixture.layout.node_log_recovery_path(
+            recovery.leader_session.as_bytes(),
+            recovery.log_epoch,
+            recovery.manifest_digest.as_bytes(),
+        );
+        let (body, _) = fixture
+            .layout
+            .store()
+            .get_with_etag_bounded(&manifest_path, MAX_MANIFEST_BYTES)
+            .await
+            .unwrap();
+        let manifest = RecoveryManifest::decode(&body).unwrap();
+        let bundle_path = fixture.layout.node_log_bundle_path(
+            recovery.leader_session.as_bytes(),
+            recovery.log_epoch,
+            &manifest.cells[0].bundle_digest,
+        );
+        fixture
+            .inner
+            .put(&bundle_path, Bytes::from_static(b"corrupt bundle").into())
+            .await
+            .unwrap();
+
+        let error = load_error(&fixture, recovery).await;
+
+        assert!(matches!(
+            error,
+            Error::Node("recovery bundle digest differs")
+        ));
     }
 }
