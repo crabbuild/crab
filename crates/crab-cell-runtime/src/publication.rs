@@ -11,6 +11,15 @@ const SELF_FENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1
 
 pub(crate) type NodeDurabilityBinding = (ApplicationId, std::sync::Arc<NodeDurability>);
 
+#[derive(Clone)]
+pub(crate) struct CellDurabilitySubmitter {
+    cell: crate::CellId,
+    incarnation: crate::IncarnationId,
+    epoch: u64,
+    node_lease: Option<crate::NodeLeaseGuard>,
+    node_durability: Option<std::sync::Arc<std::sync::OnceLock<NodeDurabilityBinding>>>,
+}
+
 /// Coordinates immutable preparation, authority CAS and result release.
 ///
 /// A failed CAS response is reconciled against origin before returning. Exact
@@ -65,55 +74,24 @@ impl CellPublisher {
         self
     }
 
-    pub(crate) async fn submit_durability(
-        &self,
-        pending: &crate::PendingCommit,
-    ) -> Result<Option<PendingDurability>> {
-        self.submit_cuts(pending.outcome().commit_sequence(), pending.cuts())
-            .await
-    }
-
     pub(crate) async fn submit_migration_durability(
         &self,
         pending: &crate::PendingMigration,
     ) -> Result<Option<PendingDurability>> {
-        self.submit_cuts(pending.commit_sequence(), pending.cuts())
+        self.durability_submitter()
+            .submit(pending.commit_sequence(), pending.cuts())
             .await
     }
 
-    async fn submit_cuts(
-        &self,
-        commit_sequence: u64,
-        cuts: &crab_ltx::CaptureBatch,
-    ) -> Result<Option<PendingDurability>> {
-        let Some((application, durability)) = self
-            .node_durability
-            .as_ref()
-            .and_then(|durability| durability.get())
-        else {
-            return Ok(None);
-        };
-        self.check_node_lease()?;
+    pub(crate) fn durability_submitter(&self) -> CellDurabilitySubmitter {
         let control = self.observed.value();
-        let submission = NodeLogSubmission::new(
-            *application,
-            control.cell,
-            control.incarnation,
-            control.epoch,
-            commit_sequence,
-            cuts,
-        )?;
-        let ticket = match durability.submit(submission).await {
-            Ok(ticket) => ticket,
-            Err(_) => {
-                self.check_node_lease()?;
-                return Ok(None);
-            }
-        };
-        Ok(Some(PendingDurability {
-            durability: std::sync::Arc::clone(durability),
-            ticket,
-        }))
+        CellDurabilitySubmitter {
+            cell: control.cell,
+            incarnation: control.incarnation,
+            epoch: control.epoch,
+            node_lease: self.node_lease.clone(),
+            node_durability: self.node_durability.clone(),
+        }
     }
 
     #[must_use]
@@ -649,18 +627,65 @@ impl CellPublisher {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct PendingDurability {
     durability: std::sync::Arc<NodeDurability>,
     ticket: CommitTicket,
 }
 
 impl PendingDurability {
+    pub(crate) async fn prove(&self) -> Result<()> {
+        self.durability.prove(self.ticket).await.map(|_| ())
+    }
+
     pub(crate) async fn prove_fleet(&self) -> Result<()> {
         self.durability.prove_fleet(self.ticket).await.map(|_| ())
     }
 
     pub(crate) async fn prove_object(&self) -> Result<()> {
         self.durability.prove_object(self.ticket).await.map(|_| ())
+    }
+}
+
+impl CellDurabilitySubmitter {
+    pub(crate) async fn submit(
+        &self,
+        commit_sequence: u64,
+        cuts: &crab_ltx::CaptureBatch,
+    ) -> Result<Option<PendingDurability>> {
+        let Some((application, durability)) = self
+            .node_durability
+            .as_ref()
+            .and_then(|durability| durability.get())
+        else {
+            return Ok(None);
+        };
+        self.check_node_lease()?;
+        let submission = NodeLogSubmission::new(
+            *application,
+            self.cell,
+            self.incarnation,
+            self.epoch,
+            commit_sequence,
+            cuts,
+        )?;
+        let ticket = match durability.submit(submission).await {
+            Ok(ticket) => ticket,
+            Err(_) => {
+                self.check_node_lease()?;
+                return Ok(None);
+            }
+        };
+        Ok(Some(PendingDurability {
+            durability: std::sync::Arc::clone(durability),
+            ticket,
+        }))
+    }
+
+    fn check_node_lease(&self) -> Result<()> {
+        self.node_lease
+            .as_ref()
+            .map_or(Ok(()), crate::NodeLeaseGuard::check)
     }
 }
 

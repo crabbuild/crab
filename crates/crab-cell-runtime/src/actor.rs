@@ -17,12 +17,13 @@ mod handle;
 pub use handle::CellHandle;
 use handle::{CellAdmission, WorkAdmission};
 
-use crate::publication::NodeDurabilityBinding;
+use crate::executor::{MAX_PENDING_PUBLICATIONS, PENDING_PUBLICATION_HIGH_WATER_BYTES};
+use crate::publication::{CellDurabilitySubmitter, NodeDurabilityBinding, PendingDurability};
 use crate::{
     ApplicationId, CatalogProof, CellAuthority, CellId, CellPublisher, Digest, Error,
     InboxDelivery, MigrationOutcome, MigrationPlan, MutationIdentity, NodeDurability,
-    NodeLeaseGuard, Owner, Resolution, SessionId, SqlWorkerPool, StoredOutcome, Transition,
-    VersionedControl, WorkerExecution,
+    NodeLeaseGuard, Owner, PendingCommit, Resolution, SessionId, SqlWorkerPool, StoredOutcome,
+    Transition, VersionedControl, WorkerExecution,
     worker::{CellReservation, Handler, Initializer, QueryHandler, WorkerState},
 };
 
@@ -993,6 +994,10 @@ struct ActiveCell {
     schema: u32,
     interrupt: Arc<crab_ltx::rusqlite::InterruptHandle>,
     publisher: Option<CellPublisher>,
+    durability_submitter: CellDurabilitySubmitter,
+    publications: VecDeque<QueuedPublication>,
+    publication_count: usize,
+    publication_bytes: u64,
     queue: VecDeque<QueuedWork>,
     busy: bool,
     renewing: bool,
@@ -1000,6 +1005,12 @@ struct ActiveCell {
     drain: Option<oneshot::Sender<crate::Result<()>>>,
     migrating: bool,
     shutdown_drain: bool,
+}
+
+struct QueuedPublication {
+    pending: PendingCommit,
+    durability: Option<PendingDurability>,
+    proof: oneshot::Sender<crate::Result<()>>,
 }
 
 impl ActiveCell {
@@ -1031,9 +1042,21 @@ enum TaskResult {
     },
     Executed {
         cell: CellId,
-        publisher: Box<CellPublisher>,
+        command: Box<QueuedCommand>,
+        result: crate::Result<CommandTaskResult>,
+        fenced: bool,
+    },
+    Proven {
+        cell: CellId,
         command: Box<QueuedCommand>,
         result: crate::Result<StoredOutcome>,
+        fenced: bool,
+    },
+    Published {
+        cell: CellId,
+        publisher: Box<CellPublisher>,
+        retained_bytes: u64,
+        result: crate::Result<()>,
         fenced: bool,
     },
     Queried {
@@ -1065,6 +1088,14 @@ enum TaskResult {
         reply: Option<oneshot::Sender<crate::Result<()>>>,
         shutdown_drain: bool,
         result: crate::Result<()>,
+    },
+}
+
+enum CommandTaskResult {
+    Recorded(StoredOutcome),
+    Pending {
+        pending: Box<PendingCommit>,
+        durability: Option<PendingDurability>,
     },
 }
 
@@ -1174,7 +1205,12 @@ fn start_shutdown_drain(
         active.admission.draining.store(true, Ordering::Release);
         active.admission.requests.close();
         active.admission.bytes.close();
-        if !active.busy && !active.renewing && active.queue.is_empty() {
+        if !active.busy
+            && !active.renewing
+            && active.queue.is_empty()
+            && active.publication_count == 0
+            && active.publisher.is_some()
+        {
             ready.push((*cell, active.fenced));
         }
     }
@@ -1381,7 +1417,12 @@ fn handle_message(
                 return;
             }
             active.drain = Some(reply);
-            if !active.busy && !active.renewing && active.queue.is_empty() {
+            if !active.busy
+                && !active.renewing
+                && active.queue.is_empty()
+                && active.publication_count == 0
+                && active.publisher.is_some()
+            {
                 start_deactivate(cell, pool, cells, transitioning, tasks);
             }
         }
@@ -1541,6 +1582,23 @@ fn start_next(
         fence_active(active);
         return;
     }
+    let Some(work) = active.queue.front() else {
+        return;
+    };
+    match work {
+        QueuedWork::Command(_)
+            if active.publication_count >= MAX_PENDING_PUBLICATIONS
+                || active.publication_bytes >= PENDING_PUBLICATION_HIGH_WATER_BYTES =>
+        {
+            return;
+        }
+        // Migrations change the schema used to prepare roots, so they cannot
+        // cross an older command cut that still targets the current schema.
+        QueuedWork::Migration(_) if active.publication_count != 0 || active.publisher.is_none() => {
+            return;
+        }
+        _ => {}
+    }
     let Some(work) = active.queue.pop_front() else {
         return;
     };
@@ -1548,16 +1606,9 @@ fn start_next(
     let pool = pool.clone();
     let interrupt = active.interrupt.clone();
     match work {
-        QueuedWork::Command(mut command) => {
-            let Some(publisher) = active.publisher.take() else {
-                send_command_reply(&mut command, Err(Error::Fenced));
-                active.fenced = true;
-                active.busy = false;
-                return;
-            };
-            tasks.spawn(async move {
-                execute_and_publish(pool, Box::new(publisher), command, interrupt).await
-            });
+        QueuedWork::Command(command) => {
+            let durability = active.durability_submitter.clone();
+            tasks.spawn(async move { execute_command(pool, durability, command, interrupt).await });
         }
         QueuedWork::Query(query) => {
             tasks.spawn(async move { execute_query(pool, query, interrupt).await });
@@ -1676,9 +1727,9 @@ async fn execute_migration(
     }
 }
 
-async fn execute_and_publish(
+async fn execute_command(
     pool: SqlWorkerPool,
-    mut publisher: Box<CellPublisher>,
+    durability: CellDurabilitySubmitter,
     mut command: Box<QueuedCommand>,
     interrupt: Arc<crab_ltx::rusqlite::InterruptHandle>,
 ) -> TaskResult {
@@ -1734,7 +1785,6 @@ async fn execute_and_publish(
                     let _ = pool.fence(command.cell).await;
                     return TaskResult::Executed {
                         cell: command.cell,
-                        publisher,
                         command,
                         result: Err(Error::Deadline),
                         fenced: true,
@@ -1745,44 +1795,15 @@ async fn execute_and_publish(
         None => Err(Error::Fenced),
     };
     let (result, must_fence) = match execution {
-        Ok(WorkerExecution::Recorded(outcome)) => (Ok(outcome), false),
+        Ok(WorkerExecution::Recorded(outcome)) => (Ok(CommandTaskResult::Recorded(outcome)), false),
         Ok(WorkerExecution::Pending(pending)) => {
-            let durability = publisher.submit_durability(&pending).await;
-            let result = match durability {
-                Err(error) => Err(error),
-                Ok(durability) => {
-                    let early_outcome = pending.outcome().clone();
-                    let cell = command.cell;
-                    let object = async {
-                        let prepared = publisher.prepare(&pending).await?;
-                        pool.bind_prepared(cell, prepared.clone()).await?;
-                        let root = publisher
-                            .publish_prepared(&prepared, pending.next_due_ms())
-                            .await?;
-                        if let Some(durability) = durability.as_ref() {
-                            durability.prove_object().await?;
-                        }
-                        pool.confirm_published(cell, root).await
-                    };
-                    tokio::pin!(object);
-                    match durability.as_ref() {
-                        Some(durability) => {
-                            let fleet = durability.prove_fleet();
-                            tokio::pin!(fleet);
-                            tokio::select! {
-                                result = &mut object => result,
-                                fleet = &mut fleet => {
-                                    if fleet.is_ok() {
-                                        send_command_reply(&mut command, Ok(early_outcome));
-                                    }
-                                    object.await
-                                }
-                            }
-                        }
-                        None => object.await,
-                    }
-                }
-            };
+            let result = durability
+                .submit(pending.outcome().commit_sequence(), pending.cuts())
+                .await
+                .map(|durability| CommandTaskResult::Pending {
+                    pending,
+                    durability,
+                });
             (result, true)
         }
         Err(error) => (
@@ -1801,11 +1822,120 @@ async fn execute_and_publish(
     };
     TaskResult::Executed {
         cell: command.cell,
-        publisher,
         command,
         result,
         fenced,
     }
+}
+
+async fn prove_command(
+    pool: SqlWorkerPool,
+    command: Box<QueuedCommand>,
+    outcome: StoredOutcome,
+    commit_sequence: u64,
+    durability: Option<PendingDurability>,
+    mut object: oneshot::Receiver<crate::Result<()>>,
+) -> TaskResult {
+    let proof = match durability {
+        Some(durability) => {
+            let fleet_or_object = durability.prove();
+            tokio::pin!(fleet_or_object);
+            tokio::select! {
+                object = &mut object => receive_publication_proof(object),
+                result = &mut fleet_or_object => match result {
+                    Ok(()) => Ok(()),
+                    // Losing the follower path does not invalidate the same
+                    // cut's object publication, which remains the fallback.
+                    Err(_) => receive_publication_proof(object.await),
+                }
+            }
+        }
+        None => receive_publication_proof(object.await),
+    };
+    let result = match proof {
+        Ok(()) => pool
+            .confirm_durable(command.cell, commit_sequence)
+            .await
+            .map(|()| outcome),
+        Err(error) => Err(error),
+    };
+    let fenced = result.is_err();
+    if fenced {
+        let _ = pool.fence(command.cell).await;
+    }
+    let result = if fenced {
+        result.map_err(|source| command.operation.unknown(source))
+    } else {
+        result
+    };
+    TaskResult::Proven {
+        cell: command.cell,
+        command,
+        result,
+        fenced,
+    }
+}
+
+fn receive_publication_proof(
+    result: std::result::Result<crate::Result<()>, oneshot::error::RecvError>,
+) -> crate::Result<()> {
+    result.map_err(|_| Error::RuntimeClosed)?
+}
+
+fn start_publication(
+    cell: CellId,
+    active: &mut ActiveCell,
+    pool: &SqlWorkerPool,
+    tasks: &mut JoinSet<TaskResult>,
+) {
+    if active.fenced {
+        return;
+    }
+    let Some(mut publisher) = active.publisher.take() else {
+        return;
+    };
+    let Some(publication) = active.publications.pop_front() else {
+        active.publisher = Some(publisher);
+        return;
+    };
+    // Moving the publisher out of ActiveCell is the serialization token for
+    // root preparation and CAS; no second object publisher can overtake it.
+    let pool = pool.clone();
+    tasks.spawn(async move {
+        let retained_bytes = publication.pending.retained_bytes();
+        let result = async {
+            let expected = publication.pending.outcome().clone();
+            let prepared = publisher.prepare(&publication.pending).await?;
+            pool.bind_prepared(cell, prepared.clone()).await?;
+            let root = publisher
+                .publish_prepared(&prepared, publication.pending.next_due_ms())
+                .await?;
+            if let Some(durability) = publication.durability.as_ref() {
+                durability.prove_object().await?;
+            }
+            let published = pool.confirm_published(cell, root).await?;
+            if published != expected {
+                return Err(Error::Control(
+                    "published result does not match queued commit",
+                ));
+            }
+            Ok(())
+        }
+        .await;
+        let fenced = result.is_err();
+        let proof = if fenced { Err(Error::Fenced) } else { Ok(()) };
+        let _ = publication.proof.send(proof);
+        if fenced {
+            let _ = pool.fence(cell).await;
+        }
+        TaskResult::Published {
+            cell,
+            publisher: Box::new(publisher),
+            retained_bytes,
+            result,
+            fenced,
+        }
+    });
 }
 
 async fn execute_query(
@@ -1961,6 +2091,7 @@ fn handle_task(
                 let incarnation = control.incarnation;
                 let code = control.code;
                 let schema = control.schema;
+                let durability_submitter = publisher.durability_submitter();
                 cells.insert(
                     cell,
                     ActiveCell {
@@ -1970,6 +2101,10 @@ fn handle_task(
                         schema,
                         interrupt,
                         publisher: Some(*publisher),
+                        durability_submitter,
+                        publications: VecDeque::new(),
+                        publication_count: 0,
+                        publication_bytes: 0,
                         queue: VecDeque::new(),
                         busy: false,
                         renewing: false,
@@ -1992,7 +2127,76 @@ fn handle_task(
         },
         TaskResult::Executed {
             cell,
-            publisher,
+            mut command,
+            mut result,
+            mut fenced,
+        } => {
+            let Some(active) = cells.get_mut(&cell) else {
+                send_command_reply(&mut command, Err(Error::CellNotActive));
+                return;
+            };
+            if node_lease.check().is_err() {
+                result = Err(command.operation.unknown(Error::Fenced));
+                fenced = true;
+            }
+            active.fenced |= fenced;
+            if active.fenced {
+                active.busy = false;
+                fence_active(active);
+                send_command_task_reply(&mut command, result);
+                continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
+                return;
+            }
+            match result {
+                Ok(CommandTaskResult::Recorded(outcome)) => {
+                    active.busy = false;
+                    send_command_reply(&mut command, Ok(outcome));
+                }
+                Ok(CommandTaskResult::Pending {
+                    pending,
+                    durability,
+                }) => {
+                    let retained_bytes = pending.retained_bytes();
+                    active.publication_count += 1;
+                    active.publication_bytes =
+                        match active.publication_bytes.checked_add(retained_bytes) {
+                            Some(bytes) => bytes,
+                            None => {
+                                active.busy = false;
+                                active.fenced = true;
+                                fence_active(active);
+                                let error = command
+                                    .operation
+                                    .unknown(Error::Capacity("pending publication bytes"));
+                                send_command_reply(&mut command, Err(error));
+                                continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
+                                return;
+                            }
+                        };
+                    let outcome = pending.outcome().clone();
+                    let commit_sequence = outcome.commit_sequence();
+                    let (proof, object) = oneshot::channel();
+                    active.publications.push_back(QueuedPublication {
+                        pending: *pending,
+                        durability: durability.clone(),
+                        proof,
+                    });
+                    start_publication(cell, active, pool, tasks);
+                    let pool = pool.clone();
+                    tasks.spawn(async move {
+                        prove_command(pool, command, outcome, commit_sequence, durability, object)
+                            .await
+                    });
+                }
+                Err(error) => {
+                    active.busy = false;
+                    send_command_reply(&mut command, Err(error));
+                }
+            }
+            continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
+        }
+        TaskResult::Proven {
+            cell,
             mut command,
             mut result,
             mut fenced,
@@ -2006,12 +2210,36 @@ fn handle_task(
                 fenced = true;
             }
             active.busy = false;
-            active.publisher = Some(*publisher);
             active.fenced |= fenced;
             if active.fenced {
                 fence_active(active);
             }
             send_command_reply(&mut command, result);
+            continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
+        }
+        TaskResult::Published {
+            cell,
+            publisher,
+            retained_bytes,
+            mut result,
+            mut fenced,
+        } => {
+            let Some(active) = cells.get_mut(&cell) else {
+                return;
+            };
+            if node_lease.check().is_err() {
+                result = Err(Error::Fenced);
+                fenced = true;
+            }
+            active.publisher = Some(*publisher);
+            active.publication_count = active.publication_count.saturating_sub(1);
+            active.publication_bytes = active.publication_bytes.saturating_sub(retained_bytes);
+            active.fenced |= fenced || result.is_err();
+            if active.fenced {
+                fence_active(active);
+            } else {
+                start_publication(cell, active, pool, tasks);
+            }
             continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
         }
         TaskResult::Queried {
@@ -2149,6 +2377,13 @@ fn handle_task(
 
 fn fence_active(active: &mut ActiveCell) {
     fence_admission(&active.admission);
+    while let Some(publication) = active.publications.pop_front() {
+        active.publication_count = active.publication_count.saturating_sub(1);
+        active.publication_bytes = active
+            .publication_bytes
+            .saturating_sub(publication.pending.retained_bytes());
+        let _ = publication.proof.send(Err(Error::Fenced));
+    }
     while let Some(queued) = active.queue.pop_front() {
         match queued {
             QueuedWork::Command(mut command) => {
@@ -2182,9 +2417,13 @@ fn continue_cell(
         return;
     }
     if active.fenced {
-        start_fenced_deactivate(cell, pool, cells, transitioning, tasks);
+        if active.publication_count == 0 && active.publisher.is_some() {
+            start_fenced_deactivate(cell, pool, cells, transitioning, tasks);
+        }
     } else if active.draining() && active.queue.is_empty() {
-        start_deactivate(cell, pool, cells, transitioning, tasks);
+        if active.publication_count == 0 && active.publisher.is_some() {
+            start_deactivate(cell, pool, cells, transitioning, tasks);
+        }
     } else {
         start_next(active, pool, tasks, node_lease);
     }
@@ -2210,6 +2449,15 @@ fn send_command_reply(command: &mut QueuedCommand, result: crate::Result<StoredO
     if let Some(reply) = command.reply.take() {
         let _ = reply.send(result);
     }
+}
+
+fn send_command_task_reply(command: &mut QueuedCommand, result: crate::Result<CommandTaskResult>) {
+    let result = match result {
+        Ok(CommandTaskResult::Recorded(outcome)) => Ok(outcome),
+        Ok(CommandTaskResult::Pending { .. }) => Err(command.operation.unknown(Error::Fenced)),
+        Err(error) => Err(error),
+    };
+    send_command_reply(command, result);
 }
 
 fn send_query_reply(query: &mut QueuedQuery, result: crate::Result<Vec<u8>>) {
@@ -2249,6 +2497,7 @@ fn start_due_renewals(
             || active.renewing
             || active.fenced
             || active.draining()
+            || active.publication_count != 0
             || !active.queue.is_empty()
             || active
                 .publisher

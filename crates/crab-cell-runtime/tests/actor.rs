@@ -1,4 +1,11 @@
-use std::sync::{Arc, Mutex, mpsc};
+use std::{
+    fmt,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+};
 
 use bytes::Bytes;
 use crab_cell_runtime::{
@@ -13,7 +20,114 @@ use crab_ltx::{CellReplica, Limits};
 use crab_storage::{
     CellObjectKind, CellStorageLayout, ObjectStoreCredentials, Store, build_explicit_store,
 };
-use object_store::{memory::InMemory, path::Path};
+use futures_util::stream::BoxStream;
+use object_store::{
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult, memory::InMemory, path::Path,
+};
+use tokio::sync::Notify;
+
+#[derive(Debug)]
+struct PausingStore {
+    inner: Arc<InMemory>,
+    armed: AtomicBool,
+    blocked: AtomicBool,
+    released: AtomicBool,
+    entered: Notify,
+    release: Notify,
+}
+
+impl PausingStore {
+    fn new(inner: Arc<InMemory>) -> Self {
+        Self {
+            inner,
+            armed: AtomicBool::new(false),
+            blocked: AtomicBool::new(false),
+            released: AtomicBool::new(false),
+            entered: Notify::new(),
+            release: Notify::new(),
+        }
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, Ordering::Release);
+    }
+
+    async fn wait_until_blocked(&self) {
+        while !self.blocked.load(Ordering::Acquire) {
+            self.entered.notified().await;
+        }
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::Release);
+        self.release.notify_waiters();
+    }
+}
+
+impl fmt::Display for PausingStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("pausing-store")
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for PausingStore {
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        options: PutOptions,
+    ) -> object_store::Result<PutResult> {
+        if self.armed.load(Ordering::Acquire) && !self.blocked.swap(true, Ordering::AcqRel) {
+            self.entered.notify_waiters();
+            while !self.released.load(Ordering::Acquire) {
+                self.release.notified().await;
+            }
+        }
+        self.inner.put_opts(location, payload, options).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        options: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(location, options).await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &Path,
+        options: GetOptions,
+    ) -> object_store::Result<GetResult> {
+        self.inner.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
 
 #[derive(Default)]
 struct TestNodeAuthority {
@@ -268,6 +382,10 @@ fn fixture_for(partition: &[u8]) -> Fixture {
 }
 
 fn fixture_with_limits(partition: &[u8], limits: Limits) -> Fixture {
+    fixture_with_limits_and_store(partition, limits, Store::new(Arc::new(InMemory::new())))
+}
+
+fn fixture_with_limits_and_store(partition: &[u8], limits: Limits, store: Store) -> Fixture {
     let target = CellTarget::new(
         TenantId::from_bytes([1; 16]),
         ApplicationId::from_bytes([3; 16]),
@@ -277,7 +395,6 @@ fn fixture_with_limits(partition: &[u8], limits: Limits) -> Fixture {
     .unwrap();
     let cell = target.cell_id();
     let incarnation = IncarnationId::from_bytes([2; 16]);
-    let store = Store::new(Arc::new(InMemory::new()));
     let layout = CellStorageLayout::new(store, Path::from("runtime"), [3; 16]);
     let replica = CellReplica::new(
         layout.clone(),
@@ -496,9 +613,175 @@ async fn command_flows_through_follower_proof_object_coverage_and_clean_close() 
     ));
     handle.drain().await.unwrap();
     runtime.shutdown().await.unwrap();
-    assert_eq!(*authority.activations.lock().unwrap(), vec![1]);
     assert_eq!(*authority.coverage.lock().unwrap(), vec![(1, 1)]);
     assert_eq!(*authority.closes.lock().unwrap(), vec![1]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn follower_proofs_advance_logical_head_and_bound_the_object_backlog() {
+    let pausing = Arc::new(PausingStore::new(Arc::new(InMemory::new())));
+    let object_store: Arc<dyn ObjectStore> = pausing.clone();
+    let fixture = fixture_with_limits_and_store(
+        b"dual-head-command",
+        Limits::default(),
+        Store::new(object_store),
+    );
+    let session = SessionId::from_bytes([51; 16]);
+    let leader = NodeId::from_bytes([52; 16]);
+    let follower = NodeId::from_bytes([53; 16]);
+    let runtime = CellRuntime::new_with_replica_host_requiring_node_lease(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        2 * 1024 * 1024,
+        session,
+        ReplicaHost::default(),
+    )
+    .unwrap();
+    let lease = NodeLeaseGuard::new(0, 60_000).unwrap();
+    runtime.install_node_lease(lease.clone()).unwrap();
+    let gate = DurabilityGate::new(session, leader, 1, [follower]).unwrap();
+    let transport: Arc<dyn NodeLogTransport> = Arc::new(TestNodeTransport);
+    let shipper =
+        NodeLogShipper::new(gate.clone(), Arc::clone(&transport), Limits::default()).unwrap();
+    let authority = Arc::new(TestNodeAuthority::default());
+    let node_authority: Arc<dyn NodeLogAuthority> = authority.clone();
+    runtime
+        .install_node_durability(
+            fixture.target.application(),
+            Arc::new(NodeDurability::new(
+                gate,
+                shipper,
+                node_authority,
+                transport,
+                lease,
+            )),
+        )
+        .unwrap();
+    let handle = bootstrap_on(&runtime, &fixture, session).await;
+    pausing.arm();
+
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        handle.execute(
+            identity(54),
+            Digest::from_bytes([55; 32]),
+            20,
+            1_024,
+            1_024,
+            |transaction| {
+                transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                Ok(HandlerOutcome::Success(b"one".to_vec()))
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(first.commit_sequence(), 1);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        pausing.wait_until_blocked(),
+    )
+    .await
+    .unwrap();
+
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        handle.execute(
+            identity(56),
+            Digest::from_bytes([57; 32]),
+            21,
+            1_024,
+            1_024,
+            |transaction| {
+                transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                Ok(HandlerOutcome::Success(b"two".to_vec()))
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(second.commit_sequence(), 2);
+    let value = handle
+        .query(64, 64, |connection| {
+            let value = connection
+                .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+            Ok(value.to_be_bytes().to_vec())
+        })
+        .await
+        .unwrap();
+    assert_eq!(i64::from_be_bytes(value.try_into().unwrap()), 2);
+
+    for sequence in 3_u8..=64 {
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            handle.execute(
+                identity(sequence.saturating_add(54)),
+                Digest::from_bytes([sequence.saturating_add(55); 32]),
+                20 + i64::from(sequence),
+                1_024,
+                1_024,
+                |transaction| {
+                    transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                    Ok(HandlerOutcome::Success(Vec::new()))
+                },
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(outcome.commit_sequence(), u64::from(sequence));
+    }
+    let sixty_fifth = handle.execute(
+        identity(119),
+        Digest::from_bytes([120; 32]),
+        85,
+        1_024,
+        1_024,
+        |transaction| {
+            transaction.execute("UPDATE counter SET value = value + 1", [])?;
+            Ok(HandlerOutcome::Success(Vec::new()))
+        },
+    );
+    tokio::pin!(sixty_fifth);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut sixty_fifth)
+            .await
+            .is_err()
+    );
+    let blocked = CellAuthority::new(fixture.layout.clone())
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(blocked.value().root.as_ref().unwrap().commit_sequence, 0);
+
+    pausing.release();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), &mut sixty_fifth)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcome.commit_sequence(), 65);
+    tokio::time::timeout(std::time::Duration::from_secs(5), handle.drain())
+        .await
+        .unwrap()
+        .unwrap();
+    runtime.shutdown().await.unwrap();
+    let released = CellAuthority::new(fixture.layout.clone())
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(released.value().root.as_ref().unwrap().commit_sequence, 65);
+    assert_eq!(*authority.activations.lock().unwrap(), vec![1]);
+    assert!(
+        authority
+            .coverage
+            .lock()
+            .unwrap()
+            .last()
+            .is_some_and(|(epoch, covered)| *epoch == 1 && *covered >= 65)
+    );
 }
 
 #[tokio::test]

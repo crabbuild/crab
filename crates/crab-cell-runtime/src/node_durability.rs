@@ -94,6 +94,35 @@ impl NodeDurability {
         Ok(proof)
     }
 
+    /// Returns the first valid follower or object proof for one ticket.
+    pub async fn prove(&self, ticket: CommitTicket) -> Result<DurabilityProof> {
+        self.node_lease.check()?;
+        let activate = async {
+            self.gate.wait_followers(ticket).await?;
+            self.activated
+                .get_or_try_init(|| async {
+                    self.node_lease.check()?;
+                    self.authority.activate(ticket.log_epoch()).await?;
+                    self.node_lease.check()?;
+                    self.gate.activate_fleet()?;
+                    Ok::<(), Error>(())
+                })
+                .await?;
+            Ok::<(), Error>(())
+        };
+        tokio::pin!(activate);
+        let proof = tokio::select! {
+            proof = self.gate.prove(ticket) => proof?,
+            activated = &mut activate => {
+                activated?;
+                self.gate.prove(ticket).await?
+            }
+            () = self.node_lease.wait_fenced() => return Err(Error::Fenced),
+        };
+        self.node_lease.check()?;
+        Ok(proof)
+    }
+
     /// Records an already-published object root and persists its contiguous watermark.
     ///
     /// Callers must complete the exact Cell root CAS before invoking this method.
