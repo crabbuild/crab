@@ -30,6 +30,7 @@ pub struct NodeCapacity {
     pub free_memory_bytes: u64,
     pub free_disk_bytes: u64,
     pub follower_free_bytes: u64,
+    pub follower_retained_bytes: u64,
     pub job_credits: u32,
     pub log_protocol: u32,
 }
@@ -2055,6 +2056,7 @@ impl From<&NodeAdvertisement> for RawAdvertisement {
                 free_memory_bytes: value.capacity.free_memory_bytes.to_string(),
                 free_disk_bytes: value.capacity.free_disk_bytes.to_string(),
                 follower_free_bytes: value.capacity.follower_free_bytes.to_string(),
+                follower_retained_bytes: value.capacity.follower_retained_bytes.to_string(),
                 job_credits: value.capacity.job_credits,
                 log_protocol: value.capacity.log_protocol,
             },
@@ -2077,6 +2079,7 @@ struct RawCapacity {
     free_memory_bytes: String,
     free_disk_bytes: String,
     follower_free_bytes: String,
+    follower_retained_bytes: String,
     job_credits: u32,
     log_protocol: u32,
 }
@@ -2147,6 +2150,7 @@ impl TryFrom<RawAdvertisement> for NodeAdvertisement {
                 free_memory_bytes: canonical_u64(&value.capacity.free_memory_bytes)?,
                 free_disk_bytes: canonical_u64(&value.capacity.free_disk_bytes)?,
                 follower_free_bytes: canonical_u64(&value.capacity.follower_free_bytes)?,
+                follower_retained_bytes: canonical_u64(&value.capacity.follower_retained_bytes)?,
                 job_credits: value.capacity.job_credits,
                 log_protocol: value.capacity.log_protocol,
             },

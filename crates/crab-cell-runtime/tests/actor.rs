@@ -31,6 +31,8 @@ use tokio::sync::Notify;
 struct PausingStore {
     inner: Arc<InMemory>,
     armed: AtomicBool,
+    failing: AtomicBool,
+    failed: AtomicBool,
     blocked: AtomicBool,
     released: AtomicBool,
     entered: Notify,
@@ -42,6 +44,8 @@ impl PausingStore {
         Self {
             inner,
             armed: AtomicBool::new(false),
+            failing: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
             blocked: AtomicBool::new(false),
             released: AtomicBool::new(false),
             entered: Notify::new(),
@@ -51,6 +55,20 @@ impl PausingStore {
 
     fn arm(&self) {
         self.armed.store(true, Ordering::Release);
+    }
+
+    fn fail_puts(&self) {
+        self.failing.store(true, Ordering::Release);
+    }
+
+    fn allow_puts(&self) {
+        self.failing.store(false, Ordering::Release);
+    }
+
+    async fn wait_until_failed(&self) {
+        while !self.failed.load(Ordering::Acquire) {
+            self.entered.notified().await;
+        }
     }
 
     async fn wait_until_blocked(&self) {
@@ -79,6 +97,17 @@ impl ObjectStore for PausingStore {
         payload: PutPayload,
         options: PutOptions,
     ) -> object_store::Result<PutResult> {
+        if self.failing.load(Ordering::Acquire) {
+            self.failed.store(true, Ordering::Release);
+            self.entered.notify_waiters();
+            return Err(object_store::Error::PermissionDenied {
+                path: location.to_string(),
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected put failure",
+                )),
+            });
+        }
         if self.armed.load(Ordering::Acquire) && !self.blocked.swap(true, Ordering::AcqRel) {
             self.entered.notify_waiters();
             while !self.released.load(Ordering::Acquire) {
@@ -172,7 +201,8 @@ impl NodeLogAuthority for TestNodeAuthority {
     }
 }
 
-struct TestNodeTransport;
+#[derive(Default)]
+struct TestNodeTransport(Option<std::time::Duration>);
 
 impl NodeLogTransport for TestNodeTransport {
     fn append<'a>(
@@ -180,7 +210,11 @@ impl NodeLogTransport for TestNodeTransport {
         _member: NodeId,
         request: AppendRequest,
     ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<FollowerReceipt>> {
+        let delay = self.0;
         Box::pin(async move {
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
             let last = request.frames.last().ok_or(crab_cell_runtime::Error::Node(
                 "test node-log append is empty",
             ))?;
@@ -328,6 +362,7 @@ async fn fence_log_session(
                     free_memory_bytes: 1,
                     free_disk_bytes: 1,
                     follower_free_bytes: 1,
+                    follower_retained_bytes: 0,
                     job_credits: 1,
                     log_protocol: crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION,
                 },
@@ -572,7 +607,7 @@ async fn command_flows_through_follower_proof_object_coverage_and_clean_close() 
     let lease = NodeLeaseGuard::new(0, 60_000).unwrap();
     runtime.install_node_lease(lease.clone()).unwrap();
     let gate = DurabilityGate::new(session, leader, 1, [follower]).unwrap();
-    let transport: Arc<dyn NodeLogTransport> = Arc::new(TestNodeTransport);
+    let transport: Arc<dyn NodeLogTransport> = Arc::new(TestNodeTransport::default());
     let shipper =
         NodeLogShipper::new(gate.clone(), Arc::clone(&transport), Limits::default()).unwrap();
     let authority = Arc::new(TestNodeAuthority::default());
@@ -639,7 +674,7 @@ async fn follower_proofs_advance_logical_head_and_bound_the_object_backlog() {
     let lease = NodeLeaseGuard::new(0, 60_000).unwrap();
     runtime.install_node_lease(lease.clone()).unwrap();
     let gate = DurabilityGate::new(session, leader, 1, [follower]).unwrap();
-    let transport: Arc<dyn NodeLogTransport> = Arc::new(TestNodeTransport);
+    let transport: Arc<dyn NodeLogTransport> = Arc::new(TestNodeTransport::default());
     let shipper =
         NodeLogShipper::new(gate.clone(), Arc::clone(&transport), Limits::default()).unwrap();
     let authority = Arc::new(TestNodeAuthority::default());
@@ -782,6 +817,109 @@ async fn follower_proofs_advance_logical_head_and_bound_the_object_backlog() {
             .last()
             .is_some_and(|(epoch, covered)| *epoch == 1 && *covered >= 65)
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fleet_proof_retains_owner_when_object_publication_fails_first() {
+    let store = Arc::new(PausingStore::new(Arc::new(InMemory::new())));
+    let object_store: Arc<dyn ObjectStore> = store.clone();
+    let fixture = fixture_with_limits_and_store(
+        b"fleet-object-failure",
+        Limits::default(),
+        Store::new(object_store),
+    );
+    let session = SessionId::from_bytes([121; 16]);
+    let leader = NodeId::from_bytes([122; 16]);
+    let follower = NodeId::from_bytes([123; 16]);
+    let runtime = CellRuntime::new_with_replica_host_requiring_node_lease(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        2 * 1024 * 1024,
+        session,
+        ReplicaHost::default(),
+    )
+    .unwrap();
+    let lease = NodeLeaseGuard::new(0, 60_000).unwrap();
+    runtime.install_node_lease(lease.clone()).unwrap();
+    let gate = DurabilityGate::new(session, leader, 1, [follower]).unwrap();
+    let transport: Arc<dyn NodeLogTransport> = Arc::new(TestNodeTransport(Some(
+        std::time::Duration::from_millis(50),
+    )));
+    let shipper =
+        NodeLogShipper::new(gate.clone(), Arc::clone(&transport), Limits::default()).unwrap();
+    runtime
+        .install_node_durability(
+            fixture.target.application(),
+            Arc::new(NodeDurability::new(
+                gate,
+                shipper,
+                Arc::new(TestNodeAuthority::default()),
+                transport,
+                lease,
+            )),
+        )
+        .unwrap();
+    let handle = bootstrap_on(&runtime, &fixture, session).await;
+    store.fail_puts();
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        handle.execute(
+            identity(124),
+            Digest::from_bytes([125; 32]),
+            20,
+            1_024,
+            1_024,
+            |transaction| {
+                transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                Ok(HandlerOutcome::Success(b"fleet-proof".to_vec()))
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(outcome.commit_sequence(), 1);
+    tokio::time::timeout(std::time::Duration::from_secs(2), store.wait_until_failed())
+        .await
+        .unwrap();
+
+    let control = CellAuthority::new(fixture.layout.clone())
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(control.value().root.as_ref().unwrap().commit_sequence, 0);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match handle.query(1, 1, |_| Ok(Vec::new())).await {
+                Err(crab_cell_runtime::Error::Fenced) => break,
+                Ok(_) => tokio::task::yield_now().await,
+                Err(error) => panic!("unexpected query result after publication failure: {error}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while runtime.stats().active_cells() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let fenced = CellAuthority::new(fixture.layout.clone())
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fenced.value().state, ControlState::Serving);
+    assert_eq!(fenced.value().owner.as_ref().unwrap().session, session);
+    assert_eq!(fenced.value().root.as_ref().unwrap().commit_sequence, 0);
+    store.allow_puts();
+    assert!(matches!(
+        runtime.shutdown().await,
+        Err(crab_cell_runtime::Error::PendingPublication)
+    ));
 }
 
 #[tokio::test]

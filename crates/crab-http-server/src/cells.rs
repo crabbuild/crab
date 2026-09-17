@@ -11,8 +11,8 @@ use crab_cell_runtime::{
     CellId, CellModule, CellRuntime, CellTarget, Control, ControlState, Digest, EffectModule,
     GarbageCollectionPolicy, MaintenanceModule, MigrationDescriptor, MigrationFailure,
     MigrationProgressState, MigrationProgressStore, ModuleDescriptor, NamespaceDescriptor,
-    NamespaceId, NodeAdvertisement, NodeCapacity, NodeDirectory, OperationDescriptor, Owner,
-    PeerRoundTrip, PeerSigner, PinnedCatalogShard, Registry, RegistryBuilder, ReleaseRecord,
+    NamespaceId, NodeAdvertisement, NodeCapacity, NodeDirectory, NodeLogPhase, OperationDescriptor,
+    Owner, PeerRoundTrip, PeerSigner, PinnedCatalogShard, Registry, RegistryBuilder, ReleaseRecord,
     ReleaseState, ReleaseStore, ReplicaHost, ReplicaLimits, RequestId, SessionId, SqlWorkerPool,
     TenantId, VersionedNodeAdvertisement, register_effect_delivery, register_maintenance,
 };
@@ -430,6 +430,37 @@ struct NodeStatus {
     session: String,
     live: bool,
     observed_at_ms: i64,
+    advertisement: Option<NodeAdvertisementStatus>,
+}
+
+#[derive(Serialize)]
+struct NodeAdvertisementStatus {
+    node: String,
+    endpoint: String,
+    generation: u64,
+    progress: u64,
+    expires_at_ms: i64,
+    follower_free_bytes: u64,
+    follower_retained_bytes: u64,
+    log: Option<NodeLogStatus>,
+}
+
+#[derive(Serialize)]
+struct NodeLogStatus {
+    state: &'static str,
+    epoch: u64,
+    member_nodes: Vec<String>,
+    active: bool,
+    tiered_through: u64,
+    recovery: Option<NodeRecoveryStatus>,
+    recovery_manifest: Option<String>,
+}
+
+#[derive(Serialize)]
+struct NodeRecoveryStatus {
+    claimant: String,
+    generation: u64,
+    expires_at_ms: i64,
 }
 
 pub(crate) async fn node_status(config: &Config, session: &str) -> Result<Vec<u8>> {
@@ -444,13 +475,59 @@ pub(crate) async fn node_status(config: &Config, session: &str) -> Result<Vec<u8
     );
     let observed_at_ms = unix_now_ms()?;
     let live = directory.is_live(session, observed_at_ms).await?;
+    let advertisement = if live {
+        directory
+            .load(session, observed_at_ms)
+            .await?
+            .map(|versioned| node_advertisement_status(versioned.advertisement()))
+    } else {
+        None
+    };
     serde_json::to_vec_pretty(&NodeStatus {
         version: 1,
         session: status_hex(session.as_bytes()),
         live,
         observed_at_ms,
+        advertisement,
     })
     .map_err(Error::from)
+}
+
+fn node_advertisement_status(advertisement: &NodeAdvertisement) -> NodeAdvertisementStatus {
+    let capacity = advertisement.capacity();
+    NodeAdvertisementStatus {
+        node: status_hex(advertisement.node().as_bytes()),
+        endpoint: advertisement.endpoint().to_owned(),
+        generation: advertisement.generation(),
+        progress: advertisement.progress(),
+        expires_at_ms: advertisement.expires_at_ms(),
+        follower_free_bytes: capacity.follower_free_bytes,
+        follower_retained_bytes: capacity.follower_retained_bytes,
+        log: advertisement.log().map(|log| NodeLogStatus {
+            state: match log.phase() {
+                NodeLogPhase::Open => "open",
+                NodeLogPhase::Recovering => "recovering",
+                NodeLogPhase::Sealed => "sealed",
+                NodeLogPhase::Retired => "retired",
+            },
+            epoch: log.epoch(),
+            member_nodes: log
+                .members()
+                .iter()
+                .map(|member| status_hex(member.as_bytes()))
+                .collect(),
+            active: log.active(),
+            tiered_through: log.tiered_through(),
+            recovery: log.recovery().map(|recovery| NodeRecoveryStatus {
+                claimant: status_hex(recovery.claimant().as_bytes()),
+                generation: recovery.generation(),
+                expires_at_ms: recovery.expires_at_ms(),
+            }),
+            recovery_manifest: log
+                .recovery_manifest()
+                .map(|manifest| status_hex(manifest.as_bytes())),
+        }),
+    }
 }
 
 #[derive(Serialize)]

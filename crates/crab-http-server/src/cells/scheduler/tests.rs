@@ -92,6 +92,7 @@ async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
         free_memory_bytes: 1 << 30,
         free_disk_bytes: 1 << 30,
         follower_free_bytes: 1 << 30,
+        follower_retained_bytes: 0,
         job_credits: 1,
         log_protocol: crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION,
     };

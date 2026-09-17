@@ -157,7 +157,8 @@ recovery path.
 | Authoritative create and refresh drive a terminal monotonic node-lease guard; admission, actor dispatch, Cell-control CAS, durability proof, and output acceptance all check it | None for the current non-streaming Cell API |
 | Write-all durability gate, first-fsynced-batch activation, bounded dual-head command continuation, ordered object publication, object fallback, schema-migration barriers, and contiguous authoritative object watermark | None for this slice |
 | Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | None for this slice |
-| Cell control attachment and takeover consumption of overlays; server drain closes a fully object-covered epoch before session withdrawal; grace-aged retired follower lanes are deleted only after authority stops naming their epoch | Live multi-node proof |
+| Cell control attachment and takeover consumption of overlays; server drain closes a fully object-covered epoch before session withdrawal; grace-aged retired follower lanes are deleted only after authority stops naming their epoch; the Compose qualifier proves a follower-only result survives owner `SIGKILL`, owner-disk deletion, RustFS restoration, takeover, and owner rejoin | Target-load and extended fault matrix across the declared small, medium, and large node profiles |
+| Bounded command and query responses bind to the actor's proven logical head | State-observing streaming responses need an explicit watermark-bound stream lease before such an API is exposed |
 
 The session record now owns one CAS-protected log epoch, its exact sorted member
 set, activation bit, contiguous object watermark, and renewable recovery claim.
@@ -777,11 +778,36 @@ The queue preserves these ordering rules:
   and accepts only the exact proposed successor.
 - A terminal lease or publication failure fences new execution. Already
   released fleet-proven outcomes remain recoverable from the node log.
+- A fenced executor may release Cell ownership only when every submitted
+  node-log cut is covered by the published root. Otherwise it discards local
+  SQLite but preserves the owner record, so session-expiry takeover seals and
+  replays the log instead of misclassifying the Cell as cleanly `Idle`.
 
 This model is narrower than a general asynchronous publication graph. It adds
 one ordered queue and two monotonic positions because they directly remove the
 hot-Cell object-store stall. It does not add configurable queue policies,
 parallel root writers, speculative branch heads, or compatibility paths.
+
+This is an intentional throughput-versus-complexity decision:
+
+| Design | Benefit | Cost or risk | Decision |
+| --- | --- | --- | --- |
+| One head; wait for every object CAS before the next command | Smallest lifecycle | One slow object round trip caps each hot Cell even after fleet durability succeeds | Keep only as the natural behavior when no fleet proof wins |
+| Bounded `logical_head` plus `published_head` | Removes object latency between consecutive commands while preserving one writer and one ordered CAS owner | Retains proven cuts until publication and needs explicit drain/backpressure rules | Chosen and implemented |
+| Multiple publishers, branch heads, or an unbounded publication queue | More speculative concurrency | Reordering, unbounded recovery state, and ambiguous CAS ownership | Rejected |
+| Let a stream follow the moving logical head | Low-latency live output | Bytes could escape after lease loss or observe state newer than the stream's proof | Rejected |
+
+The dual-head model earns its extra state only because it changes current
+command throughput. It is safe for failover because `logical_head` advances
+only after a non-forgeable fleet or object proof, every unpublished cut remains
+in the predecessor node log, and takeover seals and replays that log before
+opening the successor SQLite database. `published_head` remains the compact,
+long-term object-store authority; it is not weakened or replaced.
+
+The same owner-retention rule covers migration cuts. If fleet proof releases a
+successor handle and object publication then fails, the actor fences both
+admissions and leaves the old owner record for recovery. It never writes
+`Idle` while the acknowledged migration exists only in the node log.
 
 The actor serializes bounded outputs against the logical-head proof. A command
 waits for its own ticket, and a query or resolution starts only after the
@@ -794,12 +820,23 @@ preceding command has advanced the logical head. Therefore:
 
 The current Cell command and query APIs return bounded replies rather than
 state-observing streams. Actor ordering proves that a query can observe only a
-`logical_head` covered by an earlier durability ticket. Streaming therefore
-remains a future delivery, not part of the dual-head queue: a state-observing
-stream must bind itself to one commit-sequence watermark, prove that watermark
-before its first chunk, and keep checking the node lease until the stream ends.
-Adding those costs before a streaming caller exists would create lifecycle and
-backpressure policy with no current correctness benefit.
+`logical_head` covered by an earlier durability ticket. Streaming is a
+separate remaining delivery, not another publication head. Its minimum
+contract is:
+
+1. Capture one immutable logical-head commit sequence when the stream opens.
+2. Require that sequence's durability proof before emitting the first byte.
+3. Pin the database snapshot or materialized result for the stream lifetime;
+   never follow a moving logical head implicitly.
+4. Check the terminal node-session lease before each output flush and stop the
+   stream after fencing, cancellation, or its bounded deadline.
+5. Charge buffered bytes and pinned snapshots to admission, and release them
+   on every close path.
+
+No streaming API is exposed yet, so implementing a generic stream scheduler
+now would add speculative lifecycle and backpressure policy without a caller.
+The dual-head queue does not block this later contract and must not be expanded
+into a general streaming-response queue.
 
 Authentication, routing, and malformed-request errors produced before Cell
 execution do not need a Cell durability proof.
@@ -1245,9 +1282,11 @@ structured logs or bounded administrative queries, never metric labels.
 - Pending recovery overlay, if any
 - Last durability source
 
-`cells node --session SESSION --json` adds log state, epoch, member sessions,
-tiered sequence, retained byte estimates, and recovery claimant. It does not
-return frame bodies or credentials.
+`cells node --session SESSION --json` reports the signed advertisement's log
+state, epoch, stable member node IDs, activation bit, tiered sequence, follower
+free/retained byte estimates, recovery claimant, and recovery-manifest digest.
+It does not return frame bodies or credentials. Expired sessions return
+`live=false` without treating stale advertisement contents as current state.
 
 ## Qualify the complete contract
 

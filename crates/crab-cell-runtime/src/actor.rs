@@ -998,6 +998,7 @@ struct ActiveCell {
     publications: VecDeque<QueuedPublication>,
     publication_count: usize,
     publication_bytes: u64,
+    unpublished_node_logs: usize,
     queue: VecDeque<QueuedWork>,
     busy: bool,
     renewing: bool,
@@ -1056,6 +1057,7 @@ enum TaskResult {
         cell: CellId,
         publisher: Box<CellPublisher>,
         retained_bytes: u64,
+        node_logged: bool,
         result: crate::Result<()>,
         fenced: bool,
     },
@@ -1077,6 +1079,7 @@ enum TaskResult {
         migration: Box<QueuedMigration>,
         result: crate::Result<MigrationOutcome>,
         fenced: bool,
+        preserve_owner: bool,
     },
     Renewed {
         cell: CellId,
@@ -1211,12 +1214,12 @@ fn start_shutdown_drain(
             && active.publication_count == 0
             && active.publisher.is_some()
         {
-            ready.push((*cell, active.fenced));
+            ready.push((*cell, active.fenced, active.unpublished_node_logs != 0));
         }
     }
-    for (cell, fenced) in ready {
+    for (cell, fenced, preserve_owner) in ready {
         if fenced {
-            start_fenced_deactivate(cell, pool, cells, transitioning, tasks);
+            start_fenced_deactivate(cell, pool, cells, transitioning, tasks, preserve_owner);
         } else {
             start_deactivate(cell, pool, cells, transitioning, tasks);
         }
@@ -1637,6 +1640,7 @@ async fn execute_migration(
     mut migration: Box<QueuedMigration>,
     interrupt: Arc<crab_ltx::rusqlite::InterruptHandle>,
 ) -> TaskResult {
+    let mut preserve_owner = false;
     let deadline = std::time::Instant::now() + SQL_WALL_DEADLINE;
     let operation = pool.migrate(migration.cell, migration.plan, migration.now_ms, deadline);
     tokio::pin!(operation);
@@ -1654,6 +1658,7 @@ async fn execute_migration(
                 migration,
                 result: Err(Error::Deadline),
                 fenced: true,
+                preserve_owner: false,
             };
         }
     };
@@ -1663,6 +1668,7 @@ async fn execute_migration(
             match durability {
                 Err(error) => Err(error),
                 Ok(durability) => {
+                    let node_logged = durability.is_some();
                     let cell = migration.cell;
                     let early_outcome = MigrationOutcome {
                         code: pending.code(),
@@ -1686,7 +1692,7 @@ async fn execute_migration(
                         pool.confirm_migration_published(cell, root).await
                     };
                     tokio::pin!(object);
-                    match durability.as_ref() {
+                    let result = match durability.as_ref() {
                         Some(durability) => {
                             let fleet = durability.prove_fleet();
                             tokio::pin!(fleet);
@@ -1708,7 +1714,9 @@ async fn execute_migration(
                             }
                         }
                         None => object.await,
-                    }
+                    };
+                    preserve_owner = node_logged && result.is_err();
+                    result
                 }
             }
         }
@@ -1724,6 +1732,7 @@ async fn execute_migration(
         migration,
         result,
         fenced,
+        preserve_owner,
     }
 }
 
@@ -1841,7 +1850,12 @@ async fn prove_command(
             let fleet_or_object = durability.prove();
             tokio::pin!(fleet_or_object);
             tokio::select! {
-                object = &mut object => receive_publication_proof(object),
+                object = &mut object => match receive_publication_proof(object) {
+                    Ok(()) => Ok(()),
+                    // Object publication failure does not invalidate an
+                    // independently fsynced follower proof for this cut.
+                    Err(_) => fleet_or_object.await.map(|_| ()),
+                },
                 result = &mut fleet_or_object => match result {
                     Ok(()) => Ok(()),
                     // Losing the follower path does not invalidate the same
@@ -1898,6 +1912,7 @@ fn start_publication(
         active.publisher = Some(publisher);
         return;
     };
+    let node_logged = publication.durability.is_some();
     // Moving the publisher out of ActiveCell is the serialization token for
     // root preparation and CAS; no second object publisher can overtake it.
     let pool = pool.clone();
@@ -1932,6 +1947,7 @@ fn start_publication(
             cell,
             publisher: Box::new(publisher),
             retained_bytes,
+            node_logged,
             result,
             fenced,
         }
@@ -2105,6 +2121,7 @@ fn handle_task(
                         publications: VecDeque::new(),
                         publication_count: 0,
                         publication_bytes: 0,
+                        unpublished_node_logs: 0,
                         queue: VecDeque::new(),
                         busy: false,
                         renewing: false,
@@ -2181,6 +2198,9 @@ fn handle_task(
                         durability: durability.clone(),
                         proof,
                     });
+                    if durability.is_some() {
+                        active.unpublished_node_logs += 1;
+                    }
                     start_publication(cell, active, pool, tasks);
                     let pool = pool.clone();
                     tasks.spawn(async move {
@@ -2221,12 +2241,14 @@ fn handle_task(
             cell,
             publisher,
             retained_bytes,
+            node_logged,
             mut result,
             mut fenced,
         } => {
             let Some(active) = cells.get_mut(&cell) else {
                 return;
             };
+            let object_published = result.is_ok();
             if node_lease.check().is_err() {
                 result = Err(Error::Fenced);
                 fenced = true;
@@ -2234,6 +2256,9 @@ fn handle_task(
             active.publisher = Some(*publisher);
             active.publication_count = active.publication_count.saturating_sub(1);
             active.publication_bytes = active.publication_bytes.saturating_sub(retained_bytes);
+            if node_logged && object_published {
+                active.unpublished_node_logs = active.unpublished_node_logs.saturating_sub(1);
+            }
             active.fenced |= fenced || result.is_err();
             if active.fenced {
                 fence_active(active);
@@ -2292,6 +2317,7 @@ fn handle_task(
             mut migration,
             mut result,
             mut fenced,
+            preserve_owner,
         } => {
             let Some(active) = cells.get_mut(&cell) else {
                 send_migration_reply(&mut migration, Err(Error::CellNotActive));
@@ -2304,6 +2330,9 @@ fn handle_task(
             active.busy = false;
             active.migrating = false;
             active.publisher = Some(*publisher);
+            if preserve_owner {
+                active.unpublished_node_logs = active.unpublished_node_logs.saturating_add(1);
+            }
             active.fenced |= fenced;
             match result {
                 Ok(outcome) if !active.fenced => {
@@ -2418,7 +2447,8 @@ fn continue_cell(
     }
     if active.fenced {
         if active.publication_count == 0 && active.publisher.is_some() {
-            start_fenced_deactivate(cell, pool, cells, transitioning, tasks);
+            let preserve_owner = active.unpublished_node_logs != 0;
+            start_fenced_deactivate(cell, pool, cells, transitioning, tasks, preserve_owner);
         }
     } else if active.draining() && active.queue.is_empty() {
         if active.publication_count == 0 && active.publisher.is_some() {
@@ -2561,6 +2591,7 @@ fn start_fenced_deactivate(
     cells: &mut HashMap<CellId, ActiveCell>,
     transitioning: &mut HashSet<CellId>,
     tasks: &mut JoinSet<TaskResult>,
+    preserve_owner: bool,
 ) {
     let Some(active) = cells.remove(&cell) else {
         return;
@@ -2570,6 +2601,11 @@ fn start_fenced_deactivate(
     tasks.spawn(async move {
         let result = async {
             pool.discard(cell).await?;
+            // An unpublished node-log cut must keep its owner record so
+            // takeover seals and replays it instead of treating the Cell as idle.
+            if preserve_owner {
+                return Ok(());
+            }
             let mut publisher = active.publisher.ok_or(Error::Fenced)?;
             publisher.release_after_fence().await
         }

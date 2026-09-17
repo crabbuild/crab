@@ -349,6 +349,10 @@ impl NodePublisher {
                 free_memory_bytes: 0,
                 free_disk_bytes: 0,
                 follower_free_bytes: 0,
+                follower_retained_bytes: self
+                    .follower_store
+                    .as_ref()
+                    .map_or(0, |store| store.retained_bytes()),
                 job_credits: 0,
                 log_protocol: self
                     .follower_store
@@ -1035,6 +1039,9 @@ fn node_capacity(
             .map(crab_cell_runtime::FollowerStore::available_bytes)
             .unwrap_or(0)
             .min(free_disk_bytes),
+        follower_retained_bytes: follower_store
+            .map(crab_cell_runtime::FollowerStore::retained_bytes)
+            .unwrap_or(0),
         job_credits,
         log_protocol: follower_store.map_or(0, |_| crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION),
     })
@@ -1697,6 +1704,7 @@ mod tests {
                 free_memory_bytes: 0,
                 free_disk_bytes: 0,
                 follower_free_bytes: 0,
+                follower_retained_bytes: 0,
                 job_credits: 0,
                 log_protocol: crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION,
             }

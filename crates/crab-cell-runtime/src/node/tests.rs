@@ -74,6 +74,7 @@ fn advertisement_for(
             free_memory_bytes: 1_000,
             free_disk_bytes: 2_000,
             follower_free_bytes: 2_000,
+            follower_retained_bytes: 800,
             job_credits: 3,
             log_protocol: NODE_LOG_PROTOCOL_VERSION,
         },
@@ -158,6 +159,7 @@ async fn stable_follower_node_resolves_a_new_session_for_old_log_recovery() {
         free_memory_bytes: 1_000,
         free_disk_bytes: 2_000,
         follower_free_bytes: 2_000,
+        follower_retained_bytes: 0,
         job_credits: 3,
         log_protocol: NODE_LOG_PROTOCOL_VERSION,
     };
@@ -229,6 +231,7 @@ async fn overlapping_live_sessions_for_one_node_fail_closed() {
         free_memory_bytes: 1_000,
         free_disk_bytes: 2_000,
         follower_free_bytes: 2_000,
+        follower_retained_bytes: 0,
         job_credits: 3,
         log_protocol: NODE_LOG_PROTOCOL_VERSION,
     };
@@ -280,6 +283,7 @@ async fn follower_selection_is_capacity_aware_deterministic_and_requires_full_sh
                         free_memory_bytes: 1_000,
                         free_disk_bytes: 2_000,
                         follower_free_bytes,
+                        follower_retained_bytes: 0,
                         job_credits: 3,
                         log_protocol: NODE_LOG_PROTOCOL_VERSION,
                     },
@@ -318,6 +322,7 @@ async fn follower_selection_prefers_proven_zone_then_host_separation() {
         free_memory_bytes: 1_000,
         free_disk_bytes: 2_000,
         follower_free_bytes: 2_000,
+        follower_retained_bytes: 0,
         job_credits: 3,
         log_protocol: NODE_LOG_PROTOCOL_VERSION,
     };
