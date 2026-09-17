@@ -9,7 +9,7 @@ use crate::{
     VersionedNodeAdvertisement,
 };
 
-const MAX_TICKET_FRAMES: u64 = 1_024;
+pub(crate) const MAX_TICKET_FRAMES: u64 = 1_024;
 
 /// Exact published Cell state used to validate a recovered node-log witness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -317,6 +317,24 @@ impl DurabilityGate {
             first_sequence,
             last_sequence,
         })
+    }
+
+    pub(crate) fn shipping_scope(&self) -> Result<(SessionId, u64, Vec<NodeId>)> {
+        let state = self.lock()?;
+        if state.fenced || state.rotating {
+            return Err(Error::Fenced);
+        }
+        let mut members = state.members.iter().copied().collect::<Vec<_>>();
+        members.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        Ok((state.leader_session, state.log_epoch, members))
+    }
+
+    pub(crate) fn stop_shipping(&self) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.fleet_active = false;
+            state.rotating = true;
+        }
+        self.changed.notify_waiters();
     }
 
     /// Enables fleet proofs only after the authoritative active CAS succeeds.

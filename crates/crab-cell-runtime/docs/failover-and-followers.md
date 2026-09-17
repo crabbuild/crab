@@ -152,7 +152,7 @@ recovery path.
 | Working now | Still gated before fleet durability may serve traffic |
 | --- | --- |
 | Strict frame codec plus capacity-aware deterministic selection, authoritative enrollment, activation, coverage, recovery claims, and object-covered epoch rotation | Failure-domain-aware automatic recruitment |
-| Crash-safe, node-budgeted follower store under a persisted physical `NodeId`, plus authenticated remote append/seal/tail/retire transport that resolves the current boot session | Live shipper batching and recovery-only startup listener ordering |
+| Crash-safe, node-budgeted follower store under a persisted physical `NodeId`, authenticated remote append/seal/tail/retire transport, and a bounded node-wide batched shipper | Recovery-only startup listener ordering |
 | Write-all durability gate with contiguous object watermark | Actor submission and response-gate integration |
 | Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | Recovery-only startup listener ordering |
 | Cell control attachment and takeover consumption of overlays | Graceful drain, obsolete-marker collection, and live multi-node proof |
@@ -167,6 +167,12 @@ Each data directory strict-creates one durable `node-id`; boot sessions remain
 ephemeral. Log membership records stable physical node IDs, and each request
 resolves that ID to exactly one current live session. Two overlapping live
 sessions for one physical node fail closed.
+`NodeLogShipper` reserves encoded bytes before assigning a sequence, multiplexes
+accepted cuts in submission order, batches for at most one millisecond or 64
+frames, sends each batch to every member concurrently, and advances the gate
+only after all receipts cover the batch. Encoding, transport, or receipt
+failure stops fleet issuance for that epoch while its tickets remain eligible
+for object proof and covered rotation.
 The directory now filters live peers by protocol, pressure, and the exact
 shared-disk capacity advertised by their follower stores, then rendezvous-ranks
 the full one- or two-member ensemble before its CAS enrollment. Rotation closes
@@ -598,7 +604,7 @@ enum DurabilityProof {
         leader_session: SessionId,
         log_epoch: u64,
         durable_through: u64,
-        members: Vec<SessionId>,
+        members: Vec<NodeId>,
     },
 }
 
@@ -1024,12 +1030,20 @@ pub trait NodeLogTransport: Send + Sync {
 }
 
 pub struct DurabilityGate;
+pub struct NodeLogShipper;
+pub struct NodeLogSubmission;
 
 impl DurabilityGate {
     pub async fn prove(&self, ticket: CommitTicket)
         -> Result<DurabilityProof>;
     pub async fn wait_until(&self, sequence: u64)
         -> Result<DurabilityProof>;
+}
+
+impl NodeLogShipper {
+    pub async fn submit(&self, submission: NodeLogSubmission)
+        -> Result<CommitTicket>;
+    pub async fn shutdown(&self) -> Result<()>;
 }
 
 pub struct NodeLogRecovery;

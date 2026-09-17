@@ -24,6 +24,7 @@ mod maintenance;
 mod node;
 mod node_log;
 mod node_log_recovery;
+mod node_log_shipper;
 mod node_log_state;
 mod node_log_transport;
 mod peer;
@@ -102,6 +103,7 @@ pub use node_log_recovery::{
     CompletedNodeRecovery, NodeLogRecovery, RecoveryCell, RecoveryCoordinator, SealedSession,
     recoverable_cells,
 };
+pub use node_log_shipper::{NodeLogShipper, NodeLogSubmission};
 pub use node_log_state::{NodeLogPhase, NodeLogStatus, NodeRecoveryClaim};
 pub use node_log_transport::{
     AppendRequest, LocalFollowerTransport, NodeLogTransport, RetireRequest, SealRequest,
