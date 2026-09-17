@@ -1000,7 +1000,7 @@ gate is a correctness regression, not an optional optimization.
 The server now exposes `crab_http_server::state_observing_body` as the narrow
 HTTP adapter. It consumes one input only after the previous body chunk has
 completed, invokes `CellStateStream::emit` before encoding each chunk, maps
-disconnects and body errors to `StateStreamCancellation`, and owns no queue or
+stream errors to body I/O errors, cancels on body drop, and owns no queue or
 scheduler of its own. Product routes still choose their media type (SSE or a
 custom chunk format) and must set the corresponding response headers.
 
