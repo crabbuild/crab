@@ -66,8 +66,8 @@ true:
    when the exact root reached object storage.
 3. A response cannot reveal a SQLite state newer than the durability proof that
    released it. This includes successful mutations, durable business errors,
-   and reads performed after a mutation in the same serialized actor. The
-   current Cell API does not stream results after observing mutable Cell state.
+   reads performed after a mutation in the same serialized actor, and every
+   chunk emitted by `CellStateStream`.
 4. A successor cannot open SQLite until the predecessor node-log session is
    absent-with-proof or sealed and every recovered tail is pinned by Cell
    control.
