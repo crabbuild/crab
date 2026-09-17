@@ -154,8 +154,8 @@ recovery path.
 | Strict frame codec plus capacity- and failure-domain-aware deterministic selection, retrying automatic enrollment, activation, coverage, recovery claims, object-covered epoch rotation, and clean log close | None for this slice |
 | Crash-safe, node-budgeted follower store under a persisted physical `NodeId`, authenticated remote append/seal/tail/retire transport, a bounded node-wide batched shipper, a recovery-first management-listener lifecycle, and startup lane scrub/quarantine | None for this slice |
 | Authoritative create and refresh drive a terminal monotonic node-lease guard; admission, actor dispatch, Cell-control CAS, durability proof, and output acceptance all check it | Fleet-proof watermarks for future streamed Cell responses |
-| Write-all durability gate, first-fsynced-batch activation, actor cut submission, fleet-first command release, object fallback, and contiguous authoritative object watermark | A dual-head actor that can begin the next command before prior fleet-proven cuts finish object publication |
-| Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | Early schema-migration response release |
+| Write-all durability gate, first-fsynced-batch activation, actor cut submission, fleet-first command and schema-migration release, object fallback, and contiguous authoritative object watermark | A dual-head actor that can begin the next command before prior fleet-proven cuts finish object publication |
+| Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | None for this slice |
 | Cell control attachment and takeover consumption of overlays; server drain closes a fully object-covered epoch before session withdrawal; grace-aged retired follower lanes are deleted only after authority stops naming their epoch | Live multi-node proof |
 
 The session record now owns one CAS-protected log epoch, its exact sorted member
@@ -183,8 +183,8 @@ instead of being assumed independent. Rotation closes
 the old gate only after every issued sequence is object-covered, best-effort
 retires old lanes behind durable append fences, and CASes a fresh inactive
 epoch. Recruitment retries while the node remains healthy and leaves a
-one-node fleet on the object path. Early schema-migration response release and
-dual-head actor continuation remain gated. The preferred
+one-node fleet on the object path. Dual-head actor continuation remains gated.
+The preferred
 shard-zero scanner now inventories expired active node
 logs, claims at most two concurrently, scans at most 10,000 affected Cells,
 renews each recovery claim while gathering and pinning, seals the session, and
@@ -197,7 +197,10 @@ failure of the fleet path falls back to object proof. The actor stays busy until
 object publication finishes, so reads and later commands cannot observe
 unpublished state. This is correct but not yet the target dual-head throughput
 model. Schema-migration cuts use the same follower/object race and recovery
-coverage, but their handle-changing response still waits for object publication.
+coverage. A successful fleet proof may release the successor handle before
+object publication; its admission is already installed, so requests queue
+behind the still-owned publication task. Object-only migrations continue to
+wait for exact root publication.
 An active predecessor log cannot be converted directly from a session fence
 into Cell takeover authority: only the coordinator's successful post-seal
 result carries `NodeTakeoverProof`.

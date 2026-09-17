@@ -956,6 +956,7 @@ struct QueuedResolve {
 struct QueuedMigration {
     cell: CellId,
     admission: Arc<CellAdmission>,
+    successor_admission: Arc<CellAdmission>,
     plan: MigrationPlan,
     now_ms: i64,
     reply: Option<oneshot::Sender<crate::Result<MigratedAdmission>>>,
@@ -1266,7 +1267,7 @@ fn handle_message(
                 send_command_reply(&mut command, Err(Error::CellNotActive));
                 return;
             }
-            if active.fenced || active.draining() {
+            if active.fenced || active.drain.is_some() || active.shutdown_drain {
                 let error = if active.fenced {
                     Error::Fenced
                 } else {
@@ -1287,7 +1288,7 @@ fn handle_message(
                 send_query_reply(&mut query, Err(Error::CellNotActive));
                 return;
             }
-            if active.fenced || active.draining() {
+            if active.fenced || active.drain.is_some() || active.shutdown_drain {
                 let error = if active.fenced {
                     Error::Fenced
                 } else {
@@ -1312,7 +1313,7 @@ fn handle_message(
                 send_resolve_reply(&mut resolve, Ok(Resolution::Unknown));
                 return;
             }
-            if active.draining() {
+            if active.drain.is_some() || active.shutdown_drain {
                 send_resolve_reply(&mut resolve, Err(Error::CellDraining));
                 return;
             }
@@ -1347,6 +1348,7 @@ fn handle_message(
                 return;
             }
             active.migrating = true;
+            active.admission = Arc::clone(&migration.successor_admission);
             active.queue.push_back(QueuedWork::Migration(migration));
             start_next(active, pool, tasks, node_lease);
         }
@@ -1610,10 +1612,15 @@ async fn execute_migration(
             match durability {
                 Err(error) => Err(error),
                 Ok(durability) => {
+                    let cell = migration.cell;
+                    let early_outcome = MigrationOutcome {
+                        code: pending.code(),
+                        schema: pending.to_schema(),
+                        commit_sequence: pending.commit_sequence(),
+                    };
                     let object = async {
                         let prepared = publisher.prepare_migration(&pending).await?;
-                        pool.bind_migration_prepared(migration.cell, prepared.clone())
-                            .await?;
+                        pool.bind_migration_prepared(cell, prepared.clone()).await?;
                         let root = publisher
                             .publish_migration(
                                 &prepared,
@@ -1625,7 +1632,7 @@ async fn execute_migration(
                         if let Some(durability) = durability.as_ref() {
                             durability.prove_object().await?;
                         }
-                        pool.confirm_migration_published(migration.cell, root).await
+                        pool.confirm_migration_published(cell, root).await
                     };
                     tokio::pin!(object);
                     match durability.as_ref() {
@@ -1634,7 +1641,19 @@ async fn execute_migration(
                             tokio::pin!(fleet);
                             tokio::select! {
                                 result = &mut object => result,
-                                _ = &mut fleet => object.await,
+                                fleet = &mut fleet => {
+                                    if fleet.is_ok() {
+                                        let admission = Arc::clone(&migration.successor_admission);
+                                        send_migration_reply(
+                                            &mut migration,
+                                            Ok(MigratedAdmission {
+                                                admission,
+                                                outcome: early_outcome,
+                                            }),
+                                        );
+                                    }
+                                    object.await
+                                }
                             }
                         }
                         None => object.await,
@@ -2062,8 +2081,7 @@ fn handle_task(
                 Ok(outcome) if !active.fenced => {
                     active.code = outcome.code;
                     active.schema = outcome.schema;
-                    let admission = new_cell_admission();
-                    active.admission = admission.clone();
+                    let admission = Arc::clone(&migration.successor_admission);
                     send_migration_reply(
                         &mut migration,
                         Ok(MigratedAdmission { admission, outcome }),

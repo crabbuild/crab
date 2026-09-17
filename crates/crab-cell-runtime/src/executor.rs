@@ -151,7 +151,7 @@ impl PendingMigration {
     }
 }
 
-/// Published identity of one completed schema migration.
+/// Durably proven identity of one completed schema migration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MigrationOutcome {
     pub code: Digest,
@@ -827,7 +827,7 @@ impl CellExecutor {
             .ok_or(Error::PendingPublication)
     }
 
-    /// Releases one migration only after its exact schema-bearing root publishes.
+    /// Finalizes local migration state after its exact schema-bearing root publishes.
     pub fn confirm_migration_published(
         &mut self,
         root: &crab_ltx::RootRef,

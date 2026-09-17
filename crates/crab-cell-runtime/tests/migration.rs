@@ -1,20 +1,30 @@
 use std::{
+    fmt,
     future::Future,
     pin::Pin,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use crab_cell_runtime::{
     ApplicationId, BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellCatalog,
-    CellModule, CellRuntime, CellTarget, Digest, HandlerOutcome, IncarnationId,
-    MigrationDescriptor, MigrationPeerClient, ModuleDescriptor, NamespaceDescriptor, NamespaceId,
-    Owner, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerPrincipal, PeerRoundTrip,
-    PeerSigner, PeerVerifier, Registry, RegistryBuilder, RetainedCodeDescriptor, SessionId,
-    SqlWorkerPool, TenantId, VerifiedPeerRequest,
+    CellModule, CellRuntime, CellTarget, Digest, DurabilityGate, HandlerOutcome, IncarnationId,
+    LocalFollowerTransport, MigrationDescriptor, MigrationPeerClient, ModuleDescriptor,
+    NamespaceDescriptor, NamespaceId, NodeDurability, NodeId, NodeLeaseGuard, NodeLogAuthority,
+    NodeLogRotationBarrier, NodeLogShipper, NodeLogTransport, Owner, PeerAuthorizer,
+    PeerCellResolver, PeerDispatcher, PeerPrincipal, PeerRoundTrip, PeerSigner, PeerVerifier,
+    Registry, RegistryBuilder, RetainedCodeDescriptor, SessionId, SqlWorkerPool, TenantId,
+    VerifiedPeerRequest,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{CellStorageLayout, Store};
-use object_store::{memory::InMemory, path::Path};
+use futures_util::stream::BoxStream;
+use object_store::{
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult, memory::InMemory, path::Path,
+};
 
 const MODULE: &str = "migration-test";
 const NAMESPACE: NamespaceId = NamespaceId::from_bytes([61; 16]);
@@ -24,6 +34,117 @@ const MIGRATION_TWO: &str = "ALTER TABLE records ADD COLUMN label TEXT";
 const PREDECESSOR_CODE: Digest = Digest::from_bytes([60; 32]);
 
 struct MigrationModule;
+
+struct MigrationNodeAuthority;
+
+impl NodeLogAuthority for MigrationNodeAuthority {
+    fn activate<'a>(
+        &'a self,
+        _log_epoch: u64,
+    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn advance_coverage<'a>(
+        &'a self,
+        _log_epoch: u64,
+        _tiered_through: u64,
+    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn close<'a>(
+        &'a self,
+        _barrier: &'a NodeLogRotationBarrier,
+    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[derive(Debug)]
+struct PausedPutStore {
+    inner: Arc<InMemory>,
+    pause_next: AtomicBool,
+    started: Arc<tokio::sync::Barrier>,
+    release: Arc<tokio::sync::Barrier>,
+}
+
+impl PausedPutStore {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(InMemory::new()),
+            pause_next: AtomicBool::new(false),
+            started: Arc::new(tokio::sync::Barrier::new(2)),
+            release: Arc::new(tokio::sync::Barrier::new(2)),
+        }
+    }
+
+    fn pause_next(&self) {
+        self.pause_next.store(true, Ordering::Release);
+    }
+}
+
+impl fmt::Display for PausedPutStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("paused-put-store")
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for PausedPutStore {
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        options: PutOptions,
+    ) -> object_store::Result<PutResult> {
+        if self.pause_next.swap(false, Ordering::AcqRel) {
+            self.started.wait().await;
+            self.release.wait().await;
+        }
+        self.inner.put_opts(location, payload, options).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        options: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(location, options).await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &Path,
+        options: GetOptions,
+    ) -> object_store::Result<GetResult> {
+        self.inner.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
 
 impl CellModule for MigrationModule {
     const NAME: &'static str = MODULE;
@@ -182,8 +303,9 @@ async fn migration_replaces_capability_publishes_schema_and_restores_exact_root(
     .unwrap();
     let cell = target.cell_id();
     let incarnation = IncarnationId::from_bytes([66; 16]);
+    let object_store = Arc::new(PausedPutStore::new());
     let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
+        Store::new(object_store.clone()),
         Path::from("migration-runtime"),
         [65; 16],
     );
@@ -233,6 +355,30 @@ async fn migration_replaces_capability_publishes_schema_and_restores_exact_root(
         )
         .await
         .unwrap();
+    let follower_directory = tempfile::TempDir::new().unwrap();
+    let follower = NodeId::from_bytes([84; 16]);
+    let follower_store = crab_cell_runtime::FollowerStore::open(
+        follower_directory.path().to_owned(),
+        Limits::default(),
+        crab_cell_runtime::DiskBudget::new(1 << 30),
+    )
+    .unwrap();
+    let transport: Arc<dyn NodeLogTransport> =
+        Arc::new(LocalFollowerTransport::new(follower, follower_store));
+    let gate =
+        DurabilityGate::new(first_session, NodeId::from_bytes([85; 16]), 1, [follower]).unwrap();
+    let shipper =
+        NodeLogShipper::new(gate.clone(), Arc::clone(&transport), Limits::default()).unwrap();
+    let durability = Arc::new(NodeDurability::new(
+        gate,
+        shipper,
+        Arc::new(MigrationNodeAuthority),
+        transport,
+        NodeLeaseGuard::new(0, 60_000).unwrap(),
+    ));
+    runtime
+        .install_node_durability(target.application(), durability)
+        .unwrap();
     let old_handle = handle.clone();
     let plan = registry
         .next_migration(NAMESPACE, handle.code(), handle.schema())
@@ -241,7 +387,40 @@ async fn migration_replaces_capability_publishes_schema_and_restores_exact_root(
     assert_eq!(plan.from_code(), PREDECESSOR_CODE);
     assert_eq!(plan.to_code(), code);
     let migration_digest = plan.digest().unwrap();
-    let migrated = handle.migrate(plan, 10).await.unwrap();
+    object_store.pause_next();
+    let migrated =
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle.migrate(plan, 10))
+            .await
+            .unwrap()
+            .unwrap();
+    object_store.started.wait().await;
+    let queued_handle = migrated.handle.clone();
+    let mut queued = tokio::spawn(async move {
+        queued_handle
+            .query(1, 8, |connection| {
+                Ok(connection
+                    .query_row("SELECT schema_version FROM sys_meta", [], |row| {
+                        row.get::<_, u32>(0)
+                    })?
+                    .to_be_bytes()
+                    .to_vec())
+            })
+            .await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut queued)
+            .await
+            .is_err()
+    );
+    object_store.release.wait().await;
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), queued)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        2_u32.to_be_bytes()
+    );
     assert_eq!(migrated.outcome.code, code);
     assert_eq!(migrated.outcome.schema, 2);
     assert_eq!(migrated.outcome.commit_sequence, 1);
