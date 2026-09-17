@@ -852,7 +852,8 @@ pub async fn serve(config: Config) -> Result<()> {
         repository_cells.clone(),
         session,
         scheduler_status.clone(),
-    )?;
+    )?
+    .with_node_recovery(Arc::clone(&node_log_transport));
     let advertised = match node_publisher.publish_initial().await {
         Ok(advertised) => advertised,
         Err(error) => {

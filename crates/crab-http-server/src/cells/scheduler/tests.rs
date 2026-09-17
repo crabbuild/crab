@@ -7,15 +7,17 @@ use std::{
     },
 };
 
+use bytes::Bytes;
 use crab_cell_runtime::{
     ActivityContext, ActivityExecution, ApplicationId, BlockingActivityHandler, BuildDescriptor,
-    CellModule, CellReplica, CellRuntime, CellTarget, Digest, IncarnationId, MaintenanceModule,
-    MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor, NamespaceId, NodeAdvertisement,
-    NodeCapacity, OperationDescriptor, Owner, PeerRoundTrip, PeerSigner, RegistryBuilder,
-    ReplicaLimits, RetainedCodeDescriptor, SqlWorkerPool, TenantId, WorkflowAction,
-    WorkflowActivityModule, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowModule,
-    WorkflowNamespace, WorkflowStatus, install_workflow_schema, register_blocking_activity,
-    register_maintenance, register_workflow, register_workflow_activities,
+    CellAuthority, CellCatalog, CellModule, CellReplica, CellRuntime, CellTarget, Digest,
+    IncarnationId, MaintenanceModule, MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor,
+    NamespaceId, NodeAdvertisement, NodeCapacity, OperationDescriptor, Owner, PeerRoundTrip,
+    PeerSigner, RecoveryManifestStore, RegistryBuilder, ReplicaLimits, RetainedCodeDescriptor,
+    SqlWorkerPool, TenantId, WorkflowAction, WorkflowActivityModule, WorkflowContext,
+    WorkflowDecision, WorkflowDefinition, WorkflowModule, WorkflowNamespace, WorkflowStatus,
+    install_workflow_schema, register_blocking_activity, register_maintenance, register_workflow,
+    register_workflow_activities,
 };
 use crab_storage::{CellStorageLayout, Store};
 use ed25519_dalek::SigningKey;
@@ -65,6 +67,186 @@ const fn operation(id: u32, input_limit: u32, output_limit: u32) -> OperationDes
         input_limit,
         output_limit,
     }
+}
+
+#[tokio::test]
+async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
+    let application = ApplicationId::from_bytes([61; 16]);
+    let tenant = TenantId::from_bytes([62; 16]);
+    let layout = CellStorageLayout::new(
+        Store::new(Arc::new(InMemory::new())),
+        Path::from("scheduler-recovery"),
+        *application.as_bytes(),
+    );
+    let fleet = Digest::from_bytes([63; 32]);
+    let image = Digest::from_bytes([64; 32]);
+    let release = Digest::from_bytes([65; 32]);
+    let certificate = Digest::from_bytes([66; 32]);
+    let key = SigningKey::from_bytes(&[67; 32]);
+    let leader = crab_cell_runtime::SessionId::from_bytes([68; 16]);
+    let member = crab_cell_runtime::SessionId::from_bytes([69; 16]);
+    let claimant = crab_cell_runtime::SessionId::from_bytes([70; 16]);
+    let now_ms = super::super::unix_now_ms().unwrap();
+    let initial_ms = now_ms - 20_000;
+    let capacity = NodeCapacity {
+        free_memory_bytes: 1 << 30,
+        free_disk_bytes: 1 << 30,
+        follower_free_bytes: 1 << 30,
+        job_credits: 1,
+        log_protocol: crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION,
+    };
+    let advertisement = |session, endpoint: &str, progress, issued_at_ms, expires_at_ms| {
+        NodeAdvertisement::sign(
+            session,
+            endpoint.into(),
+            fleet,
+            certificate,
+            image,
+            release,
+            &key,
+            progress,
+            issued_at_ms,
+            expires_at_ms,
+            vec![Digest::from_bytes([71; 32])],
+            vec![1],
+            capacity,
+        )
+        .unwrap()
+    };
+    let directory = NodeDirectory::new(layout.clone(), fleet, image, release);
+    let leader_record = directory
+        .create(
+            advertisement(
+                leader,
+                "https://expired.internal:8081",
+                1,
+                initial_ms,
+                initial_ms + 15_000,
+            ),
+            initial_ms,
+        )
+        .await
+        .unwrap();
+    let member_record = directory
+        .create(
+            advertisement(
+                member,
+                "https://follower.internal:8081",
+                1,
+                initial_ms,
+                initial_ms + 15_000,
+            ),
+            initial_ms,
+        )
+        .await
+        .unwrap();
+    let enrolled = directory
+        .recruit_log(&leader_record, 1, 1, 2, initial_ms + 1)
+        .await
+        .unwrap();
+    let active = directory
+        .activate_log(&enrolled, initial_ms + 2)
+        .await
+        .unwrap();
+    directory
+        .advance_log_coverage(&active, 1, initial_ms + 3)
+        .await
+        .unwrap();
+    directory
+        .refresh(
+            &member_record,
+            advertisement(
+                member,
+                "https://follower.internal:8081",
+                2,
+                now_ms,
+                now_ms + 15_000,
+            ),
+            now_ms,
+        )
+        .await
+        .unwrap();
+    directory
+        .create(
+            advertisement(
+                claimant,
+                "https://claimant.internal:8081",
+                1,
+                now_ms,
+                now_ms + 15_000,
+            ),
+            now_ms,
+        )
+        .await
+        .unwrap();
+
+    let follower_directory = tempfile::TempDir::new().unwrap();
+    let follower = crab_cell_runtime::FollowerStore::open(
+        follower_directory.path().to_owned(),
+        super::super::repository_replica_limits(),
+        crab_cell_runtime::DiskBudget::new(1 << 30),
+    )
+    .unwrap();
+    let source = tempfile::TempDir::new().unwrap();
+    let mut database = crab_ltx::ManagedDb::open(
+        &source.path().join("follower.sqlite"),
+        super::super::repository_replica_limits(),
+    )
+    .unwrap();
+    database
+        .transaction(|transaction| transaction.execute_batch("CREATE TABLE values_(v)"))
+        .unwrap();
+    let capture = database.capture().unwrap();
+    let segment = capture.segments.first().unwrap();
+    let frame = crab_ltx::encode_node_frame(
+        crab_ltx::NodeFrameScope {
+            leader_session: *leader.as_bytes(),
+            log_epoch: 1,
+            node_sequence: 1,
+            application: *application.as_bytes(),
+            cell: [72; 32],
+            incarnation: [73; 16],
+            cell_epoch: 1,
+            commit_sequence: 1,
+        },
+        segment.info().clone(),
+        Bytes::from(std::fs::read(segment.path()).unwrap()),
+        super::super::repository_replica_limits(),
+    )
+    .unwrap()
+    .encoded()
+    .clone();
+    follower.append(leader, 1, vec![frame], 0).await.unwrap();
+    database.close().unwrap();
+    let transport: Arc<dyn crab_cell_runtime::NodeLogTransport> = Arc::new(
+        crab_cell_runtime::LocalFollowerTransport::new(member, follower),
+    );
+    recover_node_session(
+        directory.clone(),
+        CellCatalog::new(layout.clone(), tenant),
+        CellAuthority::new(layout.clone()),
+        RecoveryManifestStore::new(layout, super::super::repository_replica_limits()),
+        transport,
+        leader,
+        claimant,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        directory
+            .recovery_candidates(claimant, super::super::unix_now_ms().unwrap(), 2)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        directory
+            .takeover_proof(leader, claimant, super::super::unix_now_ms().unwrap())
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 struct SchedulerWorkflowDefinition;

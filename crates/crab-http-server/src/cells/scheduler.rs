@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    future::Future,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
@@ -10,10 +11,11 @@ use std::{
 use crab_cell_runtime::{
     ActivityRunOutcome, ApplicationIdentity, BlockingActivityPool, BlockingActivityReservation,
     CatalogProof, CatalogShardScan, CellAuthority, CellCatalog, CellId, CellTarget, ControlState,
-    DueCellScan, EffectRunOutcome, InvocationError, MaintenanceTickOutcome, MaintenanceTickRequest,
-    MigrationFailure, MigrationProgressAttempt, MigrationProgressStore, MutationIdentity,
-    NodeDirectory, Registry, ReleaseState, ReleaseStore, RequestId, SchedulerFleet, SessionId,
-    preferred_scanner,
+    DueCellScan, EffectRunOutcome, FencedNodeSession, InvocationError, MaintenanceTickOutcome,
+    MaintenanceTickRequest, MigrationFailure, MigrationProgressAttempt, MigrationProgressStore,
+    MutationIdentity, NodeDirectory, NodeLogRecovery, NodeLogTransport, RecoveryCoordinator,
+    RecoveryManifestStore, Registry, ReleaseState, ReleaseStore, RequestId, SchedulerFleet,
+    SessionId, preferred_scanner, recoverable_cells,
 };
 use crab_storage::CellStorageLayout;
 use tokio_util::sync::CancellationToken;
@@ -32,6 +34,9 @@ const MAX_MIGRATION_SCANS_PER_CYCLE: usize = 128;
 const SCHEDULER_STALE_AFTER_MS: i64 = 15_000;
 const NODE_COLLECTION_INTERVAL_MS: i64 = 60_000;
 const NODE_COLLECTION_LIMIT: usize = 128;
+const MAX_NODE_RECOVERY_JOBS: usize = 2;
+const MAX_NODE_RECOVERY_CELLS: usize = 10_000;
+const RECOVERY_CLAIM_HEARTBEAT: Duration = Duration::from_secs(10);
 
 /// Shared scanner progress used by enrollment, readiness and metrics.
 #[derive(Clone)]
@@ -98,6 +103,10 @@ pub(crate) struct RepositoryCellScheduler {
     migration_scans: HashMap<u8, MigrationShardScan>,
     migration_cells: Arc<Mutex<HashSet<CellId>>>,
     migration_jobs: tokio::task::JoinSet<crate::Result<()>>,
+    node_log_transport: Option<Arc<dyn NodeLogTransport>>,
+    recovery_sessions: Arc<Mutex<HashSet<SessionId>>>,
+    recovery_jobs: tokio::task::JoinSet<crate::Result<SessionId>>,
+    recovery_manifests: RecoveryManifestStore,
     next_migration_shard: u8,
     next_shard: u8,
     activity_admission: Arc<tokio::sync::Semaphore>,
@@ -126,7 +135,7 @@ impl RepositoryCellScheduler {
             catalog: CellCatalog::new(layout.clone(), identity.tenant()),
             authority: CellAuthority::new(layout.clone()),
             releases: ReleaseStore::new(layout.clone(), identity)?,
-            migration_progress: MigrationProgressStore::new(layout, identity)?,
+            migration_progress: MigrationProgressStore::new(layout.clone(), identity)?,
             directory,
             router,
             session,
@@ -138,6 +147,13 @@ impl RepositoryCellScheduler {
             migration_scans: HashMap::new(),
             migration_cells: Arc::new(Mutex::new(HashSet::new())),
             migration_jobs: tokio::task::JoinSet::new(),
+            node_log_transport: None,
+            recovery_sessions: Arc::new(Mutex::new(HashSet::new())),
+            recovery_jobs: tokio::task::JoinSet::new(),
+            recovery_manifests: RecoveryManifestStore::new(
+                layout.clone(),
+                super::repository_replica_limits(),
+            ),
             next_migration_shard: 0,
             next_shard: 0,
             activity_admission: Arc::new(tokio::sync::Semaphore::new(
@@ -152,6 +168,12 @@ impl RepositoryCellScheduler {
         })
     }
 
+    #[must_use]
+    pub(crate) fn with_node_recovery(mut self, transport: Arc<dyn NodeLogTransport>) -> Self {
+        self.node_log_transport = Some(transport);
+        self
+    }
+
     pub(crate) async fn run(mut self, cancellation: CancellationToken) -> crate::Result<()> {
         loop {
             if cancellation.is_cancelled() {
@@ -159,6 +181,7 @@ impl RepositoryCellScheduler {
             }
             self.reap_activity_jobs();
             self.reap_migration_jobs();
+            self.reap_recovery_jobs();
             match self.scan_once().await {
                 Ok(()) => self.status.mark_completed(super::unix_now_ms()?),
                 Err(error) => {
@@ -172,8 +195,10 @@ impl RepositoryCellScheduler {
         }
         self.activity_jobs.abort_all();
         self.migration_jobs.abort_all();
+        self.recovery_jobs.abort_all();
         while self.activity_jobs.join_next().await.is_some() {}
         while self.migration_jobs.join_next().await.is_some() {}
+        while self.recovery_jobs.join_next().await.is_some() {}
         if let Some(pool) = &self.blocking_activities {
             pool.shutdown().await?;
         }
@@ -191,6 +216,7 @@ impl RepositoryCellScheduler {
             );
         }
         self.reap_migration_jobs();
+        self.reap_recovery_jobs();
         let now_ms = super::unix_now_ms()?;
         let advertisements = self.directory.live(now_ms, MAX_LIVE_NODES).await?;
         let nodes =
@@ -205,6 +231,9 @@ impl RepositoryCellScheduler {
                 .await?;
             self.last_node_collection_ms = now_ms;
             tracing::debug!(removed, "collected stale Cell node advertisements");
+        }
+        if preferred_scanner(0, &nodes)? == Some(self.session) {
+            self.schedule_node_recovery(now_ms).await?;
         }
         let start = self.next_shard;
         let mut assigned = Vec::new();
@@ -572,6 +601,55 @@ impl RepositoryCellScheduler {
         }
     }
 
+    fn reap_recovery_jobs(&mut self) {
+        while let Some(result) = self.recovery_jobs.try_join_next() {
+            match result {
+                Ok(Ok(session)) => {
+                    tracing::info!(?session, "sealed recovered Cell node log");
+                }
+                Ok(Err(error)) => tracing::warn!(error = %error, "Cell node-log recovery failed"),
+                Err(error) if !error.is_cancelled() => {
+                    tracing::warn!(error = %error, "Cell node-log recovery task failed");
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
+    async fn schedule_node_recovery(&mut self, now_ms: i64) -> crate::Result<()> {
+        let Some(transport) = self.node_log_transport.as_ref() else {
+            return Ok(());
+        };
+        let available = MAX_NODE_RECOVERY_JOBS.saturating_sub(self.recovery_jobs.len());
+        if available == 0 {
+            return Ok(());
+        }
+        let candidates = self
+            .directory
+            .recovery_candidates(self.session, now_ms, available)
+            .await?;
+        for session in candidates {
+            let Some(reservation) = self.reserve_recovery(session) else {
+                continue;
+            };
+            let directory = self.directory.clone();
+            let catalog = self.catalog.clone();
+            let authority = self.authority.clone();
+            let manifests = self.recovery_manifests.clone();
+            let transport = Arc::clone(transport);
+            let claimant = self.session;
+            self.recovery_jobs.spawn(async move {
+                let _reservation = reservation;
+                recover_node_session(
+                    directory, catalog, authority, manifests, transport, session, claimant,
+                )
+                .await?;
+                Ok(session)
+            });
+        }
+        Ok(())
+    }
+
     fn reserve_migration(&self, cell: CellId) -> Option<MigrationCellReservation> {
         let mut cells = self
             .migration_cells
@@ -592,6 +670,19 @@ impl RepositoryCellScheduler {
             cell,
             cells: Arc::clone(&self.activity_cells),
         })
+    }
+
+    fn reserve_recovery(&self, session: SessionId) -> Option<RecoverySessionReservation> {
+        let mut sessions = self
+            .recovery_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        sessions
+            .insert(session)
+            .then(|| RecoverySessionReservation {
+                session,
+                sessions: Arc::clone(&self.recovery_sessions),
+            })
     }
 
     fn reserve_blocking_activity(
@@ -647,6 +738,11 @@ struct MigrationCellReservation {
     cells: Arc<Mutex<HashSet<CellId>>>,
 }
 
+struct RecoverySessionReservation {
+    session: SessionId,
+    sessions: Arc<Mutex<HashSet<SessionId>>>,
+}
+
 impl Drop for MigrationCellReservation {
     fn drop(&mut self) {
         self.cells
@@ -662,6 +758,70 @@ impl Drop for ActivityCellReservation {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&self.cell);
+    }
+}
+
+impl Drop for RecoverySessionReservation {
+    fn drop(&mut self) {
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.session);
+    }
+}
+
+async fn recover_node_session(
+    directory: NodeDirectory,
+    catalog: crab_cell_runtime::CellCatalog,
+    authority: CellAuthority,
+    manifests: RecoveryManifestStore,
+    transport: Arc<dyn NodeLogTransport>,
+    session: SessionId,
+    claimant: SessionId,
+) -> crate::Result<()> {
+    let mut fenced = directory
+        .claim_expired(session, claimant, super::unix_now_ms()?)
+        .await?;
+    let cells = await_with_claim_heartbeat(
+        &directory,
+        &mut fenced,
+        recoverable_cells(&catalog, &authority, session, MAX_NODE_RECOVERY_CELLS),
+    )
+    .await?;
+    let recovery =
+        NodeLogRecovery::from_fenced(transport, &fenced, super::repository_replica_limits())?;
+    let coordinator = RecoveryCoordinator::new(recovery, manifests);
+    let recovery_fence = fenced.clone();
+    let controls = await_with_claim_heartbeat(
+        &directory,
+        &mut fenced,
+        coordinator.recover(recovery_fence, cells),
+    )
+    .await?;
+    coordinator
+        .finish(&directory, fenced, controls, super::unix_now_ms()?)
+        .await?;
+    Ok(())
+}
+
+async fn await_with_claim_heartbeat<T, F>(
+    directory: &NodeDirectory,
+    fenced: &mut FencedNodeSession,
+    future: F,
+) -> crate::Result<T>
+where
+    F: Future<Output = crab_cell_runtime::Result<T>>,
+{
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            result = &mut future => return result.map_err(Into::into),
+            () = tokio::time::sleep(RECOVERY_CLAIM_HEARTBEAT) => {
+                *fenced = directory
+                    .refresh_recovery_claim(fenced, super::unix_now_ms()?)
+                    .await?;
+            }
+        }
     }
 }
 

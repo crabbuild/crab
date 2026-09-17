@@ -418,16 +418,23 @@ impl RepositoryCellRouter {
                     release_after: false,
                 });
             }
-            let fenced = self
+            let now_ms = super::unix_now_ms()?;
+            match self
                 .peer
                 .directory
-                .claim_expired(
-                    owner.session,
-                    self.peer.owner.session,
-                    super::unix_now_ms()?,
-                )
-                .await?;
-            Some(fenced.direct_takeover()?)
+                .takeover_proof(owner.session, self.peer.owner.session, now_ms)
+                .await?
+            {
+                Some(proof) => Some(proof),
+                None => {
+                    let fenced = self
+                        .peer
+                        .directory
+                        .claim_expired(owner.session, self.peer.owner.session, now_ms)
+                        .await?;
+                    Some(fenced.direct_takeover()?)
+                }
+            }
         } else {
             None
         };

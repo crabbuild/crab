@@ -550,6 +550,107 @@ impl NodeDirectory {
         }
     }
 
+    /// Loads takeover authority already persisted by a completed node recovery.
+    pub async fn takeover_proof(
+        &self,
+        session: SessionId,
+        claimant: SessionId,
+        now_ms: i64,
+    ) -> Result<Option<NodeTakeoverProof>> {
+        if now_ms < 0 || claimant == session {
+            return Err(Error::Node("node takeover time is invalid"));
+        }
+        self.load(claimant, now_ms)
+            .await?
+            .ok_or(Error::Node("node takeover claimant is not live"))?;
+        let path = self.layout.node_path(session.as_bytes());
+        let Some((record, _)) = self.load_record_at(&path).await? else {
+            return Err(Error::Node("node takeover record is missing"));
+        };
+        let NodeRecord::Tombstone(tombstone) = record else {
+            return Ok(None);
+        };
+        if tombstone.session != session {
+            return Err(Error::Node("node tombstone session differs"));
+        }
+        let claimed_by_caller = tombstone.claimant == Some(claimant)
+            && tombstone
+                .claim_expires_at_ms
+                .is_some_and(|expires_at_ms| expires_at_ms > now_ms);
+        let ready = match tombstone.log.as_ref() {
+            Some(log) if matches!(log.phase(), NodeLogPhase::Sealed | NodeLogPhase::Retired) => {
+                true
+            }
+            Some(log) => !log.active() && claimed_by_caller,
+            None => claimed_by_caller,
+        };
+        Ok(ready.then_some(NodeTakeoverProof { session, claimant }))
+    }
+
+    /// Lists expired active logs whose claim is available to this live session.
+    pub async fn recovery_candidates(
+        &self,
+        claimant: SessionId,
+        now_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<SessionId>> {
+        if now_ms < 0 || limit == 0 || limit > MAX_STALE_COLLECTION_ITEMS {
+            return Err(Error::Node("node recovery candidate bound is invalid"));
+        }
+        self.load(claimant, now_ms)
+            .await?
+            .ok_or(Error::Node("node recovery claimant is not live"))?;
+        let prefix = self.layout.node_directory_path();
+        let mut stream = self.layout.store().inner().list(Some(&prefix));
+        let mut candidates = Vec::new();
+        while let Some(item) = stream.next().await {
+            let meta = item.map_err(|error| map_object_store_error(error, prefix.as_ref()))?;
+            let Some((record, _)) = self.load_record_at(&meta.location).await? else {
+                continue;
+            };
+            let session = record.session();
+            validate_record_path(&self.layout, session, &meta.location)?;
+            let eligible = match record {
+                NodeRecord::Advertisement(advertisement) => {
+                    self.validate_scope(&advertisement)?;
+                    advertisement.validate_shape()?;
+                    advertisement.verify_signature()?;
+                    if advertisement.issued_at_ms > now_ms.saturating_add(MAX_CLOCK_SKEW_MS) {
+                        return Err(Error::Node("advertised node issue time differs"));
+                    }
+                    advertisement.expires_at_ms <= now_ms
+                        && advertisement
+                            .log
+                            .as_ref()
+                            .is_some_and(NodeLogStatus::active)
+                }
+                NodeRecord::Tombstone(tombstone) => {
+                    let claim_available = tombstone.claimant == Some(claimant)
+                        || tombstone
+                            .claim_expires_at_ms
+                            .is_none_or(|expires_at_ms| expires_at_ms <= now_ms);
+                    claim_available
+                        && tombstone.log.as_ref().is_some_and(|log| {
+                            log.active()
+                                && matches!(
+                                    log.phase(),
+                                    NodeLogPhase::Open | NodeLogPhase::Recovering
+                                )
+                        })
+                }
+            };
+            if !eligible || session == claimant {
+                continue;
+            }
+            candidates.push(session);
+            if candidates.len() == limit {
+                break;
+            }
+        }
+        candidates.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        Ok(candidates)
+    }
+
     /// Extends an exact recovery claim while its claimant remains live.
     pub async fn refresh_recovery_claim(
         &self,

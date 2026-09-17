@@ -390,10 +390,11 @@ async fn expired_enrolled_log_becomes_a_renewable_recovery_claim() {
         .create(advertisement_for(member, &key, 1, NOW_MS), NOW_MS)
         .await
         .unwrap();
-    directory
+    let enrolled = directory
         .recruit_log(&created, 7, 1, 2, NOW_MS + 1)
         .await
         .unwrap();
+    directory.activate_log(&enrolled, NOW_MS + 2).await.unwrap();
     let claimant_record = directory
         .create(advertisement_for(claimant, &key, 1, NOW_MS), NOW_MS)
         .await
@@ -415,6 +416,13 @@ async fn expired_enrolled_log_becomes_a_renewable_recovery_claim() {
         .await
         .unwrap();
 
+    assert_eq!(
+        directory
+            .recovery_candidates(claimant, NOW_MS + 10_000, 2)
+            .await
+            .unwrap(),
+        [leader]
+    );
     let fenced = directory
         .claim_expired(leader, claimant, NOW_MS + 10_000)
         .await
@@ -422,6 +430,10 @@ async fn expired_enrolled_log_becomes_a_renewable_recovery_claim() {
     let log = fenced.log().unwrap();
     assert_eq!(log.phase(), NodeLogPhase::Recovering);
     assert_eq!(log.recovery().unwrap().claimant(), claimant);
+    assert!(matches!(
+        fenced.direct_takeover(),
+        Err(Error::PendingPublication)
+    ));
     directory
         .authorize_log_recovery(leader, claimant, member, 7, NOW_MS + 10_001)
         .await
@@ -439,6 +451,27 @@ async fn expired_enrolled_log_becomes_a_renewable_recovery_claim() {
         .unwrap();
     assert_eq!(renewed.claim_generation(), fenced.claim_generation());
     assert!(renewed.claim_expires_at_ms() > fenced.claim_expires_at_ms());
+    let sealed = directory
+        .seal_recovery(&renewed, None, NOW_MS + 15_001)
+        .await
+        .unwrap();
+    assert_eq!(sealed.log().phase(), NodeLogPhase::Sealed);
+    assert!(
+        directory
+            .recovery_candidates(claimant, NOW_MS + 15_002, 2)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        directory
+            .takeover_proof(leader, claimant, NOW_MS + 15_002)
+            .await
+            .unwrap()
+            .unwrap()
+            .session(),
+        leader
+    );
 }
 
 #[tokio::test]

@@ -3,9 +3,10 @@ use std::sync::Arc;
 use futures_util::future::join_all;
 
 use crate::{
-    ApplicationId, CellAuthority, Digest, Error, FencedNodeSession, NodeDirectory, NodeLogPhase,
-    NodeLogTransport, NodeTakeoverProof, RecoveryBase, RecoveryManifestStore, Result, SealRequest,
-    SealedNodeLog, SessionId, TailRequest, Transition, VersionedControl, build_recovery_overlays,
+    ApplicationId, CellAuthority, CellCatalog, Digest, Error, FencedNodeSession, NodeDirectory,
+    NodeLogPhase, NodeLogTransport, NodeTakeoverProof, RecoveryBase, RecoveryManifestStore, Result,
+    SealRequest, SealedNodeLog, SessionId, TailRequest, Transition, VersionedControl,
+    build_recovery_overlays,
 };
 
 /// Verified uncovered suffix gathered after every reachable follower is sealed.
@@ -52,6 +53,45 @@ pub struct CompletedNodeRecovery {
     pub takeover: NodeTakeoverProof,
 }
 
+/// Scans one application catalog for published Cells owned by a dead session.
+pub async fn recoverable_cells(
+    catalog: &CellCatalog,
+    authority: &CellAuthority,
+    owner: SessionId,
+    limit: usize,
+) -> Result<Vec<RecoveryCell>> {
+    if owner.as_bytes().iter().all(|byte| *byte == 0) || limit == 0 {
+        return Err(Error::Node("node recovery inventory bound is invalid"));
+    }
+    let mut cells = Vec::new();
+    for shard in 0_u16..=u8::MAX.into() {
+        let mut scan = catalog.scan_shard(shard as u8).await?;
+        while let Some(page) = scan.next_page().await? {
+            for proof in page.entries() {
+                let Some(observed) = authority.load(proof.entry().cell()).await? else {
+                    continue;
+                };
+                if observed.value().owner.as_ref().map(|owner| owner.session) != Some(owner)
+                    || observed.value().ltx_root().is_none()
+                {
+                    continue;
+                }
+                if cells.len() == limit {
+                    return Err(Error::Node(
+                        "node recovery Cell inventory exceeds its limit",
+                    ));
+                }
+                cells.push(RecoveryCell {
+                    application: catalog.application(),
+                    authority: authority.clone(),
+                    observed,
+                });
+            }
+        }
+    }
+    Ok(cells)
+}
+
 impl RecoveryCoordinator {
     #[must_use]
     pub const fn new(recovery: NodeLogRecovery, manifests: RecoveryManifestStore) -> Self {
@@ -71,9 +111,6 @@ impl RecoveryCoordinator {
         cells: Vec<RecoveryCell>,
     ) -> Result<Vec<VersionedControl>> {
         self.recovery.validate_fence(&fenced)?;
-        if cells.is_empty() {
-            return Err(Error::Node("recovery claim or Cell inventory differs"));
-        }
         let mut bases = Vec::with_capacity(cells.len());
         for cell in &cells {
             let control = cell.observed.value();
@@ -167,6 +204,18 @@ impl RecoveryCoordinator {
         now_ms: i64,
     ) -> Result<CompletedNodeRecovery> {
         let controls = self.recover(fenced.clone(), cells).await?;
+        self.finish(directory, fenced, controls, now_ms).await
+    }
+
+    /// Seals one still-current claim after all recovered controls were pinned.
+    pub async fn finish(
+        &self,
+        directory: &NodeDirectory,
+        fenced: FencedNodeSession,
+        controls: Vec<VersionedControl>,
+        now_ms: i64,
+    ) -> Result<CompletedNodeRecovery> {
+        self.recovery.validate_fence(&fenced)?;
         let mut manifest = None::<Digest>;
         for control in &controls {
             let recovery = control

@@ -154,7 +154,7 @@ recovery path.
 | Strict frame codec plus capacity-aware deterministic selection, authoritative enrollment, activation, coverage, recovery claims, and object-covered epoch rotation | Failure-domain-aware automatic recruitment and recovery-only startup |
 | Crash-safe, node-budgeted follower store plus authenticated remote append/seal/tail/retire transport | Live shipper batching and startup listener ordering |
 | Write-all durability gate with contiguous object watermark | Actor submission and response-gate integration |
-| Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, and non-forgeable takeover proof | Automated dead-session inventory and recovery scheduling |
+| Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | Recovery-only startup identity and listener ordering |
 | Cell control attachment and takeover consumption of overlays | Graceful drain, obsolete-marker collection, and live multi-node proof |
 
 The session record now owns one CAS-protected log epoch, its exact sorted member
@@ -169,9 +169,13 @@ the full one- or two-member ensemble before its CAS enrollment. Rotation closes
 the old gate only after every issued sequence is object-covered, best-effort
 retires old lanes behind durable append fences, and CASes a fresh inactive
 epoch. Automatic recruitment with failure-domain metadata, recovery-only
-startup, actor submission, automated session recovery, and obsolete-marker
-collection remain gated. Fleet proof is not activated, so current responses
-stay on the existing exact-root path until those remaining gates are complete.
+startup identity, actor submission, and obsolete-marker collection remain
+gated. The preferred shard-zero scanner now inventories expired active node
+logs, claims at most two concurrently, scans at most 10,000 affected Cells,
+renews each recovery claim while gathering and pinning, seals the session, and
+leaves a takeover proof that another request can reload. Fleet proof is not
+activated, so current responses stay on the existing exact-root path until
+the remaining gates are complete.
 An active predecessor log cannot be converted directly from a session fence
 into Cell takeover authority: only the coordinator's successful post-seal
 result carries `NodeTakeoverProof`.

@@ -1038,15 +1038,12 @@ async fn takeover_consumes_pinned_recovery_before_serving() {
         crab_cell_runtime::NodeLogRecovery::from_fenced(transport, &fenced, Limits::default())
             .unwrap();
     let coordinator = crab_cell_runtime::RecoveryCoordinator::new(recovery, manifests.clone());
+    let inventory = crab_cell_runtime::recoverable_cells(&catalog, &authority, leader, 10)
+        .await
+        .unwrap();
+    assert_eq!(inventory.len(), 1);
     let attached = coordinator
-        .recover(
-            fenced.clone(),
-            vec![crab_cell_runtime::RecoveryCell {
-                application: fixture.target.application(),
-                authority: authority.clone(),
-                observed: stale,
-            }],
-        )
+        .recover(fenced.clone(), inventory)
         .await
         .unwrap();
     assert_eq!(attached.len(), 1);

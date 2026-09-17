@@ -100,6 +100,7 @@ pub use node_log::{
 };
 pub use node_log_recovery::{
     CompletedNodeRecovery, NodeLogRecovery, RecoveryCell, RecoveryCoordinator, SealedSession,
+    recoverable_cells,
 };
 pub use node_log_state::{NodeLogPhase, NodeLogStatus, NodeRecoveryClaim};
 pub use node_log_transport::{
