@@ -3121,7 +3121,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             Some(StatCmd::Classes { json: classes_json }) => {
                 let _span = tracing::info_span!("stat_classes").entered();
                 let mode = OutputMode::from_flags(json || classes_json, false);
-                crab::cmd::stat::run_classes(mode).await?;
+                crab::cmd::stat::run_classes(mode, &cancel).await?;
                 Ok(ExitCode::SUCCESS)
             }
             Some(StatCmd::PushPlan {
