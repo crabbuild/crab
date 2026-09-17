@@ -726,7 +726,11 @@ mod tests {
         let mut database =
             crab_ltx::ManagedDb::open(&source.path().join("cell.sqlite"), limits).unwrap();
         database
-            .transaction(|transaction| transaction.execute_batch("CREATE TABLE values_(v)"))
+            .transaction(|transaction| {
+                transaction.execute_batch(
+                    "CREATE TABLE values_(v); INSERT INTO values_ VALUES(randomblob(2097152))",
+                )
+            })
             .unwrap();
         let capture = database.capture().unwrap();
         let segment = capture.segments.first().unwrap();
@@ -748,6 +752,7 @@ mod tests {
             limits,
         )
         .unwrap();
+        assert!(frame.encoded().len() > MAX_RECOVERY_PAGE_BYTES as usize);
         let root = tempfile::TempDir::new().unwrap();
         let store = FollowerStore::open(
             root.path().to_owned(),
