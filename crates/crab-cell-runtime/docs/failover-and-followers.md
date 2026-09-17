@@ -657,8 +657,9 @@ a protocol error and blocks the CAS.
 
 The long-lived HTTP runtime applies the same barrier when the current epoch
 reaches `1_000_000` issued node-log frames. A five-second controller observes
-the active binding, closes it through `NodeDurability::shutdown` (which waits
-for object coverage and is idempotent), recruits the next epoch, and atomically
+the active binding, closes it through the idempotent
+`NodeDurability::shutdown`, and retries `PendingPublication` until object
+coverage is contiguous. It then recruits the next epoch and atomically
 replaces the runtime binding. New Cell submissions read the current binding at
 the start of each durability attempt; a replacement therefore cannot create a
 second SQLite writer or a second Cell-control CAS owner. If recruitment is
