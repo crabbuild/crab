@@ -457,6 +457,9 @@ impl DurabilityGate {
     pub fn prove_object(&self, ticket: CommitTicket) -> Result<u64> {
         let mut state = self.lock()?;
         validate_ticket(&state, ticket)?;
+        if state.fenced {
+            return Err(Error::Fenced);
+        }
         for sequence in ticket.first_sequence..=ticket.last_sequence {
             state.object_covered.insert(sequence);
         }
@@ -826,6 +829,16 @@ mod tests {
         gate.fence();
         assert!(matches!(waiter.await.unwrap(), Err(Error::Fenced)));
         assert!(matches!(gate.acknowledge(node(3), 1), Err(Error::Fenced)));
+    }
+
+    #[test]
+    fn fencing_rejects_late_object_coverage() {
+        let gate = DurabilityGate::new(session(1), node(1), 2, [node(3)]).unwrap();
+        let ticket = gate.issue(1).unwrap();
+        gate.fence();
+
+        assert!(matches!(gate.prove_object(ticket), Err(Error::Fenced)));
+        assert_eq!(gate.tiered_through(), 0);
     }
 
     #[test]
