@@ -1528,15 +1528,15 @@ load schedule change:
 
 | Profile | CPU | Memory | Local SSD | Active Cells | Throughput target |
 | --- | --- | --- | --- | ---: | ---: |
-| Small | 1–2 vCPU | 2–4 GiB | 50–100 GiB | 1,000–2,000 | 1,000 mutations/s per node |
-| Medium | 4–8 vCPU | 8–16 GiB | 100–200 GiB | 2,000–6,000 | 1,000 mutations/s per node |
-| Large | 16 vCPU | 32–64 GiB | 500–1,000 GiB | 6,000–10,000 | 1,000 mutations/s per node |
+| Small | 1–2 vCPU | 2–4 GiB | 50–100 GiB | 1,000–10,000 | 1,000 mutations/s per node |
+| Medium | 4–8 vCPU | 8–16 GiB | 100–200 GiB | 1,000–10,000 | 1,000 mutations/s per node |
+| Large | 16 vCPU | 32–64 GiB | 500–1,000 GiB | 1,000–10,000 | 1,000 mutations/s per node |
 
-The active-Cell ranges are qualification planning bands, not a promise that
-every workload reaches the upper bound. A report must include the actual
-count, retained follower bytes, queue depth, and p50/p95/p99 latency. The
-1,000 mutations/s figure is always node-aggregate; a hot repository is
-qualified separately with the one-Cell schedule described below.
+The active-Cell range is the node admission envelope, not a promise that every
+workload reaches the upper bound. A report must include the actual count,
+retained follower bytes, queue depth, and p50/p95/p99 latency. The 1,000
+mutations/s figure is always node-aggregate; a hot repository is qualified
+separately with the one-Cell schedule described below.
 
 Use `qualify_http_load --aggregate-requests-per-second 1000` for the bounded
 request schedule. Its schema-v2 receipt rejects a run whose successful response
