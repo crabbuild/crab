@@ -128,11 +128,12 @@ impl NodeDurability {
     /// Callers must complete the exact Cell root CAS before invoking this method.
     pub async fn prove_object(&self, ticket: CommitTicket) -> Result<DurabilityProof> {
         self.node_lease.check()?;
-        let tiered_through = self.gate.prove_object(ticket)?;
+        let tiered_through = self.gate.preview_object(ticket)?;
         self.authority
             .advance_coverage(ticket.log_epoch(), tiered_through)
             .await?;
         self.node_lease.check()?;
+        self.gate.prove_object(ticket)?;
         let proof = self.gate.prove(ticket).await?;
         if proof.source() != DurabilitySource::Object {
             return Err(Error::Node("object proof lost its durability race"));
@@ -165,6 +166,7 @@ mod tests {
     struct AuthorityState {
         activations: Vec<u64>,
         coverage: Vec<(u64, u64)>,
+        reject_coverage: bool,
     }
 
     #[derive(Default)]
@@ -184,11 +186,11 @@ mod tests {
             tiered_through: u64,
         ) -> BoxFuture<'a, Result<()>> {
             Box::pin(async move {
-                self.0
-                    .lock()
-                    .unwrap()
-                    .coverage
-                    .push((log_epoch, tiered_through));
+                let mut state = self.0.lock().unwrap();
+                if state.reject_coverage {
+                    return Err(Error::Node("coverage rejected"));
+                }
+                state.coverage.push((log_epoch, tiered_through));
                 Ok(())
             })
         }
@@ -324,5 +326,32 @@ mod tests {
 
         assert_eq!(proof.source(), DurabilitySource::Object);
         assert_eq!(authority.0.lock().unwrap().coverage, vec![(2, 1)]);
+    }
+
+    #[tokio::test]
+    async fn rejected_object_coverage_does_not_release_a_local_proof() {
+        let gate = DurabilityGate::new(session(1), node(1), 2, [node(2)]).unwrap();
+        let transport: Arc<dyn NodeLogTransport> = Arc::new(ImmediateTransport);
+        let shipper = NodeLogShipper::new(
+            gate.clone(),
+            Arc::clone(&transport),
+            crab_ltx::Limits::default(),
+        )
+        .unwrap();
+        let authority = Arc::new(RecordingAuthority(Mutex::new(AuthorityState {
+            reject_coverage: true,
+            ..AuthorityState::default()
+        })));
+        let durability = NodeDurability::new(gate.clone(), shipper, authority, transport, lease());
+        let (_directory, cuts) = capture();
+        let ticket = durability.submit(submission(&cuts)).await.unwrap();
+
+        assert!(durability.prove_object(ticket).await.is_err());
+        assert_eq!(gate.tiered_through(), 0);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), gate.prove(ticket))
+                .await
+                .is_err()
+        );
     }
 }

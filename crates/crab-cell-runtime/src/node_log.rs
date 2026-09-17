@@ -467,6 +467,25 @@ impl DurabilityGate {
         Ok(tiered_through)
     }
 
+    pub(crate) fn preview_object(&self, ticket: CommitTicket) -> Result<u64> {
+        let state = self.lock()?;
+        validate_ticket(&state, ticket)?;
+        if state.fenced {
+            return Err(Error::Fenced);
+        }
+        let mut tiered_through = state.tiered_through;
+        while let Some(next) = tiered_through.checked_add(1) {
+            if state.object_covered.contains(&next)
+                || (ticket.first_sequence..=ticket.last_sequence).contains(&next)
+            {
+                tiered_through = next;
+            } else {
+                break;
+            }
+        }
+        Ok(tiered_through)
+    }
+
     #[must_use]
     pub fn tiered_through(&self) -> u64 {
         self.lock().map_or(0, |state| state.tiered_through)
