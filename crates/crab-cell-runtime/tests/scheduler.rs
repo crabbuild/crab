@@ -419,6 +419,7 @@ fn advertisement_with_capacity(
         issued_at_ms + 10_000,
         vec![Digest::from_bytes([5; 32])],
         vec![1],
+        crab_cell_runtime::NodeFailureDomain::default(),
         capacity,
     )
     .unwrap()

@@ -114,6 +114,7 @@ async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
             expires_at_ms,
             vec![Digest::from_bytes([71; 32])],
             vec![1],
+            crab_cell_runtime::NodeFailureDomain::default(),
             capacity,
         )
         .unwrap()
@@ -581,6 +582,7 @@ async fn scan_executes_registered_workflow_activity_without_blocking_the_scanner
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
+                crab_cell_runtime::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
@@ -753,6 +755,7 @@ async fn scan_cursor_advances_when_the_cycle_budget_is_exhausted() {
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
+                crab_cell_runtime::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
@@ -926,6 +929,7 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
+                crab_cell_runtime::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 0,
                     free_disk_bytes: 0,
@@ -955,6 +959,7 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
+                crab_cell_runtime::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
@@ -1090,6 +1095,7 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
                 stale_issued_at_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
+                crab_cell_runtime::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1,
                     free_disk_bytes: 1,
@@ -1118,6 +1124,7 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
+                crab_cell_runtime::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
@@ -1305,6 +1312,7 @@ async fn activating_release_migrates_idle_cell_before_ready_gate() {
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
+                crab_cell_runtime::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,

@@ -876,6 +876,7 @@ mod tests {
                     stale_issued_at_ms + 15_000,
                     registry.module_digests(),
                     vec![1],
+                    crab_cell_runtime::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,
@@ -910,6 +911,7 @@ mod tests {
                     now_ms + 15_000,
                     registry.module_digests(),
                     vec![1],
+                    crab_cell_runtime::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,

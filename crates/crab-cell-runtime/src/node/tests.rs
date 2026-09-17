@@ -105,6 +105,26 @@ fn advertisement_for_node_capacity(
     issued_at_ms: i64,
     capacity: NodeCapacity,
 ) -> NodeAdvertisement {
+    advertisement_for_node_capacity_in_domain(
+        node,
+        session,
+        key,
+        progress,
+        issued_at_ms,
+        NodeFailureDomain::default(),
+        capacity,
+    )
+}
+
+fn advertisement_for_node_capacity_in_domain(
+    node: NodeId,
+    session: SessionId,
+    key: &SigningKey,
+    progress: u64,
+    issued_at_ms: i64,
+    failure_domain: NodeFailureDomain,
+    capacity: NodeCapacity,
+) -> NodeAdvertisement {
     NodeAdvertisement::sign(
         node,
         session,
@@ -119,6 +139,7 @@ fn advertisement_for_node_capacity(
         issued_at_ms + 10_000,
         vec![Digest::from_bytes([6; 32]), Digest::from_bytes([7; 32])],
         vec![1],
+        failure_domain,
         capacity,
     )
     .unwrap()
@@ -283,6 +304,67 @@ async fn follower_selection_is_capacity_aware_deterministic_and_requires_full_sh
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn follower_selection_prefers_proven_zone_then_host_separation() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let leader = SessionId::from_bytes([1; 16]);
+    let same_zone = SessionId::from_bytes([2; 16]);
+    let remote_zone = SessionId::from_bytes([3; 16]);
+    let third_zone_same_host = SessionId::from_bytes([4; 16]);
+    let directory = directory();
+    let capacity = NodeCapacity {
+        free_memory_bytes: 1_000,
+        free_disk_bytes: 2_000,
+        follower_free_bytes: 2_000,
+        job_credits: 3,
+        log_protocol: NODE_LOG_PROTOCOL_VERSION,
+    };
+    for (session, zone, host) in [
+        (leader, "zone-a", "host-a"),
+        (same_zone, "zone-a", "host-b"),
+        (remote_zone, "zone-b", "host-c"),
+        (third_zone_same_host, "zone-c", "host-a"),
+    ] {
+        directory
+            .create(
+                advertisement_for_node_capacity_in_domain(
+                    node(session),
+                    session,
+                    &key,
+                    1,
+                    NOW_MS,
+                    NodeFailureDomain::new(Some(zone.into()), Some(host.into())).unwrap(),
+                    capacity,
+                ),
+                NOW_MS,
+            )
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        directory
+            .select_log_members(leader, 1_000, NOW_MS + 1, 4)
+            .await
+            .unwrap(),
+        [node(remote_zone), node(third_zone_same_host)]
+    );
+}
+
+#[test]
+fn failure_domain_rejects_unknown_or_ambiguous_labels() {
+    for invalid in [
+        String::new(),
+        " zone-a".into(),
+        "zone a".into(),
+        "zone-a\n".into(),
+        "a".repeat(254),
+    ] {
+        assert!(NodeFailureDomain::new(Some(invalid), None).is_err());
+    }
+    assert!(NodeFailureDomain::new(None, None).is_ok());
 }
 
 #[tokio::test]
@@ -798,6 +880,7 @@ async fn live_listing_rejects_misplaced_or_foreign_active_records() {
         NOW_MS + 10_000,
         vec![Digest::from_bytes([6; 32])],
         vec![1],
+        NodeFailureDomain::default(),
         NodeCapacity {
             free_memory_bytes: 1,
             free_disk_bytes: 1,
@@ -916,6 +999,7 @@ async fn invalid_signature_expiry_and_identity_change_fail_closed() {
             NOW_MS + 10_000,
             vec![Digest::from_bytes([6; 32])],
             vec![1],
+            NodeFailureDomain::default(),
             NodeCapacity {
                 free_memory_bytes: 1,
                 free_disk_bytes: 1,

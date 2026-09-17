@@ -4,6 +4,8 @@ management_listen = "127.0.0.1:8989"
 [cells]
 data_dir = "/var/lib/crab/cells"
 peer_advertise = "https://localhost:8989"
+failure_zone = "compose-local"
+failure_host = "node-c"
 peer_certificate = "/run/secrets/crab-peer/peer.crt"
 peer_private_key = "/run/secrets/crab-peer/peer.key"
 peer_ca = "/run/secrets/crab-peer/ca.crt"

@@ -95,7 +95,7 @@ pub use maintenance::{
 };
 pub use node::{
     FencedNodeSession, NODE_LOG_PROTOCOL_VERSION, NodeAdvertisement, NodeCapacity, NodeDirectory,
-    NodeTakeoverProof, SealedNodeLog, VersionedNodeAdvertisement,
+    NodeFailureDomain, NodeTakeoverProof, SealedNodeLog, VersionedNodeAdvertisement,
 };
 pub use node_durability::{NodeDurability, NodeLogAuthority};
 pub use node_lease::NodeLeaseGuard;

@@ -11,6 +11,7 @@ use crate::{
 
 const MAX_NODE_BYTES: u64 = 64 * 1024;
 const MAX_ENDPOINT_BYTES: usize = 512;
+const MAX_FAILURE_DOMAIN_BYTES: usize = 253;
 const MAX_MODULES: usize = 128;
 const MAX_PEER_VERSIONS: usize = 16;
 const MAX_ADVERTISEMENT_LIFETIME_MS: i64 = 15_000;
@@ -33,6 +34,48 @@ pub struct NodeCapacity {
     pub log_protocol: u32,
 }
 
+/// Stable topology labels used only to prefer independent follower nodes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NodeFailureDomain {
+    zone: Option<String>,
+    host: Option<String>,
+}
+
+impl NodeFailureDomain {
+    /// Validates optional zone and host labels advertised for one boot identity.
+    pub fn new(zone: Option<String>, host: Option<String>) -> Result<Self> {
+        let domain = Self { zone, host };
+        domain.validate()?;
+        Ok(domain)
+    }
+
+    #[must_use]
+    pub fn zone(&self) -> Option<&str> {
+        self.zone.as_deref()
+    }
+
+    #[must_use]
+    pub fn host(&self) -> Option<&str> {
+        self.host.as_deref()
+    }
+
+    fn validate(&self) -> Result<()> {
+        if [self.zone.as_deref(), self.host.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(|value| {
+                value.is_empty()
+                    || value.len() > MAX_FAILURE_DOMAIN_BYTES
+                    || !value.is_ascii()
+                    || value.bytes().any(|byte| !byte.is_ascii_graphic())
+            })
+        {
+            return Err(Error::Node("node failure domain is invalid"));
+        }
+        Ok(())
+    }
+}
+
 /// Signed, short-lived identity and capacity advertisement for one node session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NodeAdvertisement {
@@ -50,6 +93,7 @@ pub struct NodeAdvertisement {
     expires_at_ms: i64,
     module_digests: Vec<Digest>,
     peer_versions: Vec<u32>,
+    failure_domain: NodeFailureDomain,
     capacity: NodeCapacity,
     log: Option<NodeLogStatus>,
     signature: [u8; 64],
@@ -75,6 +119,7 @@ impl NodeAdvertisement {
         expires_at_ms: i64,
         module_digests: Vec<Digest>,
         peer_versions: Vec<u32>,
+        failure_domain: NodeFailureDomain,
         capacity: NodeCapacity,
     ) -> Result<Self> {
         let mut advertisement = Self {
@@ -92,6 +137,7 @@ impl NodeAdvertisement {
             expires_at_ms,
             module_digests,
             peer_versions,
+            failure_domain,
             capacity,
             log: None,
             signature: [0; 64],
@@ -166,6 +212,11 @@ impl NodeAdvertisement {
     }
 
     #[must_use]
+    pub const fn failure_domain(&self) -> &NodeFailureDomain {
+        &self.failure_domain
+    }
+
+    #[must_use]
     pub const fn capacity(&self) -> NodeCapacity {
         self.capacity
     }
@@ -237,6 +288,7 @@ impl NodeAdvertisement {
                 return Err(Error::Node("live node advertisement has a terminal log"));
             }
         }
+        self.failure_domain.validate()?;
         if self.capacity.follower_free_bytes > self.capacity.free_disk_bytes
             || (self.capacity.log_protocol == 0 && self.capacity.follower_free_bytes != 0)
         {
@@ -886,10 +938,9 @@ impl NodeDirectory {
             return Err(Error::Node("node-log follower byte requirement is zero"));
         }
         let live = self.live(now_ms, limit).await?;
-        let leader_node = live
+        let leader = live
             .iter()
             .find(|candidate| candidate.session == leader)
-            .map(|candidate| candidate.node)
             .ok_or(Error::Node("node-log leader is not live"))?;
         let desired = live
             .len()
@@ -901,7 +952,7 @@ impl NodeDirectory {
         let mut eligible = live
             .iter()
             .filter(|candidate| {
-                candidate.node != leader_node
+                candidate.node != leader.node
                     && candidate.capacity.log_protocol == NODE_LOG_PROTOCOL_VERSION
                     && candidate.capacity.follower_free_bytes >= required_follower_bytes
                     && candidate.capacity.free_memory_bytes != 0
@@ -911,23 +962,30 @@ impl NodeDirectory {
             .map(|candidate| {
                 let mut hasher = blake3::Hasher::new();
                 hasher.update(NODE_LOG_SELECTION_DOMAIN);
-                hasher.update(leader.as_bytes());
+                hasher.update(leader.session.as_bytes());
                 hasher.update(candidate.node.as_bytes());
-                (candidate.node, *hasher.finalize().as_bytes())
+                (candidate, *hasher.finalize().as_bytes())
             })
             .collect::<Vec<_>>();
         if eligible.len() < desired {
             return Ok(Vec::new());
         }
-        eligible.sort_unstable_by(|(left_node, left_score), (right_node, right_score)| {
-            right_score
-                .cmp(left_score)
-                .then_with(|| left_node.as_bytes().cmp(right_node.as_bytes()))
-        });
-        let mut selected = eligible
+        let mut selected_advertisements = Vec::with_capacity(desired);
+        while selected_advertisements.len() < desired {
+            let context = std::iter::once(leader)
+                .chain(selected_advertisements.iter().copied())
+                .collect::<Vec<_>>();
+            let selected_index = eligible
+                .iter()
+                .enumerate()
+                .max_by(|(_, left), (_, right)| compare_member_candidate(left, right, &context))
+                .map(|(index, _)| index)
+                .ok_or(Error::Node("node-log follower ensemble is unavailable"))?;
+            selected_advertisements.push(eligible.swap_remove(selected_index).0);
+        }
+        let mut selected = selected_advertisements
             .into_iter()
-            .take(desired)
-            .map(|(node, _)| node)
+            .map(|advertisement| advertisement.node)
             .collect::<Vec<_>>();
         selected.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
         Ok(selected)
@@ -1754,7 +1812,46 @@ fn same_boot_identity(current: &NodeAdvertisement, next: &NodeAdvertisement) -> 
         && current.public_key == next.public_key
         && current.module_digests == next.module_digests
         && current.peer_versions == next.peer_versions
+        && current.failure_domain == next.failure_domain
         && current.signature == next.signature
+}
+
+fn compare_member_candidate(
+    left: &(&NodeAdvertisement, [u8; 32]),
+    right: &(&NodeAdvertisement, [u8; 32]),
+    context: &[&NodeAdvertisement],
+) -> std::cmp::Ordering {
+    let zone_score = |candidate: &NodeAdvertisement| {
+        context
+            .iter()
+            .filter(|other| {
+                known_domain_difference(
+                    candidate.failure_domain.zone(),
+                    other.failure_domain.zone(),
+                )
+            })
+            .count()
+    };
+    let host_score = |candidate: &NodeAdvertisement| {
+        context
+            .iter()
+            .filter(|other| {
+                known_domain_difference(
+                    candidate.failure_domain.host(),
+                    other.failure_domain.host(),
+                )
+            })
+            .count()
+    };
+    zone_score(left.0)
+        .cmp(&zone_score(right.0))
+        .then_with(|| host_score(left.0).cmp(&host_score(right.0)))
+        .then_with(|| left.1.cmp(&right.1))
+        .then_with(|| right.0.node.as_bytes().cmp(left.0.node.as_bytes()))
+}
+
+fn known_domain_difference(left: Option<&str>, right: Option<&str>) -> bool {
+    matches!((left, right), (Some(left), Some(right)) if left != right)
 }
 
 fn valid_endpoint(endpoint: &str) -> bool {
@@ -1846,6 +1943,14 @@ struct RawUnsignedIdentity {
     public_key: String,
     module_digests: Vec<String>,
     peer_versions: Vec<u32>,
+    failure_domain: RawFailureDomain,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawFailureDomain {
+    zone: Option<String>,
+    host: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1905,6 +2010,10 @@ impl From<&NodeAdvertisement> for RawUnsignedIdentity {
                 .map(|digest| encode_hex(digest.as_bytes()))
                 .collect(),
             peer_versions: value.peer_versions.clone(),
+            failure_domain: RawFailureDomain {
+                zone: value.failure_domain.zone.clone(),
+                host: value.failure_domain.host.clone(),
+            },
         }
     }
 }
@@ -2030,6 +2139,10 @@ impl TryFrom<RawAdvertisement> for NodeAdvertisement {
                 .map(|value| decode_hex(value).map(Digest::from_bytes))
                 .collect::<Result<Vec<_>>>()?,
             peer_versions: raw.peer_versions,
+            failure_domain: NodeFailureDomain::new(
+                raw.failure_domain.zone,
+                raw.failure_domain.host,
+            )?,
             capacity: NodeCapacity {
                 free_memory_bytes: canonical_u64(&value.capacity.free_memory_bytes)?,
                 free_disk_bytes: canonical_u64(&value.capacity.free_disk_bytes)?,

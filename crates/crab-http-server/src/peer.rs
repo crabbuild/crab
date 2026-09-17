@@ -16,9 +16,10 @@ use axum::{
 use bytes::Bytes;
 use crab_cell_runtime::{
     ApplicationIdentity, CellAuthority, CellCatalog, CellHandle, CellRuntime, CellTarget, Digest,
-    Error as CellError, NodeAdvertisement, NodeCapacity, NodeDirectory, NodeId, NodeLogAuthority,
-    PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerRoundTrip, Registry, ReleaseState,
-    ReleaseStore, SessionId, VerifiedPeerRequest, VersionedNodeAdvertisement, peer_wire,
+    Error as CellError, NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain, NodeId,
+    NodeLogAuthority, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerRoundTrip, Registry,
+    ReleaseState, ReleaseStore, SessionId, VerifiedPeerRequest, VersionedNodeAdvertisement,
+    peer_wire,
 };
 use crab_storage::CellStorageLayout;
 use ed25519_dalek::SigningKey;
@@ -78,6 +79,7 @@ pub(crate) struct NodePublisher {
     node: NodeId,
     session: SessionId,
     endpoint: String,
+    failure_domain: NodeFailureDomain,
     fleet: Digest,
     certificate: Digest,
     image: Digest,
@@ -108,6 +110,7 @@ impl NodePublisher {
         signing_key: SigningKey,
         session: SessionId,
         endpoint: String,
+        failure_domain: NodeFailureDomain,
         fleet: Digest,
         certificate: Digest,
         image: Digest,
@@ -130,6 +133,7 @@ impl NodePublisher {
             node,
             session,
             endpoint,
+            failure_domain,
             fleet,
             certificate,
             image,
@@ -368,6 +372,7 @@ impl NodePublisher {
             now_ms.saturating_add(ADVERTISEMENT_LIFETIME_MS),
             self.module_digests.clone(),
             vec![1],
+            self.failure_domain.clone(),
             capacity,
         )?)
     }
@@ -1660,6 +1665,7 @@ mod tests {
             signing_key.clone(),
             session,
             "https://node-1.internal:8789".into(),
+            NodeFailureDomain::default(),
             fleet,
             Digest::from_bytes([15; 32]),
             image,
@@ -1710,6 +1716,7 @@ mod tests {
             signing_key.clone(),
             SessionId::from_bytes([17; 16]),
             "https://node-1.internal:8789".into(),
+            NodeFailureDomain::default(),
             fleet,
             Digest::from_bytes([15; 32]),
             image,
@@ -1726,6 +1733,7 @@ mod tests {
                 signing_key,
                 session,
                 "https://node-1.internal:8789".into(),
+                NodeFailureDomain::default(),
                 fleet,
                 Digest::from_bytes([15; 32]),
                 image,

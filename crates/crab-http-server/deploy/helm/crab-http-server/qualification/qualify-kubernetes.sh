@@ -277,7 +277,8 @@ jq --exit-status '
   (.spec.template.spec.containers[] | select(.name == "crab-http-server") |
     (.image | test("@sha256:[0-9a-f]{64}$")) and
     (.args == ["--config", "/etc/crab/http-server/server.toml",
-      "--peer-advertise-host", "$(CRAB_POD_IP)"]) and
+      "--peer-advertise-host", "$(CRAB_POD_IP)",
+      "--cell-failure-host", "$(CRAB_NODE_NAME)"]) and
     (.securityContext.allowPrivilegeEscalation == false) and
     (.securityContext.readOnlyRootFilesystem == true) and
     (.securityContext.capabilities.drop == ["ALL"]) and
@@ -287,6 +288,7 @@ jq --exit-status '
       "/etc/crab/http-server/server.toml", "healthcheck"]) and
     (.livenessProbe.tcpSocket.port == "management") and
     any(.env[]?; .name == "CRAB_POD_IP" and .valueFrom.fieldRef.fieldPath == "status.podIP") and
+    any(.env[]?; .name == "CRAB_NODE_NAME" and .valueFrom.fieldRef.fieldPath == "spec.nodeName") and
     any(.volumeMounts[]?; .name == "scratch" and .mountPath == "/var/lib/crab") and
     all(.env[]?; (.name | forbidden_cloud_env | not)) and
     (.lifecycle.preStop.exec.command == ["/usr/bin/sleep", "15"])) and

@@ -1544,6 +1544,7 @@ impl OfflineAdvertisement {
             now_ms.saturating_add(OFFLINE_ADVERTISEMENT_LIFETIME_MS),
             self.module_digests.clone(),
             vec![1],
+            crab_cell_runtime::NodeFailureDomain::default(),
             NodeCapacity {
                 free_memory_bytes: 0,
                 free_disk_bytes: 0,
@@ -2024,6 +2025,7 @@ mod tests {
                     now_ms + 10_000,
                     registry.module_digests(),
                     vec![1],
+                    crab_cell_runtime::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,
@@ -2058,6 +2060,7 @@ mod tests {
                     now_ms + 10_000,
                     registry.module_digests(),
                     vec![1],
+                    crab_cell_runtime::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,
@@ -2118,6 +2121,7 @@ mod tests {
                     now_ms + 10_000,
                     vec![Digest::from_bytes([19; 32])],
                     vec![1],
+                    crab_cell_runtime::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,
@@ -2182,6 +2186,7 @@ mod tests {
                     now_ms - 10_000,
                     registry.module_digests(),
                     vec![1],
+                    crab_cell_runtime::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,

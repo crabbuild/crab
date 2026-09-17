@@ -151,7 +151,7 @@ recovery path.
 
 | Working now | Remaining target gaps |
 | --- | --- |
-| Strict frame codec plus capacity-aware deterministic selection, retrying automatic enrollment, activation, coverage, recovery claims, object-covered epoch rotation, and clean log close | Failure-domain-aware member selection |
+| Strict frame codec plus capacity- and failure-domain-aware deterministic selection, retrying automatic enrollment, activation, coverage, recovery claims, object-covered epoch rotation, and clean log close | None for this slice |
 | Crash-safe, node-budgeted follower store under a persisted physical `NodeId`, authenticated remote append/seal/tail/retire transport, and a bounded node-wide batched shipper | Recovery-only startup listener ordering |
 | Authoritative create and refresh drive a terminal monotonic node-lease guard; admission, actor dispatch, Cell-control CAS, durability proof, and output acceptance all check it | Fleet-proof watermarks for future streamed Cell responses |
 | Write-all durability gate, first-fsynced-batch activation, actor cut submission, fleet-first command release, object fallback, and contiguous authoritative object watermark | A dual-head actor that can begin the next command before prior fleet-proven cuts finish object publication |
@@ -175,14 +175,17 @@ only after all receipts cover the batch. Encoding, transport, or receipt
 failure stops fleet issuance for that epoch while its tickets remain eligible
 for object proof and covered rotation.
 The directory now filters live peers by protocol, pressure, and the exact
-shared-disk capacity advertised by their follower stores, then rendezvous-ranks
-the full one- or two-member ensemble before its CAS enrollment. Rotation closes
+shared-disk capacity advertised by their follower stores. It greedily maximizes
+proven zone separation, then proven host separation, then applies the owner-
+session/physical-node rendezvous rank for the full one- or two-member ensemble
+before its CAS enrollment. Unknown topology labels receive no separation credit
+instead of being assumed independent. Rotation closes
 the old gate only after every issued sequence is object-covered, best-effort
 retires old lanes behind durable append fences, and CASes a fresh inactive
 epoch. Recruitment retries while the node remains healthy and leaves a
-one-node fleet on the object path. Failure-domain metadata, recovery-only
-startup listener ordering, early schema-migration response release, and
-dual-head actor continuation remain gated. The preferred
+one-node fleet on the object path. Recovery-only startup listener ordering,
+early schema-migration response release, and dual-head actor continuation
+remain gated. The preferred
 shard-zero scanner now inventories expired active node
 logs, claims at most two concurrently, scans at most 10,000 affected Cells,
 renews each recovery claim while gathering and pinning, seals the session, and
@@ -309,6 +312,10 @@ CAS-protected mutable authority:
     "public_key": "32-byte-hex",
     "image": "32-byte-hex",
     "release": "32-byte-hex",
+    "failure_domain": {
+      "zone": "us-west-2a",
+      "host": "worker-17"
+    },
     "peer_versions": [1],
     "signature": "64-byte-hex"
   },
@@ -597,6 +604,12 @@ Selection rules, in order:
 Every selected member must fsync a batch for a fleet proof. This is write-all,
 ack-all. Quorum acknowledgement is not safe because recovery is designed to use
 one complete surviving witness, not merge partially acknowledged quorums.
+
+Zone and host are optional signed boot-identity labels. A missing label cannot
+prove separation and therefore receives no preference over a known unequal
+label. The persisted physical `NodeId` identifies the local-disk domain; live
+inventory rejects duplicate physical IDs, and the selector never chooses the
+owner or the same physical node twice.
 
 Changing members uses a barrier:
 

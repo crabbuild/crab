@@ -292,9 +292,12 @@ jobs:
             grep -F 'name: cell-release-bootstrap' "${rendered}"
             grep -F -- '- bootstrap' "${rendered}"
             grep -F -- '- --peer-advertise-host' "${rendered}"
+            grep -F -- '- --cell-failure-host' "${rendered}"
             # This is the literal Kubernetes env expansion, not a shell substitution.
             # shellcheck disable=SC2016
             grep -F -- '- $(CRAB_POD_IP)' "${rendered}"
+            # shellcheck disable=SC2016
+            grep -F -- '- $(CRAB_NODE_NAME)' "${rendered}"
             grep -F -- 'mountPath: /var/lib/crab' "${rendered}"
             grep -F -- 'path: peer/tls.crt' "${rendered}"
             grep -F -- 'path: peer/tls.key' "${rendered}"

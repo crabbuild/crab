@@ -63,6 +63,7 @@ async fn reloads_a_stale_owner_and_pins_mtls_identity() {
                     now_ms + 15_000,
                     vec![Digest::from_bytes([26; 32])],
                     vec![1],
+                    crab_cell_runtime::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1_000,
                         free_disk_bytes: 2_000,

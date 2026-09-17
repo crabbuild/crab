@@ -85,6 +85,8 @@ impl IdentityFiles {
         CellsConfig {
             data_dir: self._directory.path().join("cells"),
             peer_advertise: endpoint,
+            failure_zone: None,
+            failure_host: None,
             peer_tls_server_name: None,
             peer_certificate: self.certificate.clone(),
             peer_private_key: self.private_key.clone(),

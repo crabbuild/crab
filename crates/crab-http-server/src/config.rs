@@ -33,6 +33,10 @@ pub struct CellsConfig {
     pub data_dir: PathBuf,
     pub peer_advertise: Url,
     #[serde(default)]
+    pub failure_zone: Option<String>,
+    #[serde(default)]
+    pub failure_host: Option<String>,
+    #[serde(default)]
     pub peer_tls_server_name: Option<String>,
     pub peer_certificate: PathBuf,
     pub peer_private_key: PathBuf,
@@ -104,6 +108,21 @@ impl Config {
             .peer_advertise
             .set_host(Some(ipv6.as_deref().unwrap_or(host)))
             .map_err(|_| Error::Config("Cell peer advertise host is invalid"))?;
+        self.validate()
+    }
+
+    /// Overrides the node topology labels used for follower placement.
+    pub fn set_cell_failure_domain(
+        &mut self,
+        zone: Option<&str>,
+        host: Option<&str>,
+    ) -> Result<()> {
+        if let Some(zone) = zone {
+            self.cells.failure_zone = Some(zone.into());
+        }
+        if let Some(host) = host {
+            self.cells.failure_host = Some(host.into());
+        }
         self.validate()
     }
 
@@ -190,6 +209,10 @@ fn validate_cells(cells: &CellsConfig, management_listen: SocketAddr) -> Result<
             "cells.peer_tls_server_name must be a DNS name without a port",
         ));
     }
+    crab_cell_runtime::NodeFailureDomain::new(
+        cells.failure_zone.clone(),
+        cells.failure_host.clone(),
+    )?;
     Ok(())
 }
 
@@ -419,6 +442,19 @@ mod tests {
             "https://[2001:db8::17]:8789/"
         );
         config.cells.peer_tls_server_name = Some("https://peer.invalid".into());
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn cell_failure_domains_are_optional_bounded_topology_labels() {
+        let mut config = local_config("s3://bucket/repositories");
+        config
+            .set_cell_failure_domain(Some("us-west-2a"), Some("worker-17"))
+            .unwrap();
+        assert_eq!(config.cells.failure_zone.as_deref(), Some("us-west-2a"));
+        assert_eq!(config.cells.failure_host.as_deref(), Some("worker-17"));
+
+        config.cells.failure_host = Some("worker 17".into());
         assert!(config.validate().is_err());
     }
 

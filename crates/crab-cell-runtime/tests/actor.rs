@@ -134,6 +134,7 @@ async fn fence_session(
                 10_001,
                 vec![Digest::from_bytes([95; 32])],
                 vec![1],
+                crab_cell_runtime::NodeFailureDomain::default(),
                 crab_cell_runtime::NodeCapacity {
                     free_memory_bytes: 1,
                     free_disk_bytes: 1,
@@ -162,6 +163,7 @@ async fn fence_session(
                 20_000,
                 vec![Digest::from_bytes([95; 32])],
                 vec![1],
+                crab_cell_runtime::NodeFailureDomain::default(),
                 crab_cell_runtime::NodeCapacity {
                     free_memory_bytes: 1,
                     free_disk_bytes: 1,
@@ -207,6 +209,7 @@ async fn fence_log_session(
                 expires_at_ms,
                 vec![Digest::from_bytes([95; 32])],
                 vec![1],
+                crab_cell_runtime::NodeFailureDomain::default(),
                 crab_cell_runtime::NodeCapacity {
                     free_memory_bytes: 1,
                     free_disk_bytes: 1,

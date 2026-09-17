@@ -24,6 +24,10 @@ struct Arguments {
         help = "Read this task's awsvpc address from ECS metadata"
     )]
     peer_advertise_host_from_ecs_metadata: bool,
+    #[arg(long, global = true)]
+    cell_failure_zone: Option<String>,
+    #[arg(long, global = true)]
+    cell_failure_host: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -273,6 +277,10 @@ async fn main() -> crab_http_server::Result<()> {
     } else if arguments.peer_advertise_host_from_ecs_metadata {
         config.set_peer_advertise_host(&ecs::peer_advertise_host().await?)?;
     }
+    config.set_cell_failure_domain(
+        arguments.cell_failure_zone.as_deref(),
+        arguments.cell_failure_host.as_deref(),
+    )?;
     match arguments.command.unwrap_or(Command::Serve) {
         Command::Serve => crab_http_server::serve(config).await,
         Command::Healthcheck => healthcheck(&config).await,
@@ -616,6 +624,24 @@ mod tests {
     }
 
     #[test]
+    fn cell_failure_domain_is_a_global_option() {
+        let arguments = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "serve",
+            "--cell-failure-zone",
+            "zone-a",
+            "--cell-failure-host",
+            "worker-17",
+        ])
+        .unwrap();
+
+        assert_eq!(arguments.cell_failure_zone.as_deref(), Some("zone-a"));
+        assert_eq!(arguments.cell_failure_host.as_deref(), Some("worker-17"));
+    }
+
+    #[test]
     fn healthcheck_uses_the_stable_tls_name_against_the_local_listener() {
         let config = crab_http_server::Config {
             listen: "127.0.0.1:8788".parse().unwrap(),
@@ -626,6 +652,8 @@ mod tests {
             cells: crab_http_server::CellsConfig {
                 data_dir: "/var/lib/crab/cells".into(),
                 peer_advertise: "https://10.42.3.17:8789".parse().unwrap(),
+                failure_zone: None,
+                failure_host: None,
                 peer_tls_server_name: Some("crab-http-server-peer".into()),
                 peer_certificate: "/run/secrets/crab/peer/tls.crt".into(),
                 peer_private_key: "/run/secrets/crab/peer/tls.key".into(),

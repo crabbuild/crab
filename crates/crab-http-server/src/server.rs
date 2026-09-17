@@ -765,6 +765,10 @@ pub async fn serve(config: Config) -> Result<()> {
         peer_tls.signing_key().clone(),
         session,
         config.cells.peer_advertise.to_string(),
+        crab_cell_runtime::NodeFailureDomain::new(
+            config.cells.failure_zone.clone(),
+            config.cells.failure_host.clone(),
+        )?,
         peer_tls.fleet(),
         peer_tls.certificate(),
         startup.image,
