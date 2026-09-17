@@ -429,7 +429,8 @@ restart, locates the current repository Cell owner, and force-deletes that Pod
 without a grace period. Never run it
 against a repository where qualification branches are forbidden by policy.
 The per-node load phase also retains roughly 180,000 commit-status submissions
-across 192 synthetic commits; use a disposable qualification repository.
+across eight synthetic repository Cells (24 commits per Cell); use a disposable
+qualification namespace and repository prefix.
 The expected image, release tag, and source commit are required for release
 evidence. The script rejects a deployment whose manifest reference differs or
 a source identity that is not a stable server tag and lowercase Git commit.
@@ -447,8 +448,9 @@ The test fails unless it can prove all of these boundaries:
   capacity is the smaller of backing filesystem size and configured limit; the
   reported limit must equal the Deployment's `emptyDir.sizeLimit`
 - Every original Pod independently sustains 1,000 aggregate authenticated Cell
-  mutations/s for 60 seconds with at least 95% successful responses. Reports
-  retain p50/p95/p99 latency, admission rejections, and the exact Pod UID
+  mutations/s for 60 seconds with at least 95% successful responses across the
+  eight synthetic Cells. Reports retain p50/p95/p99 latency, admission
+  rejections, and the exact Pod UID
 - The Deployment uses an immutable digest, a private ClusterIP Service, the
   signed release's chart version, the chart NetworkPolicy, TLS ingress,
   hardened containers, and no automatic Kubernetes API token

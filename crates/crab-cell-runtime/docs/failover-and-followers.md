@@ -157,7 +157,7 @@ recovery path.
 | Authoritative create and refresh drive a terminal monotonic node-lease guard; admission, actor dispatch, Cell-control CAS, durability proof, and output acceptance all check it | None for the current non-streaming Cell API |
 | Write-all durability gate, first-fsynced-batch activation, bounded dual-watermark command continuation, ordered object publication, object fallback, schema-migration barriers, and contiguous authoritative object watermark | None for this slice |
 | Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | None for this slice |
-| Cell control attachment and takeover consumption of overlays; server drain closes a fully object-covered epoch before session withdrawal; grace-aged retired follower lanes are deleted only after authority stops naming their epoch; the Compose qualifier proves a follower-only result survives owner `SIGKILL`, owner-disk deletion, RustFS restoration, takeover, and owner rejoin; the Kubernetes harness exercises each selected node profile and the 1,000 aggregate mutation schedule against every Pod | Signed live runs across small/medium/large profiles, using a multi-Cell workload for the node aggregate claim, plus the extended fault/telemetry matrix |
+| Cell control attachment and takeover consumption of overlays; server drain closes a fully object-covered epoch before session withdrawal; grace-aged retired follower lanes are deleted only after authority stops naming their epoch; the Compose qualifier proves a follower-only result survives owner `SIGKILL`, owner-disk deletion, RustFS restoration, takeover, and owner rejoin; the Kubernetes harness exercises each selected node profile and the 1,000 aggregate mutation schedule against every Pod across eight load Cells | Signed live runs across small/medium/large profiles plus the extended fault/telemetry matrix |
 | Bounded command/query responses and the typed `CellStateStream` bind every emitted chunk to the actor's proven logical head | Extended live fault and profile qualification only |
 
 The session record now owns one CAS-protected log epoch, its exact sorted member
@@ -1523,16 +1523,13 @@ request schedule. Its schema-v2 receipt rejects a run whose successful response
 count is below 95% of the configured aggregate rate; 429 responses remain
 visible admission evidence but do not count toward the target throughput.
 The Kubernetes qualifier runs the schedule separately through each Pod, using
-64 bounded status-mutation targets backed by distinct commits per run. It binds
-the three reports to Pod UIDs, captures capacity again after load, and rejects
+64 bounded status-mutation targets backed by distinct commits per run and
+distributed across eight repository Cells (24 commits per Cell). It binds the
+three reports to Pod UIDs, captures capacity again after load, and rejects
 server, transport, body-limit, latency-over-60-second, or target-rate failures.
-The checked-in harness currently points those targets at one repository Cell.
-That is a useful hot-Cell/owner-routing stress profile, but it is not evidence
-for the node-wide aggregate claim: all 64 mutations serialize through one
-repository actor and can legitimately hit the Cell admission boundary. A
-production capacity receipt must distribute the same fixed-rate schedule over
-multiple repository Cell IDs on the node, report the Cell count and per-Cell
-request share, and retain the one-hot profile as a separate limit test.
+The eight-Cell schedule is the node-level aggregate profile (125 target
+requests/s per Cell); retain a separate one-Cell run when measuring the hot-Cell
+admission limit.
 
 ## Deliver in dependency order
 

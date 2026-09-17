@@ -345,13 +345,12 @@ a new UUIDv7 for every request.
 The release Kubernetes qualifier builds this harness from the exact tagged
 source and drives 1,000 aggregate mutation requests/s through each ready Pod
 for 60 seconds. The checked-in profile uses 64 distinct commit-status targets
-in one repository Cell; that isolates hot-Cell serialization and keeps the
-per-commit submission history from invalidating the measurement, but it is not
-the node-wide aggregate capacity proof. The production receipt must add a
-multi-Cell target set, record Cell count and per-Cell request share, and retain
-the one-Cell run as a separately labelled limit test. Every attested receipt
-retains each Pod UID, p50/p95/p99 latency, success and admission counts, plus
-capacity envelopes before and after load.
+distributed across eight repository Cells (24 commits per Cell); this is the
+node-wide aggregate capacity proof while retaining the same per-commit
+submission history. The receipt records 125 target requests/s per Cell. Retain
+a one-Cell run as a separately labelled hot-Cell limit test. Every attested
+receipt retains each Pod UID, p50/p95/p99 latency, success and admission
+counts, plus capacity envelopes before and after load.
 
 ```json
 {"request_id":"{{request_id}}","title":"load qualification","body":"durable command"}

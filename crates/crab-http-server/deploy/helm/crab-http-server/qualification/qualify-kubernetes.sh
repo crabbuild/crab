@@ -737,6 +737,37 @@ git_public -C "$client" push "$remote_public" "HEAD:refs/heads/${branch}"
 git_public -C "$client" lfs unlock "$payload"
 lock_held=false
 
+load_cell_count=8
+load_targets_per_cell=24
+load_targets="${work_dir}/load-targets"
+: > "$load_targets"
+for load_cell_index in $(seq 1 "$load_cell_count"); do
+  load_repository="${repository}-load-${qualification_id}-${load_cell_index}"
+  load_client="${work_dir}/load-${load_cell_index}"
+  mkdir -p "$load_client"
+  git -C "$load_client" init --quiet
+  git -C "$load_client" config user.name "Crab load qualification"
+  git -C "$load_client" config user.email "qualification@example.invalid"
+  printf 'load Cell %s\n' "$load_cell_index" > "${load_client}/README.md"
+  git -C "$load_client" add README.md
+  git -C "$load_client" commit --quiet --message "Create load Cell ${load_cell_index}"
+  load_cell_oids="${work_dir}/load-${load_cell_index}-oids"
+  : > "$load_cell_oids"
+  git -C "$load_client" rev-parse HEAD >> "$load_cell_oids"
+  for load_commit_index in $(seq 2 "$load_targets_per_cell"); do
+    git -C "$load_client" commit --quiet --allow-empty \
+      --message "Prepare load target ${load_commit_index}"
+    git -C "$load_client" rev-parse HEAD >> "$load_cell_oids"
+  done
+  load_remote="http://127.0.0.1:${port_a}/git/${owner}/${load_repository}.git"
+  git_pod -C "$load_client" push --quiet "$load_remote" HEAD:refs/heads/main
+  while IFS= read -r load_oid; do
+    printf '%s\t%s\n' "$load_repository" "$load_oid" >> "$load_targets"
+  done < "$load_cell_oids"
+done
+test "$(wc -l < "$load_targets" | tr -d '[:space:]')" = \
+  "$((load_cell_count * load_targets_per_cell))"
+
 uuid_from_text() {
   local digest
   if command -v sha256sum >/dev/null; then
@@ -826,12 +857,12 @@ for pod_index in 0 1 2; do
   first_line=$((pod_index * 64 + 1))
   last_line=$((first_line + 63))
   target_index=0
-  while IFS= read -r load_oid; do
+  while IFS=$'\t' read -r load_repository load_oid; do
     load_arguments+=(
-      --mutation "status-${target_index}=2@/api/repos/${owner}/${repository}/statuses/${load_oid}|${load_template}"
+      --mutation "status-${target_index}=2@/api/repos/${owner}/${load_repository}/statuses/${load_oid}|${load_template}"
     )
     target_index=$((target_index + 1))
-  done < <(sed -n "${first_line},${last_line}p" "$load_oids")
+  done < <(sed -n "${first_line},${last_line}p" "$load_targets")
   test "$target_index" = 64
   node_report="${work_dir}/load-${pod_index}.json"
   "$load_generator" "${load_arguments[@]}" > "$node_report"
@@ -1084,6 +1115,8 @@ jq --null-input \
   --arg payload_sha256 "$payload_sha256" \
   --arg status_context "$status_context" \
   --arg continuation_context "$continuation_context" \
+  --argjson load_cell_count "$load_cell_count" \
+  --argjson load_targets_per_node "$((load_cell_count * load_targets_per_cell / 3))" \
   --arg owner_pod_uid "$owner_pod_uid" \
   --arg owner_session_before "$owner_session_before" \
   --arg owner_session_after "$(jq --raw-output '.owner.session' "$control_after")" \
@@ -1143,8 +1176,10 @@ jq --null-input \
     load_workload: {
       aggregate_requests_per_second_per_node: 1000,
       duration_seconds: 60,
-      database_count: 1,
-      commit_targets_per_node: 64,
+      database_count: $load_cell_count,
+      commit_targets_per_node: $load_targets_per_node,
+      commit_targets_per_cell: $load_targets_per_cell,
+      requests_per_cell_per_node: (1000 / $load_cell_count),
       transaction: "repository commit status insert"
     },
     load: $load_reports[0],

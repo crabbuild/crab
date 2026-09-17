@@ -242,9 +242,10 @@ receipt.
 The Kubernetes release qualifier runs the tagged-source load generator against
 each Pod through a direct port-forward while preserving the public HTTP
 authority. Each node must sustain 1,000 aggregate authenticated mutations/s for
-60 seconds with at least 95% success. Treat the three bound Pod reports as the
-per-node throughput evidence; they do not by themselves prove a multi-database
-distribution or storage-provider latency envelope.
+60 seconds with at least 95% success across eight repository Cells (64 total
+commit-status targets). Treat the three bound Pod reports as the per-node
+throughput evidence; a separate one-Cell run measures the hot-Cell admission
+limit, and neither run replaces the provider latency envelope.
 
 ## Roll back a failed release
 
