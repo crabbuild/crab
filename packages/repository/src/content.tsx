@@ -739,7 +739,7 @@ function ChangeTree({
     flattenEmptyDirectories: false,
     density: "default",
     itemHeight: 32,
-    icons: { set: "minimal", colored: false },
+    icons: "complete",
     renaming: false,
     dragAndDrop: false,
     sort: (left, right) =>
