@@ -1159,17 +1159,26 @@ acknowledged tail is neither rooted nor attached.
 
 ### Consume the overlay
 
-After acquiring the Cell, the new owner calls one `crab-ltx` operation:
+After acquiring the Cell, the new owner loads the pinned overlay, prepares its
+exact successor, and publishes that successor through the control CAS:
 
 ```rust,ignore
-let prepared = replica
-    .prepare_recovered_overlay(
-        control.ltx_root(),
-        control.recovery(),
-        &scratch_directory,
-    )
+let observed = /* latest VersionedControl loaded from authority */;
+let control = observed.value();
+let recovery_ref = control
+    .recovery
+    .as_ref()
+    .ok_or(Error::Control("recovery overlay is not pinned"))?;
+let overlay = manifests
+    .load_overlay(control.cell, control.incarnation, recovery_ref)
     .await?;
-authority.publish_recovery(&control, &prepared).await?;
+let prepared = replica
+    .prepare_recovered_overlay(&overlay, control.schema)
+    .await?;
+let successor = control.publish_recovery(&prepared, control.next_due_ms)?;
+authority
+    .transition(&observed, successor, Transition::PublishRecovery)
+    .await?;
 ```
 
 `prepare_recovered_overlay` performs no ownership decision. It verifies the
