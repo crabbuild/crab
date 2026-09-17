@@ -2,12 +2,12 @@
 
 The Cell runtime serializes accepted commands, binds each SQLite commit to an immutable LTX root, and publishes that root through one authoritative control CAS. This page defines the actor, transaction, timeout, takeover, and shutdown behavior.
 
-The implemented product path still requires object-store root publication
-before releasing a result. Verified node frames, crash-safe follower storage,
-seal/gather mechanics, recovery overlays, and the dual-proof gate now exist as
-runtime primitives. The gate is intentionally not connected to application
-response release until session recovery and overlay pinning satisfy every phase
-in [Follower durability and warm failover](failover-and-followers.md).
+The product path races exact object-store publication with a write-all follower
+proof. Either proof may release a command result. The actor remains occupied
+until object publication finishes, so later work cannot observe an unpublished
+head. If the owner dies first, takeover seals the failed node log and pins and
+consumes its recovery overlays before serving. See
+[Follower durability and warm failover](failover-and-followers.md).
 
 | Document intent | Value |
 | --- | --- |

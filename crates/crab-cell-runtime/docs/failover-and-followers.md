@@ -10,7 +10,7 @@ before a successor opens SQLite.
 | Content type | Low-level target design |
 | Audience | `crab-ltx`, `crab-cell-runtime`, and `crab-http-server` implementers |
 | Goal | Define the persistence, wire, gating, recovery, lifecycle, and proof contracts needed for Celld-style follower durability |
-| Status | Implementation in progress; product response release remains object-store-only |
+| Status | Failover correctness implemented; bounded hot-Cell pipelining and live multi-node qualification remain |
 | Reference | Celld commit `10cb1303dac710dcb3b557e318e08c855261f68b` |
 
 [Back to the Cell runtime index](README.md)
@@ -66,7 +66,8 @@ true:
    when the exact root reached object storage.
 3. A response cannot reveal a SQLite state newer than the durability proof that
    released it. This includes successful mutations, durable business errors,
-   reads, and streamed response chunks.
+   and reads performed after a mutation in the same serialized actor. The
+   current Cell API does not stream results after observing mutable Cell state.
 4. A successor cannot open SQLite until the predecessor node-log session is
    absent-with-proof or sealed and every recovered tail is pinned by Cell
    control.
@@ -153,8 +154,8 @@ recovery path.
 | --- | --- |
 | Strict frame codec plus capacity- and failure-domain-aware deterministic selection, retrying automatic enrollment, activation, coverage, recovery claims, object-covered epoch rotation, and clean log close | None for this slice |
 | Crash-safe, node-budgeted follower store under a persisted physical `NodeId`, authenticated remote append/seal/tail/retire transport, a bounded node-wide batched shipper, a recovery-first management-listener lifecycle, and startup lane scrub/quarantine | None for this slice |
-| Authoritative create and refresh drive a terminal monotonic node-lease guard; admission, actor dispatch, Cell-control CAS, durability proof, and output acceptance all check it | Fleet-proof watermarks for future streamed Cell responses |
-| Write-all durability gate, first-fsynced-batch activation, actor cut submission, fleet-first command and schema-migration release, object fallback, and contiguous authoritative object watermark | A dual-head actor that can begin the next command before prior fleet-proven cuts finish object publication |
+| Authoritative create and refresh drive a terminal monotonic node-lease guard; admission, actor dispatch, Cell-control CAS, durability proof, and output acceptance all check it | None for the current non-streaming Cell API |
+| Write-all durability gate, first-fsynced-batch activation, actor cut submission, fleet-first command and schema-migration release, object fallback, and contiguous authoritative object watermark | Bounded dual-head continuation so a hot Cell can execute the next command after proof instead of after object publication; this is a throughput stage, not a failover-safety gate |
 | Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | None for this slice |
 | Cell control attachment and takeover consumption of overlays; server drain closes a fully object-covered epoch before session withdrawal; grace-aged retired follower lanes are deleted only after authority stops naming their epoch | Live multi-node proof |
 
@@ -183,7 +184,7 @@ instead of being assumed independent. Rotation closes
 the old gate only after every issued sequence is object-covered, best-effort
 retires old lanes behind durable append fences, and CASes a fresh inactive
 epoch. Recruitment retries while the node remains healthy and leaves a
-one-node fleet on the object path. Dual-head actor continuation remains gated.
+one-node fleet on the object path.
 The preferred
 shard-zero scanner now inventories expired active node
 logs, claims at most two concurrently, scans at most 10,000 affected Cells,
@@ -195,8 +196,9 @@ the exact `active=false -> active=true` CAS. Only then can fleet proof release
 the command response; root preparation and CAS continue in the same actor, and
 failure of the fleet path falls back to object proof. The actor stays busy until
 object publication finishes, so reads and later commands cannot observe
-unpublished state. This is correct but not yet the target dual-head throughput
-model. Schema-migration cuts use the same follower/object race and recovery
+unpublished state. This deliberately keeps one head and one publication task
+per Cell; node-level concurrency comes from many independent Cell actors.
+Schema-migration cuts use the same follower/object race and recovery
 coverage. A successful fleet proof may release the successor handle before
 object publication; its admission is already installed, so requests queue
 behind the still-owned publication task. Object-only migrations continue to
@@ -705,15 +707,74 @@ lease guard before entering an actor, and the output gate checks it before
 crediting a newly completed proof. A process pause cannot use an expired cached
 deadline to admit more work.
 
-The actor tracks two heads:
+The current actor keeps one in-flight publication. Fleet proof may release that
+command's result before object upload finishes, but the actor retains exclusive
+ownership of the SQLite state until the same cuts advance the exact root in
+Cell control. This is the correctness baseline and remains a valid overload
+fallback.
 
-- `logical_head`: latest locally committed and durably proven position
-- `published_head`: exact root currently named by Cell control
+### Add a bounded dual-head pipeline for hot Cells
 
-Subsequent local commands continue from `logical_head`. The object publisher
-may combine several queued cuts into one exact successor of `published_head`.
-It advances control only through the canonical CAS path and then prunes locally
-retained and follower-covered data.
+Fleet durability removes the object-store round trip from response latency, but
+the baseline still leaves that round trip between two commands on the same
+Cell. That is acceptable for a fleet whose traffic is spread across many
+repositories, but it imposes an unnecessary per-repository throughput ceiling.
+The target therefore separates two positions without creating a second owner:
+
+| Position | Meaning | May accept a new command? |
+| --- | --- | --- |
+| `logical_head` | Latest local SQLite commit covered by fleet or object proof | Yes |
+| `published_head` | Exact immutable root named by Cell control | Yes, while backlog admission remains available |
+
+```mermaid
+flowchart LR
+    C1[Commit N] --> P1[Fleet or object proof N]
+    P1 --> R1[Release response N]
+    P1 --> C2[Commit N+1]
+    C1 --> Q[Bounded publication queue]
+    C2 --> Q
+    Q --> U[One ordered object publisher]
+    U --> CAS[Exact-root control CAS]
+    CAS --> Q
+```
+
+The implementation is a bounded queue behind one actor and one object
+publisher, not two SQLite writers and not parallel control CAS operations:
+
+1. Execute and capture one command on the existing SQL worker.
+2. Submit its cuts to the node log and object path.
+3. Release its result only after its own durability ticket is proven.
+4. After proof, advance `logical_head` and allow the actor to execute the next
+   queued command.
+5. Append the captured cuts to an ordered publication queue. One publisher
+   folds a contiguous prefix onto `published_head`, performs the canonical
+   control CAS, advances object coverage for every included ticket, and then
+   removes that prefix.
+
+Queue admission is compile-time bounded by both entry count and retained LTX
+bytes and is also charged to the existing local-disk budget. The initial target
+is at most 64 pending command cuts and 64 MiB per Cell. Reaching either bound
+stops command execution and lets the publisher catch up; it does not drop cuts,
+shrink the follower ensemble, or acknowledge through a weaker proof. Schema
+migrations, graceful handoff, and shutdown remain publication barriers and
+must drain the queue completely.
+
+The queue preserves these ordering rules:
+
+- Command `N+1` never executes until command `N` has a durability proof.
+- Results are released in actor order; a later proof cannot pass an unresolved
+  earlier ticket.
+- Root preparation consumes only a contiguous queue prefix whose predecessor
+  is the current `published_head`.
+- Only the single publisher mutates Cell control. A lost CAS response reloads
+  and accepts only the exact proposed successor.
+- A terminal lease or publication failure fences new execution. Already
+  released fleet-proven outcomes remain recoverable from the node log.
+
+This model is narrower than a general asynchronous publication graph. It adds
+one ordered queue and two monotonic positions because they directly remove the
+hot-Cell object-store stall. It does not add configurable queue policies,
+parallel root writers, speculative branch heads, or compatibility paths.
 
 Every actor output records the highest commit sequence it observed. The output
 gate waits until either proof covers at least that sequence. Therefore:
@@ -722,7 +783,14 @@ gate waits until either proof covers at least that sequence. Therefore:
 - A durable business rejection follows the same rule
 - A query that observes a just-committed row waits for that row's proof
 - An error generated after reading Cell state is gated
-- Each streaming chunk carries and waits for its observation watermark
+
+The current Cell command and query APIs return bounded replies rather than
+state-observing streams. Actor ordering already proves that a query can observe
+only a `logical_head` covered by an earlier durability ticket. A future
+state-observing streaming API must bind the stream to one commit-sequence
+watermark, prove that watermark before the first chunk, and keep checking the
+node lease until the stream ends. That design is intentionally deferred until
+such an API has a caller; it is not a gap in the current failover protocol.
 
 Authentication, routing, and malformed-request errors produced before Cell
 execution do not need a Cell durability proof.
@@ -946,7 +1014,7 @@ A clean per-Cell handoff does not seal the whole owner node log.
 1. Stop new commands for the Cell
 2. Wait for accepted commands to reach either proof
 3. Force all Cell cuts through exact object publication
-4. Verify `published_head == logical_head`
+4. Verify the exact published root covers the final local commit
 5. Close SQLite and CAS Cell control to `Idle`
 6. Let the successor acquire a new Cell epoch and sparse-open that root
 
@@ -1242,9 +1310,10 @@ until the recovery gate is complete.
 | 2 | `crab-ltx` verified frame and recovered-overlay API | Golden, corruption, cross-epoch, and exact-root tests |
 | 3 | Follower disk format and private append/seal/tail protocol | Crash matrix proves fsync and torn-tail behavior |
 | 4 | Node-log recovery claim, bundles, Cell overlay attachment, retention roots | Kill recovery at every boundary and converge |
-| 5 | Dual object/fleet durability gate and logical/published heads | Fleet-first response survives owner and disk loss |
+| 5 | Dual object/fleet durability gate with one in-flight publication per Cell | Fleet-first response survives owner and disk loss |
 | 6 | Ensemble rotation, graceful drain, startup recovery-only listener, GC | Member loss and rolling restart matrix |
-| 7 | Real RustFS and Kubernetes qualification at target load | Signed receipts with zero lost acknowledged outcomes |
+| 7 | Bounded logical/published-head pipeline for hot Cells | Consecutive commands no longer wait for object publication; queue bounds and crash recovery hold |
+| 8 | Real RustFS and Kubernetes qualification at target load | Signed receipts with zero lost acknowledged outcomes |
 
 Phases 1 through 4 may ship with object-only responses. Phase 5 is the first
 point at which follower fsync may release a public result.

@@ -33,10 +33,13 @@ Each layer has one owner and one primary evidence surface.
 | Follower mechanics | `src/follower.rs`, `src/node_log.rs`, `src/node_log_recovery.rs` | verified-frame, torn-tail, dual-proof, and seal/gather unit tests |
 | Product composition | `crab-http-server/src/cells/` | server route, restore, and lifecycle tests |
 
-Celld-style follower mechanics are present but the product durability mode is
-still object-only. Its remaining phase gates and failure matrix live in
-[Follower durability and warm failover](failover-and-followers.md). Until those
-gates pass, only an exact object-store root publication can release a response.
+Celld-style follower durability is connected to product command and schema-
+migration response release. A response may be released by either an exact
+object-store root or a write-all follower proof. The actor retains the Cell
+until the exact root is published, and takeover consumes any fleet-only tail
+before serving. The remaining release gate is live multi-node fault and
+capacity qualification in
+[Follower durability and warm failover](failover-and-followers.md).
 
 Use the map during review. A change to one boundary needs caller, callee, sibling, and source-loss evidence where applicable.
 

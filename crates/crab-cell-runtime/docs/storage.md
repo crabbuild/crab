@@ -11,8 +11,8 @@ Cell storage separates one mutable authority record from immutable SQLite histor
 [Back to the Cell runtime index](README.md)
 
 This page describes the implemented `cells/v1` object-store contract. The
-in-place session-record evolution and control-pinned recovery overlay needed
-before follower fsync may release a response are specified in
+in-place session record and control-pinned recovery overlay that make follower
+fsync a valid response-release proof are specified in
 [Follower durability and warm failover](failover-and-followers.md).
 
 `v1` names the one current development format; it is not a release counter.
