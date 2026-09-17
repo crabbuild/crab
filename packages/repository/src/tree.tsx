@@ -66,7 +66,7 @@ export function RepositoryTree({
     search: true,
     density: "default",
     itemHeight: 32,
-    icons: { set: "minimal", colored: false },
+    icons: "complete",
     renaming: false,
     dragAndDrop: false,
     sort: (left, right) =>

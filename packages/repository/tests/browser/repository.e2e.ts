@@ -854,6 +854,9 @@ test("commit page keeps a sticky file tree beside independently scrolling diffs"
     exact: true,
   });
   await expect(modified).toHaveAttribute("aria-selected", "true");
+  await expect(modified.locator('[data-icon-token="typescript"]')).toHaveCount(
+    1,
+  );
   const workspace = page.locator(".change-workspace");
   const diff = page.locator(".change-diff-pane");
   const panels = diff.locator(".diff-panel");
@@ -1797,6 +1800,9 @@ test("deep links expand the active path and select its file", async ({
         activeRailBackground: selectedRail?.backgroundColor,
         activeRailLeft: selectedRail?.left,
         activeRailWidth: selectedRail?.width,
+        activeIconToken: active
+          ?.querySelector("[data-icon-token]")
+          ?.getAttribute("data-icon-token"),
         neutralBackground,
         accentColor,
         expanded: rows
@@ -1813,6 +1819,7 @@ test("deep links expand the active path and select its file", async ({
   expect(state.activeRailBackground).toBe(state.accentColor);
   expect(state.activeRailLeft).toBe("-16px");
   expect(state.activeRailWidth).toBe("3px");
+  expect(state.activeIconToken).toBe("typescript");
   expect(state.expanded).toContain("src");
   expect(state.folderIconWidth).toBe("16px");
 });
