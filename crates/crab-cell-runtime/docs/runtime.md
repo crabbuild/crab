@@ -2,10 +2,12 @@
 
 The Cell runtime serializes accepted commands, binds each SQLite commit to an immutable LTX root, and publishes that root through one authoritative control CAS. This page defines the actor, transaction, timeout, takeover, and shutdown behavior.
 
-The implemented path requires object-store root publication before releasing a
-result. The target Celld-style follower extension is specified separately in
-[Follower durability and warm failover](failover-and-followers.md); follower
-fsync is not yet a valid runtime response proof.
+The implemented product path still requires object-store root publication
+before releasing a result. Verified node frames, crash-safe follower storage,
+seal/gather mechanics, recovery overlays, and the dual-proof gate now exist as
+runtime primitives. The gate is intentionally not connected to application
+response release until session recovery and overlay pinning satisfy every phase
+in [Follower durability and warm failover](failover-and-followers.md).
 
 | Document intent | Value |
 | --- | --- |

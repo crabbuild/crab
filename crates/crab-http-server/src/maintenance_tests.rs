@@ -60,6 +60,7 @@ async fn fixture_without_cells() -> Arc<Server> {
         cell_runtime: start_test_cell_runtime(),
         repository_cells: None,
         peer_receiver: None,
+        follower_store: None,
         options: RepositoryOptions::default(),
         cursor_key: [0; 32],
         admission: Semaphore::new(16),

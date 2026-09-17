@@ -7,7 +7,8 @@ use std::sync::{
 
 use bytes::Bytes;
 use crab_ltx::{
-    CaptureBatch, CellReplica, Host, Limits, ManagedDb, RootRef, VerifiedLocalPlan,
+    CaptureBatch, CellReplica, Host, Limits, ManagedDb, RecoveryOverlay, RootRef,
+    VerifiedLocalPlan,
     bundle::{Bundle, BundleEntry},
     restore_exact,
 };
@@ -872,6 +873,87 @@ async fn prepare_does_not_write_mutable_keys() {
         3
     );
     restored.close().unwrap();
+}
+
+#[tokio::test]
+async fn recovered_overlay_requires_exact_predecessor_and_final_position() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let mut writer =
+        ManagedDb::open(&directory.path().join("recovery.sqlite"), Limits::default()).unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE events(id INTEGER PRIMARY KEY, body TEXT NOT NULL);\
+                 INSERT INTO events(body) VALUES ('published')",
+            )
+        })
+        .unwrap();
+    let first = writer.capture().unwrap();
+    let cell = [81; 32];
+    let incarnation = [82; 16];
+    let replica = replica(Store::new(Arc::new(InMemory::new())), cell, incarnation);
+    let base = replica.prepare(None, &first, 1, 6).await.unwrap().root();
+
+    writer
+        .transaction(|transaction| {
+            transaction.execute("INSERT INTO events(body) VALUES ('fleet-only')", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let tail = writer.capture().unwrap();
+    let entries = tail
+        .segments
+        .iter()
+        .map(|segment| {
+            BundleEntry::for_cell(
+                cell,
+                incarnation,
+                segment.info().clone(),
+                std::fs::read(segment.path()).unwrap(),
+            )
+        })
+        .collect();
+    let bundle = Bundle::encode(entries, Limits::default()).unwrap();
+    let overlay = RecoveryOverlay::new(base, bundle, tail.position, 2);
+    let recovered = replica
+        .prepare_recovered_overlay(&overlay, 6)
+        .await
+        .unwrap();
+
+    assert_eq!(recovered.predecessor(), Some(base));
+    assert_eq!(recovered.root().position, tail.position);
+    assert_eq!(recovered.root().commit_sequence, 2);
+
+    let invalid = RecoveryOverlay::new(
+        RootRef {
+            cell: [83; 32],
+            ..base
+        },
+        Bundle::encode(
+            tail.segments
+                .iter()
+                .map(|segment| {
+                    BundleEntry::for_cell(
+                        cell,
+                        incarnation,
+                        segment.info().clone(),
+                        std::fs::read(segment.path()).unwrap(),
+                    )
+                })
+                .collect(),
+            Limits::default(),
+        )
+        .unwrap(),
+        tail.position,
+        2,
+    );
+    assert!(
+        replica
+            .prepare_recovered_overlay(&invalid, 6)
+            .await
+            .is_err()
+    );
+    writer.close().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -56,6 +56,42 @@ pub struct Owner {
     pub endpoint: String,
 }
 
+/// Exact recovered follower tail pinned before a dead owner's Cell can move.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveryOverlayRef {
+    pub leader_session: SessionId,
+    pub log_epoch: u64,
+    pub manifest_digest: Digest,
+    pub first_node_sequence: u64,
+    pub last_node_sequence: u64,
+    pub predecessor: RootRef,
+    pub final_txid: u64,
+    pub final_checksum: u64,
+    pub final_commit_sequence: u64,
+}
+
+impl RecoveryOverlayRef {
+    fn validate(&self) -> Result<()> {
+        if self.leader_session.as_bytes().iter().all(|byte| *byte == 0)
+            || self
+                .manifest_digest
+                .as_bytes()
+                .iter()
+                .all(|byte| *byte == 0)
+            || self.log_epoch == 0
+            || self.first_node_sequence == 0
+            || self.first_node_sequence > self.last_node_sequence
+            || self.final_txid <= self.predecessor.txid
+            || self.final_checksum & CHECKSUM_FLAG == 0
+            || self.final_commit_sequence <= self.predecessor.commit_sequence
+            || self.final_commit_sequence > i64::MAX as u64
+        {
+            return Err(Error::Control("invalid recovery overlay"));
+        }
+        Ok(())
+    }
+}
+
 /// Durable Cell lifecycle state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -77,6 +113,7 @@ pub struct Control {
     pub state: ControlState,
     pub owner: Option<Owner>,
     pub root: Option<RootRef>,
+    pub recovery: Option<RecoveryOverlayRef>,
     pub code: Digest,
     pub schema: u32,
     pub next_due_ms: Option<i64>,
@@ -90,6 +127,8 @@ pub enum Transition {
     Publish,
     Migrate,
     Release,
+    AttachRecovery,
+    PublishRecovery,
     Takeover,
     Tombstone,
 }
@@ -112,6 +151,7 @@ impl Control {
             state: ControlState::Recovering,
             owner: Some(owner),
             root: None,
+            recovery: None,
             code,
             schema,
             next_due_ms: None,
@@ -163,6 +203,7 @@ impl Control {
             && previous.state == self.state
             && previous.owner == self.owner
             && previous.root == self.root
+            && previous.recovery == self.recovery
             && previous.code == self.code
             && previous.schema == self.schema
             && previous.next_due_ms == self.next_due_ms
@@ -217,6 +258,60 @@ impl Control {
         next.state = ControlState::Recovering;
         next.owner = Some(owner);
         self.validate_transition(&next, Transition::Takeover)?;
+        Ok(next)
+    }
+
+    /// Pins an exact follower-recovered tail while retaining the dead owner.
+    pub fn attach_recovery(&self, recovery: RecoveryOverlayRef) -> Result<Self> {
+        let mut next = self.clone();
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or(Error::Control("revision overflow"))?;
+        next.progress = next
+            .progress
+            .checked_add(1)
+            .ok_or(Error::Control("progress overflow"))?;
+        next.recovery = Some(recovery);
+        self.validate_transition(&next, Transition::AttachRecovery)?;
+        Ok(next)
+    }
+
+    /// Publishes the root materialized from the currently pinned recovery tail.
+    pub fn publish_recovery(
+        &self,
+        prepared: &crab_ltx::PreparedRoot,
+        next_due_ms: Option<i64>,
+    ) -> Result<Self> {
+        let recovery = self
+            .recovery
+            .as_ref()
+            .ok_or(Error::Control("recovery overlay is not pinned"))?;
+        let expected = recovery.predecessor.to_ltx(self.cell, self.incarnation);
+        let root = prepared.root();
+        if prepared.predecessor() != Some(expected)
+            || prepared.verified().schema() != self.schema
+            || root.position.txid != recovery.final_txid
+            || root.position.checksum != recovery.final_checksum
+            || root.commit_sequence != recovery.final_commit_sequence
+        {
+            return Err(Error::Control(
+                "prepared recovery does not match pinned overlay",
+            ));
+        }
+        let mut next = self.clone();
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or(Error::Control("revision overflow"))?;
+        next.progress = next
+            .progress
+            .checked_add(1)
+            .ok_or(Error::Control("progress overflow"))?;
+        next.root = Some(RootRef::from_ltx(self.cell, self.incarnation, root)?);
+        next.recovery = None;
+        next.next_due_ms = next_due_ms;
+        self.validate_transition(&next, Transition::PublishRecovery)?;
         Ok(next)
     }
 
@@ -324,6 +419,7 @@ impl Control {
                     || self.state != next.state
                     || self.owner != next.owner
                     || self.root != next.root
+                    || self.recovery != next.recovery
                     || self.code != next.code
                     || self.schema != next.schema
                     || self.next_due_ms != next.next_due_ms
@@ -338,6 +434,8 @@ impl Control {
                     || self.owner != next.owner
                     || self.root.is_none()
                     || self.root != next.root
+                    || self.recovery.is_some()
+                    || next.recovery.is_some()
                     || self.code != next.code
                     || self.schema != next.schema
                     || self.next_due_ms != next.next_due_ms
@@ -351,6 +449,8 @@ impl Control {
                     || self.epoch != next.epoch
                     || self.owner != next.owner
                     || next.root.is_none()
+                    || self.recovery.is_some()
+                    || next.recovery.is_some()
                     || self.code != next.code
                     || self.schema != next.schema
                     || !valid_root_successor(self.root.as_ref(), next.root.as_ref())
@@ -364,6 +464,8 @@ impl Control {
                     || self.epoch != next.epoch
                     || self.owner != next.owner
                     || next.root.is_none()
+                    || self.recovery.is_some()
+                    || next.recovery.is_some()
                     || next.code.as_bytes().iter().all(|byte| *byte == 0)
                     || !valid_migration_version(self.code, self.schema, next.code, next.schema)
                     || !valid_root_successor(self.root.as_ref(), next.root.as_ref())
@@ -376,13 +478,57 @@ impl Control {
                     || next.state != ControlState::Idle
                     || next.owner.is_some()
                     || next.root.is_none()
+                    || self.recovery.is_some()
+                    || next.recovery.is_some()
                     || self.epoch != next.epoch
                     || self.root != next.root
+                    || self.recovery != next.recovery
                     || self.code != next.code
                     || self.schema != next.schema
                     || self.next_due_ms != next.next_due_ms
                 {
                     return Err(Error::Control("invalid release transition"));
+                }
+            }
+            Transition::AttachRecovery => {
+                let Some(recovery) = next.recovery.as_ref() else {
+                    return Err(Error::Control("invalid recovery attachment"));
+                };
+                if self.state == ControlState::Tombstoned
+                    || self.recovery.is_some()
+                    || self.epoch != next.epoch
+                    || self.state != next.state
+                    || self.owner.as_ref().map(|owner| owner.session)
+                        != Some(recovery.leader_session)
+                    || self.owner != next.owner
+                    || self.root.as_ref() != Some(&recovery.predecessor)
+                    || self.root != next.root
+                    || self.code != next.code
+                    || self.schema != next.schema
+                    || self.next_due_ms != next.next_due_ms
+                {
+                    return Err(Error::Control("invalid recovery attachment"));
+                }
+            }
+            Transition::PublishRecovery => {
+                let Some(recovery) = self.recovery.as_ref() else {
+                    return Err(Error::Control("invalid recovery publication"));
+                };
+                if self.state != ControlState::Recovering
+                    || next.state != ControlState::Recovering
+                    || next.recovery.is_some()
+                    || self.epoch != next.epoch
+                    || self.owner != next.owner
+                    || self.root.as_ref() != Some(&recovery.predecessor)
+                    || next.root.as_ref().is_none_or(|root| {
+                        root.txid != recovery.final_txid
+                            || root.checksum != recovery.final_checksum
+                            || root.commit_sequence != recovery.final_commit_sequence
+                    })
+                    || self.code != next.code
+                    || self.schema != next.schema
+                {
+                    return Err(Error::Control("invalid recovery publication"));
                 }
             }
             Transition::Takeover => {
@@ -392,6 +538,7 @@ impl Control {
                     || self.owner == next.owner
                     || self.epoch.checked_add(1) != Some(next.epoch)
                     || self.root != next.root
+                    || self.recovery != next.recovery
                     || self.code != next.code
                     || self.schema != next.schema
                     || self.next_due_ms != next.next_due_ms
@@ -405,6 +552,8 @@ impl Control {
                     || next.owner.is_some()
                     || self.epoch.checked_add(1) != Some(next.epoch)
                     || self.root != next.root
+                    || self.recovery.is_some()
+                    || next.recovery.is_some()
                     || self.code != next.code
                     || self.schema != next.schema
                     || self.next_due_ms != next.next_due_ms
@@ -436,6 +585,12 @@ impl Control {
                 || root.commit_sequence > i64::MAX as u64)
         {
             return Err(Error::Control("invalid recovery root"));
+        }
+        if let Some(recovery) = &self.recovery {
+            recovery.validate()?;
+            if self.root.as_ref() != Some(&recovery.predecessor) {
+                return Err(Error::Control("recovery overlay does not match control"));
+            }
         }
         match self.state {
             ControlState::Recovering if self.owner.is_some() => {}
@@ -483,6 +638,7 @@ struct RawControl {
     state: ControlState,
     owner: Option<RawOwner>,
     root: Option<RawRoot>,
+    recovery: Option<RawRecoveryOverlay>,
     code: String,
     schema: u32,
     next_due_ms: Option<String>,
@@ -502,6 +658,44 @@ struct RawRoot {
     txid: String,
     checksum: String,
     commit_sequence: String,
+}
+
+impl From<&RootRef> for RawRoot {
+    fn from(root: &RootRef) -> Self {
+        Self {
+            digest: encode_hex(root.digest.as_bytes()),
+            txid: root.txid.to_string(),
+            checksum: encode_hex(&root.checksum.to_be_bytes()),
+            commit_sequence: root.commit_sequence.to_string(),
+        }
+    }
+}
+
+impl TryFrom<RawRoot> for RootRef {
+    type Error = Error;
+
+    fn try_from(root: RawRoot) -> Result<Self> {
+        Ok(Self {
+            digest: Digest::from_bytes(decode_hex(&root.digest)?),
+            txid: decimal_u64(&root.txid)?,
+            checksum: u64::from_be_bytes(decode_hex(&root.checksum)?),
+            commit_sequence: decimal_u64(&root.commit_sequence)?,
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRecoveryOverlay {
+    leader_session: String,
+    log_epoch: String,
+    manifest_digest: String,
+    first_node_sequence: String,
+    last_node_sequence: String,
+    predecessor: RawRoot,
+    final_txid: String,
+    final_checksum: String,
+    final_commit_sequence: String,
 }
 
 impl From<&Control> for RawControl {
@@ -524,6 +718,20 @@ impl From<&Control> for RawControl {
                 checksum: encode_hex(&root.checksum.to_be_bytes()),
                 commit_sequence: root.commit_sequence.to_string(),
             }),
+            recovery: control
+                .recovery
+                .as_ref()
+                .map(|recovery| RawRecoveryOverlay {
+                    leader_session: encode_hex(recovery.leader_session.as_bytes()),
+                    log_epoch: recovery.log_epoch.to_string(),
+                    manifest_digest: encode_hex(recovery.manifest_digest.as_bytes()),
+                    first_node_sequence: recovery.first_node_sequence.to_string(),
+                    last_node_sequence: recovery.last_node_sequence.to_string(),
+                    predecessor: RawRoot::from(&recovery.predecessor),
+                    final_txid: recovery.final_txid.to_string(),
+                    final_checksum: encode_hex(&recovery.final_checksum.to_be_bytes()),
+                    final_commit_sequence: recovery.final_commit_sequence.to_string(),
+                }),
             code: encode_hex(control.code.as_bytes()),
             schema: control.schema,
             next_due_ms: control.next_due_ms.map(|value| value.to_string()),
@@ -562,6 +770,24 @@ impl TryFrom<RawControl> for Control {
                         txid: decimal_u64(&root.txid)?,
                         checksum: u64::from_be_bytes(decode_hex(&root.checksum)?),
                         commit_sequence: decimal_u64(&root.commit_sequence)?,
+                    })
+                })
+                .transpose()?,
+            recovery: raw
+                .recovery
+                .map(|recovery| {
+                    Ok::<RecoveryOverlayRef, Error>(RecoveryOverlayRef {
+                        leader_session: SessionId::from_bytes(decode_hex(
+                            &recovery.leader_session,
+                        )?),
+                        log_epoch: decimal_u64(&recovery.log_epoch)?,
+                        manifest_digest: Digest::from_bytes(decode_hex(&recovery.manifest_digest)?),
+                        first_node_sequence: decimal_u64(&recovery.first_node_sequence)?,
+                        last_node_sequence: decimal_u64(&recovery.last_node_sequence)?,
+                        predecessor: RootRef::try_from(recovery.predecessor)?,
+                        final_txid: decimal_u64(&recovery.final_txid)?,
+                        final_checksum: u64::from_be_bytes(decode_hex(&recovery.final_checksum)?),
+                        final_commit_sequence: decimal_u64(&recovery.final_commit_sequence)?,
                     })
                 })
                 .transpose()?,
@@ -612,6 +838,20 @@ mod tests {
             txid: sequence,
             checksum: CHECKSUM_FLAG | sequence,
             commit_sequence: sequence,
+        }
+    }
+
+    fn recovery(predecessor: RootRef) -> RecoveryOverlayRef {
+        RecoveryOverlayRef {
+            leader_session: SessionId::from_bytes([3; 16]),
+            log_epoch: 4,
+            manifest_digest: Digest::from_bytes([7; 32]),
+            first_node_sequence: 10,
+            last_node_sequence: 12,
+            predecessor,
+            final_txid: 9,
+            final_checksum: CHECKSUM_FLAG | 9,
+            final_commit_sequence: 9,
         }
     }
 
@@ -711,6 +951,44 @@ mod tests {
         assert!(
             takeover
                 .validate_transition(&corrupted_compaction, Transition::Publish)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn recovery_attachment_is_canonical_and_survives_takeover() {
+        let mut serving = initial();
+        serving.state = ControlState::Serving;
+        serving.root = Some(root(4));
+        let attached = serving
+            .attach_recovery(recovery(serving.root.clone().unwrap()))
+            .unwrap();
+        assert_eq!(
+            Control::decode(&attached.encode().unwrap()).unwrap(),
+            attached
+        );
+        let mut normal_publish = attached.clone();
+        normal_publish.revision += 1;
+        normal_publish.progress += 1;
+        normal_publish.root = Some(root(9));
+        assert!(
+            attached
+                .validate_transition(&normal_publish, Transition::Publish)
+                .is_err()
+        );
+
+        let takeover = attached.takeover(owner(8)).unwrap();
+        assert_eq!(takeover.state, ControlState::Recovering);
+        assert_eq!(takeover.recovery, attached.recovery);
+        assert!(takeover.activate().is_err());
+
+        let mut changed = attached.clone();
+        changed.revision += 1;
+        changed.progress += 1;
+        changed.recovery.as_mut().unwrap().manifest_digest = Digest::from_bytes([8; 32]);
+        assert!(
+            attached
+                .validate_transition(&changed, Transition::Renew)
                 .is_err()
         );
     }

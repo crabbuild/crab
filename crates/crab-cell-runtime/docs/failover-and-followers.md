@@ -10,7 +10,7 @@ before a successor opens SQLite.
 | Content type | Low-level target design |
 | Audience | `crab-ltx`, `crab-cell-runtime`, and `crab-http-server` implementers |
 | Goal | Define the persistence, wire, gating, recovery, lifecycle, and proof contracts needed for Celld-style follower durability |
-| Status | Designed, not implemented; the current runtime uses object-store root publication only |
+| Status | Implementation in progress; product response release remains object-store-only |
 | Reference | Celld commit `10cb1303dac710dcb3b557e318e08c855261f68b` |
 
 [Back to the Cell runtime index](README.md)
@@ -147,6 +147,20 @@ crab-http-server
 HTTP response is safe. `crab-http-server` must not parse LTX or create a second
 recovery path.
 
+### Implementation checkpoint
+
+| Working now | Still gated before fleet durability may serve traffic |
+| --- | --- |
+| Strict, checksummed node-frame codec | Authoritative session log enrollment and rotation |
+| Crash-safe local follower append/seal/tail store | Remote seal/tail transport and recovery-only startup |
+| Write-all durability gate with contiguous object watermark | Actor submission and response-gate integration |
+| Complete-witness grouping and immutable recovery manifests | Automated dead-session recovery coordinator |
+| Cell control attachment and takeover consumption of overlays | Graceful drain, retention retirement, and live multi-node proof |
+
+The server exposes authenticated follower append handling, but fleet proof is
+not activated. This keeps current responses on the existing exact-root path
+until the remaining authority and recovery gates are complete.
+
 ## Use one multiplexed log per owner session
 
 A node can own 1,000 to 10,000 active databases. Full per-repository standbys
@@ -196,7 +210,7 @@ persistent Cell format that explicitly requires those guarantees.
 <root>/cells/v1/
   identity.json
   sessions/<session-id>.json
-  node-logs/<leader-session>/
+  node-logs/<leader-session>/<log-epoch>/
     recovery/<manifest-digest>.json
     bundles/<bundle-digest>.bundle
   apps/<application-id>/
@@ -329,7 +343,7 @@ struct RecoveryOverlayRef {
     manifest_digest: Digest,
     first_node_sequence: u64,
     last_node_sequence: u64,
-    base_txid: u64,
+    predecessor: RootRef,
     final_txid: u64,
     final_checksum: u64,
     final_commit_sequence: u64,
@@ -431,9 +445,10 @@ evictable read cache until the session record proves the bytes are covered.
     0000000000004097-open.log
 ```
 
-Each record in a chunk contains magic, version, sequence, encoded-frame length,
-frame bytes, and a CRC for torn-write detection. Startup scans the active chunk
-and truncates only an invalid suffix after the last completely verified record.
+Each record in a chunk contains magic, sequence, encoded-frame length, the
+canonical frame digest, and frame bytes. Startup scans the active chunk,
+re-verifies the frame digest and LTX body, and truncates only an invalid suffix
+after the last completely verified record.
 
 Append handling is ordered per leader/log epoch:
 
@@ -945,9 +960,8 @@ pub fn inspect_node_frame(bytes: Bytes, limits: Limits)
 impl CellReplica {
     pub async fn prepare_recovered_overlay(
         &self,
-        predecessor: RootRef,
         overlay: &RecoveryOverlay,
-        scratch: &Path,
+        schema: u32,
     ) -> Result<PreparedRoot>;
 }
 ```

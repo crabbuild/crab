@@ -107,6 +107,66 @@ async fn maintenance_inventory_retains_expired_session_until_withdrawal() {
 }
 
 #[tokio::test]
+async fn expired_session_claim_is_atomic_idempotent_and_blocks_refresh() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    let session = SessionId::from_bytes([1; 16]);
+    let claimant = SessionId::from_bytes([8; 16]);
+    let observed = directory
+        .create(advertisement(&key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    assert!(
+        directory
+            .claim_expired(session, claimant, NOW_MS + 9_999)
+            .await
+            .is_err()
+    );
+
+    let fenced = directory
+        .claim_expired(session, claimant, NOW_MS + 10_000)
+        .await
+        .unwrap();
+    assert_eq!(fenced.session(), session);
+    assert_eq!(
+        directory
+            .claim_expired(session, claimant, NOW_MS + 10_001)
+            .await
+            .unwrap(),
+        fenced
+    );
+    assert!(
+        directory
+            .claim_expired(session, SessionId::from_bytes([9; 16]), NOW_MS + 10_001,)
+            .await
+            .is_err()
+    );
+    assert!(
+        directory
+            .refresh(
+                &observed,
+                advertisement(&key, 2, NOW_MS + 10_001),
+                NOW_MS + 10_001,
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        directory
+            .withdraw(&observed, NOW_MS + 10_001)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        directory
+            .claim_expired(session, claimant, NOW_MS + 10_002)
+            .await
+            .unwrap(),
+        fenced
+    );
+}
+
+#[tokio::test]
 async fn stale_collection_fences_records_after_the_clock_skew_horizon() {
     let key = SigningKey::from_bytes(&[7; 32]);
     let directory = directory();

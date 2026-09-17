@@ -156,6 +156,28 @@ impl CellStorageLayout {
         Path::from(format!("{}/cells/v1/nodes", self.root))
     }
 
+    /// Immutable recovered follower bundle outside any one application prefix.
+    #[must_use]
+    pub fn node_log_bundle_path(&self, leader: &[u8; 16], epoch: u64, digest: &[u8; 32]) -> Path {
+        Path::from(format!(
+            "{}/cells/v1/node-logs/{}/{epoch}/bundles/{}.bundle",
+            self.root,
+            hex(leader),
+            hex(digest)
+        ))
+    }
+
+    /// Content-addressed manifest that pins every Cell tail recovered together.
+    #[must_use]
+    pub fn node_log_recovery_path(&self, leader: &[u8; 16], epoch: u64, digest: &[u8; 32]) -> Path {
+        Path::from(format!(
+            "{}/cells/v1/node-logs/{}/{epoch}/recovery/{}.json",
+            self.root,
+            hex(leader),
+            hex(digest)
+        ))
+    }
+
     fn application_path(&self, suffix: &str) -> Path {
         Path::from(format!(
             "{}/cells/v1/apps/{}/{}",
@@ -198,6 +220,18 @@ mod tests {
         assert_eq!(
             layout.node_directory_path().as_ref(),
             "tenant-root/cells/v1/nodes"
+        );
+        assert_eq!(
+            layout
+                .node_log_bundle_path(&[0xdd; 16], 7, &[0xef; 32])
+                .as_ref(),
+            "tenant-root/cells/v1/node-logs/dddddddddddddddddddddddddddddddd/7/bundles/efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef.bundle"
+        );
+        assert_eq!(
+            layout
+                .node_log_recovery_path(&[0xdd; 16], 7, &[0xef; 32])
+                .as_ref(),
+            "tenant-root/cells/v1/node-logs/dddddddddddddddddddddddddddddddd/7/recovery/efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef.json"
         );
         assert_eq!(
             layout

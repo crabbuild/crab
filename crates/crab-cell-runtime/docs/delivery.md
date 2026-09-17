@@ -30,10 +30,11 @@ Each layer has one owner and one primary evidence surface.
 | Release control | `src/release.rs`, `src/release_progress.rs` | release unit tests and server command tests |
 | Backup pins | `src/backup.rs`, `crab-ltx::CellReplica::reachable_objects` | runtime pin tests and server create/verify command tests |
 | Immutable retention | `src/retention.rs`, `crab-storage::Store::list_stream` | mark/sweep tests and server maintenance-fence tests |
+| Follower mechanics | `src/follower.rs`, `src/node_log.rs`, `src/node_log_recovery.rs` | verified-frame, torn-tail, dual-proof, and seal/gather unit tests |
 | Product composition | `crab-http-server/src/cells/` | server route, restore, and lifecycle tests |
 
-Celld-style follower durability is a target extension, not part of this
-implemented evidence map. Its phase gates and failure matrix live in
+Celld-style follower mechanics are present but the product durability mode is
+still object-only. Its remaining phase gates and failure matrix live in
 [Follower durability and warm failover](failover-and-followers.md). Until those
 gates pass, only an exact object-store root publication can release a response.
 

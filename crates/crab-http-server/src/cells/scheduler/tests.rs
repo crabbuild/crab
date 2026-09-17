@@ -17,7 +17,7 @@ use crab_cell_runtime::{
     WorkflowNamespace, WorkflowStatus, install_workflow_schema, register_blocking_activity,
     register_maintenance, register_workflow, register_workflow_activities,
 };
-use crab_storage::{CellStorageLayout, StorageError, Store};
+use crab_storage::{CellStorageLayout, Store};
 use ed25519_dalek::SigningKey;
 use object_store::{memory::InMemory, path::Path};
 
@@ -947,7 +947,7 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
     let mut scheduler = RepositoryCellScheduler::new(
         identity,
         layout.clone(),
-        node_directory,
+        node_directory.clone(),
         router,
         session,
         status.clone(),
@@ -962,13 +962,26 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
     assert_eq!(after.value().state, crab_cell_runtime::ControlState::Idle);
     assert_eq!(status.progress(), 2);
     assert!(status.is_healthy(super::super::unix_now_ms().unwrap()));
-    assert!(matches!(
+    assert!(
+        !node_directory
+            .is_live(stale_session, super::super::unix_now_ms().unwrap())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !node_directory
+            .advertised_sessions(super::super::unix_now_ms().unwrap(), 8)
+            .await
+            .unwrap()
+            .contains(&stale_session)
+    );
+    assert!(
         layout
             .store()
-            .get_with_etag_bounded(&layout.node_path(stale_session.as_bytes()), 1)
-            .await,
-        Err(StorageError::NotFound { .. })
-    ));
+            .get_with_etag_bounded(&layout.node_path(stale_session.as_bytes()), 1_024)
+            .await
+            .is_ok()
+    );
     runtime.shutdown().await.unwrap();
 }
 

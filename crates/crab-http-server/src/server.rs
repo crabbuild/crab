@@ -638,6 +638,7 @@ pub(crate) struct Server {
     pub cell_runtime: CellRuntime,
     pub(crate) repository_cells: Option<crate::cells::RepositoryCellRouter>,
     pub(crate) peer_receiver: Option<crate::peer::PeerReceiver>,
+    pub(crate) follower_store: Option<crab_cell_runtime::FollowerStore>,
     pub options: RepositoryOptions,
     pub cursor_key: [u8; 32],
     pub admission: Semaphore,
@@ -785,6 +786,10 @@ pub async fn serve(config: Config) -> Result<()> {
     let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
     let metrics = crate::metrics::Metrics::new()?;
     let cell_runtime = start_cell_runtime(session, cell_budget, local_disk, session_dir.clone())?;
+    let follower_store = crab_cell_runtime::FollowerStore::open(
+        session_dir.join("node-log"),
+        crate::cells::repository_replica_limits(),
+    )?;
     let cell_resolver = crate::peer::LocalCellResolver::new(
         startup.layout.clone(),
         startup.identity,
@@ -848,6 +853,7 @@ pub async fn serve(config: Config) -> Result<()> {
         cell_runtime,
         repository_cells: Some(repository_cells),
         peer_receiver: Some(peer_receiver),
+        follower_store: Some(follower_store),
         cancellation: cancellation.clone(),
         receives: tokio_util::task::TaskTracker::new(),
         options,
@@ -1186,6 +1192,12 @@ fn management_router(server: Arc<Server>) -> Router {
             "/internal/cells/v1/forward",
             post(crate::peer::forward).layer(axum::extract::DefaultBodyLimit::max(
                 crab_cell_runtime::MAX_PEER_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            "/internal/cells/v1/node-log/{leader}/{epoch}/append",
+            post(crate::peer::append_node_log).layer(axum::extract::DefaultBodyLimit::max(
+                (65 * 1024 * 1024) + (64 * 8) + 8,
             )),
         )
         .with_state(server)
@@ -1785,6 +1797,7 @@ mod tests {
             cell_runtime: start_test_cell_runtime(),
             repository_cells: None,
             peer_receiver: None,
+            follower_store: None,
             options: RepositoryOptions::default(),
             cursor_key: [0; 32],
             admission: Semaphore::new(1),

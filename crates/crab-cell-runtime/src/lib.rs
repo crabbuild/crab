@@ -17,13 +17,18 @@ mod control;
 mod effects;
 mod error;
 mod executor;
+mod follower;
 mod identity;
 mod kv;
 mod maintenance;
 mod node;
+mod node_log;
+mod node_log_recovery;
+mod node_log_transport;
 mod peer;
 mod publication;
 mod queue;
+mod recovery_manifest;
 mod registry;
 mod release;
 mod release_progress;
@@ -50,7 +55,7 @@ pub use client::{
     command_operation_digest,
 };
 pub use codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
-pub use control::{Control, ControlState, Owner, RootRef, Transition};
+pub use control::{Control, ControlState, Owner, RecoveryOverlayRef, RootRef, Transition};
 pub use crab_ltx::{
     CellReplica, DiskBudget, DiskReservation, Host as ReplicaHost, Limits as ReplicaLimits,
     ScratchMonitor,
@@ -70,6 +75,7 @@ pub use executor::{
     CellExecutor, CommandExecution, HandlerOutcome, MigrationOutcome, MutationIdentity,
     PendingCommit, PendingMigration, Resolution, StoredOutcome,
 };
+pub use follower::{FollowerReceipt, FollowerStore};
 pub use identity::{
     ApplicationId, CellId, CellTarget, Digest, IncarnationId, NamespaceId, RequestId, SessionId,
     TenantId, partition_for_shard, shard_for_scope,
@@ -83,7 +89,17 @@ pub use maintenance::{
     MaintenanceModule, MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest,
     PersistedWorkInventory, register_maintenance,
 };
-pub use node::{NodeAdvertisement, NodeCapacity, NodeDirectory, VersionedNodeAdvertisement};
+pub use node::{
+    FencedNodeSession, NodeAdvertisement, NodeCapacity, NodeDirectory, VersionedNodeAdvertisement,
+};
+pub use node_log::{
+    CommitTicket, DurabilityGate, DurabilityProof, DurabilitySource, RecoveredCellTail,
+    RecoveryBase, build_recovery_overlays,
+};
+pub use node_log_recovery::{NodeLogRecovery, RecoveryCell, RecoveryCoordinator, SealedSession};
+pub use node_log_transport::{
+    AppendRequest, LocalFollowerTransport, NodeLogTransport, SealRequest, TailRequest,
+};
 pub use peer::{
     EffectPeerClient, MAX_PEER_REQUEST_BYTES, MigrationPeerClient, PeerAuthorizer,
     PeerCellResolver, PeerDispatcher, PeerOperation, PeerPrincipal, PeerRoundTrip, PeerSigner,
@@ -99,6 +115,7 @@ pub use queue::{
     install_queue_schema, queue_apply_lease, queue_claim, queue_cleanup_expired, queue_send,
     queue_validate_claim, register_queue,
 };
+pub use recovery_manifest::{PinnedRecoveryCell, RecoveryManifestStore};
 pub use registry::{
     BuildDescriptor, CellModule, Command, CommandContext, CommandInvocation, CommandResult,
     MigrationDescriptor, MigrationPlan, ModuleDescriptor, NamespaceDescriptor, OperationDescriptor,

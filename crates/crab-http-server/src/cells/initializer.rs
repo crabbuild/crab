@@ -121,17 +121,9 @@ pub(crate) async fn initialize_repository_at(
                         )
                         .await?
                 } else {
-                    runtime
-                        .takeover_unpublished(
-                            proof,
-                            replica,
-                            authority.clone(),
-                            observed,
-                            destination,
-                            owner.clone(),
-                            initialize,
-                        )
-                        .await?
+                    return Err(Error::Config(
+                        "offline repository initialization cannot fence an existing Cell owner",
+                    ));
                 }
             }
             (ControlState::Idle, true) => {
@@ -147,16 +139,9 @@ pub(crate) async fn initialize_repository_at(
                     .await?
             }
             (ControlState::Recovering | ControlState::Serving, true) => {
-                runtime
-                    .takeover_restored(
-                        proof,
-                        replica,
-                        authority.clone(),
-                        observed,
-                        destination,
-                        owner.clone(),
-                    )
-                    .await?
+                return Err(Error::Config(
+                    "offline repository initialization cannot take over an owned Cell",
+                ));
             }
             (ControlState::Tombstoned, _) => {
                 return Err(Error::Config("repository Cell is tombstoned"));

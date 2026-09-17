@@ -95,6 +95,7 @@ fn idle_control(
         state: ControlState::Idle,
         owner: None,
         root: Some(RootRef::from_ltx(cell, incarnation, root).unwrap()),
+        recovery: None,
         code,
         schema: 1,
         next_due_ms: None,

@@ -33,6 +33,8 @@ pub mod bundle;
 #[cfg(feature = "replica")]
 mod cell_replica;
 #[cfg(feature = "replica")]
+mod node_frame;
+#[cfg(feature = "replica")]
 mod paged;
 #[cfg(feature = "replica")]
 mod paged_io;
@@ -50,9 +52,11 @@ pub use writable_vfs::Hydration;
 mod schedule;
 #[cfg(feature = "replica")]
 pub use cell_replica::{
-    CellObjectRef, CellPagedDatabase, CellReplica, CellWritableDatabase, PreparedRoot, RootRef,
-    VerifiedRoot,
+    CellObjectRef, CellPagedDatabase, CellReplica, CellWritableDatabase, PreparedRoot,
+    RecoveryOverlay, RootRef, VerifiedRoot,
 };
+#[cfg(feature = "replica")]
+pub use node_frame::{NodeFrameScope, VerifiedNodeFrame, encode_node_frame, inspect_node_frame};
 #[cfg(feature = "replica")]
 pub use paged::PagedDatabase;
 #[cfg(feature = "replica")]

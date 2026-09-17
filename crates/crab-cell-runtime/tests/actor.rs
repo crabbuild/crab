@@ -1,5 +1,6 @@
 use std::sync::{Arc, mpsc};
 
+use bytes::Bytes;
 use crab_cell_runtime::{
     ApplicationId, CatalogEntry, CatalogRole, CellAuthority, CellRuntime, CellTarget, ControlState,
     Digest, DiskBudget, HandlerOutcome, InboxDelivery, IncarnationId, MutationIdentity,
@@ -11,6 +12,48 @@ use crab_storage::{
     CellObjectKind, CellStorageLayout, ObjectStoreCredentials, Store, build_explicit_store,
 };
 use object_store::{memory::InMemory, path::Path};
+
+async fn fence_session(
+    layout: &CellStorageLayout,
+    session: SessionId,
+    claimant: SessionId,
+) -> crab_cell_runtime::FencedNodeSession {
+    let fleet = Digest::from_bytes([90; 32]);
+    let image = Digest::from_bytes([91; 32]);
+    let release = Digest::from_bytes([92; 32]);
+    let directory = crab_cell_runtime::NodeDirectory::new(layout.clone(), fleet, image, release);
+    let key = ed25519_dalek::SigningKey::from_bytes(&[93; 32]);
+    directory
+        .create(
+            crab_cell_runtime::NodeAdvertisement::sign(
+                session,
+                "https://expired.internal:8081".into(),
+                fleet,
+                Digest::from_bytes([94; 32]),
+                image,
+                release,
+                &key,
+                1,
+                1,
+                10_001,
+                vec![Digest::from_bytes([95; 32])],
+                vec![1],
+                crab_cell_runtime::NodeCapacity {
+                    free_memory_bytes: 1,
+                    free_disk_bytes: 1,
+                    job_credits: 1,
+                },
+            )
+            .unwrap(),
+            1,
+        )
+        .await
+        .unwrap();
+    directory
+        .claim_expired(session, claimant, 10_001)
+        .await
+        .unwrap()
+}
 
 struct Fixture {
     _directory: tempfile::TempDir,
@@ -741,6 +784,12 @@ async fn unchanged_dead_owner_is_taken_over_then_restored() {
         .await
         .unwrap()
         .unwrap();
+    let fenced = fence_session(
+        &fixture.layout,
+        stale.value().owner.as_ref().unwrap().session,
+        SessionId::from_bytes([41; 16]),
+    )
+    .await;
     let session = SessionId::from_bytes([41; 16]);
     let runtime = CellRuntime::new(
         SqlWorkerPool::new(1, 10).unwrap(),
@@ -754,6 +803,11 @@ async fn unchanged_dead_owner_is_taken_over_then_restored() {
             fixture.replica.clone(),
             authority.clone(),
             stale,
+            fenced,
+            crab_cell_runtime::RecoveryManifestStore::new(
+                fixture.layout.clone(),
+                Limits::default(),
+            ),
             fixture._directory.path().join("takeover.sqlite"),
             Owner {
                 session,
@@ -786,6 +840,186 @@ async fn unchanged_dead_owner_is_taken_over_then_restored() {
 }
 
 #[tokio::test]
+async fn takeover_consumes_pinned_recovery_before_serving() {
+    let fixture = fixture_for(b"recovered-takeover");
+    let handle = activate(&fixture, 16 * 1024 * 1024).await;
+    drop(handle);
+
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let stale = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let predecessor = stale.value().ltx_root().unwrap();
+    let leader = stale.value().owner.as_ref().unwrap().session;
+
+    let tail_directory = tempfile::TempDir::new().unwrap();
+    let tail_path = tail_directory.path().join("tail.sqlite");
+    let writable = fixture
+        .replica
+        .open_root(&predecessor)
+        .await
+        .unwrap()
+        .paged()
+        .prepare_writable(&tail_path)
+        .await
+        .unwrap();
+    let mut writer = writable.open_writable(&tail_path).unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute("UPDATE counter SET value = value + 1", [])?;
+            transaction.execute(
+                "UPDATE sys_meta SET commit_sequence = commit_sequence + 1, logical_time_ms = logical_time_ms + 1 WHERE singleton = 1",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let capture = writer.capture().unwrap();
+    let mut frames = Vec::with_capacity(capture.segments.len());
+    for (index, segment) in capture.segments.iter().enumerate() {
+        frames.push(
+            crab_ltx::encode_node_frame(
+                crab_ltx::NodeFrameScope {
+                    leader_session: *leader.as_bytes(),
+                    log_epoch: 1,
+                    node_sequence: u64::try_from(index).unwrap() + 1,
+                    application: *fixture.layout.application_id(),
+                    cell: *fixture.target.cell_id().as_bytes(),
+                    incarnation: *stale.value().incarnation.as_bytes(),
+                    cell_epoch: stale.value().epoch,
+                    commit_sequence: predecessor.commit_sequence + 1,
+                },
+                segment.info().clone(),
+                Bytes::from(std::fs::read(segment.path()).unwrap()),
+                Limits::default(),
+            )
+            .unwrap()
+            .encoded()
+            .clone(),
+        );
+    }
+    writer.close().unwrap();
+    let follower = SessionId::from_bytes([43; 16]);
+    let follower_directory = tempfile::TempDir::new().unwrap();
+    let follower_store = crab_cell_runtime::FollowerStore::open(
+        follower_directory.path().to_owned(),
+        Limits::default(),
+    )
+    .unwrap();
+    let transport: Arc<dyn crab_cell_runtime::NodeLogTransport> = Arc::new(
+        crab_cell_runtime::LocalFollowerTransport::new(follower, follower_store),
+    );
+    transport
+        .append(
+            follower,
+            crab_cell_runtime::AppendRequest {
+                leader_session: leader,
+                log_epoch: 1,
+                frames,
+                covered_through: 0,
+            },
+        )
+        .await
+        .unwrap();
+    let manifests =
+        crab_cell_runtime::RecoveryManifestStore::new(fixture.layout.clone(), Limits::default());
+    let successor = SessionId::from_bytes([42; 16]);
+    let fenced = fence_session(&fixture.layout, leader, successor).await;
+    let recovery = crab_cell_runtime::NodeLogRecovery::new(
+        transport,
+        leader,
+        1,
+        vec![follower],
+        0,
+        true,
+        Limits::default(),
+    )
+    .unwrap();
+    let coordinator = crab_cell_runtime::RecoveryCoordinator::new(recovery, manifests.clone());
+    let mut attached = coordinator
+        .recover(
+            fenced,
+            vec![crab_cell_runtime::RecoveryCell {
+                application: fixture.target.application(),
+                authority: authority.clone(),
+                observed: stale,
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(attached.len(), 1);
+    let retried = coordinator
+        .recover(
+            fenced,
+            vec![crab_cell_runtime::RecoveryCell {
+                application: fixture.target.application(),
+                authority: authority.clone(),
+                observed: attached[0].clone(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(retried[0].value(), attached[0].value());
+    let attached = attached.remove(0);
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 10).unwrap(),
+        16 * 1024 * 1024,
+        successor,
+    )
+    .unwrap();
+    let restored = runtime
+        .takeover_restored(
+            proof,
+            fixture.replica.clone(),
+            authority.clone(),
+            attached,
+            fenced,
+            manifests,
+            fixture._directory.path().join("recovered-takeover.sqlite"),
+            Owner {
+                session: successor,
+                endpoint: "https://recovered-successor.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        restored
+            .query(64, 64, |connection| {
+                let value = connection
+                    .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+                Ok(value.to_be_bytes().to_vec())
+            })
+            .await
+            .unwrap(),
+        1_i64.to_be_bytes()
+    );
+    let serving = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(serving.value().state, ControlState::Serving);
+    assert!(serving.value().recovery.is_none());
+    assert_eq!(
+        serving.value().root.as_ref().unwrap().commit_sequence,
+        predecessor.commit_sequence + 1
+    );
+    restored.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn unchanged_unpublished_owner_is_taken_over_then_bootstrapped() {
     let fixture = fixture();
     let catalog =
@@ -814,6 +1048,12 @@ async fn unchanged_unpublished_owner_is_taken_over_then_bootstrapped() {
         )
         .await
         .unwrap();
+    let fenced = fence_session(
+        &fixture.layout,
+        stale.value().owner.as_ref().unwrap().session,
+        SessionId::from_bytes([42; 16]),
+    )
+    .await;
     let session = SessionId::from_bytes([42; 16]);
     let runtime = CellRuntime::new(
         SqlWorkerPool::new(1, 10).unwrap(),
@@ -827,6 +1067,7 @@ async fn unchanged_unpublished_owner_is_taken_over_then_bootstrapped() {
             fixture.replica.clone(),
             authority.clone(),
             stale,
+            fenced,
             fixture
                 ._directory
                 .path()
@@ -1870,6 +2111,7 @@ async fn source_loss_takeover(store: Store, prefix: Path) {
             replica,
             authority.clone(),
             takeover,
+            crab_cell_runtime::RecoveryManifestStore::new(layout.clone(), Limits::default()),
             second_local.path().join("cell.sqlite"),
         )
         .await
