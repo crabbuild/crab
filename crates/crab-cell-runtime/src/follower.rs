@@ -632,7 +632,7 @@ fn parse_session_directory(path: &Path) -> Result<SessionId> {
         return Err(Error::Node("follower leader directory is invalid"));
     }
     let mut bytes = [0_u8; 16];
-    for (index, pair) in name.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in name.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let text = std::str::from_utf8(pair)
             .map_err(|_| Error::Node("follower leader directory is invalid"))?;
         bytes[index] = u8::from_str_radix(text, 16)
