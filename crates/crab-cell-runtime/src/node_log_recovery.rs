@@ -9,6 +9,9 @@ use crate::{
     build_recovery_overlays,
 };
 
+const MAX_RECOVERY_PAGE_BYTES: u64 = 1 << 20;
+const MAX_RECOVERY_PAGE_FRAMES: usize = 4_096;
+
 /// Verified uncovered suffix gathered after every reachable follower is sealed.
 pub struct SealedSession {
     pub leader_session: SessionId,
@@ -444,6 +447,10 @@ impl NodeLogRecovery {
                     break;
                 }
                 let page_count = page.frames.len();
+                if page_count > MAX_RECOVERY_PAGE_FRAMES {
+                    complete = false;
+                    break;
+                }
                 let Ok(verified) = page
                     .frames
                     .into_iter()
@@ -460,6 +467,10 @@ impl NodeLogRecovery {
                     complete = false;
                     break;
                 };
+                if page_bytes > MAX_RECOVERY_PAGE_BYTES {
+                    complete = false;
+                    break;
+                }
                 tail_bytes = match tail_bytes.checked_add(page_bytes) {
                     Some(bytes) if bytes <= recovery_tail_reservation_bytes(self.limits) => bytes,
                     _ => {
@@ -534,6 +545,7 @@ mod tests {
         failed: NodeId,
         good: LocalFollowerTransport,
         gap: bool,
+        oversized: bool,
     }
 
     struct FleetTransport {
@@ -666,8 +678,24 @@ mod tests {
             }
             let good = self.good.clone();
             let gap = self.gap;
+            let oversized = self.oversized;
             Box::pin(async move {
                 let mut page = good.tail_page(member, request).await?;
+                if oversized {
+                    let first = page
+                        .frames
+                        .first()
+                        .cloned()
+                        .ok_or(Error::Node("test page has no frame"))?;
+                    page.frames =
+                        std::iter::repeat_n(first, MAX_RECOVERY_PAGE_FRAMES + 1).collect();
+                    page.next_sequence = Some(
+                        request
+                            .first_sequence
+                            .checked_add(MAX_RECOVERY_PAGE_FRAMES as u64 + 1)
+                            .ok_or(Error::Node("test page sequence overflow"))?,
+                    );
+                }
                 if gap {
                     let count = u64::try_from(page.frames.len())
                         .map_err(|_| Error::Node("test page frame count overflow"))?;
@@ -819,6 +847,7 @@ mod tests {
             failed,
             good: local.clone(),
             gap: false,
+            oversized: false,
         });
         let recovery = NodeLogRecovery::new(
             transport,
@@ -835,11 +864,31 @@ mod tests {
 
         let gapped: Arc<dyn NodeLogTransport> = Arc::new(FailingFirstTransport {
             failed,
-            good: local,
+            good: local.clone(),
             gap: true,
+            oversized: false,
         });
         let recovery = NodeLogRecovery::new(
             gapped,
+            NodeId::from_bytes([1; 16]),
+            leader,
+            3,
+            vec![good],
+            0,
+            true,
+            limits,
+        )
+        .unwrap();
+        assert!(recovery.ensure_sealed().await.is_err());
+
+        let oversized: Arc<dyn NodeLogTransport> = Arc::new(FailingFirstTransport {
+            failed,
+            good: local,
+            gap: false,
+            oversized: true,
+        });
+        let recovery = NodeLogRecovery::new(
+            oversized,
             NodeId::from_bytes([1; 16]),
             leader,
             3,
