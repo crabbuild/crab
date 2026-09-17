@@ -40,6 +40,7 @@ mod retention;
 mod scheduler;
 mod schema;
 mod sql;
+mod telemetry;
 mod worker;
 mod workflow;
 
@@ -151,6 +152,7 @@ pub use sql::{
     SqlBatch, SqlBatchCommand, SqlBatchQuery, SqlCell, SqlModule, SqlResultSet, SqlStatement,
     SqlValue, register_sql, sql_batch, sql_query_batch,
 };
+pub use telemetry::{CellTelemetry, CellTelemetryHandle};
 pub use worker::{
     ACTIVE_CELL_FILE_DESCRIPTORS, ACTIVE_CELL_PAGE_CACHE_BYTES, SqlWorkerPool, WorkerExecution,
 };

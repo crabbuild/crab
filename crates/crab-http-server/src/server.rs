@@ -816,6 +816,7 @@ pub async fn serve(config: Config) -> Result<()> {
         local_disk.clone(),
         session_dir.clone(),
     )?;
+    cell_runtime.install_telemetry(Arc::new(metrics.clone()))?;
     let follower_store = crab_cell_runtime::FollowerStore::open(
         config.cells.data_dir.clone(),
         crate::cells::repository_replica_limits(),
@@ -827,7 +828,12 @@ pub async fn serve(config: Config) -> Result<()> {
             "corrupt follower storage remains quarantined"
         );
     }
-    let node_publisher = Arc::new(node_publisher.with_follower_store(follower_store.clone()));
+    let node_publisher = Arc::new(
+        node_publisher
+            .with_follower_store(follower_store.clone())
+            .with_telemetry(cell_runtime.telemetry_handle())
+            .with_metrics(metrics.clone()),
+    );
     let cell_resolver = crate::peer::LocalCellResolver::new(
         startup.layout.clone(),
         startup.identity,
@@ -884,7 +890,8 @@ pub async fn serve(config: Config) -> Result<()> {
         session,
         scheduler_status.clone(),
     )?
-    .with_node_recovery(Arc::clone(&node_log_transport));
+    .with_node_recovery(Arc::clone(&node_log_transport))
+    .with_metrics(metrics.clone());
     let durability_application = startup.identity.application();
     let server = Arc::new(Server {
         repositories: repositories.into(),
@@ -1021,6 +1028,15 @@ pub async fn serve(config: Config) -> Result<()> {
     let lease_cancellation = cancellation.clone();
     let lease_watch = tokio::spawn(async move {
         node_lease.wait_fenced().await;
+        if lease_server.node_healthy.load(Ordering::Acquire) {
+            lease_server
+                .metrics
+                .record_self_fence(crate::metrics::SelfFenceReason::Expiry);
+        } else if lease_cancellation.is_cancelled() {
+            lease_server
+                .metrics
+                .record_self_fence(crate::metrics::SelfFenceReason::Shutdown);
+        }
         lease_server.node_healthy.store(false, Ordering::Release);
         lease_cancellation.cancel();
     });

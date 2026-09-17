@@ -104,6 +104,7 @@ pub(crate) struct RepositoryCellScheduler {
     migration_cells: Arc<Mutex<HashSet<CellId>>>,
     migration_jobs: tokio::task::JoinSet<crate::Result<()>>,
     node_log_transport: Option<Arc<dyn NodeLogTransport>>,
+    metrics: Option<crate::metrics::Metrics>,
     recovery_sessions: Arc<Mutex<HashSet<SessionId>>>,
     recovery_jobs: tokio::task::JoinSet<crate::Result<SessionId>>,
     recovery_manifests: RecoveryManifestStore,
@@ -148,6 +149,7 @@ impl RepositoryCellScheduler {
             migration_cells: Arc::new(Mutex::new(HashSet::new())),
             migration_jobs: tokio::task::JoinSet::new(),
             node_log_transport: None,
+            metrics: None,
             recovery_sessions: Arc::new(Mutex::new(HashSet::new())),
             recovery_jobs: tokio::task::JoinSet::new(),
             recovery_manifests: RecoveryManifestStore::new(
@@ -171,6 +173,11 @@ impl RepositoryCellScheduler {
     #[must_use]
     pub(crate) fn with_node_recovery(mut self, transport: Arc<dyn NodeLogTransport>) -> Self {
         self.node_log_transport = Some(transport);
+        self
+    }
+
+    pub(crate) fn with_metrics(mut self, metrics: crate::metrics::Metrics) -> Self {
+        self.metrics = Some(metrics);
         self
     }
 
@@ -614,6 +621,9 @@ impl RepositoryCellScheduler {
                 Err(_) => {}
             }
         }
+        if let Some(metrics) = &self.metrics {
+            metrics.update_recovery_states(self.recovery_jobs.len(), 0);
+        }
     }
 
     async fn schedule_node_recovery(&mut self, now_ms: i64) -> crate::Result<()> {
@@ -638,14 +648,37 @@ impl RepositoryCellScheduler {
             let manifests = self.recovery_manifests.clone();
             let transport = Arc::clone(transport);
             let claimant = self.session;
+            let metrics = self.metrics.clone();
             self.recovery_jobs.spawn(async move {
                 let _reservation = reservation;
-                recover_node_session(
+                let started = std::time::Instant::now();
+                let result = recover_node_session(
                     directory, catalog, authority, manifests, transport, session, claimant,
                 )
-                .await?;
+                .await;
+                if let Some(metrics) = metrics {
+                    metrics.record_recovery_finished(
+                        started.elapsed(),
+                        result.as_ref().err().map(|error| match error {
+                            crate::Error::Storage(_) => {
+                                crate::metrics::RecoveryFailureReason::Storage
+                            }
+                            crate::Error::Cell(crab_cell_runtime::Error::Capacity(_)) => {
+                                crate::metrics::RecoveryFailureReason::Capacity
+                            }
+                            crate::Error::Cell(crab_cell_runtime::Error::Fenced) => {
+                                crate::metrics::RecoveryFailureReason::Fenced
+                            }
+                            _ => crate::metrics::RecoveryFailureReason::Other,
+                        }),
+                    );
+                }
+                result?;
                 Ok(session)
             });
+        }
+        if let Some(metrics) = &self.metrics {
+            metrics.update_recovery_states(self.recovery_jobs.len(), 0);
         }
         Ok(())
     }

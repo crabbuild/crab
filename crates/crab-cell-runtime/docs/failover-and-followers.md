@@ -1403,6 +1403,13 @@ crab_cell_self_fences_total{reason}
 Cell ID, repository name, request ID, session ID, and object digest belong in
 structured logs or bounded administrative queries, never metric labels.
 
+The current server wiring emits durability-proof and follower-append events
+through `CellTelemetry`; it samples the signed node-log phase and session-lease
+remaining time, and records recovery duration and bounded failure class from the
+scheduler. Recovery `waiting` is intentionally reported as zero until admission
+owns a durable queued-candidate count; it must not be inferred from a saturated
+worker count.
+
 `cells status --owner OWNER --name REPOSITORY --json` reports from persistent
 control and signed node-session state:
 

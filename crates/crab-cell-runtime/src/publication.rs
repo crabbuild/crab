@@ -18,6 +18,7 @@ pub(crate) struct CellDurabilitySubmitter {
     epoch: u64,
     node_lease: Option<crate::NodeLeaseGuard>,
     node_durability: Option<std::sync::Arc<std::sync::OnceLock<NodeDurabilityBinding>>>,
+    telemetry: crate::CellTelemetryHandle,
 }
 
 /// Coordinates immutable preparation, authority CAS and result release.
@@ -35,6 +36,7 @@ pub struct CellPublisher {
     renew_at: std::time::Instant,
     node_lease: Option<crate::NodeLeaseGuard>,
     node_durability: Option<std::sync::Arc<std::sync::OnceLock<NodeDurabilityBinding>>>,
+    telemetry: crate::CellTelemetryHandle,
 }
 
 impl CellPublisher {
@@ -58,6 +60,7 @@ impl CellPublisher {
             renew_at: std::time::Instant::now() + RENEW_INTERVAL,
             node_lease: None,
             node_durability: None,
+            telemetry: crate::CellTelemetryHandle::default(),
         }
     }
 
@@ -71,6 +74,11 @@ impl CellPublisher {
         durability: std::sync::Arc<std::sync::OnceLock<NodeDurabilityBinding>>,
     ) -> Self {
         self.node_durability = Some(durability);
+        self
+    }
+
+    pub(crate) fn with_telemetry(mut self, telemetry: crate::CellTelemetryHandle) -> Self {
+        self.telemetry = telemetry;
         self
     }
 
@@ -91,7 +99,13 @@ impl CellPublisher {
             epoch: control.epoch,
             node_lease: self.node_lease.clone(),
             node_durability: self.node_durability.clone(),
+            telemetry: self.telemetry.clone(),
         }
+    }
+
+    pub(crate) fn record_object_proof(&self, waited: std::time::Duration) {
+        self.telemetry
+            .durability_proof(crate::DurabilitySource::Object, waited);
     }
 
     #[must_use]
@@ -631,19 +645,32 @@ impl CellPublisher {
 pub(crate) struct PendingDurability {
     durability: std::sync::Arc<NodeDurability>,
     ticket: CommitTicket,
+    submitted_at: std::time::Instant,
+    telemetry: crate::CellTelemetryHandle,
 }
 
 impl PendingDurability {
     pub(crate) async fn prove(&self) -> Result<()> {
-        self.durability.prove(self.ticket).await.map(|_| ())
+        let proof = self.durability.prove(self.ticket).await?;
+        if proof.source() == crate::DurabilitySource::Fleet {
+            self.telemetry
+                .durability_proof(proof.source(), self.submitted_at.elapsed());
+        }
+        Ok(())
     }
 
     pub(crate) async fn prove_fleet(&self) -> Result<()> {
-        self.durability.prove_fleet(self.ticket).await.map(|_| ())
+        let proof = self.durability.prove_fleet(self.ticket).await?;
+        self.telemetry
+            .durability_proof(proof.source(), self.submitted_at.elapsed());
+        Ok(())
     }
 
     pub(crate) async fn prove_object(&self) -> Result<()> {
-        self.durability.prove_object(self.ticket).await.map(|_| ())
+        let proof = self.durability.prove_object(self.ticket).await?;
+        self.telemetry
+            .durability_proof(proof.source(), self.submitted_at.elapsed());
+        Ok(())
     }
 }
 
@@ -679,6 +706,8 @@ impl CellDurabilitySubmitter {
         Ok(Some(PendingDurability {
             durability: std::sync::Arc::clone(durability),
             ticket,
+            submitted_at: std::time::Instant::now(),
+            telemetry: self.telemetry.clone(),
         }))
     }
 

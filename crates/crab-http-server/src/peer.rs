@@ -89,6 +89,8 @@ pub(crate) struct NodePublisher {
     local_disk_limit_bytes: u64,
     scheduler: crate::cells::SchedulerStatus,
     follower_store: Option<crab_cell_runtime::FollowerStore>,
+    telemetry: crab_cell_runtime::CellTelemetryHandle,
+    metrics: Option<crate::metrics::Metrics>,
     lease: OnceLock<crab_cell_runtime::NodeLeaseGuard>,
     observed: OnceLock<tokio::sync::Mutex<VersionedNodeAdvertisement>>,
 }
@@ -147,6 +149,8 @@ impl NodePublisher {
             local_disk_limit_bytes,
             scheduler,
             follower_store: None,
+            telemetry: crab_cell_runtime::CellTelemetryHandle::default(),
+            metrics: None,
             lease: OnceLock::new(),
             observed: OnceLock::new(),
         })
@@ -157,6 +161,19 @@ impl NodePublisher {
         follower_store: crab_cell_runtime::FollowerStore,
     ) -> Self {
         self.follower_store = Some(follower_store);
+        self
+    }
+
+    pub(crate) fn with_telemetry(
+        mut self,
+        telemetry: crab_cell_runtime::CellTelemetryHandle,
+    ) -> Self {
+        self.telemetry = telemetry;
+        self
+    }
+
+    pub(crate) fn with_metrics(mut self, metrics: crate::metrics::Metrics) -> Self {
+        self.metrics = Some(metrics);
         self
     }
 
@@ -179,11 +196,14 @@ impl NodePublisher {
             published.advertisement().expires_at_ms(),
         )?;
         self.lease
-            .set(lease)
+            .set(lease.clone())
             .map_err(|_| crate::Error::Config("node lease was initialized twice"))?;
         self.observed
             .set(tokio::sync::Mutex::new(published.clone()))
             .map_err(|_| crate::Error::Config("node advertisement was initialized twice"))?;
+        if let Some(metrics) = &self.metrics {
+            metrics.update_node_log(published.advertisement().log(), lease.remaining());
+        }
         Ok(published)
     }
 
@@ -243,8 +263,12 @@ impl NodePublisher {
             log.epoch(),
             log.members().iter().copied(),
         )?;
-        let shipper =
-            crab_cell_runtime::NodeLogShipper::new(gate.clone(), Arc::clone(&transport), limits)?;
+        let shipper = crab_cell_runtime::NodeLogShipper::new_with_telemetry(
+            gate.clone(),
+            Arc::clone(&transport),
+            limits,
+            self.telemetry.clone(),
+        )?;
         let authority: Arc<dyn NodeLogAuthority> = self.clone();
         let durability = crab_cell_runtime::NodeDurability::new(
             gate,
@@ -281,10 +305,16 @@ impl NodePublisher {
                         if let Err(error) =
                             lease.renew(now_ms, next.advertisement().expires_at_ms())
                         {
+                            if let Some(metrics) = &self.metrics {
+                                metrics.record_self_fence(crate::metrics::SelfFenceReason::Other);
+                            }
                             lease.fence();
                             server.node_healthy.store(false, Ordering::Release);
                             server.cancellation.cancel();
                             break 'heartbeat Err(error.into());
+                        }
+                        if let Some(metrics) = &self.metrics {
+                            metrics.update_node_log(next.advertisement().log(), lease.remaining());
                         }
                         *current = next;
                         break;
@@ -295,6 +325,9 @@ impl NodePublisher {
                             .expires_at_ms()
                             .saturating_sub(ADVERTISEMENT_EXPIRY_MARGIN_MS);
                         if now_ms >= retry_deadline {
+                            if let Some(metrics) = &self.metrics {
+                                metrics.record_self_fence(crate::metrics::SelfFenceReason::Refresh);
+                            }
                             lease.fence();
                             server.node_healthy.store(false, Ordering::Release);
                             server.cancellation.cancel();

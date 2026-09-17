@@ -172,13 +172,30 @@ impl NodeLogShipper {
         transport: Arc<dyn NodeLogTransport>,
         limits: crab_ltx::Limits,
     ) -> Result<Self> {
-        Self::start(gate, transport, limits, BATCH_INTERVAL)
+        Self::start(
+            gate,
+            transport,
+            limits,
+            crate::CellTelemetryHandle::default(),
+            BATCH_INTERVAL,
+        )
+    }
+
+    /// Starts a shipper with a bounded operational telemetry sink.
+    pub fn new_with_telemetry(
+        gate: DurabilityGate,
+        transport: Arc<dyn NodeLogTransport>,
+        limits: crab_ltx::Limits,
+        telemetry: crate::CellTelemetryHandle,
+    ) -> Result<Self> {
+        Self::start(gate, transport, limits, telemetry, BATCH_INTERVAL)
     }
 
     fn start(
         gate: DurabilityGate,
         transport: Arc<dyn NodeLogTransport>,
         limits: crab_ltx::Limits,
+        telemetry: crate::CellTelemetryHandle,
         interval: Duration,
     ) -> Result<Self> {
         let (leader, log_epoch, members) = gate.shipping_scope()?;
@@ -201,6 +218,7 @@ impl NodeLogShipper {
             log_epoch,
             members,
             batch_bytes,
+            telemetry.clone(),
             interval,
         ));
         Ok(Self {
@@ -312,6 +330,10 @@ struct QueuedFrame {
     _reservation: Arc<OutstandingBytes>,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the worker keeps the exact log epoch, ensemble and bounded admission explicit"
+)]
 async fn run_shipper(
     mut receiver: mpsc::Receiver<QueuedSubmission>,
     gate: DurabilityGate,
@@ -320,6 +342,7 @@ async fn run_shipper(
     log_epoch: u64,
     members: Vec<NodeId>,
     max_batch_bytes: u64,
+    telemetry: crate::CellTelemetryHandle,
     interval: Duration,
 ) {
     let mut pending = VecDeque::<QueuedFrame>::new();
@@ -378,7 +401,14 @@ async fn run_shipper(
             }
         }
 
-        if append_batch(
+        let append_bytes = batch
+            .iter()
+            .try_fold(0_u64, |total, frame| {
+                total.checked_add(frame.encoded.len() as u64)
+            })
+            .and_then(|bytes| bytes.checked_mul(members.len() as u64))
+            .unwrap_or(u64::MAX);
+        let result = append_batch(
             &gate,
             Arc::clone(&transport),
             leader,
@@ -386,9 +416,9 @@ async fn run_shipper(
             &members,
             batch,
         )
-        .await
-        .is_err()
-        {
+        .await;
+        telemetry.node_log_append(result.is_ok(), append_bytes);
+        if result.is_err() {
             gate.stop_shipping();
             receiver.close();
             return;
@@ -454,7 +484,7 @@ async fn append_batch(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use futures_util::future::BoxFuture;
 
@@ -468,6 +498,17 @@ mod tests {
     struct RecordingTransport {
         batches: Mutex<Vec<(NodeId, Vec<u64>)>>,
         fail: Option<NodeId>,
+    }
+
+    #[derive(Default)]
+    struct RecordingTelemetry {
+        appends: Mutex<Vec<(bool, u64)>>,
+    }
+
+    impl crate::CellTelemetry for RecordingTelemetry {
+        fn node_log_append(&self, acknowledged: bool, bytes: u64) {
+            self.appends.lock().unwrap().push((acknowledged, bytes));
+        }
     }
 
     struct LostAckTransport {
@@ -629,6 +670,7 @@ mod tests {
             gate.clone(),
             transport.clone(),
             crab_ltx::Limits::default(),
+            crate::CellTelemetryHandle::default(),
             Duration::from_millis(50),
         )
         .unwrap();
@@ -655,6 +697,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn append_telemetry_records_one_result_for_each_batch() {
+        let (_directory, cuts) = capture();
+        let gate = DurabilityGate::new(session(1), node(1), 2, [node(2)]).unwrap();
+        gate.activate_fleet().unwrap();
+        let transport = Arc::new(RecordingTransport::default());
+        let telemetry = Arc::new(RecordingTelemetry::default());
+        let handle = crate::CellTelemetryHandle::default();
+        handle.install(telemetry.clone()).unwrap();
+        let shipper = NodeLogShipper::new_with_telemetry(
+            gate,
+            transport,
+            crab_ltx::Limits::default(),
+            handle,
+        )
+        .unwrap();
+
+        shipper.submit(submission(&cuts)).await.unwrap();
+        shipper.shutdown().await.unwrap();
+
+        assert_eq!(telemetry.appends.lock().unwrap().len(), 1);
+        assert!(telemetry.appends.lock().unwrap()[0].0);
+        assert!(telemetry.appends.lock().unwrap()[0].1 > 0);
+    }
+
+    #[tokio::test]
     async fn splits_large_submission_at_sixty_four_frames() {
         let (_directory, mut cuts) = capture();
         cuts.segments = std::iter::repeat_n(cuts.segments[0].clone(), 65).collect();
@@ -665,6 +732,7 @@ mod tests {
             gate.clone(),
             transport.clone(),
             crab_ltx::Limits::default(),
+            crate::CellTelemetryHandle::default(),
             Duration::from_millis(50),
         )
         .unwrap();
@@ -692,6 +760,7 @@ mod tests {
             gate.clone(),
             transport,
             crab_ltx::Limits::default(),
+            crate::CellTelemetryHandle::default(),
             Duration::from_millis(1),
         )
         .unwrap();
@@ -728,6 +797,7 @@ mod tests {
             gate.clone(),
             transport,
             crab_ltx::Limits::default(),
+            crate::CellTelemetryHandle::default(),
             Duration::from_millis(1),
         )
         .unwrap();

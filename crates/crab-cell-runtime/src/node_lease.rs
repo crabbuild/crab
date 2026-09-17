@@ -77,6 +77,21 @@ impl NodeLeaseGuard {
         Ok(())
     }
 
+    /// Returns the current lease time remaining, or zero after fencing.
+    #[must_use]
+    pub fn remaining(&self) -> std::time::Duration {
+        self.inner
+            .state
+            .lock()
+            .ok()
+            .filter(|state| !state.fenced)
+            .map_or(std::time::Duration::ZERO, |state| {
+                state
+                    .deadline
+                    .saturating_duration_since(tokio::time::Instant::now())
+            })
+    }
+
     /// Permanently closes the guard and wakes dispatch, output, and shutdown waiters.
     pub fn fence(&self) {
         if let Ok(mut state) = self.inner.state.lock() {

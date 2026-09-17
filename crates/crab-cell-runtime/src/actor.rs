@@ -124,6 +124,7 @@ pub(super) struct RuntimeInner {
     replica_host: crab_ltx::Host,
     node_lease: Arc<RuntimeNodeLease>,
     node_durability: Arc<OnceLock<NodeDurabilityBinding>>,
+    telemetry: crate::CellTelemetryHandle,
     unpublished_node_log_bytes: Arc<AtomicU64>,
 }
 
@@ -237,9 +238,21 @@ impl CellRuntime {
                 replica_host,
                 node_lease,
                 node_durability: Arc::new(OnceLock::new()),
+                telemetry: crate::CellTelemetryHandle::default(),
                 unpublished_node_log_bytes,
             }),
         })
+    }
+
+    /// Installs the process telemetry sink before Cell work begins.
+    pub fn install_telemetry(&self, telemetry: Arc<dyn crate::CellTelemetry>) -> crate::Result<()> {
+        self.inner.telemetry.install(telemetry)
+    }
+
+    /// Returns the shared sink used by node-log components for this runtime.
+    #[must_use]
+    pub fn telemetry_handle(&self) -> crate::CellTelemetryHandle {
+        self.inner.telemetry.clone()
     }
 
     /// Installs the successfully published process lease before Cell admission opens.
@@ -841,6 +854,7 @@ impl CellRuntime {
             publisher = publisher.with_node_lease(node_lease);
         }
         publisher = publisher.with_node_durability_slot(Arc::clone(&self.inner.node_durability));
+        publisher = publisher.with_telemetry(self.inner.telemetry.clone());
         self.inner
             .sender
             .send(Message::Activate {
@@ -1030,6 +1044,7 @@ struct ActiveCell {
 struct QueuedPublication {
     pending: PendingCommit,
     durability: Option<PendingDurability>,
+    submitted_at: std::time::Instant,
     proof: oneshot::Sender<crate::Result<()>>,
 }
 
@@ -1688,6 +1703,7 @@ async fn execute_migration(
     };
     let result = match pending {
         Ok(pending) => {
+            let durability_started = std::time::Instant::now();
             let durability = publisher.submit_migration_durability(&pending).await;
             match durability {
                 Err(error) => Err(error),
@@ -1713,6 +1729,8 @@ async fn execute_migration(
                             .await?;
                         if let Some(durability) = durability.as_ref() {
                             durability.prove_object().await?;
+                        } else {
+                            publisher.record_object_proof(durability_started.elapsed());
                         }
                         pool.confirm_migration_published(cell, root).await
                     };
@@ -1956,6 +1974,8 @@ fn start_publication(
                 .await?;
             if let Some(durability) = publication.durability.as_ref() {
                 durability.prove_object().await?;
+            } else {
+                publisher.record_object_proof(publication.submitted_at.elapsed());
             }
             let published = pool.confirm_published(cell, root).await?;
             if published != expected {
@@ -2226,6 +2246,7 @@ fn handle_task(
                     active.publications.push_back(QueuedPublication {
                         pending: *pending,
                         durability: durability.clone(),
+                        submitted_at: std::time::Instant::now(),
                         proof,
                     });
                     if durability.is_some() {
