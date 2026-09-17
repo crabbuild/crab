@@ -447,7 +447,7 @@ jobs:
                database_count: 8,
                commit_targets_per_node: 64,
                commit_targets_per_cell: 24,
-               requests_per_cell_per_node: 125,
+               configured_requests_per_cell_per_node: 125,
                transaction: "repository commit status insert"
              } and
              .checks.cross_replica_git == true and
