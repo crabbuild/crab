@@ -76,7 +76,7 @@ async fn append_recovers_torn_suffix_deduplicates_and_seals() {
         .join("open.log");
     std::fs::OpenOptions::new()
         .append(true)
-        .open(open)
+        .open(&open)
         .unwrap()
         .write_all(b"torn")
         .unwrap();
@@ -87,6 +87,10 @@ async fn append_recovers_torn_suffix_deduplicates_and_seals() {
         crab_ltx::DiskBudget::new(1 << 30),
     )
     .unwrap();
+    assert_eq!(
+        std::fs::metadata(&open).unwrap().len(),
+        (RECORD_HEADER_BYTES + first_frame.len()) as u64
+    );
     assert_eq!(
         store
             .append(leader, 2, vec![second_frame.clone()], 0)
@@ -154,6 +158,9 @@ async fn closed_chunk_name_must_match_verified_record_range() {
         crab_ltx::DiskBudget::new(1 << 30),
     )
     .unwrap();
+    assert_eq!(reopened.quarantined_entries(), 1);
+    assert!(!lane_directory(root.path(), Lane { leader, epoch: 2 }).exists());
+    assert!(root.path().join(FOLLOWER_QUARANTINE).exists());
     assert!(reopened.seal(leader, 2).await.is_err());
     database.close().unwrap();
 }
@@ -241,6 +248,8 @@ fn open_reserves_only_existing_follower_bytes_and_rejects_an_undersized_budget()
     .unwrap();
     assert_eq!(store.retained_bytes(), 17);
     assert_eq!(store.available_bytes(), 15);
+    assert_eq!(store.quarantined_entries(), 1);
+    assert!(!root.path().join("followers/retained.log").exists());
 }
 
 #[tokio::test]

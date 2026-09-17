@@ -14,6 +14,7 @@ const MAX_APPEND_FRAMES: usize = 64;
 const MAX_TAIL_PAGE_BYTES: usize = 1 << 20;
 const MAX_TAIL_PAGE_FRAMES: usize = 4096;
 const MAX_RETIRED_LANES: usize = 1_024;
+const FOLLOWER_QUARANTINE: &str = "followers-quarantine";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Lane {
@@ -79,6 +80,7 @@ pub struct FollowerStore {
     lanes: LaneMap,
     disk: crab_ltx::DiskBudget,
     retained: Arc<Mutex<crab_ltx::DiskReservation>>,
+    quarantined_entries: usize,
 }
 
 impl FollowerStore {
@@ -97,13 +99,16 @@ impl FollowerStore {
             sync_directory(parent).map_err(crab_ltx::CrabError::from)?;
         }
         sync_directory(&root).map_err(crab_ltx::CrabError::from)?;
+        scrub_followers(&root, limits)?;
         let retained = disk.try_reserve(follower_bytes(&root)?)?;
+        let quarantined_entries = quarantine_entry_count(&root)?;
         Ok(Self {
             root,
             limits,
             lanes: Arc::new(Mutex::new(HashMap::new())),
             disk,
             retained: Arc::new(Mutex::new(retained)),
+            quarantined_entries,
         })
     }
 
@@ -118,6 +123,12 @@ impl FollowerStore {
     #[must_use]
     pub fn available_bytes(&self) -> u64 {
         self.disk.available()
+    }
+
+    /// Reports diagnostic entries isolated by this or an earlier startup scrub.
+    #[must_use]
+    pub const fn quarantined_entries(&self) -> usize {
+        self.quarantined_entries
     }
 
     /// Appends one ordered batch and acknowledges only after `sync_data`.
@@ -369,12 +380,12 @@ fn directory_bytes(path: &Path) -> Result<u64> {
     while let Some(directory) = pending.pop() {
         for entry in std::fs::read_dir(directory)? {
             let entry = entry?;
-            let metadata = entry.metadata()?;
-            if metadata.is_dir() {
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
                 pending.push(entry.path());
-            } else if metadata.is_file() {
+            } else if file_type.is_file() {
                 total = total
-                    .checked_add(metadata.len())
+                    .checked_add(entry.metadata()?.len())
                     .ok_or(Error::Node("follower retained byte count overflow"))?;
             } else {
                 return Err(Error::Node("follower storage contains a special file"));
@@ -386,10 +397,146 @@ fn directory_bytes(path: &Path) -> Result<u64> {
 
 fn follower_bytes(root: &Path) -> Result<u64> {
     let followers = root.join("followers");
+    let retained = if followers.exists() {
+        directory_bytes(&followers)?
+    } else {
+        0
+    };
+    let quarantine = root.join(FOLLOWER_QUARANTINE);
+    let quarantined = if quarantine.exists() {
+        directory_bytes(&quarantine)?
+    } else {
+        0
+    };
+    retained
+        .checked_add(quarantined)
+        .ok_or(Error::Node("follower retained byte count overflow"))
+}
+
+fn scrub_followers(root: &Path, limits: crab_ltx::Limits) -> Result<()> {
+    let followers = root.join("followers");
     if !followers.exists() {
+        return Ok(());
+    }
+    if !std::fs::symlink_metadata(&followers)?.file_type().is_dir() {
+        quarantine_entry(root, &followers)?;
+        return Ok(());
+    }
+    let mut leaders = directory_entries(&followers)?;
+    for leader_path in leaders.drain(..) {
+        let leader = match directory_lane_component(&leader_path, parse_session_directory) {
+            Ok(leader) => leader,
+            Err(_) => {
+                quarantine_entry(root, &leader_path)?;
+                continue;
+            }
+        };
+        let mut epochs = directory_entries(&leader_path)?;
+        for epoch_path in epochs.drain(..) {
+            let epoch = match directory_lane_component(&epoch_path, parse_epoch_directory) {
+                Ok(epoch) => epoch,
+                Err(_) => {
+                    quarantine_entry(root, &epoch_path)?;
+                    continue;
+                }
+            };
+            let lane = Lane { leader, epoch };
+            if validate_stored_lane(root, lane, limits).is_err() {
+                quarantine_entry(root, &epoch_path)?;
+            }
+        }
+        if leader_path.exists() && std::fs::read_dir(&leader_path)?.next().is_none() {
+            std::fs::remove_dir(&leader_path)?;
+            sync_directory(&followers)?;
+        }
+    }
+    Ok(())
+}
+
+fn directory_entries(directory: &Path) -> Result<Vec<PathBuf>> {
+    let mut entries = std::fs::read_dir(directory)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort();
+    Ok(entries)
+}
+
+fn directory_lane_component<T>(path: &Path, parse: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
+    if !std::fs::symlink_metadata(path)?.file_type().is_dir() {
+        return Err(Error::Node("follower lane component is not a directory"));
+    }
+    parse(path)
+}
+
+fn validate_stored_lane(root: &Path, lane: Lane, limits: crab_ltx::Limits) -> Result<()> {
+    let directory = lane_directory(root, lane);
+    for entry in std::fs::read_dir(&directory)? {
+        let entry = entry?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| Error::Node("follower lane entry is not UTF-8"))?;
+        let file_type = entry.file_type()?;
+        let valid = match name.as_str() {
+            "chunks" => file_type.is_dir(),
+            "sealed" | "retired" => file_type.is_file(),
+            _ => false,
+        };
+        if !valid {
+            return Err(Error::Node("follower lane contains an invalid entry"));
+        }
+    }
+    let records = scan_lane(&directory.join("chunks"), lane, limits)?;
+    let durable_through = records.keys().next_back().copied().unwrap_or(0);
+    let sealed = directory.join("sealed");
+    if sealed.exists()
+        && read_watermark(&sealed, "follower seal marker is invalid")? != durable_through
+    {
+        return Err(Error::Node("follower seal watermark differs"));
+    }
+    let retired = directory.join("retired");
+    if retired.exists()
+        && read_watermark(&retired, "follower retire marker is invalid")? < durable_through
+    {
+        return Err(Error::Node("follower lane has uncovered records"));
+    }
+    Ok(())
+}
+
+fn quarantine_entry(root: &Path, source: &Path) -> Result<()> {
+    let quarantine = ensure_child(root, FOLLOWER_QUARANTINE)?;
+    let mut index = quarantine_entry_count(root)? as u64;
+    let destination = loop {
+        index = index
+            .checked_add(1)
+            .ok_or(Error::Node("follower quarantine index overflow"))?;
+        let candidate = quarantine.join(format!("{index:020}.bad"));
+        if !candidate.exists() {
+            break candidate;
+        }
+    };
+    std::fs::rename(source, destination)?;
+    let source_parent = source
+        .parent()
+        .ok_or(Error::Node("follower quarantine source has no parent"))?;
+    sync_directory(source_parent)?;
+    sync_directory(&quarantine)?;
+    Ok(())
+}
+
+fn quarantine_entry_count(root: &Path) -> Result<usize> {
+    let quarantine = root.join(FOLLOWER_QUARANTINE);
+    if !quarantine.exists() {
         return Ok(0);
     }
-    directory_bytes(&followers)
+    Ok(
+        std::fs::read_dir(quarantine)?.try_fold(0_usize, |count, entry| {
+            entry?;
+            count
+                .checked_add(1)
+                .ok_or_else(|| std::io::Error::other("follower quarantine entry count overflow"))
+        })?,
+    )
 }
 
 fn retired_lanes_sync(

@@ -808,6 +808,12 @@ pub async fn serve(config: Config) -> Result<()> {
         crate::cells::repository_replica_limits(),
         local_disk,
     )?;
+    if follower_store.quarantined_entries() != 0 {
+        tracing::warn!(
+            entries = follower_store.quarantined_entries(),
+            "corrupt follower storage remains quarantined"
+        );
+    }
     let node_publisher = Arc::new(node_publisher.with_follower_store(follower_store.clone()));
     let cell_resolver = crate::peer::LocalCellResolver::new(
         startup.layout.clone(),

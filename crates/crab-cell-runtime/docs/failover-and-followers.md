@@ -152,7 +152,7 @@ recovery path.
 | Working now | Remaining target gaps |
 | --- | --- |
 | Strict frame codec plus capacity- and failure-domain-aware deterministic selection, retrying automatic enrollment, activation, coverage, recovery claims, object-covered epoch rotation, and clean log close | None for this slice |
-| Crash-safe, node-budgeted follower store under a persisted physical `NodeId`, authenticated remote append/seal/tail/retire transport, a bounded node-wide batched shipper, and a recovery-first management-listener lifecycle | Startup follower-lane scrub and quarantine |
+| Crash-safe, node-budgeted follower store under a persisted physical `NodeId`, authenticated remote append/seal/tail/retire transport, a bounded node-wide batched shipper, a recovery-first management-listener lifecycle, and startup lane scrub/quarantine | None for this slice |
 | Authoritative create and refresh drive a terminal monotonic node-lease guard; admission, actor dispatch, Cell-control CAS, durability proof, and output acceptance all check it | Fleet-proof watermarks for future streamed Cell responses |
 | Write-all durability gate, first-fsynced-batch activation, actor cut submission, fleet-first command release, object fallback, and contiguous authoritative object watermark | A dual-head actor that can begin the next command before prior fleet-proven cuts finish object publication |
 | Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | Early schema-migration response release |
@@ -183,9 +183,8 @@ instead of being assumed independent. Rotation closes
 the old gate only after every issued sequence is object-covered, best-effort
 retires old lanes behind durable append fences, and CASes a fresh inactive
 epoch. Recruitment retries while the node remains healthy and leaves a
-one-node fleet on the object path. Startup follower-lane scrub and quarantine,
-early schema-migration response release, and dual-head actor continuation
-remain gated. The preferred
+one-node fleet on the object path. Early schema-migration response release and
+dual-head actor continuation remain gated. The preferred
 shard-zero scanner now inventories expired active node
 logs, claims at most two concurrently, scans at most 10,000 affected Cells,
 renews each recovery claim while gathering and pinning, seals the session, and
@@ -515,6 +514,7 @@ evictable read cache until the session record proves the bytes are covered.
   chunks/
     00000000000000000001-00000000000000004096.log
     open.log
+<cell-data>/followers-quarantine/<monotonic-id>.bad
 ```
 
 Each record in a chunk contains magic, sequence, encoded-frame length, the
@@ -542,6 +542,17 @@ The acknowledgement is sent only after `sync_data` succeeds. Directory sync is
 also required when creating, rotating, renaming, or removing a chunk. A disk
 error, short write, checksum mismatch, gap, or sync error returns a typed NACK
 and never advances `durable_through`.
+
+`FollowerStore::open` walks every retained lane before the management listener
+starts. It verifies directory shape, closed-chunk names and records, frame
+scope and digest, sequence continuity, and seal/retire watermarks. A torn or
+invalid suffix in `open.log` is truncated to its last fully verified record and
+synced. Any other invalid lane is atomically renamed into
+`followers-quarantine`; the server reports the persisted quarantine count and
+keeps those bytes charged to the same disk budget. Quarantine is diagnostic
+and has no automatic deletion path. Because the corrupt lane is no longer a
+recovery witness, an active leader log with no other complete member remains
+unavailable rather than treating the damage as an empty tail.
 
 Exact duplicates return the existing durable end after comparing the stored
 digest. A duplicate sequence with different bytes is corruption and
