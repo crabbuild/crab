@@ -290,6 +290,8 @@ pub(crate) async fn upload_pack(
                 haves: request.haves.clone(),
                 shallow: request.shallow.clone(),
                 deepen: request.deepen,
+                deepen_since: request.deepen_since,
+                deepen_not: request.deepen_not.clone(),
                 deepen_relative: request.deepen_relative,
                 include_tags: request.include_tags,
                 filter: request.filter.clone(),
