@@ -1294,7 +1294,7 @@ async fn write_capabilities<W: AsyncWrite + Unpin>(
     write_data(writer, b"ls-refs=unborn\n", cancellation).await?;
     write_data(
         writer,
-        b"fetch=shallow deepen deepen-relative filter thin-pack no-progress include-tag ofs-delta\n",
+        b"fetch=shallow deepen deepen-relative deepen-since deepen-not filter thin-pack no-progress include-tag ofs-delta\n",
         cancellation,
     )
     .await?;
@@ -1711,6 +1711,8 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
         haves: request.haves.clone(),
         shallow: request.shallow.clone(),
         deepen: request.deepen,
+        deepen_since: request.deepen_since,
+        deepen_not: request.deepen_not.clone(),
         deepen_relative: request.deepen_relative,
         include_tags: request.include_tags,
         filter: request.filter.clone(),
@@ -1899,6 +1901,8 @@ fn request_pack_preplanning_cache_eligible(request: &FetchRequest) -> bool {
     !request.haves.is_empty()
         && !request.shallow.is_empty()
         && request.deepen.is_none()
+        && request.deepen_since.is_none()
+        && request.deepen_not.is_empty()
         && !request.deepen_relative
         && matches!(request.filter, UploadPackFilter::None)
 }
@@ -1907,6 +1911,8 @@ fn external_thin_pack_eligible(request: &FetchRequest, plan: &crab_read::PackPla
     request.thin_pack
         && request.shallow.is_empty()
         && request.deepen.is_none()
+        && request.deepen_since.is_none()
+        && request.deepen_not.is_empty()
         && !request.deepen_relative
         && matches!(request.filter, UploadPackFilter::None)
         && !plan.common_haves.is_empty()
@@ -1938,6 +1944,22 @@ fn preplanned_pack_request_digest(request: &FetchRequest) -> [u8; 32] {
             hash.update(&[0]);
         }
     }
+    match request.deepen_since {
+        Some(timestamp) => {
+            hash.update(&[1]);
+            hash.update(&timestamp.to_be_bytes());
+        }
+        None => {
+            hash.update(&[0]);
+        }
+    }
+    let mut deepen_not = request.deepen_not.clone();
+    deepen_not.sort_unstable();
+    hash.update(&(deepen_not.len() as u64).to_be_bytes());
+    for reference in deepen_not {
+        hash.update(&(reference.len() as u64).to_be_bytes());
+        hash.update(reference.as_bytes());
+    }
     for objects in [
         request.wants.as_slice(),
         request.haves.as_slice(),
@@ -1956,6 +1978,8 @@ fn preplanned_pack_request_digest(request: &FetchRequest) -> [u8; 32] {
 fn dense_selected_response(request: &FetchRequest) -> bool {
     request.shallow.is_empty()
         && request.deepen.is_none()
+        && request.deepen_since.is_none()
+        && request.deepen_not.is_empty()
         && !request.deepen_relative
         && request.filter.is_catalog_exact()
 }

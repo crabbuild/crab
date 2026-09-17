@@ -254,12 +254,16 @@ impl fmt::Display for FilterSpec {
 
 /// Fetch constraints passed to the pack download pipeline.
 ///
-/// The remote helper populates `depth`. The public `filter` field is retained
+/// The remote helper populates the shallow selectors. The public `filter` field is retained
 /// for the legacy helper API; filtered fetches use protocol-v2 instead.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FetchOptions {
     /// Shallow clone depth (`--depth N`). `None` means full clone.
     pub depth: Option<u32>,
+    /// Include commits at or newer than this committer timestamp.
+    pub deepen_since: Option<i64>,
+    /// Exclude commits reachable from these references.
+    pub deepen_not: Vec<String>,
     /// Whether `depth` extends the repository's current shallow boundary.
     pub deepen_relative: bool,
     /// Legacy helper filter. A populated value is rejected before legacy pack
@@ -270,7 +274,11 @@ pub struct FetchOptions {
 impl FetchOptions {
     /// Whether any shallow or filter constraint is active.
     pub fn has_constraints(&self) -> bool {
-        self.depth.is_some() || self.deepen_relative || self.filter.is_some()
+        self.depth.is_some()
+            || self.deepen_since.is_some()
+            || !self.deepen_not.is_empty()
+            || self.deepen_relative
+            || self.filter.is_some()
     }
 }
 
@@ -1187,27 +1195,37 @@ async fn handle_option<W: tokio::io::AsyncWrite + Unpin>(
                     .await?;
             }
         },
-        // The published summary has generation numbers but no commit
-        // timestamps or excluded-ref ancestry. Reject these selectors so Git
-        // cannot silently turn a requested shallow clone into a full clone.
         "deepen-since" => {
-            let reason = "deepen-since is not supported; use --depth";
-            writer
-                .write_all(format!("error {reason}\n").as_bytes())
-                .await?;
-            writer.flush().await?;
-            // Git treats an option-level `error` as advisory and otherwise
-            // continues with an unconstrained fetch. End the helper session
-            // as well so the requested history bound cannot be discarded.
-            return Err(CrabError::Protocol(reason.to_owned()));
+            let timestamp = value
+                .parse::<i64>()
+                .map_err(|_| CrabError::Protocol(format!("invalid deepen-since value: {value}")))?;
+            if options
+                .fetch_options
+                .deepen_since
+                .replace(timestamp)
+                .is_some()
+            {
+                return Err(CrabError::Protocol(
+                    "duplicate deepen-since option".to_owned(),
+                ));
+            }
+            writer.write_all(b"ok\n").await?;
         }
         "deepen-not" => {
-            let reason = "deepen-not is not supported; use --depth";
-            writer
-                .write_all(format!("error {reason}\n").as_bytes())
-                .await?;
-            writer.flush().await?;
-            return Err(CrabError::Protocol(reason.to_owned()));
+            if value.is_empty() || value.bytes().any(|byte| byte.is_ascii_whitespace()) {
+                return Err(CrabError::Protocol(
+                    "deepen-not requires one non-empty reference".to_owned(),
+                ));
+            }
+            if !options
+                .fetch_options
+                .deepen_not
+                .iter()
+                .any(|name| name == value)
+            {
+                options.fetch_options.deepen_not.push(value.to_owned());
+            }
+            writer.write_all(b"ok\n").await?;
         }
         // Crab remotes are never shallow themselves. The option therefore
         // cannot expose additional upstream history, and either valid value
@@ -2602,7 +2620,11 @@ async fn fetch_packs(
 ) -> Result<Option<std::path::PathBuf>> {
     let raw_object_fetch = classify_raw_object_fetch(entries)?;
     if raw_object_fetch {
-        if fetch_options.depth.is_some() || fetch_options.deepen_relative {
+        if fetch_options.depth.is_some()
+            || fetch_options.deepen_since.is_some()
+            || !fetch_options.deepen_not.is_empty()
+            || fetch_options.deepen_relative
+        {
             return Err(CrabError::Protocol(
                 "raw object fetch cannot carry shallow constraints".to_owned(),
             ));
@@ -2634,7 +2656,25 @@ async fn fetch_packs(
             "relative deepening requires a depth".to_owned(),
         ));
     }
-    if fetch_options.depth.is_some() || fetch_options.deepen_relative {
+    if fetch_options.depth.is_some()
+        && (fetch_options.deepen_since.is_some() || !fetch_options.deepen_not.is_empty())
+    {
+        return Err(CrabError::Protocol(
+            "depth cannot be combined with deepen-since or deepen-not".to_owned(),
+        ));
+    }
+    if fetch_options.deepen_relative
+        && (fetch_options.deepen_since.is_some() || !fetch_options.deepen_not.is_empty())
+    {
+        return Err(CrabError::Protocol(
+            "deepen-relative cannot be combined with deepen-since or deepen-not".to_owned(),
+        ));
+    }
+    if fetch_options.depth.is_some()
+        || fetch_options.deepen_since.is_some()
+        || !fetch_options.deepen_not.is_empty()
+        || fetch_options.deepen_relative
+    {
         crate::git::upload_pack_wire::with_read_admission(
             store.as_storage(),
             router.repo_prefix(),
@@ -2879,6 +2919,12 @@ async fn fetch_capsule_shallow_pack(
             .then_some(existing_shallow.clone())
             .unwrap_or_default(),
         deepen: (!full_depth).then_some(fetch_options.depth).flatten(),
+        deepen_since: (!full_depth)
+            .then_some(fetch_options.deepen_since)
+            .flatten(),
+        deepen_not: (!full_depth)
+            .then_some(fetch_options.deepen_not.clone())
+            .unwrap_or_default(),
         deepen_relative: !full_depth && fetch_options.deepen_relative,
         include_tags,
         ..Default::default()
@@ -2955,6 +3001,8 @@ async fn fetch_capsule_shallow_pack(
         storage_protocol_version = 2,
         transport = "remote-helper-fetch",
         deepen = fetch_options.depth,
+        deepen_since = fetch_options.deepen_since,
+        deepen_not = fetch_options.deepen_not.len(),
         deepen_relative = fetch_options.deepen_relative,
         planned_objects = pack.object_count(),
         transferred_bytes = pack.size(),
@@ -6059,6 +6107,8 @@ mod tests {
     fn fetch_options_depth_only_has_constraints() {
         let opts = FetchOptions {
             depth: Some(3),
+            deepen_since: None,
+            deepen_not: Vec::new(),
             deepen_relative: false,
             filter: None,
         };
@@ -6069,6 +6119,8 @@ mod tests {
     fn fetch_options_filter_only_has_constraints() {
         let opts = FetchOptions {
             depth: None,
+            deepen_since: None,
+            deepen_not: Vec::new(),
             deepen_relative: false,
             filter: Some(FilterSpec::BlobNone),
         };
@@ -6079,6 +6131,8 @@ mod tests {
     fn fetch_options_combined_depth_and_filter() {
         let opts = FetchOptions {
             depth: Some(5),
+            deepen_since: None,
+            deepen_not: Vec::new(),
             deepen_relative: false,
             filter: Some(FilterSpec::BlobNone),
         };
@@ -6159,21 +6213,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_shallow_selectors_fail_instead_of_degrading_to_full_fetch() {
-        for (key, value) in [
-            ("deepen-since", "1700000000"),
-            ("deepen-not", "refs/heads/archive"),
-        ] {
-            let mut options = HelperOptions::default();
-            let mut output = Vec::new();
-            let result = handle_option(key, value, &mut options, &mut output).await;
-
-            assert!(matches!(result, Err(CrabError::Protocol(_))));
-            assert!(
-                String::from_utf8(output).unwrap().starts_with("error "),
-                "option {key} did not emit an explicit protocol error"
-            );
-        }
+    async fn shallow_selectors_are_accepted_without_degrading_to_full_fetch() {
+        let mut options = HelperOptions::default();
+        let mut output = Vec::new();
+        handle_option("deepen-since", "1700000000", &mut options, &mut output)
+            .await
+            .unwrap();
+        handle_option(
+            "deepen-not",
+            "refs/heads/archive",
+            &mut options,
+            &mut output,
+        )
+        .await
+        .unwrap();
+        assert_eq!(options.fetch_options.deepen_since, Some(1_700_000_000));
+        assert_eq!(options.fetch_options.deepen_not, ["refs/heads/archive"]);
+        assert_eq!(String::from_utf8(output).unwrap(), "ok\nok\n");
     }
 
     #[tokio::test]

@@ -1292,6 +1292,8 @@ mod tests {
         let store = Arc::new(TestPackStore::new(Vec::new()));
         let fetch_options = FetchOptions {
             depth: None,
+            deepen_since: None,
+            deepen_not: Vec::new(),
             deepen_relative: false,
             filter: Some(crate::git::remote_helper::FilterSpec::BlobNone),
         };
@@ -1562,6 +1564,8 @@ mod tests {
             Some(&graph),
             &FetchOptions {
                 depth: Some(u32::MAX),
+                deepen_since: None,
+                deepen_not: Vec::new(),
                 deepen_relative: false,
                 filter: None,
             },
@@ -2209,6 +2213,8 @@ mod tests {
 
         let fetch_opts = FetchOptions {
             depth: Some(3),
+            deepen_since: None,
+            deepen_not: Vec::new(),
             deepen_relative: false,
             filter: None,
         };
@@ -2248,6 +2254,8 @@ mod tests {
 
         let fetch_opts = FetchOptions {
             depth: Some(0),
+            deepen_since: None,
+            deepen_not: Vec::new(),
             deepen_relative: false,
             filter: None,
         };
@@ -2286,6 +2294,8 @@ mod tests {
         // depth=0 but no .git/shallow file — not an unshallow, just normal.
         let fetch_opts = FetchOptions {
             depth: Some(0),
+            deepen_since: None,
+            deepen_not: Vec::new(),
             deepen_relative: false,
             filter: None,
         };
