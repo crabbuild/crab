@@ -35,6 +35,9 @@ pub(crate) use node_log_client::NodeLogHttpTransport;
 
 const PROTOBUF_MEDIA_TYPE: &str = "application/x-protobuf";
 const NODE_LOG_MEDIA_TYPE: &str = "application/x-crab-node-log";
+const NODE_LOG_TAIL_PAGE_FRAMES: usize = 4_096;
+const NODE_LOG_TAIL_PAGE_BODY_BYTES: usize =
+    (65 * 1024 * 1024) + (NODE_LOG_TAIL_PAGE_FRAMES * 8) + 12;
 const ADVERTISEMENT_LIFETIME_MS: i64 = 10_000;
 const ADVERTISEMENT_EXPIRY_MARGIN_MS: i64 = 1_000;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
@@ -961,11 +964,17 @@ fn follower_receipt_response(receipt: crab_cell_runtime::FollowerReceipt) -> Res
 }
 
 fn encode_tail_page(page: crab_cell_runtime::FollowerTailPage) -> std::result::Result<Vec<u8>, ()> {
+    if page.frames.len() > NODE_LOG_TAIL_PAGE_FRAMES {
+        return Err(());
+    }
     let count = u32::try_from(page.frames.len()).map_err(|_| ())?;
     let body_len = page.frames.iter().try_fold(12_usize, |length, frame| {
         length.checked_add(8)?.checked_add(frame.len())
     });
-    let mut body = Vec::with_capacity(body_len.ok_or(())?);
+    let body_len = body_len
+        .filter(|length| *length <= NODE_LOG_TAIL_PAGE_BODY_BYTES)
+        .ok_or(())?;
+    let mut body = Vec::with_capacity(body_len);
     body.extend_from_slice(&page.next_sequence.unwrap_or(0).to_le_bytes());
     body.extend_from_slice(&count.to_le_bytes());
     for frame in page.frames {
@@ -1389,6 +1398,13 @@ mod tests {
         trailing.extend_from_slice(&4_u64.to_le_bytes());
         trailing.extend_from_slice(b"bad");
         assert!(decode_append_batch(Bytes::from(trailing)).is_err());
+        assert!(
+            encode_tail_page(crab_cell_runtime::FollowerTailPage {
+                frames: vec![Bytes::from_static(b"frame"); NODE_LOG_TAIL_PAGE_FRAMES + 1],
+                next_sequence: None,
+            })
+            .is_err()
+        );
         assert_eq!(
             decode_session("01010101010101010101010101010101").unwrap(),
             SessionId::from_bytes([1; 16])
