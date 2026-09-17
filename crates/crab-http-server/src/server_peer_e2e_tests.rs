@@ -145,37 +145,41 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     let owner_session = SessionId::from_bytes([8; 16]);
     let ingress_dir = tempfile::TempDir::new().unwrap();
     let owner_dir = tempfile::TempDir::new().unwrap();
-    let ingress_publisher = NodePublisher::new(
-        directory.clone(),
-        peer_tls.signing_key().clone(),
-        ingress_session,
-        "https://localhost:2".into(),
-        peer_tls.fleet(),
-        peer_tls.certificate(),
-        image,
-        registry.release_digest(),
-        registry.module_digests(),
-        ingress_dir.path().to_path_buf(),
-        crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap()).unwrap(),
-    )
-    .unwrap();
-    let owner_publisher = NodePublisher::new(
-        directory.clone(),
-        peer_tls.signing_key().clone(),
-        owner_session,
-        management_endpoint.clone(),
-        peer_tls.fleet(),
-        peer_tls.certificate(),
-        image,
-        registry.release_digest(),
-        registry.module_digests(),
-        owner_dir.path().to_path_buf(),
-        crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap()).unwrap(),
-    )
-    .unwrap();
+    let ingress_publisher = Arc::new(
+        NodePublisher::new(
+            directory.clone(),
+            peer_tls.signing_key().clone(),
+            ingress_session,
+            "https://localhost:2".into(),
+            peer_tls.fleet(),
+            peer_tls.certificate(),
+            image,
+            registry.release_digest(),
+            registry.module_digests(),
+            ingress_dir.path().to_path_buf(),
+            crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap()).unwrap(),
+        )
+        .unwrap(),
+    );
+    let owner_publisher = Arc::new(
+        NodePublisher::new(
+            directory.clone(),
+            peer_tls.signing_key().clone(),
+            owner_session,
+            management_endpoint.clone(),
+            peer_tls.fleet(),
+            peer_tls.certificate(),
+            image,
+            registry.release_digest(),
+            registry.module_digests(),
+            owner_dir.path().to_path_buf(),
+            crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap()).unwrap(),
+        )
+        .unwrap(),
+    );
     let owner_node = owner_publisher.node();
-    let ingress_advertisement = ingress_publisher.publish_initial().await.unwrap();
-    let owner_advertisement = owner_publisher.publish_initial().await.unwrap();
+    ingress_publisher.publish_initial().await.unwrap();
+    owner_publisher.publish_initial().await.unwrap();
     let ingress_session_dir = ingress_publisher.session_dir();
     let owner_session_dir = owner_publisher.session_dir();
 
@@ -244,11 +248,10 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         )),
     );
     let owner_heartbeat_stop = CancellationToken::new();
-    let owner_heartbeat_task = tokio::spawn(owner_publisher.run(
-        Arc::clone(&owner_server),
-        owner_advertisement,
-        owner_heartbeat_stop.clone(),
-    ));
+    let owner_heartbeat_task = tokio::spawn(
+        Arc::clone(&owner_publisher)
+            .run_shared(Arc::clone(&owner_server), owner_heartbeat_stop.clone()),
+    );
     let management = management_router(Arc::clone(&owner_server));
     let (management_stop, management_done) = tokio::sync::oneshot::channel();
     let management_tls = Arc::clone(&peer_tls);
@@ -301,11 +304,10 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         None,
     );
     let ingress_heartbeat_stop = CancellationToken::new();
-    let ingress_heartbeat_task = tokio::spawn(ingress_publisher.run(
-        Arc::clone(&ingress_server),
-        ingress_advertisement,
-        ingress_heartbeat_stop.clone(),
-    ));
+    let ingress_heartbeat_task = tokio::spawn(
+        Arc::clone(&ingress_publisher)
+            .run_shared(Arc::clone(&ingress_server), ingress_heartbeat_stop.clone()),
+    );
     let public_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let public_origin = format!("http://{}", public_listener.local_addr().unwrap());
     let public_app = router(Arc::clone(&ingress_server));

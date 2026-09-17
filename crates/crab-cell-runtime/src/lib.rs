@@ -22,6 +22,7 @@ mod identity;
 mod kv;
 mod maintenance;
 mod node;
+mod node_durability;
 mod node_lease;
 mod node_log;
 mod node_log_recovery;
@@ -96,6 +97,7 @@ pub use node::{
     FencedNodeSession, NODE_LOG_PROTOCOL_VERSION, NodeAdvertisement, NodeCapacity, NodeDirectory,
     NodeTakeoverProof, SealedNodeLog, VersionedNodeAdvertisement,
 };
+pub use node_durability::{NodeDurability, NodeLogAuthority};
 pub use node_lease::NodeLeaseGuard;
 pub use node_log::{
     CommitTicket, DurabilityGate, DurabilityProof, DurabilitySource, NodeLogRotationBarrier,

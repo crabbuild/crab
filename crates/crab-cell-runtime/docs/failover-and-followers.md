@@ -149,14 +149,14 @@ recovery path.
 
 ### Implementation checkpoint
 
-| Working now | Still gated before fleet durability may serve traffic |
+| Working now | Remaining target gaps |
 | --- | --- |
-| Strict frame codec plus capacity-aware deterministic selection, authoritative enrollment, activation, coverage, recovery claims, object-covered epoch rotation, and clean log close | Failure-domain-aware automatic recruitment |
+| Strict frame codec plus capacity-aware deterministic selection, retrying automatic enrollment, activation, coverage, recovery claims, object-covered epoch rotation, and clean log close | Failure-domain-aware member selection |
 | Crash-safe, node-budgeted follower store under a persisted physical `NodeId`, authenticated remote append/seal/tail/retire transport, and a bounded node-wide batched shipper | Recovery-only startup listener ordering |
-| Authoritative create and refresh drive a terminal monotonic node-lease guard; admission, actor dispatch, Cell-control CAS, and output acceptance all check it | Node-log ticket submission and first-batch activation |
-| Write-all durability gate with contiguous object watermark | Actor submission and response-gate integration |
+| Authoritative create and refresh drive a terminal monotonic node-lease guard; admission, actor dispatch, Cell-control CAS, durability proof, and output acceptance all check it | Fleet-proof gating for schema migrations and future streamed Cell responses |
+| Write-all durability gate, first-fsynced-batch activation, actor cut submission, fleet-first command release, object fallback, and contiguous authoritative object watermark | A dual-head actor that can begin the next command before prior fleet-proven cuts finish object publication |
 | Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | Recovery-only startup listener ordering |
-| Cell control attachment and takeover consumption of overlays | Server drain wiring, obsolete-marker collection, and live multi-node proof |
+| Cell control attachment and takeover consumption of overlays; server drain closes a fully object-covered epoch before session withdrawal | Obsolete-marker collection and live multi-node proof |
 
 The session record now owns one CAS-protected log epoch, its exact sorted member
 set, activation bit, contiguous object watermark, and renewable recovery claim.
@@ -179,14 +179,22 @@ shared-disk capacity advertised by their follower stores, then rendezvous-ranks
 the full one- or two-member ensemble before its CAS enrollment. Rotation closes
 the old gate only after every issued sequence is object-covered, best-effort
 retires old lanes behind durable append fences, and CASes a fresh inactive
-epoch. Automatic recruitment with failure-domain metadata, recovery-only
-startup listener ordering, actor submission, and obsolete-marker collection remain
-gated. The preferred shard-zero scanner now inventories expired active node
+epoch. Recruitment retries while the node remains healthy and leaves a
+one-node fleet on the object path. Failure-domain metadata, recovery-only
+startup listener ordering, schema-migration fleet gating, dual-head actor
+continuation, and obsolete-marker collection remain gated. The preferred
+shard-zero scanner now inventories expired active node
 logs, claims at most two concurrently, scans at most 10,000 affected Cells,
 renews each recovery claim while gathering and pinning, seals the session, and
-leaves a takeover proof that another request can reload. Fleet proof is not
-activated, so current responses stay on the existing exact-root path until
-the remaining gates are complete.
+leaves a takeover proof that another request can reload. For commands, the
+actor submits captured cuts before immutable-root preparation. Every selected
+follower must fsync the ticket before the shared node-session authority performs
+the exact `active=false -> active=true` CAS. Only then can fleet proof release
+the command response; root preparation and CAS continue in the same actor, and
+failure of the fleet path falls back to object proof. The actor stays busy until
+object publication finishes, so reads and later commands cannot observe
+unpublished state. This is correct but not yet the target dual-head throughput
+model.
 An active predecessor log cannot be converted directly from a session fence
 into Cell takeover authority: only the coordinator's successful post-seal
 result carries `NodeTakeoverProof`.
@@ -197,9 +205,10 @@ refresh. Expiry and refresh failure are terminal: both mark the node unhealthy
 and cancel the server, and a late refresh cannot revive the process. The
 production Cell runtime stays fenced until that guard is installed. It checks
 the same guard before admission, immediately before actor dispatch, around
-Cell-control mutation, and before returning any state-observing result. Fleet
-proof remains disabled until captured cuts are submitted and the first fsynced
-batch activates the authoritative node log.
+Cell-control mutation, and before returning any state-observing result.
+Heartbeat refresh, log activation, object coverage, and clean close share one
+mutex-protected authoritative observation, so their ETag CAS operations cannot
+race through stale local state.
 
 ## Use one multiplexed log per owner session
 

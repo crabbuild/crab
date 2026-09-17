@@ -1,17 +1,112 @@
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 
 use bytes::Bytes;
 use crab_cell_runtime::{
-    ApplicationId, CatalogEntry, CatalogRole, CellAuthority, CellRuntime, CellTarget, ControlState,
-    Digest, DiskBudget, HandlerOutcome, InboxDelivery, IncarnationId, MutationIdentity,
-    NamespaceId, NodeLeaseGuard, Owner, ReplicaHost, RequestId, Resolution, SessionId,
-    SqlWorkerPool, StoredOutcome, TenantId, Transition,
+    AppendRequest, ApplicationId, CatalogEntry, CatalogRole, CellAuthority, CellRuntime,
+    CellTarget, ControlState, Digest, DiskBudget, DurabilityGate, FollowerReceipt, HandlerOutcome,
+    InboxDelivery, IncarnationId, MutationIdentity, NamespaceId, NodeDurability, NodeId,
+    NodeLeaseGuard, NodeLogAuthority, NodeLogRotationBarrier, NodeLogShipper, NodeLogTransport,
+    Owner, ReplicaHost, RequestId, Resolution, RetireRequest, SealRequest, SessionId,
+    SqlWorkerPool, StoredOutcome, TailRequest, TenantId, Transition,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{
     CellObjectKind, CellStorageLayout, ObjectStoreCredentials, Store, build_explicit_store,
 };
 use object_store::{memory::InMemory, path::Path};
+
+#[derive(Default)]
+struct TestNodeAuthority {
+    activations: Mutex<Vec<u64>>,
+    coverage: Mutex<Vec<(u64, u64)>>,
+    closes: Mutex<Vec<u64>>,
+}
+
+impl NodeLogAuthority for TestNodeAuthority {
+    fn activate<'a>(
+        &'a self,
+        log_epoch: u64,
+    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<()>> {
+        Box::pin(async move {
+            self.activations.lock().unwrap().push(log_epoch);
+            Ok(())
+        })
+    }
+
+    fn advance_coverage<'a>(
+        &'a self,
+        log_epoch: u64,
+        tiered_through: u64,
+    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<()>> {
+        Box::pin(async move {
+            self.coverage
+                .lock()
+                .unwrap()
+                .push((log_epoch, tiered_through));
+            Ok(())
+        })
+    }
+
+    fn close<'a>(
+        &'a self,
+        barrier: &'a NodeLogRotationBarrier,
+    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<()>> {
+        Box::pin(async move {
+            self.closes.lock().unwrap().push(barrier.log_epoch());
+            Ok(())
+        })
+    }
+}
+
+struct TestNodeTransport;
+
+impl NodeLogTransport for TestNodeTransport {
+    fn append<'a>(
+        &'a self,
+        _member: NodeId,
+        request: AppendRequest,
+    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<FollowerReceipt>> {
+        Box::pin(async move {
+            let last = request.frames.last().ok_or(crab_cell_runtime::Error::Node(
+                "test node-log append is empty",
+            ))?;
+            let frame = crab_ltx::inspect_node_frame(last.clone(), Limits::default())?;
+            Ok(FollowerReceipt {
+                base_sequence: 1,
+                durable_through: frame.scope().node_sequence,
+            })
+        })
+    }
+
+    fn seal<'a>(
+        &'a self,
+        _member: NodeId,
+        _request: SealRequest,
+    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<FollowerReceipt>> {
+        Box::pin(async { Err(crab_cell_runtime::Error::Node("unused test seal")) })
+    }
+
+    fn tail<'a>(
+        &'a self,
+        _member: NodeId,
+        _request: TailRequest,
+    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<Vec<Bytes>>> {
+        Box::pin(async { Err(crab_cell_runtime::Error::Node("unused test tail")) })
+    }
+
+    fn retire<'a>(
+        &'a self,
+        _member: NodeId,
+        request: RetireRequest,
+    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<FollowerReceipt>> {
+        Box::pin(async move {
+            Ok(FollowerReceipt {
+                base_sequence: request.covered_through.saturating_add(1),
+                durable_through: request.covered_through,
+            })
+        })
+    }
+}
 
 async fn fence_session(
     layout: &CellStorageLayout,
@@ -339,6 +434,68 @@ async fn node_lease_expiry_hides_an_inflight_committed_command() {
         runtime.shutdown().await,
         Err(crab_cell_runtime::Error::Fenced)
     ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_flows_through_follower_proof_object_coverage_and_clean_close() {
+    let fixture = fixture_for(b"node-durability-command");
+    let session = SessionId::from_bytes([46; 16]);
+    let leader = NodeId::from_bytes([47; 16]);
+    let follower = NodeId::from_bytes([48; 16]);
+    let runtime = CellRuntime::new_with_replica_host_requiring_node_lease(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        2 * 1024 * 1024,
+        session,
+        ReplicaHost::default(),
+    )
+    .unwrap();
+    let lease = NodeLeaseGuard::new(0, 60_000).unwrap();
+    runtime.install_node_lease(lease.clone()).unwrap();
+    let gate = DurabilityGate::new(session, leader, 1, [follower]).unwrap();
+    let transport: Arc<dyn NodeLogTransport> = Arc::new(TestNodeTransport);
+    let shipper =
+        NodeLogShipper::new(gate.clone(), Arc::clone(&transport), Limits::default()).unwrap();
+    let authority = Arc::new(TestNodeAuthority::default());
+    let node_authority: Arc<dyn NodeLogAuthority> = authority.clone();
+    let durability = Arc::new(NodeDurability::new(
+        gate,
+        shipper,
+        node_authority,
+        transport,
+        lease,
+    ));
+    runtime
+        .install_node_durability(fixture.target.application(), durability)
+        .unwrap();
+    let handle = bootstrap_on(&runtime, &fixture, session).await;
+
+    let outcome = handle
+        .execute(
+            identity(49),
+            Digest::from_bytes([50; 32]),
+            20,
+            1_024,
+            1_024,
+            |transaction| {
+                transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                Ok(HandlerOutcome::Success(b"durable".to_vec()))
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        StoredOutcome::Success {
+            ref result,
+            commit_sequence: 1
+        } if result == b"durable"
+    ));
+    handle.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+    assert_eq!(*authority.activations.lock().unwrap(), vec![1]);
+    assert_eq!(*authority.coverage.lock().unwrap(), vec![(1, 1)]);
+    assert_eq!(*authority.closes.lock().unwrap(), vec![1]);
 }
 
 #[tokio::test]

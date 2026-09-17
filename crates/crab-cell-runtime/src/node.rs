@@ -1199,6 +1199,26 @@ impl NodeDirectory {
         live_node_limit: usize,
         now_ms: i64,
     ) -> Result<VersionedNodeAdvertisement> {
+        self.try_recruit_log(
+            observed,
+            log_epoch,
+            required_follower_bytes,
+            live_node_limit,
+            now_ms,
+        )
+        .await?
+        .ok_or(Error::Node("node-log follower ensemble is unavailable"))
+    }
+
+    /// CAS-enrolls followers when a complete ensemble is currently available.
+    pub async fn try_recruit_log(
+        &self,
+        observed: &VersionedNodeAdvertisement,
+        log_epoch: u64,
+        required_follower_bytes: u64,
+        live_node_limit: usize,
+        now_ms: i64,
+    ) -> Result<Option<VersionedNodeAdvertisement>> {
         self.validate(&observed.advertisement, now_ms)?;
         if observed.advertisement.log.is_some() {
             return Err(Error::Node("node session already has an enrolled log"));
@@ -1212,7 +1232,7 @@ impl NodeDirectory {
             )
             .await?;
         if members.is_empty() {
-            return Err(Error::Node("node-log follower ensemble is unavailable"));
+            return Ok(None);
         }
         let mut next = observed.advertisement.clone();
         next.generation = next
@@ -1220,7 +1240,9 @@ impl NodeDirectory {
             .checked_add(1)
             .ok_or(Error::Node("node session generation overflow"))?;
         next.log = Some(NodeLogStatus::open(next.node, log_epoch, members)?);
-        self.update_advertisement(observed, next, now_ms).await
+        self.update_advertisement(observed, next, now_ms)
+            .await
+            .map(Some)
     }
 
     /// CAS-activates the exact enrolled epoch after every member fsyncs its first batch.

@@ -319,6 +319,53 @@ impl DurabilityGate {
         })
     }
 
+    pub(crate) fn preview(&self, frame_count: u64) -> Result<CommitTicket> {
+        if !(1..=MAX_TICKET_FRAMES).contains(&frame_count) {
+            return Err(Error::Node("invalid node-log ticket size"));
+        }
+        let state = self.lock()?;
+        if state.fenced {
+            return Err(Error::Fenced);
+        }
+        if state.rotating {
+            return Err(Error::Node("node log is rotating"));
+        }
+        let first_sequence = state.next_sequence;
+        let last_sequence = first_sequence
+            .checked_add(frame_count - 1)
+            .ok_or(Error::Node("node sequence overflow"))?;
+        Ok(CommitTicket {
+            leader_session: state.leader_session,
+            log_epoch: state.log_epoch,
+            first_sequence,
+            last_sequence,
+        })
+    }
+
+    pub(crate) fn commit(&self, ticket: CommitTicket) -> Result<()> {
+        let mut state = self.lock()?;
+        if state.fenced {
+            return Err(Error::Fenced);
+        }
+        if state.rotating {
+            return Err(Error::Node("node log is rotating"));
+        }
+        if ticket.leader_session != state.leader_session
+            || ticket.log_epoch != state.log_epoch
+            || ticket.first_sequence != state.next_sequence
+            || ticket.first_sequence == 0
+            || ticket.first_sequence > ticket.last_sequence
+            || ticket.last_sequence.saturating_sub(ticket.first_sequence) >= MAX_TICKET_FRAMES
+        {
+            return Err(Error::Node("node-log ticket reservation changed"));
+        }
+        state.next_sequence = ticket
+            .last_sequence
+            .checked_add(1)
+            .ok_or(Error::Node("node sequence overflow"))?;
+        Ok(())
+    }
+
     pub(crate) fn shipping_scope(&self) -> Result<(SessionId, u64, Vec<NodeId>)> {
         let state = self.lock()?;
         if state.fenced || state.rotating {
@@ -373,6 +420,35 @@ impl DurabilityGate {
         drop(state);
         self.changed.notify_waiters();
         Ok(())
+    }
+
+    /// Waits until every enrolled follower has fsynced the complete ticket.
+    ///
+    /// This does not enable fleet durability. The caller must first complete
+    /// the authoritative inactive-to-active CAS and then call `activate_fleet`.
+    pub async fn wait_followers(&self, ticket: CommitTicket) -> Result<()> {
+        loop {
+            let notified = self.changed.notified();
+            {
+                let state = self.lock()?;
+                validate_ticket(&state, ticket)?;
+                if state.fenced {
+                    return Err(Error::Fenced);
+                }
+                if state.rotating {
+                    return Err(Error::Node("node log is rotating"));
+                }
+                if state.members.iter().all(|member| {
+                    state
+                        .follower_through
+                        .get(member)
+                        .is_some_and(|through| *through >= ticket.last_sequence)
+                }) {
+                    return Ok(());
+                }
+            }
+            notified.await;
+        }
     }
 
     /// Marks exactly the frame range now reachable through an authoritative root.
@@ -531,7 +607,7 @@ pub async fn close_node_log(
     directory.close_log(observed, &barrier, now_ms).await
 }
 
-async fn retire_node_log(
+pub(crate) async fn retire_node_log(
     transport: Arc<dyn NodeLogTransport>,
     barrier: &NodeLogRotationBarrier,
 ) -> Result<()> {
@@ -618,6 +694,18 @@ mod tests {
             gate.prove(ticket).await.unwrap().source(),
             DurabilitySource::Fleet
         );
+    }
+
+    #[tokio::test]
+    async fn follower_wait_does_not_activate_fleet_proof() {
+        let gate = DurabilityGate::new(session(1), node(1), 2, [node(3), node(4)]).unwrap();
+        let ticket = gate.issue(2).unwrap();
+        gate.acknowledge(node(3), 2).unwrap();
+        gate.acknowledge(node(4), 2).unwrap();
+
+        gate.wait_followers(ticket).await.unwrap();
+
+        assert!(gate.proof(ticket).unwrap().is_none());
     }
 
     #[tokio::test]

@@ -17,10 +17,12 @@ mod handle;
 pub use handle::CellHandle;
 use handle::{CellAdmission, WorkAdmission};
 
+use crate::publication::NodeDurabilityBinding;
 use crate::{
-    CatalogProof, CellAuthority, CellId, CellPublisher, Digest, Error, InboxDelivery,
-    MigrationOutcome, MigrationPlan, MutationIdentity, NodeLeaseGuard, Owner, Resolution,
-    SessionId, SqlWorkerPool, StoredOutcome, Transition, VersionedControl, WorkerExecution,
+    ApplicationId, CatalogProof, CellAuthority, CellId, CellPublisher, Digest, Error,
+    InboxDelivery, MigrationOutcome, MigrationPlan, MutationIdentity, NodeDurability,
+    NodeLeaseGuard, Owner, Resolution, SessionId, SqlWorkerPool, StoredOutcome, Transition,
+    VersionedControl, WorkerExecution,
     worker::{CellReservation, Handler, Initializer, QueryHandler, WorkerState},
 };
 
@@ -113,6 +115,7 @@ pub(super) struct RuntimeInner {
     pool: SqlWorkerPool,
     replica_host: crab_ltx::Host,
     node_lease: Arc<RuntimeNodeLease>,
+    node_durability: Arc<OnceLock<NodeDurabilityBinding>>,
 }
 
 enum RuntimeNodeLease {
@@ -218,6 +221,7 @@ impl CellRuntime {
                 pool,
                 replica_host,
                 node_lease,
+                node_durability: Arc::new(OnceLock::new()),
             }),
         })
     }
@@ -228,6 +232,19 @@ impl CellRuntime {
             return Err(Error::RuntimeClosed);
         }
         self.inner.node_lease.install(guard)
+    }
+
+    /// Installs the one recruited node-log epoch used by newly activated Cells.
+    pub fn install_node_durability(
+        &self,
+        application: ApplicationId,
+        durability: Arc<NodeDurability>,
+    ) -> crate::Result<()> {
+        self.ensure_running()?;
+        self.inner
+            .node_durability
+            .set((application, durability))
+            .map_err(|_| Error::Control("Cell runtime node durability was initialized twice"))
     }
 
     /// Stops admission, drains accepted work, closes every Cell, and releases ownership.
@@ -249,10 +266,11 @@ impl CellRuntime {
             .map_err(|_| Error::RuntimeClosed)?;
         let drain = response.await.map_err(|_| Error::RuntimeClosed)?;
         let workers = self.inner.pool.shutdown().await;
-        match drain {
-            Err(error) => Err(error),
-            Ok(()) => workers,
-        }
+        let durability = match self.inner.node_durability.get() {
+            Some((_, durability)) => durability.shutdown().await,
+            None => Ok(()),
+        };
+        drain.and(workers).and(durability)
     }
 
     /// Reports whether node-wide admission has entered its terminal drain.
@@ -802,6 +820,7 @@ impl CellRuntime {
         if let Some(node_lease) = self.inner.node_lease.guard()? {
             publisher = publisher.with_node_lease(node_lease);
         }
+        publisher = publisher.with_node_durability_slot(Arc::clone(&self.inner.node_durability));
         self.inner
             .sender
             .send(Message::Activate {
@@ -1689,15 +1708,42 @@ async fn execute_and_publish(
     let (result, must_fence) = match execution {
         Ok(WorkerExecution::Recorded(outcome)) => (Ok(outcome), false),
         Ok(WorkerExecution::Pending(pending)) => {
-            let result = async {
-                let prepared = publisher.prepare(&pending).await?;
-                pool.bind_prepared(command.cell, prepared.clone()).await?;
-                let root = publisher
-                    .publish_prepared(&prepared, pending.next_due_ms())
-                    .await?;
-                pool.confirm_published(command.cell, root).await
-            }
-            .await;
+            let durability = publisher.submit_durability(&pending).await;
+            let result = match durability {
+                Err(error) => Err(error),
+                Ok(durability) => {
+                    let early_outcome = pending.outcome().clone();
+                    let cell = command.cell;
+                    let object = async {
+                        let prepared = publisher.prepare(&pending).await?;
+                        pool.bind_prepared(cell, prepared.clone()).await?;
+                        let root = publisher
+                            .publish_prepared(&prepared, pending.next_due_ms())
+                            .await?;
+                        if let Some(durability) = durability.as_ref() {
+                            durability.prove_object().await?;
+                        }
+                        pool.confirm_published(cell, root).await
+                    };
+                    tokio::pin!(object);
+                    match durability.as_ref() {
+                        Some(durability) => {
+                            let fleet = durability.prove_fleet();
+                            tokio::pin!(fleet);
+                            tokio::select! {
+                                result = &mut object => result,
+                                fleet = &mut fleet => {
+                                    if fleet.is_ok() {
+                                        send_command_reply(&mut command, Ok(early_outcome));
+                                    }
+                                    object.await
+                                }
+                            }
+                        }
+                        None => object.await,
+                    }
+                }
+            };
             (result, true)
         }
         Err(error) => (

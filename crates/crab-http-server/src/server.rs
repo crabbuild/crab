@@ -59,6 +59,8 @@ const MAX_BLOCKING_JOBS: usize = 16;
 const MAX_RECOVERY_JOBS: usize = 2;
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(110);
 const RELEASE_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const NODE_LOG_RECRUIT_INTERVAL: Duration = Duration::from_secs(3);
+const NODE_LOG_LIVE_NODE_LIMIT: usize = 1_024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CellRuntimeBudget {
@@ -798,7 +800,7 @@ pub async fn serve(config: Config) -> Result<()> {
         crate::cells::repository_replica_limits(),
         local_disk,
     )?;
-    let node_publisher = node_publisher.with_follower_store(follower_store.clone());
+    let node_publisher = Arc::new(node_publisher.with_follower_store(follower_store.clone()));
     let cell_resolver = crate::peer::LocalCellResolver::new(
         startup.layout.clone(),
         startup.identity,
@@ -856,7 +858,7 @@ pub async fn serve(config: Config) -> Result<()> {
         scheduler_status.clone(),
     )?
     .with_node_recovery(Arc::clone(&node_log_transport));
-    let advertised = match node_publisher.publish_initial().await {
+    let _advertised = match node_publisher.publish_initial().await {
         Ok(advertised) => advertised,
         Err(error) => {
             if let Err(shutdown_error) = cell_runtime.shutdown().await {
@@ -880,6 +882,7 @@ pub async fn serve(config: Config) -> Result<()> {
         }
         return Err(error.into());
     }
+    let durability_application = startup.identity.application();
     let server = Arc::new(Server {
         repositories: repositories.into(),
         runtime: Arc::clone(&runtime),
@@ -920,12 +923,32 @@ pub async fn serve(config: Config) -> Result<()> {
     let refresh_server = Arc::clone(&server);
     let refresh =
         tokio::spawn(async move { refresh_catalog(refresh_server, catalog_version).await });
+    let durability_publisher = Arc::clone(&node_publisher);
+    let durability_runtime = server.cell_runtime.clone();
+    let durability_transport = Arc::clone(
+        server
+            .node_log_transport
+            .as_ref()
+            .ok_or(crate::Error::Config("node-log transport is unavailable"))?,
+    );
+    let durability_cancellation = cancellation.clone();
+    let durability_recruiter = tokio::spawn(async move {
+        recruit_node_durability(
+            durability_publisher,
+            durability_runtime,
+            durability_application,
+            durability_transport,
+            durability_cancellation,
+        )
+        .await
+    });
     let node_shutdown = CancellationToken::new();
     let node_server = Arc::clone(&server);
     let heartbeat_shutdown = node_shutdown.clone();
+    let heartbeat_publisher = Arc::clone(&node_publisher);
     let heartbeat = tokio::spawn(async move {
-        node_publisher
-            .run(node_server, advertised, heartbeat_shutdown)
+        heartbeat_publisher
+            .run_shared(node_server, heartbeat_shutdown)
             .await
     });
     let lease_server = Arc::clone(&server);
@@ -974,6 +997,10 @@ pub async fn serve(config: Config) -> Result<()> {
         if let Err(error) = refresh.await {
             tracing::warn!(error = %error, "repository catalog refresh task failed");
         }
+        let durability_recruiter = match durability_recruiter.await {
+            Ok(result) => result,
+            Err(error) => Err(error.into()),
+        };
         let scheduler = match scheduler.await {
             Ok(result) => result,
             Err(error) => Err(error.into()),
@@ -1007,10 +1034,46 @@ pub async fn serve(config: Config) -> Result<()> {
             .and(lease_watch)
             .and(scheduler)
             .and(release_watch)
+            .and(durability_recruiter)
             .and(maintenance)
             .and(runtimes)
     })
     .await?
+}
+
+async fn recruit_node_durability(
+    publisher: Arc<crate::peer::NodePublisher>,
+    runtime: CellRuntime,
+    application: crab_cell_runtime::ApplicationId,
+    transport: Arc<dyn crab_cell_runtime::NodeLogTransport>,
+    cancellation: CancellationToken,
+) -> Result<()> {
+    let limits = crate::cells::repository_replica_limits();
+    loop {
+        let recruited = publisher
+            .recruit_node_durability(
+                Arc::clone(&transport),
+                limits,
+                limits.max_capture_bytes,
+                NODE_LOG_LIVE_NODE_LIMIT,
+            )
+            .await;
+        match recruited {
+            Ok(Some(durability)) => {
+                runtime.install_node_durability(application, durability)?;
+                tracing::info!("node-log follower durability recruited");
+                return Ok(());
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "node-log follower recruitment failed");
+            }
+        }
+        tokio::select! {
+            () = cancellation.cancelled() => return Ok(()),
+            () = tokio::time::sleep(NODE_LOG_RECRUIT_INTERVAL) => {}
+        }
+    }
 }
 
 /// Validate the durable catalog and the storage coordination write path.

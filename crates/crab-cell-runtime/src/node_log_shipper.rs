@@ -216,10 +216,8 @@ impl NodeLogShipper {
 
     /// Assigns a consecutive ticket and retains the encoded frames for shipping.
     ///
-    /// Queue and byte admission happen before ticket allocation, so ordinary
-    /// backpressure cannot create a sequence gap. An encoding failure closes
-    /// fleet issuance for this epoch; already-issued tickets can still obtain
-    /// object-store proof and allow a covered rotation.
+    /// Queue, byte admission, disk reads, and canonical encoding happen before
+    /// the ticket reservation commits, so failures cannot create a sequence gap.
     pub async fn submit(&self, submission: NodeLogSubmission) -> Result<CommitTicket> {
         let frame_count = submission.frame_count()?;
         if frame_count > crate::node_log::MAX_TICKET_FRAMES
@@ -250,19 +248,14 @@ impl NodeLogShipper {
             .await
             .map_err(Error::FollowerWorkerJoin)??;
         let _ordered = self.order.lock().await;
-        let ticket = self.gate.issue(frame_count)?;
+        let ticket = self.gate.preview(frame_count)?;
         let encoded = match tokio::task::spawn_blocking(move || loaded.encode(ticket, limits)).await
         {
             Ok(Ok(encoded)) => encoded,
-            Ok(Err(error)) => {
-                self.gate.stop_shipping();
-                return Err(error);
-            }
-            Err(error) => {
-                self.gate.stop_shipping();
-                return Err(Error::FollowerWorkerJoin(error));
-            }
+            Ok(Err(error)) => return Err(error),
+            Err(error) => return Err(Error::FollowerWorkerJoin(error)),
         };
+        self.gate.commit(ticket)?;
         let reservation = Arc::new(OutstandingBytes {
             _permit: reservation,
         });
@@ -690,6 +683,34 @@ mod tests {
             shipper.submit(submission(&cuts)).await,
             Err(Error::Capacity("node-log submission"))
         ));
+        shipper.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn encoding_failure_does_not_consume_a_node_sequence() {
+        let (_directory, cuts) = capture();
+        let mut invalid = cuts.clone();
+        let mut info = invalid.segments[0].info().clone();
+        info.blake3 = [0; 32];
+        invalid.segments[0] =
+            crab_ltx::LocalSegment::new(invalid.segments[0].path().to_owned(), info);
+        let gate = DurabilityGate::new(session(1), node(1), 2, [node(2)]).unwrap();
+        gate.activate_fleet().unwrap();
+        let shipper = NodeLogShipper::new(
+            gate.clone(),
+            Arc::new(RecordingTransport::default()),
+            crab_ltx::Limits::default(),
+        )
+        .unwrap();
+
+        assert!(shipper.submit(submission(&invalid)).await.is_err());
+        let ticket = shipper.submit(submission(&cuts)).await.unwrap();
+
+        assert_eq!(ticket.first_sequence(), 1);
+        assert_eq!(
+            gate.prove(ticket).await.unwrap().source(),
+            crate::DurabilitySource::Fleet
+        );
         shipper.shutdown().await.unwrap();
     }
 }

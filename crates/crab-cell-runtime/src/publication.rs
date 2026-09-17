@@ -1,5 +1,6 @@
 use crate::{
-    CellAuthority, CellExecutor, Error, Result, StoredOutcome, Transition, VersionedControl,
+    ApplicationId, CellAuthority, CellExecutor, CommitTicket, Error, NodeDurability,
+    NodeLogSubmission, Result, StoredOutcome, Transition, VersionedControl,
 };
 
 const MAX_RETRY_DELAY_MS: u64 = 1_000;
@@ -7,6 +8,8 @@ const COMPACTION_CHECK_INTERVAL: u8 = 8;
 const MAX_COMPACTION_CASCADE: usize = 9;
 const RENEW_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 const SELF_FENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+pub(crate) type NodeDurabilityBinding = (ApplicationId, std::sync::Arc<NodeDurability>);
 
 /// Coordinates immutable preparation, authority CAS and result release.
 ///
@@ -22,6 +25,7 @@ pub struct CellPublisher {
     appends_since_compaction_check: u8,
     renew_at: std::time::Instant,
     node_lease: Option<crate::NodeLeaseGuard>,
+    node_durability: Option<std::sync::Arc<std::sync::OnceLock<NodeDurabilityBinding>>>,
 }
 
 impl CellPublisher {
@@ -44,12 +48,55 @@ impl CellPublisher {
             appends_since_compaction_check: COMPACTION_CHECK_INTERVAL,
             renew_at: std::time::Instant::now() + RENEW_INTERVAL,
             node_lease: None,
+            node_durability: None,
         }
     }
 
     pub(crate) fn with_node_lease(mut self, node_lease: crate::NodeLeaseGuard) -> Self {
         self.node_lease = Some(node_lease);
         self
+    }
+
+    pub(crate) fn with_node_durability_slot(
+        mut self,
+        durability: std::sync::Arc<std::sync::OnceLock<NodeDurabilityBinding>>,
+    ) -> Self {
+        self.node_durability = Some(durability);
+        self
+    }
+
+    pub(crate) async fn submit_durability(
+        &self,
+        pending: &crate::PendingCommit,
+    ) -> Result<Option<PendingDurability>> {
+        let Some((application, durability)) = self
+            .node_durability
+            .as_ref()
+            .and_then(|durability| durability.get())
+        else {
+            return Ok(None);
+        };
+        self.check_node_lease()?;
+        let control = self.observed.value();
+        let submission = NodeLogSubmission::new(
+            *application,
+            control.cell,
+            control.incarnation,
+            control.epoch,
+            pending.outcome().commit_sequence(),
+            pending.cuts(),
+        )?;
+        let ticket = match durability.submit(submission).await {
+            Ok(ticket) => ticket,
+            Err(_) => {
+                self.check_node_lease()?;
+                return Ok(None);
+            }
+        };
+        Ok(Some(PendingDurability {
+            durability: std::sync::Arc::clone(durability),
+            ticket,
+        }))
     }
 
     #[must_use]
@@ -582,6 +629,21 @@ impl CellPublisher {
         self.node_lease
             .as_ref()
             .map_or(Ok(()), crate::NodeLeaseGuard::check)
+    }
+}
+
+pub(crate) struct PendingDurability {
+    durability: std::sync::Arc<NodeDurability>,
+    ticket: CommitTicket,
+}
+
+impl PendingDurability {
+    pub(crate) async fn prove_fleet(&self) -> Result<()> {
+        self.durability.prove_fleet(self.ticket).await.map(|_| ())
+    }
+
+    pub(crate) async fn prove_object(&self) -> Result<()> {
+        self.durability.prove_object(self.ticket).await.map(|_| ())
     }
 }
 

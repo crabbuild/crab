@@ -16,9 +16,9 @@ use axum::{
 use bytes::Bytes;
 use crab_cell_runtime::{
     ApplicationIdentity, CellAuthority, CellCatalog, CellHandle, CellRuntime, CellTarget, Digest,
-    Error as CellError, NodeAdvertisement, NodeCapacity, NodeDirectory, NodeId, PeerAuthorizer,
-    PeerCellResolver, PeerDispatcher, PeerRoundTrip, Registry, ReleaseState, ReleaseStore,
-    SessionId, VerifiedPeerRequest, VersionedNodeAdvertisement, peer_wire,
+    Error as CellError, NodeAdvertisement, NodeCapacity, NodeDirectory, NodeId, NodeLogAuthority,
+    PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerRoundTrip, Registry, ReleaseState,
+    ReleaseStore, SessionId, VerifiedPeerRequest, VersionedNodeAdvertisement, peer_wire,
 };
 use crab_storage::CellStorageLayout;
 use ed25519_dalek::SigningKey;
@@ -87,6 +87,7 @@ pub(crate) struct NodePublisher {
     scheduler: crate::cells::SchedulerStatus,
     follower_store: Option<crab_cell_runtime::FollowerStore>,
     lease: OnceLock<crab_cell_runtime::NodeLeaseGuard>,
+    observed: OnceLock<tokio::sync::Mutex<VersionedNodeAdvertisement>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,6 +139,7 @@ impl NodePublisher {
             scheduler,
             follower_store: None,
             lease: OnceLock::new(),
+            observed: OnceLock::new(),
         })
     }
 
@@ -150,6 +152,11 @@ impl NodePublisher {
     }
 
     pub(crate) async fn publish_initial(&self) -> crate::Result<VersionedNodeAdvertisement> {
+        if self.lease.get().is_some() || self.observed.get().is_some() {
+            return Err(crate::Error::Config(
+                "node advertisement was initialized twice",
+            ));
+        }
         let now_ms = now_ms()?;
         let published = self
             .directory
@@ -165,6 +172,9 @@ impl NodePublisher {
         self.lease
             .set(lease)
             .map_err(|_| crate::Error::Config("node lease was initialized twice"))?;
+        self.observed
+            .set(tokio::sync::Mutex::new(published.clone()))
+            .map_err(|_| crate::Error::Config("node advertisement was initialized twice"))?;
         Ok(published)
     }
 
@@ -189,13 +199,63 @@ impl NodePublisher {
         local_resources(&self.data_dir)
     }
 
-    pub(crate) async fn run(
-        self,
+    pub(crate) async fn recruit_node_durability(
+        self: &Arc<Self>,
+        transport: Arc<dyn crab_cell_runtime::NodeLogTransport>,
+        limits: crab_cell_runtime::ReplicaLimits,
+        required_follower_bytes: u64,
+        live_node_limit: usize,
+    ) -> crate::Result<Option<Arc<crab_cell_runtime::NodeDurability>>> {
+        let now_ms = now_ms()?;
+        let mut observed = self.observed().map_err(crate::Error::from)?.lock().await;
+        if observed.advertisement().log().is_none() {
+            let Some(enrolled) = self
+                .directory
+                .try_recruit_log(
+                    &observed,
+                    1,
+                    required_follower_bytes,
+                    live_node_limit,
+                    now_ms,
+                )
+                .await?
+            else {
+                return Ok(None);
+            };
+            *observed = enrolled;
+        }
+        let log = observed
+            .advertisement()
+            .log()
+            .ok_or(CellError::Node("enrolled node session lost its log"))?;
+        let gate = crab_cell_runtime::DurabilityGate::new(
+            self.session,
+            self.node,
+            log.epoch(),
+            log.members().iter().copied(),
+        )?;
+        let shipper =
+            crab_cell_runtime::NodeLogShipper::new(gate.clone(), Arc::clone(&transport), limits)?;
+        let authority: Arc<dyn NodeLogAuthority> = self.clone();
+        let durability = crab_cell_runtime::NodeDurability::new(
+            gate,
+            shipper,
+            authority,
+            transport,
+            self.lease_guard()?,
+        );
+        Ok(Some(Arc::new(durability)))
+    }
+
+    pub(crate) async fn run_shared(
+        self: Arc<Self>,
         server: Arc<Server>,
-        mut observed: VersionedNodeAdvertisement,
         shutdown: CancellationToken,
     ) -> crate::Result<()> {
         let lease = self.lease_guard()?;
+        let observed = self.observed.get().ok_or(crate::Error::Config(
+            "node advertisement is not initialized",
+        ))?;
         let mut draining = false;
         let heartbeat = 'heartbeat: loop {
             tokio::select! {
@@ -206,7 +266,8 @@ impl NodePublisher {
             loop {
                 let now_ms = now_ms()?;
                 let next = self.advertisement(self.scheduler.progress(), now_ms, draining)?;
-                match self.directory.refresh(&observed, next, now_ms).await {
+                let mut current = observed.lock().await;
+                match self.directory.refresh(&current, next, now_ms).await {
                     Ok(next) => {
                         if let Err(error) =
                             lease.renew(now_ms, next.advertisement().expires_at_ms())
@@ -216,11 +277,11 @@ impl NodePublisher {
                             server.cancellation.cancel();
                             break 'heartbeat Err(error.into());
                         }
-                        observed = next;
+                        *current = next;
                         break;
                     }
                     Err(error) => {
-                        let retry_deadline = observed
+                        let retry_deadline = current
                             .advertisement()
                             .expires_at_ms()
                             .saturating_sub(ADVERTISEMENT_EXPIRY_MARGIN_MS);
@@ -246,11 +307,13 @@ impl NodePublisher {
             shutdown.cancelled().await;
         }
         let withdrawal = match now_ms() {
-            Ok(now_ms) => self
-                .directory
-                .withdraw(&observed, now_ms)
-                .await
-                .map_err(crate::Error::from),
+            Ok(now_ms) => {
+                let current = observed.lock().await;
+                self.directory
+                    .withdraw(&current, now_ms)
+                    .await
+                    .map_err(crate::Error::from)
+            }
             Err(error) => Err(error),
         };
         match (heartbeat, withdrawal) {
@@ -261,6 +324,14 @@ impl NodePublisher {
             (Err(error), Ok(())) => Err(error),
             (Ok(()), withdrawal) => withdrawal,
         }
+    }
+
+    fn observed(
+        &self,
+    ) -> crab_cell_runtime::Result<&tokio::sync::Mutex<VersionedNodeAdvertisement>> {
+        self.observed
+            .get()
+            .ok_or(CellError::Node("node advertisement is not initialized"))
     }
 
     fn advertisement(
@@ -299,6 +370,75 @@ impl NodePublisher {
             vec![1],
             capacity,
         )?)
+    }
+}
+
+impl NodeLogAuthority for NodePublisher {
+    fn activate<'a>(
+        &'a self,
+        log_epoch: u64,
+    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<()>> {
+        Box::pin(async move {
+            let now_ms = now_ms().map_err(|_| CellError::Node("node-log time is unavailable"))?;
+            let mut observed = self.observed()?.lock().await;
+            let log = observed
+                .advertisement()
+                .log()
+                .ok_or(CellError::Node("node session has no enrolled log"))?;
+            if log.epoch() != log_epoch {
+                return Err(CellError::Fenced);
+            }
+            if log.active() {
+                return Ok(());
+            }
+            *observed = self.directory.activate_log(&observed, now_ms).await?;
+            Ok(())
+        })
+    }
+
+    fn advance_coverage<'a>(
+        &'a self,
+        log_epoch: u64,
+        tiered_through: u64,
+    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<()>> {
+        Box::pin(async move {
+            let now_ms = now_ms().map_err(|_| CellError::Node("node-log time is unavailable"))?;
+            let mut observed = self.observed()?.lock().await;
+            let log = observed
+                .advertisement()
+                .log()
+                .ok_or(CellError::Node("node session has no enrolled log"))?;
+            if log.epoch() != log_epoch {
+                return Err(CellError::Fenced);
+            }
+            if log.tiered_through() >= tiered_through {
+                return Ok(());
+            }
+            *observed = self
+                .directory
+                .advance_log_coverage(&observed, tiered_through, now_ms)
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn close<'a>(
+        &'a self,
+        barrier: &'a crab_cell_runtime::NodeLogRotationBarrier,
+    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<()>> {
+        Box::pin(async move {
+            let now_ms = now_ms().map_err(|_| CellError::Node("node-log time is unavailable"))?;
+            let mut observed = self.observed()?.lock().await;
+            let log = observed
+                .advertisement()
+                .log()
+                .ok_or(CellError::Node("node session has no enrolled log"))?;
+            if log.epoch() != barrier.log_epoch() {
+                return Err(CellError::Fenced);
+            }
+            *observed = self.directory.close_log(&observed, barrier, now_ms).await?;
+            Ok(())
+        })
     }
 }
 
