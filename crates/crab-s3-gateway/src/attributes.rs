@@ -708,7 +708,7 @@ async fn checkpoint_is_newer(
         return Ok(false);
     }
     let current = match crab_metadata::capsule_protocol::load_root(&repository.layout).await {
-        Ok(root) => crab_read::capsule_protocol::open_view_from_root(
+        Ok(root) => crab_read::capsule_protocol::open_view_from_root_with_control(
             &repository.layout,
             root,
             crab_read::capsule_protocol::CapsuleReadLimits {

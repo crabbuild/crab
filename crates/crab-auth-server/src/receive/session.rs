@@ -110,10 +110,18 @@ impl ReceiveContext {
     }
 
     pub(crate) async fn validate_layout(&self) -> Result<()> {
-        crab_metadata::layout_descriptor::read_canonical_layout(&self.store, &self.router)
-            .await
-            .map(|_| ())
-            .map_err(AuthServerError::from)
+        match crab_metadata::capsule_protocol::load_root(&self.router).await {
+            Ok(_) => Ok(()),
+            Err(crab_metadata::error::MetadataError::Storage {
+                source: StorageError::NotFound { .. },
+            }) => {
+                crab_metadata::layout_descriptor::read_canonical_layout(&self.store, &self.router)
+                    .await
+                    .map(|_| ())
+                    .map_err(AuthServerError::from)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     async fn read_plan_body(&self) -> Result<bytes::Bytes> {
@@ -205,27 +213,26 @@ impl ReceiveContext {
                 view_scope,
             )?,
             Err(AuthServerError::NotFound { .. }) => {
-                let view = crab_read::capsule_protocol::open_view(
+                let root = crab_metadata::capsule_protocol::load_root(&self.router)
+                    .await
+                    .map_err(|error| match error {
+                        crab_metadata::error::MetadataError::Storage {
+                            source: StorageError::NotFound { path },
+                        } => AuthServerError::CorruptObject {
+                            path,
+                            reason: "repository has neither a canonical v1 manifest nor a protocol-v2 root; initialize or reset it with `crab init` before protected push".to_owned(),
+                        },
+                        other => other.into(),
+                    })?;
+                let view = crab_read::capsule_protocol::open_view_from_root_with_control(
                     &self.router,
+                    root,
                     crab_read::capsule_protocol::CapsuleReadLimits {
                         max_capsule_bytes: 2 * 1024 * 1024 * 1024,
                         max_frontier_bytes: 2 * 1024 * 1024 * 1024,
                     },
                 )
-                .await
-                .map_err(|error| match error {
-                    crab_read::ReadError::NotFound { path }
-                    | crab_read::ReadError::Storage(StorageError::NotFound { path })
-                    | crab_read::ReadError::Metadata(
-                        crab_metadata::error::MetadataError::Storage {
-                            source: StorageError::NotFound { path },
-                        },
-                    ) => AuthServerError::CorruptObject {
-                        path,
-                        reason: "repository has neither a canonical v1 manifest nor a protocol-v2 root; initialize or reset it with `crab init` before protected push".to_owned(),
-                    },
-                    other => other.into(),
-                })?;
+                .await?;
                 build_capsule_prepare_record(
                     &self.repo_prefix,
                     &self.push_id,
@@ -580,6 +587,9 @@ mod tests {
             )?,
         )?;
         crab_metadata::capsule_protocol::create_root(ctx.router(), root.clone()).await?;
+        ctx.validate_layout()
+            .await
+            .expect("v2 receive sessions do not require a legacy layout descriptor");
 
         let record = ctx
             .write_prepare_record(

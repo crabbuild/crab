@@ -339,7 +339,7 @@ async fn enumerate_sources(
         crab_storage::StoreLayout::new(store.as_storage().clone(), router.repo_prefix().to_owned());
     match crab_metadata::capsule_protocol::load_root(&capsule_layout).await {
         Ok(root) => {
-            let view = crab_read::capsule_protocol::open_view_from_root(
+            let view = crab_read::capsule_protocol::open_view_from_root_with_control(
                 &capsule_layout,
                 root,
                 crab_read::capsule_protocol::CapsuleReadLimits {

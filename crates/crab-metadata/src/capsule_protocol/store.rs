@@ -309,6 +309,9 @@ pub async fn load_checkpoint(
         .ok_or_else(|| corrupt(&path, "checkpoint object count overflowed"))?;
     if checkpoint.hash() != pointer.hash()
         || checkpoint.bytes().len() as u64 != pointer.size()
+        || checkpoint.control_offset() != pointer.control_offset()
+        || checkpoint.control_size() != pointer.control_size()
+        || checkpoint.footer_hash() != pointer.footer_hash()
         || checkpoint.covered_generation() != pointer.covered_generation()
         || checkpoint.covered_root_digest() != pointer.covered_root_digest()
         || checkpoint.git_packs().len() as u32 != pointer.pack_count()
@@ -320,6 +323,42 @@ pub async fn load_checkpoint(
         ));
     }
     Ok(checkpoint)
+}
+
+/// Load and verify only the authenticated control suffix of one checkpoint.
+pub async fn load_checkpoint_control(
+    router: &StoreLayout<Store>,
+    pointer: &super::CheckpointPointer,
+) -> Result<super::CheckpointControl> {
+    let path = router.capsule_checkpoint_path(pointer.hash());
+    let bytes = router
+        .store()
+        .range_get(&path, pointer.control_offset()..pointer.size())
+        .await?;
+    let control = Checkpoint::decode_control(
+        bytes,
+        pointer.size(),
+        pointer.hash(),
+        pointer.control_offset(),
+        pointer.control_size(),
+        pointer.footer_hash(),
+    )?;
+    let object_count = control
+        .git_packs()
+        .iter()
+        .try_fold(0_u64, |total, pack| total.checked_add(pack.object_count()))
+        .ok_or_else(|| corrupt(&path, "checkpoint object count overflowed"))?;
+    if control.covered_generation() != pointer.covered_generation()
+        || control.covered_root_digest() != pointer.covered_root_digest()
+        || control.git_packs().len() as u32 != pointer.pack_count()
+        || object_count != pointer.object_count()
+    {
+        return Err(corrupt(
+            &path,
+            "checkpoint control does not match its authenticated pointer",
+        ));
+    }
+    Ok(control)
 }
 
 /// Load and verify one immutable capsule run against its authenticated pointer.
@@ -343,7 +382,7 @@ pub async fn load_pointer_catalog_from_root(
 ) -> Result<PointerCatalog> {
     let root = snapshot.record().root().clone();
     let mut catalog = if let Some(pointer) = root.checkpoint() {
-        let checkpoint = load_checkpoint(router, pointer).await?;
+        let checkpoint = load_checkpoint_control(router, pointer).await?;
         checkpoint.pointer_catalog()?
     } else {
         PointerCatalog::new()

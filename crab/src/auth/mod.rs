@@ -655,6 +655,13 @@ mod tests {
                 .expect("open protocol-v2 repository")
                 .is_some()
         );
+        assert!(
+            v2_store
+                .head(&v2_router.layout_descriptor_path())
+                .await
+                .is_err(),
+            "v2 admission must not require or create the legacy layout descriptor"
+        );
     }
 
     #[tokio::test]

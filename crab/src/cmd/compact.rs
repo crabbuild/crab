@@ -221,7 +221,7 @@ async fn run_capsule_compact_inner(
     root: crab_metadata::capsule_protocol::RootSnapshot,
     cancel: &CancellationToken,
 ) -> Result<CompactOutcome> {
-    let view = crab_read::capsule_protocol::open_view_from_root(
+    let view = crab_read::capsule_protocol::open_view_from_root_with_control(
         layout,
         root,
         crab_read::capsule_protocol::CapsuleReadLimits {

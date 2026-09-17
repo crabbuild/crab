@@ -132,6 +132,9 @@ impl CapsulePointer {
 pub struct CheckpointPointer {
     hash: String,
     size: u64,
+    control_offset: u64,
+    control_size: u64,
+    footer_hash: String,
     covered_generation: u64,
     covered_root_digest: String,
     pack_count: u32,
@@ -140,9 +143,16 @@ pub struct CheckpointPointer {
 
 impl CheckpointPointer {
     /// Create a checkpoint pointer whose complete Git pack is range-addressable.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the serialized pointer carries each independently authenticated checkpoint field"
+    )]
     pub fn new(
         hash: impl Into<String>,
         size: u64,
+        control_offset: u64,
+        control_size: u64,
+        footer_hash: impl Into<String>,
         covered_generation: u64,
         covered_root_digest: impl Into<String>,
         pack_count: u32,
@@ -151,6 +161,9 @@ impl CheckpointPointer {
         let pointer = Self {
             hash: hash.into(),
             size,
+            control_offset,
+            control_size,
+            footer_hash: footer_hash.into(),
             covered_generation,
             covered_root_digest: covered_root_digest.into(),
             pack_count,
@@ -170,6 +183,24 @@ impl CheckpointPointer {
     #[must_use]
     pub fn size(&self) -> u64 {
         self.size
+    }
+
+    /// Return the byte offset at which the authenticated checkpoint control suffix begins.
+    #[must_use]
+    pub fn control_offset(&self) -> u64 {
+        self.control_offset
+    }
+
+    /// Return the authenticated checkpoint control suffix length.
+    #[must_use]
+    pub fn control_size(&self) -> u64 {
+        self.control_size
+    }
+
+    /// Return the BLAKE3 hash of the checkpoint footer.
+    #[must_use]
+    pub fn footer_hash(&self) -> &str {
+        &self.footer_hash
     }
 
     /// Return the repository generation materialized by this checkpoint.
@@ -855,7 +886,18 @@ fn validate_checkpoint_pointer(pointer: &CheckpointPointer) -> Result<()> {
         "root checkpoint covered digest",
         "capsule-protocol root",
     )?;
-    if pointer.size == 0 || pointer.pack_count == 0 || pointer.object_count == 0 {
+    validate_content_hash(
+        &pointer.footer_hash,
+        "root checkpoint footer hash",
+        "capsule-protocol root",
+    )?;
+    if pointer.size == 0
+        || pointer.pack_count == 0
+        || pointer.object_count == 0
+        || pointer.control_size == 0
+        || pointer.control_offset >= pointer.size
+        || pointer.control_offset.checked_add(pointer.control_size) != Some(pointer.size)
+    {
         return Err(contract_error("checkpoint descriptor is out of bounds"));
     }
     Ok(())
@@ -1130,6 +1172,9 @@ mod tests {
         let pointer = CheckpointPointer::new(
             "b".repeat(64),
             100,
+            0,
+            100,
+            "0".repeat(64),
             record.root().generation(),
             record.digest(),
             1,

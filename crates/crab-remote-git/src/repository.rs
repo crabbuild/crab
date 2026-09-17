@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::commit_graph::CommitGraphIndex;
 use crate::operation::{TrackedLocatorSession, finish_with_close};
-use crate::reader::{ReaderLimits, RemoteGitReader};
+use crate::reader::{ReaderLimits, RemoteGitPackSource, RemoteGitReader};
 use crate::state::RepositoryState;
 use crate::{
     Error, HeadReference, OperationContext, OperationKind, RemoteGitRuntime, RemoteGitSnapshot,
@@ -338,6 +338,7 @@ impl RemoteGitRepository {
             cancellation,
             None,
             None,
+            None,
         )
     }
 
@@ -366,6 +367,35 @@ impl RemoteGitRepository {
             cancellation,
             None,
             Some(Arc::new(inline_locators)),
+            None,
+        )
+    }
+
+    /// Open a snapshot with inline locators and authenticated non-canonical
+    /// pack sources such as ranges inside a checkpoint object.
+    pub async fn from_snapshot_with_inline_locators_and_pack_sources(
+        layout: StoreLayout<Store>,
+        snapshot: &crab_metadata::manifest_store::RepositorySnapshot,
+        identity: RepositoryIdentity,
+        runtime: Arc<RemoteGitRuntime>,
+        options: RepositoryOptions,
+        inline_locators: std::collections::HashMap<
+            [u8; 20],
+            crab_metadata::git_object_locator::GitObjectLocator,
+        >,
+        pack_sources: std::collections::HashMap<MerkleHash, RemoteGitPackSource>,
+        cancellation: &CancellationToken,
+    ) -> Result<Self> {
+        Self::from_snapshot_parts(
+            layout,
+            snapshot,
+            identity,
+            runtime,
+            options,
+            cancellation,
+            None,
+            Some(Arc::new(inline_locators)),
+            Some(pack_sources),
         )
     }
 
@@ -394,9 +424,14 @@ impl RemoteGitRepository {
             cancellation,
             catalog_tail,
             None,
+            None,
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the constructor keeps snapshot, runtime, catalog, and pack-source ownership explicit"
+    )]
     fn from_snapshot_parts(
         layout: StoreLayout<Store>,
         snapshot: &crab_metadata::manifest_store::RepositorySnapshot,
@@ -413,6 +448,7 @@ impl RemoteGitRepository {
                 >,
             >,
         >,
+        pack_sources: Option<std::collections::HashMap<MerkleHash, RemoteGitPackSource>>,
     ) -> Result<Self> {
         RepositoryOptions::new(options.object_limits(), options.operation_limits())?;
         check_cancelled(cancellation)?;
@@ -439,11 +475,16 @@ impl RemoteGitRepository {
             Some((identity, packs)) => (Some(identity), Some(packs)),
             None => (None, None),
         };
+        let mut lookup_sources =
+            crate::reader::ReaderLookupSources::new(preferred_pack_indexes, inline_locators);
+        if let Some(pack_sources) = pack_sources {
+            lookup_sources = lookup_sources.with_pack_sources(pack_sources);
+        }
         let reader = Arc::new(RemoteGitReader::from_pinned_with_preferred_pack_indexes(
             layout.store().clone(),
             layout.repo_prefix(),
             inventory.values().copied(),
-            crate::reader::ReaderLookupSources::new(preferred_pack_indexes, inline_locators),
+            lookup_sources,
             ReaderLimits::from_options(options),
             Arc::clone(&runtime),
             identity.clone(),

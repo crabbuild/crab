@@ -22,6 +22,12 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
   or ref-head CAS according to the authority being changed;
 - `crab-read::capsule_protocol` loads the root and its bounded capsule frontier
   concurrently, verifying every size, content, transaction, and base binding;
+- checkpoint format `CRBCKP03` writes Git pack bodies before one contiguous,
+  footer-authenticated control suffix. Ordinary clone/fetch opens that suffix
+  with one range read; selected checkpoint pack ranges are source-backed and
+  verified by the Git pack checksum, entry CRC/delta evidence, and reconstructed
+  object IDs. Full checkpoint decoding remains the authenticated path for
+  maintenance that intentionally needs every pack byte;
 - `crab init`, native and remote-helper push, full and filtered
   clone/fetch/pull, `crab repack`, and repository GC use protocol v2 without
   a v1 fallback;
@@ -65,7 +71,8 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
   requests, or 4.988 per incremental push: p50 4, p95 8, p99 10, maximum 12
   at binary carry boundaries. Incremental latency was p50 273 ms, p95 545 ms,
   and p99 927 ms. Those results do not qualify the current batched-run
-  implementation; the same workload must be rerun before release.
+  implementation or the CRBCKP03 read path; the same workload must be rerun
+  with a release binary before release.
 
 The hard cutover never falls back after a v2 root is selected. Direct
 active-active pushes place the linearizable coordinator between immutable
@@ -379,8 +386,7 @@ contiguous control suffix last. The control suffix contains the pack indexes,
 reverse indexes, object locators, pointer catalog, visibility snapshot, and
 footer. Its root pointer binds the whole-object identity and size plus the
 control-suffix offset, length, and footer BLAKE3. The footer in turn binds every
-section's kind, range, and BLAKE3, as well as hashes for fixed-size pack blocks
-used for selected range verification. This lets a cold reader fetch and
+section's kind, range, and BLAKE3. This lets a cold reader fetch and
 authenticate the complete control plane in one range request without
 downloading the Git pack payload.
 
@@ -388,8 +394,9 @@ Metadata consumers MUST NOT call the whole-object checkpoint decoder. They
 read the authenticated control suffix, validate every complete metadata
 section, and fetch pack ranges only after authorization selects them. A full
 clone still streams and verifies the complete pack section. A selected range
-is accepted only after its footer-bound block hashes, pack-entry CRC and delta
-evidence, and reconstructed Git object ID all verify. A missing, truncated, or
+is accepted only after its pack-entry CRC and delta evidence, and reconstructed
+Git object ID all verify; a full materialization additionally verifies the
+footer-bound pack-section BLAKE3. A missing, truncated, or
 corrupt control suffix or range fails closed; silently retrying with an
 unbounded whole-checkpoint GET is forbidden.
 
@@ -704,8 +711,8 @@ theoretical minima for a single-ref view are:
 | Operation | Minimum object-store reads | Qualification |
 | --- | ---: | --- |
 | Ref advertisement | **1** | Root GET |
-| Full authorized clone at checkpoint generation | **2** | Root GET plus checkpoint pack range |
-| Full clone ahead of checkpoint | **2 + D** | Root, checkpoint pack, and each capsule run; run reads are concurrent |
+| Full authorized clone at checkpoint generation | **3** | Root GET, checkpoint control-suffix range, and checkpoint pack range |
+| Full clone ahead of checkpoint | **3 + D** | Root, checkpoint control suffix and pack range, plus each capsule run; run reads are concurrent |
 | Incremental fetch or pull | **1 + C + D + R** | Root, cold control suffix, visible runs, and selected pack ranges |
 | Lazy object fetch | **1 + C + D + R** | `R = 1` only when the object and required bases co-locate |
 
@@ -714,7 +721,7 @@ by the checkpoint baseline. Many-ref qualification reports those requests
 separately; it may not hide them inside the payload-range budget.
 
 At the 32-capsule maintenance threshold, a healthy checkpointed repository
-normally needs two origin reads for a full authorized clone and at most 34
+normally needs three origin reads for a full authorized clone and at most 35
 while checkpoint publication is pending; batched run compaction usually makes
 the actual suffix-read count smaller. The tradeoff is deliberate: an ordinary
 incremental push remains four qualified or five readback-required operations.
@@ -933,19 +940,21 @@ safe while omitted required bytes violate reconstruction.
 
 1. **Complete:** freeze the v2 root, capsule, embedded Git pack, checkpoint,
    locator, checksum, visibility, fence, and error contracts.
-2. **Complete for whole objects:** build deterministic writers/readers and a
-   corruption corpus. Selected range reading remains a throughput optimization.
+2. **Complete:** build deterministic writers/readers and a corruption corpus.
+   The CRBCKP03 control suffix and source-backed selected-range reader are now
+   implemented; complete-pack authentication remains the maintenance path.
 3. **Complete:** enforce exact transport-level request budgets for qualified
    checksum and mandatory-readback stores.
 4. **Complete:** qualify official AWS S3 checksum responses explicitly; custom
    S3 endpoints and unqualified providers retain mandatory readback.
 5. **Complete:** publish ordinary native and remote-helper pushes with capsule
    upload plus per-ref heads and activation records.
-6. **Incomplete for production-scale Git reads:** checkpoint and capsule packs
-   carry authenticated indexes, reverse indexes, object locators, and
-   visibility closures. The checkpoint codec still needs the root-authenticated
-   contiguous control suffix above so metadata-only open and incremental fetch
-   never download or hash the complete pack payload.
+6. **Complete for the ordinary read path:** checkpoint and capsule packs carry
+   authenticated indexes, reverse indexes, object locators, and visibility
+   closures. CRBCKP03 binds one contiguous root-authenticated control suffix;
+   metadata-only open and incremental fetch range-load that suffix and never
+   download or hash the complete pack payload. Production-scale and hosted
+   qualification remain open.
 7. **Complete for ordinary full, shallow, and filtered clone/fetch/pull and
    raw lazy-object recovery:** remove their v1 runtime path. A later promisor
    request re-enters the line-oriented helper, pins one authenticated capsule
@@ -960,10 +969,11 @@ safe while omitted required bytes violate reconstruction.
    identity before delete, and release through another root transition.
 10. **Incomplete on RustFS:** live-qualify a fresh Kubernetes source with 5,000
     incremental pushes, 10 fetches, 11 checkpoints including the seed, a final
-    independent clone, and full Git integrity verification. The first
-    checkpoint-history rerun proved bounded pushes but exposed whole-checkpoint
-    payload loading on interval fetch; rerun only after the control-suffix path
-    is implemented. Hosted-provider, injected-failure, and concurrency
+    independent clone, and full Git integrity verification using the CRBCKP03
+    reader. The first checkpoint-history rerun exposed whole-checkpoint payload
+    loading; the control-suffix path now exists, but its release replay must
+    also stage or intentionally exclude pointer-bearing source commits before
+    it can be evidence. Hosted-provider, injected-failure, and concurrency
     qualification remain release gates.
 11. **Complete on RustFS:** live-qualify external xorbs and shards with ten
     non-zero 512 MiB files, ten versioned edits, cold cross-repository reuse,

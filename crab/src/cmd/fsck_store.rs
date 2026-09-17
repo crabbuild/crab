@@ -224,7 +224,7 @@ impl StoreChecker {
             self.router.global_prefix().to_owned(),
         );
         let current = crab_write::capsule_protocol::open_root(&layout).await?;
-        let current = crab_read::capsule_protocol::open_view_from_root(
+        let current = crab_read::capsule_protocol::open_view_from_root_with_control(
             &layout,
             current,
             crab_read::capsule_protocol::CapsuleReadLimits {

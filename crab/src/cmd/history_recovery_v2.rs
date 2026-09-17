@@ -580,7 +580,7 @@ async fn restore_preview(
         cancel,
     )
     .await?;
-    let current = crab_read::capsule_protocol::open_view_from_root(
+    let current = crab_read::capsule_protocol::open_view_from_root_with_control(
         layout,
         root.clone(),
         crab_read::capsule_protocol::CapsuleReadLimits {
@@ -797,6 +797,9 @@ mod tests {
         let checkpoint = CheckpointPointer::new(
             format!("{:064x}", generation + 200),
             1,
+            0,
+            1,
+            "0".repeat(64),
             generation,
             &root_digest,
             1,

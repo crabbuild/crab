@@ -340,7 +340,7 @@ impl ReadViewCache {
         }
         match crab_metadata::capsule_protocol::load_root(&repository.layout).await {
             Ok(root) => {
-                let capsule = crab_read::capsule_protocol::open_view_from_root(
+                let capsule = crab_read::capsule_protocol::open_view_from_root_with_control(
                     &repository.layout,
                     root,
                     crab_read::capsule_protocol::CapsuleReadLimits {
@@ -370,7 +370,8 @@ impl ReadViewCache {
                             .map(|name| (name.clone(), capsule.ref_capsule_count(name)))
                             .collect();
                         let remote = capsule
-                            .git_repository(
+                            .git_repository_from_store(
+                                repository.layout.clone(),
                                 repository.identity.clone(),
                                 runtime,
                                 options,

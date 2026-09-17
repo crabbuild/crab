@@ -2982,7 +2982,7 @@ async fn run_capsule_gc(
             )
             .await?
         };
-        let view = crab_read::capsule_protocol::open_view_from_root(
+        let view = crab_read::capsule_protocol::open_view_from_root_with_control(
             &layout,
             fenced.clone(),
             crab_read::capsule_protocol::CapsuleReadLimits {

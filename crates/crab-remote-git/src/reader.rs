@@ -15,6 +15,7 @@ use crab_storage::{
 use crab_xet::hash::MerkleHash;
 use futures_util::stream::{self, StreamExt};
 use gix_pack::data::entry::Header;
+use object_store::path::Path as ObjectPath;
 use sha1::{Digest, Sha1};
 use tokio_util::sync::CancellationToken;
 
@@ -142,6 +143,7 @@ pub(crate) struct RemoteGitPackedEntry {
 pub(crate) struct ReaderLookupSources {
     preferred_pack_indexes: Option<Vec<GitPackInventoryEntry>>,
     inline_locators: Option<Arc<HashMap<[u8; 20], GitObjectLocator>>>,
+    pack_sources: Option<HashMap<MerkleHash, RemoteGitPackSource>>,
 }
 
 impl ReaderLookupSources {
@@ -152,7 +154,84 @@ impl ReaderLookupSources {
         Self {
             preferred_pack_indexes: preferred_pack_indexes.map(|packs| packs.into_iter().collect()),
             inline_locators,
+            pack_sources: None,
         }
+    }
+
+    pub(crate) fn with_pack_sources(
+        mut self,
+        pack_sources: HashMap<MerkleHash, RemoteGitPackSource>,
+    ) -> Self {
+        self.pack_sources = Some(pack_sources);
+        self
+    }
+}
+
+/// Authenticated source for one Git pack that is not stored at the canonical
+/// `repo/packs` object key.
+#[derive(Debug, Clone)]
+pub struct RemoteGitPackSource {
+    path: Option<ObjectPath>,
+    object_offset: u64,
+    pack_size: u64,
+    pack: Option<Bytes>,
+    index: Bytes,
+    reverse_index: Bytes,
+    kind_metadata: Option<Bytes>,
+}
+
+impl RemoteGitPackSource {
+    /// Bind a pack to a byte range in an immutable object-store object.
+    pub fn embedded(
+        path: ObjectPath,
+        object_offset: u64,
+        pack_size: u64,
+        index: Bytes,
+        reverse_index: Bytes,
+        kind_metadata: Option<Bytes>,
+    ) -> Result<Self> {
+        if pack_size == 0 || index.is_empty() || reverse_index.is_empty() {
+            return Err(Error::RepositoryState {
+                reason: RepositoryStateError::InconsistentGeneration,
+            });
+        }
+        object_offset
+            .checked_add(pack_size)
+            .ok_or(Error::RepositoryState {
+                reason: RepositoryStateError::InconsistentGeneration,
+            })?;
+        Ok(Self {
+            path: Some(path),
+            object_offset,
+            pack_size,
+            pack: None,
+            index,
+            reverse_index,
+            kind_metadata,
+        })
+    }
+
+    /// Bind a pack and its index to in-memory bytes.
+    pub fn inline(
+        pack: Bytes,
+        index: Bytes,
+        reverse_index: Bytes,
+        kind_metadata: Option<Bytes>,
+    ) -> Result<Self> {
+        if pack.is_empty() || index.is_empty() || reverse_index.is_empty() {
+            return Err(Error::RepositoryState {
+                reason: RepositoryStateError::InconsistentGeneration,
+            });
+        }
+        Ok(Self {
+            path: None,
+            object_offset: 0,
+            pack_size: pack.len() as u64,
+            pack: Some(pack),
+            index,
+            reverse_index,
+            kind_metadata,
+        })
     }
 }
 
@@ -163,6 +242,7 @@ pub(crate) struct RemoteGitReader {
     inventory: HashMap<MerkleHash, GitPackInventoryEntry>,
     preferred_pack_indexes: Option<HashMap<MerkleHash, GitPackInventoryEntry>>,
     inline_locators: Option<Arc<HashMap<[u8; 20], GitObjectLocator>>>,
+    pack_sources: HashMap<MerkleHash, RemoteGitPackSource>,
     limits: ReaderLimits,
     runtime: Arc<RemoteGitRuntime>,
     identity: RepositoryIdentity,
@@ -225,17 +305,142 @@ impl RemoteGitReader {
         } else {
             None
         };
+        let pack_sources = lookup_sources.pack_sources.unwrap_or_default();
+        for (pack_id, source) in &pack_sources {
+            let Some(inventory_entry) = canonical.get(pack_id) else {
+                return Err(Error::RepositoryState {
+                    reason: RepositoryStateError::InconsistentGeneration,
+                });
+            };
+            if inventory_entry.pack_size != source.pack_size {
+                return Err(Error::RepositoryState {
+                    reason: RepositoryStateError::InconsistentGeneration,
+                });
+            }
+        }
         Ok(Self {
             store,
             repo_prefix: repo_prefix.into(),
             inventory: canonical,
             preferred_pack_indexes,
             inline_locators: lookup_sources.inline_locators,
+            pack_sources,
             limits,
             runtime,
             identity,
             generation,
         })
+    }
+
+    fn pack_source(&self, pack_id: &MerkleHash) -> Option<&RemoteGitPackSource> {
+        self.pack_sources.get(pack_id)
+    }
+
+    fn pack_path_range(
+        &self,
+        pack_id: &MerkleHash,
+        start: u64,
+        end: u64,
+    ) -> Result<Option<(ObjectPath, std::ops::Range<u64>)>> {
+        let Some(source) = self.pack_source(pack_id) else {
+            return Ok(None);
+        };
+        if start > end || end > source.pack_size {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            });
+        }
+        let path = source.path.clone().ok_or(Error::Corrupt {
+            stage: CorruptionStage::PackEntry,
+        })?;
+        let range = source
+            .object_offset
+            .checked_add(start)
+            .and_then(|offset| source.object_offset.checked_add(end).map(|end| offset..end))
+            .ok_or(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            })?;
+        Ok(Some((path, range)))
+    }
+
+    async fn read_pack_range(
+        &self,
+        pack_id: &MerkleHash,
+        start: u64,
+        end: u64,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<Bytes> {
+        let length = end.checked_sub(start).ok_or(Error::Corrupt {
+            stage: CorruptionStage::PackEntry,
+        })?;
+        check_limit(
+            "fetched bytes",
+            length,
+            budget.remaining(BudgetDimension::FetchedBytes).await,
+        )?;
+        self.read_pack_range_admitted(
+            pack_id,
+            start,
+            end,
+            budget.read_admission(cancellation.clone()),
+            cancellation,
+        )
+        .await
+    }
+
+    async fn read_pack_range_admitted(
+        &self,
+        pack_id: &MerkleHash,
+        start: u64,
+        end: u64,
+        admission: Arc<dyn crab_storage::ReadAdmission>,
+        cancellation: &CancellationToken,
+    ) -> Result<Bytes> {
+        let length = end.checked_sub(start).ok_or(Error::Corrupt {
+            stage: CorruptionStage::PackEntry,
+        })?;
+        if let Some(source) = self.pack_source(pack_id) {
+            if end > source.pack_size {
+                return Err(Error::Corrupt {
+                    stage: CorruptionStage::PackEntry,
+                });
+            }
+            if let Some(pack) = &source.pack {
+                let start = usize::try_from(start).map_err(|_| Error::Corrupt {
+                    stage: CorruptionStage::PackEntry,
+                })?;
+                let end = usize::try_from(end).map_err(|_| Error::Corrupt {
+                    stage: CorruptionStage::PackEntry,
+                })?;
+                let bytes = pack.get(start..end).ok_or(Error::Corrupt {
+                    stage: CorruptionStage::PackEntry,
+                })?;
+                admission.bytes(length).await.map_err(|source| {
+                    Error::Storage(crab_storage::StorageError::ReadRejected { source })
+                })?;
+                return Ok(Bytes::copy_from_slice(bytes));
+            }
+        }
+        let (path, range) = self
+            .pack_path_range(pack_id, start, end)?
+            .unwrap_or_else(|| (repo_pack_path(&self.repo_prefix, pack_id), start..end));
+        let store = self.store.clone().with_read_admission(admission);
+        let origin_permit = self.runtime.origin_permit(cancellation).await?;
+        let bytes = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(Error::Cancelled),
+            bytes = store.range_get(&path, range) => bytes?,
+        };
+        observe_storage_read("range_get", bytes.len() as u64);
+        drop(origin_permit);
+        check_cancelled(cancellation)?;
+        if bytes.len() as u64 != length {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            });
+        }
+        Ok(bytes)
     }
 
     pub(crate) async fn read_with_session(
@@ -1193,34 +1398,8 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<Bytes> {
-        let length = range.end.checked_sub(range.start).ok_or(Error::Corrupt {
-            stage: CorruptionStage::PackEntry,
-        })?;
-        let path = repo_pack_path(&self.repo_prefix, &range.pack_id);
-        check_limit(
-            "fetched bytes",
-            length,
-            budget.remaining(BudgetDimension::FetchedBytes).await,
-        )?;
-        let store = self
-            .store
-            .clone()
-            .with_read_admission(budget.read_admission(cancellation.clone()));
-        let origin_permit = self.runtime.origin_permit(cancellation).await?;
-        let bytes = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Err(Error::Cancelled),
-            bytes = store.range_get(&path, range.start..range.end) => bytes?,
-        };
-        observe_storage_read("range_get", bytes.len() as u64);
-        drop(origin_permit);
-        check_cancelled(cancellation)?;
-        if bytes.len() as u64 != length {
-            return Err(Error::Corrupt {
-                stage: CorruptionStage::PackEntry,
-            });
-        }
-        Ok(bytes)
+        self.read_pack_range(&range.pack_id, range.start, range.end, budget, cancellation)
+            .await
     }
 
     async fn locate(
@@ -1297,8 +1476,6 @@ impl RemoteGitReader {
             .ok_or(Error::Corrupt {
                 stage: CorruptionStage::PackEntry,
             })?;
-        let path = repo_pack_path(&self.repo_prefix, &locator.pack_id);
-        let store = self.store.clone();
         let runtime = Arc::clone(&self.runtime);
         let work_runtime = Arc::clone(&self.runtime);
         let cache_key = crate::runtime::ObjectCacheKey::new(&self.identity, self.generation, oid);
@@ -1336,16 +1513,15 @@ impl RemoteGitReader {
                             inflated: object.data.clone(),
                         });
                     }
-                    let store = store.with_read_admission(shared_budget.clone());
-                    let origin_permit = work_runtime.origin_permit(&shared_cancellation).await?;
-                    let bytes = tokio::select! {
-                        biased;
-                        () = shared_cancellation.cancelled() => return Err(Error::Cancelled),
-                        bytes = store.range_get(&path, pack_offset..end) => bytes?,
-                    };
-                    observe_storage_read("range_get", bytes.len() as u64);
-                    drop(origin_permit);
-                    check_cancelled(&shared_cancellation)?;
+                    let bytes = reader
+                        .read_pack_range_admitted(
+                            &locator.pack_id,
+                            pack_offset,
+                            end,
+                            shared_budget.clone(),
+                            &shared_cancellation,
+                        )
+                        .await?;
                     if bytes.len() as u64 != entry_len {
                         return Err(Error::Corrupt {
                             stage: CorruptionStage::PackEntry,
@@ -1461,10 +1637,6 @@ impl RemoteGitReader {
             locator.location.entry_len,
             budget.remaining(BudgetDimension::FetchedBytes).await,
         )?;
-        let store = self
-            .store
-            .clone()
-            .with_read_admission(budget.read_admission(cancellation.clone()));
         let end = locator
             .location
             .pack_offset
@@ -1472,16 +1644,15 @@ impl RemoteGitReader {
             .ok_or(Error::Corrupt {
                 stage: CorruptionStage::PackEntry,
             })?;
-        let path = repo_pack_path(&self.repo_prefix, &locator.pack_id);
-        let origin_permit = self.runtime.origin_permit(cancellation).await?;
-        let bytes = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Err(Error::Cancelled),
-            bytes = store.range_get(&path, locator.location.pack_offset..end) => bytes?,
-        };
-        observe_storage_read("range_get", bytes.len() as u64);
-        drop(origin_permit);
-        check_cancelled(cancellation)?;
+        let bytes = self
+            .read_pack_range(
+                &locator.pack_id,
+                locator.location.pack_offset,
+                end,
+                budget,
+                cancellation,
+            )
+            .await?;
         if bytes.len() as u64 != locator.location.entry_len {
             return Err(Error::Corrupt {
                 stage: CorruptionStage::PackEntry,
@@ -1530,6 +1701,65 @@ impl RemoteGitReader {
             .ok_or(Error::Corrupt {
                 stage: CorruptionStage::Inventory,
             })?;
+        if let Some(source) = self.pack_source(&pack_id).cloned() {
+            let source_size = source.index.len() as u64;
+            check_limit(
+                "pack index bytes",
+                source_size,
+                self.limits.max_pack_index_bytes,
+            )?;
+            check_limit(
+                "fetched bytes",
+                source_size,
+                budget.remaining(BudgetDimension::FetchedBytes).await,
+            )?;
+            let kind_metadata = source.kind_metadata.clone();
+            let runtime = Arc::clone(&self.runtime);
+            let index = runtime
+                .clone()
+                .load_pack_index_singleflight(
+                    cache_key,
+                    self.limits.max_pack_index_bytes,
+                    cancellation,
+                    budget,
+                    move |shared_cancellation, shared_budget| async move {
+                        check_cancelled(&shared_cancellation)?;
+                        shared_budget
+                            .charge(BudgetDimension::FetchedBytes, source_size)
+                            .await?;
+                        if let Some(kind_metadata) = &kind_metadata {
+                            let maximum =
+                                crab_git::max_pack_kind_metadata_size(inventory.object_count)
+                                    .ok_or(Error::Corrupt {
+                                        stage: CorruptionStage::PackIndex,
+                                    })?;
+                            if kind_metadata.len() as u64 > maximum {
+                                return Err(Error::Corrupt {
+                                    stage: CorruptionStage::PackIndex,
+                                });
+                            }
+                        }
+                        let decode_permit = runtime.decode_permit(&shared_cancellation).await?;
+                        let token = shared_cancellation.clone();
+                        let index = runtime
+                            .spawn_blocking(move || {
+                                parse_pack_index(
+                                    pack_id,
+                                    inventory,
+                                    source.index,
+                                    kind_metadata,
+                                    &token,
+                                )
+                            })
+                            .await
+                            .map_err(|source| Error::DecodeTask { source })??;
+                        drop(decode_permit);
+                        Ok(index)
+                    },
+                )
+                .await?;
+            return Ok(index);
+        }
         let path = repo_pack_index_path(&self.repo_prefix, &pack_id);
         let source_size = if let Some(source_size) =
             self.runtime.cached_pack_index_source_size(&cache_key).await
@@ -1674,6 +1904,19 @@ impl RemoteGitReader {
             expected_size,
             budget.remaining(BudgetDimension::FetchedBytes).await,
         )?;
+        if let Some(source) = self.pack_source(&pack_id).cloned() {
+            return self
+                .download_pack_source_to_path(
+                    pack_id,
+                    expected_size,
+                    destination,
+                    budget,
+                    cancellation,
+                    progress,
+                    source,
+                )
+                .await;
+        }
         let store = self
             .store
             .clone()
@@ -1744,6 +1987,116 @@ impl RemoteGitReader {
         Ok(identity)
     }
 
+    async fn download_pack_source_to_path(
+        &self,
+        pack_id: MerkleHash,
+        expected_size: u64,
+        destination: &std::path::Path,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+        progress: Option<&(dyn Fn(u64) + Send + Sync)>,
+        source: RemoteGitPackSource,
+    ) -> Result<VerifiedPackIdentity> {
+        use tokio::io::AsyncWriteExt as _;
+
+        if source.pack_size != expected_size {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::Inventory,
+            });
+        }
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(destination)
+            .await
+            .map_err(|source| {
+                Error::Metadata(crab_metadata::error::MetadataError::Io { source })
+            })?;
+        let mut verifier = PackStreamVerifier::default();
+        let mut written = 0_u64;
+        if let Some(pack) = source.pack {
+            budget
+                .charge(BudgetDimension::FetchedBytes, expected_size)
+                .await?;
+            verifier.update(&pack);
+            file.write_all(&pack).await.map_err(|source| {
+                Error::Metadata(crab_metadata::error::MetadataError::Io { source })
+            })?;
+            written = pack.len() as u64;
+            if let Some(progress) = progress {
+                progress(written);
+            }
+        } else {
+            let (path, range) =
+                self.pack_path_range(&pack_id, 0, expected_size)?
+                    .ok_or(Error::Corrupt {
+                        stage: CorruptionStage::PackEntry,
+                    })?;
+            let store = self
+                .store
+                .clone()
+                .with_read_admission(budget.read_admission(cancellation.clone()));
+            let origin_permit = self.runtime.origin_permit(cancellation).await?;
+            let result = async {
+                let (metadata, returned_range, mut stream) = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => return Err(Error::Cancelled),
+                    result = store.get_stream(&path, Some(range.clone())) => result?,
+                };
+                if returned_range != range || metadata.size < range.end || metadata.size == 0 {
+                    return Err(Error::Corrupt {
+                        stage: CorruptionStage::Inventory,
+                    });
+                }
+                while let Some(chunk) = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => return Err(Error::Cancelled),
+                    chunk = stream.next() => chunk,
+                } {
+                    let chunk = chunk?;
+                    verifier.update(&chunk);
+                    file.write_all(&chunk).await.map_err(|source| {
+                        Error::Metadata(crab_metadata::error::MetadataError::Io { source })
+                    })?;
+                    written = written
+                        .checked_add(chunk.len() as u64)
+                        .ok_or(Error::Corrupt {
+                            stage: CorruptionStage::PackEntry,
+                        })?;
+                    if written > expected_size {
+                        return Err(Error::Corrupt {
+                            stage: CorruptionStage::PackEntry,
+                        });
+                    }
+                    if let Some(progress) = progress {
+                        progress(chunk.len() as u64);
+                    }
+                }
+                Ok(())
+            }
+            .await;
+            drop(origin_permit);
+            result?;
+        }
+        file.flush().await.map_err(|source| {
+            Error::Metadata(crab_metadata::error::MetadataError::Io { source })
+        })?;
+        if written != expected_size {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            });
+        }
+        observe_storage_read("pack_source_stream", written);
+        let identity = verifier.finish()?;
+        let actual_content_hash = blake3::Hash::from_bytes(identity.content_hash).to_hex();
+        if actual_content_hash.as_str() != pack_id.to_string() {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            });
+        }
+        Ok(identity)
+    }
+
     pub(crate) async fn download_pack_index_to_path(
         &self,
         pack_id: MerkleHash,
@@ -1752,6 +2105,19 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<()> {
+        if let Some(source) = self.pack_source(&pack_id) {
+            return self
+                .write_inline_artifact(
+                    source.index.clone(),
+                    maximum_size,
+                    destination,
+                    budget,
+                    cancellation,
+                    "pack index bytes",
+                    "pack_index_source",
+                )
+                .await;
+        }
         self.download_pack_artifact_to_path(
             repo_pack_index_path(&self.repo_prefix, &pack_id),
             maximum_size,
@@ -1772,6 +2138,19 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<()> {
+        if let Some(source) = self.pack_source(&pack_id) {
+            return self
+                .write_inline_artifact(
+                    source.reverse_index.clone(),
+                    maximum_size,
+                    destination,
+                    budget,
+                    cancellation,
+                    "pack reverse-index bytes",
+                    "pack_reverse_index_source",
+                )
+                .await;
+        }
         self.download_pack_artifact_to_path(
             repo_pack_reverse_index_path(&self.repo_prefix, &pack_id),
             maximum_size,
@@ -1782,6 +2161,53 @@ impl RemoteGitReader {
             "pack reverse-index bytes",
         )
         .await
+    }
+
+    async fn write_inline_artifact(
+        &self,
+        bytes: Bytes,
+        maximum_size: u64,
+        destination: &std::path::Path,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+        limit: &'static str,
+        storage_request: &'static str,
+    ) -> Result<()> {
+        use tokio::io::AsyncWriteExt as _;
+
+        check_cancelled(cancellation)?;
+        let size = bytes.len() as u64;
+        check_limit(limit, size, maximum_size)?;
+        check_limit(
+            "fetched bytes",
+            size,
+            budget.remaining(BudgetDimension::FetchedBytes).await,
+        )?;
+        budget.charge(BudgetDimension::FetchedBytes, size).await?;
+        let result = async {
+            let mut file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(destination)
+                .await
+                .map_err(|source| {
+                    Error::Metadata(crab_metadata::error::MetadataError::Io { source })
+                })?;
+            file.write_all(&bytes).await.map_err(|source| {
+                Error::Metadata(crab_metadata::error::MetadataError::Io { source })
+            })?;
+            file.flush().await.map_err(|source| {
+                Error::Metadata(crab_metadata::error::MetadataError::Io { source })
+            })?;
+            observe_storage_read(storage_request, size);
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(destination).await;
+        }
+        result
     }
 
     async fn download_pack_artifact_to_path(

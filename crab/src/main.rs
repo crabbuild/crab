@@ -5637,8 +5637,6 @@ async fn run_compact_command(
         crab::replication::ensure_active_active_maintenance_admitted(&config, "compaction")?;
     }
     let store = create_cli_store(&bucket, &config, "compact", cancel).await?;
-    let router = crab::storage::StoreLayout::new(store.clone(), repo.clone());
-    crab::core::remote_layout::open(&store, &router).await?;
     let args = crab::cmd::compact::CompactArgs {
         repo,
         bucket,

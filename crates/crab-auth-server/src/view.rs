@@ -73,15 +73,11 @@ async fn read_repository_snapshot(
 }
 
 async fn read_source_view_identity(router: &StoreLayout) -> Result<SourceViewIdentity> {
-    match read_repository_snapshot(router.store(), router).await {
-        Ok(snapshot) => Ok(SourceViewIdentity {
-            protocol: ViewProtocol::Manifest,
-            generation: snapshot.manifest.generation,
-            digest: snapshot.journal.state_digest,
-        }),
-        Err(AuthServerError::NotFound { .. }) => {
-            let view = crab_read::capsule_protocol::open_view(
+    match crab_metadata::capsule_protocol::load_root(router).await {
+        Ok(root) => {
+            let view = crab_read::capsule_protocol::open_view_from_root_with_control(
                 router,
+                root,
                 crab_read::capsule_protocol::CapsuleReadLimits {
                     max_capsule_bytes: 2 * 1024 * 1024 * 1024,
                     max_frontier_bytes: 2 * 1024 * 1024 * 1024,
@@ -94,7 +90,17 @@ async fn read_source_view_identity(router: &StoreLayout) -> Result<SourceViewIde
                 digest: view.state_digest(),
             })
         }
-        Err(error) => Err(error),
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        }) => {
+            let snapshot = read_repository_snapshot(router.store(), router).await?;
+            Ok(SourceViewIdentity {
+                protocol: ViewProtocol::Manifest,
+                generation: snapshot.manifest.generation,
+                digest: snapshot.journal.state_digest,
+            })
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -253,8 +259,10 @@ pub async fn materialize_view_with_store_and_credentials(
 
     let parsed = CrabUrl::parse(repo_url).map_err(AuthServerError::from)?;
     let source_router = StoreLayout::new(store.clone(), parsed.repo_path.clone());
-    crab_metadata::layout_descriptor::read_canonical_layout(&store, &source_router).await?;
     let source = read_source_view_identity(&source_router).await?;
+    if matches!(source.protocol, ViewProtocol::Manifest) {
+        crab_metadata::layout_descriptor::read_canonical_layout(&store, &source_router).await?;
+    }
     let repo_prefix = view_prefix(
         &parsed.repo_path,
         scope_hash,
@@ -1322,6 +1330,10 @@ mod tests {
         }
 
         let router = view_store_layout(&store, repo_prefix);
+        assert!(
+            store.head(&router.layout_descriptor_path()).await.is_err(),
+            "capsule view publication must not create legacy layout metadata"
+        );
         verify_capsule_view_ready(&router, &source_digest)
             .await
             .unwrap();

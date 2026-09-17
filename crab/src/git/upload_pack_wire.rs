@@ -647,7 +647,7 @@ where
             let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
             let options = upload_pack_repository_options().map_err(remote_error)?;
             let maximum = options.operation_limits().max_fetched_bytes;
-            let view = crab_read::capsule_protocol::open_view_from_root(
+            let view = crab_read::capsule_protocol::open_view_from_root_with_control(
                 &layout,
                 root,
                 crab_read::capsule_protocol::CapsuleReadLimits {
@@ -668,7 +668,8 @@ where
                 ))
             };
             let repository = view
-                .git_repository(
+                .git_repository_from_store(
+                    layout.clone(),
                     identity,
                     Arc::new(RemoteGitRuntime::default()),
                     options,

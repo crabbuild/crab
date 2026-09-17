@@ -1082,7 +1082,7 @@ async fn finalize_capsule(
 
     for attempt in 1..=MAX_CAS_ATTEMPTS {
         check_cancelled(cancel)?;
-        let view = crab_read::capsule_protocol::open_view_from_root(
+        let view = crab_read::capsule_protocol::open_view_from_root_with_control(
             layout,
             root.clone(),
             crab_read::capsule_protocol::CapsuleReadLimits {

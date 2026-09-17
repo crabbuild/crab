@@ -1389,6 +1389,9 @@ async fn publish_checkpoint_inner(
     let pointer = CheckpointPointer::new(
         checkpoint.hash(),
         checkpoint.bytes().len() as u64,
+        checkpoint.control_offset(),
+        checkpoint.control_size(),
+        checkpoint.footer_hash(),
         checkpoint.covered_generation(),
         checkpoint.covered_root_digest(),
         pack_count,
@@ -1625,6 +1628,9 @@ pub async fn restore_checkpoint(
     let pointer = CheckpointPointer::new(
         checkpoint.hash(),
         checkpoint.bytes().len() as u64,
+        checkpoint.control_offset(),
+        checkpoint.control_size(),
+        checkpoint.footer_hash(),
         checkpoint.covered_generation(),
         checkpoint.covered_root_digest(),
         pack_count,

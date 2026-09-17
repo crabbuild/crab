@@ -566,34 +566,52 @@ async fn run_push_once(
             start.elapsed(),
         );
     }
-    if matches!(
-        config.auth.provider,
-        crate::core::config::AuthProvider::CrabAuth
-    ) {
-        return Err(CrabError::Configuration {
-            key: "capsule-protocol push authorization".to_owned(),
-            origin: "managed protected pushes require a protocol-v2 authorization commit adapter"
-                .to_owned(),
-        });
-    }
-    let selection = match StoreResolver::new(&config, &parsed_url, cancel)
-        .write_store("push")
-        .await
+    let (read_store, router, root) = if config.auth.provider
+        == crate::core::config::AuthProvider::CrabAuth
     {
-        Ok(selection) => selection,
-        Err(error) => {
-            return retryable.fail(
-                error,
-                PushFailureStage::StoreResolve,
-                &specs,
-                start.elapsed(),
-            );
+        // Crab Auth deliberately rejects direct `push` credentials. Read the
+        // v2 root with a fetch grant, then obtain the scoped upload grant below.
+        match crate::auth::build_repository_url_store_with_root(
+            &config,
+            parsed_url.clone(),
+            "fetch",
+            cancel,
+        )
+        .await
+        {
+            Ok((store, root)) => {
+                let router =
+                    crate::storage::StoreLayout::new(store.clone(), parsed_url.repo_path.clone());
+                (store, router, root)
+            }
+            Err(error) => {
+                return retryable.fail(
+                    error,
+                    PushFailureStage::StoreResolve,
+                    &specs,
+                    start.elapsed(),
+                );
+            }
         }
+    } else {
+        let selection = match StoreResolver::new(&config, &parsed_url, cancel)
+            .write_store("push")
+            .await
+        {
+            Ok(selection) => selection,
+            Err(error) => {
+                return retryable.fail(
+                    error,
+                    PushFailureStage::StoreResolve,
+                    &specs,
+                    start.elapsed(),
+                );
+            }
+        };
+        (selection.store, selection.router, selection.capsule_root)
     };
-    let store = selection.store;
-    let router = selection.router;
-    let root = selection.capsule_root;
-    let caching_store = match crab_cache_store::CachingStore::new(store.clone(), &config.cache) {
+    let caching_store = match crab_cache_store::CachingStore::new(read_store.clone(), &config.cache)
+    {
         Ok(cache) => Some(cache),
         Err(error) => {
             warn!(%error, "failed to build CachingStore, using origin only");
@@ -602,7 +620,7 @@ async fn run_push_once(
     };
     let repo_prefix = router.repo_prefix().to_owned();
     let capsule_layout = crab_storage::StoreLayout::with_global_prefix(
-        store.as_storage().clone(),
+        read_store.as_storage().clone(),
         router.repo_prefix().to_owned(),
         router.global_prefix().to_owned(),
     );
@@ -647,11 +665,30 @@ async fn run_push_once(
     let staging =
         crate::git::push_staging::PushStaging::open(repo_root.join(".crab").join("staging"))
             .await?;
+    let (publish_store, publish_router) =
+        if config.auth.provider == crate::core::config::AuthProvider::CrabAuth {
+            let prepared = crate::git::protected_push::prepare_crab_auth_push(
+                &config,
+                &parsed_url,
+                &specs,
+                cancel,
+            )
+            .await?;
+            push_config.atomic = true;
+            push_config.protected_push = Some(prepared.session);
+            let router = crate::storage::StoreLayout::new(
+                prepared.store.clone(),
+                router.repo_prefix().to_owned(),
+            );
+            (prepared.store, router)
+        } else {
+            (read_store.clone(), router.clone())
+        };
     let result = match crate::git::capsule_push::run(
         &push_config,
         &specs,
-        &store,
-        &router,
+        &publish_store,
+        &publish_router,
         Some(capsule_view),
         &config.transfer_hide_refs,
         staging.reader(),

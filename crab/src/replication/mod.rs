@@ -8081,8 +8081,6 @@ async fn apply_active_active_repair_action(
     let (target_store, target_prefix) = build_writer_store(&action.writer, primary_repo_path)?;
     let source_router = StoreLayout::new(source_store.clone(), source_prefix.clone());
     let target_router = StoreLayout::new(target_store.clone(), target_prefix.clone());
-    crate::core::remote_layout::open(&source_store, &source_router).await?;
-    crate::core::remote_layout::open(&target_store, &target_router).await?;
     let cancel = CancellationToken::new();
     let writer = crate::maintenance::GcWriterLeases::acquire(
         &target_store,
@@ -8171,6 +8169,8 @@ async fn apply_active_active_repair_action(
                 }
                 return Ok(());
             }
+            crate::core::remote_layout::open(&source_store, &source_router).await?;
+            crate::core::remote_layout::open(&target_store, &target_router).await?;
             let (manifest, _) = read_manifest(&source_store, &source_router).await?;
             if manifest.generation < action.manifest_generation {
                 return Err(CrabError::Configuration {

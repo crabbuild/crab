@@ -1891,7 +1891,7 @@ async fn prepared_parent_is_current(
     expected_transaction: Option<&str>,
 ) -> Result<bool> {
     if let PublicationProtocol::Capsule(root) = publication_protocol(repository).await? {
-        let view = crab_read::capsule_protocol::open_view_from_root(
+        let view = crab_read::capsule_protocol::open_view_from_root_with_control(
             &repository.layout,
             *root,
             crab_read::capsule_protocol::CapsuleReadLimits {

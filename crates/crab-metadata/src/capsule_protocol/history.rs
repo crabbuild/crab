@@ -351,6 +351,9 @@ fn validate_checkpoint_pointer(pointer: &CheckpointPointer) -> Result<()> {
     CheckpointPointer::new(
         pointer.hash(),
         pointer.size(),
+        pointer.control_offset(),
+        pointer.control_size(),
+        pointer.footer_hash(),
         pointer.covered_generation(),
         pointer.covered_root_digest(),
         pointer.pack_count(),
@@ -403,7 +406,18 @@ mod tests {
     use super::*;
 
     fn checkpoint() -> CheckpointPointer {
-        CheckpointPointer::new("1".repeat(64), 100, 7, "2".repeat(64), 1, 3).unwrap()
+        CheckpointPointer::new(
+            "1".repeat(64),
+            100,
+            0,
+            100,
+            "0".repeat(64),
+            7,
+            "2".repeat(64),
+            1,
+            3,
+        )
+        .unwrap()
     }
 
     fn run() -> CapsulePointer {

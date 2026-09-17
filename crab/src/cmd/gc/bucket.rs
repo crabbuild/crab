@@ -1083,7 +1083,7 @@ async fn capsule_repository_roots(
             return Err(error);
         }
     };
-    let view = crab_read::capsule_protocol::open_view_from_root(
+    let view = crab_read::capsule_protocol::open_view_from_root_with_control(
         &router,
         root,
         crab_read::capsule_protocol::CapsuleReadLimits {

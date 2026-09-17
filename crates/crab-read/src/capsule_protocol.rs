@@ -2,8 +2,8 @@
 
 use bytes::Bytes;
 use crab_metadata::capsule_protocol::{
-    Capsule, CapsuleGitPackDescriptor, CapsulePointer, CapsuleRun, Checkpoint, CheckpointPointer,
-    PointerCatalog, RootRecord, load_root,
+    Capsule, CapsuleGitPackDescriptor, CapsulePointer, CapsuleRun, Checkpoint, CheckpointControl,
+    CheckpointPointer, PointerCatalog, RootRecord, load_root,
 };
 use crab_storage::{Store, StoreLayout};
 use futures_util::future::try_join_all;
@@ -53,13 +53,19 @@ pub struct CapsuleDependencyProof {
 #[derive(Debug, Clone)]
 pub struct CapsuleRepositoryView {
     root: crab_metadata::capsule_protocol::RootSnapshot,
-    checkpoint: Option<Checkpoint>,
+    checkpoint: Option<CheckpointData>,
     capsules: Vec<Capsule>,
     refs: BTreeMap<String, String>,
     peeled_refs: BTreeMap<String, String>,
     visible_ref_transactions: BTreeMap<String, String>,
     ref_capsule_counts: BTreeMap<String, u32>,
     capsule_run_pointers: Vec<CapsulePointer>,
+}
+
+#[derive(Debug, Clone)]
+enum CheckpointData {
+    Complete(Checkpoint),
+    Control(CheckpointControl),
 }
 
 /// One authenticated root and its transaction-consistent mutable ref state.
@@ -154,7 +160,19 @@ impl CapsuleRepositoryView {
     /// Return the complete base checkpoint, when the root names one.
     #[must_use]
     pub fn checkpoint(&self) -> Option<&Checkpoint> {
-        self.checkpoint.as_ref()
+        match self.checkpoint.as_ref() {
+            Some(CheckpointData::Complete(checkpoint)) => Some(checkpoint),
+            Some(CheckpointData::Control(_)) | None => None,
+        }
+    }
+
+    /// Return the authenticated checkpoint control suffix, when loaded.
+    #[must_use]
+    pub fn checkpoint_control(&self) -> Option<&CheckpointControl> {
+        match self.checkpoint.as_ref() {
+            Some(CheckpointData::Control(control)) => Some(control),
+            Some(CheckpointData::Complete(_)) | None => None,
+        }
     }
 
     /// Return every verified post-checkpoint capsule in publication order.
@@ -216,9 +234,8 @@ impl CapsuleRepositoryView {
     /// Return the number of Git packs authenticated by this exact view.
     #[must_use]
     pub fn git_pack_count(&self) -> usize {
-        self.checkpoint
-            .as_ref()
-            .map_or(0, |checkpoint| checkpoint.git_packs().len())
+        self.checkpoint_descriptors()
+            .map_or(0, <[_]>::len)
             .saturating_add(
                 self.capsules
                     .iter()
@@ -229,35 +246,47 @@ impl CapsuleRepositoryView {
 
     /// Return the total authenticated Git pack-body bytes in this exact view.
     pub fn git_pack_bytes(&self) -> Result<u64> {
-        self.checkpoint
+        let checkpoint_bytes = match self.checkpoint.as_ref() {
+            Some(CheckpointData::Complete(checkpoint)) => checkpoint
+                .git_packs()
+                .iter()
+                .map(|pack| checkpoint.section_bytes(pack.pack_section()))
+                .try_fold(0_u64, |total, bytes| {
+                    total.checked_add(bytes?.len() as u64).ok_or_else(|| {
+                        ReadError::internal("checkpoint Git pack byte total overflowed")
+                    })
+                })?,
+            Some(CheckpointData::Control(control)) => control
+                .git_packs()
+                .iter()
+                .map(|pack| control.section_location(pack.pack_section()))
+                .try_fold(0_u64, |total, location| {
+                    total.checked_add(location?.length()).ok_or_else(|| {
+                        ReadError::internal("checkpoint Git pack byte total overflowed")
+                    })
+                })?,
+            None => 0,
+        };
+        self.capsules
             .iter()
-            .cloned()
-            .map(GitPackContainer::Checkpoint)
-            .chain(self.capsules.iter().cloned().map(GitPackContainer::Capsule))
-            .try_fold(0_u64, |total, container| {
-                container.git_packs().iter().try_fold(total, |total, pack| {
-                    total
-                        .checked_add(container.section_bytes(pack.pack_section())?.len() as u64)
-                        .ok_or_else(|| {
-                            ReadError::internal("capsule Git pack byte total overflowed")
-                        })
-                })
+            .flat_map(|capsule| capsule.git_packs().iter().map(move |pack| (capsule, pack)))
+            .try_fold(checkpoint_bytes, |total, (capsule, pack)| {
+                total
+                    .checked_add(capsule.section_bytes(pack.pack_section())?.len() as u64)
+                    .ok_or_else(|| ReadError::internal("capsule Git pack byte total overflowed"))
             })
     }
 
     /// Return the total Git objects declared by the authenticated pack inventory.
     pub fn git_object_count(&self) -> Result<u64> {
-        self.checkpoint
-            .iter()
-            .cloned()
-            .map(GitPackContainer::Checkpoint)
-            .chain(self.capsules.iter().cloned().map(GitPackContainer::Capsule))
-            .try_fold(0_u64, |total, container| {
-                container.git_packs().iter().try_fold(total, |total, pack| {
-                    total
-                        .checked_add(pack.object_count())
-                        .ok_or_else(|| ReadError::internal("capsule Git object count overflowed"))
-                })
+        self.checkpoint_descriptors()
+            .into_iter()
+            .flatten()
+            .chain(self.capsules.iter().flat_map(Capsule::git_packs))
+            .try_fold(0_u64, |total, pack| {
+                total
+                    .checked_add(pack.object_count())
+                    .ok_or_else(|| ReadError::internal("capsule Git object count overflowed"))
             })
     }
 
@@ -269,12 +298,11 @@ impl CapsuleRepositoryView {
 
     /// Materialize the complete generation-pinned external pointer catalog.
     pub fn pointer_catalog(&self) -> Result<PointerCatalog> {
-        let mut catalog = self
-            .checkpoint
-            .as_ref()
-            .map(Checkpoint::pointer_catalog)
-            .transpose()?
-            .unwrap_or_else(PointerCatalog::new);
+        let mut catalog = match self.checkpoint.as_ref() {
+            Some(CheckpointData::Complete(checkpoint)) => checkpoint.pointer_catalog()?,
+            Some(CheckpointData::Control(control)) => control.pointer_catalog()?,
+            None => PointerCatalog::new(),
+        };
         for capsule in &self.capsules {
             if let Some(delta) = capsule.pointer_catalog_delta()? {
                 catalog.apply(&delta)?;
@@ -287,8 +315,13 @@ impl CapsuleRepositoryView {
     pub fn checkpoint_git_packs(
         &self,
     ) -> Result<Vec<crab_metadata::capsule_protocol::CapsuleGitPack>> {
-        self.checkpoint
-            .iter()
+        if self.checkpoint_control().is_some() {
+            return Err(ReadError::internal(
+                "complete checkpoint bytes are required to build a replacement checkpoint",
+            ));
+        }
+        self.checkpoint()
+            .into_iter()
             .cloned()
             .map(GitPackContainer::Checkpoint)
             .chain(self.capsules.iter().cloned().map(GitPackContainer::Capsule))
@@ -326,11 +359,16 @@ impl CapsuleRepositoryView {
         if cancellation.is_cancelled() {
             return Err(ReadError::Cancelled);
         }
+        if self.checkpoint_control().is_some() {
+            return Err(ReadError::internal(
+                "complete checkpoint bytes are required to open a Git repository",
+            ));
+        }
         let workspace = tempfile::tempdir()?;
         let installed = install_git_packs(self, workspace.path(), max_input_bytes).await?;
         let artifacts = self
-            .checkpoint
-            .iter()
+            .checkpoint()
+            .into_iter()
             .cloned()
             .map(GitPackContainer::Checkpoint)
             .chain(self.capsules.iter().cloned().map(GitPackContainer::Capsule))
@@ -476,16 +514,206 @@ impl CapsuleRepositoryView {
         .map_err(Into::into)
     }
 
+    /// Open a Git repository using checkpoint ranges and inline capsule packs.
+    ///
+    /// The control suffix is fetched before this method is called. Checkpoint
+    /// pack bodies are read by the remote Git reader only for requested object
+    /// ranges; capsule packs remain inline because they are already bounded
+    /// frontier payloads.
+    pub async fn git_repository_from_store(
+        &self,
+        layout: crab_storage::StoreLayout<crab_storage::Store>,
+        identity: crab_remote_git::RepositoryIdentity,
+        runtime: Arc<crab_remote_git::RemoteGitRuntime>,
+        options: crab_remote_git::RepositoryOptions,
+        max_input_bytes: u64,
+        cancellation: &CancellationToken,
+    ) -> Result<crab_remote_git::RemoteGitRepository> {
+        let Some(control) = self.checkpoint_control().cloned() else {
+            return self
+                .git_repository(identity, runtime, options, max_input_bytes, cancellation)
+                .await;
+        };
+        if cancellation.is_cancelled() {
+            return Err(ReadError::Cancelled);
+        }
+        let workspace = tempfile::tempdir()?;
+        let checkpoint_path = layout.capsule_checkpoint_path(control.hash());
+        let mut packs = Vec::new();
+        let mut pack_sources = std::collections::HashMap::new();
+        let mut inline_locators = std::collections::HashMap::new();
+        for descriptor in control.git_packs() {
+            let pack_location = control.section_location(descriptor.pack_section())?;
+            let pack_id = crab_xet::hash::MerkleHash::from_hex(pack_location.blake3())
+                .map_err(|error| corrupt_path("capsule Git pack", error.to_string()))?;
+            let index = control.section_bytes(descriptor.index_section())?;
+            let reverse = control.section_bytes(descriptor.reverse_index_section())?;
+            let locator = control.section_bytes(descriptor.locator_section())?;
+            let index_path =
+                workspace
+                    .path()
+                    .join(format!("{}-{}.idx", pack_id, descriptor.pack_section()));
+            let reverse_path =
+                workspace
+                    .path()
+                    .join(format!("{}-{}.rev", pack_id, descriptor.pack_section()));
+            std::fs::write(&index_path, &index)?;
+            std::fs::write(&reverse_path, &reverse)?;
+            let locations = crab_git::pack_locator::PackLocationIter::open(
+                &index_path,
+                &reverse_path,
+                pack_location.length(),
+            )
+            .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+            if locations.object_count() != descriptor.object_count()
+                || locations.pack_checksum().to_string() != descriptor.git_checksum()
+            {
+                return Err(corrupt_path(
+                    "capsule Git locator",
+                    "checkpoint pack descriptor does not match its authenticated index",
+                ));
+            }
+            crab_git::pack_locator::validate_pack_kind_metadata(
+                &locator,
+                locations.pack_checksum(),
+                locations.object_count(),
+            )
+            .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+            inline_locators.extend(inline_locators_for_pack(
+                descriptor,
+                pack_id,
+                &index_path,
+                &reverse_path,
+                &locator,
+                pack_location.length(),
+            )?);
+            pack_sources.insert(
+                pack_id,
+                crab_remote_git::RemoteGitPackSource::embedded(
+                    checkpoint_path.clone(),
+                    pack_location.offset(),
+                    pack_location.length(),
+                    index,
+                    reverse,
+                    Some(locator),
+                )?,
+            );
+            packs.push(crab_metadata::manifests::PackManifestEntry {
+                pack_id: pack_id.to_string(),
+                size: pack_location.length(),
+                content_hash: pack_id.to_string(),
+                ref_tips: Vec::new(),
+                object_count: descriptor.object_count(),
+            });
+        }
+        for capsule in &self.capsules {
+            for descriptor in capsule.git_packs() {
+                let pack = capsule.section_bytes(descriptor.pack_section())?;
+                let pack_size = pack.len() as u64;
+                let index = capsule.section_bytes(descriptor.index_section())?;
+                let reverse = capsule.section_bytes(descriptor.reverse_index_section())?;
+                let locator = capsule.section_bytes(descriptor.locator_section())?;
+                let pack_id =
+                    crab_xet::hash::MerkleHash::from_hex(blake3::hash(&pack).to_hex().as_ref())
+                        .map_err(|error| corrupt_path("capsule Git pack", error.to_string()))?;
+                let index_path =
+                    workspace
+                        .path()
+                        .join(format!("{}-{}.idx", pack_id, descriptor.pack_section()));
+                let reverse_path =
+                    workspace
+                        .path()
+                        .join(format!("{}-{}.rev", pack_id, descriptor.pack_section()));
+                std::fs::write(&index_path, &index)?;
+                std::fs::write(&reverse_path, &reverse)?;
+                let locations = crab_git::pack_locator::PackLocationIter::open(
+                    &index_path,
+                    &reverse_path,
+                    pack.len() as u64,
+                )
+                .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+                if locations.object_count() != descriptor.object_count()
+                    || locations.pack_checksum().to_string() != descriptor.git_checksum()
+                {
+                    return Err(corrupt_path(
+                        "capsule Git locator",
+                        "capsule pack descriptor does not match its authenticated index",
+                    ));
+                }
+                crab_git::pack_locator::validate_pack_kind_metadata(
+                    &locator,
+                    locations.pack_checksum(),
+                    locations.object_count(),
+                )
+                .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+                inline_locators.extend(inline_locators_for_pack(
+                    descriptor,
+                    pack_id,
+                    &index_path,
+                    &reverse_path,
+                    &locator,
+                    pack_size,
+                )?);
+                pack_sources.insert(
+                    pack_id,
+                    crab_remote_git::RemoteGitPackSource::inline(
+                        pack,
+                        index,
+                        reverse,
+                        Some(locator),
+                    )?,
+                );
+                packs.push(crab_metadata::manifests::PackManifestEntry {
+                    pack_id: pack_id.to_string(),
+                    size: pack_size,
+                    content_hash: pack_id.to_string(),
+                    ref_tips: Vec::new(),
+                    object_count: descriptor.object_count(),
+                });
+            }
+        }
+        let manifest = self.git_manifest(&packs)?;
+        let root = self.root();
+        let snapshot = crab_metadata::manifest_store::RepositorySnapshot {
+            layout: crab_metadata::layout_descriptor::LayoutDescriptor::canonical(),
+            manifest: manifest.clone(),
+            manifest_etag: root.digest().to_owned(),
+            journal: crab_metadata::ref_journal::RefJournalSnapshot {
+                refs: manifest.refs.clone(),
+                peeled_refs: manifest.peeled_refs.clone(),
+                head: manifest.head.clone(),
+                packs,
+                shards: Vec::new(),
+                transactions: Vec::new(),
+                ordered_edits: Vec::new(),
+                visible_heads: std::collections::BTreeMap::new(),
+                state_digest: root.digest().to_owned(),
+            },
+        };
+        crab_remote_git::RemoteGitRepository::from_snapshot_with_inline_locators_and_pack_sources(
+            layout,
+            &snapshot,
+            identity,
+            runtime,
+            options,
+            inline_locators,
+            pack_sources,
+            cancellation,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
     /// Materialize the complete view-bound Git visibility proof.
     pub fn git_visibility_index(
         &self,
     ) -> Result<crab_metadata::git_visibility::GitVisibilityIndex> {
-        let mut index = self
-            .checkpoint
-            .as_ref()
-            .map(Checkpoint::visibility_snapshot)
-            .transpose()?
-            .flatten()
+        let visibility = match self.checkpoint.as_ref() {
+            Some(CheckpointData::Complete(checkpoint)) => checkpoint.visibility_snapshot()?,
+            Some(CheckpointData::Control(control)) => control.visibility_snapshot()?,
+            None => None,
+        };
+        let mut index = visibility
             .map(|snapshot| snapshot.to_index(0, &"0".repeat(64), &"0".repeat(64)))
             .transpose()?
             .unwrap_or(crab_metadata::git_visibility::GitVisibilityIndex::new(
@@ -544,26 +772,57 @@ impl CapsuleRepositoryView {
     fn git_pack_manifest_entries(
         &self,
     ) -> Result<Vec<crab_metadata::manifests::PackManifestEntry>> {
-        self.checkpoint
-            .iter()
-            .cloned()
-            .map(GitPackContainer::Checkpoint)
-            .chain(self.capsules.iter().cloned().map(GitPackContainer::Capsule))
-            .flat_map(|container| {
-                let descriptors = container.git_packs().to_vec();
-                descriptors.into_iter().map(move |descriptor| {
-                    let pack = container.section_bytes(descriptor.pack_section())?;
+        let mut entries = Vec::new();
+        match self.checkpoint.as_ref() {
+            Some(CheckpointData::Complete(checkpoint)) => {
+                for descriptor in checkpoint.git_packs() {
+                    let pack = checkpoint.section_bytes(descriptor.pack_section())?;
                     let pack_id = blake3::hash(&pack).to_hex().to_string();
-                    Ok(crab_metadata::manifests::PackManifestEntry {
+                    entries.push(crab_metadata::manifests::PackManifestEntry {
                         pack_id: pack_id.clone(),
                         size: pack.len() as u64,
                         content_hash: pack_id,
                         ref_tips: Vec::new(),
                         object_count: descriptor.object_count(),
-                    })
-                })
-            })
-            .collect()
+                    });
+                }
+            }
+            Some(CheckpointData::Control(control)) => {
+                for descriptor in control.git_packs() {
+                    let location = control.section_location(descriptor.pack_section())?;
+                    entries.push(crab_metadata::manifests::PackManifestEntry {
+                        pack_id: location.blake3().to_owned(),
+                        size: location.length(),
+                        content_hash: location.blake3().to_owned(),
+                        ref_tips: Vec::new(),
+                        object_count: descriptor.object_count(),
+                    });
+                }
+            }
+            None => {}
+        }
+        for capsule in &self.capsules {
+            for descriptor in capsule.git_packs() {
+                let pack = capsule.section_bytes(descriptor.pack_section())?;
+                let pack_id = blake3::hash(&pack).to_hex().to_string();
+                entries.push(crab_metadata::manifests::PackManifestEntry {
+                    pack_id: pack_id.clone(),
+                    size: pack.len() as u64,
+                    content_hash: pack_id,
+                    ref_tips: Vec::new(),
+                    object_count: descriptor.object_count(),
+                });
+            }
+        }
+        Ok(entries)
+    }
+
+    fn checkpoint_descriptors(&self) -> Option<&[CapsuleGitPackDescriptor]> {
+        match self.checkpoint.as_ref() {
+            Some(CheckpointData::Complete(checkpoint)) => Some(checkpoint.git_packs()),
+            Some(CheckpointData::Control(control)) => Some(control.git_packs()),
+            None => None,
+        }
     }
 
     fn git_manifest(
@@ -718,26 +977,87 @@ pub async fn install_git_packs_with_candidates(
     git_dir: &Path,
     max_input_bytes: u64,
 ) -> Result<Vec<PathBuf>> {
-    let checkpoint = view.checkpoint.clone();
+    if view.checkpoint_control().is_some() {
+        return Err(ReadError::internal(
+            "complete checkpoint bytes are required for this installation path",
+        ));
+    }
+    let checkpoint = view.checkpoint().cloned();
     let capsules = view.capsules.clone();
     let candidates = candidates.to_vec();
-    let git_dir = git_dir.to_owned();
+    let mut payloads = Vec::new();
+    if let Some(checkpoint) = checkpoint {
+        payloads.extend(payloads_from_container(GitPackContainer::Checkpoint(
+            checkpoint,
+        ))?);
+    }
+    for capsule in capsules.into_iter().chain(candidates) {
+        payloads.extend(payloads_from_container(GitPackContainer::Capsule(capsule))?);
+    }
+    install_git_pack_payloads(git_dir, payloads, max_input_bytes).await
+}
+
+#[derive(Debug)]
+struct GitPackPayload {
+    descriptor: CapsuleGitPackDescriptor,
+    pack: Option<Bytes>,
+    index: Bytes,
+    reverse_index: Bytes,
+    locator: Bytes,
+    content_hash: String,
+}
+
+fn payloads_from_container(container: GitPackContainer) -> Result<Vec<GitPackPayload>> {
+    let descriptors = container.git_packs().to_vec();
+    descriptors
+        .into_iter()
+        .map(|descriptor| {
+            let pack = container.section_bytes(descriptor.pack_section())?;
+            let index = container.section_bytes(descriptor.index_section())?;
+            let reverse_index = container.section_bytes(descriptor.reverse_index_section())?;
+            let locator = container.section_bytes(descriptor.locator_section())?;
+            let content_hash = blake3::hash(&pack).to_hex().to_string();
+            Ok(GitPackPayload {
+                descriptor,
+                pack: Some(pack),
+                index,
+                reverse_index,
+                locator,
+                content_hash,
+            })
+        })
+        .collect()
+}
+
+async fn install_git_pack_payloads(
+    git_dir: impl Into<PathBuf>,
+    payloads: Vec<GitPackPayload>,
+    max_input_bytes: u64,
+) -> Result<Vec<PathBuf>> {
+    let git_dir = git_dir.into();
     tokio::task::spawn_blocking(move || {
         let pack_dir = git_dir.join("objects").join("pack");
         std::fs::create_dir_all(&pack_dir)?;
         let mut total = 0_u64;
         let mut installed = Vec::new();
-        let containers = checkpoint
-            .into_iter()
-            .map(GitPackContainer::Checkpoint)
-            .chain(capsules.into_iter().map(GitPackContainer::Capsule))
-            .chain(candidates.into_iter().map(GitPackContainer::Capsule));
-        for container in containers {
-            for descriptor in container.git_packs() {
-                let pack_bytes = container.section_bytes(descriptor.pack_section())?;
-                let pack_size = u64::try_from(pack_bytes.len()).map_err(|_| {
-                    ReadError::internal("Git pack size cannot be represented as u64")
-                })?;
+        for GitPackPayload {
+            descriptor,
+            pack,
+            index,
+            reverse_index,
+            locator,
+            content_hash,
+        } in payloads
+        {
+            let has_download = pack.is_some();
+            let final_pack = pack_dir.join(format!("pack-{content_hash}.pack"));
+            let final_index = pack_dir.join(format!("pack-{content_hash}.idx"));
+            let final_reverse = pack_dir.join(format!("pack-{content_hash}.rev"));
+            let pack_size = match pack.as_ref() {
+                Some(pack) => pack.len() as u64,
+                None => std::fs::metadata(&final_pack)?.len(),
+            };
+            if has_download {
                 total = total.checked_add(pack_size).ok_or_else(|| {
                     ReadError::internal("capsule-protocol Git intake size overflowed")
                 })?;
@@ -747,75 +1067,105 @@ pub async fn install_git_packs_with_candidates(
                         maximum: max_input_bytes,
                     });
                 }
-                let temporary = tempfile::Builder::new()
-                    .prefix(".crab-capsule-pack-")
-                    .tempdir_in(&pack_dir)?;
-                let pack_path = temporary.path().join("pack.pack");
-                let index_path = temporary.path().join("pack.idx");
-                let reverse_path = temporary.path().join("pack.rev");
-                std::fs::write(&pack_path, &pack_bytes)?;
-                std::fs::write(
-                    &index_path,
-                    container.section_bytes(descriptor.index_section())?,
-                )?;
-                std::fs::write(
-                    &reverse_path,
-                    container.section_bytes(descriptor.reverse_index_section())?,
-                )?;
-                let locator = container.section_bytes(descriptor.locator_section())?;
-                let locations = crab_git::pack_locator::PackLocationIter::open(
-                    &index_path,
-                    &reverse_path,
-                    pack_size,
-                )
-                .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
-                if locations.object_count() != descriptor.object_count()
-                    || locations.pack_checksum().to_string() != descriptor.git_checksum()
-                {
-                    return Err(corrupt_path(
-                        "capsule Git locator",
-                        "pack descriptor does not match its index",
-                    ));
-                }
-                crab_git::pack_locator::validate_pack_kind_metadata(
-                    &locator,
-                    locations.pack_checksum(),
-                    locations.object_count(),
-                )
-                .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
-                let canonical_name = blake3::hash(&pack_bytes).to_hex().to_string();
-                let final_pack = pack_dir.join(format!("pack-{canonical_name}.pack"));
-                let final_index = pack_dir.join(format!("pack-{canonical_name}.idx"));
-                let final_reverse = pack_dir.join(format!("pack-{canonical_name}.rev"));
-                let result =
-                    if final_pack.exists() && final_index.exists() && final_reverse.exists() {
-                        crab_git::pack::install_pack_file_from_path(
-                            &pack_dir,
-                            &pack_path,
-                            &canonical_name,
-                            max_input_bytes,
-                            false,
-                        )
-                    } else {
-                        crab_git::pack::install_pack_files_from_paths(
-                            &pack_dir,
-                            &pack_path,
-                            &index_path,
-                            &reverse_path,
-                            &canonical_name,
-                            max_input_bytes,
-                            descriptor.object_count(),
-                        )
+            }
+            let temporary = tempfile::Builder::new()
+                .prefix(".crab-capsule-pack-")
+                .tempdir_in(&pack_dir)?;
+            let pack_path = temporary.path().join("pack.pack");
+            let index_path = temporary.path().join("pack.idx");
+            let reverse_path = temporary.path().join("pack.rev");
+            let (index_for_validation, reverse_for_validation) =
+                if let Some(pack) = pack {
+                    std::fs::write(&pack_path, &pack)?;
+                    std::fs::write(&index_path, &index)?;
+                    std::fs::write(&reverse_path, &reverse_index)?;
+                    (&index_path, &reverse_path)
+                } else {
+                    if !final_pack.exists() || !final_index.exists() || !final_reverse.exists() {
+                        return Err(corrupt_path(
+                            "capsule Git pack",
+                            "checkpoint pack disappeared before its range was installed",
+                        ));
                     }
-                    .map_err(|error| corrupt_path("capsule Git pack", error.to_string()))?;
-                if result.git_sha1 != descriptor.git_checksum() {
+                    let mut file = std::fs::File::open(&final_pack)?;
+                    let mut hasher = blake3::Hasher::new();
+                    let mut buffer = [0_u8; 64 * 1024];
+                    loop {
+                        let read = std::io::Read::read(&mut file, &mut buffer)?;
+                        if read == 0 {
+                            break;
+                        }
+                        hasher.update(&buffer[..read]);
+                    }
+                    if hasher.finalize().to_hex().as_str() != content_hash {
+                        return Err(corrupt_path(
+                            "capsule Git pack",
+                            "local checkpoint pack content hash does not match its authenticated section",
+                        ));
+                    }
+                    if std::fs::read(&final_index)? != index.as_ref()
+                        || std::fs::read(&final_reverse)? != reverse_index.as_ref()
+                    {
+                        return Err(corrupt_path(
+                            "capsule Git pack",
+                            "local checkpoint sidecar does not match its authenticated section",
+                        ));
+                    }
+                    (&final_index, &final_reverse)
+                };
+            let locations = crab_git::pack_locator::PackLocationIter::open(
+                index_for_validation,
+                reverse_for_validation,
+                pack_size,
+            )
+            .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+            if locations.object_count() != descriptor.object_count()
+                || locations.pack_checksum().to_string() != descriptor.git_checksum()
+            {
+                return Err(corrupt_path(
+                    "capsule Git locator",
+                    "pack descriptor does not match its index",
+                ));
+            }
+            crab_git::pack_locator::validate_pack_kind_metadata(
+                &locator,
+                locations.pack_checksum(),
+                locations.object_count(),
+            )
+            .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+            let result = if has_download {
+                if final_pack.exists() || final_index.exists() || final_reverse.exists() {
                     return Err(corrupt_path(
                         "capsule Git pack",
-                        "installed pack checksum does not match its descriptor",
+                        "pack installation destination already exists with different contents",
                     ));
                 }
-                installed.push(result.pack_path);
+                crab_git::pack::install_pack_files_from_paths(
+                    &pack_dir,
+                    &pack_path,
+                    &index_path,
+                    &reverse_path,
+                    &content_hash,
+                    max_input_bytes,
+                    descriptor.object_count(),
+                )
+            } else {
+                crab_git::pack::install_pack_file_from_path(
+                    &pack_dir,
+                    &final_pack,
+                    &content_hash,
+                    0,
+                    false,
+                )
             }
+            .map_err(|error| corrupt_path("capsule Git pack", error.to_string()))?;
+            if result.git_sha1 != descriptor.git_checksum() {
+                return Err(corrupt_path(
+                    "capsule Git pack",
+                    "installed pack checksum does not match its descriptor",
+                ));
+            }
+            installed.push(result.pack_path);
         }
         Ok(installed)
     })
@@ -823,9 +1173,134 @@ pub async fn install_git_packs_with_candidates(
     .map_err(|error| ReadError::Internal(format!("capsule pack install worker failed: {error}")))?
 }
 
+/// Install packs from a view, range-reading only checkpoint pack bodies that
+/// are not already present in the destination Git object database.
+pub async fn install_git_packs_from_store(
+    view: &CapsuleRepositoryView,
+    store: &Store,
+    router: &StoreLayout<Store>,
+    git_dir: &Path,
+    max_input_bytes: u64,
+) -> Result<Vec<PathBuf>> {
+    let Some(control) = view.checkpoint_control().cloned() else {
+        return install_git_packs(view, git_dir, max_input_bytes).await;
+    };
+    let pack_dir = git_dir.join("objects").join("pack");
+    tokio::fs::create_dir_all(&pack_dir).await?;
+    let mut payloads = Vec::new();
+    for descriptor in control.git_packs() {
+        let location = control.section_location(descriptor.pack_section())?;
+        let content_hash = location.blake3().to_owned();
+        let final_pack = pack_dir.join(format!("pack-{content_hash}.pack"));
+        let final_index = pack_dir.join(format!("pack-{content_hash}.idx"));
+        let final_reverse = pack_dir.join(format!("pack-{content_hash}.rev"));
+        let pack_exists = final_pack.exists();
+        let index_exists = final_index.exists();
+        let reverse_exists = final_reverse.exists();
+        let pack = if pack_exists || index_exists || reverse_exists {
+            if !(pack_exists && index_exists && reverse_exists) {
+                return Err(corrupt_path(
+                    "capsule Git pack",
+                    "local checkpoint pack installation is incomplete",
+                ));
+            }
+            None
+        } else {
+            let end = location
+                .offset()
+                .checked_add(location.length())
+                .ok_or_else(|| corrupt_path("capsule Git pack", "pack range overflowed"))?;
+            let path = router.capsule_checkpoint_path(control.hash());
+            Some(store.range_get(&path, location.offset()..end).await?)
+        };
+        payloads.push(GitPackPayload {
+            descriptor: descriptor.clone(),
+            pack,
+            index: control.section_bytes(descriptor.index_section())?,
+            reverse_index: control.section_bytes(descriptor.reverse_index_section())?,
+            locator: control.section_bytes(descriptor.locator_section())?,
+            content_hash,
+        });
+    }
+    for capsule in view.capsules.iter().cloned() {
+        payloads.extend(payloads_from_container(GitPackContainer::Capsule(capsule))?);
+    }
+    install_git_pack_payloads(git_dir, payloads, max_input_bytes).await
+}
+
 enum GitPackContainer {
     Checkpoint(Checkpoint),
     Capsule(Capsule),
+}
+
+fn inline_locators_for_pack(
+    descriptor: &CapsuleGitPackDescriptor,
+    pack_id: crab_xet::hash::MerkleHash,
+    index_path: &Path,
+    reverse_path: &Path,
+    locator_bytes: &Bytes,
+    pack_size: u64,
+) -> Result<std::collections::HashMap<[u8; 20], crab_metadata::git_object_locator::GitObjectLocator>>
+{
+    let locations =
+        crab_git::pack_locator::PackLocationIter::open(index_path, reverse_path, pack_size)
+            .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+    let locator_entries = crab_git::pack_locator::decode_pack_kind_metadata_with_external_deltas(
+        locator_bytes,
+        locations,
+    )
+    .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+    let locator_locations =
+        crab_git::pack_locator::PackLocationIter::open(index_path, reverse_path, pack_size)
+            .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+    let mut inline = std::collections::HashMap::new();
+    for (ordinal, ((oid, kind, delta_base_oid), location)) in locator_entries
+        .into_iter()
+        .zip(locator_locations)
+        .enumerate()
+    {
+        let location =
+            location.map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+        let oid_bytes = oid
+            .as_bytes()
+            .try_into()
+            .map_err(|_| ReadError::internal("capsule Git locator is not SHA-1"))?;
+        let ordinal = u32::try_from(ordinal)
+            .map_err(|_| ReadError::internal("capsule Git locator ordinal overflowed"))?;
+        let kind = match kind {
+            gix_object::Kind::Commit => crab_metadata::git_object_locator::GitObjectKind::Commit,
+            gix_object::Kind::Tree => crab_metadata::git_object_locator::GitObjectKind::Tree,
+            gix_object::Kind::Blob => crab_metadata::git_object_locator::GitObjectKind::Blob,
+            gix_object::Kind::Tag => crab_metadata::git_object_locator::GitObjectKind::Tag,
+        };
+        inline.insert(
+            oid_bytes,
+            crab_metadata::git_object_locator::GitObjectLocator {
+                ordinal,
+                pack_id,
+                location: crab_metadata::git_object_locator::GitObjectLocation {
+                    pack_offset: location.pack_offset,
+                    entry_len: location.entry_len,
+                    crc32: location.crc32,
+                },
+                metadata: crab_metadata::git_object_locator::GitObjectMetadata {
+                    kind: Some(kind),
+                    logical_size: None,
+                    delta_base_oid: delta_base_oid
+                        .map(|oid| oid.as_bytes().try_into())
+                        .transpose()
+                        .map_err(|_| ReadError::internal("capsule Git delta base is not SHA-1"))?,
+                },
+            },
+        );
+    }
+    if inline.len() as u64 != descriptor.object_count() {
+        return Err(corrupt_path(
+            "capsule Git locator",
+            "locator metadata count does not match its pack descriptor",
+        ));
+    }
+    Ok(inline)
 }
 
 impl GitPackContainer {
@@ -966,7 +1441,43 @@ pub async fn open_view_from_root(
     limits: CapsuleReadLimits,
 ) -> Result<CapsuleRepositoryView> {
     let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
-    assemble_view(router, snapshot, limits, heads, active).await
+    assemble_view(
+        router,
+        snapshot,
+        limits,
+        heads,
+        active,
+        CheckpointLoad::Complete,
+    )
+    .await
+}
+
+/// Load a repository view with only the range-addressable checkpoint control suffix.
+///
+/// This path is used by ordinary fetch. It authenticates checkpoint metadata and
+/// leaves pack bodies available for selective range reads, so an existing local
+/// clone does not download its checkpoint again.
+pub async fn open_view_from_root_with_control(
+    router: &StoreLayout<Store>,
+    snapshot: crab_metadata::capsule_protocol::RootSnapshot,
+    limits: CapsuleReadLimits,
+) -> Result<CapsuleRepositoryView> {
+    let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
+    assemble_view(
+        router,
+        snapshot,
+        limits,
+        heads,
+        active,
+        CheckpointLoad::Control,
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CheckpointLoad {
+    Complete,
+    Control,
 }
 
 async fn assemble_view(
@@ -975,6 +1486,7 @@ async fn assemble_view(
     limits: CapsuleReadLimits,
     heads: Vec<crab_metadata::capsule_protocol::CapsuleRefHead>,
     active: BTreeSet<String>,
+    checkpoint_load: CheckpointLoad,
 ) -> Result<CapsuleRepositoryView> {
     let mut refs = snapshot.record().root().refs().clone();
     let mut peeled_refs = snapshot.record().root().peeled_refs().clone();
@@ -987,7 +1499,15 @@ async fn assemble_view(
     admit_frontier(&pointers, limits)?;
     let checkpoint = async {
         match snapshot.record().root().checkpoint() {
-            Some(pointer) => load_checkpoint(router, pointer, limits).await.map(Some),
+            Some(pointer) => match checkpoint_load {
+                CheckpointLoad::Complete => load_checkpoint(router, pointer, limits)
+                    .await
+                    .map(CheckpointData::Complete),
+                CheckpointLoad::Control => load_checkpoint_control(router, pointer, limits)
+                    .await
+                    .map(CheckpointData::Control),
+            }
+            .map(Some),
             None => Ok(None),
         }
     };
@@ -1111,7 +1631,10 @@ async fn assemble_view(
     }
     let mut visibility_refs = checkpoint
         .as_ref()
-        .map(Checkpoint::visibility_snapshot)
+        .map(|checkpoint| match checkpoint {
+            CheckpointData::Complete(checkpoint) => checkpoint.visibility_snapshot(),
+            CheckpointData::Control(control) => control.visibility_snapshot(),
+        })
         .transpose()?
         .flatten()
         .map(|visibility| visibility.refs().clone())
@@ -1714,6 +2237,9 @@ async fn load_checkpoint(
         .ok_or_else(|| ReadError::internal("checkpoint object count overflowed"))?;
     if checkpoint.hash() != pointer.hash()
         || checkpoint.bytes().len() as u64 != pointer.size()
+        || checkpoint.control_offset() != pointer.control_offset()
+        || checkpoint.control_size() != pointer.control_size()
+        || checkpoint.footer_hash() != pointer.footer_hash()
         || checkpoint.covered_generation() != pointer.covered_generation()
         || checkpoint.covered_root_digest() != pointer.covered_root_digest()
         || checkpoint.git_packs().len() as u32 != pointer.pack_count()
@@ -1725,6 +2251,49 @@ async fn load_checkpoint(
         ));
     }
     Ok(checkpoint)
+}
+
+/// Load and verify only a checkpoint's authenticated control suffix.
+pub async fn load_checkpoint_control(
+    router: &StoreLayout<Store>,
+    pointer: &CheckpointPointer,
+    limits: CapsuleReadLimits,
+) -> Result<CheckpointControl> {
+    if pointer.control_size() > limits.max_capsule_bytes {
+        return Err(ReadError::CapsuleReadLimit {
+            resource: "checkpoint control bytes",
+            maximum: limits.max_capsule_bytes,
+        });
+    }
+    let path = router.capsule_checkpoint_path(pointer.hash());
+    let bytes = router
+        .store()
+        .range_get(&path, pointer.control_offset()..pointer.size())
+        .await?;
+    let control = Checkpoint::decode_control(
+        bytes,
+        pointer.size(),
+        pointer.hash(),
+        pointer.control_offset(),
+        pointer.control_size(),
+        pointer.footer_hash(),
+    )?;
+    let object_count = control
+        .git_packs()
+        .iter()
+        .try_fold(0_u64, |total, pack| total.checked_add(pack.object_count()))
+        .ok_or_else(|| corrupt(&path, "checkpoint object count overflowed"))?;
+    if control.covered_generation() != pointer.covered_generation()
+        || control.covered_root_digest() != pointer.covered_root_digest()
+        || control.git_packs().len() as u32 != pointer.pack_count()
+        || object_count != pointer.object_count()
+    {
+        return Err(corrupt(
+            &path,
+            "checkpoint control does not match its authenticated root pointer",
+        ));
+    }
+    Ok(control)
 }
 
 fn admit_frontier(pointers: &[CapsulePointer], limits: CapsuleReadLimits) -> Result<()> {
@@ -1805,7 +2374,8 @@ mod tests {
     use bytes::Bytes;
     use crab_metadata::capsule_protocol::{
         CapsuleGitPack, CapsuleRefEdit, CapsuleSection, CapsuleSectionKind, CapsuleTransaction,
-        CapsuleVisibilityDelta, RepositoryRoot,
+        CapsuleVisibilityDelta, Checkpoint, CheckpointPointer, HistorySegment, HistorySegmentState,
+        RepositoryRoot,
     };
     use crab_metadata::git_visibility::GitVisibilityEdit;
     use crab_storage::{StorageObservation, StorageObserver, StorageOperation, StorageOutcome};
@@ -2122,6 +2692,116 @@ mod tests {
                 StorageOperation::List,
                 StorageOperation::List,
                 StorageOperation::Get,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn control_view_range_reads_checkpoint_suffix_without_pack_body() {
+        let inner = Arc::new(InMemory::new());
+        seed_one_capsule(inner.clone(), None).await;
+        let seed_store = Store::new(inner.clone());
+        let seed_router = StoreLayout::new(seed_store.clone(), "repositories/test".to_owned());
+        let current = load_root(&seed_router).await.unwrap();
+        let checkpoint = Checkpoint::build_with_pointer_catalog(
+            current.record().root().generation(),
+            current.record().digest(),
+            vec![
+                CapsuleGitPack::new(
+                    Bytes::from_static(b"PACK checkpoint control test body"),
+                    Bytes::from_static(b"index"),
+                    Bytes::from_static(b"reverse"),
+                    Bytes::from_static(b"locator"),
+                    "4".repeat(40),
+                    1,
+                )
+                .unwrap(),
+            ],
+            crab_metadata::capsule_protocol::PointerCatalog::new(),
+        )
+        .unwrap();
+        let checkpoint_pointer = CheckpointPointer::new(
+            checkpoint.hash(),
+            checkpoint.bytes().len() as u64,
+            checkpoint.control_offset(),
+            checkpoint.control_size(),
+            checkpoint.footer_hash(),
+            checkpoint.covered_generation(),
+            checkpoint.covered_root_digest(),
+            checkpoint.git_packs().len() as u32,
+            checkpoint
+                .git_packs()
+                .iter()
+                .map(|pack| pack.object_count())
+                .sum(),
+        )
+        .unwrap();
+        let history = HistorySegment::build(
+            checkpoint_pointer.clone(),
+            None,
+            HistorySegmentState::new(
+                current.record().root().refs().clone(),
+                current.record().root().peeled_refs().clone(),
+                current.record().root().head().to_owned(),
+                current.record().root().compacted_ref_transactions().clone(),
+                current.record().root().capsule_frontier().to_vec(),
+            ),
+        )
+        .unwrap();
+        let root = current
+            .record()
+            .root()
+            .install_checkpoint(
+                current.record().digest(),
+                checkpoint_pointer,
+                Some(history.pointer().unwrap()),
+            )
+            .unwrap();
+        let root = RootRecord::encode(root).unwrap();
+        seed_store
+            .put(
+                &seed_router.capsule_checkpoint_path(checkpoint.hash()),
+                checkpoint.bytes().clone(),
+            )
+            .await
+            .unwrap();
+        seed_store
+            .update(
+                &seed_router.capsule_root_path(),
+                root.bytes().clone(),
+                current.etag().clone(),
+            )
+            .await
+            .unwrap();
+
+        let observer = Arc::new(RecordingObserver::default());
+        let store = Store::new(inner).with_storage_observer(observer.clone());
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        let view = open_view_from_root_with_control(
+            &router,
+            load_root(&router).await.unwrap(),
+            TEST_LIMITS,
+        )
+        .await
+        .unwrap();
+
+        assert!(view.checkpoint().is_none());
+        assert!(view.checkpoint_control().is_some());
+        let operations = observer
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|observation| observation.outcome == StorageOutcome::Success)
+            .map(|observation| observation.operation)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            operations,
+            vec![
+                StorageOperation::Get,
+                StorageOperation::List,
+                StorageOperation::List,
+                StorageOperation::Range
             ]
         );
     }

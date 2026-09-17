@@ -48,8 +48,10 @@ pub(super) async fn verify_ready(router: &StoreLayout, source_digest: &str) -> R
             reason: "capsule view readiness does not match its source state".to_owned(),
         });
     }
-    crab_read::capsule_protocol::open_view(
+    let root = crab_metadata::capsule_protocol::load_root(router).await?;
+    crab_read::capsule_protocol::open_view_from_root_with_control(
         router,
+        root,
         crab_read::capsule_protocol::CapsuleReadLimits {
             max_capsule_bytes: 2 * 1024 * 1024 * 1024,
             max_frontier_bytes: 2 * 1024 * 1024 * 1024,
@@ -72,7 +74,6 @@ pub(super) async fn publish(
     let head = resolve_view_head(filtered_git, &refs)?;
     let repository_id = blake3::hash(repo_prefix.as_bytes()).to_hex().to_string();
     let base = crab_write::capsule_protocol::initialize(&router, &repository_id, &head).await?;
-    crab_metadata::layout_descriptor::ensure_canonical_layout(store, &router).await?;
 
     let uploaded_crab = upload_view_crab_objects(store, &router, crab_objects).await?;
     let scan = scan_reachable_pointers(filtered_git)?;
@@ -91,8 +92,9 @@ pub(super) async fn publish(
     )
     .await?;
 
-    let current = crab_read::capsule_protocol::open_view(
+    let current = crab_read::capsule_protocol::open_view_from_root_with_control(
         &router,
+        base.clone(),
         crab_read::capsule_protocol::CapsuleReadLimits {
             max_capsule_bytes: 2 * 1024 * 1024 * 1024,
             max_frontier_bytes: 2 * 1024 * 1024 * 1024,

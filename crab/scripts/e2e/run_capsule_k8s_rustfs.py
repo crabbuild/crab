@@ -144,6 +144,10 @@ class Qualification:
         self.git(["symbolic-ref", "HEAD", "refs/heads/main"], self.replay)
         self.git(["update-ref", "refs/heads/main", base], self.replay)
         self.run([str(self.crab), "init", self.remote_url], self.replay)
+        staging_source = None
+        if self.args.staging_source is not None:
+            self.copy_staging_source(self.args.staging_source)
+            staging_source = str(self.args.staging_source.resolve())
         self.git(["remote", "set-url", "origin", self.remote_url], self.replay)
 
         version = subprocess.run(
@@ -173,6 +177,7 @@ class Qualification:
                 "commits": self.args.commits,
                 "fetch_interval": self.args.interval,
                 "repack_interval": self.args.interval,
+                **({"staging_source": staging_source} if staging_source else {}),
             },
             "provenance": {
                 "crab_binary": str(self.crab),
@@ -187,6 +192,23 @@ class Qualification:
             "metrics": {},
         }
         self.save()
+
+    def copy_staging_source(self, source: Path) -> None:
+        source = source.resolve()
+        destination = (self.replay / ".crab" / "staging").resolve()
+        if not source.is_dir():
+            raise RuntimeError(f"staging source is not a directory: {source}")
+        if source == destination or source in destination.parents:
+            raise RuntimeError("staging source must be outside the replay checkout")
+
+        def ignore_ephemeral(_directory: str, names: list[str]) -> set[str]:
+            return {name for name in names if name in {"lockfile", "index.db-shm", "index.db-wal"}}
+
+        shutil.copytree(
+            source,
+            destination,
+            ignore=ignore_ephemeral,
+        )
 
     def push(self, ordinal: int, oid: str) -> None:
         self.git(["update-ref", "refs/heads/main", oid], self.replay)
@@ -338,6 +360,11 @@ class Qualification:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", required=True)
+    parser.add_argument(
+        "--staging-source",
+        type=Path,
+        help="Optional existing .crab/staging directory for pointer-bearing replay commits",
+    )
     parser.add_argument("--crab-bin", required=True)
     parser.add_argument("--git-bin", default="git")
     parser.add_argument("--root", type=Path, required=True)

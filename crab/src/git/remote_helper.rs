@@ -1437,22 +1437,22 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                             may_reuse_primary_root,
                         )
                     };
-                    let (output, view) = match cache.capsule_view.take() {
+                    let (output, view) = match cache.capsule_ref_view.take() {
                         Some(view) if may_reuse_primary_root => {
-                            (list_output_from_view(&view, &hidden_ref_patterns), view)
+                            (list_output_from_ref_view(&view, &hidden_ref_patterns), view)
                         }
-                        _ => read_remote_refs_with_snapshot(
+                        _ => read_remote_refs_payload_free_with_snapshot(
                             &read_store,
                             &router,
                             &hidden_ref_patterns,
                             may_reuse_primary_root
-                                .then(|| cache.capsule_root.take())
+                                .then(|| cache.capsule_root.clone())
                                 .flatten(),
                         )
                         .await
                         .map_err(map_missing_capsule_root)?,
                     };
-                    cache.capsule_view = Some(view);
+                    cache.capsule_ref_view = Some(view);
                     output
                 }
             } else {
@@ -2195,6 +2195,25 @@ async fn read_remote_refs_with_snapshot(
     Ok((list_output_from_view(&view, hidden_ref_patterns), view))
 }
 
+async fn read_remote_refs_payload_free_with_snapshot(
+    store: &crate::storage::store::Store,
+    router: &StoreLayout,
+    hidden_ref_patterns: &[String],
+    root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
+) -> Result<(ListOutput, crab_read::capsule_protocol::CapsuleRefView)> {
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let root = match root {
+        Some(root) => root,
+        None => crab_write::capsule_protocol::open_root(&layout).await?,
+    };
+    let view = crab_read::capsule_protocol::open_ref_view_from_root(&layout, root).await?;
+    Ok((list_output_from_ref_view(&view, hidden_ref_patterns), view))
+}
+
 async fn read_remote_refs_for_push_with_snapshot(
     store: &crate::storage::store::Store,
     router: &StoreLayout,
@@ -2659,15 +2678,14 @@ async fn open_capsule_fetch_view(
         router.repo_prefix().to_owned(),
         router.global_prefix().to_owned(),
     );
-    crab_read::capsule_protocol::open_view(
-        &layout,
-        crab_read::capsule_protocol::CapsuleReadLimits {
-            max_capsule_bytes: capsule_fetch_maximum(config),
-            max_frontier_bytes: capsule_fetch_maximum(config),
-        },
-    )
-    .await
-    .map_err(Into::into)
+    let limits = crab_read::capsule_protocol::CapsuleReadLimits {
+        max_capsule_bytes: capsule_fetch_maximum(config),
+        max_frontier_bytes: capsule_fetch_maximum(config),
+    };
+    let root = crab_write::capsule_protocol::open_root(&layout).await?;
+    crab_read::capsule_protocol::open_view_from_root_with_control(&layout, root, limits)
+        .await
+        .map_err(Into::into)
 }
 
 async fn fetch_capsule_packs(
@@ -2695,8 +2713,18 @@ async fn fetch_capsule_packs(
         }
     }
     let git_dir = super::discover::discover_git_dir()?;
-    let installed =
-        crab_read::capsule_protocol::install_git_packs(&view, &git_dir, maximum).await?;
+    let installed = crab_read::capsule_protocol::install_git_packs_from_store(
+        &view,
+        store.as_storage(),
+        &crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        ),
+        &git_dir,
+        maximum,
+    )
+    .await?;
     crate::git::pack::validate_fetched_ref_tips(
         &git_dir,
         &entries
@@ -2750,16 +2778,35 @@ async fn capsule_git_repository(
     let identity =
         crab_remote_git::RepositoryIdentity::new(provider, router.repo_prefix().to_owned(), 1)
             .map_err(|error| CrabError::Protocol(error.to_string()))?;
-    view.git_repository(
-        identity,
-        Arc::new(crab_remote_git::RemoteGitRuntime::default()),
-        crab_read::upload_pack_repository_options()
-            .map_err(|error| CrabError::Protocol(error.to_string()))?,
-        capsule_fetch_maximum(config),
-        cancel,
-    )
-    .await
-    .map_err(Into::into)
+    let options = crab_read::upload_pack_repository_options()
+        .map_err(|error| CrabError::Protocol(error.to_string()))?;
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    if view.checkpoint_control().is_some() {
+        view.git_repository_from_store(
+            layout,
+            identity,
+            Arc::new(crab_remote_git::RemoteGitRuntime::default()),
+            options,
+            capsule_fetch_maximum(config),
+            cancel,
+        )
+        .await
+        .map_err(Into::into)
+    } else {
+        view.git_repository(
+            identity,
+            Arc::new(crab_remote_git::RemoteGitRuntime::default()),
+            options,
+            capsule_fetch_maximum(config),
+            cancel,
+        )
+        .await
+        .map_err(Into::into)
+    }
 }
 
 #[expect(
