@@ -830,15 +830,22 @@ jobs:
              .owner_loss.root_before.txid > 0 and
              (.owner_loss.root_before.checksum | type) == "number" and
              .owner_loss.root_before.commit_sequence > 0 and
-             .owner_loss.root_after_restore == .owner_loss.root_before and
+             (.owner_loss.root_after_restore | keys | sort) ==
+               ["checksum", "commit_sequence", "digest", "txid"] and
+             (.owner_loss.root_after_restore.digest | test("^[0-9a-f]{64}$")) and
+             (.owner_loss.root_after_restore.checksum | type) == "number" and
+             .owner_loss.root_after_restore.digest != .owner_loss.root_before.digest and
+             .owner_loss.root_after_restore.txid > .owner_loss.root_before.txid and
+             .owner_loss.root_after_restore.commit_sequence >
+               .owner_loss.root_before.commit_sequence and
              (.owner_loss.root_continued | keys | sort) ==
                ["checksum", "commit_sequence", "digest", "txid"] and
              (.owner_loss.root_continued.digest | test("^[0-9a-f]{64}$")) and
              (.owner_loss.root_continued.checksum | type) == "number" and
-             .owner_loss.root_continued.digest != .owner_loss.root_before.digest and
-             .owner_loss.root_continued.txid > .owner_loss.root_before.txid and
+             .owner_loss.root_continued.digest != .owner_loss.root_after_restore.digest and
+             .owner_loss.root_continued.txid > .owner_loss.root_after_restore.txid and
              .owner_loss.root_continued.commit_sequence >
-               .owner_loss.root_before.commit_sequence and
+               .owner_loss.root_after_restore.commit_sequence and
              .fleet_only_commit.owner_uncovered_bytes > 0 and
              .fleet_only_commit.follower_retained_bytes > 0 and
              .fleet_only_commit.control_before_owner_loss.owner_lease.state == "live" and
