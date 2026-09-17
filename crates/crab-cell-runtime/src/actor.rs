@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -19,8 +19,8 @@ use handle::{CellAdmission, WorkAdmission};
 
 use crate::{
     CatalogProof, CellAuthority, CellId, CellPublisher, Digest, Error, InboxDelivery,
-    MigrationOutcome, MigrationPlan, MutationIdentity, Owner, Resolution, SessionId, SqlWorkerPool,
-    StoredOutcome, Transition, VersionedControl, WorkerExecution,
+    MigrationOutcome, MigrationPlan, MutationIdentity, NodeLeaseGuard, Owner, Resolution,
+    SessionId, SqlWorkerPool, StoredOutcome, Transition, VersionedControl, WorkerExecution,
     worker::{CellReservation, Handler, Initializer, QueryHandler, WorkerState},
 };
 
@@ -112,6 +112,39 @@ pub(super) struct RuntimeInner {
     session: SessionId,
     pool: SqlWorkerPool,
     replica_host: crab_ltx::Host,
+    node_lease: Arc<RuntimeNodeLease>,
+}
+
+enum RuntimeNodeLease {
+    ObjectOnly,
+    Required(OnceLock<NodeLeaseGuard>),
+}
+
+impl RuntimeNodeLease {
+    fn check(&self) -> crate::Result<()> {
+        match self {
+            Self::ObjectOnly => Ok(()),
+            Self::Required(guard) => guard.get().ok_or(Error::Fenced)?.check(),
+        }
+    }
+
+    fn guard(&self) -> crate::Result<Option<NodeLeaseGuard>> {
+        match self {
+            Self::ObjectOnly => Ok(None),
+            Self::Required(guard) => guard.get().cloned().map(Some).ok_or(Error::Fenced),
+        }
+    }
+
+    fn install(&self, guard: NodeLeaseGuard) -> crate::Result<()> {
+        match self {
+            Self::ObjectOnly => Err(Error::Control(
+                "object-only Cell runtime does not accept a node lease",
+            )),
+            Self::Required(slot) => slot
+                .set(guard)
+                .map_err(|_| Error::Control("Cell runtime node lease was initialized twice")),
+        }
+    }
 }
 
 impl CellRuntime {
@@ -136,12 +169,45 @@ impl CellRuntime {
         session: SessionId,
         replica_host: crab_ltx::Host,
     ) -> crate::Result<Self> {
+        Self::new_inner(
+            pool,
+            node_retained_bytes,
+            session,
+            replica_host,
+            RuntimeNodeLease::ObjectOnly,
+        )
+    }
+
+    /// Starts one dispatcher that remains fenced until its node lease is installed.
+    pub fn new_with_replica_host_requiring_node_lease(
+        pool: SqlWorkerPool,
+        node_retained_bytes: usize,
+        session: SessionId,
+        replica_host: crab_ltx::Host,
+    ) -> crate::Result<Self> {
+        Self::new_inner(
+            pool,
+            node_retained_bytes,
+            session,
+            replica_host,
+            RuntimeNodeLease::Required(OnceLock::new()),
+        )
+    }
+
+    fn new_inner(
+        pool: SqlWorkerPool,
+        node_retained_bytes: usize,
+        session: SessionId,
+        replica_host: crab_ltx::Host,
+        node_lease: RuntimeNodeLease,
+    ) -> crate::Result<Self> {
         if node_retained_bytes == 0 || node_retained_bytes > Semaphore::MAX_PERMITS {
             return Err(Error::Capacity("node retained bytes"));
         }
         let runtime = tokio::runtime::Handle::try_current().map_err(Error::RuntimeStart)?;
         let (sender, receiver) = mpsc::channel(INGRESS_REQUESTS);
-        runtime.spawn(run(receiver, pool.clone()));
+        let node_lease = Arc::new(node_lease);
+        runtime.spawn(run(receiver, pool.clone(), Arc::clone(&node_lease)));
         Ok(Self {
             inner: Arc::new(RuntimeInner {
                 sender,
@@ -151,8 +217,17 @@ impl CellRuntime {
                 session,
                 pool,
                 replica_host,
+                node_lease,
             }),
         })
+    }
+
+    /// Installs the successfully published process lease before Cell admission opens.
+    pub fn install_node_lease(&self, guard: NodeLeaseGuard) -> crate::Result<()> {
+        if self.inner.shutting_down.load(Ordering::Acquire) {
+            return Err(Error::RuntimeClosed);
+        }
+        self.inner.node_lease.install(guard)
     }
 
     /// Stops admission, drains accepted work, closes every Cell, and releases ownership.
@@ -700,7 +775,7 @@ impl CellRuntime {
         if self.inner.shutting_down.load(Ordering::Acquire) {
             return Err(Error::RuntimeClosed);
         }
-        Ok(())
+        self.inner.node_lease.check()
     }
 
     async fn activate_inner(
@@ -723,17 +798,16 @@ impl CellRuntime {
         .ok_or(Error::Control("Cell activation destination has no parent"))?
         .to_owned();
         let (reply, response) = oneshot::channel();
+        let mut publisher = CellPublisher::new(replica, authority, observed, scratch_directory);
+        if let Some(node_lease) = self.inner.node_lease.guard()? {
+            publisher = publisher.with_node_lease(node_lease);
+        }
         self.inner
             .sender
             .send(Message::Activate {
                 cell,
                 activation,
-                publisher: Box::new(CellPublisher::new(
-                    replica,
-                    authority,
-                    observed,
-                    scratch_directory,
-                )),
+                publisher: Box::new(publisher),
                 reply,
             })
             .await
@@ -974,7 +1048,11 @@ enum TaskResult {
     },
 }
 
-async fn run(mut receiver: mpsc::Receiver<Message>, pool: SqlWorkerPool) {
+async fn run(
+    mut receiver: mpsc::Receiver<Message>,
+    pool: SqlWorkerPool,
+    node_lease: Arc<RuntimeNodeLease>,
+) {
     let mut cells = HashMap::<CellId, ActiveCell>::new();
     let mut transitioning = HashSet::<CellId>::new();
     let mut tasks = JoinSet::<TaskResult>::new();
@@ -1006,6 +1084,7 @@ async fn run(mut receiver: mpsc::Receiver<Message>, pool: SqlWorkerPool) {
                 &mut transitioning,
                 &mut tasks,
                 &mut shutdown,
+                &node_lease,
             );
             continue;
         }
@@ -1019,7 +1098,7 @@ async fn run(mut receiver: mpsc::Receiver<Message>, pool: SqlWorkerPool) {
                         }
                         break;
                     };
-                    handle_message(message, &mut receiver, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown);
+                    handle_message(message, &mut receiver, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown, &node_lease);
                 }
                 _ = renewal_tick.tick() => {
                     start_due_renewals(&pool, &mut cells, &mut tasks);
@@ -1036,17 +1115,17 @@ async fn run(mut receiver: mpsc::Receiver<Message>, pool: SqlWorkerPool) {
                     }
                     while let Some(result) = tasks.join_next().await {
                         let Ok(result) = result else { return; };
-                        handle_task(result, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown);
+                        handle_task(result, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown, &node_lease);
                     }
                     break;
                 };
-                handle_message(message, &mut receiver, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown);
+                handle_message(message, &mut receiver, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown, &node_lease);
             }
             result = tasks.join_next() => {
                 let Some(Ok(result)) = result else {
                     return;
                 };
-                handle_task(result, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown);
+                handle_task(result, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown, &node_lease);
             }
             _ = renewal_tick.tick() => {
                 start_due_renewals(&pool, &mut cells, &mut tasks);
@@ -1112,7 +1191,16 @@ fn handle_message(
     transitioning: &mut HashSet<CellId>,
     tasks: &mut JoinSet<TaskResult>,
     shutdown: &mut Option<ShutdownState>,
+    node_lease: &RuntimeNodeLease,
 ) {
+    if !matches!(message, Message::Shutdown { .. }) && node_lease.check().is_err() {
+        for active in cells.values_mut() {
+            active.fenced = true;
+            fence_active(active);
+        }
+        reject_fenced_message(message);
+        return;
+    }
     match message {
         Message::Activate {
             cell,
@@ -1169,7 +1257,7 @@ fn handle_message(
                 return;
             }
             active.queue.push_back(QueuedWork::Command(command));
-            start_next(active, pool, tasks);
+            start_next(active, pool, tasks, node_lease);
         }
         Message::Query(mut query) => {
             let Some(active) = cells.get_mut(&query.cell) else {
@@ -1190,7 +1278,7 @@ fn handle_message(
                 return;
             }
             active.queue.push_back(QueuedWork::Query(query));
-            start_next(active, pool, tasks);
+            start_next(active, pool, tasks, node_lease);
         }
         Message::Resolve(mut resolve) => {
             let Some(active) = cells.get_mut(&resolve.cell) else {
@@ -1210,7 +1298,7 @@ fn handle_message(
                 return;
             }
             active.queue.push_back(QueuedWork::Resolve(resolve));
-            start_next(active, pool, tasks);
+            start_next(active, pool, tasks, node_lease);
         }
         Message::Migrate(mut migration) => {
             let Some(active) = cells.get_mut(&migration.cell) else {
@@ -1241,7 +1329,7 @@ fn handle_message(
             }
             active.migrating = true;
             active.queue.push_back(QueuedWork::Migration(migration));
-            start_next(active, pool, tasks);
+            start_next(active, pool, tasks, node_lease);
         }
         Message::Lookup { cell, reply } => {
             let local = cells.get(&cell).and_then(|active| {
@@ -1287,6 +1375,35 @@ fn handle_message(
                 draining: false,
                 error: None,
             });
+        }
+    }
+}
+
+fn reject_fenced_message(message: Message) {
+    match message {
+        Message::Activate { reply, .. } => {
+            let _ = reply.send(Err(Error::Fenced));
+        }
+        Message::Execute(mut command) => {
+            send_command_reply(&mut command, Err(Error::Fenced));
+        }
+        Message::Query(mut query) => {
+            send_query_reply(&mut query, Err(Error::Fenced));
+        }
+        Message::Resolve(mut resolve) => {
+            send_resolve_reply(&mut resolve, Ok(Resolution::Unknown));
+        }
+        Message::Migrate(mut migration) => {
+            send_migration_reply(&mut migration, Err(Error::Fenced));
+        }
+        Message::Lookup { reply, .. } => {
+            let _ = reply.send(None);
+        }
+        Message::Drain { reply, .. } => {
+            let _ = reply.send(Err(Error::Fenced));
+        }
+        Message::Shutdown { reply } => {
+            let _ = reply.send(Err(Error::RuntimeClosed));
         }
     }
 }
@@ -1389,8 +1506,18 @@ async fn bootstrap_and_publish(
     Ok(())
 }
 
-fn start_next(active: &mut ActiveCell, pool: &SqlWorkerPool, tasks: &mut JoinSet<TaskResult>) {
+fn start_next(
+    active: &mut ActiveCell,
+    pool: &SqlWorkerPool,
+    tasks: &mut JoinSet<TaskResult>,
+    node_lease: &RuntimeNodeLease,
+) {
     if active.busy || active.renewing || active.fenced {
+        return;
+    }
+    if node_lease.check().is_err() {
+        active.fenced = true;
+        fence_active(active);
         return;
     }
     let Some(work) = active.queue.pop_front() else {
@@ -1715,6 +1842,7 @@ fn handle_task(
     transitioning: &mut HashSet<CellId>,
     tasks: &mut JoinSet<TaskResult>,
     shutdown: &mut Option<ShutdownState>,
+    node_lease: &RuntimeNodeLease,
 ) {
     match result {
         TaskResult::Activated {
@@ -1725,6 +1853,12 @@ fn handle_task(
             result,
         } => match result {
             Ok(interrupt) => {
+                if node_lease.check().is_err() {
+                    fence_admission(&admission);
+                    let _ = reply.send(Err(Error::Fenced));
+                    start_orphan_deactivate(cell, pool, *publisher, transitioning, tasks, false);
+                    return;
+                }
                 if shutdown.as_ref().is_some_and(|state| state.draining) {
                     admission.draining.store(true, Ordering::Release);
                     admission.requests.close();
@@ -1763,6 +1897,11 @@ fn handle_task(
             }
             Err(error) => {
                 transitioning.remove(&cell);
+                let error = if node_lease.check().is_err() {
+                    Error::Fenced
+                } else {
+                    error
+                };
                 let _ = reply.send(Err(error));
             }
         },
@@ -1770,13 +1909,17 @@ fn handle_task(
             cell,
             publisher,
             mut command,
-            result,
-            fenced,
+            mut result,
+            mut fenced,
         } => {
             let Some(active) = cells.get_mut(&cell) else {
                 send_command_reply(&mut command, Err(Error::CellNotActive));
                 return;
             };
+            if node_lease.check().is_err() {
+                result = Err(command.operation.unknown(Error::Fenced));
+                fenced = true;
+            }
             active.busy = false;
             active.publisher = Some(*publisher);
             active.fenced |= fenced;
@@ -1784,55 +1927,67 @@ fn handle_task(
                 fence_active(active);
             }
             send_command_reply(&mut command, result);
-            continue_cell(cell, pool, cells, transitioning, tasks);
+            continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
         }
         TaskResult::Queried {
             cell,
             mut query,
-            result,
-            fenced,
+            mut result,
+            mut fenced,
         } => {
             let Some(active) = cells.get_mut(&cell) else {
                 send_query_reply(&mut query, Err(Error::CellNotActive));
                 return;
             };
+            if node_lease.check().is_err() {
+                result = Err(Error::Fenced);
+                fenced = true;
+            }
             active.busy = false;
             active.fenced |= fenced;
             if active.fenced {
                 fence_active(active);
             }
             send_query_reply(&mut query, result);
-            continue_cell(cell, pool, cells, transitioning, tasks);
+            continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
         }
         TaskResult::Resolved {
             cell,
             mut resolve,
-            result,
-            fenced,
+            mut result,
+            mut fenced,
         } => {
             let Some(active) = cells.get_mut(&cell) else {
                 send_resolve_reply(&mut resolve, Err(Error::CellNotActive));
                 return;
             };
+            if node_lease.check().is_err() {
+                result = Ok(Resolution::Unknown);
+                fenced = true;
+            }
             active.busy = false;
             active.fenced |= fenced;
             if active.fenced {
                 fence_active(active);
             }
             send_resolve_reply(&mut resolve, result);
-            continue_cell(cell, pool, cells, transitioning, tasks);
+            continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
         }
         TaskResult::Migrated {
             cell,
             publisher,
             mut migration,
-            result,
-            fenced,
+            mut result,
+            mut fenced,
         } => {
             let Some(active) = cells.get_mut(&cell) else {
                 send_migration_reply(&mut migration, Err(Error::CellNotActive));
                 return;
             };
+            if node_lease.check().is_err() {
+                result = Err(Error::Fenced);
+                fenced = true;
+            }
             active.busy = false;
             active.migrating = false;
             active.publisher = Some(*publisher);
@@ -1854,23 +2009,26 @@ fn handle_task(
             if active.fenced {
                 fence_active(active);
             }
-            continue_cell(cell, pool, cells, transitioning, tasks);
+            continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
         }
         TaskResult::Renewed {
             cell,
             publisher,
-            result,
+            mut result,
         } => {
             let Some(active) = cells.get_mut(&cell) else {
                 return;
             };
+            if node_lease.check().is_err() {
+                result = Err(Error::Fenced);
+            }
             active.renewing = false;
             active.publisher = Some(*publisher);
             if result.is_err() {
                 active.fenced = true;
                 fence_active(active);
             }
-            continue_cell(cell, pool, cells, transitioning, tasks);
+            continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
         }
         TaskResult::Deactivated {
             cell,
@@ -1931,6 +2089,7 @@ fn continue_cell(
     cells: &mut HashMap<CellId, ActiveCell>,
     transitioning: &mut HashSet<CellId>,
     tasks: &mut JoinSet<TaskResult>,
+    node_lease: &RuntimeNodeLease,
 ) {
     let Some(active) = cells.get_mut(&cell) else {
         return;
@@ -1943,7 +2102,7 @@ fn continue_cell(
     } else if active.draining() && active.queue.is_empty() {
         start_deactivate(cell, pool, cells, transitioning, tasks);
     } else {
-        start_next(active, pool, tasks);
+        start_next(active, pool, tasks, node_lease);
     }
 }
 

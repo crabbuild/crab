@@ -21,6 +21,7 @@ pub struct CellPublisher {
     segment_count: Option<usize>,
     appends_since_compaction_check: u8,
     renew_at: std::time::Instant,
+    node_lease: Option<crate::NodeLeaseGuard>,
 }
 
 impl CellPublisher {
@@ -42,7 +43,13 @@ impl CellPublisher {
             segment_count: None,
             appends_since_compaction_check: COMPACTION_CHECK_INTERVAL,
             renew_at: std::time::Instant::now() + RENEW_INTERVAL,
+            node_lease: None,
         }
+    }
+
+    pub(crate) fn with_node_lease(mut self, node_lease: crate::NodeLeaseGuard) -> Self {
+        self.node_lease = Some(node_lease);
+        self
     }
 
     #[must_use]
@@ -60,10 +67,12 @@ impl CellPublisher {
 
     /// Advances owner progress or fences when the renewal cannot be proven in time.
     pub(crate) async fn renew(&mut self) -> Result<()> {
+        self.check_node_lease()?;
         let deadline = std::time::Instant::now() + SELF_FENCE_TIMEOUT;
         let deadline_at = tokio::time::Instant::from_std(deadline);
         let mut backoff = PublicationBackoff::default();
         loop {
+            self.check_node_lease()?;
             let successor = self.observed.value().renew()?;
             let transition = tokio::time::timeout_at(
                 deadline_at,
@@ -74,6 +83,7 @@ impl CellPublisher {
             .map_err(|_| Error::Fenced)?;
             match transition {
                 Ok(renewed) => {
+                    self.check_node_lease()?;
                     if std::time::Instant::now() >= deadline {
                         return Err(Error::Fenced);
                     }
@@ -112,8 +122,10 @@ impl CellPublisher {
 
     // Reconcile a lost activation CAS before exposing the restored handle.
     pub(crate) async fn activate(&mut self) -> Result<()> {
+        self.check_node_lease()?;
         let mut backoff = PublicationBackoff::default();
         loop {
+            self.check_node_lease()?;
             let successor = self.observed.value().activate()?;
             match self
                 .authority
@@ -121,6 +133,7 @@ impl CellPublisher {
                 .await
             {
                 Ok(activated) => {
+                    self.check_node_lease()?;
                     self.observed = activated;
                     self.renew_at = std::time::Instant::now() + RENEW_INTERVAL;
                     return Ok(());
@@ -384,8 +397,10 @@ impl CellPublisher {
         next_due_ms: Option<i64>,
         migration: Option<(crate::Digest, u32)>,
     ) -> Result<crab_ltx::RootRef> {
+        self.check_node_lease()?;
         let mut backoff = PublicationBackoff::default();
         loop {
+            self.check_node_lease()?;
             let (successor, transition) = match migration {
                 Some((code, schema)) => (
                     self.observed
@@ -406,6 +421,7 @@ impl CellPublisher {
                 .await
             {
                 Ok(published) => {
+                    self.check_node_lease()?;
                     self.observed = published;
                     self.renew_at = std::time::Instant::now() + RENEW_INTERVAL;
                     return Ok(prepared.root());
@@ -473,8 +489,10 @@ impl CellPublisher {
 
     /// Releases ownership after the SQL worker has closed the drained Cell.
     pub(crate) async fn release(&mut self) -> Result<()> {
+        self.check_node_lease()?;
         let mut backoff = PublicationBackoff::default();
         loop {
+            self.check_node_lease()?;
             let successor = self.observed.value().release()?;
             match self
                 .authority
@@ -482,6 +500,7 @@ impl CellPublisher {
                 .await
             {
                 Ok(released) => {
+                    self.check_node_lease()?;
                     self.observed = released;
                     return Ok(());
                 }
@@ -557,6 +576,12 @@ impl CellPublisher {
         }
         self.observed = current;
         self.release().await
+    }
+
+    fn check_node_lease(&self) -> Result<()> {
+        self.node_lease
+            .as_ref()
+            .map_or(Ok(()), crate::NodeLeaseGuard::check)
     }
 }
 

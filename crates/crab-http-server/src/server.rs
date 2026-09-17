@@ -310,7 +310,7 @@ fn start_cell_runtime(
     scratch_root: PathBuf,
 ) -> Result<CellRuntime> {
     crate::cells::compiled_registry()?;
-    Ok(CellRuntime::new_with_replica_host(
+    Ok(CellRuntime::new_with_replica_host_requiring_node_lease(
         SqlWorkerPool::for_system(budget.max_active_cells)?,
         budget.node_retained_bytes,
         session,
@@ -874,6 +874,12 @@ pub async fn serve(config: Config) -> Result<()> {
             return Err(error);
         }
     };
+    if let Err(error) = cell_runtime.install_node_lease(node_lease.clone()) {
+        if let Err(shutdown_error) = cell_runtime.shutdown().await {
+            tracing::warn!(error = %shutdown_error, "Cell runtime startup cleanup failed");
+        }
+        return Err(error.into());
+    }
     let server = Arc::new(Server {
         repositories: repositories.into(),
         runtime: Arc::clone(&runtime),

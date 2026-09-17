@@ -351,6 +351,7 @@ impl CellHandle {
         if self.inner.shutting_down.load(Ordering::Acquire) {
             return Err(Error::RuntimeClosed);
         }
+        self.inner.node_lease.check()?;
         if operation_bytes > MAX_OPERATION_BYTES || max_result_bytes > MAX_RESULT_BYTES {
             return Err(Error::Capacity("operation or result bytes"));
         }
@@ -383,6 +384,7 @@ impl CellHandle {
         if self.admission.draining.load(Ordering::Acquire) {
             return Err(Error::CellDraining);
         }
+        self.inner.node_lease.check()?;
         Ok(admission)
     }
 }
