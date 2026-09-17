@@ -169,6 +169,35 @@ match result {
 
 `CellClient` validates namespace, role, code, schema, and incarnation. It chooses the local actor or authenticated peer path without changing command semantics.
 
+## Stream mutable Cell state safely
+
+Use `CellStateStream` when a response producer must query mutable Cell state
+after the response head. Emission is serial, receipt-monotonic, bounded by one
+deadline, and fail-closed on cancellation or owner fencing.
+
+```rust,ignore
+let mut stream = client
+    .open_state_stream::<GetRepositoryEvents>(&target, deadline)
+    .await?;
+
+let first = stream.emit(GetEventsInput { after: None }).await?;
+send_chunk(first.output).await?;
+
+let next = stream
+    .emit(GetEventsInput {
+        after: Some(first.receipt.commit_sequence),
+    })
+    .await?;
+send_chunk(next.output).await?;
+
+stream.finish();
+```
+
+Each `emit` passes the preceding `Receipt` as the next minimum watermark. An
+HTTP/SSE adapter must send a chunk only after `emit` returns; it must not read
+the Cell handle or logical head directly. Call `stream.cancellation().cancel()`
+from a disconnect handler to wake a pending emission.
+
 ## Keep HTTP policy in crab-http-server
 
 A route adapter performs product concerns before invoking the runtime.
