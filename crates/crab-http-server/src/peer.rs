@@ -1012,7 +1012,11 @@ fn decode_session(value: &str) -> std::result::Result<SessionId, ()> {
         return Err(());
     }
     let mut bytes = [0_u8; 16];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return Err(());
+    }
+    for (index, pair) in pairs.iter().enumerate() {
         bytes[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
     }
     Ok(SessionId::from_bytes(bytes))
