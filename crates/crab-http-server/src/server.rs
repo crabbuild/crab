@@ -1262,7 +1262,7 @@ async fn rotate_node_durability(
             () = tokio::time::sleep(NODE_LOG_ROTATION_INTERVAL) => {}
         }
         let Some((installed_application, durability)) = runtime.node_durability() else {
-            return Ok(());
+            continue;
         };
         if installed_application != application {
             return Err(crate::Error::Config(
