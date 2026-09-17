@@ -334,16 +334,19 @@ fn exhausted_scanner_is_removed_until_its_capacity_recovers() {
             free_memory_bytes: 0,
             free_disk_bytes: 1,
             job_credits: 1,
+            ..NodeCapacity::default()
         },
         NodeCapacity {
             free_memory_bytes: 1,
             free_disk_bytes: 0,
             job_credits: 1,
+            ..NodeCapacity::default()
         },
         NodeCapacity {
             free_memory_bytes: 1,
             free_disk_bytes: 1,
             job_credits: 0,
+            ..NodeCapacity::default()
         },
     ];
     let available = advertisement(2, 1, 0, &key);
@@ -390,6 +393,7 @@ fn advertisement(
             free_memory_bytes: 1,
             free_disk_bytes: 1,
             job_credits: 1,
+            ..NodeCapacity::default()
         },
     )
 }

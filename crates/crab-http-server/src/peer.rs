@@ -80,6 +80,7 @@ pub(crate) struct NodePublisher {
     module_digests: Vec<Digest>,
     data_dir: PathBuf,
     scheduler: crate::cells::SchedulerStatus,
+    follower_store: Option<crab_cell_runtime::FollowerStore>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,7 +128,16 @@ impl NodePublisher {
             module_digests,
             data_dir,
             scheduler,
+            follower_store: None,
         })
+    }
+
+    pub(crate) fn with_follower_store(
+        mut self,
+        follower_store: crab_cell_runtime::FollowerStore,
+    ) -> Self {
+        self.follower_store = Some(follower_store);
+        self
     }
 
     pub(crate) async fn publish_initial(&self) -> crate::Result<VersionedNodeAdvertisement> {
@@ -224,10 +234,15 @@ impl NodePublisher {
             NodeCapacity {
                 free_memory_bytes: 0,
                 free_disk_bytes: 0,
+                follower_free_bytes: 0,
                 job_credits: 0,
+                log_protocol: self
+                    .follower_store
+                    .as_ref()
+                    .map_or(0, |_| crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION),
             }
         } else {
-            node_capacity(&self.data_dir)?
+            node_capacity(&self.data_dir, self.follower_store.as_ref())?
         };
         Ok(NodeAdvertisement::sign(
             self.session,
@@ -757,7 +772,10 @@ fn remaining_timeout(started: Instant, original_ms: u32) -> crab_cell_runtime::R
         .ok_or(CellError::Deadline)
 }
 
-fn node_capacity(data_dir: &Path) -> crate::Result<NodeCapacity> {
+fn node_capacity(
+    data_dir: &Path,
+    follower_store: Option<&crab_cell_runtime::FollowerStore>,
+) -> crate::Result<NodeCapacity> {
     let mut system = sysinfo::System::new();
     system.refresh_memory();
     let free_memory_bytes = effective_memory_available(system.available_memory());
@@ -769,7 +787,12 @@ fn node_capacity(data_dir: &Path) -> crate::Result<NodeCapacity> {
     Ok(NodeCapacity {
         free_memory_bytes,
         free_disk_bytes,
+        follower_free_bytes: follower_store
+            .map(crab_cell_runtime::FollowerStore::available_bytes)
+            .unwrap_or(0)
+            .min(free_disk_bytes),
         job_credits,
+        log_protocol: follower_store.map_or(0, |_| crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION),
     })
 }
 
@@ -1366,8 +1389,20 @@ mod tests {
             crate::cells::SchedulerStatus::new(now_ms().unwrap()).unwrap(),
         )
         .unwrap();
+        let follower_store = crab_cell_runtime::FollowerStore::open(
+            publisher.session_dir().join("node-log"),
+            crab_ltx::Limits::default(),
+            crab_ltx::DiskBudget::new(1 << 20),
+        )
+        .unwrap();
+        let publisher = publisher.with_follower_store(follower_store);
 
         let published = publisher.publish_initial().await.unwrap();
+        assert_eq!(
+            published.advertisement().capacity().log_protocol,
+            crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION
+        );
+        assert!(published.advertisement().capacity().follower_free_bytes > 0);
         assert_eq!(
             publisher
                 .advertisement(2, now_ms().unwrap(), true)
@@ -1376,7 +1411,9 @@ mod tests {
             NodeCapacity {
                 free_memory_bytes: 0,
                 free_disk_bytes: 0,
+                follower_free_bytes: 0,
                 job_credits: 0,
+                log_protocol: crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION,
             }
         );
         let loaded = directory

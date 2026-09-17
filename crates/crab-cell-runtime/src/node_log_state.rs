@@ -1,7 +1,7 @@
 use crate::{Digest, Error, Result, SessionId};
 
 pub(crate) const RECOVERY_CLAIM_LIFETIME_MS: i64 = 30_000;
-const MAX_NODE_LOG_MEMBERS: usize = 2;
+pub(crate) const MAX_NODE_LOG_MEMBERS: usize = 2;
 
 /// Authoritative lifecycle state for one node-session durability log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -66,6 +66,7 @@ async fn reloads_a_stale_owner_and_pins_mtls_identity() {
                         free_memory_bytes: 1_000,
                         free_disk_bytes: 2_000,
                         job_credits: 1,
+                        ..NodeCapacity::default()
                     },
                 )
                 .unwrap(),

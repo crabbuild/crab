@@ -151,7 +151,7 @@ recovery path.
 
 | Working now | Still gated before fleet durability may serve traffic |
 | --- | --- |
-| Strict frame codec plus authoritative session enrollment, activation, coverage, and recovery claims | Follower selection, epoch rotation, and recovery-only startup |
+| Strict frame codec plus capacity-aware deterministic selection, authoritative enrollment, activation, coverage, and recovery claims | Failure-domain-aware automatic recruitment, epoch rotation, and recovery-only startup |
 | Crash-safe, node-budgeted follower store plus authenticated remote append/seal/tail transport | Live shipper batching and startup listener ordering |
 | Write-all durability gate with contiguous object watermark | Actor submission and response-gate integration |
 | Complete-witness grouping, immutable recovery manifests, and post-pin session seal CAS | Automated dead-session inventory and recovery scheduling |
@@ -163,10 +163,13 @@ The private mTLS transport implements enrolled append plus claimant-authorized,
 page-bounded seal and tail operations. The follower store admits every append
 and seal against the same node-level disk budget used by Cell work, reserves
 existing bytes on restart, and NACKs before writing when capacity is exhausted.
-Ensemble selection and epoch rotation, recovery-only startup, actor submission,
-and automated session recovery remain gated. Fleet proof is not activated, so
-current responses stay on the existing exact-root path until those remaining
-gates are complete.
+The directory now filters live peers by protocol, pressure, and the exact
+shared-disk capacity advertised by their follower stores, then rendezvous-ranks
+the full one- or two-member ensemble before its CAS enrollment. Automatic
+recruitment with failure-domain metadata, epoch rotation, recovery-only startup,
+actor submission, and automated session recovery remain gated. Fleet proof is
+not activated, so current responses stay on the existing exact-root path until
+those remaining gates are complete.
 
 ## Use one multiplexed log per owner session
 

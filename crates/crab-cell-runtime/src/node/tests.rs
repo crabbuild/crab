@@ -22,6 +22,28 @@ fn advertisement_for(
     progress: u64,
     issued_at_ms: i64,
 ) -> NodeAdvertisement {
+    advertisement_for_capacity(
+        session,
+        key,
+        progress,
+        issued_at_ms,
+        NodeCapacity {
+            free_memory_bytes: 1_000,
+            free_disk_bytes: 2_000,
+            follower_free_bytes: 2_000,
+            job_credits: 3,
+            log_protocol: NODE_LOG_PROTOCOL_VERSION,
+        },
+    )
+}
+
+fn advertisement_for_capacity(
+    session: SessionId,
+    key: &SigningKey,
+    progress: u64,
+    issued_at_ms: i64,
+    capacity: NodeCapacity,
+) -> NodeAdvertisement {
     NodeAdvertisement::sign(
         session,
         "https://node-1.internal:8789".into(),
@@ -35,13 +57,60 @@ fn advertisement_for(
         issued_at_ms + 10_000,
         vec![Digest::from_bytes([6; 32]), Digest::from_bytes([7; 32])],
         vec![1],
-        NodeCapacity {
-            free_memory_bytes: 1_000,
-            free_disk_bytes: 2_000,
-            job_credits: 3,
-        },
+        capacity,
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn follower_selection_is_capacity_aware_deterministic_and_requires_full_shape() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let leader = SessionId::from_bytes([1; 16]);
+    let first = SessionId::from_bytes([2; 16]);
+    let second = SessionId::from_bytes([3; 16]);
+    let pressured = SessionId::from_bytes([4; 16]);
+    let directory = directory();
+    for (session, follower_free_bytes) in [
+        (leader, 2_000),
+        (first, 2_000),
+        (second, 1_000),
+        (pressured, 9),
+    ] {
+        directory
+            .create(
+                advertisement_for_capacity(
+                    session,
+                    &key,
+                    1,
+                    NOW_MS,
+                    NodeCapacity {
+                        free_memory_bytes: 1_000,
+                        free_disk_bytes: 2_000,
+                        follower_free_bytes,
+                        job_credits: 3,
+                        log_protocol: NODE_LOG_PROTOCOL_VERSION,
+                    },
+                ),
+                NOW_MS,
+            )
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        directory
+            .select_log_members(leader, 1_000, NOW_MS + 1, 4)
+            .await
+            .unwrap(),
+        [first, second]
+    );
+    assert!(
+        directory
+            .select_log_members(leader, 1_001, NOW_MS + 1, 4)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -191,7 +260,7 @@ async fn node_log_enrollment_activation_and_coverage_are_authoritative() {
     }
 
     let enrolled = directory
-        .recruit_log(&created, 4, vec![first, second], NOW_MS + 1)
+        .recruit_log(&created, 4, 1, 3, NOW_MS + 1)
         .await
         .unwrap();
     let log = enrolled.advertisement().log().unwrap();
@@ -248,12 +317,12 @@ async fn expired_enrolled_log_becomes_a_renewable_recovery_claim() {
         .create(advertisement_for(member, &key, 1, NOW_MS), NOW_MS)
         .await
         .unwrap();
-    let claimant_record = directory
-        .create(advertisement_for(claimant, &key, 1, NOW_MS), NOW_MS)
+    directory
+        .recruit_log(&created, 7, 1, 2, NOW_MS + 1)
         .await
         .unwrap();
-    directory
-        .recruit_log(&created, 7, vec![member], NOW_MS + 1)
+    let claimant_record = directory
+        .create(advertisement_for(claimant, &key, 1, NOW_MS), NOW_MS)
         .await
         .unwrap();
     directory
@@ -440,6 +509,7 @@ async fn live_listing_rejects_misplaced_or_foreign_active_records() {
             free_memory_bytes: 1,
             free_disk_bytes: 1,
             job_credits: 1,
+            ..NodeCapacity::default()
         },
     )
     .unwrap();
@@ -556,6 +626,7 @@ async fn invalid_signature_expiry_and_identity_change_fail_closed() {
                 free_memory_bytes: 1,
                 free_disk_bytes: 1,
                 job_credits: 1,
+                ..NodeCapacity::default()
             },
         )
         .is_err()

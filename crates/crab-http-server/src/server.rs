@@ -797,6 +797,7 @@ pub async fn serve(config: Config) -> Result<()> {
         crate::cells::repository_replica_limits(),
         local_disk,
     )?;
+    let node_publisher = node_publisher.with_follower_store(follower_store.clone());
     let cell_resolver = crate::peer::LocalCellResolver::new(
         startup.layout.clone(),
         startup.identity,

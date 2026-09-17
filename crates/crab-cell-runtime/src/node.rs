@@ -15,13 +15,19 @@ const MAX_CLOCK_SKEW_MS: i64 = 5 * 60_000;
 const STALE_ADVERTISEMENT_RETENTION_MS: i64 = MAX_CLOCK_SKEW_MS + MAX_ADVERTISEMENT_LIFETIME_MS;
 const MAX_STALE_COLLECTION_ITEMS: usize = 1_024;
 const SIGNING_DOMAIN: &[u8] = b"crab.node.v1\0";
+const NODE_LOG_SELECTION_DOMAIN: &[u8] = b"crab.node-log.member.v1\0";
+
+/// Current private follower-log wire and persistence protocol.
+pub const NODE_LOG_PROTOCOL_VERSION: u32 = 1;
 
 /// Capacity hints published by one node boot session.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NodeCapacity {
     pub free_memory_bytes: u64,
     pub free_disk_bytes: u64,
+    pub follower_free_bytes: u64,
     pub job_credits: u32,
+    pub log_protocol: u32,
 }
 
 /// Signed, short-lived identity and capacity advertisement for one node session.
@@ -218,6 +224,11 @@ impl NodeAdvertisement {
             if log.phase() != NodeLogPhase::Open || log.recovery().is_some() {
                 return Err(Error::Node("live node advertisement has a terminal log"));
             }
+        }
+        if self.capacity.follower_free_bytes > self.capacity.free_disk_bytes
+            || (self.capacity.log_protocol == 0 && self.capacity.follower_free_bytes != 0)
+        {
+            return Err(Error::Node("advertisement follower capacity is invalid"));
         }
         if self.module_digests.is_empty()
             || self.module_digests.len() > MAX_MODULES
@@ -620,6 +631,66 @@ impl NodeDirectory {
             .await
     }
 
+    /// Selects the exact deterministic follower ensemble from current live capacity.
+    ///
+    /// An empty result means this fleet cannot currently satisfy the desired
+    /// one-follower/two-follower durability shape and must use object proof.
+    pub async fn select_log_members(
+        &self,
+        leader: SessionId,
+        required_follower_bytes: u64,
+        now_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<SessionId>> {
+        if required_follower_bytes == 0 {
+            return Err(Error::Node("node-log follower byte requirement is zero"));
+        }
+        let live = self.live(now_ms, limit).await?;
+        if !live.iter().any(|candidate| candidate.session == leader) {
+            return Err(Error::Node("node-log leader is not live"));
+        }
+        let desired = live
+            .len()
+            .saturating_sub(1)
+            .min(crate::node_log_state::MAX_NODE_LOG_MEMBERS);
+        if desired == 0 {
+            return Ok(Vec::new());
+        }
+        let mut eligible = live
+            .iter()
+            .filter(|candidate| {
+                candidate.session != leader
+                    && candidate.capacity.log_protocol == NODE_LOG_PROTOCOL_VERSION
+                    && candidate.capacity.follower_free_bytes >= required_follower_bytes
+                    && candidate.capacity.free_memory_bytes != 0
+                    && candidate.capacity.free_disk_bytes != 0
+                    && candidate.capacity.job_credits != 0
+            })
+            .map(|candidate| {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(NODE_LOG_SELECTION_DOMAIN);
+                hasher.update(leader.as_bytes());
+                hasher.update(candidate.session.as_bytes());
+                (candidate.session, *hasher.finalize().as_bytes())
+            })
+            .collect::<Vec<_>>();
+        if eligible.len() < desired {
+            return Ok(Vec::new());
+        }
+        eligible.sort_unstable_by(|(left_session, left_score), (right_session, right_score)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| left_session.as_bytes().cmp(right_session.as_bytes()))
+        });
+        let mut selected = eligible
+            .into_iter()
+            .take(desired)
+            .map(|(session, _)| session)
+            .collect::<Vec<_>>();
+        selected.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        Ok(selected)
+    }
+
     /// Lists every unfenced advertised session in this fleet, including expired records.
     ///
     /// Graceful withdrawal happens only after writers close. Stale collection first fences
@@ -899,22 +970,29 @@ impl NodeDirectory {
         Err(Error::Node("node session changed during heartbeat refresh"))
     }
 
-    /// CAS-enrolls the complete follower set before the first frame is sent.
+    /// Selects and CAS-enrolls the complete follower set before any frame is sent.
     pub async fn recruit_log(
         &self,
         observed: &VersionedNodeAdvertisement,
         log_epoch: u64,
-        members: Vec<SessionId>,
+        required_follower_bytes: u64,
+        live_node_limit: usize,
         now_ms: i64,
     ) -> Result<VersionedNodeAdvertisement> {
         self.validate(&observed.advertisement, now_ms)?;
         if observed.advertisement.log.is_some() {
             return Err(Error::Node("node session already has an enrolled log"));
         }
-        for member in &members {
-            self.load(*member, now_ms)
-                .await?
-                .ok_or(Error::Node("node-log member is not live"))?;
+        let members = self
+            .select_log_members(
+                observed.advertisement.session,
+                required_follower_bytes,
+                now_ms,
+                live_node_limit,
+            )
+            .await?;
+        if members.is_empty() {
+            return Err(Error::Node("node-log follower ensemble is unavailable"));
         }
         let mut next = observed.advertisement.clone();
         next.generation = next
@@ -1504,7 +1582,9 @@ impl From<&NodeAdvertisement> for RawAdvertisement {
             capacity: RawCapacity {
                 free_memory_bytes: value.capacity.free_memory_bytes.to_string(),
                 free_disk_bytes: value.capacity.free_disk_bytes.to_string(),
+                follower_free_bytes: value.capacity.follower_free_bytes.to_string(),
                 job_credits: value.capacity.job_credits,
+                log_protocol: value.capacity.log_protocol,
             },
         }
     }
@@ -1524,7 +1604,9 @@ struct RawLease {
 struct RawCapacity {
     free_memory_bytes: String,
     free_disk_bytes: String,
+    follower_free_bytes: String,
     job_credits: u32,
+    log_protocol: u32,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1586,7 +1668,9 @@ impl TryFrom<RawAdvertisement> for NodeAdvertisement {
             capacity: NodeCapacity {
                 free_memory_bytes: canonical_u64(&value.capacity.free_memory_bytes)?,
                 free_disk_bytes: canonical_u64(&value.capacity.free_disk_bytes)?,
+                follower_free_bytes: canonical_u64(&value.capacity.follower_free_bytes)?,
                 job_credits: value.capacity.job_credits,
+                log_protocol: value.capacity.log_protocol,
             },
             log: value.log.map(|log| decode_log(session, log)).transpose()?,
             signature: decode_hex(&value.identity.signature)?,

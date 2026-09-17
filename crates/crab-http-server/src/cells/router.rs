@@ -872,6 +872,7 @@ mod tests {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,
                         job_credits: 1,
+                        ..NodeCapacity::default()
                     },
                 )
                 .unwrap(),
@@ -904,6 +905,7 @@ mod tests {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,
                         job_credits: 1,
+                        ..NodeCapacity::default()
                     },
                 )
                 .unwrap(),

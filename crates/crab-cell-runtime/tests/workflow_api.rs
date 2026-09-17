@@ -55,6 +55,7 @@ async fn fence_session(
                     free_memory_bytes: 1,
                     free_disk_bytes: 1,
                     job_credits: 1,
+                    ..crab_cell_runtime::NodeCapacity::default()
                 },
             )
             .unwrap(),
@@ -81,6 +82,7 @@ async fn fence_session(
                     free_memory_bytes: 1,
                     free_disk_bytes: 1,
                     job_credits: 1,
+                    ..crab_cell_runtime::NodeCapacity::default()
                 },
             )
             .unwrap(),

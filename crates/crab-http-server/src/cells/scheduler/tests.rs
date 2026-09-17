@@ -395,6 +395,7 @@ async fn scan_executes_registered_workflow_activity_without_blocking_the_scanner
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
                     job_credits: 1,
+                    ..NodeCapacity::default()
                 },
             )
             .unwrap(),
@@ -565,6 +566,7 @@ async fn scan_cursor_advances_when_the_cycle_budget_is_exhausted() {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
                     job_credits: 1,
+                    ..NodeCapacity::default()
                 },
             )
             .unwrap(),
@@ -736,6 +738,7 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
                     free_memory_bytes: 0,
                     free_disk_bytes: 0,
                     job_credits: 0,
+                    ..NodeCapacity::default()
                 },
             )
             .unwrap(),
@@ -763,6 +766,7 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
                     job_credits: 1,
+                    ..NodeCapacity::default()
                 },
             )
             .unwrap(),
@@ -896,6 +900,7 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
                     free_memory_bytes: 1,
                     free_disk_bytes: 1,
                     job_credits: 1,
+                    ..NodeCapacity::default()
                 },
             )
             .unwrap(),
@@ -922,6 +927,7 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
                     job_credits: 1,
+                    ..NodeCapacity::default()
                 },
             )
             .unwrap(),
@@ -1107,6 +1113,7 @@ async fn activating_release_migrates_idle_cell_before_ready_gate() {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
                     job_credits: 1,
+                    ..NodeCapacity::default()
                 },
             )
             .unwrap(),

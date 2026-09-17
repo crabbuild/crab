@@ -42,6 +42,7 @@ async fn fence_session(
                     free_memory_bytes: 1,
                     free_disk_bytes: 1,
                     job_credits: 1,
+                    ..crab_cell_runtime::NodeCapacity::default()
                 },
             )
             .unwrap(),
@@ -68,6 +69,7 @@ async fn fence_session(
                     free_memory_bytes: 1,
                     free_disk_bytes: 1,
                     job_credits: 1,
+                    ..crab_cell_runtime::NodeCapacity::default()
                 },
             )
             .unwrap(),
@@ -109,7 +111,9 @@ async fn fence_log_session(
             crab_cell_runtime::NodeCapacity {
                 free_memory_bytes: 1,
                 free_disk_bytes: 1,
+                follower_free_bytes: 1,
                 job_credits: 1,
+                log_protocol: crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION,
             },
         )
         .unwrap()
@@ -128,20 +132,17 @@ async fn fence_log_session(
         )
         .await
         .unwrap();
+    let enrolled = directory.recruit_log(&leader, 1, 1, 2, 2).await.unwrap();
+    directory.activate_log(&enrolled, 3).await.unwrap();
     if claimant != member {
         directory
             .create(
                 signed(claimant, "https://claimant.internal:8081", 10_000, 20_000),
-                2,
+                3,
             )
             .await
             .unwrap();
     }
-    let enrolled = directory
-        .recruit_log(&leader, 1, vec![member], 2)
-        .await
-        .unwrap();
-    directory.activate_log(&enrolled, 3).await.unwrap();
     directory
         .claim_expired(session, claimant, 10_001)
         .await

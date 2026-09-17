@@ -91,8 +91,8 @@ pub use maintenance::{
     PersistedWorkInventory, register_maintenance,
 };
 pub use node::{
-    FencedNodeSession, NodeAdvertisement, NodeCapacity, NodeDirectory, SealedNodeLog,
-    VersionedNodeAdvertisement,
+    FencedNodeSession, NODE_LOG_PROTOCOL_VERSION, NodeAdvertisement, NodeCapacity, NodeDirectory,
+    SealedNodeLog, VersionedNodeAdvertisement,
 };
 pub use node_log::{
     CommitTicket, DurabilityGate, DurabilityProof, DurabilitySource, RecoveredCellTail,
