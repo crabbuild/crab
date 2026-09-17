@@ -131,12 +131,6 @@ async fn run_inner(
     if let Some(result) = duplicate_destination_result(specs) {
         return Ok((result, advertised));
     }
-    if config.protected_push.is_some() && config.mirror_plan_id.is_some() {
-        return Err(CrabError::Configuration {
-            key: "capsule-protocol push coordination".to_owned(),
-            origin: "protocol-v2 protected mirror-plan publication is not implemented".to_owned(),
-        });
-    }
     if cancel.is_cancelled() {
         return Err(CrabError::Cancelled);
     }

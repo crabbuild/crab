@@ -1292,8 +1292,10 @@ mod tests {
             new_oid: tip.clone(),
         };
         prepare_receive(&ctx, vec![update.clone()], None).await?;
-        let transaction = CapsuleTransaction::new(
+        let plan_id = "c".repeat(64);
+        let transaction = CapsuleTransaction::for_plan(
             root.record().digest(),
+            &plan_id,
             vec![CapsuleRefEdit::new(
                 update.ref_name.clone(),
                 None,
@@ -1364,6 +1366,14 @@ mod tests {
             view.visible_ref_transactions().get("refs/heads/main"),
             Some(&plan.transaction_id)
         );
+        let receipt = crab_metadata::capsule_protocol::resolve_capsule_plan_receipt(
+            ctx.store(),
+            ctx.router(),
+            &plan_id,
+        )
+        .await?
+        .ok_or_else(|| invalid("protected planned capsule did not publish a plan receipt"))?;
+        assert_eq!(receipt.transaction(), &transaction);
 
         let retried =
             commit_receive(&ctx, "crab://bucket/org/repo", &verified.plan_digest, None).await?;
