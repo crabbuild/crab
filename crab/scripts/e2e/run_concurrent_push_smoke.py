@@ -51,9 +51,12 @@ DEFAULT_ROOT = Path.home() / "Workspace" / "CrabRepos"
 DEFAULT_BUCKET = "crab"
 DEFAULT_ENDPOINT = "http://127.0.0.1:9000"
 REMOTE_PREFIX = "e2e-concurrent-push"
-REF_JOURNAL_GATE_PATHS = {
-    "prepared-head": "/refs/journal/heads/",
-    "active-marker": "/refs/journal/active/",
+PUBLICATION_GATE_PATHS = {
+    # V2 uploads the immutable capsule before publishing the per-ref head.
+    # Keep the v1 journal paths as aliases so the proxy unit tests continue to
+    # exercise the generic gate and older qualification fixtures remain usable.
+    "prepared-head": ("/v2/capsules/", "/refs/journal/heads/"),
+    "active-marker": ("/v2/refs/", "/refs/journal/active/"),
 }
 REF_JOURNAL_FAULT_PHASES = {"before-upstream", "after-upstream"}
 SECRET_KEYS = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}
@@ -280,7 +283,7 @@ class RequestCountingProxy:
             self.thread.join(timeout=5)
 
     def arm_ref_journal_gate(self, boundary: str) -> None:
-        if boundary not in REF_JOURNAL_GATE_PATHS:
+        if boundary not in PUBLICATION_GATE_PATHS:
             raise SmokeError(f"unsupported ref-journal gate: {boundary}")
         with self.lock:
             if self.ref_journal_gate is not None:
@@ -297,7 +300,9 @@ class RequestCountingProxy:
                 gate is not None
                 and method == "PUT"
                 and 200 <= status < 300
-                and REF_JOURNAL_GATE_PATHS[gate] in decoded_path
+                and any(
+                    marker in decoded_path for marker in PUBLICATION_GATE_PATHS[gate]
+                )
             )
             if matches:
                 self.ref_journal_gate = None
@@ -319,7 +324,7 @@ class RequestCountingProxy:
         *,
         attempts: int | None,
     ) -> None:
-        if boundary not in REF_JOURNAL_GATE_PATHS:
+        if boundary not in PUBLICATION_GATE_PATHS:
             raise SmokeError(f"unsupported ref-journal fault boundary: {boundary}")
         if phase not in REF_JOURNAL_FAULT_PHASES:
             raise SmokeError(f"unsupported ref-journal fault phase: {phase}")
@@ -352,7 +357,10 @@ class RequestCountingProxy:
                     phase == "after-upstream"
                     and (status is None or not 200 <= status < 300)
                 )
-                or REF_JOURNAL_GATE_PATHS[boundary] not in decoded_path
+                or not any(
+                    marker in decoded_path
+                    for marker in PUBLICATION_GATE_PATHS[boundary]
+                )
             ):
                 return False
             if remaining is not None:

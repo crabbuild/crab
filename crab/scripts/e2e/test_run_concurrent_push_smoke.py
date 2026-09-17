@@ -315,6 +315,18 @@ class RequestCountingProxyTest(unittest.TestCase):
             "/crab/e2e-concurrent-push/run/refs/journal/heads/abc.json",
         )
 
+    def test_v2_capsule_gate_waits_before_ref_visibility(self) -> None:
+        self.assert_ref_journal_gate_waits(
+            "prepared-head",
+            "/crab/e2e-concurrent-push/run/v2/capsules/aa/capsule",
+        )
+
+    def test_v2_ref_gate_waits_after_ref_visibility(self) -> None:
+        self.assert_ref_journal_gate_waits(
+            "active-marker",
+            "/crab/e2e-concurrent-push/run/v2/refs/heads/abc.json",
+        )
+
     def assert_active_marker_fault(self, phase: str, forwarded: bool) -> None:
         self.proxy.arm_ref_journal_fault("active-marker", phase, attempts=1)
         request = urllib.request.Request(
