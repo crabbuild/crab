@@ -511,6 +511,7 @@ mod tests {
     struct RecordingTransport {
         batches: Mutex<Vec<(NodeId, Vec<u64>)>>,
         fail: Option<NodeId>,
+        delay: Option<Duration>,
     }
 
     #[derive(Default)]
@@ -570,6 +571,15 @@ mod tests {
             Self {
                 batches: Mutex::new(Vec::new()),
                 fail: Some(member),
+                delay: None,
+            }
+        }
+
+        fn slow(delay: Duration) -> Self {
+            Self {
+                batches: Mutex::new(Vec::new()),
+                fail: None,
+                delay: Some(delay),
             }
         }
 
@@ -593,6 +603,9 @@ mod tests {
             Box::pin(async move {
                 if self.fail == Some(member) {
                     return Err(Error::Node("injected follower failure"));
+                }
+                if let Some(delay) = self.delay {
+                    tokio::time::sleep(delay).await;
                 }
                 let sequences = request
                     .frames
@@ -798,6 +811,30 @@ mod tests {
             gate.prove(ticket).await.unwrap().source(),
             crate::DurabilitySource::Object
         );
+    }
+
+    #[tokio::test]
+    async fn slow_follower_delays_fleet_proof_until_every_member_acknowledges() {
+        let (_directory, cuts) = capture();
+        let gate = DurabilityGate::new(session(1), node(1), 2, [node(2), node(3)]).unwrap();
+        gate.activate_fleet().unwrap();
+        let delay = Duration::from_millis(40);
+        let transport = Arc::new(RecordingTransport::slow(delay));
+        let shipper = NodeLogShipper::start(
+            gate.clone(),
+            transport,
+            crab_ltx::Limits::default(),
+            crate::CellTelemetryHandle::default(),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+
+        let started = tokio::time::Instant::now();
+        let ticket = shipper.submit(submission(&cuts)).await.unwrap();
+        let proof = gate.prove(ticket).await.unwrap();
+        assert_eq!(proof.source(), crate::DurabilitySource::Fleet);
+        assert!(started.elapsed() >= delay);
+        shipper.shutdown().await.unwrap();
     }
 
     #[tokio::test]
