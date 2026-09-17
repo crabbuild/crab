@@ -7,6 +7,7 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::Notify;
 
 use super::{
     CellClient, CellDescription, CellTransport, EncodedCommand, EncodedObservation, EncodedQuery,
@@ -205,6 +206,8 @@ struct StreamTransport {
     description: CellDescription,
     sequence: Arc<AtomicUsize>,
     fenced: Arc<AtomicUsize>,
+    query_started: Option<Arc<Notify>>,
+    query_release: Option<Arc<Notify>>,
 }
 
 impl CellTransport for StreamTransport {
@@ -230,7 +233,15 @@ impl CellTransport for StreamTransport {
         let fenced = self.fenced.load(Ordering::Acquire) != 0;
         let description = self.description;
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst) as u64 + 1;
+        let query_started = self.query_started.clone();
+        let query_release = self.query_release.clone();
         Box::pin(async move {
+            if let Some(query_started) = query_started {
+                query_started.notify_one();
+            }
+            if let Some(query_release) = query_release {
+                query_release.notified().await;
+            }
             if fenced {
                 return Err(Error::Fenced);
             }
@@ -394,6 +405,8 @@ async fn state_stream_advances_receipts_and_cancellation_is_terminal() {
             description,
             sequence: Arc::new(AtomicUsize::new(0)),
             fenced: fenced.clone(),
+            query_started: None,
+            query_release: None,
         }),
     );
     let mut stream = client
@@ -449,4 +462,40 @@ async fn state_stream_advances_receipts_and_cancellation_is_terminal() {
         Err(InvocationError::NotStarted(Error::Fenced))
     ));
     assert!(fenced_stream.is_closed());
+
+    let query_started = Arc::new(Notify::new());
+    let query_release = Arc::new(Notify::new());
+    let waiting_client = CellClient::new(
+        client.registry.clone(),
+        Arc::new(StreamTransport {
+            description,
+            sequence: Arc::new(AtomicUsize::new(0)),
+            fenced: Arc::new(AtomicUsize::new(0)),
+            query_started: Some(query_started.clone()),
+            query_release: Some(query_release),
+        }),
+    );
+    let waiting_stream = waiting_client
+        .open_state_stream::<StreamQuery>(
+            &target,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    let cancellation = waiting_stream.cancellation();
+    let waiting = tokio::spawn(async move {
+        let mut waiting_stream = waiting_stream;
+        waiting_stream.emit(6).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(1), query_started.notified())
+        .await
+        .unwrap();
+    cancellation.cancel();
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .unwrap(),
+        Err(InvocationError::NotStarted(Error::StreamCancelled))
+    ));
 }

@@ -144,9 +144,16 @@ impl<Q: Query> CellStateStream<Q> {
             input,
         );
         tokio::pin!(query);
+        let notified = self.cancellation.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.cancellation.is_cancelled() {
+            self.closed = true;
+            return Err(stream_error(Error::StreamCancelled));
+        }
         let result = match tokio::select! {
             result = &mut query => result,
-            () = self.cancellation.notify.notified() => {
+            () = &mut notified => {
                 self.closed = true;
                 Err(stream_error(Error::StreamCancelled))
             }
