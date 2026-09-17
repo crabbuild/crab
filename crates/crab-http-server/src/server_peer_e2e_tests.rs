@@ -717,11 +717,13 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
 
 async fn repository(store: Store, bucket: &str, prefix: String) -> Arc<Repository> {
     let layout = StoreLayout::new(store.clone(), prefix.clone());
-    crab_write::initialize::initialize_repository(&store, &layout, "refs/heads/main")
+    let id = Uuid::from_bytes([1; 16]);
+    let repository_key = blake3::hash(id.as_bytes()).to_hex().to_string();
+    crab_write::capsule_protocol::initialize(&layout, &repository_key, "refs/heads/main")
         .await
         .unwrap();
     Arc::new(Repository {
-        id: Uuid::from_bytes([1; 16]),
+        id,
         config: RepositoryConfig {
             owner: "team".into(),
             name: "repo".into(),
