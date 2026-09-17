@@ -1402,8 +1402,6 @@ pub struct NodeLogSubmission;
 impl DurabilityGate {
     pub async fn prove(&self, ticket: CommitTicket)
         -> Result<DurabilityProof>;
-    pub async fn wait_until(&self, sequence: u64)
-        -> Result<DurabilityProof>;
 }
 
 impl NodeLogShipper {
