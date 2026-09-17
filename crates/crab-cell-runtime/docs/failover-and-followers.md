@@ -1347,8 +1347,8 @@ proofs. It never evicts uncovered fragments.
 
 ## Expose narrow Rust APIs
 
-The names below define ownership and data flow. Final signatures may change to
-fit existing types, but they must not collapse the layer boundaries.
+The names below mirror the current public ownership and data-flow boundaries;
+private fields and imports are omitted. Changes must not collapse these layers.
 
 ### `crab-ltx`
 
