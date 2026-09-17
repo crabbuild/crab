@@ -204,7 +204,7 @@ pub enum Error {
     #[error("repository initialization failed")]
     Remote(#[from] crab_remote_git::Error),
     #[error("capsule repository read failed")]
-    Read(#[from] crab_read::ReadError),
+    Read(#[source] Box<crab_read::ReadError>),
     #[error("repository maintenance failed")]
     Maintenance(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("repository catalog operation failed")]
@@ -234,6 +234,12 @@ pub enum Error {
 
 /// Server startup or lifecycle result.
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl From<crab_read::ReadError> for Error {
+    fn from(source: crab_read::ReadError) -> Self {
+        Self::Read(Box::new(source))
+    }
+}
 
 impl From<maintenance::Error> for Error {
     fn from(source: maintenance::Error) -> Self {

@@ -103,9 +103,9 @@ aws_cli=(
   --entrypoint aws bucket-init
   --endpoint-url http://rustfs:9000
 )
-printf 'The root-scoped shared namespace must survive restore.\n' > "${work_dir}/global-probe"
-"${aws_cli[@]}" s3 cp "${work_dir}/global-probe" \
-  "s3://${source_bucket}/${global_probe}" --only-show-errors
+printf 'The root-scoped shared namespace must survive restore.\n' \
+  | "${aws_cli[@]}" s3 cp - "s3://${source_bucket}/${global_probe}" \
+    --only-show-errors
 "${aws_cli[@]}" s3api create-bucket --bucket "$restore_bucket" >/dev/null
 "${aws_cli[@]}" s3 cp "s3://${source_bucket}/repositories/" \
   "s3://${restore_bucket}/repositories/" --recursive --only-show-errors

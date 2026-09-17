@@ -595,6 +595,7 @@ impl Repository {
         .map_err(Into::into)
     }
 
+    #[cfg(test)]
     pub(crate) async fn open_view(
         &self,
     ) -> Result<crab_read::capsule_protocol::CapsuleRepositoryView> {

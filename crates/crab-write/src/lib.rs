@@ -5,7 +5,7 @@ pub mod generation;
 pub mod initialize;
 pub mod journal;
 mod namespace;
-pub use namespace::{with_ref_namespace, with_ref_namespaces};
+pub use namespace::{with_ref_namespace, with_ref_namespaces, with_ref_namespaces_wait};
 
 /// Failure while preparing or publishing canonical Git metadata.
 #[derive(Debug, thiserror::Error)]

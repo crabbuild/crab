@@ -440,11 +440,12 @@ async fn run_inner(
             }
             let result = if changes_namespace {
                 let commit_layout = layout.clone();
-                crab_write::with_ref_namespaces(
+                crab_write::with_ref_namespaces_wait(
                     layout.store(),
                     &layout,
                     &ref_names,
                     config.lock_ttl,
+                    config.lock_wait,
                     cancel,
                     |scoped| async move {
                         if scoped.is_cancelled() {

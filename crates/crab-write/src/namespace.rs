@@ -28,17 +28,46 @@ where
     F: FnOnce(CancellationToken) -> Fut,
     Fut: Future<Output = std::result::Result<T, E>>,
 {
+    with_ref_namespaces_wait(
+        store,
+        layout,
+        ref_names,
+        ttl,
+        ttl.saturating_mul(2),
+        cancel,
+        operation,
+    )
+    .await
+}
+
+/// Serialize ref-name changes with an explicit contention wait budget.
+pub async fn with_ref_namespaces_wait<T, E, F, Fut>(
+    store: &Store,
+    layout: &StoreLayout<Store>,
+    ref_names: &[String],
+    ttl: Duration,
+    wait: Duration,
+    cancel: &CancellationToken,
+    operation: F,
+) -> std::result::Result<T, E>
+where
+    E: From<WriteError>,
+    F: FnOnce(CancellationToken) -> Fut,
+    Fut: Future<Output = std::result::Result<T, E>>,
+{
     let resources = ref_names
         .iter()
         .map(|name| namespace_resource(name))
         .collect::<std::collections::BTreeSet<_>>();
-    let deadline = Instant::now()
-        .checked_add(ttl.saturating_mul(2))
-        .ok_or_else(|| {
+    let deadline = if wait.is_zero() {
+        None
+    } else {
+        Some(Instant::now().checked_add(wait).ok_or_else(|| {
             E::from(WriteError::Internal(
                 "namespace lease deadline overflow".into(),
             ))
-        })?;
+        })?)
+    };
     let scoped = cancel.child_token();
     let mut leases = Vec::with_capacity(resources.len());
     for resource in resources {
@@ -55,6 +84,10 @@ where
             {
                 Ok(lease) => break lease,
                 Err(error @ CoordinationError::PushLockHeld { .. }) => {
+                    let Some(deadline) = deadline else {
+                        release_leases(leases).await;
+                        return Err(E::from(WriteError::from(error)));
+                    };
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
                         release_leases(leases).await;
