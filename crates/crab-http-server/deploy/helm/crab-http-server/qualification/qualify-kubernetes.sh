@@ -854,15 +854,14 @@ for pod_index in 0 1 2; do
     --duration-seconds 60
     --warmup-seconds 5
   )
-  first_line=$((pod_index * 64 + 1))
-  last_line=$((first_line + 63))
   target_index=0
   while IFS=$'\t' read -r load_repository load_oid; do
     load_arguments+=(
       --mutation "status-${target_index}=2@/api/repos/${owner}/${load_repository}/statuses/${load_oid}|${load_template}"
     )
     target_index=$((target_index + 1))
-  done < <(sed -n "${first_line},${last_line}p" "$load_targets")
+  done < <(awk -F '\t' -v pod_index="$pod_index" \
+    '((NR - 1) % 3) == pod_index { print $0 }' "$load_targets")
   test "$target_index" = 64
   node_report="${work_dir}/load-${pod_index}.json"
   "$load_generator" "${load_arguments[@]}" > "$node_report"
@@ -1179,7 +1178,7 @@ jq --null-input \
       database_count: $load_cell_count,
       commit_targets_per_node: $load_targets_per_node,
       commit_targets_per_cell: $load_targets_per_cell,
-      requests_per_cell_per_node: (1000 / $load_cell_count),
+      configured_requests_per_cell_per_node: (1000 / $load_cell_count),
       transaction: "repository commit status insert"
     },
     load: $load_reports[0],

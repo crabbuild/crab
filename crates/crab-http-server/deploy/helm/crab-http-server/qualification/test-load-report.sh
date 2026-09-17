@@ -40,10 +40,11 @@ jq --null-input '
     max_response_bytes: 67108864,
     health_before: {status: 200, latency_ms: 1, response_bytes: 2},
     health_after: {status: 200, latency_ms: 1, response_bytes: 2},
-    targets: [range(0; 64) | {
-      name: ("status" + tostring),
+    targets: [range(0; 8) as $cell | range(0; 8) as $target | {
+      name: ("status" + (($cell * 8 + $target) | tostring)),
       method: "POST",
-      path: ("/api/repos/team/repository/statuses/" + ("a" * 40)),
+      path: ("/api/repos/team/repository-load-" + (($cell + 1) | tostring) +
+        "/statuses/" + ("a" * 40)),
       concurrency: 2
     }],
     aggregate: traffic,
@@ -75,6 +76,7 @@ reject "the wrong aggregate rate" '.[0].report.aggregate_requests_per_second = 9
 reject "a short duration" '.[0].report.configured_duration_ms = 59000'
 reject "too few successful responses" '.[0].report.aggregate.successful_responses = 56999'
 reject "a false target-rate proof" '.[0].report.target_rate_qualified = false'
+reject "single-cell targets" '.[0].report.targets |= map(.path = "/api/repos/team/repository/statuses/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")'
 reject "an admission percentage above five" '.[0].report.aggregate.admission_rejection_percent = 5.01'
 reject "one server error" '.[0].report.aggregate.server_errors = 1'
 reject "an invalid latency order" '.[0].report.aggregate.successful_latency.p95_ms = 0'

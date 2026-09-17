@@ -1524,12 +1524,13 @@ count is below 95% of the configured aggregate rate; 429 responses remain
 visible admission evidence but do not count toward the target throughput.
 The Kubernetes qualifier runs the schedule separately through each Pod, using
 64 bounded status-mutation targets backed by distinct commits per run and
-distributed across eight repository Cells (24 commits per Cell). It binds the
-three reports to Pod UIDs, captures capacity again after load, and rejects
-server, transport, body-limit, latency-over-60-second, or target-rate failures.
-The eight-Cell schedule is the node-level aggregate profile (125 target
-requests/s per Cell); retain a separate one-Cell run when measuring the hot-Cell
-admission limit.
+distributed across eight repository Cells (24 commits per Cell). Each Pod gets
+eight targets per Cell, so every report exercises the complete Cell set. It
+binds the three reports to Pod UIDs, captures capacity again after load, and
+rejects server, transport, body-limit, latency-over-60-second, or target-rate
+failures. The eight-Cell schedule is the node-level aggregate profile (the
+receipt records a configured 125 target requests/s per Cell); retain a separate
+one-Cell run when measuring the hot-Cell admission limit.
 
 ## Deliver in dependency order
 

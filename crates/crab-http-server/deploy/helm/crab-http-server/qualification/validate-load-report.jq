@@ -20,6 +20,9 @@ def valid_traffic($minimum):
   (.latency | valid_latency) and
   (.successful_latency | valid_latency);
 
+def target_repository:
+  .path | capture("^/api/repos/[^/]+/(?<repository>[^/]+)/statuses/[0-9a-f]{40}$").repository;
+
 type == "array" and
 length >= 3 and
 ([.[].pod_uid] | length == (unique | length)) and
@@ -38,6 +41,8 @@ all(.[];
     $report.health_before.status == 200 and
     $report.health_after.status == 200 and
     ($report.targets | length) == 64 and
+    ($report.targets | map(target_repository) | unique | length) == 8 and
+    ($report.targets | map(target_repository) | sort | group_by(.) | all(length == 8)) and
     all($report.targets[];
       .method == "POST" and
       (.path | test("^/api/repos/[^/]+/[^/]+/statuses/[0-9a-f]{40}$"))) and
