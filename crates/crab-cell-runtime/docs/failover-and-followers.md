@@ -228,6 +228,11 @@ node-session record to exist and no longer name that log epoch, rechecks the
 unchanged marker and its filesystem timestamp under the lane lock, and only
 then deletes it and releases disk admission. Missing authority fails closed.
 
+Deterministic fault coverage includes the two ambiguous recovery boundaries: a
+follower may fsync a frame and lose its ACK without authorizing a fleet proof,
+and an expired recovery claim may move to a new live claimant while permanently
+fencing the old claimant's renewal.
+
 ## Use one multiplexed log per owner session
 
 A node can own 1,000 to 10,000 active databases. Full per-repository standbys

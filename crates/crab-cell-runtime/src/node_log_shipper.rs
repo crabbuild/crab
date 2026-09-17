@@ -459,12 +459,56 @@ mod tests {
     use futures_util::future::BoxFuture;
 
     use super::*;
-    use crate::{FollowerReceipt, RetireRequest, SealRequest, SessionId, TailRequest};
+    use crate::{
+        FollowerReceipt, FollowerStore, LocalFollowerTransport, RetireRequest, SealRequest,
+        SessionId, TailRequest,
+    };
 
     #[derive(Default)]
     struct RecordingTransport {
         batches: Mutex<Vec<(NodeId, Vec<u64>)>>,
         fail: Option<NodeId>,
+    }
+
+    struct LostAckTransport {
+        inner: LocalFollowerTransport,
+    }
+
+    impl NodeLogTransport for LostAckTransport {
+        fn append<'a>(
+            &'a self,
+            member: NodeId,
+            request: AppendRequest,
+        ) -> BoxFuture<'a, Result<FollowerReceipt>> {
+            Box::pin(async move {
+                self.inner.append(member, request).await?;
+                Err(Error::Node("injected lost follower acknowledgement"))
+            })
+        }
+
+        fn seal<'a>(
+            &'a self,
+            member: NodeId,
+            request: SealRequest,
+        ) -> BoxFuture<'a, Result<FollowerReceipt>> {
+            self.inner.seal(member, request)
+        }
+
+        fn retire<'a>(
+            &'a self,
+            member: NodeId,
+            request: RetireRequest,
+        ) -> BoxFuture<'a, Result<FollowerReceipt>> {
+            self.inner.retire(member, request)
+        }
+
+        fn tail<'a>(
+            &'a self,
+            member: NodeId,
+            request: TailRequest,
+        ) -> BoxFuture<'a, Result<Vec<Bytes>>> {
+            self.inner.tail(member, request)
+        }
     }
 
     impl RecordingTransport {
@@ -656,6 +700,44 @@ mod tests {
         shipper.shutdown().await.unwrap();
 
         assert!(gate.issue(1).is_err());
+        gate.prove_object(ticket).unwrap();
+        assert_eq!(
+            gate.prove(ticket).await.unwrap().source(),
+            crate::DurabilitySource::Object
+        );
+    }
+
+    #[tokio::test]
+    async fn lost_ack_keeps_the_durable_follower_tail_without_issuing_fleet_proof() {
+        let (_directory, cuts) = capture();
+        let leader = session(1);
+        let member = node(2);
+        let gate = DurabilityGate::new(leader, node(1), 2, [member]).unwrap();
+        gate.activate_fleet().unwrap();
+        let follower_directory = tempfile::TempDir::new().unwrap();
+        let store = FollowerStore::open(
+            follower_directory.path().to_owned(),
+            crab_ltx::Limits::default(),
+            crab_ltx::DiskBudget::new(1 << 30),
+        )
+        .unwrap();
+        let transport: Arc<dyn NodeLogTransport> = Arc::new(LostAckTransport {
+            inner: LocalFollowerTransport::new(member, store.clone()),
+        });
+        let shipper = NodeLogShipper::start(
+            gate.clone(),
+            transport,
+            crab_ltx::Limits::default(),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+
+        let ticket = shipper.submit(submission(&cuts)).await.unwrap();
+        shipper.shutdown().await.unwrap();
+
+        assert!(gate.issue(1).is_err());
+        assert_eq!(store.seal(leader, 2).await.unwrap().durable_through, 1);
+        assert_eq!(store.read_tail(leader, 2, 1).await.unwrap().len(), 1);
         gate.prove_object(ticket).unwrap();
         assert_eq!(
             gate.prove(ticket).await.unwrap().source(),

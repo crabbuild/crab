@@ -770,6 +770,71 @@ async fn expired_enrolled_log_becomes_a_renewable_recovery_claim() {
 }
 
 #[tokio::test]
+async fn expired_recovery_claim_moves_to_a_new_live_claimant_and_fences_the_old_one() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    let leader = SessionId::from_bytes([1; 16]);
+    let member = SessionId::from_bytes([2; 16]);
+    let first_claimant = SessionId::from_bytes([3; 16]);
+    let second_claimant = SessionId::from_bytes([4; 16]);
+    let created = directory
+        .create(advertisement_for(leader, &key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    directory
+        .create(advertisement_for(member, &key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    let enrolled = directory
+        .recruit_log(&created, 7, 1, 2, NOW_MS + 1)
+        .await
+        .unwrap();
+    directory.activate_log(&enrolled, NOW_MS + 2).await.unwrap();
+    directory
+        .create(
+            advertisement_for(first_claimant, &key, 1, NOW_MS + 9_000),
+            NOW_MS + 9_000,
+        )
+        .await
+        .unwrap();
+    let first = directory
+        .claim_expired(leader, first_claimant, NOW_MS + 10_000)
+        .await
+        .unwrap();
+    directory
+        .create(
+            advertisement_for(second_claimant, &key, 1, NOW_MS + 39_000),
+            NOW_MS + 39_000,
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        directory
+            .claim_expired(leader, second_claimant, NOW_MS + 39_999)
+            .await
+            .is_err()
+    );
+    let second = directory
+        .claim_expired(leader, second_claimant, NOW_MS + 40_000)
+        .await
+        .unwrap();
+
+    assert_eq!(second.claimant(), second_claimant);
+    assert_eq!(second.claim_generation(), first.claim_generation() + 1);
+    assert_eq!(
+        second.log().unwrap().recovery().unwrap().generation(),
+        second.claim_generation()
+    );
+    assert!(
+        directory
+            .refresh_recovery_claim(&first, NOW_MS + 40_001)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn stale_collection_fences_records_after_the_clock_skew_horizon() {
     let key = SigningKey::from_bytes(&[7; 32]);
     let directory = directory();
