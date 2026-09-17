@@ -1376,8 +1376,8 @@ impl CellReplica {
 }
 ```
 
-The verified frame exposes immutable metadata and a bounded body stream. It
-does not expose unchecked constructors for server code.
+The verified frame exposes immutable metadata and bounded, already-verified body
+bytes. It does not expose unchecked constructors for server code.
 
 ### `crab-cell-runtime`
 
