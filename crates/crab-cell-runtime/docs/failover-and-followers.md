@@ -1058,7 +1058,9 @@ sequenceDiagram
 The recoverer rereads the session record and current time immediately before
 claiming. It refuses a live lease. `Open -> Recovering` records claimant
 session, claim generation, and claim expiry. The claimant refreshes that field
-every ten seconds.
+every ten seconds. Each refresh has a five-second deadline; a stalled object
+store therefore fails recovery closed instead of allowing a claimant to keep
+gathering after its 30-second claim expires.
 
 A second node waits behind a live claim. After the 30-second claim expiry, it
 may CAS takeover of recovery. All later operations are content-addressed,

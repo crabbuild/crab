@@ -37,6 +37,7 @@ const NODE_COLLECTION_LIMIT: usize = 128;
 const MAX_NODE_RECOVERY_JOBS: usize = 2;
 const MAX_NODE_RECOVERY_CELLS: usize = 10_000;
 const RECOVERY_CLAIM_HEARTBEAT: Duration = Duration::from_secs(10);
+const RECOVERY_CLAIM_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Shared scanner progress used by enrollment, readiness and metrics.
 #[derive(Clone)]
@@ -850,9 +851,13 @@ where
         tokio::select! {
             result = &mut future => return result.map_err(Into::into),
             () = tokio::time::sleep(RECOVERY_CLAIM_HEARTBEAT) => {
-                *fenced = directory
-                    .refresh_recovery_claim(fenced, super::unix_now_ms()?)
-                    .await?;
+                let refreshed = tokio::time::timeout(
+                    RECOVERY_CLAIM_REFRESH_TIMEOUT,
+                    directory.refresh_recovery_claim(fenced, super::unix_now_ms()?),
+                )
+                .await
+                .map_err(|_| crab_cell_runtime::Error::Fenced)??;
+                *fenced = refreshed;
             }
         }
     }
