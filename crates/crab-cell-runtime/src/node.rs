@@ -297,6 +297,25 @@ impl FencedNodeSession {
     }
 }
 
+/// Proof that one failed node log has finished pinning every recovered tail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SealedNodeLog {
+    session: SessionId,
+    log: NodeLogStatus,
+}
+
+impl SealedNodeLog {
+    #[must_use]
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    #[must_use]
+    pub const fn log(&self) -> &NodeLogStatus {
+        &self.log
+    }
+}
+
 impl VersionedNodeAdvertisement {
     #[must_use]
     pub const fn advertisement(&self) -> &NodeAdvertisement {
@@ -487,6 +506,62 @@ impl NodeDirectory {
             .update(&path, Bytes::from(renewed.encode()?), token)
             .await?;
         Ok(proof)
+    }
+
+    /// Seals an exact recovery claim after every affected Cell pins its overlay.
+    pub(crate) async fn seal_recovery(
+        &self,
+        fenced: &FencedNodeSession,
+        recovery_manifest: Option<Digest>,
+        now_ms: i64,
+    ) -> Result<SealedNodeLog> {
+        let path = self.layout.node_path(fenced.session.as_bytes());
+        let Some((NodeRecord::Tombstone(current), token)) = self.load_record_at(&path).await?
+        else {
+            return Err(Error::Fenced);
+        };
+        if let Some(log) = &current.log
+            && log.phase() == NodeLogPhase::Sealed
+            && log.recovery_manifest() == recovery_manifest
+        {
+            return Ok(SealedNodeLog {
+                session: current.session,
+                log: log.clone(),
+            });
+        }
+        let sealed = current.seal(fenced, recovery_manifest, now_ms)?;
+        let log = sealed
+            .log
+            .clone()
+            .ok_or(Error::Node("sealed node session lost its log"))?;
+        match self
+            .layout
+            .store()
+            .update(&path, Bytes::from(sealed.encode()?), token)
+            .await
+        {
+            Ok(_) => Ok(SealedNodeLog {
+                session: sealed.session,
+                log,
+            }),
+            Err(update_error) => match self.load_record_at(&path).await? {
+                Some((NodeRecord::Tombstone(current), _))
+                    if current.session == fenced.session
+                        && current.log.as_ref().is_some_and(|current| {
+                            current.phase() == NodeLogPhase::Sealed
+                                && current.recovery_manifest() == recovery_manifest
+                        }) =>
+                {
+                    Ok(SealedNodeLog {
+                        session: current.session,
+                        log: current
+                            .log
+                            .ok_or(Error::Node("sealed node session lost its log"))?,
+                    })
+                }
+                Some(_) | None => Err(update_error.into()),
+            },
+        }
     }
 
     /// Verifies that this exact follower belongs to a live leader log epoch.
@@ -1096,6 +1171,39 @@ impl NodeTombstone {
         Ok(self)
     }
 
+    fn seal(
+        mut self,
+        fenced: &FencedNodeSession,
+        recovery_manifest: Option<Digest>,
+        now_ms: i64,
+    ) -> Result<Self> {
+        if self.session != fenced.session
+            || self.claimant != Some(fenced.claimant)
+            || self.claim_generation != fenced.claim_generation
+            || self
+                .claim_expires_at_ms
+                .is_none_or(|expires_at_ms| expires_at_ms <= now_ms)
+        {
+            return Err(Error::Fenced);
+        }
+        let log = self
+            .log
+            .as_ref()
+            .ok_or(Error::Node("claimed session has no enrolled node log"))?
+            .seal_recovery(
+                self.session,
+                fenced.claimant,
+                fenced.claim_generation,
+                recovery_manifest,
+            )?;
+        self.claimant = None;
+        self.claim_generation = 0;
+        self.claim_expires_at_ms = None;
+        self.log = Some(log);
+        self.validate()?;
+        Ok(self)
+    }
+
     fn fenced(&self) -> Result<FencedNodeSession> {
         let claimant = self
             .claimant
@@ -1428,6 +1536,7 @@ struct RawNodeLog {
     active: bool,
     tiered_through: String,
     recovery: Option<RawNodeRecoveryClaim>,
+    recovery_manifest: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1506,6 +1615,9 @@ fn encode_log(log: &NodeLogStatus) -> RawNodeLog {
             generation: claim.generation().to_string(),
             expires_at_ms: claim.expires_at_ms().to_string(),
         }),
+        recovery_manifest: log
+            .recovery_manifest()
+            .map(|digest| encode_hex(digest.as_bytes())),
     }
 }
 
@@ -1536,6 +1648,9 @@ fn decode_log(leader: SessionId, raw: RawNodeLog) -> Result<NodeLogStatus> {
         raw.active,
         canonical_u64(&raw.tiered_through)?,
         recovery,
+        raw.recovery_manifest
+            .map(|digest| decode_hex(&digest).map(Digest::from_bytes))
+            .transpose()?,
     )
 }
 

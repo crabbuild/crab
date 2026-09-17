@@ -81,6 +81,73 @@ async fn fence_session(
         .unwrap()
 }
 
+async fn fence_log_session(
+    layout: &CellStorageLayout,
+    session: SessionId,
+    claimant: SessionId,
+    member: SessionId,
+) -> crab_cell_runtime::FencedNodeSession {
+    let fleet = Digest::from_bytes([90; 32]);
+    let image = Digest::from_bytes([91; 32]);
+    let release = Digest::from_bytes([92; 32]);
+    let directory = crab_cell_runtime::NodeDirectory::new(layout.clone(), fleet, image, release);
+    let key = ed25519_dalek::SigningKey::from_bytes(&[93; 32]);
+    let signed = |session, endpoint: &str, issued_at_ms, expires_at_ms| {
+        crab_cell_runtime::NodeAdvertisement::sign(
+            session,
+            endpoint.into(),
+            fleet,
+            Digest::from_bytes([94; 32]),
+            image,
+            release,
+            &key,
+            1,
+            issued_at_ms,
+            expires_at_ms,
+            vec![Digest::from_bytes([95; 32])],
+            vec![1],
+            crab_cell_runtime::NodeCapacity {
+                free_memory_bytes: 1,
+                free_disk_bytes: 1,
+                job_credits: 1,
+            },
+        )
+        .unwrap()
+    };
+    let leader = directory
+        .create(
+            signed(session, "https://expired.internal:8081", 1, 10_001),
+            1,
+        )
+        .await
+        .unwrap();
+    directory
+        .create(
+            signed(member, "https://follower.internal:8081", 10_000, 20_000),
+            2,
+        )
+        .await
+        .unwrap();
+    if claimant != member {
+        directory
+            .create(
+                signed(claimant, "https://claimant.internal:8081", 10_000, 20_000),
+                2,
+            )
+            .await
+            .unwrap();
+    }
+    let enrolled = directory
+        .recruit_log(&leader, 1, vec![member], 2)
+        .await
+        .unwrap();
+    directory.activate_log(&enrolled, 3).await.unwrap();
+    directory
+        .claim_expired(session, claimant, 10_001)
+        .await
+        .unwrap()
+}
+
 struct Fixture {
     _directory: tempfile::TempDir,
     database: std::path::PathBuf,
@@ -959,19 +1026,12 @@ async fn takeover_consumes_pinned_recovery_before_serving() {
     let manifests =
         crab_cell_runtime::RecoveryManifestStore::new(fixture.layout.clone(), Limits::default());
     let successor = SessionId::from_bytes([42; 16]);
-    let fenced = fence_session(&fixture.layout, leader, successor).await;
-    let recovery = crab_cell_runtime::NodeLogRecovery::new(
-        transport,
-        leader,
-        1,
-        vec![follower],
-        0,
-        true,
-        Limits::default(),
-    )
-    .unwrap();
+    let fenced = fence_log_session(&fixture.layout, leader, successor, follower).await;
+    let recovery =
+        crab_cell_runtime::NodeLogRecovery::from_fenced(transport, &fenced, Limits::default())
+            .unwrap();
     let coordinator = crab_cell_runtime::RecoveryCoordinator::new(recovery, manifests.clone());
-    let mut attached = coordinator
+    let attached = coordinator
         .recover(
             fenced.clone(),
             vec![crab_cell_runtime::RecoveryCell {
@@ -983,19 +1043,45 @@ async fn takeover_consumes_pinned_recovery_before_serving() {
         .await
         .unwrap();
     assert_eq!(attached.len(), 1);
-    let retried = coordinator
-        .recover(
+    let directory = crab_cell_runtime::NodeDirectory::new(
+        fixture.layout.clone(),
+        Digest::from_bytes([90; 32]),
+        Digest::from_bytes([91; 32]),
+        Digest::from_bytes([92; 32]),
+    );
+    let completed = coordinator
+        .recover_and_seal(
+            &directory,
             fenced.clone(),
             vec![crab_cell_runtime::RecoveryCell {
                 application: fixture.target.application(),
                 authority: authority.clone(),
                 observed: attached[0].clone(),
             }],
+            10_002,
         )
         .await
         .unwrap();
-    assert_eq!(retried[0].value(), attached[0].value());
-    let attached = attached.remove(0);
+    assert_eq!(completed.controls[0].value(), attached[0].value());
+    assert_eq!(
+        completed.sealed.log().phase(),
+        crab_cell_runtime::NodeLogPhase::Sealed
+    );
+    let repeated = coordinator
+        .recover_and_seal(
+            &directory,
+            fenced.clone(),
+            vec![crab_cell_runtime::RecoveryCell {
+                application: fixture.target.application(),
+                authority: authority.clone(),
+                observed: completed.controls[0].clone(),
+            }],
+            10_003,
+        )
+        .await
+        .unwrap();
+    assert_eq!(repeated.sealed, completed.sealed);
+    let attached = repeated.controls.into_iter().next().unwrap();
     let runtime = CellRuntime::new(
         SqlWorkerPool::new(1, 10).unwrap(),
         16 * 1024 * 1024,

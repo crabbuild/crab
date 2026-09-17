@@ -3,9 +3,9 @@ use std::sync::Arc;
 use futures_util::future::join_all;
 
 use crate::{
-    ApplicationId, CellAuthority, Error, FencedNodeSession, NodeLogTransport, RecoveryBase,
-    RecoveryManifestStore, Result, SealRequest, SessionId, TailRequest, Transition,
-    VersionedControl, build_recovery_overlays,
+    ApplicationId, CellAuthority, Digest, Error, FencedNodeSession, NodeDirectory, NodeLogPhase,
+    NodeLogTransport, RecoveryBase, RecoveryManifestStore, Result, SealRequest, SealedNodeLog,
+    SessionId, TailRequest, Transition, VersionedControl, build_recovery_overlays,
 };
 
 /// Verified uncovered suffix gathered after every reachable follower is sealed.
@@ -45,6 +45,12 @@ pub struct RecoveryCoordinator {
     manifests: RecoveryManifestStore,
 }
 
+/// Completed dead-session recovery with every overlay pinned before log seal.
+pub struct CompletedNodeRecovery {
+    pub sealed: SealedNodeLog,
+    pub controls: Vec<VersionedControl>,
+}
+
 impl RecoveryCoordinator {
     #[must_use]
     pub const fn new(recovery: NodeLogRecovery, manifests: RecoveryManifestStore) -> Self {
@@ -63,7 +69,8 @@ impl RecoveryCoordinator {
         fenced: FencedNodeSession,
         cells: Vec<RecoveryCell>,
     ) -> Result<Vec<VersionedControl>> {
-        if fenced.session() != self.recovery.leader_session || cells.is_empty() {
+        self.recovery.validate_fence(&fenced)?;
+        if cells.is_empty() {
             return Err(Error::Node("recovery claim or Cell inventory differs"));
         }
         let mut bases = Vec::with_capacity(cells.len());
@@ -149,10 +156,45 @@ impl RecoveryCoordinator {
         }
         Ok(attached)
     }
+
+    /// Pins every recovered Cell and then atomically seals the claimed node log.
+    pub async fn recover_and_seal(
+        &self,
+        directory: &NodeDirectory,
+        fenced: FencedNodeSession,
+        cells: Vec<RecoveryCell>,
+        now_ms: i64,
+    ) -> Result<CompletedNodeRecovery> {
+        let controls = self.recover(fenced.clone(), cells).await?;
+        let mut manifest = None::<Digest>;
+        for control in &controls {
+            let recovery = control
+                .value()
+                .recovery
+                .as_ref()
+                .ok_or(Error::Control("recovered Cell has no pinned overlay"))?;
+            if recovery.leader_session != fenced.session()
+                || recovery.log_epoch != self.recovery.log_epoch
+            {
+                return Err(Error::Control("recovered Cell overlay scope differs"));
+            }
+            match manifest {
+                None => manifest = Some(recovery.manifest_digest),
+                Some(current) if current == recovery.manifest_digest => {}
+                Some(_) => {
+                    return Err(Error::Control(
+                        "recovered session produced multiple manifests",
+                    ));
+                }
+            }
+        }
+        let sealed = directory.seal_recovery(&fenced, manifest, now_ms).await?;
+        Ok(CompletedNodeRecovery { sealed, controls })
+    }
 }
 
 impl NodeLogRecovery {
-    pub fn new(
+    pub(crate) fn new(
         transport: Arc<dyn NodeLogTransport>,
         leader_session: SessionId,
         log_epoch: u64,
@@ -184,6 +226,54 @@ impl NodeLogRecovery {
             active,
             limits,
         })
+    }
+
+    /// Builds recovery only from the exact CAS-protected failed-session log.
+    pub fn from_fenced(
+        transport: Arc<dyn NodeLogTransport>,
+        fenced: &FencedNodeSession,
+        limits: crab_ltx::Limits,
+    ) -> Result<Self> {
+        let log = fenced
+            .log()
+            .ok_or(Error::Node("fenced session has no enrolled node log"))?;
+        let claim = log
+            .recovery()
+            .ok_or(Error::Node("fenced node log has no recovery claim"))?;
+        if log.phase() != NodeLogPhase::Recovering
+            || claim.claimant() != fenced.claimant()
+            || claim.generation() != fenced.claim_generation()
+            || claim.expires_at_ms() != fenced.claim_expires_at_ms()
+        {
+            return Err(Error::Fenced);
+        }
+        Self::new(
+            transport,
+            fenced.session(),
+            log.epoch(),
+            log.members().to_vec(),
+            log.tiered_through(),
+            log.active(),
+            limits,
+        )
+    }
+
+    fn validate_fence(&self, fenced: &FencedNodeSession) -> Result<()> {
+        let log = fenced.log().ok_or(Error::Fenced)?;
+        let claim = log.recovery().ok_or(Error::Fenced)?;
+        if fenced.session() != self.leader_session
+            || log.phase() != NodeLogPhase::Recovering
+            || log.epoch() != self.log_epoch
+            || log.members() != self.members
+            || log.tiered_through() != self.tiered_through
+            || log.active() != self.active
+            || claim.claimant() != fenced.claimant()
+            || claim.generation() != fenced.claim_generation()
+            || claim.expires_at_ms() != fenced.claim_expires_at_ms()
+        {
+            return Err(Error::Fenced);
+        }
+        Ok(())
     }
 
     /// Seals all reachable members and returns one complete verified witness.

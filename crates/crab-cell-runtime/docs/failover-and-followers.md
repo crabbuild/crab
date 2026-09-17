@@ -154,7 +154,7 @@ recovery path.
 | Strict frame codec plus authoritative session enrollment, activation, coverage, and recovery claims | Follower selection, epoch rotation, and recovery-only startup |
 | Crash-safe follower store plus authenticated remote append/seal/tail transport | Live shipper batching, backpressure, and startup listener ordering |
 | Write-all durability gate with contiguous object watermark | Actor submission and response-gate integration |
-| Complete-witness grouping and immutable recovery manifests | Automated dead-session recovery coordinator |
+| Complete-witness grouping, immutable recovery manifests, and post-pin session seal CAS | Automated dead-session inventory and recovery scheduling |
 | Cell control attachment and takeover consumption of overlays | Graceful drain, retention retirement, and live multi-node proof |
 
 The session record now owns one CAS-protected log epoch, its exact sorted member

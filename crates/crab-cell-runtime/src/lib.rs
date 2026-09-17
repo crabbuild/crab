@@ -91,13 +91,16 @@ pub use maintenance::{
     PersistedWorkInventory, register_maintenance,
 };
 pub use node::{
-    FencedNodeSession, NodeAdvertisement, NodeCapacity, NodeDirectory, VersionedNodeAdvertisement,
+    FencedNodeSession, NodeAdvertisement, NodeCapacity, NodeDirectory, SealedNodeLog,
+    VersionedNodeAdvertisement,
 };
 pub use node_log::{
     CommitTicket, DurabilityGate, DurabilityProof, DurabilitySource, RecoveredCellTail,
     RecoveryBase, build_recovery_overlays,
 };
-pub use node_log_recovery::{NodeLogRecovery, RecoveryCell, RecoveryCoordinator, SealedSession};
+pub use node_log_recovery::{
+    CompletedNodeRecovery, NodeLogRecovery, RecoveryCell, RecoveryCoordinator, SealedSession,
+};
 pub use node_log_state::{NodeLogPhase, NodeLogStatus, NodeRecoveryClaim};
 pub use node_log_transport::{
     AppendRequest, LocalFollowerTransport, NodeLogTransport, SealRequest, TailRequest,

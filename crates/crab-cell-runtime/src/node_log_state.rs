@@ -1,4 +1,4 @@
-use crate::{Error, Result, SessionId};
+use crate::{Digest, Error, Result, SessionId};
 
 pub(crate) const RECOVERY_CLAIM_LIFETIME_MS: i64 = 30_000;
 const MAX_NODE_LOG_MEMBERS: usize = 2;
@@ -107,6 +107,7 @@ pub struct NodeLogStatus {
     active: bool,
     tiered_through: u64,
     recovery: Option<NodeRecoveryClaim>,
+    recovery_manifest: Option<Digest>,
 }
 
 impl NodeLogStatus {
@@ -118,6 +119,7 @@ impl NodeLogStatus {
             active: false,
             tiered_through: 0,
             recovery: None,
+            recovery_manifest: None,
         };
         status.validate(leader)?;
         Ok(status)
@@ -131,6 +133,7 @@ impl NodeLogStatus {
         active: bool,
         tiered_through: u64,
         recovery: Option<NodeRecoveryClaim>,
+        recovery_manifest: Option<Digest>,
     ) -> Result<Self> {
         let status = Self {
             phase,
@@ -139,6 +142,7 @@ impl NodeLogStatus {
             active,
             tiered_through,
             recovery,
+            recovery_manifest,
         };
         status.validate(leader)?;
         Ok(status)
@@ -174,6 +178,11 @@ impl NodeLogStatus {
         self.recovery
     }
 
+    #[must_use]
+    pub const fn recovery_manifest(&self) -> Option<Digest> {
+        self.recovery_manifest
+    }
+
     pub(crate) fn activate(&self, leader: SessionId) -> Result<Self> {
         if self.phase != NodeLogPhase::Open || self.active {
             return Err(Error::Node("node log cannot be activated"));
@@ -185,6 +194,7 @@ impl NodeLogStatus {
             self.members.clone(),
             true,
             self.tiered_through,
+            None,
             None,
         )
     }
@@ -200,6 +210,7 @@ impl NodeLogStatus {
             self.members.clone(),
             self.active,
             through,
+            None,
             None,
         )
     }
@@ -219,6 +230,7 @@ impl NodeLogStatus {
                 self.active,
                 self.tiered_through,
                 Some(NodeRecoveryClaim::new(claimant, 1, now_ms)?),
+                None,
             ),
             (NodeLogPhase::Recovering, Some(current)) if current.claimant == claimant => {
                 if now_ms < current.expires_at_ms {
@@ -232,6 +244,7 @@ impl NodeLogStatus {
                     self.active,
                     self.tiered_through,
                     Some(current.take_over(claimant, now_ms)?),
+                    None,
                 )
             }
             (NodeLogPhase::Recovering, Some(current)) => Self::from_parts(
@@ -242,6 +255,7 @@ impl NodeLogStatus {
                 self.active,
                 self.tiered_through,
                 Some(current.take_over(claimant, now_ms)?),
+                None,
             ),
             _ => Err(Error::Node("node log cannot enter recovery")),
         }
@@ -266,6 +280,33 @@ impl NodeLogStatus {
             self.active,
             self.tiered_through,
             Some(current.renew(claimant, now_ms)?),
+            None,
+        )
+    }
+
+    pub(crate) fn seal_recovery(
+        &self,
+        leader: SessionId,
+        claimant: SessionId,
+        generation: u64,
+        manifest: Option<Digest>,
+    ) -> Result<Self> {
+        let current = self.recovery.ok_or(Error::Fenced)?;
+        if self.phase != NodeLogPhase::Recovering
+            || current.claimant != claimant
+            || current.generation != generation
+        {
+            return Err(Error::Fenced);
+        }
+        Self::from_parts(
+            leader,
+            NodeLogPhase::Sealed,
+            self.epoch,
+            self.members.clone(),
+            self.active,
+            self.tiered_through,
+            None,
+            manifest,
         )
     }
 
@@ -328,11 +369,14 @@ impl NodeLogStatus {
         {
             return Err(Error::Node("node log ensemble is invalid"));
         }
-        match (self.phase, self.recovery) {
-            (NodeLogPhase::Open, None)
-            | (NodeLogPhase::Sealed, None)
-            | (NodeLogPhase::Retired, None) => {}
-            (NodeLogPhase::Recovering, Some(claim)) => claim.validate()?,
+        match (self.phase, self.recovery, self.recovery_manifest) {
+            (NodeLogPhase::Open, None, None) => {}
+            (NodeLogPhase::Recovering, Some(claim), None) => claim.validate()?,
+            (NodeLogPhase::Sealed, None, manifest) | (NodeLogPhase::Retired, None, manifest) => {
+                if manifest.is_some_and(|digest| digest.as_bytes().iter().all(|byte| *byte == 0)) {
+                    return Err(Error::Node("node recovery manifest digest is zero"));
+                }
+            }
             _ => return Err(Error::Node("node log state is invalid")),
         }
         Ok(())
