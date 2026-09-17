@@ -78,17 +78,27 @@ pub trait NodeLogTransport: Send + Sync {
             let mut bytes = 0_usize;
             let mut count = 0_usize;
             for frame in &frames {
-                if count == 4096 || (count != 0 && bytes.saturating_add(frame.len()) > 1 << 20) {
+                let next_bytes = bytes
+                    .checked_add(frame.len())
+                    .ok_or(Error::Node("follower tail page byte count overflow"))?;
+                if count == 4096 || (count != 0 && next_bytes > 1 << 20) {
                     break;
                 }
-                bytes = bytes.saturating_add(frame.len());
+                bytes = next_bytes;
                 count += 1;
             }
-            let next_sequence = (count < frames.len()).then(|| {
-                request
-                    .first_sequence
-                    .saturating_add(u64::try_from(count).unwrap_or(u64::MAX))
-            });
+            let next_sequence = if count < frames.len() {
+                let count = u64::try_from(count)
+                    .map_err(|_| Error::Node("follower tail page frame count overflow"))?;
+                Some(
+                    request
+                        .first_sequence
+                        .checked_add(count)
+                        .ok_or(Error::Node("follower tail page sequence overflow"))?,
+                )
+            } else {
+                None
+            };
             Ok(FollowerTailPage {
                 frames: frames.into_iter().take(count).collect(),
                 next_sequence,
@@ -201,5 +211,69 @@ impl NodeLogTransport for LocalFollowerTransport {
                 )
                 .await
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct LegacyTransport {
+        frames: Vec<Bytes>,
+    }
+
+    impl NodeLogTransport for LegacyTransport {
+        fn append<'a>(
+            &'a self,
+            _member: NodeId,
+            _request: AppendRequest,
+        ) -> BoxFuture<'a, Result<FollowerReceipt>> {
+            Box::pin(async { Err(Error::Node("append is not used by this test")) })
+        }
+
+        fn seal<'a>(
+            &'a self,
+            _member: NodeId,
+            _request: SealRequest,
+        ) -> BoxFuture<'a, Result<FollowerReceipt>> {
+            Box::pin(async { Err(Error::Node("seal is not used by this test")) })
+        }
+
+        fn retire<'a>(
+            &'a self,
+            _member: NodeId,
+            _request: RetireRequest,
+        ) -> BoxFuture<'a, Result<FollowerReceipt>> {
+            Box::pin(async { Err(Error::Node("retire is not used by this test")) })
+        }
+
+        fn tail<'a>(
+            &'a self,
+            _member: NodeId,
+            _request: TailRequest,
+        ) -> BoxFuture<'a, Result<Vec<Bytes>>> {
+            let frames = self.frames.clone();
+            Box::pin(async move { Ok(frames) })
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_tail_fallback_preserves_page_boundaries() {
+        let transport = LegacyTransport {
+            frames: (0..4_097).map(|_| Bytes::from_static(b"frame")).collect(),
+        };
+        let page = transport
+            .tail_page(
+                NodeId::from_bytes([1; 16]),
+                TailRequest {
+                    leader_session: SessionId::from_bytes([2; 16]),
+                    log_epoch: 1,
+                    first_sequence: 10,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.frames.len(), 4_096);
+        assert_eq!(page.next_sequence, Some(4_106));
     }
 }
