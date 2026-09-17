@@ -20,6 +20,13 @@ use crate::core::metrics::Metrics;
 
 const PREPARED_XORB_UPLOAD_CONCURRENCY: usize = 4;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct XetPublicationStats {
+    pub xorbs_uploaded: u64,
+    pub shards_uploaded: u64,
+    pub xorb_bytes_uploaded: u64,
+}
+
 pub(crate) async fn prepare_delta(
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
     base: &crab_metadata::capsule_protocol::RootSnapshot,
@@ -29,13 +36,16 @@ pub(crate) async fn prepare_delta(
     metrics: Option<&Metrics>,
     publish_gc_roots: bool,
     cancel: &CancellationToken,
-) -> Result<crab_metadata::capsule_protocol::PointerCatalog> {
+) -> Result<(
+    crab_metadata::capsule_protocol::PointerCatalog,
+    XetPublicationStats,
+)> {
     use crab_metadata::capsule_protocol::{
         FileCatalogEntry, PointerCatalog, ShardCatalogEntry, XorbCatalogEntry,
     };
 
     if pointers.is_empty() {
-        return Ok(PointerCatalog::new());
+        return Ok((PointerCatalog::new(), XetPublicationStats::default()));
     }
     let view = crab_read::capsule_protocol::open_view_from_root_with_control(
         layout,
@@ -91,7 +101,7 @@ pub(crate) async fn prepare_delta(
         })
         .collect::<Result<Vec<_>>>()?;
     if unresolved.is_empty() {
-        return Ok(PointerCatalog::new());
+        return Ok((PointerCatalog::new(), XetPublicationStats::default()));
     }
     let staging = staging.ok_or_else(|| {
         let (file_hash, size) = unresolved[0];
@@ -107,6 +117,7 @@ pub(crate) async fn prepare_delta(
     let mut shard_session = PushShardSession::new();
     let mut pending_files = Vec::with_capacity(unresolved.len());
     let mut uploaded_xorbs = HashSet::new();
+    let mut xorb_bytes_uploaded = 0_u64;
     let mut prepared_files = Vec::with_capacity(unresolved.len());
     let mut prepared_candidates = Vec::<crab_staging::push_plan::PlannedXorb>::new();
     let mut candidate_indices = HashMap::<MerkleHash, usize>::new();
@@ -310,6 +321,7 @@ pub(crate) async fn prepare_delta(
     for (_, planned_hash, entry, xorb_placements, uploaded_bytes) in verified_candidates {
         if uploaded_bytes > 0 {
             uploaded_xorbs.insert(planned_hash);
+            xorb_bytes_uploaded = xorb_bytes_uploaded.saturating_add(uploaded_bytes);
             if let Some(metrics) = metrics {
                 metrics.add_bytes_uploaded(uploaded_bytes);
             }
@@ -356,6 +368,7 @@ pub(crate) async fn prepare_delta(
                             &mut uploaded_xorbs,
                         )
                         .await?;
+                        xorb_bytes_uploaded = xorb_bytes_uploaded.saturating_add(uploaded_bytes);
                         if let Some(metrics) = metrics {
                             metrics.add_bytes_uploaded(uploaded_bytes);
                         }
@@ -372,6 +385,7 @@ pub(crate) async fn prepare_delta(
                     &mut uploaded_xorbs,
                 )
                 .await?;
+                xorb_bytes_uploaded = xorb_bytes_uploaded.saturating_add(uploaded_bytes);
                 if let Some(metrics) = metrics {
                     metrics.add_bytes_uploaded(uploaded_bytes);
                 }
@@ -409,6 +423,7 @@ pub(crate) async fn prepare_delta(
 
     let shards = shard_session.finalize()?;
     let mut shard_hashes = Vec::with_capacity(shards.len());
+    let mut shards_uploaded = 0_u64;
     for (bytes, hash) in &shards {
         let path = layout.shard_path(hash);
         let bytes = Bytes::from(bytes.clone());
@@ -416,6 +431,9 @@ pub(crate) async fn prepare_delta(
             .store()
             .put_if_absent_verified(&path, bytes.clone())
             .await?;
+        if created {
+            shards_uploaded = shards_uploaded.saturating_add(1);
+        }
         if created && let Some(cache) = caching_store {
             warm_published_cache_object(cache, &path, crab_cache::CacheKey::Shard(*hash), bytes)
                 .await;
@@ -485,7 +503,14 @@ pub(crate) async fn prepare_delta(
         reused_xorbs,
         "prepared capsule-protocol pointer dependency closure"
     );
-    Ok(delta)
+    Ok((
+        delta,
+        XetPublicationStats {
+            xorbs_uploaded: uploaded_xorbs.len() as u64,
+            shards_uploaded,
+            xorb_bytes_uploaded,
+        },
+    ))
 }
 
 async fn publish_built_xorb(

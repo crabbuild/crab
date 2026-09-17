@@ -4166,6 +4166,10 @@ pub struct PushPipeline {
     uploaded_shard_hashes: tokio::sync::Mutex<Vec<MerkleHash>>,
     /// Number of shard payloads that were not already verified on the origin.
     uploaded_shards: std::sync::atomic::AtomicU64,
+    /// Number of xorb payloads successfully accepted by the upload stage.
+    uploaded_xorb_count: std::sync::atomic::AtomicU64,
+    /// Bytes in xorb payloads successfully accepted by the upload stage.
+    uploaded_xorb_bytes: std::sync::atomic::AtomicU64,
     /// Set of chunk hashes classified as "new" (class C) by step 4.
     /// Step 5 only packs chunks in this set. `None` means classification did
     /// not run and every pinned recipe chunk must be packed.
@@ -6706,6 +6710,8 @@ impl PushPipeline {
             connectivity_frontier_tips: tokio::sync::Mutex::new(Vec::new()),
             uploaded_shard_hashes: tokio::sync::Mutex::new(Vec::new()),
             uploaded_shards: std::sync::atomic::AtomicU64::new(0),
+            uploaded_xorb_count: std::sync::atomic::AtomicU64::new(0),
+            uploaded_xorb_bytes: std::sync::atomic::AtomicU64::new(0),
             new_chunk_hashes: tokio::sync::Mutex::new(None),
             planned_xorb_bytes: std::sync::atomic::AtomicU64::new(0),
             planned_git_bytes: std::sync::atomic::AtomicU64::new(0),
@@ -12179,6 +12185,10 @@ impl PushPipeline {
             match handle.await {
                 Ok(Ok((uploaded_xorb, bytes, multipart_progress))) => {
                     uploaded += 1;
+                    self.uploaded_xorb_count
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.uploaded_xorb_bytes
+                        .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
                     // Collected test paths retain the body for cache-warm
                     // coverage. The production stream keeps only remote
                     // identity metadata so its payload permit is reusable.
@@ -16909,11 +16919,15 @@ impl PushPipeline {
             PushResult::new(outcomes)
         };
         let transfer_stats = PushTransferStats {
-            xorbs_uploaded: upload_summary.uploaded_xorbs,
+            xorbs_uploaded: self
+                .uploaded_xorb_count
+                .load(std::sync::atomic::Ordering::Relaxed),
             shards_uploaded: self
                 .uploaded_shards
                 .load(std::sync::atomic::Ordering::Relaxed),
-            xorb_bytes_uploaded: upload_summary.uploaded_bytes,
+            xorb_bytes_uploaded: self
+                .uploaded_xorb_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
         };
         let result = result.with_transfer_stats(transfer_stats);
         Ok(match active_active_commit {

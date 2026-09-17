@@ -16,8 +16,8 @@ use crate::git::pack::{
     install_pack_file_locally_with_timeout,
 };
 use crate::git::push::{
-    PushConfig, PushRejectReason, PushResult, RefPushOutcome, RefUpdate, check_ref_update,
-    duplicate_destination_result,
+    PushConfig, PushRejectReason, PushResult, PushTransferStats, RefPushOutcome, RefUpdate,
+    check_ref_update, duplicate_destination_result,
 };
 use crate::git::remote_helper::PushSpec;
 
@@ -359,6 +359,7 @@ async fn run_inner(
             .into_iter()
             .collect::<Vec<_>>()
     };
+    let mut xet_stats = super::xet_publication::XetPublicationStats::default();
     let publication: Result<Option<Option<crab_coordination::write_coordinator::CommitOutcome>>> =
         async {
             // LFS bytes share the ref visibility boundary with Git and Xet data.
@@ -372,7 +373,7 @@ async fn run_inner(
                 cancel,
             )
             .await?;
-            let pointer_delta = super::xet_publication::prepare_delta(
+            let (pointer_delta, prepared_xet_stats) = super::xet_publication::prepare_delta(
                 &layout,
                 &base,
                 &prepared.pointers,
@@ -383,6 +384,7 @@ async fn run_inner(
                 cancel,
             )
             .await?;
+            xet_stats = prepared_xet_stats;
             if config.protected_push.is_none()
                 && let Some(replication) = config.active_active_replication.as_ref()
             {
@@ -509,7 +511,14 @@ async fn run_inner(
             Some(outcome) => PushResult::new(outcomes).with_active_active_commit(outcome.into()),
             None => PushResult::new(outcomes),
         };
-        return Ok((result, None));
+        return Ok((
+            result.with_transfer_stats(PushTransferStats {
+                xorbs_uploaded: xet_stats.xorbs_uploaded,
+                shards_uploaded: xet_stats.shards_uploaded,
+                xorb_bytes_uploaded: xet_stats.xorb_bytes_uploaded,
+            }),
+            None,
+        ));
     }
     for ref_name in ref_names {
         outcomes.insert(

@@ -881,6 +881,49 @@ mod tests {
         assert!(e2e.journal_root.join(".crab").exists());
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn large_file_publish_reports_xet_transfers() {
+        let git_dir_guard = GitDirOverride::locked_without_env();
+        let tmp = TempDir::new().unwrap();
+        let source_inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+
+        // Use deterministic incompressible bytes so the file crosses the
+        // xorb minimum-run threshold instead of being folded into Git.
+        let mut body = Vec::with_capacity(20 * 1024 * 1024);
+        let mut state = 0x9e37_79b9_u32;
+        for _ in 0..(20 * 1024 * 1024) {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            body.push((state >> 24) as u8);
+        }
+        let objects = vec![("models/large.bin", body)];
+        for (path, object) in &objects {
+            seed_object(&source_inner, "", path, object).await;
+        }
+
+        let e2e =
+            run_ingest_and_assemble(resolved(Arc::clone(&source_inner), ""), &objects, &tmp).await;
+        let target_inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (stats, _, _git_dir_guard) = run_publish_against(
+            Arc::clone(&target_inner),
+            "repos/v2",
+            e2e.staging_root.clone(),
+            e2e.repo_root.clone(),
+            e2e.head_oid.clone(),
+            git_dir_guard,
+        )
+        .await;
+
+        assert!(
+            stats.xorbs_uploaded > 0,
+            "large file must upload an xorb: {stats:?}"
+        );
+        assert!(
+            stats.shards_uploaded > 0,
+            "large file must upload a shard: {stats:?}"
+        );
+        verify_reconstructed_files(&target_inner, "repos/v2", &e2e.repo_root, &objects).await;
+    }
+
     // ── Task 13.4: same-bucket integration ───────────────────────
 
     /// One in-memory store plays both source and target, with
