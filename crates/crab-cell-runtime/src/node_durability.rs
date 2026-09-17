@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
-use tokio::sync::OnceCell;
+use tokio::sync::{Mutex, OnceCell};
 
 use crate::{
     CommitTicket, DurabilityGate, DurabilityProof, DurabilitySource, Error, NodeLeaseGuard,
@@ -36,6 +36,8 @@ pub struct NodeDurability {
     transport: Arc<dyn NodeLogTransport>,
     node_lease: NodeLeaseGuard,
     activated: OnceCell<()>,
+    shutdown: Mutex<()>,
+    closed: std::sync::atomic::AtomicBool,
 }
 
 impl NodeDurability {
@@ -54,7 +56,15 @@ impl NodeDurability {
             transport,
             node_lease,
             activated: OnceCell::new(),
+            shutdown: Mutex::new(()),
+            closed: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Returns whether this epoch has reached the caller's rotation threshold.
+    #[must_use]
+    pub fn needs_rotation(&self, max_issued_frames: u64) -> bool {
+        self.gate.issued_through() >= max_issued_frames
     }
 
     /// Assigns and asynchronously ships one captured commit to every member.
@@ -143,10 +153,17 @@ impl NodeDurability {
 
     /// Drains accepted frames and permanently closes fleet issuance for this epoch.
     pub async fn shutdown(&self) -> Result<()> {
+        let _shutdown = self.shutdown.lock().await;
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
         self.shipper.shutdown().await?;
         let barrier = self.gate.begin_rotation()?;
         crate::node_log::retire_node_log(Arc::clone(&self.transport), &barrier).await?;
-        self.authority.close(&barrier).await
+        self.authority.close(&barrier).await?;
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
     }
 }
 
@@ -353,5 +370,48 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn rotation_threshold_tracks_issued_frames() {
+        let gate = DurabilityGate::new(session(1), node(1), 2, [node(2)]).unwrap();
+        let transport: Arc<dyn NodeLogTransport> = Arc::new(ImmediateTransport);
+        let shipper = NodeLogShipper::new(
+            gate.clone(),
+            Arc::clone(&transport),
+            crab_ltx::Limits::default(),
+        )
+        .unwrap();
+        let authority = Arc::new(RecordingAuthority::default());
+        let durability = NodeDurability::new(gate.clone(), shipper, authority, transport, lease());
+
+        assert!(!durability.needs_rotation(1));
+        gate.issue(1).unwrap();
+        assert!(durability.needs_rotation(1));
+        assert!(!durability.needs_rotation(2));
+    }
+
+    #[tokio::test]
+    async fn shutdown_retries_after_object_coverage_and_is_idempotent() {
+        let gate = DurabilityGate::new(session(1), node(1), 2, [node(2)]).unwrap();
+        let transport: Arc<dyn NodeLogTransport> = Arc::new(ImmediateTransport);
+        let shipper = NodeLogShipper::new(
+            gate.clone(),
+            Arc::clone(&transport),
+            crab_ltx::Limits::default(),
+        )
+        .unwrap();
+        let authority = Arc::new(RecordingAuthority::default());
+        let durability = NodeDurability::new(gate, shipper, authority, transport, lease());
+        let (_directory, cuts) = capture();
+        let ticket = durability.submit(submission(&cuts)).await.unwrap();
+
+        assert!(matches!(
+            durability.shutdown().await,
+            Err(Error::PendingPublication)
+        ));
+        durability.prove_object(ticket).await.unwrap();
+        durability.shutdown().await.unwrap();
+        durability.shutdown().await.unwrap();
     }
 }

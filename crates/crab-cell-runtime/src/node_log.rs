@@ -491,6 +491,12 @@ impl DurabilityGate {
         self.lock().map_or(0, |state| state.tiered_through)
     }
 
+    #[must_use]
+    pub fn issued_through(&self) -> u64 {
+        self.lock()
+            .map_or(0, |state| state.next_sequence.saturating_sub(1))
+    }
+
     /// Stops ticket issuance after the entire old epoch is object-covered.
     pub fn begin_rotation(&self) -> Result<NodeLogRotationBarrier> {
         let mut state = self.lock()?;

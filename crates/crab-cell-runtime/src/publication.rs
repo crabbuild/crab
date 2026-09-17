@@ -10,6 +10,8 @@ const RENEW_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 const SELF_FENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub(crate) type NodeDurabilityBinding = (ApplicationId, std::sync::Arc<NodeDurability>);
+pub(crate) type NodeDurabilitySlot =
+    std::sync::Arc<std::sync::RwLock<Option<NodeDurabilityBinding>>>;
 
 #[derive(Clone)]
 pub(crate) struct CellDurabilitySubmitter {
@@ -17,7 +19,7 @@ pub(crate) struct CellDurabilitySubmitter {
     incarnation: crate::IncarnationId,
     epoch: u64,
     node_lease: Option<crate::NodeLeaseGuard>,
-    node_durability: Option<std::sync::Arc<std::sync::OnceLock<NodeDurabilityBinding>>>,
+    node_durability: Option<NodeDurabilitySlot>,
     telemetry: crate::CellTelemetryHandle,
 }
 
@@ -35,7 +37,7 @@ pub struct CellPublisher {
     appends_since_compaction_check: u8,
     renew_at: std::time::Instant,
     node_lease: Option<crate::NodeLeaseGuard>,
-    node_durability: Option<std::sync::Arc<std::sync::OnceLock<NodeDurabilityBinding>>>,
+    node_durability: Option<NodeDurabilitySlot>,
     telemetry: crate::CellTelemetryHandle,
 }
 
@@ -69,10 +71,7 @@ impl CellPublisher {
         self
     }
 
-    pub(crate) fn with_node_durability_slot(
-        mut self,
-        durability: std::sync::Arc<std::sync::OnceLock<NodeDurabilityBinding>>,
-    ) -> Self {
+    pub(crate) fn with_node_durability_slot(mut self, durability: NodeDurabilitySlot) -> Self {
         self.node_durability = Some(durability);
         self
     }
@@ -680,16 +679,19 @@ impl CellDurabilitySubmitter {
         commit_sequence: u64,
         cuts: &crab_ltx::CaptureBatch,
     ) -> Result<Option<PendingDurability>> {
-        let Some((application, durability)) = self
-            .node_durability
-            .as_ref()
-            .and_then(|durability| durability.get())
+        let Some(slot) = self.node_durability.as_ref() else {
+            return Ok(None);
+        };
+        let Some((application, durability)) = slot
+            .read()
+            .map_err(|_| Error::Control("Cell runtime node durability lock poisoned"))?
+            .clone()
         else {
             return Ok(None);
         };
         self.check_node_lease()?;
         let submission = NodeLogSubmission::new(
-            *application,
+            application,
             self.cell,
             self.incarnation,
             self.epoch,
@@ -704,7 +706,7 @@ impl CellDurabilitySubmitter {
             }
         };
         Ok(Some(PendingDurability {
-            durability: std::sync::Arc::clone(durability),
+            durability: std::sync::Arc::clone(&durability),
             ticket,
             submitted_at: std::time::Instant::now(),
             telemetry: self.telemetry.clone(),

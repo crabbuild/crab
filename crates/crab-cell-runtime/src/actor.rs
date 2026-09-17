@@ -18,7 +18,7 @@ pub use handle::CellHandle;
 use handle::{CellAdmission, WorkAdmission};
 
 use crate::executor::{MAX_PENDING_PUBLICATIONS, PENDING_PUBLICATION_HIGH_WATER_BYTES};
-use crate::publication::{CellDurabilitySubmitter, NodeDurabilityBinding, PendingDurability};
+use crate::publication::{CellDurabilitySubmitter, NodeDurabilitySlot, PendingDurability};
 use crate::{
     ApplicationId, CatalogProof, CellAuthority, CellId, CellPublisher, Digest, Error,
     InboxDelivery, MigrationOutcome, MigrationPlan, MutationIdentity, NodeDurability,
@@ -123,7 +123,7 @@ pub(super) struct RuntimeInner {
     pool: SqlWorkerPool,
     replica_host: crab_ltx::Host,
     node_lease: Arc<RuntimeNodeLease>,
-    node_durability: Arc<OnceLock<NodeDurabilityBinding>>,
+    node_durability: NodeDurabilitySlot,
     telemetry: crate::CellTelemetryHandle,
     unpublished_node_log_bytes: Arc<AtomicU64>,
 }
@@ -237,7 +237,7 @@ impl CellRuntime {
                 pool,
                 replica_host,
                 node_lease,
-                node_durability: Arc::new(OnceLock::new()),
+                node_durability: Arc::new(std::sync::RwLock::new(None)),
                 telemetry: crate::CellTelemetryHandle::default(),
                 unpublished_node_log_bytes,
             }),
@@ -270,10 +270,56 @@ impl CellRuntime {
         durability: Arc<NodeDurability>,
     ) -> crate::Result<()> {
         self.ensure_running()?;
+        let mut slot = self
+            .inner
+            .node_durability
+            .write()
+            .map_err(|_| Error::Control("Cell runtime node durability lock poisoned"))?;
+        if slot.is_some() {
+            return Err(Error::Control(
+                "Cell runtime node durability was initialized twice",
+            ));
+        }
+        *slot = Some((application, durability));
+        Ok(())
+    }
+
+    /// Returns the currently installed node-log durability binding.
+    #[must_use]
+    pub fn node_durability(&self) -> Option<(ApplicationId, Arc<NodeDurability>)> {
         self.inner
             .node_durability
-            .set((application, durability))
-            .map_err(|_| Error::Control("Cell runtime node durability was initialized twice"))
+            .read()
+            .ok()
+            .and_then(|slot| slot.clone())
+    }
+
+    /// Replaces the active node-log durability binding after an epoch close.
+    pub fn replace_node_durability(
+        &self,
+        application: ApplicationId,
+        durability: Arc<NodeDurability>,
+    ) -> crate::Result<Arc<NodeDurability>> {
+        self.ensure_running()?;
+        let mut slot = self
+            .inner
+            .node_durability
+            .write()
+            .map_err(|_| Error::Control("Cell runtime node durability lock poisoned"))?;
+        let Some((installed_application, _)) = slot.as_ref() else {
+            return Err(Error::Control(
+                "Cell runtime node durability is not installed",
+            ));
+        };
+        if *installed_application != application {
+            return Err(Error::Control(
+                "Cell runtime node durability application changed",
+            ));
+        }
+        let (_, previous) = slot
+            .replace((application, durability))
+            .ok_or(Error::Control("Cell runtime node durability disappeared"))?;
+        Ok(previous)
     }
 
     /// Stops admission, drains accepted work, closes every Cell, and releases ownership.
@@ -295,7 +341,7 @@ impl CellRuntime {
             .map_err(|_| Error::RuntimeClosed)?;
         let drain = response.await.map_err(|_| Error::RuntimeClosed)?;
         let workers = self.inner.pool.shutdown().await;
-        let durability = match self.inner.node_durability.get() {
+        let durability = match self.node_durability() {
             Some((_, durability)) => durability.shutdown().await,
             None => Ok(()),
         };

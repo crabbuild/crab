@@ -555,6 +555,52 @@ async fn node_byte_reservation_rejects_overcommit_and_releases_capacity() {
     runtime.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_replaces_node_durability_binding_for_a_new_epoch() {
+    let fixture = fixture_for(b"node-durability-rotation");
+    let session = SessionId::from_bytes([60; 16]);
+    let leader = NodeId::from_bytes([61; 16]);
+    let follower = NodeId::from_bytes([62; 16]);
+    let runtime = CellRuntime::new_with_replica_host_requiring_node_lease(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        2 * 1024 * 1024,
+        session,
+        ReplicaHost::default(),
+    )
+    .unwrap();
+    let lease = NodeLeaseGuard::new(0, 60_000).unwrap();
+    runtime.install_node_lease(lease.clone()).unwrap();
+    let transport: Arc<dyn NodeLogTransport> = Arc::new(TestNodeTransport(None));
+    let make_durability = |log_epoch| {
+        let gate = DurabilityGate::new(session, leader, log_epoch, [follower]).unwrap();
+        let shipper =
+            NodeLogShipper::new(gate.clone(), Arc::clone(&transport), Limits::default()).unwrap();
+        let authority: Arc<dyn NodeLogAuthority> = Arc::new(TestNodeAuthority::default());
+        Arc::new(NodeDurability::new(
+            gate,
+            shipper,
+            authority,
+            Arc::clone(&transport),
+            lease.clone(),
+        ))
+    };
+    let first = make_durability(1);
+    runtime
+        .install_node_durability(fixture.target.application(), Arc::clone(&first))
+        .unwrap();
+    let second = make_durability(2);
+
+    let previous = runtime
+        .replace_node_durability(fixture.target.application(), Arc::clone(&second))
+        .unwrap();
+
+    assert!(Arc::ptr_eq(&previous, &first));
+    let (application, current) = runtime.node_durability().unwrap();
+    assert_eq!(application, fixture.target.application());
+    assert!(Arc::ptr_eq(&current, &second));
+    runtime.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn fleet_runtime_stays_fenced_until_one_live_node_lease_is_installed() {
     let session = SessionId::from_bytes([41; 16]);

@@ -10,7 +10,7 @@ before a successor opens SQLite.
 | Content type | Low-level target design |
 | Audience | `crab-ltx`, `crab-cell-runtime`, and `crab-http-server` implementers |
 | Goal | Define the persistence, wire, gating, recovery, lifecycle, and proof contracts needed for Celld-style follower durability |
-| Status | Non-streaming failover, bounded hot-Cell pipelining, and state-observing stream gating implemented; target-load and extended fault qualification remain |
+| Status | Non-streaming failover, bounded hot-Cell pipelining, state-observing stream gating, and online epoch rotation implemented; target-load and extended fault qualification remain |
 | Reference | Celld commit `10cb1303dac710dcb3b557e318e08c855261f68b` |
 
 [Back to the Cell runtime index](README.md)
@@ -152,7 +152,7 @@ recovery path.
 
 | Working now | Remaining target gaps |
 | --- | --- |
-| Strict frame codec plus capacity- and failure-domain-aware deterministic selection, retrying automatic enrollment, activation, coverage, recovery claims, object-covered epoch-rotation primitives, and clean log close | Online epoch-rotation controller must be wired into the long-lived HTTP runtime; today the server rotates/clears the active epoch during drain/shutdown |
+| Strict frame codec plus capacity- and failure-domain-aware deterministic selection, retrying automatic enrollment, activation, coverage, recovery claims, object-covered epoch rotation, and clean log close | Signed small/medium/large live runs and the extended fault/telemetry matrix |
 | Crash-safe, node-budgeted follower store under a persisted physical `NodeId`, authenticated remote append/seal/tail/retire transport, a bounded node-wide batched shipper, a recovery-first management-listener lifecycle, and startup lane scrub/quarantine | None for this slice |
 | Authoritative create and refresh drive a terminal monotonic node-lease guard; admission, actor dispatch, Cell-control CAS, durability proof, and output acceptance all check it | None for the current non-streaming Cell API |
 | Write-all durability gate, first-fsynced-batch activation, bounded dual-watermark command continuation, ordered object publication, object fallback, schema-migration barriers, and contiguous authoritative object watermark | None for this slice |
@@ -655,6 +655,17 @@ it retains inert data, rejects future appends after the authority CAS, and is
 collected later. A successful retirement response with any other watermark is
 a protocol error and blocks the CAS.
 
+The long-lived HTTP runtime applies the same barrier when the current epoch
+reaches `1_000_000` issued node-log frames. A five-second controller observes
+the active binding, closes it through `NodeDurability::shutdown` (which waits
+for object coverage and is idempotent), recruits the next epoch, and atomically
+replaces the runtime binding. New Cell submissions read the current binding at
+the start of each durability attempt; a replacement therefore cannot create a
+second SQLite writer or a second Cell-control CAS owner. If recruitment is
+temporarily unavailable, the server keeps serving through the object proof
+path and retries while the node lease remains healthy. A shutdown or lease
+fence cancels the controller and closes whichever binding is current.
+
 ## Release responses through one gate
 
 Each SQLite commit produces a monotonic local `CommitTicket`. The ticket binds
@@ -826,8 +837,8 @@ The shorter name **dual-head** refers only to these two publication watermarks;
 it does not imply two independent root writers. A true dual-head publication
 graph is deliberately deferred: it would add another CAS owner, reordering
 state, and recovery surface without improving the one-writer contract. The next
-durability delivery is the online epoch-rotation controller, not a second
-publication head.
+durability work is qualification across signed node profiles and the extended
+fault matrix, not a second publication head.
 
 State-observing streaming is delivered separately from publication. The first
 Rust API reads mutable Cell state through `CellStateStream`; it adds no stream

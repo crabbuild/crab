@@ -61,6 +61,8 @@ const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(110);
 const RELEASE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const NODE_LOG_RECRUIT_INTERVAL: Duration = Duration::from_secs(3);
 const NODE_LOG_LIVE_NODE_LIMIT: usize = 1_024;
+const NODE_LOG_ROTATION_INTERVAL: Duration = Duration::from_secs(5);
+const NODE_LOG_ROTATION_FRAMES: u64 = 1_000_000;
 const RETIRED_FOLLOWER_COLLECTION_INTERVAL: Duration = Duration::from_secs(60);
 const RETIRED_FOLLOWER_GRACE_MS: i64 = 10 * 60 * 1_000;
 const RETIRED_FOLLOWER_BATCH: usize = 64;
@@ -1004,6 +1006,25 @@ pub async fn serve(config: Config) -> Result<()> {
         )
         .await
     });
+    let rotation_publisher = Arc::clone(&node_publisher);
+    let rotation_runtime = server.cell_runtime.clone();
+    let rotation_transport = Arc::clone(
+        server
+            .node_log_transport
+            .as_ref()
+            .ok_or(crate::Error::Config("node-log transport is unavailable"))?,
+    );
+    let rotation_cancellation = cancellation.clone();
+    let durability_rotator = tokio::spawn(async move {
+        rotate_node_durability(
+            rotation_publisher,
+            rotation_runtime,
+            durability_application,
+            rotation_transport,
+            rotation_cancellation,
+        )
+        .await
+    });
     let follower_collection_store = follower_store;
     let follower_collection_directory = directory.clone();
     let follower_collection_cancellation = cancellation.clone();
@@ -1092,6 +1113,10 @@ pub async fn serve(config: Config) -> Result<()> {
             Ok(result) => result,
             Err(error) => Err(error.into()),
         };
+        let durability_rotator = match durability_rotator.await {
+            Ok(result) => result,
+            Err(error) => Err(error.into()),
+        };
         let follower_collection = match follower_collection.await {
             Ok(result) => result,
             Err(error) => Err(error.into()),
@@ -1136,6 +1161,7 @@ pub async fn serve(config: Config) -> Result<()> {
             .and(scheduler)
             .and(release_watch)
             .and(durability_recruiter)
+            .and(durability_rotator)
             .and(follower_collection)
             .and(maintenance)
             .and(runtimes)
@@ -1219,6 +1245,78 @@ async fn recruit_node_durability(
             () = cancellation.cancelled() => return Ok(()),
             () = tokio::time::sleep(NODE_LOG_RECRUIT_INTERVAL) => {}
         }
+    }
+}
+
+async fn rotate_node_durability(
+    publisher: Arc<crate::peer::NodePublisher>,
+    runtime: CellRuntime,
+    application: crab_cell_runtime::ApplicationId,
+    transport: Arc<dyn crab_cell_runtime::NodeLogTransport>,
+    cancellation: CancellationToken,
+) -> Result<()> {
+    let limits = crate::cells::repository_replica_limits();
+    loop {
+        tokio::select! {
+            () = cancellation.cancelled() => return Ok(()),
+            () = tokio::time::sleep(NODE_LOG_ROTATION_INTERVAL) => {}
+        }
+        let Some((installed_application, durability)) = runtime.node_durability() else {
+            return Ok(());
+        };
+        if installed_application != application {
+            return Err(crate::Error::Config(
+                "node-log durability application changed during rotation",
+            ));
+        }
+        if !durability.needs_rotation(NODE_LOG_ROTATION_FRAMES) {
+            continue;
+        }
+        loop {
+            match durability.shutdown().await {
+                Ok(()) => break,
+                Err(crab_cell_runtime::Error::PendingPublication) => {
+                    tokio::select! {
+                        () = cancellation.cancelled() => return Ok(()),
+                        () = tokio::time::sleep(NODE_LOG_RECRUIT_INTERVAL) => {}
+                    }
+                }
+                Err(error) => return Err(crate::Error::Cell(error)),
+            }
+        }
+        if cancellation.is_cancelled() {
+            return Ok(());
+        }
+        let replacement = loop {
+            match publisher
+                .recruit_node_durability(
+                    Arc::clone(&transport),
+                    limits,
+                    limits.max_capture_bytes,
+                    NODE_LOG_LIVE_NODE_LIMIT,
+                )
+                .await
+            {
+                Ok(Some(durability)) => break durability,
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(error = %error, "node-log epoch rotation recruitment failed");
+                }
+            }
+            tokio::select! {
+                () = cancellation.cancelled() => return Ok(()),
+                () = tokio::time::sleep(NODE_LOG_RECRUIT_INTERVAL) => {}
+            }
+        };
+        if cancellation.is_cancelled() {
+            replacement.shutdown().await?;
+            return Ok(());
+        }
+        if let Err(error) = runtime.replace_node_durability(application, Arc::clone(&replacement)) {
+            replacement.shutdown().await?;
+            return Err(crate::Error::Cell(error));
+        }
+        tracing::info!("node-log epoch rotated after object coverage");
     }
 }
 
