@@ -219,12 +219,10 @@ fn s3_class_str(class: StorageClass) -> &'static str {
 /// Implements both [`LifecycleProvider`] (lifecycle rule CRUD) and
 /// [`RestoreBackend`] (archive restore + state queries).
 ///
-/// # Credential adapter
-///
-/// The real integration with `auth::CredentialProvider` will be wired
-/// when the auth adapter shim is available. For now the client is built
-/// from the default AWS SDK credential chain (environment variables,
-/// `~/.aws/credentials`, IMDS, etc.).
+/// The runtime constructor uses the AWS SDK default credential chain and
+/// honors Crab's standard `AWS_ENDPOINT_URL_S3`/`AWS_ENDPOINT_URL` override.
+/// The infallible constructor remains useful for rendering and tests; callers
+/// that perform remote operations should use [`Self::from_env`].
 pub struct S3LifecycleProvider {
     client: aws_sdk_s3::Client,
     bucket: String,
@@ -233,12 +231,9 @@ pub struct S3LifecycleProvider {
 impl S3LifecycleProvider {
     /// Build an S3 lifecycle provider for the given bucket and region.
     ///
-    /// Uses the default AWS credential chain. The credential adapter
-    /// from `auth::CredentialProvider` will be wired in a follow-up
-    /// task.
-    // TODO(crab-storage-economy): wire `auth::CredentialProvider` via
-    // `aws_credential_types::provider::ProvideCredentials` adapter when
-    // the auth shim is available.
+    /// Build a provider from an already selected region without resolving
+    /// credentials. This constructor is retained for SDK-client tests and
+    /// rendering-only callers.
     pub fn new(bucket: String, region: String) -> Self {
         let sdk_config = aws_sdk_s3::config::Builder::new()
             .region(aws_sdk_s3::config::Region::new(region))
@@ -246,6 +241,28 @@ impl S3LifecycleProvider {
             .build();
         let client = aws_sdk_s3::Client::from_conf(sdk_config);
         Self { client, bucket }
+    }
+
+    /// Build an authenticated provider from the AWS SDK default chain.
+    ///
+    /// The endpoint override is applied to the lifecycle client as well as
+    /// the object-store client, which keeps tier operations working against
+    /// S3-compatible backends such as RustFS and MinIO. The SDK credential
+    /// chain remains lazy; missing credentials surface on the first request.
+    pub async fn from_env(bucket: String, region: String) -> Result<Self> {
+        let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new(region));
+        if let Some(endpoint) = crab_storage::s3_endpoint_from_env() {
+            loader = loader.endpoint_url(endpoint);
+        }
+        let config = loader.load().await;
+        if config.credentials_provider().is_none() {
+            return Err(CrabError::NoCredentials);
+        }
+        Ok(Self {
+            client: aws_sdk_s3::Client::new(&config),
+            bucket,
+        })
     }
 
     /// Build an S3 lifecycle provider from an existing SDK client.

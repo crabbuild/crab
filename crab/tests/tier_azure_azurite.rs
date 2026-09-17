@@ -1,6 +1,9 @@
-//! Integration tests for the Azure lifecycle provider against Azurite.
+//! Integration tests for the Azure lifecycle provider.
 //!
-//! Requires Azurite running on `http://127.0.0.1:10000` (blob service).
+//! Azurite only provides the Blob data plane. Lifecycle policy calls use the
+//! Azure Resource Manager endpoint and therefore require a real Azure
+//! subscription plus a credential. The ignored remote tests below are live
+//! provider checks; the pure rendering and capability checks run locally.
 //! Start it with:
 //! ```sh
 //! docker run -d --name azurite -p 10000:10000 -p 10001:10001 -p 10002:10002 \
@@ -15,6 +18,7 @@
 //!
 //! Run with:
 //! ```sh
+//! cargo test --features tier-azure --test tier_azure_azurite
 //! cargo test --features tier-azure --test tier_azure_azurite -- --ignored
 //! ```
 
@@ -96,16 +100,25 @@ async fn render_produces_valid_json() {
     assert_eq!(rules.len(), 1);
 }
 
-/// Verify `cas_guard` returns an ETag guard.
+/// Build a live provider from the default Azure credential chain.
+///
+/// The ignored tests intentionally skip when the required account,
+/// subscription, or resource-group variables are absent, so local CI never
+/// attempts a cloud request by accident.
+fn live_provider() -> Option<AzureLifecycleProvider> {
+    let account = std::env::var("AZURE_STORAGE_ACCOUNT").ok()?;
+    let provider = AzureLifecycleProvider::from_env(account, "crab-test-container".into()).ok()?;
+    Some(provider)
+}
+
+/// Verify `cas_guard` returns an ETag guard from Azure Resource Manager.
 #[ignore]
 #[tokio::test]
 async fn cas_guard_returns_etag() {
-    let provider = AzureLifecycleProvider::new(
-        "devstoreaccount1".into(),
-        "testcontainer".into(),
-        "sub-0000".into(),
-        "rg-test".into(),
-    );
+    let Some(provider) = live_provider() else {
+        eprintln!("Azure lifecycle env is incomplete — skipping live guard test");
+        return;
+    };
 
     let guard = provider
         .cas_guard()
@@ -162,16 +175,14 @@ async fn supported_tiers_empty_for_non_archive_classes() {
     }
 }
 
-/// Verify restore stub returns a handle.
+/// Verify Azure archive restore submits a blob-tier request.
 #[ignore]
 #[tokio::test]
 async fn restore_returns_handle() {
-    let provider = AzureLifecycleProvider::new(
-        "devstoreaccount1".into(),
-        "testcontainer".into(),
-        "sub-0000".into(),
-        "rg-test".into(),
-    );
+    let Some(provider) = live_provider() else {
+        eprintln!("Azure lifecycle env is incomplete — skipping live restore test");
+        return;
+    };
 
     let handle = provider
         .restore(
@@ -187,16 +198,14 @@ async fn restore_returns_handle() {
     );
 }
 
-/// Verify restore state stub returns NotRequested.
+/// Verify Azure archive restore state is read from blob response headers.
 #[ignore]
 #[tokio::test]
 async fn restore_state_returns_not_requested() {
-    let provider = AzureLifecycleProvider::new(
-        "devstoreaccount1".into(),
-        "testcontainer".into(),
-        "sub-0000".into(),
-        "rg-test".into(),
-    );
+    let Some(provider) = live_provider() else {
+        eprintln!("Azure lifecycle env is incomplete — skipping live state test");
+        return;
+    };
 
     let state = provider
         .state(&"some/blob/path".to_string())
