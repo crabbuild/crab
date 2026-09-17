@@ -5,8 +5,8 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Digest, Error, NodeLogPhase, NodeLogRotationBarrier, NodeLogStatus, NodeRecoveryClaim, Result,
-    SessionId,
+    Digest, Error, NodeId, NodeLogPhase, NodeLogRotationBarrier, NodeLogStatus, NodeRecoveryClaim,
+    Result, SessionId,
 };
 
 const MAX_NODE_BYTES: u64 = 64 * 1024;
@@ -36,6 +36,7 @@ pub struct NodeCapacity {
 /// Signed, short-lived identity and capacity advertisement for one node session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NodeAdvertisement {
+    node: NodeId,
     session: SessionId,
     endpoint: String,
     fleet: Digest,
@@ -61,6 +62,7 @@ impl NodeAdvertisement {
         reason = "all signed identity fields stay explicit"
     )]
     pub fn sign(
+        node: NodeId,
         session: SessionId,
         endpoint: String,
         fleet: Digest,
@@ -76,6 +78,7 @@ impl NodeAdvertisement {
         capacity: NodeCapacity,
     ) -> Result<Self> {
         let mut advertisement = Self {
+            node,
             session,
             endpoint,
             fleet,
@@ -96,6 +99,11 @@ impl NodeAdvertisement {
         advertisement.validate_shape()?;
         advertisement.signature = signing_key.sign(&advertisement.signing_bytes()?).to_bytes();
         Ok(advertisement)
+    }
+
+    #[must_use]
+    pub const fn node(&self) -> NodeId {
+        self.node
     }
 
     #[must_use]
@@ -202,7 +210,8 @@ impl NodeAdvertisement {
     }
 
     fn validate_shape(&self) -> Result<()> {
-        if self.session.as_bytes().iter().all(|byte| *byte == 0)
+        if self.node.as_bytes().iter().all(|byte| *byte == 0)
+            || self.session.as_bytes().iter().all(|byte| *byte == 0)
             || self.fleet.as_bytes().iter().all(|byte| *byte == 0)
             || self.certificate.as_bytes().iter().all(|byte| *byte == 0)
             || self.image.as_bytes().iter().all(|byte| *byte == 0)
@@ -223,7 +232,7 @@ impl NodeAdvertisement {
             return Err(Error::Node("advertisement progress or time is invalid"));
         }
         if let Some(log) = &self.log {
-            log.validate(self.session)?;
+            log.validate(self.node)?;
             if log.phase() != NodeLogPhase::Open || log.recovery().is_some() {
                 return Err(Error::Node("live node advertisement has a terminal log"));
             }
@@ -277,6 +286,7 @@ pub struct VersionedNodeAdvertisement {
 /// Proof that the exact predecessor session was atomically fenced after expiry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FencedNodeSession {
+    node: NodeId,
     session: SessionId,
     claimant: SessionId,
     claim_generation: u64,
@@ -285,6 +295,11 @@ pub struct FencedNodeSession {
 }
 
 impl FencedNodeSession {
+    #[must_use]
+    pub const fn node(&self) -> NodeId {
+        self.node
+    }
+
     #[must_use]
     pub const fn session(&self) -> SessionId {
         self.session
@@ -505,7 +520,7 @@ impl NodeDirectory {
                 {
                     return tombstone.fenced();
                 }
-                tombstone.claim(claimant, now_ms)?
+                (*tombstone).claim(claimant, now_ms)?
             }
             NodeRecord::Advertisement(advertisement) => {
                 self.validate_scope(&advertisement)?;
@@ -516,6 +531,7 @@ impl NodeDirectory {
                 }
                 NodeTombstone::new(
                     session,
+                    advertisement.node,
                     advertisement.expires_at_ms,
                     now_ms,
                     None,
@@ -665,7 +681,7 @@ impl NodeDirectory {
         else {
             return Err(Error::Fenced);
         };
-        let renewed = current.renew(fenced, now_ms)?;
+        let renewed = (*current).renew(fenced, now_ms)?;
         let proof = renewed.fenced()?;
         self.layout
             .store()
@@ -695,7 +711,7 @@ impl NodeDirectory {
                 log: log.clone(),
             });
         }
-        let sealed = current.seal(fenced, recovery_manifest, now_ms)?;
+        let sealed = (*current).seal(fenced, recovery_manifest, now_ms)?;
         let log = sealed
             .log
             .clone()
@@ -734,7 +750,7 @@ impl NodeDirectory {
     pub async fn authorize_log_append(
         &self,
         leader: SessionId,
-        member: SessionId,
+        member: NodeId,
         log_epoch: u64,
         now_ms: i64,
     ) -> Result<NodeLogStatus> {
@@ -749,7 +765,7 @@ impl NodeDirectory {
             .ok_or(Error::PeerAuthorization(
                 "node-log leader has no enrolled log",
             ))?;
-        log.permits_append(leader, member, log_epoch)?;
+        log.permits_append(current.advertisement.node, member, log_epoch)?;
         Ok(log.clone())
     }
 
@@ -757,7 +773,7 @@ impl NodeDirectory {
     pub async fn authorize_log_retire(
         &self,
         leader: SessionId,
-        member: SessionId,
+        member: NodeId,
         log_epoch: u64,
         covered_through: u64,
         now_ms: i64,
@@ -778,7 +794,7 @@ impl NodeDirectory {
         &self,
         leader: SessionId,
         claimant: SessionId,
-        member: SessionId,
+        member: NodeId,
         log_epoch: u64,
         now_ms: i64,
     ) -> Result<NodeLogStatus> {
@@ -792,7 +808,7 @@ impl NodeDirectory {
         let log = tombstone.log.as_ref().ok_or(Error::PeerAuthorization(
             "node-log leader has no recovery log",
         ))?;
-        log.permits_recovery_read(leader, claimant, member, log_epoch, now_ms)?;
+        log.permits_recovery_read(tombstone.node, claimant, member, log_epoch, now_ms)?;
         Ok(log.clone())
     }
 
@@ -802,8 +818,33 @@ impl NodeDirectory {
     /// foreign live records fail closed so maintenance cannot mistake an active
     /// incompatible fleet for an offline deployment.
     pub async fn live(&self, now_ms: i64, limit: usize) -> Result<Vec<NodeAdvertisement>> {
-        self.scan_advertisements(now_ms, limit, AdvertisementScan::LiveRelease)
-            .await
+        let advertisements = self
+            .scan_advertisements(now_ms, limit, AdvertisementScan::LiveRelease)
+            .await?;
+        if advertisements.iter().enumerate().any(|(index, left)| {
+            advertisements[index + 1..]
+                .iter()
+                .any(|right| left.node == right.node)
+        }) {
+            return Err(Error::Node("multiple live sessions advertise one node"));
+        }
+        Ok(advertisements)
+    }
+
+    /// Resolves a stable physical node to its one current live boot session.
+    pub async fn resolve_node(
+        &self,
+        node: NodeId,
+        now_ms: i64,
+    ) -> Result<Option<NodeAdvertisement>> {
+        if node.as_bytes().iter().all(|byte| *byte == 0) {
+            return Err(Error::Node("node identity is zero"));
+        }
+        Ok(self
+            .live(now_ms, MAX_STALE_COLLECTION_ITEMS)
+            .await?
+            .into_iter()
+            .find(|advertisement| advertisement.node == node))
     }
 
     /// Selects the exact deterministic follower ensemble from current live capacity.
@@ -816,14 +857,16 @@ impl NodeDirectory {
         required_follower_bytes: u64,
         now_ms: i64,
         limit: usize,
-    ) -> Result<Vec<SessionId>> {
+    ) -> Result<Vec<NodeId>> {
         if required_follower_bytes == 0 {
             return Err(Error::Node("node-log follower byte requirement is zero"));
         }
         let live = self.live(now_ms, limit).await?;
-        if !live.iter().any(|candidate| candidate.session == leader) {
-            return Err(Error::Node("node-log leader is not live"));
-        }
+        let leader_node = live
+            .iter()
+            .find(|candidate| candidate.session == leader)
+            .map(|candidate| candidate.node)
+            .ok_or(Error::Node("node-log leader is not live"))?;
         let desired = live
             .len()
             .saturating_sub(1)
@@ -834,7 +877,7 @@ impl NodeDirectory {
         let mut eligible = live
             .iter()
             .filter(|candidate| {
-                candidate.session != leader
+                candidate.node != leader_node
                     && candidate.capacity.log_protocol == NODE_LOG_PROTOCOL_VERSION
                     && candidate.capacity.follower_free_bytes >= required_follower_bytes
                     && candidate.capacity.free_memory_bytes != 0
@@ -845,22 +888,22 @@ impl NodeDirectory {
                 let mut hasher = blake3::Hasher::new();
                 hasher.update(NODE_LOG_SELECTION_DOMAIN);
                 hasher.update(leader.as_bytes());
-                hasher.update(candidate.session.as_bytes());
-                (candidate.session, *hasher.finalize().as_bytes())
+                hasher.update(candidate.node.as_bytes());
+                (candidate.node, *hasher.finalize().as_bytes())
             })
             .collect::<Vec<_>>();
         if eligible.len() < desired {
             return Ok(Vec::new());
         }
-        eligible.sort_unstable_by(|(left_session, left_score), (right_session, right_score)| {
+        eligible.sort_unstable_by(|(left_node, left_score), (right_node, right_score)| {
             right_score
                 .cmp(left_score)
-                .then_with(|| left_session.as_bytes().cmp(right_session.as_bytes()))
+                .then_with(|| left_node.as_bytes().cmp(right_node.as_bytes()))
         });
         let mut selected = eligible
             .into_iter()
             .take(desired)
-            .map(|(session, _)| session)
+            .map(|(node, _)| node)
             .collect::<Vec<_>>();
         selected.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
         Ok(selected)
@@ -975,6 +1018,7 @@ impl NodeDirectory {
                 {
                     let tombstone = NodeTombstone::new(
                         advertisement.session,
+                        advertisement.node,
                         advertisement.expires_at_ms,
                         now_ms,
                         None,
@@ -1023,6 +1067,7 @@ impl NodeDirectory {
             .node_path(observed.advertisement.session.as_bytes());
         let tombstone = NodeTombstone::new(
             observed.advertisement.session,
+            observed.advertisement.node,
             observed.advertisement.expires_at_ms,
             now_ms,
             None,
@@ -1174,7 +1219,7 @@ impl NodeDirectory {
             .generation
             .checked_add(1)
             .ok_or(Error::Node("node session generation overflow"))?;
-        next.log = Some(NodeLogStatus::open(next.session, log_epoch, members)?);
+        next.log = Some(NodeLogStatus::open(next.node, log_epoch, members)?);
         self.update_advertisement(observed, next, now_ms).await
     }
 
@@ -1190,7 +1235,7 @@ impl NodeDirectory {
             .log
             .as_ref()
             .ok_or(Error::Node("node session has no enrolled log"))?
-            .activate(observed.advertisement.session)?;
+            .activate(observed.advertisement.node)?;
         let mut next = observed.advertisement.clone();
         next.generation = next
             .generation
@@ -1213,7 +1258,7 @@ impl NodeDirectory {
             .log
             .as_ref()
             .ok_or(Error::Node("node session has no enrolled log"))?
-            .advance_tiered(observed.advertisement.session, tiered_through)?;
+            .advance_tiered(observed.advertisement.node, tiered_through)?;
         let mut next = observed.advertisement.clone();
         next.generation = next
             .generation
@@ -1265,7 +1310,7 @@ impl NodeDirectory {
             .generation
             .checked_add(1)
             .ok_or(Error::Node("node session generation overflow"))?;
-        next.log = Some(NodeLogStatus::open(next.session, next_epoch, members)?);
+        next.log = Some(NodeLogStatus::open(next.node, next_epoch, members)?);
         self.update_advertisement(observed, next, now_ms).await
     }
 
@@ -1357,7 +1402,7 @@ fn validate_record_path(
 
 enum NodeRecord {
     Advertisement(Box<NodeAdvertisement>),
-    Tombstone(NodeTombstone),
+    Tombstone(Box<NodeTombstone>),
 }
 
 impl NodeRecord {
@@ -1365,7 +1410,9 @@ impl NodeRecord {
         if let Ok(advertisement) = NodeAdvertisement::decode_canonical(bytes) {
             return Ok(Self::Advertisement(Box::new(advertisement)));
         }
-        Ok(Self::Tombstone(NodeTombstone::decode_canonical(bytes)?))
+        Ok(Self::Tombstone(Box::new(NodeTombstone::decode_canonical(
+            bytes,
+        )?)))
     }
 
     const fn session(&self) -> SessionId {
@@ -1378,6 +1425,7 @@ impl NodeRecord {
 
 struct NodeTombstone {
     session: SessionId,
+    node: NodeId,
     expires_at_ms: i64,
     retired_at_ms: i64,
     claimant: Option<SessionId>,
@@ -1389,6 +1437,7 @@ struct NodeTombstone {
 impl NodeTombstone {
     fn new(
         session: SessionId,
+        node: NodeId,
         expires_at_ms: i64,
         retired_at_ms: i64,
         claimant: Option<SessionId>,
@@ -1396,6 +1445,7 @@ impl NodeTombstone {
     ) -> Result<Self> {
         let tombstone = Self {
             session,
+            node,
             expires_at_ms,
             retired_at_ms,
             claimant,
@@ -1434,7 +1484,7 @@ impl NodeTombstone {
                 .ok_or(Error::Node("node recovery claim time overflow"))?,
         );
         if let Some(log) = &self.log {
-            self.log = Some(log.begin_recovery(self.session, claimant, now_ms)?);
+            self.log = Some(log.begin_recovery(self.node, claimant, now_ms)?);
         }
         self.validate()?;
         Ok(self)
@@ -1460,7 +1510,7 @@ impl NodeTombstone {
         self.claim_expires_at_ms = Some(next_expiry);
         if let Some(log) = &self.log {
             self.log = Some(log.renew_recovery(
-                self.session,
+                self.node,
                 fenced.claimant,
                 fenced.claim_generation,
                 now_ms,
@@ -1490,7 +1540,7 @@ impl NodeTombstone {
             .as_ref()
             .ok_or(Error::Node("claimed session has no enrolled node log"))?
             .seal_recovery(
-                self.session,
+                self.node,
                 fenced.claimant,
                 fenced.claim_generation,
                 recovery_manifest,
@@ -1508,6 +1558,7 @@ impl NodeTombstone {
             .claimant
             .ok_or(Error::Node("node session is not claimed"))?;
         Ok(FencedNodeSession {
+            node: self.node,
             session: self.session,
             claimant,
             claim_generation: self.claim_generation,
@@ -1537,8 +1588,10 @@ impl NodeTombstone {
         }
         let raw = raw.tombstone;
         let session = SessionId::from_bytes(decode_hex(&raw.session)?);
+        let node = NodeId::from_bytes(decode_hex(&raw.node)?);
         let tombstone = Self {
             session,
+            node,
             expires_at_ms: canonical_i64(&raw.expires_at_ms)?,
             retired_at_ms: canonical_i64(&raw.retired_at_ms)?,
             claimant: raw
@@ -1551,7 +1604,7 @@ impl NodeTombstone {
                 .as_deref()
                 .map(canonical_i64)
                 .transpose()?,
-            log: raw.log.map(|log| decode_log(session, log)).transpose()?,
+            log: raw.log.map(|log| decode_log(node, log)).transpose()?,
         };
         tombstone.validate()?;
         if tombstone.encode()?.as_slice() != bytes {
@@ -1562,6 +1615,7 @@ impl NodeTombstone {
 
     fn validate(&self) -> Result<()> {
         if self.session.as_bytes().iter().all(|byte| *byte == 0)
+            || self.node.as_bytes().iter().all(|byte| *byte == 0)
             || self.expires_at_ms < 0
             || self.retired_at_ms < 0
             || self.claimant.is_some_and(|claimant| {
@@ -1576,7 +1630,7 @@ impl NodeTombstone {
             return Err(Error::Node("node tombstone is invalid"));
         }
         if let Some(log) = &self.log {
-            log.validate(self.session)?;
+            log.validate(self.node)?;
             let log_claim = log.recovery();
             if self.claimant.is_some() != (log.phase() == NodeLogPhase::Recovering)
                 || log_claim.map(|claim| claim.claimant()) != self.claimant
@@ -1607,7 +1661,8 @@ fn validate_successor(current: &NodeAdvertisement, next: &NodeAdvertisement) -> 
 }
 
 fn same_boot_identity(current: &NodeAdvertisement, next: &NodeAdvertisement) -> bool {
-    current.session == next.session
+    current.node == next.node
+        && current.session == next.session
         && current.endpoint == next.endpoint
         && current.fleet == next.fleet
         && current.certificate == next.certificate
@@ -1698,6 +1753,7 @@ fn strictly_sorted<T: Ord>(values: &[T]) -> bool {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RawUnsignedIdentity {
+    node: String,
     session: String,
     endpoint: String,
     fleet: String,
@@ -1721,6 +1777,7 @@ impl From<&NodeTombstone> for RawNodeTombstoneEnvelope {
             tombstone: RawNodeTombstone {
                 version: 1,
                 session: encode_hex(value.session.as_bytes()),
+                node: encode_hex(value.node.as_bytes()),
                 expires_at_ms: value.expires_at_ms.to_string(),
                 retired_at_ms: value.retired_at_ms.to_string(),
                 claimant: value
@@ -1739,6 +1796,7 @@ impl From<&NodeTombstone> for RawNodeTombstoneEnvelope {
 struct RawNodeTombstone {
     version: u8,
     session: String,
+    node: String,
     expires_at_ms: String,
     retired_at_ms: String,
     claimant: Option<String>,
@@ -1750,6 +1808,7 @@ struct RawNodeTombstone {
 impl From<&NodeAdvertisement> for RawUnsignedIdentity {
     fn from(value: &NodeAdvertisement) -> Self {
         Self {
+            node: encode_hex(value.node.as_bytes()),
             session: encode_hex(value.session.as_bytes()),
             endpoint: value.endpoint.clone(),
             fleet: encode_hex(value.fleet.as_bytes()),
@@ -1868,7 +1927,9 @@ impl TryFrom<RawAdvertisement> for NodeAdvertisement {
         }
         let raw = value.identity.unsigned;
         let session = SessionId::from_bytes(decode_hex(&raw.session)?);
+        let node = NodeId::from_bytes(decode_hex(&raw.node)?);
         Ok(Self {
+            node,
             session,
             endpoint: raw.endpoint,
             fleet: Digest::from_bytes(decode_hex(&raw.fleet)?),
@@ -1893,7 +1954,7 @@ impl TryFrom<RawAdvertisement> for NodeAdvertisement {
                 job_credits: value.capacity.job_credits,
                 log_protocol: value.capacity.log_protocol,
             },
-            log: value.log.map(|log| decode_log(session, log)).transpose()?,
+            log: value.log.map(|log| decode_log(node, log)).transpose()?,
             signature: decode_hex(&value.identity.signature)?,
         })
     }
@@ -1926,7 +1987,7 @@ fn encode_log(log: &NodeLogStatus) -> RawNodeLog {
     }
 }
 
-fn decode_log(leader: SessionId, raw: RawNodeLog) -> Result<NodeLogStatus> {
+fn decode_log(leader: NodeId, raw: RawNodeLog) -> Result<NodeLogStatus> {
     let recovery = raw
         .recovery
         .map(|claim| {
@@ -1948,7 +2009,7 @@ fn decode_log(leader: SessionId, raw: RawNodeLog) -> Result<NodeLogStatus> {
         canonical_u64(&raw.epoch)?,
         raw.members
             .iter()
-            .map(|member| decode_hex(member).map(SessionId::from_bytes))
+            .map(|member| decode_hex(member).map(NodeId::from_bytes))
             .collect::<Result<Vec<_>>>()?,
         raw.active,
         canonical_u64(&raw.tiered_through)?,

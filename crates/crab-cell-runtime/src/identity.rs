@@ -44,6 +44,7 @@ macro_rules! fixed_id {
 fixed_id!(TenantId, 16);
 fixed_id!(ApplicationId, 16);
 fixed_id!(NamespaceId, 16);
+fixed_id!(NodeId, 16);
 fixed_id!(SessionId, 16);
 fixed_id!(IncarnationId, 16);
 fixed_id!(RequestId, 16);

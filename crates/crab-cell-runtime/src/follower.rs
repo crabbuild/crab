@@ -50,7 +50,7 @@ pub struct FollowerStore {
 }
 
 impl FollowerStore {
-    /// Opens a follower root. The caller must place it on durable local SSD.
+    /// Opens the `followers` namespace beneath a durable node data directory.
     pub fn open(
         root: PathBuf,
         limits: crab_ltx::Limits,
@@ -65,7 +65,7 @@ impl FollowerStore {
             sync_directory(parent).map_err(crab_ltx::CrabError::from)?;
         }
         sync_directory(&root).map_err(crab_ltx::CrabError::from)?;
-        let retained = disk.try_reserve(directory_bytes(&root)?)?;
+        let retained = disk.try_reserve(follower_bytes(&root)?)?;
         Ok(Self {
             root,
             limits,
@@ -123,8 +123,8 @@ impl FollowerStore {
                 .lock()
                 .map_err(|_| Error::Node("follower lane lock poisoned"))?;
             let result = append_sync(&root, lane, frames, covered_through, limits, &mut state);
-            let resize = directory_bytes(&root)
-                .and_then(|bytes| retained.resize(bytes).map_err(Error::from));
+            let resize =
+                follower_bytes(&root).and_then(|bytes| retained.resize(bytes).map_err(Error::from));
             if result.is_err() {
                 *state = None;
             }
@@ -153,8 +153,8 @@ impl FollowerStore {
                 retained.try_grow(8)?;
             }
             let result = seal_sync(&root, lane, limits, &mut state);
-            let resize = directory_bytes(&root)
-                .and_then(|bytes| retained.resize(bytes).map_err(Error::from));
+            let resize =
+                follower_bytes(&root).and_then(|bytes| retained.resize(bytes).map_err(Error::from));
             if result.is_err() {
                 *state = None;
             }
@@ -187,8 +187,8 @@ impl FollowerStore {
                 retained.try_grow(8)?;
             }
             let result = retire_sync(&root, lane, covered_through, limits);
-            let resize = directory_bytes(&root)
-                .and_then(|bytes| retained.resize(bytes).map_err(Error::from));
+            let resize =
+                follower_bytes(&root).and_then(|bytes| retained.resize(bytes).map_err(Error::from));
             *state = None;
             settle_disk_reservation(result, resize)
         })
@@ -289,6 +289,14 @@ fn directory_bytes(path: &Path) -> Result<u64> {
         }
     }
     Ok(total)
+}
+
+fn follower_bytes(root: &Path) -> Result<u64> {
+    let followers = root.join("followers");
+    if !followers.exists() {
+        return Ok(0);
+    }
+    directory_bytes(&followers)
 }
 
 fn settle_disk_reservation(

@@ -406,6 +406,7 @@ fn advertisement_with_capacity(
     capacity: NodeCapacity,
 ) -> NodeAdvertisement {
     NodeAdvertisement::sign(
+        crab_cell_runtime::NodeId::from_bytes([session; 16]),
         SessionId::from_bytes([session; 16]),
         format!("https://node-{session}.internal:8789"),
         Digest::from_bytes([1; 32]),

@@ -3,7 +3,7 @@ use std::time::Duration;
 use axum::http::{StatusCode, header};
 use bytes::Bytes;
 use crab_cell_runtime::{
-    AppendRequest, Error as CellError, FollowerReceipt, NodeDirectory, NodeLogTransport,
+    AppendRequest, Error as CellError, FollowerReceipt, NodeDirectory, NodeId, NodeLogTransport,
     RetireRequest, SealRequest, SessionId, TailRequest,
 };
 use futures_util::{StreamExt, future::BoxFuture};
@@ -38,13 +38,12 @@ impl NodeLogHttpTransport {
         }
     }
 
-    async fn remote(&self, member: SessionId) -> crab_cell_runtime::Result<RemoteFollower> {
-        let current = self
+    async fn remote(&self, member: NodeId) -> crab_cell_runtime::Result<RemoteFollower> {
+        let advertisement = self
             .directory
-            .load(member, now_ms().map_err(transport_error)?)
+            .resolve_node(member, now_ms().map_err(transport_error)?)
             .await?
             .ok_or(CellError::CellNotActive)?;
-        let advertisement = current.advertisement();
         Ok(RemoteFollower {
             endpoint: url::Url::parse(advertisement.endpoint()).map_err(transport_error)?,
             client: self
@@ -59,7 +58,7 @@ impl NodeLogHttpTransport {
 
     async fn append_inner(
         &self,
-        member: SessionId,
+        member: NodeId,
         request: AppendRequest,
     ) -> crab_cell_runtime::Result<FollowerReceipt> {
         let remote = self.remote(member).await?;
@@ -84,7 +83,7 @@ impl NodeLogHttpTransport {
 
     async fn seal_inner(
         &self,
-        member: SessionId,
+        member: NodeId,
         request: SealRequest,
     ) -> crab_cell_runtime::Result<FollowerReceipt> {
         let remote = self.remote(member).await?;
@@ -107,7 +106,7 @@ impl NodeLogHttpTransport {
 
     async fn retire_inner(
         &self,
-        member: SessionId,
+        member: NodeId,
         request: RetireRequest,
     ) -> crab_cell_runtime::Result<FollowerReceipt> {
         let remote = self.remote(member).await?;
@@ -130,7 +129,7 @@ impl NodeLogHttpTransport {
 
     async fn tail_inner(
         &self,
-        member: SessionId,
+        member: NodeId,
         request: TailRequest,
     ) -> crab_cell_runtime::Result<Vec<Bytes>> {
         let remote = self.remote(member).await?;
@@ -188,7 +187,7 @@ impl NodeLogHttpTransport {
 impl NodeLogTransport for NodeLogHttpTransport {
     fn append<'a>(
         &'a self,
-        member: SessionId,
+        member: NodeId,
         request: AppendRequest,
     ) -> BoxFuture<'a, crab_cell_runtime::Result<FollowerReceipt>> {
         Box::pin(self.append_inner(member, request))
@@ -196,7 +195,7 @@ impl NodeLogTransport for NodeLogHttpTransport {
 
     fn seal<'a>(
         &'a self,
-        member: SessionId,
+        member: NodeId,
         request: SealRequest,
     ) -> BoxFuture<'a, crab_cell_runtime::Result<FollowerReceipt>> {
         Box::pin(self.seal_inner(member, request))
@@ -204,7 +203,7 @@ impl NodeLogTransport for NodeLogHttpTransport {
 
     fn retire<'a>(
         &'a self,
-        member: SessionId,
+        member: NodeId,
         request: RetireRequest,
     ) -> BoxFuture<'a, crab_cell_runtime::Result<FollowerReceipt>> {
         Box::pin(self.retire_inner(member, request))
@@ -212,7 +211,7 @@ impl NodeLogTransport for NodeLogHttpTransport {
 
     fn tail<'a>(
         &'a self,
-        member: SessionId,
+        member: NodeId,
         request: TailRequest,
     ) -> BoxFuture<'a, crab_cell_runtime::Result<Vec<Bytes>>> {
         Box::pin(self.tail_inner(member, request))

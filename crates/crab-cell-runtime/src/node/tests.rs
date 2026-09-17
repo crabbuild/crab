@@ -14,12 +14,16 @@ use crate::{
 
 const NOW_MS: i64 = 1_000_000;
 
+fn node(session: SessionId) -> NodeId {
+    NodeId::from_bytes(*session.as_bytes())
+}
+
 struct UnavailableFollowerTransport;
 
 impl NodeLogTransport for UnavailableFollowerTransport {
     fn append<'a>(
         &'a self,
-        _member: SessionId,
+        _member: NodeId,
         _request: AppendRequest,
     ) -> BoxFuture<'a, Result<crate::FollowerReceipt>> {
         Box::pin(async { Err(Error::Node("injected unavailable follower")) })
@@ -27,7 +31,7 @@ impl NodeLogTransport for UnavailableFollowerTransport {
 
     fn seal<'a>(
         &'a self,
-        _member: SessionId,
+        _member: NodeId,
         _request: SealRequest,
     ) -> BoxFuture<'a, Result<crate::FollowerReceipt>> {
         Box::pin(async { Err(Error::Node("injected unavailable follower")) })
@@ -35,7 +39,7 @@ impl NodeLogTransport for UnavailableFollowerTransport {
 
     fn retire<'a>(
         &'a self,
-        _member: SessionId,
+        _member: NodeId,
         _request: RetireRequest,
     ) -> BoxFuture<'a, Result<crate::FollowerReceipt>> {
         Box::pin(async { Err(Error::Node("injected unavailable follower")) })
@@ -43,7 +47,7 @@ impl NodeLogTransport for UnavailableFollowerTransport {
 
     fn tail<'a>(
         &'a self,
-        _member: SessionId,
+        _member: NodeId,
         _request: TailRequest,
     ) -> BoxFuture<'a, Result<Vec<Bytes>>> {
         Box::pin(async { Err(Error::Node("injected unavailable follower")) })
@@ -60,7 +64,8 @@ fn advertisement_for(
     progress: u64,
     issued_at_ms: i64,
 ) -> NodeAdvertisement {
-    advertisement_for_capacity(
+    advertisement_for_node_capacity(
+        node(session),
         session,
         key,
         progress,
@@ -82,7 +87,26 @@ fn advertisement_for_capacity(
     issued_at_ms: i64,
     capacity: NodeCapacity,
 ) -> NodeAdvertisement {
+    advertisement_for_node_capacity(
+        node(session),
+        session,
+        key,
+        progress,
+        issued_at_ms,
+        capacity,
+    )
+}
+
+fn advertisement_for_node_capacity(
+    node: NodeId,
+    session: SessionId,
+    key: &SigningKey,
+    progress: u64,
+    issued_at_ms: i64,
+    capacity: NodeCapacity,
+) -> NodeAdvertisement {
     NodeAdvertisement::sign(
+        node,
         session,
         "https://node-1.internal:8789".into(),
         Digest::from_bytes([2; 32]),
@@ -98,6 +122,116 @@ fn advertisement_for_capacity(
         capacity,
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn stable_follower_node_resolves_a_new_session_for_old_log_recovery() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    let leader = SessionId::from_bytes([1; 16]);
+    let old_follower = SessionId::from_bytes([2; 16]);
+    let restarted_follower = SessionId::from_bytes([3; 16]);
+    let claimant = SessionId::from_bytes([4; 16]);
+    let follower_node = NodeId::from_bytes([9; 16]);
+    let capacity = NodeCapacity {
+        free_memory_bytes: 1_000,
+        free_disk_bytes: 2_000,
+        follower_free_bytes: 2_000,
+        job_credits: 3,
+        log_protocol: NODE_LOG_PROTOCOL_VERSION,
+    };
+    let leader_record = directory
+        .create(advertisement_for(leader, &key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    directory
+        .create(
+            advertisement_for_node_capacity(follower_node, old_follower, &key, 1, NOW_MS, capacity),
+            NOW_MS,
+        )
+        .await
+        .unwrap();
+    let enrolled = directory
+        .recruit_log(&leader_record, 7, 1, 2, NOW_MS + 1)
+        .await
+        .unwrap();
+    directory.activate_log(&enrolled, NOW_MS + 2).await.unwrap();
+
+    directory
+        .create(
+            advertisement_for_node_capacity(
+                follower_node,
+                restarted_follower,
+                &key,
+                1,
+                NOW_MS + 10_000,
+                capacity,
+            ),
+            NOW_MS + 10_000,
+        )
+        .await
+        .unwrap();
+    directory
+        .create(
+            advertisement_for(claimant, &key, 1, NOW_MS + 10_000),
+            NOW_MS + 10_000,
+        )
+        .await
+        .unwrap();
+    let fenced = directory
+        .claim_expired(leader, claimant, NOW_MS + 10_000)
+        .await
+        .unwrap();
+
+    assert_eq!(fenced.log().unwrap().members(), [follower_node]);
+    assert_eq!(
+        directory
+            .resolve_node(follower_node, NOW_MS + 10_001)
+            .await
+            .unwrap()
+            .unwrap()
+            .session(),
+        restarted_follower
+    );
+    directory
+        .authorize_log_recovery(leader, claimant, follower_node, 7, NOW_MS + 10_001)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn overlapping_live_sessions_for_one_node_fail_closed() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    let stable = NodeId::from_bytes([8; 16]);
+    let capacity = NodeCapacity {
+        free_memory_bytes: 1_000,
+        free_disk_bytes: 2_000,
+        follower_free_bytes: 2_000,
+        job_credits: 3,
+        log_protocol: NODE_LOG_PROTOCOL_VERSION,
+    };
+    for session in [
+        SessionId::from_bytes([1; 16]),
+        SessionId::from_bytes([2; 16]),
+    ] {
+        directory
+            .create(
+                advertisement_for_node_capacity(stable, session, &key, 1, NOW_MS, capacity),
+                NOW_MS,
+            )
+            .await
+            .unwrap();
+    }
+
+    assert!(matches!(
+        directory.live(NOW_MS + 1, 2).await,
+        Err(Error::Node(_))
+    ));
+    assert!(matches!(
+        directory.resolve_node(stable, NOW_MS + 1).await,
+        Err(Error::Node(_))
+    ));
 }
 
 #[tokio::test]
@@ -140,7 +274,7 @@ async fn follower_selection_is_capacity_aware_deterministic_and_requires_full_sh
             .select_log_members(leader, 1_000, NOW_MS + 1, 4)
             .await
             .unwrap(),
-        [first, second]
+        [node(first), node(second)]
     );
     assert!(
         directory
@@ -305,14 +439,14 @@ async fn node_log_enrollment_activation_and_coverage_are_authoritative() {
     assert_eq!(enrolled.advertisement().generation(), 2);
     assert_eq!(log.phase(), NodeLogPhase::Open);
     assert!(!log.active());
-    assert_eq!(log.members(), [first, second]);
+    assert_eq!(log.members(), [node(first), node(second)]);
     directory
-        .authorize_log_append(leader, first, 4, NOW_MS + 2)
+        .authorize_log_append(leader, node(first), 4, NOW_MS + 2)
         .await
         .unwrap();
     assert!(
         directory
-            .authorize_log_append(leader, SessionId::from_bytes([8; 16]), 4, NOW_MS + 2)
+            .authorize_log_append(leader, NodeId::from_bytes([8; 16]), 4, NOW_MS + 2)
             .await
             .is_err()
     );
@@ -338,10 +472,11 @@ async fn node_log_enrollment_activation_and_coverage_are_authoritative() {
         .unwrap();
     assert_eq!(covered.advertisement().log().unwrap().tiered_through(), 27);
     directory
-        .authorize_log_retire(leader, first, 4, 27, NOW_MS + 1_003)
+        .authorize_log_retire(leader, node(first), 4, 27, NOW_MS + 1_003)
         .await
         .unwrap();
-    let gate = crate::DurabilityGate::new(leader, 4, [first, second]).unwrap();
+    let gate =
+        crate::DurabilityGate::new(leader, node(leader), 4, [node(first), node(second)]).unwrap();
     let ticket = gate.issue(27).unwrap();
     gate.prove_object(ticket).unwrap();
     let rotated = crate::rotate_node_log(
@@ -363,7 +498,7 @@ async fn node_log_enrollment_activation_and_coverage_are_authoritative() {
     assert_eq!(rotated.gate.issue(1).unwrap().first_sequence(), 1);
     assert!(
         directory
-            .authorize_log_retire(leader, first, 4, 27, NOW_MS + 1_004)
+            .authorize_log_retire(leader, node(first), 4, 27, NOW_MS + 1_004)
             .await
             .is_err()
     );
@@ -435,12 +570,12 @@ async fn expired_enrolled_log_becomes_a_renewable_recovery_claim() {
         Err(Error::PendingPublication)
     ));
     directory
-        .authorize_log_recovery(leader, claimant, member, 7, NOW_MS + 10_001)
+        .authorize_log_recovery(leader, claimant, node(member), 7, NOW_MS + 10_001)
         .await
         .unwrap();
     assert!(
         directory
-            .authorize_log_append(leader, member, 7, NOW_MS + 10_001)
+            .authorize_log_append(leader, node(member), 7, NOW_MS + 10_001)
             .await
             .is_err()
     );
@@ -599,6 +734,7 @@ async fn live_listing_rejects_misplaced_or_foreign_active_records() {
     ));
 
     let foreign = NodeAdvertisement::sign(
+        NodeId::from_bytes([9; 16]),
         SessionId::from_bytes([9; 16]),
         "https://node-1.internal:8789".into(),
         Digest::from_bytes([10; 32]),
@@ -716,6 +852,7 @@ async fn invalid_signature_expiry_and_identity_change_fail_closed() {
     let directory = directory();
     assert!(
         NodeAdvertisement::sign(
+            NodeId::from_bytes([1; 16]),
             SessionId::from_bytes([1; 16]),
             "https:///not-an-authority".into(),
             Digest::from_bytes([2; 32]),

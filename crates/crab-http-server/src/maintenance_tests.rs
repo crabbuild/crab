@@ -255,6 +255,7 @@ fn enable_catalog_readiness(server: &mut Arc<Server>) {
         crate::peer::LocalCellResolver::new(layout.clone(), identity, server.cell_runtime.clone());
     let releases = crab_cell_runtime::ReleaseStore::new(layout.clone(), identity).unwrap();
     server.peer_receiver = Some(crate::peer::PeerReceiver::new(
+        crab_cell_runtime::NodeId::from_bytes([9; 16]),
         crab_cell_runtime::SessionId::from_bytes([9; 16]),
         crab_cell_runtime::NodeDirectory::new(
             layout,

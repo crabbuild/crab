@@ -863,6 +863,7 @@ mod tests {
         directory
             .create(
                 NodeAdvertisement::sign(
+                    crab_cell_runtime::NodeId::from_bytes(*stale_session.as_bytes()),
                     stale_session,
                     owner(stale_session).endpoint,
                     crab_cell_runtime::Digest::from_bytes([21; 32]),
@@ -896,6 +897,7 @@ mod tests {
         directory
             .create(
                 NodeAdvertisement::sign(
+                    crab_cell_runtime::NodeId::from_bytes(*third_session.as_bytes()),
                     third_session,
                     owner(third_session).endpoint,
                     crab_cell_runtime::Digest::from_bytes([21; 32]),

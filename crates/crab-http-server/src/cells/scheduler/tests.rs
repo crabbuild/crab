@@ -95,8 +95,13 @@ async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
         job_credits: 1,
         log_protocol: crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION,
     };
-    let advertisement = |session, endpoint: &str, progress, issued_at_ms, expires_at_ms| {
+    let advertisement = |session: crab_cell_runtime::SessionId,
+                         endpoint: &str,
+                         progress,
+                         issued_at_ms,
+                         expires_at_ms| {
         NodeAdvertisement::sign(
+            crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
             session,
             endpoint.into(),
             fleet,
@@ -218,9 +223,11 @@ async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
     .clone();
     follower.append(leader, 1, vec![frame], 0).await.unwrap();
     database.close().unwrap();
-    let transport: Arc<dyn crab_cell_runtime::NodeLogTransport> = Arc::new(
-        crab_cell_runtime::LocalFollowerTransport::new(member, follower),
-    );
+    let transport: Arc<dyn crab_cell_runtime::NodeLogTransport> =
+        Arc::new(crab_cell_runtime::LocalFollowerTransport::new(
+            crab_cell_runtime::NodeId::from_bytes(*member.as_bytes()),
+            follower,
+        ));
     recover_node_session(
         directory.clone(),
         CellCatalog::new(layout.clone(), tenant),
@@ -561,6 +568,7 @@ async fn scan_executes_registered_workflow_activity_without_blocking_the_scanner
     node_directory
         .create(
             NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 endpoint,
                 fleet,
@@ -732,6 +740,7 @@ async fn scan_cursor_advances_when_the_cycle_budget_is_exhausted() {
     node_directory
         .create(
             NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 endpoint,
                 fleet,
@@ -904,6 +913,7 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
     node_directory
         .create(
             NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*remote_session.as_bytes()),
                 remote_session,
                 remote_endpoint,
                 fleet,
@@ -932,6 +942,7 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
     node_directory
         .create(
             NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*local_session.as_bytes()),
                 local_session,
                 local_endpoint.clone(),
                 fleet,
@@ -1066,6 +1077,7 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
     node_directory
         .create(
             NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*stale_session.as_bytes()),
                 stale_session,
                 "https://stale.internal:8789".into(),
                 fleet,
@@ -1093,6 +1105,7 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
     node_directory
         .create(
             NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 endpoint,
                 fleet,
@@ -1279,6 +1292,7 @@ async fn activating_release_migrates_idle_cell_before_ready_gate() {
     node_directory
         .create(
             NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 endpoint,
                 fleet,

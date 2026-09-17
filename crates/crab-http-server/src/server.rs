@@ -768,6 +768,7 @@ pub async fn serve(config: Config) -> Result<()> {
         config.cells.data_dir.clone(),
         scheduler_status.clone(),
     )?;
+    let node = node_publisher.node();
     let session_dir = node_publisher.session_dir();
     let local_resources = node_publisher.local_resources()?;
     let cell_budget = CellRuntimeBudget::from_resources(local_resources)?;
@@ -793,7 +794,7 @@ pub async fn serve(config: Config) -> Result<()> {
         session_dir.clone(),
     )?;
     let follower_store = crab_cell_runtime::FollowerStore::open(
-        session_dir.join("node-log"),
+        config.cells.data_dir.clone(),
         crate::cells::repository_replica_limits(),
         local_disk,
     )?;
@@ -818,6 +819,7 @@ pub async fn serve(config: Config) -> Result<()> {
         ));
     let release_store = ReleaseStore::new(startup.layout.clone(), startup.identity)?;
     let peer_receiver = crate::peer::PeerReceiver::new(
+        node,
         session,
         directory.clone(),
         Arc::clone(&registry),

@@ -78,8 +78,8 @@ pub use executor::{
 };
 pub use follower::{FollowerReceipt, FollowerStore, FollowerTailPage};
 pub use identity::{
-    ApplicationId, CellId, CellTarget, Digest, IncarnationId, NamespaceId, RequestId, SessionId,
-    TenantId, partition_for_shard, shard_for_scope,
+    ApplicationId, CellId, CellTarget, Digest, IncarnationId, NamespaceId, NodeId, RequestId,
+    SessionId, TenantId, partition_for_shard, shard_for_scope,
 };
 pub use kv::{
     KvAtomicCommand, KvAtomicOutcome, KvAtomicRequest, KvCheck, KvCondition, KvEntry, KvGetQuery,

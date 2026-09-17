@@ -1,4 +1,4 @@
-use crate::{Digest, Error, Result, SessionId};
+use crate::{Digest, Error, NodeId, Result, SessionId};
 
 pub(crate) const RECOVERY_CLAIM_LIFETIME_MS: i64 = 30_000;
 pub(crate) const MAX_NODE_LOG_MEMBERS: usize = 2;
@@ -103,7 +103,7 @@ impl NodeRecoveryClaim {
 pub struct NodeLogStatus {
     phase: NodeLogPhase,
     epoch: u64,
-    members: Vec<SessionId>,
+    members: Vec<NodeId>,
     active: bool,
     tiered_through: u64,
     recovery: Option<NodeRecoveryClaim>,
@@ -111,7 +111,7 @@ pub struct NodeLogStatus {
 }
 
 impl NodeLogStatus {
-    pub(crate) fn open(leader: SessionId, epoch: u64, members: Vec<SessionId>) -> Result<Self> {
+    pub(crate) fn open(leader: NodeId, epoch: u64, members: Vec<NodeId>) -> Result<Self> {
         let status = Self {
             phase: NodeLogPhase::Open,
             epoch,
@@ -126,10 +126,10 @@ impl NodeLogStatus {
     }
 
     pub(crate) fn from_parts(
-        leader: SessionId,
+        leader: NodeId,
         phase: NodeLogPhase,
         epoch: u64,
-        members: Vec<SessionId>,
+        members: Vec<NodeId>,
         active: bool,
         tiered_through: u64,
         recovery: Option<NodeRecoveryClaim>,
@@ -159,7 +159,7 @@ impl NodeLogStatus {
     }
 
     #[must_use]
-    pub fn members(&self) -> &[SessionId] {
+    pub fn members(&self) -> &[NodeId] {
         &self.members
     }
 
@@ -183,7 +183,7 @@ impl NodeLogStatus {
         self.recovery_manifest
     }
 
-    pub(crate) fn activate(&self, leader: SessionId) -> Result<Self> {
+    pub(crate) fn activate(&self, leader: NodeId) -> Result<Self> {
         if self.phase != NodeLogPhase::Open || self.active {
             return Err(Error::Node("node log cannot be activated"));
         }
@@ -199,7 +199,7 @@ impl NodeLogStatus {
         )
     }
 
-    pub(crate) fn advance_tiered(&self, leader: SessionId, through: u64) -> Result<Self> {
+    pub(crate) fn advance_tiered(&self, leader: NodeId, through: u64) -> Result<Self> {
         if self.phase != NodeLogPhase::Open || through < self.tiered_through {
             return Err(Error::Node("node log object coverage regressed"));
         }
@@ -217,7 +217,7 @@ impl NodeLogStatus {
 
     pub(crate) fn begin_recovery(
         &self,
-        leader: SessionId,
+        leader: NodeId,
         claimant: SessionId,
         now_ms: i64,
     ) -> Result<Self> {
@@ -263,7 +263,7 @@ impl NodeLogStatus {
 
     pub(crate) fn renew_recovery(
         &self,
-        leader: SessionId,
+        leader: NodeId,
         claimant: SessionId,
         generation: u64,
         now_ms: i64,
@@ -286,7 +286,7 @@ impl NodeLogStatus {
 
     pub(crate) fn seal_recovery(
         &self,
-        leader: SessionId,
+        leader: NodeId,
         claimant: SessionId,
         generation: u64,
         manifest: Option<Digest>,
@@ -310,12 +310,7 @@ impl NodeLogStatus {
         )
     }
 
-    pub(crate) fn permits_append(
-        &self,
-        leader: SessionId,
-        member: SessionId,
-        epoch: u64,
-    ) -> Result<()> {
+    pub(crate) fn permits_append(&self, leader: NodeId, member: NodeId, epoch: u64) -> Result<()> {
         self.validate(leader)?;
         if self.phase != NodeLogPhase::Open
             || self.epoch != epoch
@@ -330,9 +325,9 @@ impl NodeLogStatus {
 
     pub(crate) fn permits_recovery_read(
         &self,
-        leader: SessionId,
+        leader: NodeId,
         claimant: SessionId,
-        member: SessionId,
+        member: NodeId,
         epoch: u64,
         now_ms: i64,
     ) -> Result<()> {
@@ -353,7 +348,7 @@ impl NodeLogStatus {
         Ok(())
     }
 
-    pub(crate) fn validate(&self, leader: SessionId) -> Result<()> {
+    pub(crate) fn validate(&self, leader: NodeId) -> Result<()> {
         if self.epoch == 0
             || self.members.is_empty()
             || self.members.len() > MAX_NODE_LOG_MEMBERS

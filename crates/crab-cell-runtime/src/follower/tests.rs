@@ -217,9 +217,12 @@ async fn conflicting_duplicate_and_sequence_gap_fail_closed() {
 }
 
 #[test]
-fn open_reserves_existing_bytes_and_rejects_an_undersized_budget() {
+fn open_reserves_only_existing_follower_bytes_and_rejects_an_undersized_budget() {
     let root = tempfile::TempDir::new().unwrap();
-    std::fs::write(root.path().join("retained.log"), [0_u8; 17]).unwrap();
+    std::fs::create_dir(root.path().join("followers")).unwrap();
+    std::fs::write(root.path().join("followers/retained.log"), [0_u8; 17]).unwrap();
+    std::fs::create_dir(root.path().join("sessions")).unwrap();
+    std::fs::write(root.path().join("sessions/unrelated.sqlite"), [0_u8; 64]).unwrap();
 
     assert!(
         FollowerStore::open(

@@ -26,6 +26,7 @@ async fn fence_session(
     directory
         .create(
             crab_cell_runtime::NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 "https://expired.internal:8081".into(),
                 fleet,
@@ -53,6 +54,7 @@ async fn fence_session(
     directory
         .create(
             crab_cell_runtime::NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*claimant.as_bytes()),
                 claimant,
                 "https://claimant.internal:8081".into(),
                 fleet,
@@ -94,30 +96,32 @@ async fn fence_log_session(
     let release = Digest::from_bytes([92; 32]);
     let directory = crab_cell_runtime::NodeDirectory::new(layout.clone(), fleet, image, release);
     let key = ed25519_dalek::SigningKey::from_bytes(&[93; 32]);
-    let signed = |session, endpoint: &str, issued_at_ms, expires_at_ms| {
-        crab_cell_runtime::NodeAdvertisement::sign(
-            session,
-            endpoint.into(),
-            fleet,
-            Digest::from_bytes([94; 32]),
-            image,
-            release,
-            &key,
-            1,
-            issued_at_ms,
-            expires_at_ms,
-            vec![Digest::from_bytes([95; 32])],
-            vec![1],
-            crab_cell_runtime::NodeCapacity {
-                free_memory_bytes: 1,
-                free_disk_bytes: 1,
-                follower_free_bytes: 1,
-                job_credits: 1,
-                log_protocol: crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION,
-            },
-        )
-        .unwrap()
-    };
+    let signed =
+        |session: crab_cell_runtime::SessionId, endpoint: &str, issued_at_ms, expires_at_ms| {
+            crab_cell_runtime::NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+                session,
+                endpoint.into(),
+                fleet,
+                Digest::from_bytes([94; 32]),
+                image,
+                release,
+                &key,
+                1,
+                issued_at_ms,
+                expires_at_ms,
+                vec![Digest::from_bytes([95; 32])],
+                vec![1],
+                crab_cell_runtime::NodeCapacity {
+                    free_memory_bytes: 1,
+                    free_disk_bytes: 1,
+                    follower_free_bytes: 1,
+                    job_credits: 1,
+                    log_protocol: crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION,
+                },
+            )
+            .unwrap()
+        };
     let leader = directory
         .create(
             signed(session, "https://expired.internal:8081", 1, 10_001),
@@ -1011,12 +1015,14 @@ async fn takeover_consumes_pinned_recovery_before_serving() {
         crab_cell_runtime::DiskBudget::new(1 << 30),
     )
     .unwrap();
-    let transport: Arc<dyn crab_cell_runtime::NodeLogTransport> = Arc::new(
-        crab_cell_runtime::LocalFollowerTransport::new(follower, follower_store),
-    );
+    let transport: Arc<dyn crab_cell_runtime::NodeLogTransport> =
+        Arc::new(crab_cell_runtime::LocalFollowerTransport::new(
+            crab_cell_runtime::NodeId::from_bytes(*follower.as_bytes()),
+            follower_store,
+        ));
     transport
         .append(
-            follower,
+            crab_cell_runtime::NodeId::from_bytes(*follower.as_bytes()),
             crab_cell_runtime::AppendRequest {
                 leader_session: leader,
                 log_epoch: 1,

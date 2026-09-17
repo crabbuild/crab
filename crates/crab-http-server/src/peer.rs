@@ -1,5 +1,6 @@
 use std::{
     future::Future,
+    io::Write,
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, atomic::Ordering},
@@ -15,7 +16,7 @@ use axum::{
 use bytes::Bytes;
 use crab_cell_runtime::{
     ApplicationIdentity, CellAuthority, CellCatalog, CellHandle, CellRuntime, CellTarget, Digest,
-    Error as CellError, NodeAdvertisement, NodeCapacity, NodeDirectory, PeerAuthorizer,
+    Error as CellError, NodeAdvertisement, NodeCapacity, NodeDirectory, NodeId, PeerAuthorizer,
     PeerCellResolver, PeerDispatcher, PeerRoundTrip, Registry, ReleaseState, ReleaseStore,
     SessionId, VerifiedPeerRequest, VersionedNodeAdvertisement, peer_wire,
 };
@@ -40,6 +41,7 @@ const HEARTBEAT_RETRY: Duration = Duration::from_millis(500);
 
 #[derive(Clone)]
 pub(crate) struct PeerReceiver {
+    node: NodeId,
     session: SessionId,
     directory: NodeDirectory,
     registry: Arc<Registry>,
@@ -50,6 +52,7 @@ pub(crate) struct PeerReceiver {
 
 impl PeerReceiver {
     pub(crate) fn new(
+        node: NodeId,
         session: SessionId,
         directory: NodeDirectory,
         registry: Arc<Registry>,
@@ -58,6 +61,7 @@ impl PeerReceiver {
         round_trip: Arc<dyn PeerRoundTrip>,
     ) -> Self {
         Self {
+            node,
             session,
             directory,
             registry,
@@ -71,6 +75,7 @@ impl PeerReceiver {
 pub(crate) struct NodePublisher {
     directory: NodeDirectory,
     signing_key: SigningKey,
+    node: NodeId,
     session: SessionId,
     endpoint: String,
     fleet: Digest,
@@ -113,12 +118,14 @@ impl NodePublisher {
         if !std::fs::metadata(&data_dir)?.is_dir() {
             return Err(crate::Error::Config("cells.data_dir is not a directory"));
         }
+        let node = load_or_create_node_id(&data_dir)?;
         let sessions = data_dir.join("sessions");
         std::fs::create_dir_all(&sessions)?;
         std::fs::create_dir(sessions.join(encode_session(session)))?;
         Ok(Self {
             directory,
             signing_key,
+            node,
             session,
             endpoint,
             fleet,
@@ -155,6 +162,10 @@ impl NodePublisher {
         self.data_dir
             .join("sessions")
             .join(encode_session(self.session))
+    }
+
+    pub(crate) const fn node(&self) -> NodeId {
+        self.node
     }
 
     pub(crate) fn local_resources(&self) -> crate::Result<LocalResources> {
@@ -245,6 +256,7 @@ impl NodePublisher {
             node_capacity(&self.data_dir, self.follower_store.as_ref())?
         };
         Ok(NodeAdvertisement::sign(
+            self.node,
             self.session,
             self.endpoint.clone(),
             self.fleet,
@@ -538,12 +550,15 @@ pub(crate) async fn append_node_log(
         Ok(now_ms) => now_ms,
         Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
     };
+    if !receiver_is_current(receiver, now_ms).await {
+        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+    }
     if !authenticated_session(receiver, leader, &identity, now_ms).await {
         return peer_http_error(StatusCode::UNAUTHORIZED);
     }
     if receiver
         .directory
-        .authorize_log_append(leader, receiver.session, epoch, now_ms)
+        .authorize_log_append(leader, receiver.node, epoch, now_ms)
         .await
         .is_err()
     {
@@ -580,12 +595,15 @@ pub(crate) async fn seal_node_log(
         Ok(now_ms) => now_ms,
         Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
     };
+    if !receiver_is_current(receiver, now_ms).await {
+        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+    }
     if !authenticated_session(receiver, claimant, &identity, now_ms).await {
         return peer_http_error(StatusCode::UNAUTHORIZED);
     }
     if receiver
         .directory
-        .authorize_log_recovery(leader, claimant, receiver.session, epoch, now_ms)
+        .authorize_log_recovery(leader, claimant, receiver.node, epoch, now_ms)
         .await
         .is_err()
     {
@@ -618,12 +636,15 @@ pub(crate) async fn retire_node_log(
         Ok(now_ms) => now_ms,
         Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
     };
+    if !receiver_is_current(receiver, now_ms).await {
+        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+    }
     if !authenticated_session(receiver, leader, &identity, now_ms).await {
         return peer_http_error(StatusCode::UNAUTHORIZED);
     }
     if receiver
         .directory
-        .authorize_log_retire(leader, receiver.session, epoch, covered_through, now_ms)
+        .authorize_log_retire(leader, receiver.node, epoch, covered_through, now_ms)
         .await
         .is_err()
     {
@@ -655,12 +676,15 @@ pub(crate) async fn tail_node_log(
         Ok(now_ms) => now_ms,
         Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
     };
+    if !receiver_is_current(receiver, now_ms).await {
+        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+    }
     if !authenticated_session(receiver, claimant, &identity, now_ms).await {
         return peer_http_error(StatusCode::UNAUTHORIZED);
     }
     if receiver
         .directory
-        .authorize_log_recovery(leader, claimant, receiver.session, epoch, now_ms)
+        .authorize_log_recovery(leader, claimant, receiver.node, epoch, now_ms)
         .await
         .is_err()
     {
@@ -698,6 +722,13 @@ async fn authenticated_session(
         && advertisement
             .verifying_key()
             .is_ok_and(|key| key.to_bytes() == identity.public_key())
+}
+
+async fn receiver_is_current(receiver: &PeerReceiver, now_ms: i64) -> bool {
+    let Ok(Some(current)) = receiver.directory.load(receiver.session, now_ms).await else {
+        return false;
+    };
+    current.advertisement().node() == receiver.node
 }
 
 fn follower_receipt_response(receipt: crab_cell_runtime::FollowerReceipt) -> Response {
@@ -768,6 +799,10 @@ fn decode_session(value: &str) -> std::result::Result<SessionId, ()> {
         bytes[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
     }
     Ok(SessionId::from_bytes(bytes))
+}
+
+fn decode_node(value: &str) -> std::result::Result<NodeId, ()> {
+    decode_session(value).map(|session| NodeId::from_bytes(*session.as_bytes()))
 }
 
 fn hex_nibble(value: u8) -> std::result::Result<u8, ()> {
@@ -914,6 +949,45 @@ fn cgroup_memory_limit(path: &str) -> Option<u64> {
 
 fn encode_session(session: SessionId) -> String {
     encode_hex(session.as_bytes())
+}
+
+fn load_or_create_node_id(data_dir: &Path) -> crate::Result<NodeId> {
+    let path = data_dir.join("node-id");
+    match std::fs::read_to_string(&path) {
+        Ok(encoded) => {
+            return decode_node(&encoded)
+                .map_err(|()| crate::Error::Config("cells.data_dir node-id is invalid"));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let generated = NodeId::from_bytes(Uuid::now_v7().into_bytes());
+    let temporary = data_dir.join(format!(".node-id-{}.tmp", Uuid::now_v7()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    file.write_all(encode_hex(generated.as_bytes()).as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    let installed = match std::fs::hard_link(&temporary, &path) {
+        Ok(()) => {
+            std::fs::File::open(data_dir)?.sync_all()?;
+            generated
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let encoded = std::fs::read_to_string(&path)?;
+            decode_node(&encoded)
+                .map_err(|()| crate::Error::Config("cells.data_dir node-id is invalid"))?
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error.into());
+        }
+    };
+    std::fs::remove_file(temporary)?;
+    std::fs::File::open(data_dir)?.sync_all()?;
+    Ok(installed)
 }
 
 fn encode_digest(digest: Digest) -> String {
@@ -1428,7 +1502,7 @@ mod tests {
         )
         .unwrap();
         let follower_store = crab_cell_runtime::FollowerStore::open(
-            publisher.session_dir().join("node-log"),
+            data_dir.path().to_owned(),
             crab_ltx::Limits::default(),
             crab_ltx::DiskBudget::new(1 << 20),
         )
@@ -1461,6 +1535,22 @@ mod tests {
             .unwrap();
 
         assert_eq!(loaded.advertisement(), published.advertisement());
+        assert_eq!(loaded.advertisement().node(), publisher.node());
+        let restarted = NodePublisher::new(
+            directory.clone(),
+            signing_key.clone(),
+            SessionId::from_bytes([17; 16]),
+            "https://node-1.internal:8789".into(),
+            fleet,
+            Digest::from_bytes([15; 32]),
+            image,
+            release,
+            vec![Digest::from_bytes([16; 32])],
+            data_dir.path().into(),
+            crate::cells::SchedulerStatus::new(now_ms().unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restarted.node(), publisher.node());
         assert!(
             NodePublisher::new(
                 directory,

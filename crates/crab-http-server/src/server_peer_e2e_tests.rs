@@ -173,6 +173,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap()).unwrap(),
     )
     .unwrap();
+    let owner_node = owner_publisher.node();
     let ingress_advertisement = ingress_publisher.publish_initial().await.unwrap();
     let owner_advertisement = owner_publisher.publish_initial().await.unwrap();
     let ingress_session_dir = ingress_publisher.session_dir();
@@ -233,6 +234,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         owner_runtime.clone(),
         None,
         Some(PeerReceiver::new(
+            owner_node,
             owner_session,
             directory.clone(),
             Arc::clone(&registry),

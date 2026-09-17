@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
 
-use crate::{Error, FollowerReceipt, FollowerStore, Result, SessionId};
+use crate::{Error, FollowerReceipt, FollowerStore, NodeId, Result, SessionId};
 
 /// One ordered follower append with the leader's safe truncation watermark.
 pub struct AppendRequest {
@@ -41,25 +41,25 @@ pub struct TailRequest {
 pub trait NodeLogTransport: Send + Sync {
     fn append<'a>(
         &'a self,
-        member: SessionId,
+        member: NodeId,
         request: AppendRequest,
     ) -> BoxFuture<'a, Result<FollowerReceipt>>;
 
     fn seal<'a>(
         &'a self,
-        member: SessionId,
+        member: NodeId,
         request: SealRequest,
     ) -> BoxFuture<'a, Result<FollowerReceipt>>;
 
     fn retire<'a>(
         &'a self,
-        member: SessionId,
+        member: NodeId,
         request: RetireRequest,
     ) -> BoxFuture<'a, Result<FollowerReceipt>>;
 
     fn tail<'a>(
         &'a self,
-        member: SessionId,
+        member: NodeId,
         request: TailRequest,
     ) -> BoxFuture<'a, Result<Vec<Bytes>>>;
 }
@@ -67,17 +67,17 @@ pub trait NodeLogTransport: Send + Sync {
 /// In-process transport for deterministic tests and single-process recovery.
 #[derive(Clone)]
 pub struct LocalFollowerTransport {
-    member: SessionId,
+    member: NodeId,
     store: FollowerStore,
 }
 
 impl LocalFollowerTransport {
     #[must_use]
-    pub const fn new(member: SessionId, store: FollowerStore) -> Self {
+    pub const fn new(member: NodeId, store: FollowerStore) -> Self {
         Self { member, store }
     }
 
-    fn validate_member(&self, member: SessionId) -> Result<()> {
+    fn validate_member(&self, member: NodeId) -> Result<()> {
         if member != self.member {
             return Err(Error::PeerAuthorization(
                 "node-log transport selected a different follower",
@@ -90,7 +90,7 @@ impl LocalFollowerTransport {
 impl NodeLogTransport for LocalFollowerTransport {
     fn append<'a>(
         &'a self,
-        member: SessionId,
+        member: NodeId,
         request: AppendRequest,
     ) -> BoxFuture<'a, Result<FollowerReceipt>> {
         Box::pin(async move {
@@ -108,7 +108,7 @@ impl NodeLogTransport for LocalFollowerTransport {
 
     fn seal<'a>(
         &'a self,
-        member: SessionId,
+        member: NodeId,
         request: SealRequest,
     ) -> BoxFuture<'a, Result<FollowerReceipt>> {
         Box::pin(async move {
@@ -121,7 +121,7 @@ impl NodeLogTransport for LocalFollowerTransport {
 
     fn retire<'a>(
         &'a self,
-        member: SessionId,
+        member: NodeId,
         request: RetireRequest,
     ) -> BoxFuture<'a, Result<FollowerReceipt>> {
         Box::pin(async move {
@@ -138,7 +138,7 @@ impl NodeLogTransport for LocalFollowerTransport {
 
     fn tail<'a>(
         &'a self,
-        member: SessionId,
+        member: NodeId,
         request: TailRequest,
     ) -> BoxFuture<'a, Result<Vec<Bytes>>> {
         Box::pin(async move {

@@ -1531,6 +1531,7 @@ impl OfflineAdvertisement {
 
     fn advertisement(&self, now_ms: i64) -> Result<NodeAdvertisement> {
         NodeAdvertisement::sign(
+            crab_cell_runtime::NodeId::from_bytes(*self.session.as_bytes()),
             self.session,
             self.endpoint.clone(),
             self.fleet,
@@ -2010,6 +2011,7 @@ mod tests {
         directory
             .create(
                 NodeAdvertisement::sign(
+                    crab_cell_runtime::NodeId::from_bytes([13; 16]),
                     SessionId::from_bytes([13; 16]),
                     "https://node-1.internal:8081".into(),
                     fleet,
@@ -2043,6 +2045,7 @@ mod tests {
         directory
             .create(
                 NodeAdvertisement::sign(
+                    crab_cell_runtime::NodeId::from_bytes([15; 16]),
                     SessionId::from_bytes([15; 16]),
                     "https://node-2.internal:8081".into(),
                     fleet,
@@ -2102,6 +2105,7 @@ mod tests {
         foreign_directory
             .create(
                 NodeAdvertisement::sign(
+                    crab_cell_runtime::NodeId::from_bytes([17; 16]),
                     SessionId::from_bytes([17; 16]),
                     "https://foreign-node.internal:8081".into(),
                     fleet,
@@ -2165,6 +2169,7 @@ mod tests {
         let session = directory
             .create(
                 NodeAdvertisement::sign(
+                    crab_cell_runtime::NodeId::from_bytes([55; 16]),
                     SessionId::from_bytes([55; 16]),
                     "https://node.internal:8789".into(),
                     fleet,

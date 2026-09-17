@@ -39,6 +39,7 @@ async fn fence_session(
     directory
         .create(
             crab_cell_runtime::NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 "https://expired.internal:8081".into(),
                 fleet,
@@ -66,6 +67,7 @@ async fn fence_session(
     directory
         .create(
             crab_cell_runtime::NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*claimant.as_bytes()),
                 claimant,
                 "https://claimant.internal:8081".into(),
                 fleet,

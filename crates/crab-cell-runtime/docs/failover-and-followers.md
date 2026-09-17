@@ -151,10 +151,10 @@ recovery path.
 
 | Working now | Still gated before fleet durability may serve traffic |
 | --- | --- |
-| Strict frame codec plus capacity-aware deterministic selection, authoritative enrollment, activation, coverage, recovery claims, and object-covered epoch rotation | Failure-domain-aware automatic recruitment and recovery-only startup |
-| Crash-safe, node-budgeted follower store plus authenticated remote append/seal/tail/retire transport | Live shipper batching and startup listener ordering |
+| Strict frame codec plus capacity-aware deterministic selection, authoritative enrollment, activation, coverage, recovery claims, and object-covered epoch rotation | Failure-domain-aware automatic recruitment |
+| Crash-safe, node-budgeted follower store under a persisted physical `NodeId`, plus authenticated remote append/seal/tail/retire transport that resolves the current boot session | Live shipper batching and recovery-only startup listener ordering |
 | Write-all durability gate with contiguous object watermark | Actor submission and response-gate integration |
-| Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | Recovery-only startup identity and listener ordering |
+| Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | Recovery-only startup listener ordering |
 | Cell control attachment and takeover consumption of overlays | Graceful drain, obsolete-marker collection, and live multi-node proof |
 
 The session record now owns one CAS-protected log epoch, its exact sorted member
@@ -163,13 +163,17 @@ The private mTLS transport implements enrolled append plus claimant-authorized,
 page-bounded seal and tail operations. The follower store admits every append
 and seal against the same node-level disk budget used by Cell work, reserves
 existing bytes on restart, and NACKs before writing when capacity is exhausted.
+Each data directory strict-creates one durable `node-id`; boot sessions remain
+ephemeral. Log membership records stable physical node IDs, and each request
+resolves that ID to exactly one current live session. Two overlapping live
+sessions for one physical node fail closed.
 The directory now filters live peers by protocol, pressure, and the exact
 shared-disk capacity advertised by their follower stores, then rendezvous-ranks
 the full one- or two-member ensemble before its CAS enrollment. Rotation closes
 the old gate only after every issued sequence is object-covered, best-effort
 retires old lanes behind durable append fences, and CASes a fresh inactive
 epoch. Automatic recruitment with failure-domain metadata, recovery-only
-startup identity, actor submission, and obsolete-marker collection remain
+startup listener ordering, actor submission, and obsolete-marker collection remain
 gated. The preferred shard-zero scanner now inventories expired active node
 logs, claims at most two concurrently, scans at most 10,000 affected Cells,
 renews each recovery claim while gathering and pinning, seals the session, and
@@ -225,6 +229,11 @@ discarded and recreated when that format changes. There is no dual write,
 fallback reader, compatibility branch, or data migration until Crab ships a
 persistent Cell format that explicitly requires those guarantees.
 
+This applies to both the `cells/v1` path and the `version: 1` fields inside its
+documents. During development those values remain stable while the only reader,
+writer, validation rules, fixtures, and diagrams change together. They are
+format identity guards, not counters to increment for each structural edit.
+
 ```text
 <root>/cells/v1/
   identity.json
@@ -260,6 +269,7 @@ CAS-protected mutable authority:
   "version": 1,
   "identity": {
     "fleet": "32-byte-hex",
+    "node": "16-byte-hex",
     "session": "16-byte-hex",
     "endpoint": "https://node-a.internal:8081",
     "certificate": "32-byte-hex",
@@ -277,7 +287,7 @@ CAS-protected mutable authority:
   "log": {
     "state": "open",
     "epoch": 3,
-    "members": ["follower-session-a", "follower-session-b"],
+    "members": ["physical-node-a", "physical-node-b"],
     "active": true,
     "tiered_through": 9001,
     "recovery": null
@@ -291,7 +301,9 @@ CAS-protected mutable authority:
 }
 ```
 
-The identity signature covers only the canonical `identity` fields. The whole
+`node` identifies the durable local data directory; `session` identifies only
+one boot generation. The identity signature covers only the canonical
+`identity` fields. The whole
 object is still protected by its object-store ETag. The owner may renew only a
 `live` record with the exact session and generation. A recoverer may change
 only recovery-owned fields after expiry. Every transition validates all
@@ -457,6 +469,7 @@ Follower storage is local SSD cache with a durability obligation. It is not an
 evictable read cache until the session record proves the bytes are covered.
 
 ```text
+<cell-data>/node-id
 <cell-data>/followers/<leader-session>/<log-epoch>/
   retired
   chunks/
@@ -535,15 +548,17 @@ for that owner session.
 
 ## Select and change the follower ensemble
 
-The owner chooses followers from live, release-compatible node sessions that
-advertise the node-log protocol and available follower bytes.
+The owner chooses followers from live, release-compatible physical nodes whose
+current boot sessions advertise the node-log protocol and available follower
+bytes.
 
 Selection rules, in order:
 
-1. Exclude the owner session
-2. Exclude draining, pressured, stale, or protocol-incompatible sessions
+1. Exclude the owner's physical node
+2. Exclude draining, pressured, stale, protocol-incompatible, or ambiguously
+   advertised nodes
 3. Prefer a different zone, host, and local-disk failure domain
-4. Rank by rendezvous hash of owner session and candidate session
+4. Rank by rendezvous hash of owner session and candidate physical node ID
 5. Select one follower in a two-node fleet and two in a fleet of three or more
 
 Every selected member must fsync a batch for a fleet proof. This is write-all,
@@ -896,7 +911,8 @@ dead-session recovery path.
 
 Startup order is:
 
-1. Validate local follower directories and quarantine corrupt lanes
+1. Load or strict-create the durable physical node ID, then validate local
+   follower directories and quarantine corrupt lanes
 2. Start the private mTLS listener in **recovery-only** mode
 3. Serve `SealFragment` and `ReadTail` for surviving peer fragments
 4. Probe object-store conditional writes and range reads
@@ -1000,10 +1016,10 @@ does not expose unchecked constructors for server code.
 
 ```rust,ignore
 pub trait NodeLogTransport: Send + Sync {
-    async fn open_append(&self, member: SessionId) -> Result<AppendLane>;
-    async fn seal(&self, member: SessionId, request: SealRequest)
+    async fn open_append(&self, member: NodeId) -> Result<AppendLane>;
+    async fn seal(&self, member: NodeId, request: SealRequest)
         -> Result<SealReceipt>;
-    async fn tail(&self, member: SessionId, request: TailRequest)
+    async fn tail(&self, member: NodeId, request: TailRequest)
         -> Result<TailStream>;
 }
 

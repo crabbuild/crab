@@ -4,8 +4,8 @@ use futures_util::future::join_all;
 
 use crate::{
     ApplicationId, CellAuthority, CellCatalog, Digest, Error, FencedNodeSession, NodeDirectory,
-    NodeLogPhase, NodeLogTransport, NodeTakeoverProof, RecoveryBase, RecoveryManifestStore, Result,
-    SealRequest, SealedNodeLog, SessionId, TailRequest, Transition, VersionedControl,
+    NodeId, NodeLogPhase, NodeLogTransport, NodeTakeoverProof, RecoveryBase, RecoveryManifestStore,
+    Result, SealRequest, SealedNodeLog, SessionId, TailRequest, Transition, VersionedControl,
     build_recovery_overlays,
 };
 
@@ -27,7 +27,7 @@ pub struct NodeLogRecovery {
     transport: Arc<dyn NodeLogTransport>,
     leader_session: SessionId,
     log_epoch: u64,
-    members: Vec<SessionId>,
+    members: Vec<NodeId>,
     tiered_through: u64,
     active: bool,
     limits: crab_ltx::Limits,
@@ -251,18 +251,20 @@ impl RecoveryCoordinator {
 impl NodeLogRecovery {
     pub(crate) fn new(
         transport: Arc<dyn NodeLogTransport>,
+        leader_node: NodeId,
         leader_session: SessionId,
         log_epoch: u64,
-        members: Vec<SessionId>,
+        members: Vec<NodeId>,
         tiered_through: u64,
         active: bool,
         limits: crab_ltx::Limits,
     ) -> Result<Self> {
-        if leader_session.as_bytes().iter().all(|byte| *byte == 0)
+        if leader_node.as_bytes().iter().all(|byte| *byte == 0)
+            || leader_session.as_bytes().iter().all(|byte| *byte == 0)
             || log_epoch == 0
             || members.is_empty()
             || members.len() > 2
-            || members.contains(&leader_session)
+            || members.contains(&leader_node)
             || members
                 .iter()
                 .any(|member| member.as_bytes().iter().all(|byte| *byte == 0))
@@ -304,6 +306,7 @@ impl NodeLogRecovery {
         }
         Self::new(
             transport,
+            fenced.node(),
             fenced.session(),
             log.epoch(),
             log.members().to_vec(),
@@ -443,14 +446,14 @@ mod tests {
     };
 
     struct FailingFirstTransport {
-        failed: SessionId,
+        failed: NodeId,
         good: LocalFollowerTransport,
     }
 
     impl NodeLogTransport for FailingFirstTransport {
         fn append<'a>(
             &'a self,
-            member: SessionId,
+            member: NodeId,
             request: AppendRequest,
         ) -> BoxFuture<'a, Result<crate::FollowerReceipt>> {
             self.good.append(member, request)
@@ -458,7 +461,7 @@ mod tests {
 
         fn seal<'a>(
             &'a self,
-            member: SessionId,
+            member: NodeId,
             request: SealRequest,
         ) -> BoxFuture<'a, Result<crate::FollowerReceipt>> {
             if member == self.failed {
@@ -474,7 +477,7 @@ mod tests {
 
         fn retire<'a>(
             &'a self,
-            member: SessionId,
+            member: NodeId,
             request: RetireRequest,
         ) -> BoxFuture<'a, Result<crate::FollowerReceipt>> {
             self.good.retire(member, request)
@@ -482,7 +485,7 @@ mod tests {
 
         fn tail<'a>(
             &'a self,
-            member: SessionId,
+            member: NodeId,
             request: TailRequest,
         ) -> BoxFuture<'a, Result<Vec<Bytes>>> {
             if member == self.failed {
@@ -504,7 +507,7 @@ mod tests {
         let capture = database.capture().unwrap();
         let segment = capture.segments.first().unwrap();
         let leader = SessionId::from_bytes([1; 16]);
-        let member = SessionId::from_bytes([2; 16]);
+        let member = NodeId::from_bytes([2; 16]);
         let frame = crab_ltx::encode_node_frame(
             crab_ltx::NodeFrameScope {
                 leader_session: *leader.as_bytes(),
@@ -542,8 +545,17 @@ mod tests {
             )
             .await
             .unwrap();
-        let recovery =
-            NodeLogRecovery::new(transport, leader, 3, vec![member], 0, true, limits).unwrap();
+        let recovery = NodeLogRecovery::new(
+            transport,
+            NodeId::from_bytes([1; 16]),
+            leader,
+            3,
+            vec![member],
+            0,
+            true,
+            limits,
+        )
+        .unwrap();
         let sealed = recovery.ensure_sealed().await.unwrap();
         assert_eq!(sealed.durable_through, 1);
         assert_eq!(sealed.frames.len(), 1);
@@ -561,8 +573,8 @@ mod tests {
             .unwrap();
         let segment = database.capture().unwrap().segments.remove(0);
         let leader = SessionId::from_bytes([1; 16]);
-        let failed = SessionId::from_bytes([2; 16]);
-        let good = SessionId::from_bytes([3; 16]);
+        let failed = NodeId::from_bytes([2; 16]);
+        let good = NodeId::from_bytes([3; 16]);
         let frame = crab_ltx::encode_node_frame(
             crab_ltx::NodeFrameScope {
                 leader_session: *leader.as_bytes(),
@@ -605,9 +617,17 @@ mod tests {
             failed,
             good: local,
         });
-        let recovery =
-            NodeLogRecovery::new(transport, leader, 3, vec![failed, good], 0, true, limits)
-                .unwrap();
+        let recovery = NodeLogRecovery::new(
+            transport,
+            NodeId::from_bytes([1; 16]),
+            leader,
+            3,
+            vec![failed, good],
+            0,
+            true,
+            limits,
+        )
+        .unwrap();
         assert_eq!(recovery.ensure_sealed().await.unwrap().frames.len(), 1);
         database.close().unwrap();
     }

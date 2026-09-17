@@ -5,7 +5,7 @@ use futures_util::future::join_all;
 use tokio::sync::Notify;
 
 use crate::{
-    Error, NodeDirectory, NodeLogTransport, Result, RetireRequest, SessionId,
+    Error, NodeDirectory, NodeId, NodeLogTransport, Result, RetireRequest, SessionId,
     VersionedNodeAdvertisement,
 };
 
@@ -186,7 +186,7 @@ pub struct DurabilityProof {
 pub struct NodeLogRotationBarrier {
     leader_session: SessionId,
     log_epoch: u64,
-    members: Vec<SessionId>,
+    members: Vec<NodeId>,
     covered_through: u64,
 }
 
@@ -208,7 +208,7 @@ impl NodeLogRotationBarrier {
     }
 
     #[must_use]
-    pub fn members(&self) -> &[SessionId] {
+    pub fn members(&self) -> &[NodeId] {
         &self.members
     }
 
@@ -244,8 +244,8 @@ pub struct DurabilityGate {
 struct GateState {
     leader_session: SessionId,
     log_epoch: u64,
-    members: HashSet<SessionId>,
-    follower_through: HashMap<SessionId, u64>,
+    members: HashSet<NodeId>,
+    follower_through: HashMap<NodeId, u64>,
     object_covered: BTreeSet<u64>,
     tiered_through: u64,
     next_sequence: u64,
@@ -258,14 +258,16 @@ impl DurabilityGate {
     /// Creates one inactive gate for the exact recruited follower ensemble.
     pub fn new(
         leader_session: SessionId,
+        leader_node: NodeId,
         log_epoch: u64,
-        members: impl IntoIterator<Item = SessionId>,
+        members: impl IntoIterator<Item = NodeId>,
     ) -> Result<Self> {
         let members = members.into_iter().collect::<HashSet<_>>();
         if leader_session.as_bytes().iter().all(|byte| *byte == 0)
+            || leader_node.as_bytes().iter().all(|byte| *byte == 0)
             || log_epoch == 0
             || members.is_empty()
-            || members.contains(&leader_session)
+            || members.contains(&leader_node)
             || members
                 .iter()
                 .any(|member| member.as_bytes().iter().all(|byte| *byte == 0))
@@ -333,7 +335,7 @@ impl DurabilityGate {
     }
 
     /// Records one authenticated follower's fsynced contiguous watermark.
-    pub fn acknowledge(&self, member: SessionId, durable_through: u64) -> Result<()> {
+    pub fn acknowledge(&self, member: NodeId, durable_through: u64) -> Result<()> {
         let mut state = self.lock()?;
         if state.fenced {
             return Err(Error::Fenced);
@@ -506,6 +508,7 @@ pub async fn rotate_node_log(
         .ok_or(Error::Node("rotated node session lost its log"))?;
     let gate = DurabilityGate::new(
         enrollment.advertisement().session(),
+        enrollment.advertisement().node(),
         log.epoch(),
         log.members().iter().copied(),
     )?;
@@ -557,12 +560,16 @@ mod tests {
         SessionId::from_bytes([byte; 16])
     }
 
+    fn node(byte: u8) -> NodeId {
+        NodeId::from_bytes([byte; 16])
+    }
+
     #[tokio::test]
     async fn fleet_requires_activation_and_every_follower() {
-        let gate = DurabilityGate::new(session(1), 2, [session(3), session(4)]).unwrap();
+        let gate = DurabilityGate::new(session(1), node(1), 2, [node(3), node(4)]).unwrap();
         let ticket = gate.issue(2).unwrap();
-        gate.acknowledge(session(3), 2).unwrap();
-        gate.acknowledge(session(4), 2).unwrap();
+        gate.acknowledge(node(3), 2).unwrap();
+        gate.acknowledge(node(4), 2).unwrap();
         assert!(gate.proof(ticket).unwrap().is_none());
         gate.activate_fleet().unwrap();
         assert_eq!(
@@ -573,7 +580,7 @@ mod tests {
 
     #[tokio::test]
     async fn object_proof_wins_independently_and_watermark_stays_contiguous() {
-        let gate = DurabilityGate::new(session(1), 2, [session(3)]).unwrap();
+        let gate = DurabilityGate::new(session(1), node(1), 2, [node(3)]).unwrap();
         let first = gate.issue(1).unwrap();
         let second = gate.issue(1).unwrap();
         assert_eq!(gate.prove_object(second).unwrap(), 0);
@@ -587,7 +594,7 @@ mod tests {
 
     #[tokio::test]
     async fn rotation_waits_for_object_coverage_and_closes_the_old_gate() {
-        let gate = DurabilityGate::new(session(1), 2, [session(4), session(3)]).unwrap();
+        let gate = DurabilityGate::new(session(1), node(1), 2, [node(4), node(3)]).unwrap();
         let ticket = gate.issue(2).unwrap();
 
         assert!(matches!(
@@ -598,12 +605,12 @@ mod tests {
         let barrier = gate.begin_rotation().unwrap();
         assert_eq!(barrier.leader_session(), session(1));
         assert_eq!(barrier.log_epoch(), 2);
-        assert_eq!(barrier.members(), [session(3), session(4)]);
+        assert_eq!(barrier.members(), [node(3), node(4)]);
         assert_eq!(barrier.covered_through(), 2);
         assert_eq!(gate.begin_rotation().unwrap(), barrier);
         assert!(gate.issue(1).is_err());
         assert!(gate.activate_fleet().is_err());
-        assert!(gate.acknowledge(session(3), 2).is_err());
+        assert!(gate.acknowledge(node(3), 2).is_err());
         assert_eq!(
             gate.prove(ticket).await.unwrap().source(),
             DurabilitySource::Object
@@ -612,7 +619,7 @@ mod tests {
 
     #[tokio::test]
     async fn fencing_wakes_waiters_and_rejects_late_acks() {
-        let gate = DurabilityGate::new(session(1), 2, [session(3)]).unwrap();
+        let gate = DurabilityGate::new(session(1), node(1), 2, [node(3)]).unwrap();
         let ticket = gate.issue(1).unwrap();
         let waiter = {
             let gate = gate.clone();
@@ -620,10 +627,7 @@ mod tests {
         };
         gate.fence();
         assert!(matches!(waiter.await.unwrap(), Err(Error::Fenced)));
-        assert!(matches!(
-            gate.acknowledge(session(3), 1),
-            Err(Error::Fenced)
-        ));
+        assert!(matches!(gate.acknowledge(node(3), 1), Err(Error::Fenced)));
     }
 
     #[test]

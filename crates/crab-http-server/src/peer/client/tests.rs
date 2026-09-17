@@ -50,6 +50,7 @@ async fn reloads_a_stale_owner_and_pins_mtls_identity() {
         directory
             .create(
                 NodeAdvertisement::sign(
+                    crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
                     session,
                     endpoint,
                     loaded.fleet(),
