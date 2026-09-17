@@ -154,7 +154,7 @@ recovery path.
 | Strict frame codec plus capacity-aware deterministic selection, authoritative enrollment, activation, coverage, recovery claims, and object-covered epoch rotation | Failure-domain-aware automatic recruitment and recovery-only startup |
 | Crash-safe, node-budgeted follower store plus authenticated remote append/seal/tail/retire transport | Live shipper batching and startup listener ordering |
 | Write-all durability gate with contiguous object watermark | Actor submission and response-gate integration |
-| Complete-witness grouping, immutable recovery manifests, and post-pin session seal CAS | Automated dead-session inventory and recovery scheduling |
+| Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, and non-forgeable takeover proof | Automated dead-session inventory and recovery scheduling |
 | Cell control attachment and takeover consumption of overlays | Graceful drain, obsolete-marker collection, and live multi-node proof |
 
 The session record now owns one CAS-protected log epoch, its exact sorted member
@@ -172,6 +172,9 @@ epoch. Automatic recruitment with failure-domain metadata, recovery-only
 startup, actor submission, automated session recovery, and obsolete-marker
 collection remain gated. Fleet proof is not activated, so current responses
 stay on the existing exact-root path until those remaining gates are complete.
+An active predecessor log cannot be converted directly from a session fence
+into Cell takeover authority: only the coordinator's successful post-seal
+result carries `NodeTakeoverProof`.
 
 ## Use one multiplexed log per owner session
 
@@ -1015,11 +1018,16 @@ impl NodeLogRecovery {
     pub async fn ensure_sealed(&self, predecessor: SessionId)
         -> Result<SealedSession>;
 }
+
+pub struct NodeTakeoverProof { /* private validated fields */ }
 ```
 
 `CommitTicket` is created only by the actor after capture. `DurabilityProof`
 has private fields or validated constructors so application handlers cannot
-forge a release token.
+forge a release token. `FencedNodeSession` converts directly to
+`NodeTakeoverProof` only when fleet durability was never active. Otherwise the
+proof is emitted only after every recovered overlay is pinned and the session
+log is CASed to `sealed`.
 
 ### `crab-http-server`
 

@@ -411,23 +411,23 @@ impl RepositoryCellRouter {
             .owner
             .as_ref()
             .filter(|owner| owner.session != self.peer.owner.session);
-        let fenced = if let Some(owner) = remote_owner {
+        let takeover = if let Some(owner) = remote_owner {
             if self.remote_owner_is_live(owner).await? {
                 return Ok(ScheduledRepositoryCell {
                     cell: self.peer(target, principal.clone()),
                     release_after: false,
                 });
             }
-            Some(
-                self.peer
-                    .directory
-                    .claim_expired(
-                        owner.session,
-                        self.peer.owner.session,
-                        super::unix_now_ms()?,
-                    )
-                    .await?,
-            )
+            let fenced = self
+                .peer
+                .directory
+                .claim_expired(
+                    owner.session,
+                    self.peer.owner.session,
+                    super::unix_now_ms()?,
+                )
+                .await?;
+            Some(fenced.direct_takeover()?)
         } else {
             None
         };
@@ -459,14 +459,14 @@ impl RepositoryCellRouter {
                     .await?
             }
             ControlState::Recovering | ControlState::Serving => {
-                if let Some(fenced) = fenced {
+                if let Some(takeover) = takeover {
                     self.runtime
                         .takeover_restored(
                             proof,
                             replica,
                             self.authority.clone(),
                             observed,
-                            fenced,
+                            takeover,
                             crab_cell_runtime::RecoveryManifestStore::new(
                                 self.layout.clone(),
                                 repository_replica_limits(),

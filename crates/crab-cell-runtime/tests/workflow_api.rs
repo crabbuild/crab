@@ -984,6 +984,7 @@ async fn native_activity_heartbeats_and_recovers_after_node_loss() {
     );
     assert!(stale_owner.value().root.is_some());
     let fenced = fence_session(&layout, first_session, SessionId::from_bytes([27; 16])).await;
+    let takeover = fenced.direct_takeover().unwrap();
     let second_session = SessionId::from_bytes([27; 16]);
     let runtime = CellRuntime::new(
         SqlWorkerPool::new(1, 10).unwrap(),
@@ -997,7 +998,7 @@ async fn native_activity_heartbeats_and_recovers_after_node_loss() {
             replica,
             authority.clone(),
             stale_owner,
-            fenced,
+            takeover,
             crab_cell_runtime::RecoveryManifestStore::new(layout.clone(), Limits::default()),
             directory.path().join("activity-second.sqlite"),
             Owner {

@@ -309,6 +309,57 @@ impl FencedNodeSession {
     pub const fn log(&self) -> Option<&NodeLogStatus> {
         self.log.as_ref()
     }
+
+    /// Converts a fence into takeover authority when no fleet proof needs recovery.
+    pub fn direct_takeover(&self) -> Result<NodeTakeoverProof> {
+        if self.log.as_ref().is_some_and(NodeLogStatus::active) {
+            return Err(Error::PendingPublication);
+        }
+        Ok(NodeTakeoverProof {
+            session: self.session,
+            claimant: self.claimant,
+        })
+    }
+}
+
+/// Proof that predecessor node-log recovery cannot add newer durable Cell state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NodeTakeoverProof {
+    session: SessionId,
+    claimant: SessionId,
+}
+
+impl NodeTakeoverProof {
+    #[must_use]
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    #[must_use]
+    pub const fn claimant(&self) -> SessionId {
+        self.claimant
+    }
+
+    pub(crate) fn after_recovery(
+        fenced: &FencedNodeSession,
+        sealed: &SealedNodeLog,
+    ) -> Result<Self> {
+        let recovering = fenced.log.as_ref().ok_or(Error::Fenced)?;
+        let sealed_log = sealed.log();
+        if sealed.session() != fenced.session
+            || sealed_log.phase() != NodeLogPhase::Sealed
+            || sealed_log.epoch() != recovering.epoch()
+            || sealed_log.members() != recovering.members()
+            || sealed_log.active() != recovering.active()
+            || sealed_log.tiered_through() != recovering.tiered_through()
+        {
+            return Err(Error::Fenced);
+        }
+        Ok(Self {
+            session: fenced.session,
+            claimant: fenced.claimant,
+        })
+    }
 }
 
 /// Proof that one failed node log has finished pinning every recovered tail.

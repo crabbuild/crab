@@ -884,6 +884,7 @@ async fn unchanged_dead_owner_is_taken_over_then_restored() {
         SessionId::from_bytes([41; 16]),
     )
     .await;
+    let takeover = fenced.direct_takeover().unwrap();
     let session = SessionId::from_bytes([41; 16]);
     let runtime = CellRuntime::new(
         SqlWorkerPool::new(1, 10).unwrap(),
@@ -897,7 +898,7 @@ async fn unchanged_dead_owner_is_taken_over_then_restored() {
             fixture.replica.clone(),
             authority.clone(),
             stale,
-            fenced.clone(),
+            takeover,
             crab_cell_runtime::RecoveryManifestStore::new(
                 fixture.layout.clone(),
                 Limits::default(),
@@ -1029,6 +1030,10 @@ async fn takeover_consumes_pinned_recovery_before_serving() {
         crab_cell_runtime::RecoveryManifestStore::new(fixture.layout.clone(), Limits::default());
     let successor = SessionId::from_bytes([42; 16]);
     let fenced = fence_log_session(&fixture.layout, leader, successor, follower).await;
+    assert!(matches!(
+        fenced.direct_takeover(),
+        Err(crab_cell_runtime::Error::PendingPublication)
+    ));
     let recovery =
         crab_cell_runtime::NodeLogRecovery::from_fenced(transport, &fenced, Limits::default())
             .unwrap();
@@ -1084,6 +1089,7 @@ async fn takeover_consumes_pinned_recovery_before_serving() {
         .unwrap();
     assert_eq!(repeated.sealed, completed.sealed);
     let attached = repeated.controls.into_iter().next().unwrap();
+    let takeover = repeated.takeover;
     let runtime = CellRuntime::new(
         SqlWorkerPool::new(1, 10).unwrap(),
         16 * 1024 * 1024,
@@ -1096,7 +1102,7 @@ async fn takeover_consumes_pinned_recovery_before_serving() {
             fixture.replica.clone(),
             authority.clone(),
             attached,
-            fenced,
+            takeover,
             manifests,
             fixture._directory.path().join("recovered-takeover.sqlite"),
             Owner {
@@ -1168,6 +1174,7 @@ async fn unchanged_unpublished_owner_is_taken_over_then_bootstrapped() {
         SessionId::from_bytes([42; 16]),
     )
     .await;
+    let takeover = fenced.direct_takeover().unwrap();
     let session = SessionId::from_bytes([42; 16]);
     let runtime = CellRuntime::new(
         SqlWorkerPool::new(1, 10).unwrap(),
@@ -1181,7 +1188,7 @@ async fn unchanged_unpublished_owner_is_taken_over_then_bootstrapped() {
             fixture.replica.clone(),
             authority.clone(),
             stale,
-            fenced,
+            takeover,
             fixture
                 ._directory
                 .path()

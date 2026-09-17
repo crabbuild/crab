@@ -92,7 +92,7 @@ pub use maintenance::{
 };
 pub use node::{
     FencedNodeSession, NODE_LOG_PROTOCOL_VERSION, NodeAdvertisement, NodeCapacity, NodeDirectory,
-    SealedNodeLog, VersionedNodeAdvertisement,
+    NodeTakeoverProof, SealedNodeLog, VersionedNodeAdvertisement,
 };
 pub use node_log::{
     CommitTicket, DurabilityGate, DurabilityProof, DurabilitySource, NodeLogRotationBarrier,

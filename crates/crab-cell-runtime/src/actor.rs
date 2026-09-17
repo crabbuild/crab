@@ -325,7 +325,7 @@ impl CellRuntime {
         replica: crab_ltx::CellReplica,
         authority: CellAuthority,
         mut observed: VersionedControl,
-        fenced: crate::FencedNodeSession,
+        takeover: crate::NodeTakeoverProof,
         destination: PathBuf,
         owner: Owner,
         initialize: F,
@@ -339,7 +339,7 @@ impl CellRuntime {
     {
         self.ensure_running()?;
         let cell = self.claiming_cell(&catalog, &observed, &owner)?;
-        if owner.session != fenced.claimant() {
+        if owner.session != takeover.claimant() {
             return Err(Error::Fenced);
         }
         loop {
@@ -351,7 +351,8 @@ impl CellRuntime {
                     "unpublished takeover requires an active rootless control",
                 ));
             }
-            if observed.value().owner.as_ref().map(|owner| owner.session) != Some(fenced.session())
+            if observed.value().owner.as_ref().map(|owner| owner.session)
+                != Some(takeover.session())
             {
                 return Err(Error::Fenced);
             }
@@ -492,14 +493,14 @@ impl CellRuntime {
         replica: crab_ltx::CellReplica,
         authority: CellAuthority,
         mut observed: VersionedControl,
-        fenced: crate::FencedNodeSession,
+        takeover: crate::NodeTakeoverProof,
         recovery_store: crate::RecoveryManifestStore,
         destination: PathBuf,
         owner: Owner,
     ) -> crate::Result<CellHandle> {
         self.ensure_running()?;
         let cell = self.claiming_cell(&catalog, &observed, &owner)?;
-        if owner.session != fenced.claimant() {
+        if owner.session != takeover.claimant() {
             return Err(Error::Fenced);
         }
         loop {
@@ -513,7 +514,8 @@ impl CellRuntime {
                     "takeover requires a published control with an active owner",
                 ));
             }
-            if observed.value().owner.as_ref().map(|owner| owner.session) != Some(fenced.session())
+            if observed.value().owner.as_ref().map(|owner| owner.session)
+                != Some(takeover.session())
             {
                 return Err(Error::Fenced);
             }

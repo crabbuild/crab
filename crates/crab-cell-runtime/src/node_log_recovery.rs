@@ -4,8 +4,8 @@ use futures_util::future::join_all;
 
 use crate::{
     ApplicationId, CellAuthority, Digest, Error, FencedNodeSession, NodeDirectory, NodeLogPhase,
-    NodeLogTransport, RecoveryBase, RecoveryManifestStore, Result, SealRequest, SealedNodeLog,
-    SessionId, TailRequest, Transition, VersionedControl, build_recovery_overlays,
+    NodeLogTransport, NodeTakeoverProof, RecoveryBase, RecoveryManifestStore, Result, SealRequest,
+    SealedNodeLog, SessionId, TailRequest, Transition, VersionedControl, build_recovery_overlays,
 };
 
 /// Verified uncovered suffix gathered after every reachable follower is sealed.
@@ -49,6 +49,7 @@ pub struct RecoveryCoordinator {
 pub struct CompletedNodeRecovery {
     pub sealed: SealedNodeLog,
     pub controls: Vec<VersionedControl>,
+    pub takeover: NodeTakeoverProof,
 }
 
 impl RecoveryCoordinator {
@@ -189,7 +190,12 @@ impl RecoveryCoordinator {
             }
         }
         let sealed = directory.seal_recovery(&fenced, manifest, now_ms).await?;
-        Ok(CompletedNodeRecovery { sealed, controls })
+        let takeover = NodeTakeoverProof::after_recovery(&fenced, &sealed)?;
+        Ok(CompletedNodeRecovery {
+            sealed,
+            controls,
+            takeover,
+        })
     }
 }
 
