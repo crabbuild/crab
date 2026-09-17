@@ -421,6 +421,7 @@ impl NodeLogRecovery {
             };
             let mut first_sequence = required_first;
             let mut frames = Vec::new();
+            let mut tail_bytes = 0_u64;
             let mut complete = true;
             loop {
                 let Ok(page) = self
@@ -451,6 +452,20 @@ impl NodeLogRecovery {
                 else {
                     complete = false;
                     break;
+                };
+                let page_bytes = verified.iter().try_fold(0_u64, |bytes, frame| {
+                    bytes.checked_add(frame.encoded().len() as u64)
+                });
+                let Some(page_bytes) = page_bytes else {
+                    complete = false;
+                    break;
+                };
+                tail_bytes = match tail_bytes.checked_add(page_bytes) {
+                    Some(bytes) if bytes <= recovery_tail_reservation_bytes(self.limits) => bytes,
+                    _ => {
+                        complete = false;
+                        break;
+                    }
                 };
                 frames.extend(verified);
                 let Some(next_sequence) = page.next_sequence else {
