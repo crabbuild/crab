@@ -74,6 +74,8 @@ pub enum Error {
     Fenced,
     #[error("Cell runtime worker pool is closed")]
     RuntimeClosed,
+    #[error("Cell state stream was cancelled")]
+    StreamCancelled,
     #[error("Cell is not active on its assigned worker")]
     CellNotActive,
     #[error("Cell is already active on its assigned worker")]

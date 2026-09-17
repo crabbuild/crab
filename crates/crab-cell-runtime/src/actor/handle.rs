@@ -174,7 +174,9 @@ impl CellHandle {
             })))
             .await
             .map_err(|_| Error::RuntimeClosed)?;
-        response.await.map_err(|_| Error::RuntimeClosed)?
+        let result = response.await.map_err(|_| Error::RuntimeClosed)?;
+        self.inner.node_lease.check()?;
+        result
     }
 
     /// Reads durable work that can retain a removed release contract.

@@ -56,8 +56,8 @@ pub use catalog::{
     CatalogEntry, CatalogProof, CatalogRole, CatalogScanPage, CatalogShardScan, CellCatalog,
 };
 pub use client::{
-    CellClient, CellDescription, Committed, InvocationError, Observed, PendingMutation, Receipt,
-    command_operation_digest,
+    CellClient, CellDescription, CellStateStream, Committed, InvocationError, Observed,
+    PendingMutation, Receipt, StateStreamCancellation, command_operation_digest,
 };
 pub use codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 pub use control::{Control, ControlState, Owner, RecoveryOverlayRef, RootRef, Transition};

@@ -16,8 +16,8 @@ use crate::{
     ApplicationId, BuildDescriptor, CatalogRole, CellModule, CellTarget, Command, CommandContext,
     CommandResult, Digest, Error, IncarnationId, MigrationDescriptor, ModuleDescriptor,
     MutationIdentity, NamespaceDescriptor, NamespaceId, OperationDescriptor, PeerPrincipal,
-    PeerRoundTrip, PeerSigner, RegistryBuilder, RequestId, Resolution, RetainedCodeDescriptor,
-    SessionId, StoredOutcome, TenantId,
+    PeerRoundTrip, PeerSigner, Query, QueryContext, Receipt, RegistryBuilder, RequestId,
+    Resolution, RetainedCodeDescriptor, SessionId, StoredOutcome, TenantId,
 };
 
 const MODULE: &str = "pending-test";
@@ -39,6 +39,20 @@ impl Command for PendingCommand {
         input: Self::Input,
     ) -> crate::Result<CommandResult<Self::Output>> {
         Ok(CommandResult::Success(input))
+    }
+}
+
+struct StreamQuery;
+
+impl Query for StreamQuery {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 2;
+    const CODEC_VERSION: u32 = 1;
+    type Input = u64;
+    type Output = Vec<u8>;
+
+    fn execute(_context: &mut QueryContext<'_>, input: Self::Input) -> crate::Result<Self::Output> {
+        Ok(input.to_be_bytes().to_vec())
     }
 }
 
@@ -160,7 +174,14 @@ impl CellModule for PendingModule {
                 input_limit: 64,
                 output_limit: 64,
             }],
-            queries: &[],
+            queries: &[OperationDescriptor {
+                id: 2,
+                codec_version: 1,
+                schema_min: 1,
+                schema_max: 1,
+                input_limit: 64,
+                output_limit: 64,
+            }],
             workflow_definitions: &[],
             activity_types: &[],
             namespaces: &[NamespaceDescriptor {
@@ -175,7 +196,61 @@ impl CellModule for PendingModule {
     }
 
     fn register(self, registry: &mut RegistryBuilder) -> crate::Result<()> {
-        registry.bind_command::<PendingCommand>()
+        registry.bind_command::<PendingCommand>()?;
+        registry.bind_query::<StreamQuery>()
+    }
+}
+
+struct StreamTransport {
+    description: CellDescription,
+    sequence: Arc<AtomicUsize>,
+    fenced: Arc<AtomicUsize>,
+}
+
+impl CellTransport for StreamTransport {
+    fn describe(
+        &self,
+        _target: CellTarget,
+    ) -> Pin<Box<dyn Future<Output = crate::Result<CellDescription>> + Send + 'static>> {
+        let description = self.description;
+        Box::pin(async move { Ok(description) })
+    }
+
+    fn command(
+        &self,
+        _command: EncodedCommand,
+    ) -> Pin<Box<dyn Future<Output = crate::Result<StoredOutcome>> + Send + 'static>> {
+        Box::pin(async { Err(Error::Command("unexpected stream command")) })
+    }
+
+    fn query(
+        &self,
+        _query: EncodedQuery,
+    ) -> Pin<Box<dyn Future<Output = crate::Result<EncodedObservation>> + Send + 'static>> {
+        let fenced = self.fenced.load(Ordering::Acquire) != 0;
+        let description = self.description;
+        let sequence = self.sequence.fetch_add(1, Ordering::SeqCst) as u64 + 1;
+        Box::pin(async move {
+            if fenced {
+                return Err(Error::Fenced);
+            }
+            let output = crate::codec::encode_wire(&sequence.to_be_bytes().to_vec(), 64)?;
+            Ok(EncodedObservation {
+                output,
+                receipt: Receipt {
+                    cell: description.cell,
+                    incarnation: description.incarnation,
+                    commit_sequence: sequence,
+                },
+            })
+        })
+    }
+
+    fn resolve(
+        &self,
+        _resolve: EncodedResolve,
+    ) -> Pin<Box<dyn Future<Output = crate::Result<Resolution>> + Send + 'static>> {
+        Box::pin(async { Err(Error::Command("unexpected stream resolve")) })
     }
 }
 
@@ -289,4 +364,77 @@ async fn unknown_outcome_keeps_identity_and_digest_for_resolve() {
         Some(pending.operation_digest()),
         *resolved_digest.lock().unwrap()
     );
+}
+
+#[tokio::test]
+async fn state_stream_advances_receipts_and_cancellation_is_terminal() {
+    let mut builder = RegistryBuilder::new(BuildDescriptor {
+        source_revision: "stream-test".into(),
+        cargo_lock_digest: Digest::from_bytes([15; 32]),
+    });
+    builder.register(PendingModule).unwrap();
+    let registry = Arc::new(builder.finish().unwrap());
+    let target = CellTarget::new(
+        TenantId::from_bytes([16; 16]),
+        ApplicationId::from_bytes([17; 16]),
+        NAMESPACE,
+        b"stream",
+    )
+    .unwrap();
+    let description = CellDescription {
+        cell: target.cell_id(),
+        incarnation: IncarnationId::from_bytes([18; 16]),
+        code: RETAINED_CODE,
+        schema: 1,
+    };
+    let fenced = Arc::new(AtomicUsize::new(0));
+    let client = CellClient::new(
+        registry,
+        Arc::new(StreamTransport {
+            description,
+            sequence: Arc::new(AtomicUsize::new(0)),
+            fenced: fenced.clone(),
+        }),
+    );
+    let mut stream = client
+        .open_state_stream::<StreamQuery>(
+            &target,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    let first = stream.emit(1).await.unwrap();
+    assert_eq!(first.receipt.commit_sequence, 1);
+    let second = stream.emit(2).await.unwrap();
+    assert_eq!(second.receipt.commit_sequence, 2);
+    assert_eq!(stream.last_receipt(), Some(second.receipt));
+
+    let cancellation = stream.cancellation();
+    cancellation.cancel();
+    assert!(matches!(
+        stream.emit(3).await,
+        Err(InvocationError::NotStarted(Error::StreamCancelled))
+    ));
+    assert!(stream.is_closed());
+
+    assert!(matches!(
+        client
+            .open_state_stream::<StreamQuery>(&target, std::time::Instant::now())
+            .await,
+        Err(InvocationError::NotStarted(Error::Deadline))
+    ));
+
+    fenced.store(1, Ordering::Release);
+    let mut fenced_stream = client
+        .open_state_stream::<StreamQuery>(
+            &target,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        fenced_stream.emit(5).await,
+        Err(InvocationError::NotStarted(Error::Fenced))
+    ));
+    assert!(fenced_stream.is_closed());
 }

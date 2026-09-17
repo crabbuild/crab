@@ -653,6 +653,7 @@ fn error_reply(error: Error) -> wire::PeerReply {
         | Error::CellNotActive
         | Error::CellDraining
         | Error::RuntimeClosed
+        | Error::StreamCancelled
         | Error::PendingPublication => (
             wire::error::Code::Unavailable,
             wire::error::Outcome::NotStarted,

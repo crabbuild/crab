@@ -6,19 +6,22 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crab_ltx::rusqlite::OptionalExtension;
+use tokio::sync::Notify;
 
 use crate::{
     ActivityContext, ActivityExecution, ActivitySupport, CatalogRole, CellHandle, CellId,
     CellTarget, Command, CommandInvocation, Digest, Error, IncarnationId, MutationIdentity,
-    OperationDescriptor, Query, QueryInvocation, Registry, Resolution, Result, StoredOutcome,
+    OperationDescriptor, Query, QueryInvocation, Registry, RequestId, Resolution, Result,
+    StoredOutcome,
     codec::{decode_wire, encode_wire},
 };
 
 const CELL_COMMAND_TAG: u16 = 10;
+const MAX_STATE_STREAM_CHUNKS: usize = 1_024;
 
 #[cfg(test)]
 mod tests;
@@ -52,6 +55,150 @@ pub struct Committed<T> {
 pub struct Observed<T> {
     pub output: T,
     pub receipt: Receipt,
+}
+
+/// Cancellation capability for one state-observing Cell stream.
+#[derive(Clone)]
+pub struct StateStreamCancellation {
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+impl StateStreamCancellation {
+    /// Cancels the stream and releases any pending output wait.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    /// Returns whether cancellation has been requested.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+}
+
+/// Serial, watermark-bound output capability for state-observing streams.
+///
+/// Each call to [`Self::emit`] performs one actor-ordered query at or beyond
+/// the previous receipt. The mutable borrow prevents two chunks from being
+/// released out of order; the deadline and cancellation capability bound the
+/// retained stream state.
+pub struct CellStateStream<Q: Query> {
+    client: CellClient,
+    target: CellTarget,
+    expected: CellDescription,
+    stream_id: RequestId,
+    minimum: Option<Receipt>,
+    deadline: Instant,
+    chunks: usize,
+    closed: bool,
+    cancellation: StateStreamCancellation,
+    marker: std::marker::PhantomData<fn() -> Q>,
+}
+
+impl<Q: Query> CellStateStream<Q> {
+    /// Returns the opaque stream identity used for lifecycle and telemetry.
+    #[must_use]
+    pub const fn id(&self) -> RequestId {
+        self.stream_id
+    }
+
+    /// Returns the latest proven observation, if the stream emitted a chunk.
+    #[must_use]
+    pub const fn last_receipt(&self) -> Option<Receipt> {
+        self.minimum
+    }
+
+    /// Returns a capability that cancels this stream from another task.
+    #[must_use]
+    pub fn cancellation(&self) -> StateStreamCancellation {
+        self.cancellation.clone()
+    }
+
+    /// Emits one state-observing chunk after its watermark is proven.
+    pub async fn emit(
+        &mut self,
+        input: Q::Input,
+    ) -> std::result::Result<Observed<Q::Output>, InvocationError<Q::Output>> {
+        if self.closed || self.cancellation.is_cancelled() {
+            self.closed = true;
+            return Err(stream_error(Error::StreamCancelled));
+        }
+        if self.chunks >= MAX_STATE_STREAM_CHUNKS {
+            self.closed = true;
+            return Err(stream_error(Error::Capacity("state stream chunks")));
+        }
+        let remaining = self
+            .deadline
+            .checked_duration_since(Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(|| {
+                self.closed = true;
+                stream_error(Error::Deadline)
+            })?;
+        let query = self.client.query_with_description::<Q>(
+            &self.target,
+            self.expected,
+            self.minimum,
+            input,
+        );
+        tokio::pin!(query);
+        let result = match tokio::select! {
+            result = &mut query => result,
+            () = self.cancellation.notify.notified() => {
+                self.closed = true;
+                Err(stream_error(Error::StreamCancelled))
+            }
+            () = tokio::time::sleep(remaining) => {
+                self.closed = true;
+                Err(stream_error(Error::Deadline))
+            }
+        } {
+            Ok(result) => result,
+            Err(error) => {
+                self.closed = true;
+                return Err(error);
+            }
+        };
+        if self.cancellation.is_cancelled() {
+            self.closed = true;
+            return Err(stream_error(Error::StreamCancelled));
+        }
+        if Instant::now() >= self.deadline {
+            self.closed = true;
+            return Err(stream_error(Error::Deadline));
+        }
+        let receipt = result.receipt;
+        if self
+            .minimum
+            .is_some_and(|minimum| receipt.commit_sequence < minimum.commit_sequence)
+        {
+            self.closed = true;
+            return Err(stream_error(Error::Command(
+                "state stream watermark moved backwards",
+            )));
+        }
+        self.minimum = Some(receipt);
+        self.chunks = self.chunks.saturating_add(1);
+        Ok(result)
+    }
+
+    /// Closes the stream. No later chunk can be emitted.
+    pub fn finish(&mut self) {
+        self.closed = true;
+        self.cancellation.cancel();
+    }
+
+    /// Returns whether the stream is closed or cancelled.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.closed || self.cancellation.is_cancelled()
+    }
+}
+
+fn stream_error<T>(error: Error) -> InvocationError<T> {
+    InvocationError::NotStarted(error)
 }
 
 /// Stable mutation evidence retained when acceptance cannot be resolved.
@@ -249,6 +396,41 @@ impl CellClient {
         Self::new(registry, transport)
     }
 
+    /// Opens a bounded, serial state-observing stream for one Cell target.
+    ///
+    /// The first emitted chunk establishes the response watermark. Every later
+    /// chunk is queried at or beyond the prior receipt and is therefore gated
+    /// by the same actor durability proof before it can be returned.
+    #[must_use = "await the stream setup result"]
+    pub async fn open_state_stream<Q: Query>(
+        &self,
+        target: &CellTarget,
+        deadline: Instant,
+    ) -> std::result::Result<CellStateStream<Q>, InvocationError<Q::Output>> {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(|| InvocationError::NotStarted(Error::Deadline))?;
+        let expected = tokio::time::timeout(remaining, self.describe::<Q::Output>(target))
+            .await
+            .map_err(|_| InvocationError::NotStarted(Error::Deadline))??;
+        Ok(CellStateStream {
+            client: self.clone(),
+            target: target.clone(),
+            expected,
+            stream_id: RequestId::from_bytes(rand::random()),
+            minimum: None,
+            deadline,
+            chunks: 0,
+            closed: false,
+            cancellation: StateStreamCancellation {
+                cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                notify: Arc::new(Notify::new()),
+            },
+            marker: std::marker::PhantomData,
+        })
+    }
+
     pub(crate) fn require_namespace(
         &self,
         namespace: crate::NamespaceId,
@@ -365,8 +547,19 @@ impl CellClient {
         minimum: Option<Receipt>,
         input: Q::Input,
     ) -> std::result::Result<Observed<Q::Output>, InvocationError<Q::Output>> {
-        let now_ms = unix_time_ms().map_err(InvocationError::NotStarted)?;
         let description = self.describe::<Q::Output>(target).await?;
+        self.query_with_description::<Q>(target, description, minimum, input)
+            .await
+    }
+
+    async fn query_with_description<Q: Query>(
+        &self,
+        target: &CellTarget,
+        description: CellDescription,
+        minimum: Option<Receipt>,
+        input: Q::Input,
+    ) -> std::result::Result<Observed<Q::Output>, InvocationError<Q::Output>> {
+        let now_ms = unix_time_ms().map_err(InvocationError::NotStarted)?;
         let operation = self
             .registry
             .query_contract::<Q>(target.namespace())

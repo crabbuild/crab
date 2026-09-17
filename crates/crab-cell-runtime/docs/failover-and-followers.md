@@ -10,7 +10,7 @@ before a successor opens SQLite.
 | Content type | Low-level target design |
 | Audience | `crab-ltx`, `crab-cell-runtime`, and `crab-http-server` implementers |
 | Goal | Define the persistence, wire, gating, recovery, lifecycle, and proof contracts needed for Celld-style follower durability |
-| Status | Non-streaming failover, bounded hot-Cell pipelining, and Compose owner-loss qualification implemented; state-observing stream gating, target-load, and extended fault qualification remain |
+| Status | Non-streaming failover, bounded hot-Cell pipelining, and state-observing stream gating implemented; target-load and extended fault qualification remain |
 | Reference | Celld commit `10cb1303dac710dcb3b557e318e08c855261f68b` |
 
 [Back to the Cell runtime index](README.md)
@@ -158,7 +158,7 @@ recovery path.
 | Write-all durability gate, first-fsynced-batch activation, bounded dual-watermark command continuation, ordered object publication, object fallback, schema-migration barriers, and contiguous authoritative object watermark | None for this slice |
 | Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | None for this slice |
 | Cell control attachment and takeover consumption of overlays; server drain closes a fully object-covered epoch before session withdrawal; grace-aged retired follower lanes are deleted only after authority stops naming their epoch; the Compose qualifier proves a follower-only result survives owner `SIGKILL`, owner-disk deletion, RustFS restoration, takeover, and owner rejoin; the Kubernetes qualifier enforces each selected node profile and 1,000 aggregate mutation requests/s against every Pod | Signed live runs across small, medium, and large profiles, plus the extended fault and telemetry matrix |
-| Bounded command and query responses bind to the actor's proven logical head | State-observing streaming responses need an explicit watermark-bound stream lease before such an API is exposed |
+| Bounded command/query responses and the typed `CellStateStream` bind every emitted chunk to the actor's proven logical head | Extended live fault and profile qualification only |
 
 The session record now owns one CAS-protected log epoch, its exact sorted member
 set, activation bit, contiguous object watermark, and renewable recovery claim.
@@ -822,12 +822,10 @@ watermark and one bounded queue to remove object-store latency from consecutive
 commands. It deliberately stops before a general publication graph: one actor,
 one SQLite writer, one ordered publisher, and one Cell-control CAS owner remain.
 
-State-observing streaming remains a separate, demand-gated delivery. Crab
-should implement it only with the first Rust API that can read mutable Cell
-state after the response head. Shipping an unused stream scheduler now would
-add lifecycle and admission state without improving current bounded responses;
-shipping such an API later without the per-output gate would violate the
-durability contract.
+State-observing streaming is delivered separately from publication. The first
+Rust API reads mutable Cell state through `CellStateStream`; it adds no stream
+scheduler, second writer, or publication head. Any future body adapter must
+delegate to this gate rather than bypassing its receipt and lease checks.
 
 The dual-watermark model earns its extra state only because it changes current
 command throughput. It is the narrowest design that gives Crab all three of
@@ -876,8 +874,8 @@ state-observing streams. Actor ordering proves that a query can observe only a
 
 ### Deliver state-observing streaming as a separate output gate
 
-Streaming is a remaining delivery, not another publication head and not an
-extension of the object-publication queue. The important distinction is what
+Streaming is an output gate, not another publication head and not an extension
+of the object-publication queue. The important distinction is what
 the producer can observe:
 
 | Stream kind | Required gate |
@@ -888,7 +886,7 @@ the producer can observe:
 
 Celld uses the third rule: one response release is insufficient because the
 producer continues after the head and a later chunk can reveal a later commit.
-Crab should match that behavior when it exposes a Rust state-observing stream.
+`CellStateStream` applies that same rule to Crab's Rust state-observing API.
 
 ```mermaid
 sequenceDiagram
@@ -912,8 +910,10 @@ sequenceDiagram
 
 The first implementation must satisfy this contract:
 
-1. `OpenStream` binds a stream ID to the current Cell, incarnation, owner
-   epoch, node session, deadline, and latest observed commit sequence.
+1. `open_state_stream` allocates a stream ID and binds it to the current Cell,
+   incarnation, expected owner description, deadline, and latest observed
+   commit sequence. The owner lease/session is rechecked by the local actor or
+   authenticated peer on every query.
 2. `EmitChunk` carries the highest commit sequence the chunk may reveal. The
    gate releases it only when the same epoch has a fleet or object proof
    covering that sequence.
@@ -930,14 +930,15 @@ The first implementation must satisfy this contract:
    a new chunk ticket.
 
 ```rust,ignore
-// Target contract, not yet a public API.
-let mut stream = cell.open_state_stream(deadline).await?;
-let observation = stream.observe(|db| render_next_chunk(db)).await?;
-stream.emit(observation).await?; // waits for proof, then rechecks lease
-stream.finish().await?;
+let mut stream = client.open_state_stream::<LiveQuery>(&target, deadline).await?;
+let first = stream.emit(first_input).await?;
+send_chunk(first.output).await?;
+let next = stream.emit(next_input).await?; // waits for the next proof
+send_chunk(next.output).await?;
+stream.finish();
 ```
 
-The remaining-delivery proof matrix is small and specific:
+The stream-gate proof matrix is small and specific:
 
 - A response head and first chunk wait for the commit they reveal.
 - A mutation between two chunks makes only the later chunk wait for the newer
@@ -947,11 +948,13 @@ The remaining-delivery proof matrix is small and specific:
 - Client cancellation, deadline, proof failure, and producer failure return
   every buffer, snapshot, and admission permit.
 
-The streaming gate is an accepted remaining product delivery, with one narrow
-trigger: the first Rust API whose producer can observe mutable Cell state after
-the response head. The API and gate above must ship together. It is not a
-prerequisite for the existing bounded Cell API, and it does not change the
-dual-watermark publication queue.
+The streaming gate is now the first Rust state-observing stream API. `CellClient`
+opens a typed `CellStateStream`; its mutable `emit` operation serializes chunks,
+passes the previous `Receipt` as the next minimum watermark, and closes on
+deadline, cancellation, fencing, or a non-monotonic receipt. The existing actor
+query path performs the final node-lease check immediately before returning the
+observed value. The stream uses the query's declared output limit as its one-
+chunk byte bound and never creates a second publication queue or writer.
 
 The current server stream audit explains that boundary:
 
@@ -960,12 +963,11 @@ The current server stream audit explains that boundary:
 | Release asset and LFS download | Immutable object selected by digest and size | Pin identity before the head; no per-chunk Cell gate |
 | Repository archive and Git pack | One fixed repository snapshot or fetch plan | Keep snapshot/operation lifetime through the body |
 | SQL, KV, Queue, and Workflow response | None; runtime returns one bounded value | Existing actor proof gates the complete value |
-| Future SSE, live query, or incremental Cell renderer | May read a newer Cell head for each chunk | Phase 8 per-output watermark gate is mandatory |
+| Future SSE, live query, or incremental Cell renderer | May read a newer Cell head for each chunk | Use `CellStateStream`; a custom body must preserve the same per-output gate |
 
-This deferral avoids a second speculative queue, stream scheduler, and public
-API with no caller. It does not weaken the contract: introducing a
-state-observing body without the phase 8 gate is a correctness regression, not
-an optional optimization.
+This narrow API avoids a second speculative queue or stream scheduler. It does
+not weaken the contract: introducing a state-observing body without the phase 8
+gate is a correctness regression, not an optional optimization.
 
 Authentication, routing, and malformed-request errors produced before Cell
 execution do not need a Cell durability proof.
@@ -1514,7 +1516,7 @@ until the recovery gate is complete.
 | 5 | Dual object/fleet durability gate with one in-flight publication per Cell | Fleet-first response survives owner and disk loss |
 | 6 | Ensemble rotation, graceful drain, startup recovery-only listener, GC | Member loss and rolling restart matrix |
 | 7 | Bounded logical/published-head pipeline for hot Cells | Consecutive commands no longer wait for object publication; queue bounds and crash recovery hold |
-| 8 | Accepted remaining delivery: per-output watermark gate shipped atomically with the first Rust state-observing stream API | Head and chunks wait for the state they reveal; fencing and cancellation release no later bytes or resources |
+| 8 | `CellClient::open_state_stream` and `CellStateStream` per-output watermark gate | Typed stream tests prove monotonic receipts, serial emission, deadline, cancellation, and fencing behavior |
 | 9 | Real RustFS and Kubernetes qualification at target load | Signed receipts with zero lost acknowledged outcomes |
 
 Phases 1 through 4 may ship with object-only responses. Phase 5 is the first
