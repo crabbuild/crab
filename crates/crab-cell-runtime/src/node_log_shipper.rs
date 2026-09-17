@@ -315,6 +315,7 @@ impl NodeLogShipper {
 impl Drop for NodeLogShipper {
     fn drop(&mut self) {
         self.gate.stop_shipping();
+        self.bytes.close();
     }
 }
 
