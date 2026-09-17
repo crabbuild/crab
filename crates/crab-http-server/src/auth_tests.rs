@@ -307,6 +307,7 @@ impl Harness {
             cell_runtime,
             repository_cells: Some(repository_cells),
             peer_receiver: None,
+            follower_store: None,
             options: RepositoryOptions::default(),
             cursor_key: [7; 32],
             admission: Semaphore::new(16),

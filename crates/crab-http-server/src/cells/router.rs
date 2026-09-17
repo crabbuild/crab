@@ -411,15 +411,26 @@ impl RepositoryCellRouter {
             .owner
             .as_ref()
             .filter(|owner| owner.session != self.peer.owner.session);
-        if let Some(owner) = remote_owner
-            && self.remote_owner_is_live(owner).await?
-        {
-            return Ok(ScheduledRepositoryCell {
-                cell: self.peer(target, principal.clone()),
-                release_after: false,
-            });
-        }
-        let takeover = remote_owner.is_some();
+        let fenced = if let Some(owner) = remote_owner {
+            if self.remote_owner_is_live(owner).await? {
+                return Ok(ScheduledRepositoryCell {
+                    cell: self.peer(target, principal.clone()),
+                    release_after: false,
+                });
+            }
+            Some(
+                self.peer
+                    .directory
+                    .claim_expired(
+                        owner.session,
+                        self.peer.owner.session,
+                        super::unix_now_ms()?,
+                    )
+                    .await?,
+            )
+        } else {
+            None
+        };
         if observed.value().owner.as_ref().is_some_and(|owner| {
             owner.session == self.peer.owner.session && owner != &self.peer.owner
         }) {
@@ -448,13 +459,18 @@ impl RepositoryCellRouter {
                     .await?
             }
             ControlState::Recovering | ControlState::Serving => {
-                if takeover {
+                if let Some(fenced) = fenced {
                     self.runtime
                         .takeover_restored(
                             proof,
                             replica,
                             self.authority.clone(),
                             observed,
+                            fenced,
+                            crab_cell_runtime::RecoveryManifestStore::new(
+                                self.layout.clone(),
+                                repository_replica_limits(),
+                            ),
                             destination,
                             self.peer.owner.clone(),
                         )
@@ -466,6 +482,10 @@ impl RepositoryCellRouter {
                             replica,
                             self.authority.clone(),
                             observed,
+                            crab_cell_runtime::RecoveryManifestStore::new(
+                                self.layout.clone(),
+                                repository_replica_limits(),
+                            ),
                             destination,
                         )
                         .await?
@@ -626,8 +646,8 @@ mod tests {
     use std::{future::Future, pin::Pin, time::UNIX_EPOCH};
 
     use crab_cell_runtime::{
-        ApplicationId, IncarnationId, MutationIdentity, RequestId, SessionId, SqlWorkerPool,
-        TenantId, Transition,
+        ApplicationId, IncarnationId, MutationIdentity, NodeAdvertisement, NodeCapacity, RequestId,
+        SessionId, SqlWorkerPool, TenantId, Transition,
     };
     use crab_storage::Store;
     use ed25519_dalek::SigningKey;
@@ -819,6 +839,45 @@ mod tests {
         let authority = CellAuthority::new(layout.clone());
         let idle = authority.load(target.cell_id()).await.unwrap().unwrap();
         let stale_session = SessionId::from_bytes([10; 16]);
+        let now_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let stale_issued_at_ms = now_ms - 20_000;
+        NodeDirectory::new(
+            layout.clone(),
+            crab_cell_runtime::Digest::from_bytes([21; 32]),
+            crab_cell_runtime::Digest::from_bytes([22; 32]),
+            registry.release_digest(),
+        )
+        .create(
+            NodeAdvertisement::sign(
+                stale_session,
+                owner(stale_session).endpoint,
+                crab_cell_runtime::Digest::from_bytes([21; 32]),
+                crab_cell_runtime::Digest::from_bytes([23; 32]),
+                crab_cell_runtime::Digest::from_bytes([22; 32]),
+                registry.release_digest(),
+                &SigningKey::from_bytes(&[10; 32]),
+                1,
+                stale_issued_at_ms,
+                stale_issued_at_ms + 15_000,
+                registry.module_digests(),
+                vec![1],
+                NodeCapacity {
+                    free_memory_bytes: 1,
+                    free_disk_bytes: 1,
+                    job_credits: 1,
+                },
+            )
+            .unwrap(),
+            stale_issued_at_ms,
+        )
+        .await
+        .unwrap();
         let stale = idle.value().takeover(owner(stale_session)).unwrap();
         authority
             .transition(&idle, stale, Transition::Takeover)

@@ -29,7 +29,6 @@ const CELL_REQUESTS: usize = 64;
 const CELL_BYTES: usize = 8 * 1024 * 1024;
 const RENEWAL_SCAN: std::time::Duration = std::time::Duration::from_millis(100);
 const MAX_RENEWALS_IN_FLIGHT: usize = 32;
-const TAKEOVER_OBSERVATION: std::time::Duration = std::time::Duration::from_secs(15);
 const SQL_WALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Conservative per-active-Cell reservation for actor state and native tasks.
@@ -316,12 +315,17 @@ impl CellRuntime {
     }
 
     /// Takes over an unchanged unpublished owner, initializes and publishes the Cell.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the takeover boundary keeps every authority and activation input explicit"
+    )]
     pub async fn takeover_unpublished<F>(
         &self,
         catalog: CatalogProof,
         replica: crab_ltx::CellReplica,
         authority: CellAuthority,
         mut observed: VersionedControl,
+        fenced: crate::FencedNodeSession,
         destination: PathBuf,
         owner: Owner,
         initialize: F,
@@ -335,6 +339,9 @@ impl CellRuntime {
     {
         self.ensure_running()?;
         let cell = self.claiming_cell(&catalog, &observed, &owner)?;
+        if owner.session != fenced.claimant() {
+            return Err(Error::Fenced);
+        }
         loop {
             if observed.value().state != crate::ControlState::Recovering
                 || observed.value().owner.is_none()
@@ -344,7 +351,10 @@ impl CellRuntime {
                     "unpublished takeover requires an active rootless control",
                 ));
             }
-            tokio::time::sleep(TAKEOVER_OBSERVATION).await;
+            if observed.value().owner.as_ref().map(|owner| owner.session) != Some(fenced.session())
+            {
+                return Err(Error::Fenced);
+            }
             self.ensure_running()?;
             let current = authority.load(cell).await?.ok_or(Error::Fenced)?;
             if current.value() != observed.value() {
@@ -402,9 +412,14 @@ impl CellRuntime {
         replica: crab_ltx::CellReplica,
         authority: CellAuthority,
         observed: VersionedControl,
+        recovery_store: crate::RecoveryManifestStore,
         destination: PathBuf,
     ) -> crate::Result<CellHandle> {
         self.ensure_running()?;
+        self.activation_cell(&catalog, &observed)?;
+        let observed = self
+            .publish_attached_recovery(&replica, &authority, observed, &recovery_store)
+            .await?;
         let reservation = self.inner.pool.reserve_activation()?;
         self.activate_restored_reserved(
             catalog,
@@ -466,18 +481,27 @@ impl CellRuntime {
         .await
     }
 
-    /// Takes over an unchanged owner after the fixed observation interval.
+    /// Takes over an unchanged owner after its exact node session is fenced.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the takeover boundary keeps every authority, recovery and activation input explicit"
+    )]
     pub async fn takeover_restored(
         &self,
         catalog: CatalogProof,
         replica: crab_ltx::CellReplica,
         authority: CellAuthority,
         mut observed: VersionedControl,
+        fenced: crate::FencedNodeSession,
+        recovery_store: crate::RecoveryManifestStore,
         destination: PathBuf,
         owner: Owner,
     ) -> crate::Result<CellHandle> {
         self.ensure_running()?;
         let cell = self.claiming_cell(&catalog, &observed, &owner)?;
+        if owner.session != fenced.claimant() {
+            return Err(Error::Fenced);
+        }
         loop {
             if !matches!(
                 observed.value().state,
@@ -489,7 +513,10 @@ impl CellRuntime {
                     "takeover requires a published control with an active owner",
                 ));
             }
-            tokio::time::sleep(TAKEOVER_OBSERVATION).await;
+            if observed.value().owner.as_ref().map(|owner| owner.session) != Some(fenced.session())
+            {
+                return Err(Error::Fenced);
+            }
             self.ensure_running()?;
             let current = authority.load(cell).await?.ok_or(Error::Fenced)?;
             if current.value() != observed.value() {
@@ -519,6 +546,9 @@ impl CellRuntime {
                     }
                 }
             };
+            let claimed = self
+                .publish_attached_recovery(&replica, &authority, claimed, &recovery_store)
+                .await?;
             return self
                 .activate_restored_reserved(
                     catalog,
@@ -529,6 +559,49 @@ impl CellRuntime {
                     reservation,
                 )
                 .await;
+        }
+    }
+
+    async fn publish_attached_recovery(
+        &self,
+        replica: &crab_ltx::CellReplica,
+        authority: &CellAuthority,
+        observed: VersionedControl,
+        recovery_store: &crate::RecoveryManifestStore,
+    ) -> crate::Result<VersionedControl> {
+        let Some(recovery) = observed.value().recovery.as_ref() else {
+            return Ok(observed);
+        };
+        let overlay = recovery_store
+            .load_overlay(
+                observed.value().cell,
+                observed.value().incarnation,
+                recovery,
+            )
+            .await?;
+        let prepared = replica
+            .prepare_recovered_overlay(&overlay, observed.value().schema)
+            .await?;
+        self.ensure_running()?;
+        let successor = observed
+            .value()
+            .publish_recovery(&prepared, observed.value().next_due_ms)?;
+        match authority
+            .transition(&observed, successor.clone(), Transition::PublishRecovery)
+            .await
+        {
+            Ok(published) => Ok(published),
+            Err(error) => {
+                let current = authority
+                    .load(observed.value().cell)
+                    .await?
+                    .ok_or(Error::Fenced)?;
+                if current.value() == &successor {
+                    Ok(current)
+                } else {
+                    Err(error)
+                }
+            }
         }
     }
 

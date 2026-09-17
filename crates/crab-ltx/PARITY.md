@@ -86,10 +86,13 @@ The library shares bounded I/O, blocking-job and recovery concurrency by default
 hosts can inject shared semaphore budgets. The embedding server still owns SQL
 admission, byte-weighted memory budgets, activation counts, timers and cancellation.
 
-Celld's node log, actors, follower durability, placement, owner election and HTTP
-response gate are outside its LTX crate and outside this change. Crab's combined
-HTTP owner/head CAS still requires server implementation. A library epoch-head
-receipt is not a lease and cannot authorize a successful HTTP response.
+Celld's actors, follower placement, owner election and HTTP response policy stay
+outside the LTX crate. `crab-ltx` now owns the strict node-frame codec and the
+exact recovered-overlay root builder; `crab-cell-runtime` owns the follower
+store, seal/gather mechanics and dual-proof gate. Fleet proof remains disabled
+in the product actor until session recovery and overlay pinning are wired end to
+end. A library root or follower receipt is not a lease and cannot by itself
+authorize a successful HTTP response.
 
 The low-level target for closing that surrounding service gap is
 [Follower durability and warm failover](../crab-cell-runtime/docs/failover-and-followers.md).

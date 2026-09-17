@@ -10,9 +10,10 @@ Run one `crab-http-server` process per Kubernetes Pod or virtual machine. Nodes 
 
 [Back to the Cell runtime index](README.md)
 
-The current deployment has no follower durability tier. The target node-session
-lease, follower placement, recovery-only startup listener, and warm failover
-ordering are defined in
+The current deployment does not yet enable follower fsync as a response proof.
+It creates the local follower store and exposes authenticated append handling on
+the private mTLS listener; session recovery, placement, recovery-only startup,
+and fleet-proof activation remain gated by
 [Follower durability and warm failover](failover-and-followers.md).
 
 ## Configure one process per node

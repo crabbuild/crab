@@ -54,6 +54,55 @@ pub struct PreparedRoot {
     verified: VerifiedRoot,
 }
 
+/// A verified recovery bundle pinned to one exact published predecessor.
+///
+/// The bundle validates every embedded LTX file at construction. A
+/// [`CellReplica`] additionally verifies Cell scope, chain continuity, and the
+/// declared final position before it uploads a successor root.
+pub struct RecoveryOverlay {
+    predecessor: RootRef,
+    bundle: crate::bundle::Bundle,
+    final_position: Position,
+    final_commit_sequence: u64,
+}
+
+impl RecoveryOverlay {
+    #[must_use]
+    pub fn new(
+        predecessor: RootRef,
+        bundle: crate::bundle::Bundle,
+        final_position: Position,
+        final_commit_sequence: u64,
+    ) -> Self {
+        Self {
+            predecessor,
+            bundle,
+            final_position,
+            final_commit_sequence,
+        }
+    }
+
+    #[must_use]
+    pub const fn predecessor(&self) -> RootRef {
+        self.predecessor
+    }
+
+    #[must_use]
+    pub const fn final_position(&self) -> Position {
+        self.final_position
+    }
+
+    #[must_use]
+    pub const fn final_commit_sequence(&self) -> u64 {
+        self.final_commit_sequence
+    }
+
+    #[must_use]
+    pub fn bundle(&self) -> &crate::bundle::Bundle {
+        &self.bundle
+    }
+}
+
 impl PreparedRoot {
     #[must_use]
     pub fn root(&self) -> RootRef {
@@ -559,6 +608,47 @@ impl CellReplica {
         replica
             .prepare_bundle_admitted(base, bundle, commit_sequence, schema)
             .await
+    }
+
+    /// Prepares the exact successor pinned by a recovered node-log overlay.
+    ///
+    /// Recovery policy and ownership remain caller-owned. This method accepts
+    /// only this replica's Cell/incarnation rows, requires the declared final
+    /// position to match the bundle, and reuses normal root preparation.
+    pub async fn prepare_recovered_overlay(
+        &self,
+        overlay: &RecoveryOverlay,
+        schema: u32,
+    ) -> Result<PreparedRoot> {
+        if overlay.predecessor.cell != self.cell
+            || overlay.predecessor.incarnation != self.incarnation
+            || overlay.final_commit_sequence <= overlay.predecessor.commit_sequence
+        {
+            return Err(CrabError::InvalidState("recovery overlay scope"));
+        }
+        let (repository, epoch) = crate::bundle::cell_identity(&self.cell, &self.incarnation);
+        let final_position = overlay
+            .bundle
+            .rows()
+            .iter()
+            .rfind(|row| row.repository == repository && row.epoch == epoch)
+            .map(|row| row.info.position())
+            .ok_or(CrabError::TxNotAvailable)?;
+        if final_position != overlay.final_position {
+            return Err(CrabError::ChecksumMismatch);
+        }
+        let prepared = self
+            .prepare_bundle(
+                Some(&overlay.predecessor),
+                &overlay.bundle,
+                overlay.final_commit_sequence,
+                schema,
+            )
+            .await?;
+        if prepared.root().position != overlay.final_position {
+            return Err(CrabError::ChecksumMismatch);
+        }
+        Ok(prepared)
     }
 
     async fn prepare_bundle_admitted(

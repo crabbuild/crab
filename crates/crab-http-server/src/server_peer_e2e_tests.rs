@@ -752,6 +752,7 @@ fn server(
         cell_runtime,
         repository_cells,
         peer_receiver,
+        follower_store: None,
         options: RepositoryOptions::default(),
         cursor_key: [0; 32],
         admission: Semaphore::new(16),

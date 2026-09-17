@@ -238,6 +238,25 @@ pub struct VersionedNodeAdvertisement {
     token: ETag,
 }
 
+/// Proof that the exact predecessor session was atomically fenced after expiry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FencedNodeSession {
+    session: SessionId,
+    claimant: SessionId,
+}
+
+impl FencedNodeSession {
+    #[must_use]
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    #[must_use]
+    pub const fn claimant(&self) -> SessionId {
+        self.claimant
+    }
+}
+
 impl VersionedNodeAdvertisement {
     #[must_use]
     pub const fn advertisement(&self) -> &NodeAdvertisement {
@@ -333,6 +352,87 @@ impl NodeDirectory {
         Ok(advertisement.expires_at_ms > now_ms)
     }
 
+    /// Fences one expired boot session with an ETag CAS before any Cell takeover.
+    ///
+    /// Missing, live, malformed, or foreign records fail closed. The tombstone
+    /// remains durable so a paused owner cannot revive its old advertisement.
+    pub async fn claim_expired(
+        &self,
+        session: SessionId,
+        claimant: SessionId,
+        now_ms: i64,
+    ) -> Result<FencedNodeSession> {
+        if now_ms < 0 || claimant.as_bytes().iter().all(|byte| *byte == 0) || claimant == session {
+            return Err(Error::Node("node recovery time is invalid"));
+        }
+        let path = self.layout.node_path(session.as_bytes());
+        let Some((record, token)) = self.load_record_at(&path).await? else {
+            return Err(Error::Node("expired node session record is missing"));
+        };
+        match record {
+            NodeRecord::Tombstone(tombstone)
+                if tombstone.session == session && tombstone.claimant == Some(claimant) =>
+            {
+                Ok(FencedNodeSession { session, claimant })
+            }
+            NodeRecord::Tombstone(tombstone)
+                if tombstone.session == session && tombstone.claimant.is_none() =>
+            {
+                let claimed = tombstone.claim(claimant)?;
+                match self
+                    .layout
+                    .store()
+                    .update(&path, Bytes::from(claimed.encode()?), token)
+                    .await
+                {
+                    Ok(_) => Ok(FencedNodeSession { session, claimant }),
+                    Err(update_error) => match self.load_record_at(&path).await? {
+                        Some((NodeRecord::Tombstone(current), _))
+                            if current.session == session && current.claimant == Some(claimant) =>
+                        {
+                            Ok(FencedNodeSession { session, claimant })
+                        }
+                        Some(_) | None => Err(update_error.into()),
+                    },
+                }
+            }
+            NodeRecord::Advertisement(advertisement) => {
+                self.validate_scope(&advertisement)?;
+                advertisement.validate_shape()?;
+                advertisement.verify_signature()?;
+                if advertisement.session != session || advertisement.expires_at_ms > now_ms {
+                    return Err(Error::Node("node session is not expired"));
+                }
+                let tombstone = NodeTombstone::new(
+                    session,
+                    advertisement.expires_at_ms,
+                    now_ms,
+                    Some(claimant),
+                )?;
+                match self
+                    .layout
+                    .store()
+                    .update(&path, Bytes::from(tombstone.encode()?), token)
+                    .await
+                {
+                    Ok(_) => Ok(FencedNodeSession { session, claimant }),
+                    Err(update_error) => match self.load_record_at(&path).await? {
+                        Some((NodeRecord::Tombstone(current), _))
+                            if current.session == session && current.claimant == Some(claimant) =>
+                        {
+                            Ok(FencedNodeSession { session, claimant })
+                        }
+                        Some((NodeRecord::Advertisement(_), _)) | None => Err(update_error.into()),
+                        Some((NodeRecord::Tombstone(_), _)) => {
+                            Err(Error::Node("node tombstone session differs"))
+                        }
+                    },
+                }
+            }
+            NodeRecord::Tombstone(_) => Err(Error::Node("node tombstone session differs")),
+        }
+    }
+
     /// Streams and verifies every currently live boot-session advertisement.
     ///
     /// Expired records do not count against `limit`; malformed, misplaced, or
@@ -422,7 +522,10 @@ impl NodeDirectory {
         Ok(advertisements)
     }
 
-    /// Fences and removes a bounded number of advertisements past the clock-skew horizon.
+    /// Fences a bounded number of advertisements past the clock-skew horizon.
+    ///
+    /// Tombstones remain until node-log recovery and every owned Cell complete;
+    /// generic stale collection cannot prove that retention condition.
     pub async fn collect_stale(&self, now_ms: i64, limit: usize) -> Result<usize> {
         if now_ms < 0 || !(1..=MAX_STALE_COLLECTION_ITEMS).contains(&limit) {
             return Err(Error::Node(
@@ -443,10 +546,7 @@ impl NodeDirectory {
             let session = record.session();
             validate_record_path(&self.layout, session, &meta.location)?;
             match record {
-                NodeRecord::Tombstone(_) => {
-                    self.delete_collected(&meta.location).await?;
-                    removed += 1;
-                }
+                NodeRecord::Tombstone(_) => {}
                 NodeRecord::Advertisement(advertisement)
                     if advertisement.expires_at_ms <= cutoff_ms =>
                 {
@@ -454,6 +554,7 @@ impl NodeDirectory {
                         advertisement.session,
                         advertisement.expires_at_ms,
                         now_ms,
+                        None,
                     )?;
                     let encoded = tombstone.encode()?;
                     match self
@@ -463,15 +564,11 @@ impl NodeDirectory {
                         .await
                     {
                         Ok(_) => {
-                            self.delete_collected(&meta.location).await?;
                             removed += 1;
                         }
                         Err(update_error) => match self.load_record_at(&meta.location).await? {
-                            None => removed += 1,
-                            Some((NodeRecord::Tombstone(_), _)) => {
-                                self.delete_collected(&meta.location).await?;
-                                removed += 1;
-                            }
+                            None => return Err(Error::Node("stale node record disappeared")),
+                            Some((NodeRecord::Tombstone(_), _)) => removed += 1,
                             Some((NodeRecord::Advertisement(_), _)) => {
                                 if !matches!(update_error, StorageError::StateConflict { .. }) {
                                     return Err(update_error.into());
@@ -499,6 +596,7 @@ impl NodeDirectory {
             observed.advertisement.session,
             observed.advertisement.expires_at_ms,
             now_ms,
+            None,
         )?;
         match self
             .layout
@@ -513,7 +611,10 @@ impl NodeDirectory {
             Ok(_) => self.delete_collected(&path).await,
             Err(update_error) => match self.load_record_at(&path).await? {
                 None => Ok(()),
-                Some((NodeRecord::Tombstone(_), _)) => self.delete_collected(&path).await,
+                Some((NodeRecord::Tombstone(current), _)) if current.claimant.is_none() => {
+                    self.delete_collected(&path).await
+                }
+                Some((NodeRecord::Tombstone(_), _)) => Err(Error::Fenced),
                 Some((NodeRecord::Advertisement(current), _))
                     if *current == observed.advertisement =>
                 {
@@ -678,17 +779,33 @@ struct NodeTombstone {
     session: SessionId,
     expires_at_ms: i64,
     retired_at_ms: i64,
+    claimant: Option<SessionId>,
 }
 
 impl NodeTombstone {
-    fn new(session: SessionId, expires_at_ms: i64, retired_at_ms: i64) -> Result<Self> {
+    fn new(
+        session: SessionId,
+        expires_at_ms: i64,
+        retired_at_ms: i64,
+        claimant: Option<SessionId>,
+    ) -> Result<Self> {
         let tombstone = Self {
             session,
             expires_at_ms,
             retired_at_ms,
+            claimant,
         };
         tombstone.validate()?;
         Ok(tombstone)
+    }
+
+    fn claim(self, claimant: SessionId) -> Result<Self> {
+        Self::new(
+            self.session,
+            self.expires_at_ms,
+            self.retired_at_ms,
+            Some(claimant),
+        )
     }
 
     fn encode(&self) -> Result<Vec<u8>> {
@@ -712,6 +829,11 @@ impl NodeTombstone {
             session: SessionId::from_bytes(decode_hex(&raw.tombstone.session)?),
             expires_at_ms: canonical_i64(&raw.tombstone.expires_at_ms)?,
             retired_at_ms: canonical_i64(&raw.tombstone.retired_at_ms)?,
+            claimant: raw
+                .tombstone
+                .claimant
+                .map(|claimant| decode_hex(&claimant).map(SessionId::from_bytes))
+                .transpose()?,
         };
         tombstone.validate()?;
         if tombstone.encode()?.as_slice() != bytes {
@@ -724,6 +846,9 @@ impl NodeTombstone {
         if self.session.as_bytes().iter().all(|byte| *byte == 0)
             || self.expires_at_ms < 0
             || self.retired_at_ms < 0
+            || self.claimant.is_some_and(|claimant| {
+                claimant == self.session || claimant.as_bytes().iter().all(|byte| *byte == 0)
+            })
         {
             return Err(Error::Node("node tombstone is invalid"));
         }
@@ -862,6 +987,9 @@ impl From<&NodeTombstone> for RawNodeTombstoneEnvelope {
                 session: encode_hex(value.session.as_bytes()),
                 expires_at_ms: value.expires_at_ms.to_string(),
                 retired_at_ms: value.retired_at_ms.to_string(),
+                claimant: value
+                    .claimant
+                    .map(|claimant| encode_hex(claimant.as_bytes())),
             },
         }
     }
@@ -874,6 +1002,7 @@ struct RawNodeTombstone {
     session: String,
     expires_at_ms: String,
     retired_at_ms: String,
+    claimant: Option<String>,
 }
 
 impl From<&NodeAdvertisement> for RawUnsignedAdvertisement {

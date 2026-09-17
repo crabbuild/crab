@@ -7,7 +7,8 @@ use std::{
 };
 
 use axum::{
-    extract::{ConnectInfo, State},
+    Json,
+    extract::{ConnectInfo, Path as AxumPath, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -29,6 +30,7 @@ mod client;
 pub(crate) use client::PeerHttpRoundTrip;
 
 const PROTOBUF_MEDIA_TYPE: &str = "application/x-protobuf";
+const NODE_LOG_MEDIA_TYPE: &str = "application/x-crab-node-log";
 const ADVERTISEMENT_LIFETIME_MS: i64 = 15_000;
 const ADVERTISEMENT_EXPIRY_MARGIN_MS: i64 = 1_000;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
@@ -487,6 +489,116 @@ pub(crate) async fn forward(
     }
 }
 
+pub(crate) async fn append_node_log(
+    State(server): State<Arc<Server>>,
+    ConnectInfo(identity): ConnectInfo<PeerTlsIdentity>,
+    AxumPath((leader, epoch)): AxumPath<(String, u64)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        != Some(NODE_LOG_MEDIA_TYPE)
+    {
+        return peer_http_error(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+    let (Some(receiver), Some(store)) = (
+        server.peer_receiver.as_ref(),
+        server.follower_store.as_ref(),
+    ) else {
+        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let leader = match decode_session(&leader) {
+        Ok(leader) => leader,
+        Err(()) => return peer_http_error(StatusCode::BAD_REQUEST),
+    };
+    let now_ms = match now_ms() {
+        Ok(now_ms) => now_ms,
+        Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    let enrolled = match receiver.directory.load(leader, now_ms).await {
+        Ok(Some(enrolled)) => enrolled,
+        Ok(None) | Err(_) => return peer_http_error(StatusCode::UNAUTHORIZED),
+    };
+    let advertisement = enrolled.advertisement();
+    let signing_key_matches = advertisement
+        .verifying_key()
+        .is_ok_and(|key| key.to_bytes() == identity.public_key());
+    if advertisement.certificate() != identity.certificate() || !signing_key_matches {
+        return peer_http_error(StatusCode::UNAUTHORIZED);
+    }
+    let (covered_through, frames) = match decode_append_batch(body) {
+        Ok(batch) => batch,
+        Err(()) => return peer_http_error(StatusCode::BAD_REQUEST),
+    };
+    match store.append(leader, epoch, frames, covered_through).await {
+        Ok(receipt) => (
+            StatusCode::OK,
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({
+                "base_sequence": receipt.base_sequence.to_string(),
+                "durable_through": receipt.durable_through.to_string(),
+            })),
+        )
+            .into_response(),
+        Err(CellError::PeerAuthorization(_)) => peer_http_error(StatusCode::UNAUTHORIZED),
+        Err(CellError::Node(_)) | Err(CellError::Ltx(_)) => peer_http_error(StatusCode::CONFLICT),
+        Err(_) => peer_http_error(StatusCode::SERVICE_UNAVAILABLE),
+    }
+}
+
+fn decode_append_batch(body: Bytes) -> std::result::Result<(u64, Vec<Bytes>), ()> {
+    let covered = body.get(..8).ok_or(())?;
+    let covered_through = u64::from_le_bytes(covered.try_into().map_err(|_| ())?);
+    let mut cursor = 8_usize;
+    let mut frames = Vec::new();
+    while cursor < body.len() {
+        if frames.len() == 64 {
+            return Err(());
+        }
+        let length_end = cursor.checked_add(8).ok_or(())?;
+        let length = u64::from_le_bytes(
+            body.get(cursor..length_end)
+                .ok_or(())?
+                .try_into()
+                .map_err(|_| ())?,
+        );
+        if length == 0 || length > usize::MAX as u64 {
+            return Err(());
+        }
+        let frame_end = length_end.checked_add(length as usize).ok_or(())?;
+        if frame_end > body.len() {
+            return Err(());
+        }
+        frames.push(body.slice(length_end..frame_end));
+        cursor = frame_end;
+    }
+    if frames.is_empty() {
+        return Err(());
+    }
+    Ok((covered_through, frames))
+}
+
+fn decode_session(value: &str) -> std::result::Result<SessionId, ()> {
+    if value.len() != 32 {
+        return Err(());
+    }
+    let mut bytes = [0_u8; 16];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        bytes[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
+    }
+    Ok(SessionId::from_bytes(bytes))
+}
+
+fn hex_nibble(value: u8) -> std::result::Result<u8, ()> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        _ => Err(()),
+    }
+}
+
 fn peer_http_reply(body: Vec<u8>) -> Response {
     (
         StatusCode::OK,
@@ -763,6 +875,33 @@ mod tests {
     use super::*;
 
     const NOW_MS: i64 = 1_000_000;
+
+    #[test]
+    fn node_log_append_codec_is_bounded_and_exact() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&9_u64.to_le_bytes());
+        body.extend_from_slice(&3_u64.to_le_bytes());
+        body.extend_from_slice(b"one");
+        body.extend_from_slice(&3_u64.to_le_bytes());
+        body.extend_from_slice(b"two");
+        let (covered, frames) = decode_append_batch(Bytes::from(body)).unwrap();
+        assert_eq!(covered, 9);
+        assert_eq!(
+            frames,
+            [Bytes::from_static(b"one"), Bytes::from_static(b"two")]
+        );
+
+        let mut trailing = Vec::new();
+        trailing.extend_from_slice(&0_u64.to_le_bytes());
+        trailing.extend_from_slice(&4_u64.to_le_bytes());
+        trailing.extend_from_slice(b"bad");
+        assert!(decode_append_batch(Bytes::from(trailing)).is_err());
+        assert_eq!(
+            decode_session("01010101010101010101010101010101").unwrap(),
+            SessionId::from_bytes([1; 16])
+        );
+        assert!(decode_session("0101010101010101010101010101010G").is_err());
+    }
 
     #[test]
     fn local_resources_include_process_file_capacity() {
