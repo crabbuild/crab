@@ -6422,35 +6422,6 @@ mod unmount_tests {
     use super::*;
     use crate::vfs::mounts_registry::{self, MountEntry};
 
-    struct HomeGuard {
-        original: Option<std::ffi::OsString>,
-    }
-
-    impl HomeGuard {
-        fn set(home: &Path) -> Self {
-            let original = std::env::var_os("HOME");
-            // SAFETY: these tests update HOME before starting any worker
-            // threads and restore it before returning to the harness.
-            unsafe {
-                std::env::set_var("HOME", home);
-            }
-            Self { original }
-        }
-    }
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            // SAFETY: restores the process environment for this test scope.
-            unsafe {
-                if let Some(original) = &self.original {
-                    std::env::set_var("HOME", original);
-                } else {
-                    std::env::remove_var("HOME");
-                }
-            }
-        }
-    }
-
     fn sample_entry(mountpoint: &str, pid: u32) -> MountEntry {
         MountEntry {
             mountpoint: mountpoint.to_owned(),
@@ -6629,7 +6600,7 @@ mod unmount_tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        let _home = HomeGuard::set(tmp.path());
+        let _home = set_test_home(tmp.path());
         let raw_mountpoint = tmp.path().join("view");
         std::fs::create_dir_all(&raw_mountpoint).unwrap();
         let mountpoint = normalize_unmount_path(&raw_mountpoint);
