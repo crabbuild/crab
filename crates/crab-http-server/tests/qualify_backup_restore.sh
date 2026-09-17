@@ -9,7 +9,6 @@ work_root="${RUNNER_TEMP:?RUNNER_TEMP must name disposable qualification storage
 work_dir="$(mktemp -d "${work_root}/crab-http-server-restore.XXXXXX")"
 chmod 0755 "$work_dir"
 deploy_dir="$(cd "$(dirname "$compose_file")" && pwd)"
-hash_script="$(cd "$(dirname "$0")" && pwd)/hash_backup_restore_objects.sh"
 compose=(docker compose --file "$compose_file")
 server_id="$("${compose[@]}" ps --quiet server)"
 proxy_id="$("${compose[@]}" ps --quiet proxy)"
