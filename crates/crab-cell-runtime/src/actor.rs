@@ -1606,21 +1606,41 @@ async fn execute_migration(
     };
     let result = match pending {
         Ok(pending) => {
-            async {
-                let prepared = publisher.prepare_migration(&pending).await?;
-                pool.bind_migration_prepared(migration.cell, prepared.clone())
-                    .await?;
-                let root = publisher
-                    .publish_migration(
-                        &prepared,
-                        pending.next_due_ms(),
-                        pending.code(),
-                        pending.to_schema(),
-                    )
-                    .await?;
-                pool.confirm_migration_published(migration.cell, root).await
+            let durability = publisher.submit_migration_durability(&pending).await;
+            match durability {
+                Err(error) => Err(error),
+                Ok(durability) => {
+                    let object = async {
+                        let prepared = publisher.prepare_migration(&pending).await?;
+                        pool.bind_migration_prepared(migration.cell, prepared.clone())
+                            .await?;
+                        let root = publisher
+                            .publish_migration(
+                                &prepared,
+                                pending.next_due_ms(),
+                                pending.code(),
+                                pending.to_schema(),
+                            )
+                            .await?;
+                        if let Some(durability) = durability.as_ref() {
+                            durability.prove_object().await?;
+                        }
+                        pool.confirm_migration_published(migration.cell, root).await
+                    };
+                    tokio::pin!(object);
+                    match durability.as_ref() {
+                        Some(durability) => {
+                            let fleet = durability.prove_fleet();
+                            tokio::pin!(fleet);
+                            tokio::select! {
+                                result = &mut object => result,
+                                _ = &mut fleet => object.await,
+                            }
+                        }
+                        None => object.await,
+                    }
+                }
             }
-            .await
         }
         Err(error) => Err(error),
     };

@@ -153,7 +153,7 @@ recovery path.
 | --- | --- |
 | Strict frame codec plus capacity-aware deterministic selection, retrying automatic enrollment, activation, coverage, recovery claims, object-covered epoch rotation, and clean log close | Failure-domain-aware member selection |
 | Crash-safe, node-budgeted follower store under a persisted physical `NodeId`, authenticated remote append/seal/tail/retire transport, and a bounded node-wide batched shipper | Recovery-only startup listener ordering |
-| Authoritative create and refresh drive a terminal monotonic node-lease guard; admission, actor dispatch, Cell-control CAS, durability proof, and output acceptance all check it | Fleet-proof gating for schema migrations and future streamed Cell responses |
+| Authoritative create and refresh drive a terminal monotonic node-lease guard; admission, actor dispatch, Cell-control CAS, durability proof, and output acceptance all check it | Fleet-proof watermarks for future streamed Cell responses |
 | Write-all durability gate, first-fsynced-batch activation, actor cut submission, fleet-first command release, object fallback, and contiguous authoritative object watermark | A dual-head actor that can begin the next command before prior fleet-proven cuts finish object publication |
 | Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | Recovery-only startup listener ordering |
 | Cell control attachment and takeover consumption of overlays; server drain closes a fully object-covered epoch before session withdrawal | Obsolete-marker collection and live multi-node proof |
@@ -181,8 +181,8 @@ the old gate only after every issued sequence is object-covered, best-effort
 retires old lanes behind durable append fences, and CASes a fresh inactive
 epoch. Recruitment retries while the node remains healthy and leaves a
 one-node fleet on the object path. Failure-domain metadata, recovery-only
-startup listener ordering, schema-migration fleet gating, dual-head actor
-continuation, and obsolete-marker collection remain gated. The preferred
+startup listener ordering, early schema-migration response release, dual-head
+actor continuation, and obsolete-marker collection remain gated. The preferred
 shard-zero scanner now inventories expired active node
 logs, claims at most two concurrently, scans at most 10,000 affected Cells,
 renews each recovery claim while gathering and pinning, seals the session, and
@@ -194,7 +194,8 @@ the command response; root preparation and CAS continue in the same actor, and
 failure of the fleet path falls back to object proof. The actor stays busy until
 object publication finishes, so reads and later commands cannot observe
 unpublished state. This is correct but not yet the target dual-head throughput
-model.
+model. Schema-migration cuts use the same follower/object race and recovery
+coverage, but their handle-changing response still waits for object publication.
 An active predecessor log cannot be converted directly from a session fence
 into Cell takeover authority: only the coordinator's successful post-seal
 result carries `NodeTakeoverProof`.

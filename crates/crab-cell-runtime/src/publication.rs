@@ -69,6 +69,23 @@ impl CellPublisher {
         &self,
         pending: &crate::PendingCommit,
     ) -> Result<Option<PendingDurability>> {
+        self.submit_cuts(pending.outcome().commit_sequence(), pending.cuts())
+            .await
+    }
+
+    pub(crate) async fn submit_migration_durability(
+        &self,
+        pending: &crate::PendingMigration,
+    ) -> Result<Option<PendingDurability>> {
+        self.submit_cuts(pending.commit_sequence(), pending.cuts())
+            .await
+    }
+
+    async fn submit_cuts(
+        &self,
+        commit_sequence: u64,
+        cuts: &crab_ltx::CaptureBatch,
+    ) -> Result<Option<PendingDurability>> {
         let Some((application, durability)) = self
             .node_durability
             .as_ref()
@@ -83,8 +100,8 @@ impl CellPublisher {
             control.cell,
             control.incarnation,
             control.epoch,
-            pending.outcome().commit_sequence(),
-            pending.cuts(),
+            commit_sequence,
+            cuts,
         )?;
         let ticket = match durability.submit(submission).await {
             Ok(ticket) => ticket,
