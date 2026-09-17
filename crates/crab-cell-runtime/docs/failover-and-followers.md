@@ -231,7 +231,9 @@ then deletes it and releases disk admission. Missing authority fails closed.
 Deterministic fault coverage includes the two ambiguous recovery boundaries: a
 follower may fsync a frame and lose its ACK without authorizing a fleet proof,
 and an expired recovery claim may move to a new live claimant while permanently
-fencing the old claimant's renewal.
+fencing the old claimant's renewal. It also closes and reopens every follower
+in an ensemble before gathering the witness, and discards a recovery
+coordinator after overlay attachment before a new coordinator resumes sealing.
 
 ## Use one multiplexed log per owner session
 

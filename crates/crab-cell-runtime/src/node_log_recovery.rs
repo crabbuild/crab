@@ -450,6 +450,82 @@ mod tests {
         good: LocalFollowerTransport,
     }
 
+    struct FleetTransport {
+        stores: Vec<(NodeId, FollowerStore)>,
+    }
+
+    impl FleetTransport {
+        fn store(&self, member: NodeId) -> Result<&FollowerStore> {
+            self.stores
+                .iter()
+                .find_map(|(candidate, store)| (*candidate == member).then_some(store))
+                .ok_or(Error::Node("follower is absent from test fleet"))
+        }
+    }
+
+    impl NodeLogTransport for FleetTransport {
+        fn append<'a>(
+            &'a self,
+            member: NodeId,
+            request: AppendRequest,
+        ) -> BoxFuture<'a, Result<crate::FollowerReceipt>> {
+            Box::pin(async move {
+                self.store(member)?
+                    .append(
+                        request.leader_session,
+                        request.log_epoch,
+                        request.frames,
+                        request.covered_through,
+                    )
+                    .await
+            })
+        }
+
+        fn seal<'a>(
+            &'a self,
+            member: NodeId,
+            request: SealRequest,
+        ) -> BoxFuture<'a, Result<crate::FollowerReceipt>> {
+            Box::pin(async move {
+                self.store(member)?
+                    .seal(request.leader_session, request.log_epoch)
+                    .await
+            })
+        }
+
+        fn retire<'a>(
+            &'a self,
+            member: NodeId,
+            request: RetireRequest,
+        ) -> BoxFuture<'a, Result<crate::FollowerReceipt>> {
+            Box::pin(async move {
+                self.store(member)?
+                    .retire(
+                        request.leader_session,
+                        request.log_epoch,
+                        request.covered_through,
+                    )
+                    .await
+            })
+        }
+
+        fn tail<'a>(
+            &'a self,
+            member: NodeId,
+            request: TailRequest,
+        ) -> BoxFuture<'a, Result<Vec<Bytes>>> {
+            Box::pin(async move {
+                self.store(member)?
+                    .read_tail(
+                        request.leader_session,
+                        request.log_epoch,
+                        request.first_sequence,
+                    )
+                    .await
+            })
+        }
+    }
+
     impl NodeLogTransport for FailingFirstTransport {
         fn append<'a>(
             &'a self,
@@ -629,6 +705,90 @@ mod tests {
         )
         .unwrap();
         assert_eq!(recovery.ensure_sealed().await.unwrap().frames.len(), 1);
+        database.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_survives_a_simultaneous_follower_fleet_restart() {
+        let limits = crab_ltx::Limits::default();
+        let source = tempfile::TempDir::new().unwrap();
+        let mut database =
+            crab_ltx::ManagedDb::open(&source.path().join("cell.sqlite"), limits).unwrap();
+        database
+            .transaction(|transaction| transaction.execute_batch("CREATE TABLE values_(v)"))
+            .unwrap();
+        let segment = database.capture().unwrap().segments.remove(0);
+        let leader = SessionId::from_bytes([1; 16]);
+        let leader_node = NodeId::from_bytes([1; 16]);
+        let members = [NodeId::from_bytes([2; 16]), NodeId::from_bytes([3; 16])];
+        let frame = crab_ltx::encode_node_frame(
+            crab_ltx::NodeFrameScope {
+                leader_session: *leader.as_bytes(),
+                log_epoch: 3,
+                node_sequence: 1,
+                application: [4; 16],
+                cell: [5; 32],
+                incarnation: [6; 16],
+                cell_epoch: 7,
+                commit_sequence: 1,
+            },
+            segment.info().clone(),
+            Bytes::from(std::fs::read(segment.path()).unwrap()),
+            limits,
+        )
+        .unwrap();
+        let roots = [
+            tempfile::TempDir::new().unwrap(),
+            tempfile::TempDir::new().unwrap(),
+        ];
+        for (member, root) in members.iter().zip(&roots) {
+            let store = FollowerStore::open(
+                root.path().to_owned(),
+                limits,
+                crab_ltx::DiskBudget::new(1 << 30),
+            )
+            .unwrap();
+            store
+                .append(leader, 3, vec![frame.encoded().clone()], 0)
+                .await
+                .unwrap();
+            drop(store);
+            assert!(root.path().join("followers").exists(), "{member:?}");
+        }
+
+        let transport: Arc<dyn NodeLogTransport> = Arc::new(FleetTransport {
+            stores: members
+                .iter()
+                .zip(&roots)
+                .map(|(member, root)| {
+                    (
+                        *member,
+                        FollowerStore::open(
+                            root.path().to_owned(),
+                            limits,
+                            crab_ltx::DiskBudget::new(1 << 30),
+                        )
+                        .unwrap(),
+                    )
+                })
+                .collect(),
+        });
+        let recovery = NodeLogRecovery::new(
+            transport,
+            leader_node,
+            leader,
+            3,
+            members.to_vec(),
+            0,
+            true,
+            limits,
+        )
+        .unwrap();
+
+        let sealed = recovery.ensure_sealed().await.unwrap();
+        assert_eq!(sealed.durable_through, 1);
+        assert_eq!(sealed.frames.len(), 1);
+        assert_eq!(sealed.frames[0].scope().node_sequence, 1);
         database.close().unwrap();
     }
 }

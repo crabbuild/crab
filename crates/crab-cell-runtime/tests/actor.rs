@@ -1886,7 +1886,7 @@ async fn unchanged_dead_owner_is_taken_over_then_restored() {
 }
 
 #[tokio::test]
-async fn takeover_consumes_pinned_recovery_before_serving() {
+async fn takeover_resumes_pinned_recovery_before_serving() {
     let fixture = fixture_for(b"recovered-takeover");
     let handle = activate(&fixture, 16 * 1024 * 1024).await;
     drop(handle);
@@ -1987,9 +1987,12 @@ async fn takeover_consumes_pinned_recovery_before_serving() {
         fenced.direct_takeover(),
         Err(crab_cell_runtime::Error::PendingPublication)
     ));
-    let recovery =
-        crab_cell_runtime::NodeLogRecovery::from_fenced(transport, &fenced, Limits::default())
-            .unwrap();
+    let recovery = crab_cell_runtime::NodeLogRecovery::from_fenced(
+        Arc::clone(&transport),
+        &fenced,
+        Limits::default(),
+    )
+    .unwrap();
     let coordinator = crab_cell_runtime::RecoveryCoordinator::new(recovery, manifests.clone());
     let inventory = crab_cell_runtime::recoverable_cells(&catalog, &authority, leader, 10)
         .await
@@ -2000,13 +2003,18 @@ async fn takeover_consumes_pinned_recovery_before_serving() {
         .await
         .unwrap();
     assert_eq!(attached.len(), 1);
+    drop(coordinator);
+    let resumed_recovery =
+        crab_cell_runtime::NodeLogRecovery::from_fenced(transport, &fenced, Limits::default())
+            .unwrap();
+    let resumed = crab_cell_runtime::RecoveryCoordinator::new(resumed_recovery, manifests.clone());
     let directory = crab_cell_runtime::NodeDirectory::new(
         fixture.layout.clone(),
         Digest::from_bytes([90; 32]),
         Digest::from_bytes([91; 32]),
         Digest::from_bytes([92; 32]),
     );
-    let completed = coordinator
+    let completed = resumed
         .recover_and_seal(
             &directory,
             fenced.clone(),
@@ -2024,7 +2032,7 @@ async fn takeover_consumes_pinned_recovery_before_serving() {
         completed.sealed.log().phase(),
         crab_cell_runtime::NodeLogPhase::Sealed
     );
-    let repeated = coordinator
+    let repeated = resumed
         .recover_and_seal(
             &directory,
             fenced.clone(),
