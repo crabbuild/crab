@@ -9,6 +9,7 @@ usage() {
   echo "usage: qualify-kubernetes.sh PROVIDER NAMESPACE DEPLOYMENT HTTPS_ORIGIN OWNER REPOSITORY EVIDENCE_FILE" >&2
   echo "Set CRAB_HTTP_SERVER_GIT_TOKEN, CRAB_HTTP_SERVER_EXPECTED_IMAGE, CRAB_HTTP_SERVER_EXPECTED_CHART," >&2
   echo "CRAB_HTTP_SERVER_RELEASE_TAG, CRAB_HTTP_SERVER_SOURCE_SHA, CRAB_HTTP_SERVER_NODE_PROFILE," >&2
+  echo "CRAB_HTTP_SERVER_LOAD_GENERATOR pointing to the tagged-source load executable," >&2
   echo "CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true," >&2
   echo "and CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true." >&2
   exit 2
@@ -59,6 +60,11 @@ case "$node_profile" in
     exit 2
     ;;
 esac
+load_generator="${CRAB_HTTP_SERVER_LOAD_GENERATOR:?set CRAB_HTTP_SERVER_LOAD_GENERATOR to the tagged-source load executable}"
+test -x "$load_generator" || {
+  echo "CRAB_HTTP_SERVER_LOAD_GENERATOR must be executable." >&2
+  exit 2
+}
 
 case "$provider" in
   eks | gke | aks) ;;
@@ -599,6 +605,7 @@ check_workload_identity
 check_management_isolation
 check_pod_health
 capacity_before_traffic="${work_dir}/capacity-before-traffic.json"
+capacity_after_load="${work_dir}/capacity-after-load.json"
 capacity_after_rollout="${work_dir}/capacity-after-rollout.json"
 capacity_after_owner_loss="${work_dir}/capacity-after-owner-loss.json"
 capture_capacity_envelopes before-traffic "$capacity_before_traffic"
@@ -717,7 +724,15 @@ git -C "$client" config "lfs.${remote_public}/info/lfs.locksverify" true
 printf 'second revision %s\n' "$qualification_id" >> "${client}/${payload}"
 git -C "$client" add "$payload"
 git -C "$client" commit --message "Qualify durable LFS lock owner write"
-final_oid="$(git -C "$client" rev-parse HEAD)"
+load_oids="${work_dir}/load-oids"
+: > "$load_oids"
+for commit_index in $(seq 1 192); do
+  git -C "$client" commit --allow-empty \
+    --message "Prepare load target ${commit_index}" >/dev/null
+  git -C "$client" rev-parse HEAD >> "$load_oids"
+done
+test "$(wc -l < "$load_oids" | tr -d '[:space:]')" = 192
+final_oid="$(tail -1 "$load_oids")"
 git_public -C "$client" push "$remote_public" "HEAD:refs/heads/${branch}"
 git_public -C "$client" lfs unlock "$payload"
 lock_held=false
@@ -787,6 +802,51 @@ jq --exit-status \
   '.id == $id and .status == "completed" and .conclusion == "success" and
    .output.title == "Three-node Cell qualification passed"' \
   "${work_dir}/check-replica.json" >/dev/null
+
+load_headers="${work_dir}/load-headers"
+printf 'Authorization: Basic %s\n' "$basic_token" > "$load_headers"
+load_template="${work_dir}/load-status.json"
+jq --null-input \
+  '{request_id: "{{request_id}}", context: "crab/load-qualification",
+    state: "success", description: null, target_url: null}' \
+  > "$load_template"
+load_reports_jsonl="${work_dir}/load-reports.jsonl"
+load_reports="${work_dir}/load-reports.json"
+: > "$load_reports_jsonl"
+load_ports=("$port_a" "$port_b" "$port_c")
+for pod_index in 0 1 2; do
+  load_arguments=(
+    --base-url "http://127.0.0.1:${load_ports[$pod_index]}/"
+    --authority "$public_host"
+    --header-file "$load_headers"
+    --aggregate-requests-per-second 1000
+    --duration-seconds 60
+    --warmup-seconds 5
+  )
+  first_line=$((pod_index * 64 + 1))
+  last_line=$((first_line + 63))
+  target_index=0
+  while IFS= read -r load_oid; do
+    load_arguments+=(
+      --mutation "status-${target_index}=2@/api/repos/${owner}/${repository}/statuses/${load_oid}|${load_template}"
+    )
+    target_index=$((target_index + 1))
+  done < <(sed -n "${first_line},${last_line}p" "$load_oids")
+  test "$target_index" = 64
+  node_report="${work_dir}/load-${pod_index}.json"
+  "$load_generator" "${load_arguments[@]}" > "$node_report"
+  pod_uid="$(jq --raw-output --arg pod "${pods[$pod_index]}" '
+    .items[] | select(.metadata.name == $pod) | .metadata.uid
+  ' "$pods_json")"
+  jq --compact-output \
+    --arg pod "${pods[$pod_index]}" --arg pod_uid "$pod_uid" \
+    '{pod: $pod, pod_uid: $pod_uid, report: .}' "$node_report" \
+    >> "$load_reports_jsonl"
+done
+jq --slurp . "$load_reports_jsonl" > "$load_reports"
+jq --exit-status --arg authority "$public_host" --from-file \
+  "$(dirname -- "$0")/validate-load-report.jq" "$load_reports" >/dev/null
+capture_capacity_envelopes after-load "$capacity_after_load"
 
 stop_forwards
 kubectl --namespace "$namespace" rollout restart "deployment/${deployment}"
@@ -1044,9 +1104,11 @@ jq --null-input \
   --argjson old_pod_uids "$old_uids" \
   --argjson new_pod_uids "$new_uids" \
   --slurpfile capacity_before_traffic "$capacity_before_traffic" \
+  --slurpfile capacity_after_load "$capacity_after_load" \
   --slurpfile capacity_after_rollout "$capacity_after_rollout" \
   --slurpfile capacity_after_owner_loss "$capacity_after_owner_loss" \
-  '{schema: 10, provider: $provider, namespace: $namespace, deployment: $deployment,
+  --slurpfile load_reports "$load_reports" \
+  '{schema: 11, provider: $provider, namespace: $namespace, deployment: $deployment,
     origin: $origin, image: $image, chart: $chart,
     qualification_source: {release_tag: $release_tag, commit: $source_sha},
     node_profile: $node_profile, scratch_limit_bytes: $scratch_limit_bytes,
@@ -1074,9 +1136,18 @@ jq --null-input \
     old_pod_uids: $old_pod_uids, new_pod_uids: $new_pod_uids,
     capacity: {
       before_traffic: $capacity_before_traffic[0],
+      after_load: $capacity_after_load[0],
       after_rollout: $capacity_after_rollout[0],
       after_owner_loss: $capacity_after_owner_loss[0]
     },
+    load_workload: {
+      aggregate_requests_per_second_per_node: 1000,
+      duration_seconds: 60,
+      database_count: 1,
+      commit_targets_per_node: 64,
+      transaction: "repository commit status insert"
+    },
+    load: $load_reports[0],
     rollout_probes: $rollout_probes,
     rollout_probe_failures: $rollout_probe_failures,
     checks: {
@@ -1088,6 +1159,7 @@ jq --null-input \
       management_network_isolation: true,
       capacity_envelopes: true,
       node_profile_resources: true,
+      aggregate_node_load: true,
       cross_replica_git: true,
       cross_replica_lfs: true,
       durable_lfs_lock: true,

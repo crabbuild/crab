@@ -157,7 +157,7 @@ recovery path.
 | Authoritative create and refresh drive a terminal monotonic node-lease guard; admission, actor dispatch, Cell-control CAS, durability proof, and output acceptance all check it | None for the current non-streaming Cell API |
 | Write-all durability gate, first-fsynced-batch activation, bounded dual-watermark command continuation, ordered object publication, object fallback, schema-migration barriers, and contiguous authoritative object watermark | None for this slice |
 | Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | None for this slice |
-| Cell control attachment and takeover consumption of overlays; server drain closes a fully object-covered epoch before session withdrawal; grace-aged retired follower lanes are deleted only after authority stops naming their epoch; the Compose qualifier proves a follower-only result survives owner `SIGKILL`, owner-disk deletion, RustFS restoration, takeover, and owner rejoin | Target-load and extended fault matrix across the declared small, medium, and large node profiles |
+| Cell control attachment and takeover consumption of overlays; server drain closes a fully object-covered epoch before session withdrawal; grace-aged retired follower lanes are deleted only after authority stops naming their epoch; the Compose qualifier proves a follower-only result survives owner `SIGKILL`, owner-disk deletion, RustFS restoration, takeover, and owner rejoin; the Kubernetes qualifier enforces each selected node profile and 1,000 aggregate mutation requests/s against every Pod | Signed live runs across small, medium, and large profiles, plus the extended fault and telemetry matrix |
 | Bounded command and query responses bind to the actor's proven logical head | State-observing streaming responses need an explicit watermark-bound stream lease before such an API is exposed |
 
 The session record now owns one CAS-protected log epoch, its exact sorted member
@@ -1484,6 +1484,12 @@ Use `qualify_http_load --aggregate-requests-per-second 1000` for the bounded
 request schedule. Its schema-v2 receipt rejects a run whose successful response
 count is below 95% of the configured aggregate rate; 429 responses remain
 visible admission evidence but do not count toward the target throughput.
+The Kubernetes qualifier runs the schedule separately through each Pod, using
+64 bounded status-mutation targets backed by distinct commits per run. It binds
+the three reports to Pod UIDs, captures capacity again after load, and rejects
+server, transport, body-limit, latency-over-60-second, or target-rate failures.
+This proves per-node ingress and owner-routing pressure; the receipt explicitly
+states that the database distribution is one hot repository.
 
 ## Deliver in dependency order
 

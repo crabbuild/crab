@@ -229,6 +229,21 @@ async fn mutation_load_runner_sends_unique_request_ids() {
     server.abort();
 }
 
+#[test]
+fn direct_node_authority_is_explicit_and_bounded() {
+    assert_eq!(
+        load_authority(Some("git.example.com"))
+            .unwrap()
+            .unwrap()
+            .as_bytes(),
+        b"git.example.com"
+    );
+    assert!(load_authority(None).unwrap().is_none());
+    for authority in ["", "git.example.com:8788", "user@git.example.com", "/path"] {
+        assert!(load_authority(Some(authority)).is_err(), "{authority}");
+    }
+}
+
 #[tokio::test]
 async fn aggregate_rate_is_shared_across_workers_and_targets() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

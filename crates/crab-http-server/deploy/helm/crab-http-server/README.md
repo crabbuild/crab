@@ -406,6 +406,9 @@ script from a trusted operator workstation with `kubectl`, Git LFS, `curl`, and
 identity fields:
 
 ```sh
+CARGO_TARGET_DIR=/secure/crab-http-load-target \
+  cargo build -p crab-http-server --release --example qualify_http_load --locked
+export CRAB_HTTP_SERVER_LOAD_GENERATOR=/secure/crab-http-load-target/release/examples/qualify_http_load
 export CRAB_HTTP_SERVER_GIT_TOKEN=secret_from_git_access
 export CRAB_HTTP_SERVER_EXPECTED_IMAGE="$(jq --raw-output .image.reference crab-http-server-release.json)"
 export CRAB_HTTP_SERVER_EXPECTED_CHART="$(jq --raw-output .chart.reference crab-http-server-release.json)"
@@ -425,6 +428,8 @@ because this test creates and retains a uniquely named branch, performs a rollin
 restart, locates the current repository Cell owner, and force-deletes that Pod
 without a grace period. Never run it
 against a repository where qualification branches are forbidden by policy.
+The per-node load phase also retains roughly 180,000 commit-status submissions
+across 192 synthetic commits; use a disposable qualification repository.
 The expected image, release tag, and source commit are required for release
 evidence. The script rejects a deployment whose manifest reference differs or
 a source identity that is not a stable server tag and lowercase Git commit.
@@ -441,6 +446,9 @@ The test fails unless it can prove all of these boundaries:
   CPU, memory, and local-disk capacity match the selected node profile. Disk
   capacity is the smaller of backing filesystem size and configured limit; the
   reported limit must equal the Deployment's `emptyDir.sizeLimit`
+- Every original Pod independently sustains 1,000 aggregate authenticated Cell
+  mutations/s for 60 seconds with at least 95% successful responses. Reports
+  retain p50/p95/p99 latency, admission rejections, and the exact Pod UID
 - The Deployment uses an immutable digest, a private ClusterIP Service, the
   signed release's chart version, the chart NetworkPolicy, TLS ingress,
   hardened containers, and no automatic Kubernetes API token
@@ -466,9 +474,9 @@ The test fails unless it can prove all of these boundaries:
 The script writes a secret-free JSON evidence receipt containing the provider,
 image and chart digests, release tag and source commit, workload identity
 mechanism and Kubernetes ServiceAccount, repository, qualification branch and
-commit, payload digest, selected node profile, per-Pod capacity envelopes
-before traffic, after the rollout, and after owner loss, rollout probes and
-failures, and explicit
+commit, payload digest, selected node profile, per-Pod load reports, capacity
+envelopes before traffic, after load, after the rollout, and after owner loss,
+rollout probes and failures, and explicit
 successful checks including the installed chart version,
 management-network-isolation result, deleted owner Pod UID, old/new owner
 sessions, takeover epochs, the complete root before and after takeover, and the

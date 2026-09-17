@@ -342,6 +342,13 @@ request creates durable state. The JSON template must contain the exact
 top-level marker `"request_id":"{{request_id}}"`; the harness replaces it with
 a new UUIDv7 for every request.
 
+The release Kubernetes qualifier builds this harness from the exact tagged
+source and drives 1,000 aggregate mutation requests/s through each ready Pod
+for 60 seconds. Each Pod uses 64 distinct commit-status targets, so the
+repository's bounded per-commit submission history cannot invalidate the
+measurement. The attested receipt retains each Pod UID, p50/p95/p99 latency,
+success and admission counts, plus capacity envelopes before and after load.
+
 ```json
 {"request_id":"{{request_id}}","title":"load qualification","body":"durable command"}
 ```

@@ -1373,6 +1373,10 @@ not masquerade as sustained target throughput. The generator fully consumes ever
 non-429 status, transport/body-limit failure, or unhealthy liveness. Use
 `--header-file /secure/load-headers` for one private HTTP header per line; the
 tool neither prints nor stores those values.
+For direct-node qualification through a loopback port-forward, pass
+`--authority git.example.com`. The option accepts only one DNS name or IP
+address without a port and changes the HTTP Host header without changing the
+connection destination.
 
 ### Read the executable evidence map
 

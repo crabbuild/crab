@@ -8,7 +8,10 @@ use std::{
 
 use clap::Parser;
 use futures_util::StreamExt as _;
-use reqwest::{Client, Method, StatusCode, header::CONTENT_TYPE};
+use reqwest::{
+    Client, Method, StatusCode,
+    header::{CONTENT_TYPE, HOST},
+};
 use serde::Serialize;
 use tokio::{
     sync::{Barrier, Mutex},
@@ -25,8 +28,8 @@ const MINIMUM_TARGET_PERCENT: u64 = 95;
 mod config;
 
 use config::{
-    MutationSpec, TargetSpec, load_headers, load_mutation_template, validate_origin, validate_path,
-    validate_targets,
+    MutationSpec, TargetSpec, load_authority, load_headers, load_mutation_template,
+    validate_origin, validate_path, validate_targets,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -92,6 +95,10 @@ struct Arguments {
     /// Optional file containing one Authorization, Cookie, or other header per line.
     #[arg(long)]
     header_file: Option<PathBuf>,
+
+    /// Optional validated HTTP authority for direct-node qualification.
+    #[arg(long)]
+    authority: Option<String>,
 
     /// Health path checked before and after measured traffic.
     #[arg(long, default_value = "/livez")]
@@ -289,6 +296,7 @@ struct QualificationReport {
     schema_version: u32,
     started_at_ms: u64,
     base_url: String,
+    authority: Option<String>,
     configured_duration_ms: u64,
     warmup_ms: u64,
     aggregate_requests_per_second: Option<u32>,
@@ -425,7 +433,10 @@ async fn main() -> Result<(), Error> {
         .cloned()
         .collect::<Vec<_>>();
     validate_targets(&configured_targets)?;
-    let headers = load_headers(arguments.header_file.as_deref())?;
+    let mut headers = load_headers(arguments.header_file.as_deref())?;
+    if let Some(authority) = load_authority(arguments.authority.as_deref())? {
+        headers.insert(HOST, authority);
+    }
     let total_concurrency = configured_targets
         .iter()
         .map(|target| target.concurrency)
@@ -515,6 +526,7 @@ async fn main() -> Result<(), Error> {
         schema_version: REPORT_SCHEMA,
         started_at_ms,
         base_url: arguments.base_url.to_string(),
+        authority: arguments.authority,
         configured_duration_ms: arguments.duration_seconds.saturating_mul(1_000),
         warmup_ms: arguments.warmup_seconds.saturating_mul(1_000),
         aggregate_requests_per_second: arguments.aggregate_requests_per_second,

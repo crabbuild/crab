@@ -239,6 +239,13 @@ ceilings. Treat it as admission evidence only: latency, throughput, RSS,
 descriptors, local bytes and object-store cost still require a measured workload
 receipt.
 
+The Kubernetes release qualifier runs the tagged-source load generator against
+each Pod through a direct port-forward while preserving the public HTTP
+authority. Each node must sustain 1,000 aggregate authenticated mutations/s for
+60 seconds with at least 95% success. Treat the three bound Pod reports as the
+per-node throughput evidence; they do not by themselves prove a multi-database
+distribution or storage-provider latency envelope.
+
 ## Roll back a failed release
 
 Stop a rollout when readiness fails, restarts grow, or live verification fails:
@@ -349,6 +356,9 @@ qualification repository and issue a short-lived write token through **Git
 access**. Run the same provider-neutral test on EKS, GKE, and AKS:
 
 ```sh
+CARGO_TARGET_DIR=/secure/crab-http-load-target \
+  cargo build -p crab-http-server --release --example qualify_http_load --locked
+export CRAB_HTTP_SERVER_LOAD_GENERATOR=/secure/crab-http-load-target/release/examples/qualify_http_load
 export CRAB_HTTP_SERVER_GIT_TOKEN=secret_from_git_access
 export CRAB_HTTP_SERVER_EXPECTED_IMAGE="$(jq --raw-output .image.reference crab-http-server-release.json)"
 export CRAB_HTTP_SERVER_EXPECTED_CHART="$(jq --raw-output .chart.reference crab-http-server-release.json)"
@@ -376,6 +386,8 @@ higher epoch and publish a new status visible through another replica. It leaves
 durable evidence and writes a secret-free JSON receipt bound to the supplied
 release tag, source commit, image, and chart. Review and retain that receipt
 with the release record; revoke the qualification token afterward.
+The load phase retains roughly 180,000 status submissions and 192 synthetic
+commits, so the qualification repository must be disposable.
 
 For repeatable retained evidence, dispatch
 `.github/workflows/http-server-kubernetes-live.yml` from the release tag. Its
