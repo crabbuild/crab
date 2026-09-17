@@ -10,7 +10,7 @@ before a successor opens SQLite.
 | Content type | Low-level target design |
 | Audience | `crab-ltx`, `crab-cell-runtime`, and `crab-http-server` implementers |
 | Goal | Define the persistence, wire, gating, recovery, lifecycle, and proof contracts needed for Celld-style follower durability |
-| Status | Non-streaming failover, bounded hot-Cell pipelining, and Compose owner-loss qualification implemented; target-load and extended fault qualification remain |
+| Status | Non-streaming failover, bounded hot-Cell pipelining, and Compose owner-loss qualification implemented; state-observing stream gating, target-load, and extended fault qualification remain |
 | Reference | Celld commit `10cb1303dac710dcb3b557e318e08c855261f68b` |
 
 [Back to the Cell runtime index](README.md)
@@ -155,7 +155,7 @@ recovery path.
 | Strict frame codec plus capacity- and failure-domain-aware deterministic selection, retrying automatic enrollment, activation, coverage, recovery claims, object-covered epoch rotation, and clean log close | None for this slice |
 | Crash-safe, node-budgeted follower store under a persisted physical `NodeId`, authenticated remote append/seal/tail/retire transport, a bounded node-wide batched shipper, a recovery-first management-listener lifecycle, and startup lane scrub/quarantine | None for this slice |
 | Authoritative create and refresh drive a terminal monotonic node-lease guard; admission, actor dispatch, Cell-control CAS, durability proof, and output acceptance all check it | None for the current non-streaming Cell API |
-| Write-all durability gate, first-fsynced-batch activation, bounded dual-head command continuation, ordered object publication, object fallback, schema-migration barriers, and contiguous authoritative object watermark | None for this slice |
+| Write-all durability gate, first-fsynced-batch activation, bounded dual-watermark command continuation, ordered object publication, object fallback, schema-migration barriers, and contiguous authoritative object watermark | None for this slice |
 | Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | None for this slice |
 | Cell control attachment and takeover consumption of overlays; server drain closes a fully object-covered epoch before session withdrawal; grace-aged retired follower lanes are deleted only after authority stops naming their epoch; the Compose qualifier proves a follower-only result survives owner `SIGKILL`, owner-disk deletion, RustFS restoration, takeover, and owner rejoin | Target-load and extended fault matrix across the declared small, medium, and large node profiles |
 | Bounded command and query responses bind to the actor's proven logical head | State-observing streaming responses need an explicit watermark-bound stream lease before such an API is exposed |
@@ -723,13 +723,15 @@ every root CAS in commit-sequence order. Reaching a backlog high water pauses
 new commands until publication catches up; it never creates another writer or
 weakens durability.
 
-### Use a bounded dual-head pipeline for hot Cells
+### Use a bounded dual-watermark pipeline for hot Cells
 
 Fleet durability removes the object-store round trip from response latency, but
 the baseline still leaves that round trip between two commands on the same
 Cell. That is acceptable for a fleet whose traffic is spread across many
 repositories, but it imposes an unnecessary per-repository throughput ceiling.
-The target therefore separates two positions without creating a second owner:
+The target therefore separates two positions without creating a second owner.
+The shorter name **dual-head** refers only to these publication watermarks; it
+does not mean dual primary, two SQLite writers, or two control authorities.
 
 | Position | Meaning | May accept a new command? |
 | --- | --- | --- |
@@ -756,10 +758,10 @@ publisher, not two SQLite writers and not parallel control CAS operations:
 3. Release its result only after its own durability ticket is proven.
 4. After proof, advance `logical_head` and allow the actor to execute the next
    queued command.
-5. Append the captured cuts to an ordered publication queue. One publisher
-   folds a contiguous prefix onto `published_head`, performs the canonical
-   control CAS, advances object coverage for every included ticket, and then
-   removes that prefix.
+5. Append the captured cut to an ordered publication queue. One publisher
+   advances one contiguous queued cut at a time onto `published_head`, performs
+   the canonical control CAS, advances that ticket's object coverage, and then
+   removes the cut.
 
 Queue admission is bounded by both entry count and retained LTX bytes and is
 also charged to the existing local-disk budget. A Cell stops starting commands
@@ -800,14 +802,34 @@ This is an intentional throughput-versus-complexity decision:
 | One head; wait for every object CAS before the next command | Smallest lifecycle | One slow object round trip caps each hot Cell even after fleet durability succeeds | Keep only as the natural behavior when no fleet proof wins |
 | Bounded `logical_head` plus `published_head` | Removes object latency between consecutive commands while preserving one writer and one ordered CAS owner | Retains proven cuts until publication and needs explicit drain/backpressure rules | Chosen and implemented |
 | Multiple publishers, branch heads, or an unbounded publication queue | More speculative concurrency | Reordering, unbounded recovery state, and ambiguous CAS ownership | Rejected |
-| Let a stream follow the moving logical head | Low-latency live output | Bytes could escape after lease loss or observe state newer than the stream's proof | Rejected |
+| Let a stream follow the moving logical head without per-chunk gates | Low-latency live output | Bytes could escape after lease loss or observe state newer than the stream's proof | Rejected |
 
-The dual-head model earns its extra state only because it changes current
-command throughput. It is safe for failover because `logical_head` advances
-only after a non-forgeable fleet or object proof, every unpublished cut remains
-in the predecessor node log, and takeover seals and replays that log before
-opening the successor SQLite database. `published_head` remains the compact,
+The dual-watermark model earns its extra state only because it changes current
+command throughput. It is the narrowest design that gives Crab all three of
+these properties:
+
+1. The next command does not wait for object-store latency after fleet fsync.
+2. SQLite and Cell-control mutation still have one serial owner.
+3. Recovery has one ordered interval, `(published_head, logical_head]`, rather
+   than speculative branches to reconcile.
+
+It is safe for failover because `logical_head` advances only after a
+non-forgeable fleet or object proof, every unpublished cut remains in the
+predecessor node log, and takeover seals and replays that log before opening
+the successor SQLite database. `published_head` remains the compact,
 long-term object-store authority; it is not weakened or replaced.
+
+```text
+normal:    published_head == logical_head
+fleet win: published_head <  logical_head  # bounded recoverable interval
+drained:   published_head == logical_head
+fenced:    stop output; preserve the interval for takeover
+```
+
+This choice fits Crab because object stores have materially higher and more
+variable latency than an in-fleet fsync, while the exact-root CAS must remain
+serial. A general multi-publisher graph would add conflict resolution without
+improving the one-writer SQLite execution path.
 
 The same owner-retention rule covers migration cuts. If fleet proof releases a
 successor handle and object publication then fails, the actor fences both
@@ -825,23 +847,85 @@ preceding command has advanced the logical head. Therefore:
 
 The current Cell command and query APIs return bounded replies rather than
 state-observing streams. Actor ordering proves that a query can observe only a
-`logical_head` covered by an earlier durability ticket. Streaming is a
-separate remaining delivery, not another publication head. Its minimum
-contract is:
+`logical_head` covered by an earlier durability ticket.
 
-1. Capture one immutable logical-head commit sequence when the stream opens.
-2. Require that sequence's durability proof before emitting the first byte.
-3. Pin the database snapshot or materialized result for the stream lifetime;
-   never follow a moving logical head implicitly.
-4. Check the terminal node-session lease before each output flush and stop the
-   stream after fencing, cancellation, or its bounded deadline.
-5. Charge buffered bytes and pinned snapshots to admission, and release them
-   on every close path.
+### Deliver state-observing streaming as a separate output gate
 
-No streaming API is exposed yet, so implementing a generic stream scheduler
-now would add speculative lifecycle and backpressure policy without a caller.
-The dual-head queue does not block this later contract and must not be expanded
-into a general streaming-response queue.
+Streaming is a remaining delivery, not another publication head and not an
+extension of the object-publication queue. The important distinction is what
+the producer can observe:
+
+| Stream kind | Required gate |
+| --- | --- |
+| Immutable blob or object already authorized by digest/root | Pin that immutable identity before the response head; later byte reads cannot reveal newer Cell state |
+| Materialized result fixed at stream open | Prove the captured logical watermark before the response head and retain the materialization until close |
+| Producer that can read Cell state between chunks | Take a fresh output ticket for the response head and every chunk |
+
+Celld uses the third rule: one response release is insufficient because the
+producer continues after the head and a later chunk can reveal a later commit.
+Crab should match that behavior when it exposes a Rust state-observing stream.
+
+```mermaid
+sequenceDiagram
+    participant P as Rust stream producer
+    participant G as Cell output gate
+    participant D as Durability proof
+    participant H as HTTP body
+
+    P->>G: emit(stream, observed_sequence, chunk)
+    G->>G: verify owner epoch and node lease
+    alt observed_sequence is already proven
+        G-->>H: release chunk
+    else proof is pending
+        G->>D: await fleet or object proof
+        D-->>G: proven through observed_sequence
+        G-->>H: release chunk
+    else fenced, expired, or unprovable
+        G-->>H: terminate body without releasing chunk
+    end
+```
+
+The first implementation must satisfy this contract:
+
+1. `OpenStream` binds a stream ID to the current Cell, incarnation, owner
+   epoch, node session, deadline, and latest observed commit sequence.
+2. `EmitChunk` carries the highest commit sequence the chunk may reveal. The
+   gate releases it only when the same epoch has a fleet or object proof
+   covering that sequence.
+3. The response head and each chunk use the same gate. Exactly one chunk per
+   stream may wait or flush, so held data cannot be overtaken.
+4. The terminal node-session lease is checked immediately before every flush.
+   Lease loss, ownership change, cancellation, deadline, or an unprovable
+   watermark closes the stream and releases all admission permits.
+5. Buffered chunk bytes, stream count, and any pinned materialization are
+   bounded by runtime admission. The producer cannot build an unbounded queue
+   behind a slow client or slow proof.
+6. A stream never reads a moving logical head implicitly. A producer that
+   performs another state observation must obtain a new observed sequence and
+   a new chunk ticket.
+
+```rust,ignore
+// Target contract, not yet a public API.
+let mut stream = cell.open_state_stream(deadline).await?;
+let observation = stream.observe(|db| render_next_chunk(db)).await?;
+stream.emit(observation).await?; // waits for proof, then rechecks lease
+stream.finish().await?;
+```
+
+The remaining-delivery proof matrix is small and specific:
+
+- A response head and first chunk wait for the commit they reveal.
+- A mutation between two chunks makes only the later chunk wait for the newer
+  watermark.
+- Lease expiry or takeover between chunks releases no further bytes.
+- A later proven chunk cannot overtake an earlier held chunk.
+- Client cancellation, deadline, proof failure, and producer failure return
+  every buffer, snapshot, and admission permit.
+
+No streaming API is exposed yet, so the runtime must not add a generic stream
+scheduler before the first Rust caller exists. When that caller is added, the
+API and the gate above ship together. The dual-watermark publication queue
+remains unchanged.
 
 Authentication, routing, and malformed-request errors produced before Cell
 execution do not need a Cell durability proof.
@@ -1375,7 +1459,8 @@ until the recovery gate is complete.
 | 5 | Dual object/fleet durability gate with one in-flight publication per Cell | Fleet-first response survives owner and disk loss |
 | 6 | Ensemble rotation, graceful drain, startup recovery-only listener, GC | Member loss and rolling restart matrix |
 | 7 | Bounded logical/published-head pipeline for hot Cells | Consecutive commands no longer wait for object publication; queue bounds and crash recovery hold |
-| 8 | Real RustFS and Kubernetes qualification at target load | Signed receipts with zero lost acknowledged outcomes |
+| 8 | Per-output watermark gate for the first Rust state-observing stream API | Head and chunks wait for the state they reveal; fencing and cancellation release no later bytes or resources |
+| 9 | Real RustFS and Kubernetes qualification at target load | Signed receipts with zero lost acknowledged outcomes |
 
 Phases 1 through 4 may ship with object-only responses. Phase 5 is the first
 point at which follower fsync may release a public result.
@@ -1392,6 +1477,8 @@ The pinned Celld design establishes the pattern used here:
   recovery claims.
 - [Celld LTX replication](https://github.com/denoland/celld/blob/10cb1303dac710dcb3b557e318e08c855261f68b/crates/celld/ltx_repl.rs)
   races bucket and fleet proofs and multiplexes Cell cuts.
+- [Celld output gate](https://github.com/denoland/celld/blob/10cb1303dac710dcb3b557e318e08c855261f68b/crates/logic/output_gate.rs)
+  gates the response head and each later state-observing stream chunk.
 
 Crab must prove its own version because its control model differs. Celld can
 restore discoverable epoch prefixes. Crab restores one authenticated root, so
