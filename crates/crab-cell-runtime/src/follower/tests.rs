@@ -332,3 +332,44 @@ async fn retire_requires_full_coverage_and_persists_an_append_fence() {
     assert_eq!(reopened.seal(leader, 2).await.unwrap().durable_through, 1);
     database.close().unwrap();
 }
+
+#[tokio::test]
+async fn retired_lane_collection_requires_exact_grace_aged_candidate() {
+    let limits = crab_ltx::Limits::default();
+    let source = tempfile::TempDir::new().unwrap();
+    let mut database = ManagedDb::open(&source.path().join("cell.sqlite"), limits).unwrap();
+    database
+        .transaction(|transaction| transaction.execute_batch("CREATE TABLE values_(v)"))
+        .unwrap();
+    let capture = database.capture().unwrap();
+    let encoded = frame(1, capture.segments.first().unwrap(), limits);
+    let leader = SessionId::from_bytes([1; 16]);
+    let root = tempfile::TempDir::new().unwrap();
+    let store = FollowerStore::open(
+        root.path().to_owned(),
+        limits,
+        crab_ltx::DiskBudget::new(1 << 30),
+    )
+    .unwrap();
+    store.append(leader, 2, vec![encoded], 0).await.unwrap();
+    store.retire(leader, 2, 1).await.unwrap();
+
+    let candidates = store.retired_lanes(i64::MAX, 1).await.unwrap();
+    assert_eq!(candidates.len(), 1);
+    let candidate = candidates[0];
+    assert_eq!(candidate.leader(), leader);
+    assert_eq!(candidate.epoch(), 2);
+    assert_eq!(candidate.covered_through(), 1);
+    assert!(
+        store
+            .remove_retired(candidate, candidate.retired_at_ms().saturating_sub(1))
+            .await
+            .is_err()
+    );
+
+    assert!(store.remove_retired(candidate, i64::MAX).await.unwrap());
+    assert!(!store.remove_retired(candidate, i64::MAX).await.unwrap());
+    assert_eq!(store.retained_bytes(), 0);
+    assert!(store.retired_lanes(i64::MAX, 1).await.unwrap().is_empty());
+    database.close().unwrap();
+}

@@ -156,7 +156,7 @@ recovery path.
 | Authoritative create and refresh drive a terminal monotonic node-lease guard; admission, actor dispatch, Cell-control CAS, durability proof, and output acceptance all check it | Fleet-proof watermarks for future streamed Cell responses |
 | Write-all durability gate, first-fsynced-batch activation, actor cut submission, fleet-first command release, object fallback, and contiguous authoritative object watermark | A dual-head actor that can begin the next command before prior fleet-proven cuts finish object publication |
 | Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | Recovery-only startup listener ordering |
-| Cell control attachment and takeover consumption of overlays; server drain closes a fully object-covered epoch before session withdrawal | Obsolete-marker collection and live multi-node proof |
+| Cell control attachment and takeover consumption of overlays; server drain closes a fully object-covered epoch before session withdrawal; grace-aged retired follower lanes are deleted only after authority stops naming their epoch | Live multi-node proof |
 
 The session record now owns one CAS-protected log epoch, its exact sorted member
 set, activation bit, contiguous object watermark, and renewable recovery claim.
@@ -181,8 +181,8 @@ the old gate only after every issued sequence is object-covered, best-effort
 retires old lanes behind durable append fences, and CASes a fresh inactive
 epoch. Recruitment retries while the node remains healthy and leaves a
 one-node fleet on the object path. Failure-domain metadata, recovery-only
-startup listener ordering, early schema-migration response release, dual-head
-actor continuation, and obsolete-marker collection remain gated. The preferred
+startup listener ordering, early schema-migration response release, and
+dual-head actor continuation remain gated. The preferred
 shard-zero scanner now inventories expired active node
 logs, claims at most two concurrently, scans at most 10,000 affected Cells,
 renews each recovery claim while gathering and pinning, seals the session, and
@@ -210,6 +210,12 @@ Cell-control mutation, and before returning any state-observing result.
 Heartbeat refresh, log activation, object coverage, and clean close share one
 mutex-protected authoritative observation, so their ETag CAS operations cannot
 race through stale local state.
+
+Retired follower lanes keep their durable append-fence marker for ten minutes.
+The server then scans at most 64 lanes per minute, requires the exact
+node-session record to exist and no longer name that log epoch, rechecks the
+unchanged marker and its filesystem timestamp under the lane lock, and only
+then deletes it and releases disk admission. Missing authority fails closed.
 
 ## Use one multiplexed log per owner session
 

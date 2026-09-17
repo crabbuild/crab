@@ -61,6 +61,9 @@ const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(110);
 const RELEASE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const NODE_LOG_RECRUIT_INTERVAL: Duration = Duration::from_secs(3);
 const NODE_LOG_LIVE_NODE_LIMIT: usize = 1_024;
+const RETIRED_FOLLOWER_COLLECTION_INTERVAL: Duration = Duration::from_secs(60);
+const RETIRED_FOLLOWER_GRACE_MS: i64 = 10 * 60 * 1_000;
+const RETIRED_FOLLOWER_BATCH: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CellRuntimeBudget {
@@ -889,7 +892,7 @@ pub async fn serve(config: Config) -> Result<()> {
         cell_runtime,
         repository_cells: Some(repository_cells),
         peer_receiver: Some(peer_receiver),
-        follower_store: Some(follower_store),
+        follower_store: Some(follower_store.clone()),
         node_log_transport: Some(node_log_transport),
         cancellation: cancellation.clone(),
         receives: tokio_util::task::TaskTracker::new(),
@@ -939,6 +942,17 @@ pub async fn serve(config: Config) -> Result<()> {
             durability_application,
             durability_transport,
             durability_cancellation,
+        )
+        .await
+    });
+    let follower_collection_store = follower_store;
+    let follower_collection_directory = directory.clone();
+    let follower_collection_cancellation = cancellation.clone();
+    let follower_collection = tokio::spawn(async move {
+        collect_retired_follower_lanes(
+            follower_collection_store,
+            follower_collection_directory,
+            follower_collection_cancellation,
         )
         .await
     });
@@ -1001,6 +1015,10 @@ pub async fn serve(config: Config) -> Result<()> {
             Ok(result) => result,
             Err(error) => Err(error.into()),
         };
+        let follower_collection = match follower_collection.await {
+            Ok(result) => result,
+            Err(error) => Err(error.into()),
+        };
         let scheduler = match scheduler.await {
             Ok(result) => result,
             Err(error) => Err(error.into()),
@@ -1035,10 +1053,49 @@ pub async fn serve(config: Config) -> Result<()> {
             .and(scheduler)
             .and(release_watch)
             .and(durability_recruiter)
+            .and(follower_collection)
             .and(maintenance)
             .and(runtimes)
     })
     .await?
+}
+
+async fn collect_retired_follower_lanes(
+    store: crab_cell_runtime::FollowerStore,
+    directory: NodeDirectory,
+    cancellation: CancellationToken,
+) -> Result<()> {
+    loop {
+        tokio::select! {
+            () = cancellation.cancelled() => return Ok(()),
+            () = tokio::time::sleep(RETIRED_FOLLOWER_COLLECTION_INTERVAL) => {}
+        }
+        let now_ms = crate::cells::unix_now_ms()?;
+        let cutoff_ms = now_ms.saturating_sub(RETIRED_FOLLOWER_GRACE_MS);
+        let candidates = match store.retired_lanes(cutoff_ms, RETIRED_FOLLOWER_BATCH).await {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                tracing::warn!(error = %error, "retired follower scan failed");
+                continue;
+            }
+        };
+        for candidate in candidates {
+            match directory
+                .log_epoch_referenced(candidate.leader(), candidate.epoch())
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    if let Err(error) = store.remove_retired(candidate, cutoff_ms).await {
+                        tracing::warn!(error = %error, "retired follower collection failed");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "retired follower authority check failed");
+                }
+            }
+        }
+    }
 }
 
 async fn recruit_node_durability(

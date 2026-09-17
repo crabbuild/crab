@@ -470,6 +470,7 @@ async fn node_log_enrollment_activation_and_coverage_are_authoritative() {
         .advance_log_coverage(&active, 27, NOW_MS + 1_002)
         .await
         .unwrap();
+    assert!(directory.log_epoch_referenced(leader, 4).await.unwrap());
     assert_eq!(covered.advertisement().log().unwrap().tiered_through(), 27);
     directory
         .authorize_log_retire(leader, node(first), 4, 27, NOW_MS + 1_003)
@@ -548,6 +549,7 @@ async fn clean_node_log_close_clears_authority_before_session_withdrawal() {
     .unwrap();
 
     assert!(closed.advertisement().log().is_none());
+    assert!(!directory.log_epoch_referenced(leader, 4).await.unwrap());
     assert!(
         directory
             .authorize_log_append(leader, node(member), 4, NOW_MS + 5)
@@ -556,6 +558,7 @@ async fn clean_node_log_close_clears_authority_before_session_withdrawal() {
     );
     directory.withdraw(&closed, NOW_MS + 5).await.unwrap();
     assert!(directory.load(leader, NOW_MS + 6).await.unwrap().is_none());
+    assert!(!directory.log_epoch_referenced(leader, 4).await.unwrap());
 }
 
 #[tokio::test]

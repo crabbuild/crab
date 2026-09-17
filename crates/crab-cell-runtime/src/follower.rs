@@ -13,6 +13,7 @@ const ROTATE_BYTES: u64 = 64 << 20;
 const MAX_APPEND_FRAMES: usize = 64;
 const MAX_TAIL_PAGE_BYTES: usize = 1 << 20;
 const MAX_TAIL_PAGE_FRAMES: usize = 4096;
+const MAX_RETIRED_LANES: usize = 1_024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Lane {
@@ -34,6 +35,37 @@ pub struct FollowerReceipt {
 pub struct FollowerTailPage {
     pub frames: Vec<Bytes>,
     pub next_sequence: Option<u64>,
+}
+
+/// Exact retired follower lane eligible for authority-checked collection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetiredFollowerLane {
+    leader: SessionId,
+    epoch: u64,
+    covered_through: u64,
+    retired_at_ms: i64,
+}
+
+impl RetiredFollowerLane {
+    #[must_use]
+    pub const fn leader(&self) -> SessionId {
+        self.leader
+    }
+
+    #[must_use]
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    #[must_use]
+    pub const fn covered_through(&self) -> u64 {
+        self.covered_through
+    }
+
+    #[must_use]
+    pub const fn retired_at_ms(&self) -> i64 {
+        self.retired_at_ms
+    }
 }
 
 /// Local SSD store for checksum-verified follower fragments.
@@ -258,6 +290,52 @@ impl FollowerStore {
         .map_err(Error::FollowerWorkerJoin)?
     }
 
+    /// Lists bounded retired lanes whose marker predates the caller's grace cutoff.
+    pub async fn retired_lanes(
+        &self,
+        retired_before_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<RetiredFollowerLane>> {
+        if retired_before_ms < 0 || !(1..=MAX_RETIRED_LANES).contains(&limit) {
+            return Err(Error::Node("retired follower scan bound is invalid"));
+        }
+        let root = self.root.clone();
+        tokio::task::spawn_blocking(move || retired_lanes_sync(&root, retired_before_ms, limit))
+            .await
+            .map_err(Error::FollowerWorkerJoin)?
+    }
+
+    /// Deletes one exact, grace-aged retired lane after external authority proof.
+    pub async fn remove_retired(
+        &self,
+        candidate: RetiredFollowerLane,
+        retired_before_ms: i64,
+    ) -> Result<bool> {
+        if candidate.retired_at_ms > retired_before_ms {
+            return Err(Error::Node("retired follower grace period has not elapsed"));
+        }
+        let lane = Lane {
+            leader: candidate.leader,
+            epoch: candidate.epoch,
+        };
+        let lock = self.lane_lock(lane)?;
+        let root = self.root.clone();
+        let retained = Arc::clone(&self.retained);
+        tokio::task::spawn_blocking(move || {
+            let retained = retained
+                .lock()
+                .map_err(|_| Error::Node("follower disk reservation lock poisoned"))?;
+            let _lane = lock
+                .lock()
+                .map_err(|_| Error::Node("follower lane lock poisoned"))?;
+            let removed = remove_retired_sync(&root, lane, candidate, retired_before_ms)?;
+            retained.resize(follower_bytes(&root)?)?;
+            Ok(removed)
+        })
+        .await
+        .map_err(Error::FollowerWorkerJoin)?
+    }
+
     fn lane_lock(&self, lane: Lane) -> Result<Arc<Mutex<Option<LaneMemory>>>> {
         let mut lanes = self
             .lanes
@@ -297,6 +375,123 @@ fn follower_bytes(root: &Path) -> Result<u64> {
         return Ok(0);
     }
     directory_bytes(&followers)
+}
+
+fn retired_lanes_sync(
+    root: &Path,
+    retired_before_ms: i64,
+    limit: usize,
+) -> Result<Vec<RetiredFollowerLane>> {
+    let followers = root.join("followers");
+    if !followers.exists() {
+        return Ok(Vec::new());
+    }
+    let mut leaders = std::fs::read_dir(&followers)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    leaders.sort();
+    let mut retired = Vec::new();
+    for leader_path in leaders {
+        let leader = parse_session_directory(&leader_path)?;
+        let mut epochs = std::fs::read_dir(&leader_path)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        epochs.sort();
+        for epoch_path in epochs {
+            let epoch = parse_epoch_directory(&epoch_path)?;
+            let marker = epoch_path.join("retired");
+            if !marker.exists() {
+                continue;
+            }
+            let retired_at_ms = modified_at_ms(&marker)?;
+            if retired_at_ms > retired_before_ms {
+                continue;
+            }
+            retired.push(RetiredFollowerLane {
+                leader,
+                epoch,
+                covered_through: read_watermark(&marker, "follower retire marker is invalid")?,
+                retired_at_ms,
+            });
+            if retired.len() == limit {
+                return Ok(retired);
+            }
+        }
+    }
+    Ok(retired)
+}
+
+fn remove_retired_sync(
+    root: &Path,
+    lane: Lane,
+    candidate: RetiredFollowerLane,
+    retired_before_ms: i64,
+) -> Result<bool> {
+    validate_lane(lane)?;
+    let directory = lane_directory(root, lane);
+    let marker = directory.join("retired");
+    if !marker.exists() {
+        return Ok(false);
+    }
+    if read_watermark(&marker, "follower retire marker is invalid")? != candidate.covered_through
+        || modified_at_ms(&marker)? != candidate.retired_at_ms
+        || candidate.retired_at_ms > retired_before_ms
+    {
+        return Err(Error::Node("retired follower marker changed"));
+    }
+    std::fs::remove_dir_all(&directory)?;
+    let leader = directory
+        .parent()
+        .ok_or(Error::Node("follower leader directory is missing"))?;
+    sync_directory(leader)?;
+    if std::fs::read_dir(leader)?.next().is_none() {
+        std::fs::remove_dir(leader)?;
+        if let Some(followers) = leader.parent() {
+            sync_directory(followers)?;
+        }
+    }
+    Ok(true)
+}
+
+fn modified_at_ms(path: &Path) -> Result<i64> {
+    let duration = std::fs::metadata(path)?
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| Error::Node("follower marker time predates Unix epoch"))?;
+    i64::try_from(duration.as_millis()).map_err(|_| Error::Node("follower marker time exceeds i64"))
+}
+
+fn parse_session_directory(path: &Path) -> Result<SessionId> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(Error::Node("follower leader directory is not UTF-8"))?;
+    if name.len() != 32 {
+        return Err(Error::Node("follower leader directory is invalid"));
+    }
+    let mut bytes = [0_u8; 16];
+    for (index, pair) in name.as_bytes().chunks_exact(2).enumerate() {
+        let text = std::str::from_utf8(pair)
+            .map_err(|_| Error::Node("follower leader directory is invalid"))?;
+        bytes[index] = u8::from_str_radix(text, 16)
+            .map_err(|_| Error::Node("follower leader directory is invalid"))?;
+    }
+    let session = SessionId::from_bytes(bytes);
+    validate_lane(Lane {
+        leader: session,
+        epoch: 1,
+    })?;
+    Ok(session)
+}
+
+fn parse_epoch_directory(path: &Path) -> Result<u64> {
+    let epoch = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.parse::<u64>().ok())
+        .filter(|epoch| *epoch != 0)
+        .ok_or(Error::Node("follower epoch directory is invalid"))?;
+    Ok(epoch)
 }
 
 fn settle_disk_reservation(

@@ -789,6 +789,30 @@ impl NodeDirectory {
         Ok(log)
     }
 
+    /// Reports whether the authoritative session record still names one log epoch.
+    ///
+    /// A missing record is corruption rather than collection authority and fails
+    /// closed. Callers may delete an exact grace-aged retired follower lane only
+    /// when this returns `false`.
+    pub async fn log_epoch_referenced(&self, session: SessionId, epoch: u64) -> Result<bool> {
+        if epoch == 0 {
+            return Err(Error::Node("node-log epoch is zero"));
+        }
+        let path = self.layout.node_path(session.as_bytes());
+        let Some((record, _)) = self.load_record_at(&path).await? else {
+            return Err(Error::Node("node session record is missing"));
+        };
+        if record.session() != session {
+            return Err(Error::Node("node advertisement path and session differ"));
+        }
+        if let NodeRecord::Advertisement(advertisement) = &record {
+            self.validate_scope(advertisement)?;
+            advertisement.validate_shape()?;
+            advertisement.verify_signature()?;
+        }
+        Ok(record.log().is_some_and(|log| log.epoch() == epoch))
+    }
+
     /// Verifies a live claimant may seal or read this follower's failed-owner lane.
     pub async fn authorize_log_recovery(
         &self,
@@ -1471,6 +1495,13 @@ impl NodeRecord {
         match self {
             Self::Advertisement(advertisement) => advertisement.session,
             Self::Tombstone(tombstone) => tombstone.session,
+        }
+    }
+
+    fn log(&self) -> Option<&NodeLogStatus> {
+        match self {
+            Self::Advertisement(advertisement) => advertisement.log.as_ref(),
+            Self::Tombstone(tombstone) => tombstone.log.as_ref(),
         }
     }
 }

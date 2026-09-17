@@ -79,7 +79,7 @@ pub use executor::{
     CellExecutor, CommandExecution, HandlerOutcome, MigrationOutcome, MutationIdentity,
     PendingCommit, PendingMigration, Resolution, StoredOutcome,
 };
-pub use follower::{FollowerReceipt, FollowerStore, FollowerTailPage};
+pub use follower::{FollowerReceipt, FollowerStore, FollowerTailPage, RetiredFollowerLane};
 pub use identity::{
     ApplicationId, CellId, CellTarget, Digest, IncarnationId, NamespaceId, NodeId, RequestId,
     SessionId, TenantId, partition_for_shard, shard_for_scope,
