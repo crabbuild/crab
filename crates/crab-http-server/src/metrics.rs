@@ -421,6 +421,10 @@ impl Metrics {
             SelfFenceReason::Other => 3,
         };
         self.inner.self_fences[index].increment(1);
+        for lane in &self.inner.node_log_lanes {
+            lane.set(0.0);
+        }
+        self.inner.session_lease_seconds.set(0.0);
     }
 
     pub(crate) fn update_recovery_states(&self, running: usize, waiting: usize) {
@@ -920,6 +924,7 @@ mod tests {
         assert!(rendered.contains("crab_cell_node_log_append_bytes_total{result=\"acked\"} 512"));
         assert!(rendered.contains("crab_cell_node_log_append_bytes_total{result=\"nacked\"} 128"));
         assert!(rendered.contains("crab_cell_self_fences_total{reason=\"refresh\"} 1"));
+        assert!(rendered.contains("crab_cell_session_lease_seconds 0"));
         assert!(rendered.contains("crab_cell_node_log_recoveries{state=\"running\"} 1"));
         assert!(rendered.contains("crab_cell_node_log_recovery_seconds_count 1"));
         assert!(
