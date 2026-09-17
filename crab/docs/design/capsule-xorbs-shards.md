@@ -1168,9 +1168,9 @@ The same v2-only prefix was then exercised independently with the installed
 release binary: `git ls-remote`, a lazy `crab clone --depth 1`, and
 `git fsck --full` all succeeded while the prefix contained no `layout` object.
 This closes the suspected clone-admission regression; the remaining live gap
-is fixture completeness. `deepen-since` and `deepen-not` now have a verified
-planner and wire path, but still require an end-to-end Git fixture before
-release qualification. `--staging-source` accepts a canonical staging
+is fixture completeness. `deepen-since` and `deepen-not` now have verified
+planner, wire, and helper fixtures; hosted, older-Git, and adversarial
+qualification remain release gates. `--staging-source` accepts a canonical staging
 snapshot, but each pointer file hash reached by the replay must have its
 verified recipe and an active path lease (a latest-only recipe is correctly
 rejected).
