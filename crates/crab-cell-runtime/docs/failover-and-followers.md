@@ -151,15 +151,19 @@ recovery path.
 
 | Working now | Still gated before fleet durability may serve traffic |
 | --- | --- |
-| Strict, checksummed node-frame codec | Authoritative session log enrollment and rotation |
-| Crash-safe local follower append/seal/tail store | Remote seal/tail transport and recovery-only startup |
+| Strict frame codec plus authoritative session enrollment, activation, coverage, and recovery claims | Follower selection, epoch rotation, and recovery-only startup |
+| Crash-safe follower store plus authenticated remote append/seal/tail transport | Live shipper batching, backpressure, and startup listener ordering |
 | Write-all durability gate with contiguous object watermark | Actor submission and response-gate integration |
 | Complete-witness grouping and immutable recovery manifests | Automated dead-session recovery coordinator |
 | Cell control attachment and takeover consumption of overlays | Graceful drain, retention retirement, and live multi-node proof |
 
-The server exposes authenticated follower append handling, but fleet proof is
-not activated. This keeps current responses on the existing exact-root path
-until the remaining authority and recovery gates are complete.
+The session record now owns one CAS-protected log epoch, its exact sorted member
+set, activation bit, contiguous object watermark, and renewable recovery claim.
+The private mTLS transport implements enrolled append plus claimant-authorized,
+page-bounded seal and tail operations. Ensemble selection and epoch rotation,
+recovery-only startup, actor submission, and automated session recovery remain
+gated. Fleet proof is not activated, so current responses stay on the existing
+exact-root path until those remaining gates are complete.
 
 ## Use one multiplexed log per owner session
 

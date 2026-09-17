@@ -233,6 +233,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         owner_runtime.clone(),
         None,
         Some(PeerReceiver::new(
+            owner_session,
             directory.clone(),
             Arc::clone(&registry),
             crab_cell_runtime::ReleaseStore::new(cell_layout.clone(), identity).unwrap(),
@@ -753,6 +754,7 @@ fn server(
         repository_cells,
         peer_receiver,
         follower_store: None,
+        node_log_transport: None,
         options: RepositoryOptions::default(),
         cursor_key: [0; 32],
         admission: Semaphore::new(16),

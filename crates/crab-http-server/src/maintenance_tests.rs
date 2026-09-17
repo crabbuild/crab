@@ -61,6 +61,7 @@ async fn fixture_without_cells() -> Arc<Server> {
         repository_cells: None,
         peer_receiver: None,
         follower_store: None,
+        node_log_transport: None,
         options: RepositoryOptions::default(),
         cursor_key: [0; 32],
         admission: Semaphore::new(16),
@@ -254,6 +255,7 @@ fn enable_catalog_readiness(server: &mut Arc<Server>) {
         crate::peer::LocalCellResolver::new(layout.clone(), identity, server.cell_runtime.clone());
     let releases = crab_cell_runtime::ReleaseStore::new(layout.clone(), identity).unwrap();
     server.peer_receiver = Some(crate::peer::PeerReceiver::new(
+        crab_cell_runtime::SessionId::from_bytes([9; 16]),
         crab_cell_runtime::NodeDirectory::new(
             layout,
             crab_cell_runtime::Digest::from_bytes([3; 32]),

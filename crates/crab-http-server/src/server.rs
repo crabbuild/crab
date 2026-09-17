@@ -639,6 +639,7 @@ pub(crate) struct Server {
     pub(crate) repository_cells: Option<crate::cells::RepositoryCellRouter>,
     pub(crate) peer_receiver: Option<crate::peer::PeerReceiver>,
     pub(crate) follower_store: Option<crab_cell_runtime::FollowerStore>,
+    pub(crate) node_log_transport: Option<Arc<dyn crab_cell_runtime::NodeLogTransport>>,
     pub options: RepositoryOptions,
     pub cursor_key: [u8; 32],
     pub admission: Semaphore,
@@ -802,8 +803,15 @@ pub async fn serve(config: Config) -> Result<()> {
         peer_tls.client_identity(),
         session,
     ));
+    let node_log_transport: Arc<dyn crab_cell_runtime::NodeLogTransport> =
+        Arc::new(crate::peer::NodeLogHttpTransport::new(
+            directory.clone(),
+            peer_tls.client_identity(),
+            session,
+        ));
     let release_store = ReleaseStore::new(startup.layout.clone(), startup.identity)?;
     let peer_receiver = crate::peer::PeerReceiver::new(
+        session,
         directory.clone(),
         Arc::clone(&registry),
         release_store.clone(),
@@ -854,6 +862,7 @@ pub async fn serve(config: Config) -> Result<()> {
         repository_cells: Some(repository_cells),
         peer_receiver: Some(peer_receiver),
         follower_store: Some(follower_store),
+        node_log_transport: Some(node_log_transport),
         cancellation: cancellation.clone(),
         receives: tokio_util::task::TaskTracker::new(),
         options,
@@ -1199,6 +1208,14 @@ fn management_router(server: Arc<Server>) -> Router {
             post(crate::peer::append_node_log).layer(axum::extract::DefaultBodyLimit::max(
                 (65 * 1024 * 1024) + (64 * 8) + 8,
             )),
+        )
+        .route(
+            "/internal/cells/v1/node-log/{leader}/{epoch}/recovery/{claimant}/seal",
+            post(crate::peer::seal_node_log).layer(axum::extract::DefaultBodyLimit::max(0)),
+        )
+        .route(
+            "/internal/cells/v1/node-log/{leader}/{epoch}/recovery/{claimant}/tail/{first}",
+            post(crate::peer::tail_node_log).layer(axum::extract::DefaultBodyLimit::max(0)),
         )
         .with_state(server)
 }
@@ -1798,6 +1815,7 @@ mod tests {
             repository_cells: None,
             peer_receiver: None,
             follower_store: None,
+            node_log_transport: None,
             options: RepositoryOptions::default(),
             cursor_key: [0; 32],
             admission: Semaphore::new(1),

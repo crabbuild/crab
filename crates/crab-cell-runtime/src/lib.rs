@@ -24,6 +24,7 @@ mod maintenance;
 mod node;
 mod node_log;
 mod node_log_recovery;
+mod node_log_state;
 mod node_log_transport;
 mod peer;
 mod publication;
@@ -75,7 +76,7 @@ pub use executor::{
     CellExecutor, CommandExecution, HandlerOutcome, MigrationOutcome, MutationIdentity,
     PendingCommit, PendingMigration, Resolution, StoredOutcome,
 };
-pub use follower::{FollowerReceipt, FollowerStore};
+pub use follower::{FollowerReceipt, FollowerStore, FollowerTailPage};
 pub use identity::{
     ApplicationId, CellId, CellTarget, Digest, IncarnationId, NamespaceId, RequestId, SessionId,
     TenantId, partition_for_shard, shard_for_scope,
@@ -97,6 +98,7 @@ pub use node_log::{
     RecoveryBase, build_recovery_overlays,
 };
 pub use node_log_recovery::{NodeLogRecovery, RecoveryCell, RecoveryCoordinator, SealedSession};
+pub use node_log_state::{NodeLogPhase, NodeLogStatus, NodeRecoveryClaim};
 pub use node_log_transport::{
     AppendRequest, LocalFollowerTransport, NodeLogTransport, SealRequest, TailRequest,
 };

@@ -11,6 +11,8 @@ const RECORD_MAGIC: &[u8; 4] = b"CFR1";
 const RECORD_HEADER_BYTES: usize = 52;
 const ROTATE_BYTES: u64 = 64 << 20;
 const MAX_APPEND_FRAMES: usize = 64;
+const MAX_TAIL_PAGE_BYTES: usize = 1 << 20;
+const MAX_TAIL_PAGE_FRAMES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Lane {
@@ -26,6 +28,12 @@ type LaneMap = Arc<Mutex<HashMap<Lane, LaneState>>>;
 pub struct FollowerReceipt {
     pub base_sequence: u64,
     pub durable_through: u64,
+}
+
+/// One bounded page from a sealed follower lane.
+pub struct FollowerTailPage {
+    pub frames: Vec<Bytes>,
+    pub next_sequence: Option<u64>,
 }
 
 /// Local SSD store for checksum-verified follower fragments.
@@ -130,6 +138,47 @@ impl FollowerStore {
                 .lock()
                 .map_err(|_| Error::Node("follower lane lock poisoned"))?;
             read_tail_sync(&root, lane, first_sequence, limits)
+        })
+        .await
+        .map_err(Error::FollowerWorkerJoin)?
+    }
+
+    /// Reads one network-sized page from a sealed, verified tail.
+    ///
+    /// A single frame may exceed the page target and is returned alone because
+    /// node frames are the independently checksummed transport unit.
+    pub async fn read_tail_page(
+        &self,
+        leader: SessionId,
+        epoch: u64,
+        first_sequence: u64,
+    ) -> Result<FollowerTailPage> {
+        let lane = Lane { leader, epoch };
+        let lock = self.lane_lock(lane)?;
+        let root = self.root.clone();
+        let limits = self.limits;
+        tokio::task::spawn_blocking(move || {
+            let _guard = lock
+                .lock()
+                .map_err(|_| Error::Node("follower lane lock poisoned"))?;
+            let frames = read_tail_sync(&root, lane, first_sequence, limits)?;
+            let mut bytes = 0_usize;
+            let mut count = 0_usize;
+            for frame in &frames {
+                if count == MAX_TAIL_PAGE_FRAMES
+                    || (count != 0 && bytes.saturating_add(frame.len()) > MAX_TAIL_PAGE_BYTES)
+                {
+                    break;
+                }
+                bytes = bytes.saturating_add(frame.len());
+                count += 1;
+            }
+            let has_more = count < frames.len();
+            let frames = frames.into_iter().take(count).collect();
+            Ok(FollowerTailPage {
+                frames,
+                next_sequence: has_more.then(|| first_sequence.saturating_add(count as u64)),
+            })
         })
         .await
         .map_err(Error::FollowerWorkerJoin)?

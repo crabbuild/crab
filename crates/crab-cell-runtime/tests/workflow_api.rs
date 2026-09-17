@@ -63,6 +63,32 @@ async fn fence_session(
         .await
         .unwrap();
     directory
+        .create(
+            crab_cell_runtime::NodeAdvertisement::sign(
+                claimant,
+                "https://claimant.internal:8081".into(),
+                fleet,
+                Digest::from_bytes([93; 32]),
+                image,
+                release,
+                &ed25519_dalek::SigningKey::from_bytes(&[94; 32]),
+                1,
+                10_000,
+                20_000,
+                vec![Digest::from_bytes([95; 32])],
+                vec![1],
+                crab_cell_runtime::NodeCapacity {
+                    free_memory_bytes: 1,
+                    free_disk_bytes: 1,
+                    job_credits: 1,
+                },
+            )
+            .unwrap(),
+            10_000,
+        )
+        .await
+        .unwrap();
+    directory
         .claim_expired(session, claimant, 10_001)
         .await
         .unwrap()

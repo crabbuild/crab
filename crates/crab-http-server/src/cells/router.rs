@@ -847,43 +847,70 @@ mod tests {
         )
         .unwrap();
         let stale_issued_at_ms = now_ms - 20_000;
-        NodeDirectory::new(
+        let directory = NodeDirectory::new(
             layout.clone(),
             crab_cell_runtime::Digest::from_bytes([21; 32]),
             crab_cell_runtime::Digest::from_bytes([22; 32]),
             registry.release_digest(),
-        )
-        .create(
-            NodeAdvertisement::sign(
-                stale_session,
-                owner(stale_session).endpoint,
-                crab_cell_runtime::Digest::from_bytes([21; 32]),
-                crab_cell_runtime::Digest::from_bytes([23; 32]),
-                crab_cell_runtime::Digest::from_bytes([22; 32]),
-                registry.release_digest(),
-                &SigningKey::from_bytes(&[10; 32]),
-                1,
+        );
+        directory
+            .create(
+                NodeAdvertisement::sign(
+                    stale_session,
+                    owner(stale_session).endpoint,
+                    crab_cell_runtime::Digest::from_bytes([21; 32]),
+                    crab_cell_runtime::Digest::from_bytes([23; 32]),
+                    crab_cell_runtime::Digest::from_bytes([22; 32]),
+                    registry.release_digest(),
+                    &SigningKey::from_bytes(&[10; 32]),
+                    1,
+                    stale_issued_at_ms,
+                    stale_issued_at_ms + 15_000,
+                    registry.module_digests(),
+                    vec![1],
+                    NodeCapacity {
+                        free_memory_bytes: 1,
+                        free_disk_bytes: 1,
+                        job_credits: 1,
+                    },
+                )
+                .unwrap(),
                 stale_issued_at_ms,
-                stale_issued_at_ms + 15_000,
-                registry.module_digests(),
-                vec![1],
-                NodeCapacity {
-                    free_memory_bytes: 1,
-                    free_disk_bytes: 1,
-                    job_credits: 1,
-                },
             )
-            .unwrap(),
-            stale_issued_at_ms,
-        )
-        .await
-        .unwrap();
+            .await
+            .unwrap();
         let stale = idle.value().takeover(owner(stale_session)).unwrap();
         authority
             .transition(&idle, stale, Transition::Takeover)
             .await
             .unwrap();
         let third_session = SessionId::from_bytes([11; 16]);
+        directory
+            .create(
+                NodeAdvertisement::sign(
+                    third_session,
+                    owner(third_session).endpoint,
+                    crab_cell_runtime::Digest::from_bytes([21; 32]),
+                    crab_cell_runtime::Digest::from_bytes([24; 32]),
+                    crab_cell_runtime::Digest::from_bytes([22; 32]),
+                    registry.release_digest(),
+                    &SigningKey::from_bytes(&[11; 32]),
+                    1,
+                    now_ms,
+                    now_ms + 15_000,
+                    registry.module_digests(),
+                    vec![1],
+                    NodeCapacity {
+                        free_memory_bytes: 1,
+                        free_disk_bytes: 1,
+                        job_credits: 1,
+                    },
+                )
+                .unwrap(),
+                now_ms,
+            )
+            .await
+            .unwrap();
         let third_runtime = CellRuntime::new(
             SqlWorkerPool::new(1, 10).unwrap(),
             16 * 1024 * 1024,

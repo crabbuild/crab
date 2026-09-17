@@ -27,7 +27,9 @@ use uuid::Uuid;
 use crate::{RepositoryAccess, RepositoryConfig, peer_tls::PeerTlsIdentity, server::Server};
 
 mod client;
+mod node_log_client;
 pub(crate) use client::PeerHttpRoundTrip;
+pub(crate) use node_log_client::NodeLogHttpTransport;
 
 const PROTOBUF_MEDIA_TYPE: &str = "application/x-protobuf";
 const NODE_LOG_MEDIA_TYPE: &str = "application/x-crab-node-log";
@@ -38,6 +40,7 @@ const HEARTBEAT_RETRY: Duration = Duration::from_millis(500);
 
 #[derive(Clone)]
 pub(crate) struct PeerReceiver {
+    session: SessionId,
     directory: NodeDirectory,
     registry: Arc<Registry>,
     releases: ReleaseStore,
@@ -47,6 +50,7 @@ pub(crate) struct PeerReceiver {
 
 impl PeerReceiver {
     pub(crate) fn new(
+        session: SessionId,
         directory: NodeDirectory,
         registry: Arc<Registry>,
         releases: ReleaseStore,
@@ -54,6 +58,7 @@ impl PeerReceiver {
         round_trip: Arc<dyn PeerRoundTrip>,
     ) -> Self {
         Self {
+            session,
             directory,
             registry,
             releases,
@@ -503,9 +508,10 @@ pub(crate) async fn append_node_log(
     {
         return peer_http_error(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
-    let (Some(receiver), Some(store)) = (
+    let (Some(receiver), Some(store), Some(_transport)) = (
         server.peer_receiver.as_ref(),
         server.follower_store.as_ref(),
+        server.node_log_transport.as_ref(),
     ) else {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     };
@@ -517,35 +523,155 @@ pub(crate) async fn append_node_log(
         Ok(now_ms) => now_ms,
         Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
     };
-    let enrolled = match receiver.directory.load(leader, now_ms).await {
-        Ok(Some(enrolled)) => enrolled,
-        Ok(None) | Err(_) => return peer_http_error(StatusCode::UNAUTHORIZED),
-    };
-    let advertisement = enrolled.advertisement();
-    let signing_key_matches = advertisement
-        .verifying_key()
-        .is_ok_and(|key| key.to_bytes() == identity.public_key());
-    if advertisement.certificate() != identity.certificate() || !signing_key_matches {
+    if !authenticated_session(receiver, leader, &identity, now_ms).await {
         return peer_http_error(StatusCode::UNAUTHORIZED);
+    }
+    if receiver
+        .directory
+        .authorize_log_append(leader, receiver.session, epoch, now_ms)
+        .await
+        .is_err()
+    {
+        return peer_http_error(StatusCode::FORBIDDEN);
     }
     let (covered_through, frames) = match decode_append_batch(body) {
         Ok(batch) => batch,
         Err(()) => return peer_http_error(StatusCode::BAD_REQUEST),
     };
     match store.append(leader, epoch, frames, covered_through).await {
-        Ok(receipt) => (
-            StatusCode::OK,
-            [(header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({
-                "base_sequence": receipt.base_sequence.to_string(),
-                "durable_through": receipt.durable_through.to_string(),
-            })),
-        )
-            .into_response(),
+        Ok(receipt) => follower_receipt_response(receipt),
         Err(CellError::PeerAuthorization(_)) => peer_http_error(StatusCode::UNAUTHORIZED),
         Err(CellError::Node(_)) | Err(CellError::Ltx(_)) => peer_http_error(StatusCode::CONFLICT),
         Err(_) => peer_http_error(StatusCode::SERVICE_UNAVAILABLE),
     }
+}
+
+pub(crate) async fn seal_node_log(
+    State(server): State<Arc<Server>>,
+    ConnectInfo(identity): ConnectInfo<PeerTlsIdentity>,
+    AxumPath((leader, epoch, claimant)): AxumPath<(String, u64, String)>,
+) -> Response {
+    let (Some(receiver), Some(store), Some(_transport)) = (
+        server.peer_receiver.as_ref(),
+        server.follower_store.as_ref(),
+        server.node_log_transport.as_ref(),
+    ) else {
+        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let (Ok(leader), Ok(claimant)) = (decode_session(&leader), decode_session(&claimant)) else {
+        return peer_http_error(StatusCode::BAD_REQUEST);
+    };
+    let now_ms = match now_ms() {
+        Ok(now_ms) => now_ms,
+        Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    if !authenticated_session(receiver, claimant, &identity, now_ms).await {
+        return peer_http_error(StatusCode::UNAUTHORIZED);
+    }
+    if receiver
+        .directory
+        .authorize_log_recovery(leader, claimant, receiver.session, epoch, now_ms)
+        .await
+        .is_err()
+    {
+        return peer_http_error(StatusCode::FORBIDDEN);
+    }
+    match store.seal(leader, epoch).await {
+        Ok(receipt) => follower_receipt_response(receipt),
+        Err(CellError::Node(_)) | Err(CellError::Ltx(_)) => peer_http_error(StatusCode::CONFLICT),
+        Err(_) => peer_http_error(StatusCode::SERVICE_UNAVAILABLE),
+    }
+}
+
+pub(crate) async fn tail_node_log(
+    State(server): State<Arc<Server>>,
+    ConnectInfo(identity): ConnectInfo<PeerTlsIdentity>,
+    AxumPath((leader, epoch, claimant, first)): AxumPath<(String, u64, String, u64)>,
+) -> Response {
+    let (Some(receiver), Some(store), Some(_transport)) = (
+        server.peer_receiver.as_ref(),
+        server.follower_store.as_ref(),
+        server.node_log_transport.as_ref(),
+    ) else {
+        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let (Ok(leader), Ok(claimant)) = (decode_session(&leader), decode_session(&claimant)) else {
+        return peer_http_error(StatusCode::BAD_REQUEST);
+    };
+    let now_ms = match now_ms() {
+        Ok(now_ms) => now_ms,
+        Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    if !authenticated_session(receiver, claimant, &identity, now_ms).await {
+        return peer_http_error(StatusCode::UNAUTHORIZED);
+    }
+    if receiver
+        .directory
+        .authorize_log_recovery(leader, claimant, receiver.session, epoch, now_ms)
+        .await
+        .is_err()
+    {
+        return peer_http_error(StatusCode::FORBIDDEN);
+    }
+    match store.read_tail_page(leader, epoch, first).await {
+        Ok(page) => match encode_tail_page(page) {
+            Ok(body) => (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, NODE_LOG_MEDIA_TYPE),
+                    (header::CACHE_CONTROL, "no-store"),
+                ],
+                body,
+            )
+                .into_response(),
+            Err(()) => peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
+        },
+        Err(CellError::Node(_)) | Err(CellError::Ltx(_)) => peer_http_error(StatusCode::CONFLICT),
+        Err(_) => peer_http_error(StatusCode::SERVICE_UNAVAILABLE),
+    }
+}
+
+async fn authenticated_session(
+    receiver: &PeerReceiver,
+    claimed: SessionId,
+    identity: &PeerTlsIdentity,
+    now_ms: i64,
+) -> bool {
+    let Ok(Some(enrolled)) = receiver.directory.load(claimed, now_ms).await else {
+        return false;
+    };
+    let advertisement = enrolled.advertisement();
+    advertisement.certificate() == identity.certificate()
+        && advertisement
+            .verifying_key()
+            .is_ok_and(|key| key.to_bytes() == identity.public_key())
+}
+
+fn follower_receipt_response(receipt: crab_cell_runtime::FollowerReceipt) -> Response {
+    (
+        StatusCode::OK,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({
+            "base_sequence": receipt.base_sequence.to_string(),
+            "durable_through": receipt.durable_through.to_string(),
+        })),
+    )
+        .into_response()
+}
+
+fn encode_tail_page(page: crab_cell_runtime::FollowerTailPage) -> std::result::Result<Vec<u8>, ()> {
+    let count = u32::try_from(page.frames.len()).map_err(|_| ())?;
+    let body_len = page.frames.iter().try_fold(12_usize, |length, frame| {
+        length.checked_add(8)?.checked_add(frame.len())
+    });
+    let mut body = Vec::with_capacity(body_len.ok_or(())?);
+    body.extend_from_slice(&page.next_sequence.unwrap_or(0).to_le_bytes());
+    body.extend_from_slice(&count.to_le_bytes());
+    for frame in page.frames {
+        body.extend_from_slice(&(frame.len() as u64).to_le_bytes());
+        body.extend_from_slice(&frame);
+    }
+    Ok(body)
 }
 
 fn decode_append_batch(body: Bytes) -> std::result::Result<(u64, Vec<Bytes>), ()> {

@@ -4,7 +4,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
-use crate::{Digest, Error, Result, SessionId};
+use crate::{Digest, Error, NodeLogPhase, NodeLogStatus, NodeRecoveryClaim, Result, SessionId};
 
 const MAX_NODE_BYTES: u64 = 64 * 1024;
 const MAX_ENDPOINT_BYTES: usize = 512;
@@ -34,12 +34,14 @@ pub struct NodeAdvertisement {
     image: Digest,
     release: Digest,
     public_key: [u8; 32],
+    generation: u64,
     progress: u64,
     issued_at_ms: i64,
     expires_at_ms: i64,
     module_digests: Vec<Digest>,
     peer_versions: Vec<u32>,
     capacity: NodeCapacity,
+    log: Option<NodeLogStatus>,
     signature: [u8; 64],
 }
 
@@ -72,12 +74,14 @@ impl NodeAdvertisement {
             image,
             release,
             public_key: signing_key.verifying_key().to_bytes(),
+            generation: 1,
             progress,
             issued_at_ms,
             expires_at_ms,
             module_digests,
             peer_versions,
             capacity,
+            log: None,
             signature: [0; 64],
         };
         advertisement.validate_shape()?;
@@ -125,6 +129,11 @@ impl NodeAdvertisement {
     }
 
     #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    #[must_use]
     pub const fn expires_at_ms(&self) -> i64 {
         self.expires_at_ms
     }
@@ -142,6 +151,11 @@ impl NodeAdvertisement {
     #[must_use]
     pub const fn capacity(&self) -> NodeCapacity {
         self.capacity
+    }
+
+    #[must_use]
+    pub const fn log(&self) -> Option<&NodeLogStatus> {
+        self.log.as_ref()
     }
 
     fn encode(&self) -> Result<Vec<u8>> {
@@ -191,12 +205,19 @@ impl NodeAdvertisement {
         if !valid_endpoint(&self.endpoint) {
             return Err(Error::Node("advertisement endpoint is invalid"));
         }
-        if self.progress == 0
+        if self.generation == 0
+            || self.progress == 0
             || self.issued_at_ms < 0
             || self.expires_at_ms <= self.issued_at_ms
             || self.expires_at_ms.saturating_sub(self.issued_at_ms) > MAX_ADVERTISEMENT_LIFETIME_MS
         {
             return Err(Error::Node("advertisement progress or time is invalid"));
+        }
+        if let Some(log) = &self.log {
+            log.validate(self.session)?;
+            if log.phase() != NodeLogPhase::Open || log.recovery().is_some() {
+                return Err(Error::Node("live node advertisement has a terminal log"));
+            }
         }
         if self.module_digests.is_empty()
             || self.module_digests.len() > MAX_MODULES
@@ -224,7 +245,7 @@ impl NodeAdvertisement {
     }
 
     fn signing_bytes(&self) -> Result<Vec<u8>> {
-        let unsigned = serde_json::to_vec(&RawUnsignedAdvertisement::from(self))?;
+        let unsigned = serde_json::to_vec(&RawUnsignedIdentity::from(self))?;
         let mut bytes = Vec::with_capacity(SIGNING_DOMAIN.len() + unsigned.len());
         bytes.extend_from_slice(SIGNING_DOMAIN);
         bytes.extend_from_slice(&unsigned);
@@ -233,16 +254,20 @@ impl NodeAdvertisement {
 }
 
 /// Exact node advertisement plus the token required for conditional refresh.
+#[derive(Clone)]
 pub struct VersionedNodeAdvertisement {
     advertisement: NodeAdvertisement,
     token: ETag,
 }
 
 /// Proof that the exact predecessor session was atomically fenced after expiry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FencedNodeSession {
     session: SessionId,
     claimant: SessionId,
+    claim_generation: u64,
+    claim_expires_at_ms: i64,
+    log: Option<NodeLogStatus>,
 }
 
 impl FencedNodeSession {
@@ -254,6 +279,21 @@ impl FencedNodeSession {
     #[must_use]
     pub const fn claimant(&self) -> SessionId {
         self.claimant
+    }
+
+    #[must_use]
+    pub const fn claim_generation(&self) -> u64 {
+        self.claim_generation
+    }
+
+    #[must_use]
+    pub const fn claim_expires_at_ms(&self) -> i64 {
+        self.claim_expires_at_ms
+    }
+
+    #[must_use]
+    pub const fn log(&self) -> Option<&NodeLogStatus> {
+        self.log.as_ref()
     }
 }
 
@@ -365,36 +405,23 @@ impl NodeDirectory {
         if now_ms < 0 || claimant.as_bytes().iter().all(|byte| *byte == 0) || claimant == session {
             return Err(Error::Node("node recovery time is invalid"));
         }
+        self.load(claimant, now_ms)
+            .await?
+            .ok_or(Error::Node("node recovery claimant is not live"))?;
         let path = self.layout.node_path(session.as_bytes());
         let Some((record, token)) = self.load_record_at(&path).await? else {
             return Err(Error::Node("expired node session record is missing"));
         };
-        match record {
-            NodeRecord::Tombstone(tombstone)
-                if tombstone.session == session && tombstone.claimant == Some(claimant) =>
-            {
-                Ok(FencedNodeSession { session, claimant })
-            }
-            NodeRecord::Tombstone(tombstone)
-                if tombstone.session == session && tombstone.claimant.is_none() =>
-            {
-                let claimed = tombstone.claim(claimant)?;
-                match self
-                    .layout
-                    .store()
-                    .update(&path, Bytes::from(claimed.encode()?), token)
-                    .await
+        let tombstone = match record {
+            NodeRecord::Tombstone(tombstone) if tombstone.session == session => {
+                if tombstone.claimant == Some(claimant)
+                    && tombstone
+                        .claim_expires_at_ms
+                        .is_some_and(|expires_at_ms| expires_at_ms > now_ms)
                 {
-                    Ok(_) => Ok(FencedNodeSession { session, claimant }),
-                    Err(update_error) => match self.load_record_at(&path).await? {
-                        Some((NodeRecord::Tombstone(current), _))
-                            if current.session == session && current.claimant == Some(claimant) =>
-                        {
-                            Ok(FencedNodeSession { session, claimant })
-                        }
-                        Some(_) | None => Err(update_error.into()),
-                    },
+                    return tombstone.fenced();
                 }
+                tombstone.claim(claimant, now_ms)?
             }
             NodeRecord::Advertisement(advertisement) => {
                 self.validate_scope(&advertisement)?;
@@ -403,34 +430,109 @@ impl NodeDirectory {
                 if advertisement.session != session || advertisement.expires_at_ms > now_ms {
                     return Err(Error::Node("node session is not expired"));
                 }
-                let tombstone = NodeTombstone::new(
+                NodeTombstone::new(
                     session,
                     advertisement.expires_at_ms,
                     now_ms,
-                    Some(claimant),
-                )?;
-                match self
-                    .layout
-                    .store()
-                    .update(&path, Bytes::from(tombstone.encode()?), token)
-                    .await
-                {
-                    Ok(_) => Ok(FencedNodeSession { session, claimant }),
-                    Err(update_error) => match self.load_record_at(&path).await? {
-                        Some((NodeRecord::Tombstone(current), _))
-                            if current.session == session && current.claimant == Some(claimant) =>
-                        {
-                            Ok(FencedNodeSession { session, claimant })
-                        }
-                        Some((NodeRecord::Advertisement(_), _)) | None => Err(update_error.into()),
-                        Some((NodeRecord::Tombstone(_), _)) => {
-                            Err(Error::Node("node tombstone session differs"))
-                        }
-                    },
-                }
+                    None,
+                    advertisement.log.clone(),
+                )?
+                .claim(claimant, now_ms)?
             }
-            NodeRecord::Tombstone(_) => Err(Error::Node("node tombstone session differs")),
+            NodeRecord::Tombstone(_) => {
+                return Err(Error::Node("node tombstone session differs"));
+            }
+        };
+        let proof = tombstone.fenced()?;
+        match self
+            .layout
+            .store()
+            .update(&path, Bytes::from(tombstone.encode()?), token)
+            .await
+        {
+            Ok(_) => Ok(proof),
+            Err(update_error) => match self.load_record_at(&path).await? {
+                Some((NodeRecord::Tombstone(current), _))
+                    if current.session == session
+                        && current.claimant == Some(claimant)
+                        && current
+                            .claim_expires_at_ms
+                            .is_some_and(|expires_at_ms| expires_at_ms > now_ms) =>
+                {
+                    current.fenced()
+                }
+                Some(_) | None => Err(update_error.into()),
+            },
         }
+    }
+
+    /// Extends an exact recovery claim while its claimant remains live.
+    pub async fn refresh_recovery_claim(
+        &self,
+        fenced: &FencedNodeSession,
+        now_ms: i64,
+    ) -> Result<FencedNodeSession> {
+        self.load(fenced.claimant, now_ms)
+            .await?
+            .ok_or(Error::Fenced)?;
+        let path = self.layout.node_path(fenced.session.as_bytes());
+        let Some((NodeRecord::Tombstone(current), token)) = self.load_record_at(&path).await?
+        else {
+            return Err(Error::Fenced);
+        };
+        let renewed = current.renew(fenced, now_ms)?;
+        let proof = renewed.fenced()?;
+        self.layout
+            .store()
+            .update(&path, Bytes::from(renewed.encode()?), token)
+            .await?;
+        Ok(proof)
+    }
+
+    /// Verifies that this exact follower belongs to a live leader log epoch.
+    pub async fn authorize_log_append(
+        &self,
+        leader: SessionId,
+        member: SessionId,
+        log_epoch: u64,
+        now_ms: i64,
+    ) -> Result<NodeLogStatus> {
+        let current = self
+            .load(leader, now_ms)
+            .await?
+            .ok_or(Error::PeerAuthorization("node-log leader is not live"))?;
+        let log = current
+            .advertisement
+            .log
+            .as_ref()
+            .ok_or(Error::PeerAuthorization(
+                "node-log leader has no enrolled log",
+            ))?;
+        log.permits_append(leader, member, log_epoch)?;
+        Ok(log.clone())
+    }
+
+    /// Verifies a live claimant may seal or read this follower's failed-owner lane.
+    pub async fn authorize_log_recovery(
+        &self,
+        leader: SessionId,
+        claimant: SessionId,
+        member: SessionId,
+        log_epoch: u64,
+        now_ms: i64,
+    ) -> Result<NodeLogStatus> {
+        self.load(claimant, now_ms)
+            .await?
+            .ok_or(Error::PeerAuthorization("node-log recoverer is not live"))?;
+        let path = self.layout.node_path(leader.as_bytes());
+        let Some((NodeRecord::Tombstone(tombstone), _)) = self.load_record_at(&path).await? else {
+            return Err(Error::PeerAuthorization("node-log leader is not fenced"));
+        };
+        let log = tombstone.log.as_ref().ok_or(Error::PeerAuthorization(
+            "node-log leader has no recovery log",
+        ))?;
+        log.permits_recovery_read(leader, claimant, member, log_epoch, now_ms)?;
+        Ok(log.clone())
     }
 
     /// Streams and verifies every currently live boot-session advertisement.
@@ -555,6 +657,7 @@ impl NodeDirectory {
                         advertisement.expires_at_ms,
                         now_ms,
                         None,
+                        advertisement.log.clone(),
                     )?;
                     let encoded = tombstone.encode()?;
                     match self
@@ -589,6 +692,11 @@ impl NodeDirectory {
             return Err(Error::Node("node withdrawal time is invalid"));
         }
         self.validate_scope(&observed.advertisement)?;
+        if observed.advertisement.log.is_some() {
+            return Err(Error::Node(
+                "node log must be sealed before session withdrawal",
+            ));
+        }
         let path = self
             .layout
             .node_path(observed.advertisement.session.as_bytes());
@@ -596,6 +704,7 @@ impl NodeDirectory {
             observed.advertisement.session,
             observed.advertisement.expires_at_ms,
             now_ms,
+            None,
             None,
         )?;
         match self
@@ -608,12 +717,10 @@ impl NodeDirectory {
             )
             .await
         {
-            Ok(_) => self.delete_collected(&path).await,
+            Ok(_) => Ok(()),
             Err(update_error) => match self.load_record_at(&path).await? {
                 None => Ok(()),
-                Some((NodeRecord::Tombstone(current), _)) if current.claimant.is_none() => {
-                    self.delete_collected(&path).await
-                }
+                Some((NodeRecord::Tombstone(current), _)) if current.claimant.is_none() => Ok(()),
                 Some((NodeRecord::Tombstone(_), _)) => Err(Error::Fenced),
                 Some((NodeRecord::Advertisement(current), _))
                     if *current == observed.advertisement =>
@@ -665,8 +772,141 @@ impl NodeDirectory {
         next: NodeAdvertisement,
         now_ms: i64,
     ) -> Result<VersionedNodeAdvertisement> {
-        self.validate(&next, now_ms)?;
-        validate_successor(&observed.advertisement, &next)?;
+        let mut base = observed.clone();
+        for _ in 0..4 {
+            if !same_boot_identity(&base.advertisement, &next) {
+                return Err(Error::Node("advertisement refresh changed boot identity"));
+            }
+            if next.issued_at_ms <= base.advertisement.issued_at_ms {
+                if next.progress <= base.advertisement.progress
+                    && next.expires_at_ms <= base.advertisement.expires_at_ms
+                {
+                    return Ok(base);
+                }
+                return Err(Error::Node("advertisement refresh lease regressed"));
+            }
+            let mut candidate = next.clone();
+            candidate.generation = base
+                .advertisement
+                .generation
+                .checked_add(1)
+                .ok_or(Error::Node("node session generation overflow"))?;
+            candidate.log.clone_from(&base.advertisement.log);
+            self.validate(&candidate, now_ms)?;
+            validate_successor(&base.advertisement, &candidate)?;
+            let path = self.layout.node_path(candidate.session.as_bytes());
+            match self
+                .layout
+                .store()
+                .update(&path, Bytes::from(candidate.encode()?), base.token.clone())
+                .await
+            {
+                Ok(token) => {
+                    return Ok(VersionedNodeAdvertisement {
+                        advertisement: candidate,
+                        token,
+                    });
+                }
+                Err(update_error) => match self.load(candidate.session, now_ms).await? {
+                    Some(current) if current.advertisement == candidate => return Ok(current),
+                    Some(current)
+                        if same_boot_identity(&base.advertisement, &current.advertisement)
+                            && current.advertisement.issued_at_ms
+                                >= base.advertisement.issued_at_ms
+                            && current.advertisement.progress >= base.advertisement.progress =>
+                    {
+                        base = current;
+                    }
+                    Some(_) | None => return Err(update_error.into()),
+                },
+            }
+        }
+        Err(Error::Node("node session changed during heartbeat refresh"))
+    }
+
+    /// CAS-enrolls the complete follower set before the first frame is sent.
+    pub async fn recruit_log(
+        &self,
+        observed: &VersionedNodeAdvertisement,
+        log_epoch: u64,
+        members: Vec<SessionId>,
+        now_ms: i64,
+    ) -> Result<VersionedNodeAdvertisement> {
+        self.validate(&observed.advertisement, now_ms)?;
+        if observed.advertisement.log.is_some() {
+            return Err(Error::Node("node session already has an enrolled log"));
+        }
+        for member in &members {
+            self.load(*member, now_ms)
+                .await?
+                .ok_or(Error::Node("node-log member is not live"))?;
+        }
+        let mut next = observed.advertisement.clone();
+        next.generation = next
+            .generation
+            .checked_add(1)
+            .ok_or(Error::Node("node session generation overflow"))?;
+        next.log = Some(NodeLogStatus::open(next.session, log_epoch, members)?);
+        self.update_advertisement(observed, next, now_ms).await
+    }
+
+    /// CAS-activates the exact enrolled epoch after every member fsyncs its first batch.
+    pub async fn activate_log(
+        &self,
+        observed: &VersionedNodeAdvertisement,
+        now_ms: i64,
+    ) -> Result<VersionedNodeAdvertisement> {
+        self.validate(&observed.advertisement, now_ms)?;
+        let log = observed
+            .advertisement
+            .log
+            .as_ref()
+            .ok_or(Error::Node("node session has no enrolled log"))?
+            .activate(observed.advertisement.session)?;
+        let mut next = observed.advertisement.clone();
+        next.generation = next
+            .generation
+            .checked_add(1)
+            .ok_or(Error::Node("node session generation overflow"))?;
+        next.log = Some(log);
+        self.update_advertisement(observed, next, now_ms).await
+    }
+
+    /// CAS-advances the largest contiguous node sequence covered by object roots.
+    pub async fn advance_log_coverage(
+        &self,
+        observed: &VersionedNodeAdvertisement,
+        tiered_through: u64,
+        now_ms: i64,
+    ) -> Result<VersionedNodeAdvertisement> {
+        self.validate(&observed.advertisement, now_ms)?;
+        let log = observed
+            .advertisement
+            .log
+            .as_ref()
+            .ok_or(Error::Node("node session has no enrolled log"))?
+            .advance_tiered(observed.advertisement.session, tiered_through)?;
+        let mut next = observed.advertisement.clone();
+        next.generation = next
+            .generation
+            .checked_add(1)
+            .ok_or(Error::Node("node session generation overflow"))?;
+        next.log = Some(log);
+        self.update_advertisement(observed, next, now_ms).await
+    }
+
+    fn validate(&self, advertisement: &NodeAdvertisement, now_ms: i64) -> Result<()> {
+        advertisement.validate_at(now_ms)?;
+        advertisement.verify_signature()?;
+        self.validate_scope(advertisement)
+    }
+
+    async fn update_advertisement(
+        &self,
+        observed: &VersionedNodeAdvertisement,
+        next: NodeAdvertisement,
+        now_ms: i64,
+    ) -> Result<VersionedNodeAdvertisement> {
         let path = self.layout.node_path(next.session.as_bytes());
         match self
             .layout
@@ -683,12 +923,6 @@ impl NodeDirectory {
                 Some(_) | None => Err(update_error.into()),
             },
         }
-    }
-
-    fn validate(&self, advertisement: &NodeAdvertisement, now_ms: i64) -> Result<()> {
-        advertisement.validate_at(now_ms)?;
-        advertisement.verify_signature()?;
-        self.validate_scope(advertisement)
     }
 
     async fn load_canonical(
@@ -723,13 +957,6 @@ impl NodeDirectory {
             Err(error) => return Err(error.into()),
         };
         Ok(Some((NodeRecord::decode_canonical(&body)?, token)))
-    }
-
-    async fn delete_collected(&self, path: &object_store::path::Path) -> Result<()> {
-        match self.layout.store().delete(path).await {
-            Ok(()) | Err(StorageError::NotFound { .. }) => Ok(()),
-            Err(error) => Err(error.into()),
-        }
     }
 
     fn validate_scope(&self, advertisement: &NodeAdvertisement) -> Result<()> {
@@ -780,6 +1007,9 @@ struct NodeTombstone {
     expires_at_ms: i64,
     retired_at_ms: i64,
     claimant: Option<SessionId>,
+    claim_generation: u64,
+    claim_expires_at_ms: Option<i64>,
+    log: Option<NodeLogStatus>,
 }
 
 impl NodeTombstone {
@@ -788,24 +1018,97 @@ impl NodeTombstone {
         expires_at_ms: i64,
         retired_at_ms: i64,
         claimant: Option<SessionId>,
+        log: Option<NodeLogStatus>,
     ) -> Result<Self> {
         let tombstone = Self {
             session,
             expires_at_ms,
             retired_at_ms,
             claimant,
+            claim_generation: u64::from(claimant.is_some()),
+            claim_expires_at_ms: claimant.map(|_| {
+                retired_at_ms.saturating_add(crate::node_log_state::RECOVERY_CLAIM_LIFETIME_MS)
+            }),
+            log,
         };
         tombstone.validate()?;
         Ok(tombstone)
     }
 
-    fn claim(self, claimant: SessionId) -> Result<Self> {
-        Self::new(
-            self.session,
-            self.expires_at_ms,
-            self.retired_at_ms,
-            Some(claimant),
-        )
+    fn claim(mut self, claimant: SessionId, now_ms: i64) -> Result<Self> {
+        let generation = match (self.claimant, self.claim_expires_at_ms) {
+            (Some(current), Some(expires_at_ms))
+                if current == claimant && now_ms < expires_at_ms =>
+            {
+                return Ok(self);
+            }
+            (Some(_), Some(expires_at_ms)) if now_ms < expires_at_ms => {
+                return Err(Error::Node("node recovery is already claimed"));
+            }
+            (Some(_), Some(_)) => self
+                .claim_generation
+                .checked_add(1)
+                .ok_or(Error::Node("node recovery claim generation overflow"))?,
+            (None, None) => 1,
+            _ => return Err(Error::Node("node recovery claim is invalid")),
+        };
+        self.claimant = Some(claimant);
+        self.claim_generation = generation;
+        self.claim_expires_at_ms = Some(
+            now_ms
+                .checked_add(crate::node_log_state::RECOVERY_CLAIM_LIFETIME_MS)
+                .ok_or(Error::Node("node recovery claim time overflow"))?,
+        );
+        if let Some(log) = &self.log {
+            self.log = Some(log.begin_recovery(self.session, claimant, now_ms)?);
+        }
+        self.validate()?;
+        Ok(self)
+    }
+
+    fn renew(mut self, fenced: &FencedNodeSession, now_ms: i64) -> Result<Self> {
+        if self.session != fenced.session
+            || self.claimant != Some(fenced.claimant)
+            || self.claim_generation != fenced.claim_generation
+        {
+            return Err(Error::Fenced);
+        }
+        let current_expiry = self
+            .claim_expires_at_ms
+            .ok_or(Error::Node("node recovery claim expiry is missing"))?;
+        if now_ms >= current_expiry {
+            return Err(Error::Fenced);
+        }
+        let next_expiry = now_ms
+            .checked_add(crate::node_log_state::RECOVERY_CLAIM_LIFETIME_MS)
+            .filter(|expires_at_ms| *expires_at_ms > current_expiry)
+            .ok_or(Error::Node("node recovery claim expiry did not advance"))?;
+        self.claim_expires_at_ms = Some(next_expiry);
+        if let Some(log) = &self.log {
+            self.log = Some(log.renew_recovery(
+                self.session,
+                fenced.claimant,
+                fenced.claim_generation,
+                now_ms,
+            )?);
+        }
+        self.validate()?;
+        Ok(self)
+    }
+
+    fn fenced(&self) -> Result<FencedNodeSession> {
+        let claimant = self
+            .claimant
+            .ok_or(Error::Node("node session is not claimed"))?;
+        Ok(FencedNodeSession {
+            session: self.session,
+            claimant,
+            claim_generation: self.claim_generation,
+            claim_expires_at_ms: self
+                .claim_expires_at_ms
+                .ok_or(Error::Node("node recovery claim expiry is missing"))?,
+            log: self.log.clone(),
+        })
     }
 
     fn encode(&self) -> Result<Vec<u8>> {
@@ -825,15 +1128,23 @@ impl NodeTombstone {
         if raw.tombstone.version != 1 {
             return Err(Error::Node("unsupported node tombstone version"));
         }
+        let raw = raw.tombstone;
+        let session = SessionId::from_bytes(decode_hex(&raw.session)?);
         let tombstone = Self {
-            session: SessionId::from_bytes(decode_hex(&raw.tombstone.session)?),
-            expires_at_ms: canonical_i64(&raw.tombstone.expires_at_ms)?,
-            retired_at_ms: canonical_i64(&raw.tombstone.retired_at_ms)?,
+            session,
+            expires_at_ms: canonical_i64(&raw.expires_at_ms)?,
+            retired_at_ms: canonical_i64(&raw.retired_at_ms)?,
             claimant: raw
-                .tombstone
                 .claimant
                 .map(|claimant| decode_hex(&claimant).map(SessionId::from_bytes))
                 .transpose()?,
+            claim_generation: canonical_u64(&raw.claim_generation)?,
+            claim_expires_at_ms: raw
+                .claim_expires_at_ms
+                .as_deref()
+                .map(canonical_i64)
+                .transpose()?,
+            log: raw.log.map(|log| decode_log(session, log)).transpose()?,
         };
         tombstone.validate()?;
         if tombstone.encode()?.as_slice() != bytes {
@@ -849,23 +1160,34 @@ impl NodeTombstone {
             || self.claimant.is_some_and(|claimant| {
                 claimant == self.session || claimant.as_bytes().iter().all(|byte| *byte == 0)
             })
+            || self.claimant.is_some() != self.claim_expires_at_ms.is_some()
+            || self.claimant.is_some() != (self.claim_generation != 0)
+            || self
+                .claim_expires_at_ms
+                .is_some_and(|expires_at_ms| expires_at_ms <= self.retired_at_ms)
         {
             return Err(Error::Node("node tombstone is invalid"));
+        }
+        if let Some(log) = &self.log {
+            log.validate(self.session)?;
+            let log_claim = log.recovery();
+            if self.claimant.is_some() != (log.phase() == NodeLogPhase::Recovering)
+                || log_claim.map(|claim| claim.claimant()) != self.claimant
+                || log_claim.map(|claim| claim.generation())
+                    != (self.claim_generation != 0).then_some(self.claim_generation)
+                || log_claim.map(|claim| claim.expires_at_ms()) != self.claim_expires_at_ms
+            {
+                return Err(Error::Node("node tombstone log claim differs"));
+            }
         }
         Ok(())
     }
 }
 
 fn validate_successor(current: &NodeAdvertisement, next: &NodeAdvertisement) -> Result<()> {
-    if current.session != next.session
-        || current.endpoint != next.endpoint
-        || current.fleet != next.fleet
-        || current.certificate != next.certificate
-        || current.image != next.image
-        || current.release != next.release
-        || current.public_key != next.public_key
-        || current.module_digests != next.module_digests
-        || current.peer_versions != next.peer_versions
+    if !same_boot_identity(current, next)
+        || current.log != next.log
+        || current.generation.checked_add(1) != Some(next.generation)
         || next.progress < current.progress
         || next.issued_at_ms <= current.issued_at_ms
         || next.expires_at_ms <= current.expires_at_ms
@@ -875,6 +1197,19 @@ fn validate_successor(current: &NodeAdvertisement, next: &NodeAdvertisement) -> 
         ));
     }
     Ok(())
+}
+
+fn same_boot_identity(current: &NodeAdvertisement, next: &NodeAdvertisement) -> bool {
+    current.session == next.session
+        && current.endpoint == next.endpoint
+        && current.fleet == next.fleet
+        && current.certificate == next.certificate
+        && current.image == next.image
+        && current.release == next.release
+        && current.public_key == next.public_key
+        && current.module_digests == next.module_digests
+        && current.peer_versions == next.peer_versions
+        && current.signature == next.signature
 }
 
 fn valid_endpoint(endpoint: &str) -> bool {
@@ -953,9 +1288,9 @@ fn strictly_sorted<T: Ord>(values: &[T]) -> bool {
     values.windows(2).all(|pair| pair[0] < pair[1])
 }
 
-#[derive(Serialize)]
-struct RawUnsignedAdvertisement {
-    version: u8,
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawUnsignedIdentity {
     session: String,
     endpoint: String,
     fleet: String,
@@ -963,14 +1298,8 @@ struct RawUnsignedAdvertisement {
     image: String,
     release: String,
     public_key: String,
-    progress: String,
-    issued_at_ms: String,
-    expires_at_ms: String,
     module_digests: Vec<String>,
     peer_versions: Vec<u32>,
-    free_memory_bytes: String,
-    free_disk_bytes: String,
-    job_credits: u32,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -990,6 +1319,9 @@ impl From<&NodeTombstone> for RawNodeTombstoneEnvelope {
                 claimant: value
                     .claimant
                     .map(|claimant| encode_hex(claimant.as_bytes())),
+                claim_generation: value.claim_generation.to_string(),
+                claim_expires_at_ms: value.claim_expires_at_ms.map(|value| value.to_string()),
+                log: value.log.as_ref().map(encode_log),
             },
         }
     }
@@ -1003,12 +1335,14 @@ struct RawNodeTombstone {
     expires_at_ms: String,
     retired_at_ms: String,
     claimant: Option<String>,
+    claim_generation: String,
+    claim_expires_at_ms: Option<String>,
+    log: Option<RawNodeLog>,
 }
 
-impl From<&NodeAdvertisement> for RawUnsignedAdvertisement {
+impl From<&NodeAdvertisement> for RawUnsignedIdentity {
     fn from(value: &NodeAdvertisement) -> Self {
         Self {
-            version: 1,
             session: encode_hex(value.session.as_bytes()),
             endpoint: value.endpoint.clone(),
             fleet: encode_hex(value.fleet.as_bytes()),
@@ -1016,18 +1350,12 @@ impl From<&NodeAdvertisement> for RawUnsignedAdvertisement {
             image: encode_hex(value.image.as_bytes()),
             release: encode_hex(value.release.as_bytes()),
             public_key: encode_hex(&value.public_key),
-            progress: value.progress.to_string(),
-            issued_at_ms: value.issued_at_ms.to_string(),
-            expires_at_ms: value.expires_at_ms.to_string(),
             module_digests: value
                 .module_digests
                 .iter()
                 .map(|digest| encode_hex(digest.as_bytes()))
                 .collect(),
             peer_versions: value.peer_versions.clone(),
-            free_memory_bytes: value.capacity.free_memory_bytes.to_string(),
-            free_disk_bytes: value.capacity.free_disk_bytes.to_string(),
-            job_credits: value.capacity.job_credits,
         }
     }
 }
@@ -1035,84 +1363,111 @@ impl From<&NodeAdvertisement> for RawUnsignedAdvertisement {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RawAdvertisement {
+    version: u8,
+    identity: RawIdentity,
+    lease: RawLease,
+    log: Option<RawNodeLog>,
+    capacity: RawCapacity,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawIdentity {
     #[serde(flatten)]
-    unsigned: RawDecodedUnsignedAdvertisement,
+    unsigned: RawUnsignedIdentity,
     signature: String,
 }
 
 impl From<&NodeAdvertisement> for RawAdvertisement {
     fn from(value: &NodeAdvertisement) -> Self {
         Self {
-            unsigned: RawDecodedUnsignedAdvertisement::from(value),
-            signature: encode_hex(&value.signature),
+            version: 1,
+            identity: RawIdentity {
+                unsigned: RawUnsignedIdentity::from(value),
+                signature: encode_hex(&value.signature),
+            },
+            lease: RawLease {
+                generation: value.generation.to_string(),
+                progress: value.progress.to_string(),
+                issued_at_ms: value.issued_at_ms.to_string(),
+                expires_at_ms: value.expires_at_ms.to_string(),
+            },
+            log: value.log.as_ref().map(encode_log),
+            capacity: RawCapacity {
+                free_memory_bytes: value.capacity.free_memory_bytes.to_string(),
+                free_disk_bytes: value.capacity.free_disk_bytes.to_string(),
+                job_credits: value.capacity.job_credits,
+            },
         }
     }
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct RawDecodedUnsignedAdvertisement {
-    version: u8,
-    session: String,
-    endpoint: String,
-    fleet: String,
-    certificate: String,
-    image: String,
-    release: String,
-    public_key: String,
+struct RawLease {
+    generation: String,
     progress: String,
     issued_at_ms: String,
     expires_at_ms: String,
-    module_digests: Vec<String>,
-    peer_versions: Vec<u32>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawCapacity {
     free_memory_bytes: String,
     free_disk_bytes: String,
     job_credits: u32,
 }
 
-impl From<&NodeAdvertisement> for RawDecodedUnsignedAdvertisement {
-    fn from(value: &NodeAdvertisement) -> Self {
-        let raw = RawUnsignedAdvertisement::from(value);
-        Self {
-            version: raw.version,
-            session: raw.session,
-            endpoint: raw.endpoint,
-            fleet: raw.fleet,
-            certificate: raw.certificate,
-            image: raw.image,
-            release: raw.release,
-            public_key: raw.public_key,
-            progress: raw.progress,
-            issued_at_ms: raw.issued_at_ms,
-            expires_at_ms: raw.expires_at_ms,
-            module_digests: raw.module_digests,
-            peer_versions: raw.peer_versions,
-            free_memory_bytes: raw.free_memory_bytes,
-            free_disk_bytes: raw.free_disk_bytes,
-            job_credits: raw.job_credits,
-        }
-    }
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawNodeLog {
+    state: RawNodeLogPhase,
+    epoch: String,
+    members: Vec<String>,
+    active: bool,
+    tiered_through: String,
+    recovery: Option<RawNodeRecoveryClaim>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RawNodeLogPhase {
+    Open,
+    Recovering,
+    Sealed,
+    Retired,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawNodeRecoveryClaim {
+    claimant: String,
+    generation: String,
+    expires_at_ms: String,
 }
 
 impl TryFrom<RawAdvertisement> for NodeAdvertisement {
     type Error = Error;
 
     fn try_from(value: RawAdvertisement) -> Result<Self> {
-        let raw = value.unsigned;
-        if raw.version != 1 {
+        if value.version != 1 {
             return Err(Error::Node("unsupported advertisement version"));
         }
+        let raw = value.identity.unsigned;
+        let session = SessionId::from_bytes(decode_hex(&raw.session)?);
         Ok(Self {
-            session: SessionId::from_bytes(decode_hex(&raw.session)?),
+            session,
             endpoint: raw.endpoint,
             fleet: Digest::from_bytes(decode_hex(&raw.fleet)?),
             certificate: Digest::from_bytes(decode_hex(&raw.certificate)?),
             image: Digest::from_bytes(decode_hex(&raw.image)?),
             release: Digest::from_bytes(decode_hex(&raw.release)?),
             public_key: decode_hex(&raw.public_key)?,
-            progress: canonical_u64(&raw.progress)?,
-            issued_at_ms: canonical_i64(&raw.issued_at_ms)?,
-            expires_at_ms: canonical_i64(&raw.expires_at_ms)?,
+            generation: canonical_u64(&value.lease.generation)?,
+            progress: canonical_u64(&value.lease.progress)?,
+            issued_at_ms: canonical_i64(&value.lease.issued_at_ms)?,
+            expires_at_ms: canonical_i64(&value.lease.expires_at_ms)?,
             module_digests: raw
                 .module_digests
                 .iter()
@@ -1120,13 +1475,68 @@ impl TryFrom<RawAdvertisement> for NodeAdvertisement {
                 .collect::<Result<Vec<_>>>()?,
             peer_versions: raw.peer_versions,
             capacity: NodeCapacity {
-                free_memory_bytes: canonical_u64(&raw.free_memory_bytes)?,
-                free_disk_bytes: canonical_u64(&raw.free_disk_bytes)?,
-                job_credits: raw.job_credits,
+                free_memory_bytes: canonical_u64(&value.capacity.free_memory_bytes)?,
+                free_disk_bytes: canonical_u64(&value.capacity.free_disk_bytes)?,
+                job_credits: value.capacity.job_credits,
             },
-            signature: decode_hex(&value.signature)?,
+            log: value.log.map(|log| decode_log(session, log)).transpose()?,
+            signature: decode_hex(&value.identity.signature)?,
         })
     }
+}
+
+fn encode_log(log: &NodeLogStatus) -> RawNodeLog {
+    RawNodeLog {
+        state: match log.phase() {
+            NodeLogPhase::Open => RawNodeLogPhase::Open,
+            NodeLogPhase::Recovering => RawNodeLogPhase::Recovering,
+            NodeLogPhase::Sealed => RawNodeLogPhase::Sealed,
+            NodeLogPhase::Retired => RawNodeLogPhase::Retired,
+        },
+        epoch: log.epoch().to_string(),
+        members: log
+            .members()
+            .iter()
+            .map(|member| encode_hex(member.as_bytes()))
+            .collect(),
+        active: log.active(),
+        tiered_through: log.tiered_through().to_string(),
+        recovery: log.recovery().map(|claim| RawNodeRecoveryClaim {
+            claimant: encode_hex(claim.claimant().as_bytes()),
+            generation: claim.generation().to_string(),
+            expires_at_ms: claim.expires_at_ms().to_string(),
+        }),
+    }
+}
+
+fn decode_log(leader: SessionId, raw: RawNodeLog) -> Result<NodeLogStatus> {
+    let recovery = raw
+        .recovery
+        .map(|claim| {
+            NodeRecoveryClaim::from_parts(
+                SessionId::from_bytes(decode_hex(&claim.claimant)?),
+                canonical_u64(&claim.generation)?,
+                canonical_i64(&claim.expires_at_ms)?,
+            )
+        })
+        .transpose()?;
+    NodeLogStatus::from_parts(
+        leader,
+        match raw.state {
+            RawNodeLogPhase::Open => NodeLogPhase::Open,
+            RawNodeLogPhase::Recovering => NodeLogPhase::Recovering,
+            RawNodeLogPhase::Sealed => NodeLogPhase::Sealed,
+            RawNodeLogPhase::Retired => NodeLogPhase::Retired,
+        },
+        canonical_u64(&raw.epoch)?,
+        raw.members
+            .iter()
+            .map(|member| decode_hex(member).map(SessionId::from_bytes))
+            .collect::<Result<Vec<_>>>()?,
+        raw.active,
+        canonical_u64(&raw.tiered_through)?,
+        recovery,
+    )
 }
 
 fn canonical_u64(value: &str) -> Result<u64> {

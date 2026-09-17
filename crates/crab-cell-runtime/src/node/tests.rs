@@ -84,7 +84,6 @@ async fn maintenance_inventory_retains_expired_session_until_withdrawal() {
         .create(advertisement(&key, 1, NOW_MS), NOW_MS)
         .await
         .unwrap();
-
     assert!(directory.live(NOW_MS + 10_000, 1).await.unwrap().is_empty());
     assert_eq!(
         directory
@@ -114,6 +113,13 @@ async fn expired_session_claim_is_atomic_idempotent_and_blocks_refresh() {
     let claimant = SessionId::from_bytes([8; 16]);
     let observed = directory
         .create(advertisement(&key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    directory
+        .create(
+            advertisement_for(claimant, &key, 1, NOW_MS + 9_000),
+            NOW_MS + 9_000,
+        )
         .await
         .unwrap();
     assert!(
@@ -164,6 +170,133 @@ async fn expired_session_claim_is_atomic_idempotent_and_blocks_refresh() {
             .unwrap(),
         fenced
     );
+}
+
+#[tokio::test]
+async fn node_log_enrollment_activation_and_coverage_are_authoritative() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    let leader = SessionId::from_bytes([1; 16]);
+    let first = SessionId::from_bytes([2; 16]);
+    let second = SessionId::from_bytes([3; 16]);
+    let created = directory
+        .create(advertisement_for(leader, &key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    for member in [first, second] {
+        directory
+            .create(advertisement_for(member, &key, 1, NOW_MS), NOW_MS)
+            .await
+            .unwrap();
+    }
+
+    let enrolled = directory
+        .recruit_log(&created, 4, vec![first, second], NOW_MS + 1)
+        .await
+        .unwrap();
+    let log = enrolled.advertisement().log().unwrap();
+    assert_eq!(enrolled.advertisement().generation(), 2);
+    assert_eq!(log.phase(), NodeLogPhase::Open);
+    assert!(!log.active());
+    assert_eq!(log.members(), [first, second]);
+    directory
+        .authorize_log_append(leader, first, 4, NOW_MS + 2)
+        .await
+        .unwrap();
+    assert!(
+        directory
+            .authorize_log_append(leader, SessionId::from_bytes([8; 16]), 4, NOW_MS + 2)
+            .await
+            .is_err()
+    );
+
+    let refreshed = directory
+        .refresh(
+            &created,
+            advertisement_for(leader, &key, 2, NOW_MS + 1_000),
+            NOW_MS + 1_000,
+        )
+        .await
+        .unwrap();
+    assert_eq!(refreshed.advertisement().generation(), 3);
+    assert_eq!(refreshed.advertisement().log(), Some(log));
+    let active = directory
+        .activate_log(&refreshed, NOW_MS + 1_001)
+        .await
+        .unwrap();
+    assert!(active.advertisement().log().unwrap().active());
+    let covered = directory
+        .advance_log_coverage(&active, 27, NOW_MS + 1_002)
+        .await
+        .unwrap();
+    assert_eq!(covered.advertisement().log().unwrap().tiered_through(), 27);
+    assert!(directory.withdraw(&covered, NOW_MS + 1_003).await.is_err());
+}
+
+#[tokio::test]
+async fn expired_enrolled_log_becomes_a_renewable_recovery_claim() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    let leader = SessionId::from_bytes([1; 16]);
+    let member = SessionId::from_bytes([2; 16]);
+    let claimant = SessionId::from_bytes([3; 16]);
+    let created = directory
+        .create(advertisement_for(leader, &key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    let member_record = directory
+        .create(advertisement_for(member, &key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    let claimant_record = directory
+        .create(advertisement_for(claimant, &key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    directory
+        .recruit_log(&created, 7, vec![member], NOW_MS + 1)
+        .await
+        .unwrap();
+    directory
+        .refresh(
+            &member_record,
+            advertisement_for(member, &key, 2, NOW_MS + 9_000),
+            NOW_MS + 9_000,
+        )
+        .await
+        .unwrap();
+    directory
+        .refresh(
+            &claimant_record,
+            advertisement_for(claimant, &key, 2, NOW_MS + 9_000),
+            NOW_MS + 9_000,
+        )
+        .await
+        .unwrap();
+
+    let fenced = directory
+        .claim_expired(leader, claimant, NOW_MS + 10_000)
+        .await
+        .unwrap();
+    let log = fenced.log().unwrap();
+    assert_eq!(log.phase(), NodeLogPhase::Recovering);
+    assert_eq!(log.recovery().unwrap().claimant(), claimant);
+    directory
+        .authorize_log_recovery(leader, claimant, member, 7, NOW_MS + 10_001)
+        .await
+        .unwrap();
+    assert!(
+        directory
+            .authorize_log_append(leader, member, 7, NOW_MS + 10_001)
+            .await
+            .is_err()
+    );
+
+    let renewed = directory
+        .refresh_recovery_claim(&fenced, NOW_MS + 15_000)
+        .await
+        .unwrap();
+    assert_eq!(renewed.claim_generation(), fenced.claim_generation());
+    assert!(renewed.claim_expires_at_ms() > fenced.claim_expires_at_ms());
 }
 
 #[tokio::test]
@@ -240,14 +373,18 @@ async fn withdrawal_removes_only_the_exact_observed_advertisement() {
     directory.withdraw(&created, NOW_MS + 1).await.unwrap();
     assert!(directory.load_canonical(session).await.unwrap().is_none());
 
+    let replacement = SessionId::from_bytes([2; 16]);
     let created = directory
-        .create(advertisement(&key, 1, NOW_MS + 20_000), NOW_MS + 20_000)
+        .create(
+            advertisement_for(replacement, &key, 1, NOW_MS + 20_000),
+            NOW_MS + 20_000,
+        )
         .await
         .unwrap();
     let refreshed = directory
         .refresh(
             &created,
-            advertisement(&key, 2, NOW_MS + 21_000),
+            advertisement_for(replacement, &key, 2, NOW_MS + 21_000),
             NOW_MS + 21_000,
         )
         .await
@@ -255,7 +392,7 @@ async fn withdrawal_removes_only_the_exact_observed_advertisement() {
     assert!(directory.withdraw(&created, NOW_MS + 21_001).await.is_err());
     assert_eq!(
         directory
-            .load(session, NOW_MS + 21_001)
+            .load(replacement, NOW_MS + 21_001)
             .await
             .unwrap()
             .unwrap()
@@ -382,6 +519,10 @@ async fn create_load_and_refresh_preserve_signed_boot_identity() {
         .await
         .unwrap();
     assert_eq!(refreshed.advertisement().progress(), 1);
+    assert_eq!(
+        refreshed.advertisement().signature,
+        created.advertisement().signature
+    );
     let refreshed = directory
         .refresh(
             &refreshed,

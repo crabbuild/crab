@@ -50,6 +50,32 @@ async fn fence_session(
         .await
         .unwrap();
     directory
+        .create(
+            crab_cell_runtime::NodeAdvertisement::sign(
+                claimant,
+                "https://claimant.internal:8081".into(),
+                fleet,
+                Digest::from_bytes([94; 32]),
+                image,
+                release,
+                &key,
+                1,
+                10_000,
+                20_000,
+                vec![Digest::from_bytes([95; 32])],
+                vec![1],
+                crab_cell_runtime::NodeCapacity {
+                    free_memory_bytes: 1,
+                    free_disk_bytes: 1,
+                    job_credits: 1,
+                },
+            )
+            .unwrap(),
+            10_000,
+        )
+        .await
+        .unwrap();
+    directory
         .claim_expired(session, claimant, 10_001)
         .await
         .unwrap()
@@ -803,7 +829,7 @@ async fn unchanged_dead_owner_is_taken_over_then_restored() {
             fixture.replica.clone(),
             authority.clone(),
             stale,
-            fenced,
+            fenced.clone(),
             crab_cell_runtime::RecoveryManifestStore::new(
                 fixture.layout.clone(),
                 Limits::default(),
@@ -947,7 +973,7 @@ async fn takeover_consumes_pinned_recovery_before_serving() {
     let coordinator = crab_cell_runtime::RecoveryCoordinator::new(recovery, manifests.clone());
     let mut attached = coordinator
         .recover(
-            fenced,
+            fenced.clone(),
             vec![crab_cell_runtime::RecoveryCell {
                 application: fixture.target.application(),
                 authority: authority.clone(),
@@ -959,7 +985,7 @@ async fn takeover_consumes_pinned_recovery_before_serving() {
     assert_eq!(attached.len(), 1);
     let retried = coordinator
         .recover(
-            fenced,
+            fenced.clone(),
             vec![crab_cell_runtime::RecoveryCell {
                 application: fixture.target.application(),
                 authority: authority.clone(),

@@ -87,6 +87,9 @@ async fn append_recovers_torn_suffix_deduplicates_and_seals() {
     );
     assert_eq!(store.seal(leader, 2).await.unwrap().base_sequence, 1);
     assert_eq!(store.read_tail(leader, 2, 1).await.unwrap().len(), 2);
+    let page = store.read_tail_page(leader, 2, 1).await.unwrap();
+    assert_eq!(page.frames.len(), 2);
+    assert_eq!(page.next_sequence, None);
     assert!(
         store
             .append(leader, 2, vec![second_frame], 0)
