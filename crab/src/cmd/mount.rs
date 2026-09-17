@@ -2441,7 +2441,8 @@ fn read_remote_url_from_crab_dir(crab_dir: &Path) -> Result<String> {
 /// Reads the remote URL from `crab.toml`, parses it as a Crab URL,
 /// builds an authenticated object store, and returns the layout. Returns
 /// `None` if any step fails (e.g. no remote configured, auth unavailable).
-/// Pointer-file hydration will fall back to stub resolvers in that case.
+/// Callers must reject `None` for `crab://` sources; local mounts may still
+/// use the Git object database fallback.
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 async fn resolve_mount_read_context_from_config(
     crab_dir: &Path,
