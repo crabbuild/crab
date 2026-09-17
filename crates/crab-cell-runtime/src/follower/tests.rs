@@ -47,7 +47,12 @@ async fn append_recovers_torn_suffix_deduplicates_and_seals() {
     let second_frame = frame(2, second.segments.first().unwrap(), limits);
 
     let root = tempfile::TempDir::new().unwrap();
-    let store = FollowerStore::open(root.path().to_owned(), limits).unwrap();
+    let store = FollowerStore::open(
+        root.path().to_owned(),
+        limits,
+        crab_ltx::DiskBudget::new(1 << 30),
+    )
+    .unwrap();
     let leader = SessionId::from_bytes([1; 16]);
     assert_eq!(
         store
@@ -76,7 +81,12 @@ async fn append_recovers_torn_suffix_deduplicates_and_seals() {
         .write_all(b"torn")
         .unwrap();
     drop(store);
-    let store = FollowerStore::open(root.path().to_owned(), limits).unwrap();
+    let store = FollowerStore::open(
+        root.path().to_owned(),
+        limits,
+        crab_ltx::DiskBudget::new(1 << 30),
+    )
+    .unwrap();
     assert_eq!(
         store
             .append(leader, 2, vec![second_frame.clone()], 0)
@@ -116,7 +126,12 @@ async fn closed_chunk_name_must_match_verified_record_range() {
     let capture = database.capture().unwrap();
     let leader = SessionId::from_bytes([1; 16]);
     let root = tempfile::TempDir::new().unwrap();
-    let store = FollowerStore::open(root.path().to_owned(), limits).unwrap();
+    let store = FollowerStore::open(
+        root.path().to_owned(),
+        limits,
+        crab_ltx::DiskBudget::new(1 << 30),
+    )
+    .unwrap();
     store
         .append(
             leader,
@@ -133,7 +148,12 @@ async fn closed_chunk_name_must_match_verified_record_range() {
         chunks.join("00000000000000000002-00000000000000000002.log"),
     )
     .unwrap();
-    let reopened = FollowerStore::open(root.path().to_owned(), limits).unwrap();
+    let reopened = FollowerStore::open(
+        root.path().to_owned(),
+        limits,
+        crab_ltx::DiskBudget::new(1 << 30),
+    )
+    .unwrap();
     assert!(reopened.seal(leader, 2).await.is_err());
     database.close().unwrap();
 }
@@ -155,7 +175,12 @@ async fn conflicting_duplicate_and_sequence_gap_fail_closed() {
         .unwrap();
     let second = database.capture().unwrap();
     let root = tempfile::TempDir::new().unwrap();
-    let store = FollowerStore::open(root.path().to_owned(), limits).unwrap();
+    let store = FollowerStore::open(
+        root.path().to_owned(),
+        limits,
+        crab_ltx::DiskBudget::new(1 << 30),
+    )
+    .unwrap();
     let leader = SessionId::from_bytes([1; 16]);
     store
         .append(
@@ -188,5 +213,72 @@ async fn conflicting_duplicate_and_sequence_gap_fail_closed() {
             .await
             .is_err()
     );
+    database.close().unwrap();
+}
+
+#[test]
+fn open_reserves_existing_bytes_and_rejects_an_undersized_budget() {
+    let root = tempfile::TempDir::new().unwrap();
+    std::fs::write(root.path().join("retained.log"), [0_u8; 17]).unwrap();
+
+    assert!(
+        FollowerStore::open(
+            root.path().to_owned(),
+            crab_ltx::Limits::default(),
+            crab_ltx::DiskBudget::new(16),
+        )
+        .is_err()
+    );
+
+    let store = FollowerStore::open(
+        root.path().to_owned(),
+        crab_ltx::Limits::default(),
+        crab_ltx::DiskBudget::new(32),
+    )
+    .unwrap();
+    assert_eq!(store.retained_bytes(), 17);
+    assert_eq!(store.available_bytes(), 15);
+}
+
+#[tokio::test]
+async fn append_reserves_capacity_before_writing_and_seal_accounts_for_marker() {
+    let limits = crab_ltx::Limits::default();
+    let source = tempfile::TempDir::new().unwrap();
+    let mut database = ManagedDb::open(&source.path().join("cell.sqlite"), limits).unwrap();
+    database
+        .transaction(|transaction| transaction.execute_batch("CREATE TABLE values_(v)"))
+        .unwrap();
+    let capture = database.capture().unwrap();
+    let encoded = frame(1, capture.segments.first().unwrap(), limits);
+    let required = RECORD_HEADER_BYTES as u64 + encoded.len() as u64;
+    let leader = SessionId::from_bytes([1; 16]);
+
+    let rejected_root = tempfile::TempDir::new().unwrap();
+    let rejected = FollowerStore::open(
+        rejected_root.path().to_owned(),
+        limits,
+        crab_ltx::DiskBudget::new(required - 1),
+    )
+    .unwrap();
+    assert!(
+        rejected
+            .append(leader, 2, vec![encoded.clone()], 0)
+            .await
+            .is_err()
+    );
+    assert_eq!(directory_bytes(rejected_root.path()).unwrap(), 0);
+
+    let root = tempfile::TempDir::new().unwrap();
+    let store = FollowerStore::open(
+        root.path().to_owned(),
+        limits,
+        crab_ltx::DiskBudget::new(required + 8),
+    )
+    .unwrap();
+    store.append(leader, 2, vec![encoded], 0).await.unwrap();
+    assert_eq!(store.retained_bytes(), required);
+    store.seal(leader, 2).await.unwrap();
+    assert_eq!(store.retained_bytes(), required + 8);
+    assert_eq!(store.available_bytes(), 0);
     database.close().unwrap();
 }

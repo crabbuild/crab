@@ -152,7 +152,7 @@ recovery path.
 | Working now | Still gated before fleet durability may serve traffic |
 | --- | --- |
 | Strict frame codec plus authoritative session enrollment, activation, coverage, and recovery claims | Follower selection, epoch rotation, and recovery-only startup |
-| Crash-safe follower store plus authenticated remote append/seal/tail transport | Live shipper batching, backpressure, and startup listener ordering |
+| Crash-safe, node-budgeted follower store plus authenticated remote append/seal/tail transport | Live shipper batching and startup listener ordering |
 | Write-all durability gate with contiguous object watermark | Actor submission and response-gate integration |
 | Complete-witness grouping, immutable recovery manifests, and post-pin session seal CAS | Automated dead-session inventory and recovery scheduling |
 | Cell control attachment and takeover consumption of overlays | Graceful drain, retention retirement, and live multi-node proof |
@@ -160,10 +160,13 @@ recovery path.
 The session record now owns one CAS-protected log epoch, its exact sorted member
 set, activation bit, contiguous object watermark, and renewable recovery claim.
 The private mTLS transport implements enrolled append plus claimant-authorized,
-page-bounded seal and tail operations. Ensemble selection and epoch rotation,
-recovery-only startup, actor submission, and automated session recovery remain
-gated. Fleet proof is not activated, so current responses stay on the existing
-exact-root path until those remaining gates are complete.
+page-bounded seal and tail operations. The follower store admits every append
+and seal against the same node-level disk budget used by Cell work, reserves
+existing bytes on restart, and NACKs before writing when capacity is exhausted.
+Ensemble selection and epoch rotation, recovery-only startup, actor submission,
+and automated session recovery remain gated. Fleet proof is not activated, so
+current responses stay on the existing exact-root path until those remaining
+gates are complete.
 
 ## Use one multiplexed log per owner session
 

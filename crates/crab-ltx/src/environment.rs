@@ -78,7 +78,8 @@ pub struct DiskReservation {
 }
 
 impl DiskReservation {
-    pub(crate) fn try_grow(&self, bytes: u64) -> crate::Result<()> {
+    /// Adds bytes to this reservation without exceeding the shared budget.
+    pub fn try_grow(&self, bytes: u64) -> crate::Result<()> {
         let mut held = match self.bytes.lock() {
             Ok(held) => held,
             Err(poisoned) => poisoned.into_inner(),
@@ -91,7 +92,8 @@ impl DiskReservation {
         Ok(())
     }
 
-    pub(crate) fn resize(&self, bytes: u64) -> crate::Result<()> {
+    /// Changes the exact held byte count, releasing capacity when it shrinks.
+    pub fn resize(&self, bytes: u64) -> crate::Result<()> {
         let mut held = match self.bytes.lock() {
             Ok(held) => held,
             Err(poisoned) => poisoned.into_inner(),
@@ -118,7 +120,8 @@ impl DiskReservation {
         self.budget.inner.used.fetch_sub(released, Ordering::AcqRel);
     }
 
-    pub(crate) fn bytes(&self) -> u64 {
+    #[must_use]
+    pub fn bytes(&self) -> u64 {
         match self.bytes.lock() {
             Ok(held) => *held,
             Err(poisoned) => *poisoned.into_inner(),

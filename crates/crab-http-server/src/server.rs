@@ -786,10 +786,16 @@ pub async fn serve(config: Config) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
     let metrics = crate::metrics::Metrics::new()?;
-    let cell_runtime = start_cell_runtime(session, cell_budget, local_disk, session_dir.clone())?;
+    let cell_runtime = start_cell_runtime(
+        session,
+        cell_budget,
+        local_disk.clone(),
+        session_dir.clone(),
+    )?;
     let follower_store = crab_cell_runtime::FollowerStore::open(
         session_dir.join("node-log"),
         crate::cells::repository_replica_limits(),
+        local_disk,
     )?;
     let cell_resolver = crate::peer::LocalCellResolver::new(
         startup.layout.clone(),

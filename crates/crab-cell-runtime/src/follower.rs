@@ -45,11 +45,17 @@ pub struct FollowerStore {
     root: PathBuf,
     limits: crab_ltx::Limits,
     lanes: LaneMap,
+    disk: crab_ltx::DiskBudget,
+    retained: Arc<Mutex<crab_ltx::DiskReservation>>,
 }
 
 impl FollowerStore {
     /// Opens a follower root. The caller must place it on durable local SSD.
-    pub fn open(root: PathBuf, limits: crab_ltx::Limits) -> Result<Self> {
+    pub fn open(
+        root: PathBuf,
+        limits: crab_ltx::Limits,
+        disk: crab_ltx::DiskBudget,
+    ) -> Result<Self> {
         let existed = root.exists();
         std::fs::create_dir_all(&root).map_err(crab_ltx::CrabError::from)?;
         if !existed {
@@ -59,11 +65,27 @@ impl FollowerStore {
             sync_directory(parent).map_err(crab_ltx::CrabError::from)?;
         }
         sync_directory(&root).map_err(crab_ltx::CrabError::from)?;
+        let retained = disk.try_reserve(directory_bytes(&root)?)?;
         Ok(Self {
             root,
             limits,
             lanes: Arc::new(Mutex::new(HashMap::new())),
+            disk,
+            retained: Arc::new(Mutex::new(retained)),
         })
+    }
+
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        match self.retained.lock() {
+            Ok(retained) => retained.bytes(),
+            Err(poisoned) => poisoned.into_inner().bytes(),
+        }
+    }
+
+    #[must_use]
+    pub fn available_bytes(&self) -> u64 {
+        self.disk.available()
     }
 
     /// Appends one ordered batch and acknowledges only after `sync_data`.
@@ -88,15 +110,25 @@ impl FollowerStore {
         let lock = self.lane_lock(lane)?;
         let root = self.root.clone();
         let limits = self.limits;
+        let retained = Arc::clone(&self.retained);
+        let growth = encoded_bytes
+            .and_then(|bytes| bytes.checked_add((frames.len() * RECORD_HEADER_BYTES) as u64))
+            .ok_or(Error::Node("follower append byte count overflow"))?;
         tokio::task::spawn_blocking(move || {
+            let retained = retained
+                .lock()
+                .map_err(|_| Error::Node("follower disk reservation lock poisoned"))?;
+            retained.try_grow(growth)?;
             let mut state = lock
                 .lock()
                 .map_err(|_| Error::Node("follower lane lock poisoned"))?;
             let result = append_sync(&root, lane, frames, covered_through, limits, &mut state);
+            let resize = directory_bytes(&root)
+                .and_then(|bytes| retained.resize(bytes).map_err(Error::from));
             if result.is_err() {
                 *state = None;
             }
-            result
+            settle_disk_reservation(result, resize)
         })
         .await
         .map_err(Error::FollowerWorkerJoin)?
@@ -108,15 +140,22 @@ impl FollowerStore {
         let lock = self.lane_lock(lane)?;
         let root = self.root.clone();
         let limits = self.limits;
+        let retained = Arc::clone(&self.retained);
         tokio::task::spawn_blocking(move || {
+            let retained = retained
+                .lock()
+                .map_err(|_| Error::Node("follower disk reservation lock poisoned"))?;
+            retained.try_grow(8)?;
             let mut state = lock
                 .lock()
                 .map_err(|_| Error::Node("follower lane lock poisoned"))?;
             let result = seal_sync(&root, lane, limits, &mut state);
+            let resize = directory_bytes(&root)
+                .and_then(|bytes| retained.resize(bytes).map_err(Error::from));
             if result.is_err() {
                 *state = None;
             }
-            result
+            settle_disk_reservation(result, resize)
         })
         .await
         .map_err(Error::FollowerWorkerJoin)?
@@ -194,6 +233,36 @@ impl FollowerStore {
             .or_insert_with(|| Arc::new(Mutex::new(None)))
             .clone())
     }
+}
+
+fn directory_bytes(path: &Path) -> Result<u64> {
+    let mut total = 0_u64;
+    let mut pending = vec![path.to_owned()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else if metadata.is_file() {
+                total = total
+                    .checked_add(metadata.len())
+                    .ok_or(Error::Node("follower retained byte count overflow"))?;
+            } else {
+                return Err(Error::Node("follower storage contains a special file"));
+            }
+        }
+    }
+    Ok(total)
+}
+
+fn settle_disk_reservation(
+    result: Result<FollowerReceipt>,
+    resize: Result<()>,
+) -> Result<FollowerReceipt> {
+    let receipt = result?;
+    resize?;
+    Ok(receipt)
 }
 
 fn append_sync(

@@ -1006,6 +1006,7 @@ async fn takeover_consumes_pinned_recovery_before_serving() {
     let follower_store = crab_cell_runtime::FollowerStore::open(
         follower_directory.path().to_owned(),
         Limits::default(),
+        crab_cell_runtime::DiskBudget::new(1 << 30),
     )
     .unwrap();
     let transport: Arc<dyn crab_cell_runtime::NodeLogTransport> = Arc::new(

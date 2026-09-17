@@ -457,7 +457,12 @@ mod tests {
         )
         .unwrap();
         let root = tempfile::TempDir::new().unwrap();
-        let store = FollowerStore::open(root.path().to_owned(), limits).unwrap();
+        let store = FollowerStore::open(
+            root.path().to_owned(),
+            limits,
+            crab_ltx::DiskBudget::new(1 << 30),
+        )
+        .unwrap();
         let transport: Arc<dyn NodeLogTransport> =
             Arc::new(LocalFollowerTransport::new(member, store));
         transport
@@ -512,7 +517,12 @@ mod tests {
         let root = tempfile::TempDir::new().unwrap();
         let local = LocalFollowerTransport::new(
             good,
-            FollowerStore::open(root.path().to_owned(), limits).unwrap(),
+            FollowerStore::open(
+                root.path().to_owned(),
+                limits,
+                crab_ltx::DiskBudget::new(1 << 30),
+            )
+            .unwrap(),
         );
         local
             .append(
