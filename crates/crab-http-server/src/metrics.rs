@@ -1,6 +1,9 @@
 use std::{
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll},
     time::{Duration, Instant},
 };
@@ -78,6 +81,7 @@ struct MetricsInner {
     node_log_append_bytes: [Counter; APPEND_RESULT_COUNT],
     node_log_lanes: [Gauge; NODE_LOG_LANE_STATE_COUNT],
     session_lease_seconds: Gauge,
+    self_fenced: AtomicBool,
     self_fences: [Counter; SELF_FENCE_REASON_COUNT],
     node_log_recoveries: [Gauge; RECOVERY_STATE_COUNT],
     node_log_recovery_seconds: Histogram,
@@ -227,6 +231,7 @@ impl Metrics {
                     &Key::from_static_name("crab_cell_session_lease_seconds"),
                     &METADATA,
                 ),
+                self_fenced: AtomicBool::new(false),
                 self_fences: SELF_FENCE_REASON_LABELS.map(|reason| {
                     recorder.register_counter(
                         &key("crab_cell_self_fences_total", &[("reason", reason)]),
@@ -414,6 +419,9 @@ impl Metrics {
     }
 
     pub(crate) fn record_self_fence(&self, reason: SelfFenceReason) {
+        if self.inner.self_fenced.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let index = match reason {
             SelfFenceReason::Expiry => 0,
             SelfFenceReason::Refresh => 1,
@@ -886,6 +894,7 @@ mod tests {
         <Metrics as crab_cell_runtime::CellTelemetry>::node_log_append(&metrics, true, 512);
         <Metrics as crab_cell_runtime::CellTelemetry>::node_log_append(&metrics, false, 128);
         metrics.record_self_fence(SelfFenceReason::Refresh);
+        metrics.record_self_fence(SelfFenceReason::Shutdown);
         metrics.update_recovery_states(1, 0);
         metrics.record_recovery_finished(
             Duration::from_millis(75),
