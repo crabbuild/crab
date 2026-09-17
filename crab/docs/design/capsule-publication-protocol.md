@@ -28,6 +28,10 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
   verified by the Git pack checksum, entry CRC/delta evidence, and reconstructed
   object IDs. Full checkpoint decoding remains the authenticated path for
   maintenance that intentionally needs every pack byte;
+- terminal unfiltered thin-pack fetches retain only delta bases covered by the
+  complete authenticated common-have set. OFS deltas are rewritten to
+  REF_DELTA without a full dependency sort; filtered, shallow, deepen, and
+  incomplete negotiations retain the self-contained conservative path;
 - `crab init`, native and remote-helper push, full and filtered
   clone/fetch/pull, `crab repack`, and repository GC use protocol v2 without
   a v1 fallback;
@@ -65,6 +69,8 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
   superseded baseline;
 - CAS-loser, expected-old mismatch, payload corruption, and lost-root-response
   tests fail closed or reconcile through exact transaction identity;
+- protected capsule pushes carrying a mirror-plan identity use the same
+  authenticated transaction-scoped plan receipt as direct capsule publication;
 - the earlier release-mode Kubernetes qualification replayed 5,000 first-parent
   commits with a fetch and checkpoint every 500 pushes. All fetches, the final
   independent clone, and full `git fsck` passed. RustFS measured 24,940
