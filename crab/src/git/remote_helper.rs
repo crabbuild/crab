@@ -4139,14 +4139,21 @@ mod tests {
     }
 
     fn run_git(repo: &std::path::Path, args: &[&str]) -> Vec<u8> {
-        let output = std::process::Command::new("git")
+        run_git_with_env(repo, args, &[])
+    }
+
+    fn run_git_with_env(repo: &std::path::Path, args: &[&str], envs: &[(&str, String)]) -> Vec<u8> {
+        let mut command = std::process::Command::new("git");
+        command
             .args(args)
             .current_dir(repo)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_COMMON_DIR")
-            .output()
-            .expect("spawn git");
+            .env_remove("GIT_COMMON_DIR");
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        let output = command.output().expect("spawn git");
         assert!(
             output.status.success(),
             "git {:?} failed\nstdout: {}\nstderr: {}",
@@ -4531,9 +4538,19 @@ mod tests {
             )
             .expect("write history");
             run_git(source.path(), &["add", "history.txt"]);
-            run_git(
+            run_git_with_env(
                 source.path(),
                 &["commit", "-q", "-m", &format!("generation {generation}")],
+                &[
+                    (
+                        "GIT_AUTHOR_DATE",
+                        format!("{} +0000", 1_700_000_000 + generation * 86_400),
+                    ),
+                    (
+                        "GIT_COMMITTER_DATE",
+                        format!("{} +0000", 1_700_000_000 + generation * 86_400),
+                    ),
+                ],
             );
             commits.push(
                 String::from_utf8(run_git(source.path(), &["rev-parse", "HEAD"]))
@@ -4705,6 +4722,43 @@ mod tests {
         );
         assert!(git_object_exists(target.path(), tip));
         assert!(!git_object_exists(target.path(), &commits[1]));
+        assert!(!git_object_exists(target.path(), &commits[0]));
+    }
+
+    #[tokio::test]
+    async fn classic_capsule_shallow_since_keeps_newer_commits() {
+        let (source, store, router, commits, _tag) = capsule_history_fixture().await;
+        let cutoff = String::from_utf8(run_git(
+            source.path(),
+            &["show", "-s", "--format=%ct", &commits[1]],
+        ))
+        .expect("commit timestamp is utf8")
+        .trim()
+        .to_owned();
+        let target = tempfile::tempdir().expect("target repository");
+        run_git(target.path(), &["init", "-q"]);
+        let git_dir = target.path().join(".git");
+        let _target_guard = GitEnvCwdGuard::set(target.path(), &git_dir, target.path());
+        let tip = commits.last().expect("history tip");
+
+        let input = format!("option deepen-since {cutoff}\nfetch {tip} refs/heads/main\n\n");
+        let context = test_context(
+            store,
+            router.repo_prefix(),
+            target.path().join("push-state"),
+        );
+        let (output, result) =
+            run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
+        result.expect("timestamp-bounded shallow fetch");
+        assert_eq!(output, "ok\n\n");
+        assert_eq!(
+            crate::git::shallow::read_shallow_file(&git_dir)
+                .await
+                .expect("read timestamp boundary"),
+            vec![commits[1].clone()]
+        );
+        assert!(git_object_exists(target.path(), tip));
+        assert!(git_object_exists(target.path(), &commits[1]));
         assert!(!git_object_exists(target.path(), &commits[0]));
     }
 
