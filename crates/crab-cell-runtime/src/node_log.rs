@@ -429,6 +429,8 @@ impl DurabilityGate {
     pub async fn wait_followers(&self, ticket: CommitTicket) -> Result<()> {
         loop {
             let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             {
                 let state = self.lock()?;
                 validate_ticket(&state, ticket)?;
@@ -526,6 +528,8 @@ impl DurabilityGate {
     pub async fn prove(&self, ticket: CommitTicket) -> Result<DurabilityProof> {
         loop {
             let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if let Some(proof) = self.proof(ticket)? {
                 return Ok(proof);
             }
@@ -735,6 +739,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn follower_wait_wakes_after_ack_arrives() {
+        let gate = DurabilityGate::new(session(1), node(1), 2, [node(3)]).unwrap();
+        let ticket = gate.issue(1).unwrap();
+        let waiter = {
+            let gate = gate.clone();
+            tokio::spawn(async move { gate.wait_followers(ticket).await })
+        };
+        tokio::task::yield_now().await;
+        gate.acknowledge(node(3), 1).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn object_proof_wins_independently_and_watermark_stays_contiguous() {
         let gate = DurabilityGate::new(session(1), node(1), 2, [node(3)]).unwrap();
         let first = gate.issue(1).unwrap();
@@ -746,6 +767,27 @@ mod tests {
         );
         assert_eq!(gate.prove_object(first).unwrap(), 2);
         assert_eq!(gate.tiered_through(), 2);
+    }
+
+    #[tokio::test]
+    async fn proof_wakes_after_object_coverage_arrives() {
+        let gate = DurabilityGate::new(session(1), node(1), 2, [node(3)]).unwrap();
+        let ticket = gate.issue(1).unwrap();
+        let waiter = {
+            let gate = gate.clone();
+            tokio::spawn(async move { gate.prove(ticket).await })
+        };
+        tokio::task::yield_now().await;
+        gate.prove_object(ticket).unwrap();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .source(),
+            DurabilitySource::Object
+        );
     }
 
     #[tokio::test]
