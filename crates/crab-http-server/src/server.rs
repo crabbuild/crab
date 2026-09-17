@@ -822,7 +822,7 @@ pub async fn serve(config: Config) -> Result<()> {
     let follower_store = crab_cell_runtime::FollowerStore::open(
         config.cells.data_dir.clone(),
         crate::cells::repository_replica_limits(),
-        local_disk,
+        local_disk.clone(),
     )?;
     if follower_store.quarantined_entries() != 0 {
         tracing::warn!(
@@ -893,6 +893,7 @@ pub async fn serve(config: Config) -> Result<()> {
         scheduler_status.clone(),
     )?
     .with_node_recovery(Arc::clone(&node_log_transport))
+    .with_node_recovery_disk(local_disk.clone())
     .with_metrics(metrics.clone());
     let durability_application = startup.identity.application();
     let server = Arc::new(Server {

@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
 
-use crate::{Error, FollowerReceipt, FollowerStore, NodeId, Result, SessionId};
+use crate::{Error, FollowerReceipt, FollowerStore, FollowerTailPage, NodeId, Result, SessionId};
 
 /// One ordered follower append with the leader's safe truncation watermark.
 pub struct AppendRequest {
@@ -62,6 +62,39 @@ pub trait NodeLogTransport: Send + Sync {
         member: NodeId,
         request: TailRequest,
     ) -> BoxFuture<'a, Result<Vec<Bytes>>>;
+
+    /// Reads one bounded page of a sealed follower tail.
+    ///
+    /// Implementations with a paged transport should override this method.
+    /// The default keeps older transports source-compatible while applying the
+    /// same one-megabyte/4096-frame page boundary in memory.
+    fn tail_page<'a>(
+        &'a self,
+        member: NodeId,
+        request: TailRequest,
+    ) -> BoxFuture<'a, Result<FollowerTailPage>> {
+        Box::pin(async move {
+            let frames = self.tail(member, request).await?;
+            let mut bytes = 0_usize;
+            let mut count = 0_usize;
+            for frame in &frames {
+                if count == 4096 || (count != 0 && bytes.saturating_add(frame.len()) > 1 << 20) {
+                    break;
+                }
+                bytes = bytes.saturating_add(frame.len());
+                count += 1;
+            }
+            let next_sequence = (count < frames.len()).then(|| {
+                request
+                    .first_sequence
+                    .saturating_add(u64::try_from(count).map_or(u64::MAX, |count| count))
+            });
+            Ok(FollowerTailPage {
+                frames: frames.into_iter().take(count).collect(),
+                next_sequence,
+            })
+        })
+    }
 }
 
 /// In-process transport for deterministic tests and single-process recovery.
@@ -145,6 +178,23 @@ impl NodeLogTransport for LocalFollowerTransport {
             self.validate_member(member)?;
             self.store
                 .read_tail(
+                    request.leader_session,
+                    request.log_epoch,
+                    request.first_sequence,
+                )
+                .await
+        })
+    }
+
+    fn tail_page<'a>(
+        &'a self,
+        member: NodeId,
+        request: TailRequest,
+    ) -> BoxFuture<'a, Result<FollowerTailPage>> {
+        Box::pin(async move {
+            self.validate_member(member)?;
+            self.store
+                .read_tail_page(
                     request.leader_session,
                     request.log_epoch,
                     request.first_sequence,

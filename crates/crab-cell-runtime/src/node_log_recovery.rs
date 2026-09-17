@@ -31,6 +31,7 @@ pub struct NodeLogRecovery {
     tiered_through: u64,
     active: bool,
     limits: crab_ltx::Limits,
+    recovery_disk: crab_ltx::DiskBudget,
 }
 
 /// One dead-session Cell control that may need a recovered tail attached.
@@ -282,6 +283,7 @@ impl NodeLogRecovery {
             tiered_through,
             active,
             limits,
+            recovery_disk: default_recovery_disk(limits),
         })
     }
 
@@ -290,6 +292,16 @@ impl NodeLogRecovery {
         transport: Arc<dyn NodeLogTransport>,
         fenced: &FencedNodeSession,
         limits: crab_ltx::Limits,
+    ) -> Result<Self> {
+        Self::from_fenced_with_disk(transport, fenced, limits, default_recovery_disk(limits))
+    }
+
+    /// Builds recovery with a shared node-local disk budget.
+    pub fn from_fenced_with_disk(
+        transport: Arc<dyn NodeLogTransport>,
+        fenced: &FencedNodeSession,
+        limits: crab_ltx::Limits,
+        recovery_disk: crab_ltx::DiskBudget,
     ) -> Result<Self> {
         let log = fenced
             .log()
@@ -314,6 +326,16 @@ impl NodeLogRecovery {
             log.active(),
             limits,
         )
+        .map(|mut recovery| {
+            recovery.recovery_disk = recovery_disk;
+            recovery
+        })
+    }
+
+    /// Uses a shared budget for temporary follower-tail materialization.
+    pub fn with_recovery_disk(mut self, recovery_disk: crab_ltx::DiskBudget) -> Self {
+        self.recovery_disk = recovery_disk;
+        self
     }
 
     fn validate_fence(&self, fenced: &FencedNodeSession) -> Result<()> {
@@ -391,27 +413,67 @@ impl NodeLogRecovery {
             if receipt.base_sequence > required_first || receipt.durable_through < durable_through {
                 continue;
             }
-            let Ok(encoded) = self
-                .transport
-                .tail(
-                    member,
-                    TailRequest {
-                        leader_session: self.leader_session,
-                        log_epoch: self.log_epoch,
-                        first_sequence: required_first,
-                    },
-                )
-                .await
+            let Ok(reservation) = self
+                .recovery_disk
+                .try_reserve(recovery_tail_reservation_bytes(self.limits))
             else {
                 continue;
             };
-            let Ok(frames) = encoded
-                .into_iter()
-                .map(|bytes| crab_ltx::inspect_node_frame(bytes, self.limits))
-                .collect::<crab_ltx::Result<Vec<_>>>()
-            else {
+            let mut first_sequence = required_first;
+            let mut frames = Vec::new();
+            let mut complete = true;
+            loop {
+                let Ok(page) = self
+                    .transport
+                    .tail_page(
+                        member,
+                        TailRequest {
+                            leader_session: self.leader_session,
+                            log_epoch: self.log_epoch,
+                            first_sequence,
+                        },
+                    )
+                    .await
+                else {
+                    complete = false;
+                    break;
+                };
+                if page.frames.is_empty() {
+                    complete = false;
+                    break;
+                }
+                let page_count = page.frames.len();
+                let Ok(verified) = page
+                    .frames
+                    .into_iter()
+                    .map(|bytes| crab_ltx::inspect_node_frame(bytes, self.limits))
+                    .collect::<crab_ltx::Result<Vec<_>>>()
+                else {
+                    complete = false;
+                    break;
+                };
+                frames.extend(verified);
+                let Some(next_sequence) = page.next_sequence else {
+                    break;
+                };
+                let Ok(page_count) = u64::try_from(page_count) else {
+                    complete = false;
+                    break;
+                };
+                let Some(expected_next) = first_sequence.checked_add(page_count) else {
+                    complete = false;
+                    break;
+                };
+                if next_sequence != expected_next {
+                    complete = false;
+                    break;
+                }
+                first_sequence = next_sequence;
+            }
+            drop(reservation);
+            if !complete {
                 continue;
-            };
+            }
             if frames.first().map(|frame| frame.scope().node_sequence) != Some(required_first)
                 || frames.last().map(|frame| frame.scope().node_sequence) != Some(durable_through)
                 || !frames.windows(2).all(|pair| {
@@ -433,6 +495,14 @@ impl NodeLogRecovery {
             "active node log has no complete follower witness",
         ))
     }
+}
+
+fn default_recovery_disk(limits: crab_ltx::Limits) -> crab_ltx::DiskBudget {
+    crab_ltx::DiskBudget::new(recovery_tail_reservation_bytes(limits))
+}
+
+fn recovery_tail_reservation_bytes(limits: crab_ltx::Limits) -> u64 {
+    limits.max_plan_bytes.min(512 << 20)
 }
 
 #[cfg(test)]
@@ -621,6 +691,19 @@ mod tests {
             )
             .await
             .unwrap();
+        let rejected = NodeLogRecovery::new(
+            Arc::clone(&transport),
+            NodeId::from_bytes([1; 16]),
+            leader,
+            3,
+            vec![member],
+            0,
+            true,
+            limits,
+        )
+        .unwrap()
+        .with_recovery_disk(crab_ltx::DiskBudget::new(0));
+        assert!(rejected.ensure_sealed().await.is_err());
         let recovery = NodeLogRecovery::new(
             transport,
             NodeId::from_bytes([1; 16]),

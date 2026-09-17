@@ -109,6 +109,7 @@ pub(crate) struct RepositoryCellScheduler {
     recovery_sessions: Arc<Mutex<HashSet<SessionId>>>,
     recovery_jobs: tokio::task::JoinSet<crate::Result<SessionId>>,
     recovery_manifests: RecoveryManifestStore,
+    recovery_disk: crab_cell_runtime::DiskBudget,
     next_migration_shard: u8,
     next_shard: u8,
     activity_admission: Arc<tokio::sync::Semaphore>,
@@ -157,6 +158,7 @@ impl RepositoryCellScheduler {
                 layout.clone(),
                 super::repository_replica_limits(),
             ),
+            recovery_disk: crab_cell_runtime::DiskBudget::new(512 << 20),
             next_migration_shard: 0,
             next_shard: 0,
             activity_admission: Arc::new(tokio::sync::Semaphore::new(
@@ -174,6 +176,14 @@ impl RepositoryCellScheduler {
     #[must_use]
     pub(crate) fn with_node_recovery(mut self, transport: Arc<dyn NodeLogTransport>) -> Self {
         self.node_log_transport = Some(transport);
+        self
+    }
+
+    pub(crate) fn with_node_recovery_disk(
+        mut self,
+        recovery_disk: crab_cell_runtime::DiskBudget,
+    ) -> Self {
+        self.recovery_disk = recovery_disk;
         self
     }
 
@@ -650,11 +660,19 @@ impl RepositoryCellScheduler {
             let transport = Arc::clone(transport);
             let claimant = self.session;
             let metrics = self.metrics.clone();
+            let recovery_disk = self.recovery_disk.clone();
             self.recovery_jobs.spawn(async move {
                 let _reservation = reservation;
                 let started = std::time::Instant::now();
                 let result = recover_node_session(
-                    directory, catalog, authority, manifests, transport, session, claimant,
+                    directory,
+                    catalog,
+                    authority,
+                    manifests,
+                    transport,
+                    recovery_disk,
+                    session,
+                    claimant,
                 )
                 .await;
                 if let Some(metrics) = metrics {
@@ -810,6 +828,7 @@ async fn recover_node_session(
     authority: CellAuthority,
     manifests: RecoveryManifestStore,
     transport: Arc<dyn NodeLogTransport>,
+    recovery_disk: crab_cell_runtime::DiskBudget,
     session: SessionId,
     claimant: SessionId,
 ) -> crate::Result<()> {
@@ -822,8 +841,12 @@ async fn recover_node_session(
         recoverable_cells(&catalog, &authority, session, MAX_NODE_RECOVERY_CELLS),
     )
     .await?;
-    let recovery =
-        NodeLogRecovery::from_fenced(transport, &fenced, super::repository_replica_limits())?;
+    let recovery = NodeLogRecovery::from_fenced_with_disk(
+        transport,
+        &fenced,
+        super::repository_replica_limits(),
+        recovery_disk,
+    )?;
     let coordinator = RecoveryCoordinator::new(recovery, manifests);
     let recovery_fence = fenced.clone();
     let controls = await_with_claim_heartbeat(

@@ -1370,6 +1370,8 @@ pub trait NodeLogTransport: Send + Sync {
         -> Result<SealReceipt>;
     async fn tail(&self, member: NodeId, request: TailRequest)
         -> Result<TailStream>;
+    async fn tail_page(&self, member: NodeId, request: TailRequest)
+        -> Result<FollowerTailPage>;
 }
 
 pub struct DurabilityGate;

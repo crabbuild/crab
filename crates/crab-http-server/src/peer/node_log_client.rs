@@ -132,26 +132,19 @@ impl NodeLogHttpTransport {
         member: NodeId,
         request: TailRequest,
     ) -> crab_cell_runtime::Result<Vec<Bytes>> {
-        let remote = self.remote(member).await?;
         let mut first = request.first_sequence;
         let mut frames = Vec::new();
         let mut retained_bytes = 0_usize;
         loop {
-            let path = format!(
-                "internal/cells/v1/node-log/{}/{}/recovery/{}/tail/{first}",
-                encode_session(request.leader_session),
-                request.log_epoch,
-                encode_session(self.session)
-            );
-            let response = remote
-                .client
-                .post(remote.endpoint.join(&path).map_err(transport_error)?)
-                .header(header::CACHE_CONTROL, "no-store")
-                .timeout(REQUEST_TIMEOUT)
-                .send()
-                .await
-                .map_err(transport_unknown)?;
-            let page = decode_tail_page(response).await?;
+            let page = self
+                .tail_page_inner(
+                    member,
+                    TailRequest {
+                        first_sequence: first,
+                        ..request
+                    },
+                )
+                .await?;
             let page_count = page.frames.len();
             if page.frames.is_empty() && page.next_sequence.is_some() {
                 return Err(CellError::Peer("follower tail page made no progress"));
@@ -181,6 +174,34 @@ impl NodeLogHttpTransport {
             }
             first = next;
         }
+    }
+
+    async fn tail_page_inner(
+        &self,
+        member: NodeId,
+        request: TailRequest,
+    ) -> crab_cell_runtime::Result<crab_cell_runtime::FollowerTailPage> {
+        let remote = self.remote(member).await?;
+        let path = format!(
+            "internal/cells/v1/node-log/{}/{}/recovery/{}/tail/{}",
+            encode_session(request.leader_session),
+            request.log_epoch,
+            encode_session(self.session),
+            request.first_sequence
+        );
+        let response = remote
+            .client
+            .post(remote.endpoint.join(&path).map_err(transport_error)?)
+            .header(header::CACHE_CONTROL, "no-store")
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(transport_unknown)?;
+        let page = decode_tail_page(response).await?;
+        Ok(crab_cell_runtime::FollowerTailPage {
+            next_sequence: page.next_sequence,
+            frames: page.frames,
+        })
     }
 }
 
@@ -215,6 +236,14 @@ impl NodeLogTransport for NodeLogHttpTransport {
         request: TailRequest,
     ) -> BoxFuture<'a, crab_cell_runtime::Result<Vec<Bytes>>> {
         Box::pin(self.tail_inner(member, request))
+    }
+
+    fn tail_page<'a>(
+        &'a self,
+        member: NodeId,
+        request: TailRequest,
+    ) -> BoxFuture<'a, crab_cell_runtime::Result<crab_cell_runtime::FollowerTailPage>> {
+        Box::pin(self.tail_page_inner(member, request))
     }
 }
 

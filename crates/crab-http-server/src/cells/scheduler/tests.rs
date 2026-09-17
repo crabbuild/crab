@@ -236,6 +236,7 @@ async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
         CellAuthority::new(layout.clone()),
         RecoveryManifestStore::new(layout, super::super::repository_replica_limits()),
         transport,
+        crab_ltx::DiskBudget::new(512 << 20),
         leader,
         claimant,
     )
