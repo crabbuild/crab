@@ -467,7 +467,14 @@ impl NodeLogRecovery {
                     complete = false;
                     break;
                 };
-                if page_bytes > MAX_RECOVERY_PAGE_BYTES {
+                let page_limit = if page_count == 1 {
+                    // A single LTX frame may exceed the network page target;
+                    // keep the same bounded-one-frame exception as FollowerStore.
+                    MAX_RECOVERY_PAGE_BYTES.saturating_add(self.limits.max_capture_bytes)
+                } else {
+                    MAX_RECOVERY_PAGE_BYTES
+                };
+                if page_bytes > page_limit {
                     complete = false;
                     break;
                 }
