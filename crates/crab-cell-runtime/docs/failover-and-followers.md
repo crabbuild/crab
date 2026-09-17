@@ -152,12 +152,12 @@ recovery path.
 
 | Working now | Remaining target gaps |
 | --- | --- |
-| Strict frame codec plus capacity- and failure-domain-aware deterministic selection, retrying automatic enrollment, activation, coverage, recovery claims, object-covered epoch rotation, and clean log close | None for this slice |
+| Strict frame codec plus capacity- and failure-domain-aware deterministic selection, retrying automatic enrollment, activation, coverage, recovery claims, object-covered epoch-rotation primitives, and clean log close | Online epoch-rotation controller must be wired into the long-lived HTTP runtime; today the server rotates/clears the active epoch during drain/shutdown |
 | Crash-safe, node-budgeted follower store under a persisted physical `NodeId`, authenticated remote append/seal/tail/retire transport, a bounded node-wide batched shipper, a recovery-first management-listener lifecycle, and startup lane scrub/quarantine | None for this slice |
 | Authoritative create and refresh drive a terminal monotonic node-lease guard; admission, actor dispatch, Cell-control CAS, durability proof, and output acceptance all check it | None for the current non-streaming Cell API |
 | Write-all durability gate, first-fsynced-batch activation, bounded dual-watermark command continuation, ordered object publication, object fallback, schema-migration barriers, and contiguous authoritative object watermark | None for this slice |
 | Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | None for this slice |
-| Cell control attachment and takeover consumption of overlays; server drain closes a fully object-covered epoch before session withdrawal; grace-aged retired follower lanes are deleted only after authority stops naming their epoch; the Compose qualifier proves a follower-only result survives owner `SIGKILL`, owner-disk deletion, RustFS restoration, takeover, and owner rejoin; the Kubernetes qualifier enforces each selected node profile and 1,000 aggregate mutation requests/s against every Pod | Signed live runs across small, medium, and large profiles, plus the extended fault and telemetry matrix |
+| Cell control attachment and takeover consumption of overlays; server drain closes a fully object-covered epoch before session withdrawal; grace-aged retired follower lanes are deleted only after authority stops naming their epoch; the Compose qualifier proves a follower-only result survives owner `SIGKILL`, owner-disk deletion, RustFS restoration, takeover, and owner rejoin; the Kubernetes qualifier enforces each selected node profile and 1,000 aggregate mutation requests/s against every Pod | Online epoch rotation, signed live runs across small/medium/large profiles, and the extended fault/telemetry matrix |
 | Bounded command/query responses and the typed `CellStateStream` bind every emitted chunk to the actor's proven logical head | Extended live fault and profile qualification only |
 
 The session record now owns one CAS-protected log epoch, its exact sorted member
@@ -822,6 +822,13 @@ watermark and one bounded queue to remove object-store latency from consecutive
 commands. It deliberately stops before a general publication graph: one actor,
 one SQLite writer, one ordered publisher, and one Cell-control CAS owner remain.
 
+The shorter name **dual-head** refers only to these two publication watermarks;
+it does not imply two independent root writers. A true dual-head publication
+graph is deliberately deferred: it would add another CAS owner, reordering
+state, and recovery surface without improving the one-writer contract. The next
+durability delivery is the online epoch-rotation controller, not a second
+publication head.
+
 State-observing streaming is delivered separately from publication. The first
 Rust API reads mutable Cell state through `CellStateStream`; it adds no stream
 scheduler, second writer, or publication head. Any future body adapter must
@@ -968,6 +975,10 @@ The current server stream audit explains that boundary:
 This narrow API avoids a second speculative queue or stream scheduler. It does
 not weaken the contract: introducing a state-observing body without the phase 8
 gate is a correctness regression, not an optional optimization.
+
+An HTTP/SSE adapter remains a separate delivery item. It must map disconnects to
+`StateStreamCancellation`, preserve per-chunk receipts, and never introduce a
+second stream scheduler or publication queue.
 
 Authentication, routing, and malformed-request errors produced before Cell
 execution do not need a Cell durability proof.
