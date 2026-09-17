@@ -209,10 +209,12 @@ impl NodeLogShipper {
             .ok_or(Error::Capacity("node-log outstanding bytes"))?;
         let runtime = tokio::runtime::Handle::try_current().map_err(Error::RuntimeStart)?;
         let (sender, receiver) = mpsc::channel(MAX_QUEUED_SUBMISSIONS);
+        let bytes = Arc::new(Semaphore::new(permits));
         let worker_gate = gate.clone();
         let worker = runtime.spawn(run_shipper(
             receiver,
             worker_gate,
+            Arc::clone(&bytes),
             transport,
             leader,
             log_epoch,
@@ -224,7 +226,7 @@ impl NodeLogShipper {
         Ok(Self {
             sender: std::sync::Mutex::new(Some(sender)),
             worker: std::sync::Mutex::new(Some(worker)),
-            bytes: Arc::new(Semaphore::new(permits)),
+            bytes,
             order: tokio::sync::Mutex::new(()),
             max_outstanding_bytes: batch_bytes,
             gate,
@@ -337,6 +339,7 @@ struct QueuedFrame {
 async fn run_shipper(
     mut receiver: mpsc::Receiver<QueuedSubmission>,
     gate: DurabilityGate,
+    bytes: Arc<Semaphore>,
     transport: Arc<dyn NodeLogTransport>,
     leader: crate::SessionId,
     log_epoch: u64,
@@ -350,11 +353,15 @@ async fn run_shipper(
     loop {
         if pending.is_empty() {
             if closed {
+                bytes.close();
                 return;
             }
             match receiver.recv().await {
                 Some(submission) => pending.extend(submission.frames),
-                None => return,
+                None => {
+                    bytes.close();
+                    return;
+                }
             }
         }
 
@@ -367,18 +374,18 @@ async fn run_shipper(
                     break;
                 };
                 let Some(next_bytes) = batch_bytes.checked_add(next.encoded.len() as u64) else {
-                    gate.stop_shipping();
+                    stop_shipper(&gate, &bytes);
                     return;
                 };
                 if !batch.is_empty() && next_bytes > max_batch_bytes {
                     break;
                 }
                 if next_bytes > max_batch_bytes {
-                    gate.stop_shipping();
+                    stop_shipper(&gate, &bytes);
                     return;
                 }
                 let Some(next) = pending.pop_front() else {
-                    gate.stop_shipping();
+                    stop_shipper(&gate, &bytes);
                     return;
                 };
                 batch_bytes = next_bytes;
@@ -419,11 +426,16 @@ async fn run_shipper(
         .await;
         telemetry.node_log_append(result.is_ok(), append_bytes);
         if result.is_err() {
-            gate.stop_shipping();
+            stop_shipper(&gate, &bytes);
             receiver.close();
             return;
         }
     }
+}
+
+fn stop_shipper(gate: &DurabilityGate, bytes: &Semaphore) {
+    gate.stop_shipping();
+    bytes.close();
 }
 
 async fn append_batch(
@@ -766,6 +778,17 @@ mod tests {
         .unwrap();
 
         let ticket = shipper.submit(submission(&cuts)).await.unwrap();
+        for _ in 0..100 {
+            if gate.shipping_scope().is_err() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(gate.shipping_scope().is_err());
+        let retry = tokio::time::timeout(Duration::from_secs(1), shipper.submit(submission(&cuts)))
+            .await
+            .expect("failed shipper must release blocked byte admission");
+        assert!(retry.is_err());
         shipper.shutdown().await.unwrap();
 
         assert!(gate.issue(1).is_err());
