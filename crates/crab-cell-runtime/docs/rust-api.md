@@ -194,9 +194,11 @@ stream.finish();
 ```
 
 Each `emit` passes the preceding `Receipt` as the next minimum watermark. An
-HTTP/SSE adapter must send a chunk only after `emit` returns; it must not read
-the Cell handle or logical head directly. Call `stream.cancellation().cancel()`
-from a disconnect handler to wake a pending emission.
+HTTP routes use `crab_http_server::state_observing_body` to send a chunk only
+after `emit` returns; it must not read the Cell handle or logical head directly.
+The helper serializes input consumption and cancels the stream when the body is
+dropped. A custom adapter can call `stream.cancellation().cancel()` from a
+disconnect handler to wake a pending emission.
 
 ## Keep HTTP policy in crab-http-server
 

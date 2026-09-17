@@ -26,6 +26,7 @@ mod receive;
 mod releases;
 mod repository_settings;
 mod server;
+mod state_stream;
 mod statuses;
 mod storage_root;
 mod transfer_admission;
@@ -35,6 +36,7 @@ pub use config::{
     RepositoryMember, StorageConfig,
 };
 pub use server::{probe_storage, serve};
+pub use state_stream::state_observing_body;
 
 /// Returns the resource-derived Cell admission envelope for this process.
 pub fn cell_capacity(config: &Config) -> Result<Vec<u8>> {

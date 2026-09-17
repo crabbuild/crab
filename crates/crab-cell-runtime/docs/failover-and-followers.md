@@ -988,9 +988,12 @@ This narrow API avoids a second speculative queue or stream scheduler. It does
 not weaken the contract: introducing a state-observing body without the phase 8
 gate is a correctness regression, not an optional optimization.
 
-An HTTP/SSE adapter remains a separate delivery item. It must map disconnects to
-`StateStreamCancellation`, preserve per-chunk receipts, and never introduce a
-second stream scheduler or publication queue.
+The server now exposes `crab_http_server::state_observing_body` as the narrow
+HTTP adapter. It consumes one input only after the previous body chunk has
+completed, invokes `CellStateStream::emit` before encoding each chunk, maps
+disconnects and body errors to `StateStreamCancellation`, and owns no queue or
+scheduler of its own. Product routes still choose their media type (SSE or a
+custom chunk format) and must set the corresponding response headers.
 
 Authentication, routing, and malformed-request errors produced before Cell
 execution do not need a Cell durability proof.
@@ -1420,6 +1423,7 @@ crab_cell_node_log_lanes{state="open|degraded|sealed"}
 crab_cell_node_log_recoveries{state="running|waiting"}
 crab_cell_node_log_recovery_seconds
 crab_cell_node_log_recovery_failures_total{reason}
+crab_cell_node_log_rotations_total{result="started|pending|failed|completed"}
 crab_cell_follower_retained_bytes
 crab_cell_session_lease_seconds
 crab_cell_self_fences_total{reason}

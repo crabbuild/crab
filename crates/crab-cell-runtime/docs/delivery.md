@@ -31,7 +31,7 @@ Each layer has one owner and one primary evidence surface.
 | Backup pins | `src/backup.rs`, `crab-ltx::CellReplica::reachable_objects` | runtime pin tests and server create/verify command tests |
 | Immutable retention | `src/retention.rs`, `crab-storage::Store::list_stream` | mark/sweep tests and server maintenance-fence tests |
 | Follower mechanics | `src/follower.rs`, `src/node_log.rs`, `src/node_log_recovery.rs` | verified-frame, object-covered queued-prefix, lost-ACK suffix, torn-tail, dual-proof, and seal/gather tests |
-| State-observing streams | `src/client.rs` | `tests/client.rs`; `CellStateStream` enforces per-output receipts, cancellation, deadlines, and fencing; HTTP/SSE framing remains a server-layer adapter |
+| State-observing streams | `src/client.rs`; `crab-http-server/src/state_stream.rs` | `tests/client.rs`; `CellStateStream` enforces per-output receipts, cancellation, deadlines, and fencing; `state_observing_body` adapts it to one-at-a-time HTTP chunks without a second queue |
 | Product composition | `crab-http-server/src/cells/` | server route, restore, and lifecycle tests |
 
 Celld-style follower durability is connected to product command and schema-

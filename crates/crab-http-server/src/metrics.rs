@@ -27,6 +27,7 @@ const NODE_LOG_LANE_STATE_COUNT: usize = 3;
 const SELF_FENCE_REASON_COUNT: usize = 4;
 const RECOVERY_STATE_COUNT: usize = 2;
 const RECOVERY_FAILURE_REASON_COUNT: usize = 4;
+const NODE_LOG_ROTATION_RESULT_COUNT: usize = 4;
 const DURATION_BUCKETS_SECONDS: [f64; 16] = [
     0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
     600.0,
@@ -46,6 +47,8 @@ const SELF_FENCE_REASON_LABELS: [&str; SELF_FENCE_REASON_COUNT] =
 const RECOVERY_STATE_LABELS: [&str; RECOVERY_STATE_COUNT] = ["running", "waiting"];
 const RECOVERY_FAILURE_REASON_LABELS: [&str; RECOVERY_FAILURE_REASON_COUNT] =
     ["storage", "capacity", "fenced", "other"];
+const NODE_LOG_ROTATION_RESULT_LABELS: [&str; NODE_LOG_ROTATION_RESULT_COUNT] =
+    ["started", "pending", "failed", "completed"];
 const METADATA: Metadata<'static> = Metadata::new(
     "crab_http_server",
     Level::INFO,
@@ -86,6 +89,7 @@ struct MetricsInner {
     node_log_recoveries: [Gauge; RECOVERY_STATE_COUNT],
     node_log_recovery_seconds: Histogram,
     node_log_recovery_failures: [Counter; RECOVERY_FAILURE_REASON_COUNT],
+    node_log_rotations: [Counter; NODE_LOG_ROTATION_RESULT_COUNT],
     catalog_refresh_failures: Counter,
     transfer_admission_rejections: [Counter; TRANSFER_REJECTION_COUNT],
 }
@@ -254,6 +258,12 @@ impl Metrics {
                             "crab_cell_node_log_recovery_failures_total",
                             &[("reason", reason)],
                         ),
+                        &METADATA,
+                    )
+                }),
+                node_log_rotations: NODE_LOG_ROTATION_RESULT_LABELS.map(|result| {
+                    recorder.register_counter(
+                        &key("crab_cell_node_log_rotations_total", &[("result", result)]),
                         &METADATA,
                     )
                 }),
@@ -458,6 +468,24 @@ impl Metrics {
             self.inner.node_log_recovery_failures[index].increment(1);
         }
     }
+
+    pub(crate) fn record_node_log_rotation(&self, result: NodeLogRotationResult) {
+        let index = match result {
+            NodeLogRotationResult::Started => 0,
+            NodeLogRotationResult::Pending => 1,
+            NodeLogRotationResult::Failed => 2,
+            NodeLogRotationResult::Completed => 3,
+        };
+        self.inner.node_log_rotations[index].increment(1);
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum NodeLogRotationResult {
+    Started,
+    Pending,
+    Failed,
+    Completed,
 }
 
 impl MethodMetrics {
@@ -799,6 +827,11 @@ fn describe_metrics(recorder: &impl Recorder) {
     );
     describe_counter(
         recorder,
+        "crab_cell_node_log_rotations_total",
+        "Node-log epoch rotation attempts by bounded result.",
+    );
+    describe_counter(
+        recorder,
         "crab_http_server_catalog_refresh_failures_total",
         "Catalog refresh attempts that failed or moved backwards.",
     );
@@ -900,6 +933,10 @@ mod tests {
             Duration::from_millis(75),
             Some(RecoveryFailureReason::Storage),
         );
+        metrics.record_node_log_rotation(NodeLogRotationResult::Started);
+        metrics.record_node_log_rotation(NodeLogRotationResult::Pending);
+        metrics.record_node_log_rotation(NodeLogRotationResult::Failed);
+        metrics.record_node_log_rotation(NodeLogRotationResult::Completed);
         let observation = metrics.start_request(&Method::GET).response(StatusCode::OK);
         let body = Body::new(ObservedBody::new(Body::from("response"), observation));
         assert_eq!(
@@ -939,6 +976,10 @@ mod tests {
         assert!(
             rendered.contains("crab_cell_node_log_recovery_failures_total{reason=\"storage\"} 1")
         );
+        assert!(rendered.contains("crab_cell_node_log_rotations_total{result=\"started\"} 1"));
+        assert!(rendered.contains("crab_cell_node_log_rotations_total{result=\"pending\"} 1"));
+        assert!(rendered.contains("crab_cell_node_log_rotations_total{result=\"failed\"} 1"));
+        assert!(rendered.contains("crab_cell_node_log_rotations_total{result=\"completed\"} 1"));
         assert!(
             rendered
                 .contains("crab_http_server_admission_available_permits{class=\"git_transfer\"} 3")
