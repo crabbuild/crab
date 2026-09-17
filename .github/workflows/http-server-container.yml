@@ -811,7 +811,7 @@ jobs:
             crates/crab-http-server/tests/qualify_compose_cluster.sh \
             > "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json"
           jq --exit-status \
-            '.version == 2 and
+            '.version == 4 and
              .owner_loss.session_before != .owner_loss.session_after and
              .owner_loss.epoch_after > .owner_loss.epoch_before and
              (.owner_loss.root_before | keys | sort) ==
@@ -828,5 +828,10 @@ jobs:
              .owner_loss.root_continued.digest != .owner_loss.root_before.digest and
              .owner_loss.root_continued.txid > .owner_loss.root_before.txid and
              .owner_loss.root_continued.commit_sequence >
-               .owner_loss.root_before.commit_sequence' \
+               .owner_loss.root_before.commit_sequence and
+             .fleet_only_commit.owner_uncovered_bytes > 0 and
+             .fleet_only_commit.follower_retained_bytes > 0 and
+             .fleet_only_commit.control_before_owner_loss.owner_lease.state == "live" and
+             .fleet_only_commit.control_before_owner_loss.owner_lease.expires_at_ms >
+               .fleet_only_commit.control_before_owner_loss.owner_lease.observed_at_ms' \
             "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json"

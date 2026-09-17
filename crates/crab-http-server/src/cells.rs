@@ -358,7 +358,9 @@ struct RepositoryControlStatus {
     progress: u64,
     state: ControlState,
     owner: Option<RepositoryControlOwner>,
+    owner_lease: Option<RepositoryOwnerLeaseStatus>,
     root: Option<RepositoryControlRoot>,
+    recovery: Option<RepositoryRecoveryStatus>,
     code: String,
     schema: u32,
     next_due_ms: Option<i64>,
@@ -371,11 +373,28 @@ struct RepositoryControlOwner {
 }
 
 #[derive(Serialize)]
+struct RepositoryOwnerLeaseStatus {
+    state: &'static str,
+    observed_at_ms: i64,
+    expires_at_ms: Option<i64>,
+}
+
+#[derive(Serialize)]
 struct RepositoryControlRoot {
     digest: String,
     txid: u64,
     checksum: u64,
     commit_sequence: u64,
+}
+
+#[derive(Serialize)]
+struct RepositoryRecoveryStatus {
+    leader_session: String,
+    log_epoch: u64,
+    manifest_digest: String,
+    first_node_sequence: u64,
+    last_node_sequence: u64,
+    final_commit_sequence: u64,
 }
 
 pub(crate) async fn repository_status(config: &Config, owner: &str, name: &str) -> Result<Vec<u8>> {
@@ -393,11 +412,39 @@ pub(crate) async fn repository_status(config: &Config, owner: &str, name: &str) 
         REPOSITORY_NAMESPACE,
         repository.id.as_bytes(),
     )?;
-    let control = CellAuthority::new(startup.layout)
+    let control = CellAuthority::new(startup.layout.clone())
         .load(target.cell_id())
         .await?
         .ok_or(Error::Config("cataloged repository Cell has no control"))?;
     let control = control.value();
+    let observed_at_ms = unix_now_ms()?;
+    let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
+    let directory = NodeDirectory::new(
+        startup.layout,
+        peer_tls.fleet(),
+        startup.image,
+        startup.registry.release_digest(),
+    );
+    let owner_lease = match control.owner.as_ref() {
+        Some(owner) => {
+            let advertisement = directory
+                .inspect_advertisement(owner.session, observed_at_ms)
+                .await?;
+            let (state, expires_at_ms) = match advertisement {
+                Some(advertisement) if advertisement.expires_at_ms() > observed_at_ms => {
+                    ("live", Some(advertisement.expires_at_ms()))
+                }
+                Some(advertisement) => ("expired", Some(advertisement.expires_at_ms())),
+                None => ("missing", None),
+            };
+            Some(RepositoryOwnerLeaseStatus {
+                state,
+                observed_at_ms,
+                expires_at_ms,
+            })
+        }
+        None => None,
+    };
     let status = RepositoryControlStatus {
         version: 1,
         repository: repository.id,
@@ -411,12 +458,24 @@ pub(crate) async fn repository_status(config: &Config, owner: &str, name: &str) 
             session: status_hex(owner.session.as_bytes()),
             endpoint: owner.endpoint.clone(),
         }),
+        owner_lease,
         root: control.root.as_ref().map(|root| RepositoryControlRoot {
             digest: status_hex(root.digest.as_bytes()),
             txid: root.txid,
             checksum: root.checksum,
             commit_sequence: root.commit_sequence,
         }),
+        recovery: control
+            .recovery
+            .as_ref()
+            .map(|recovery| RepositoryRecoveryStatus {
+                leader_session: status_hex(recovery.leader_session.as_bytes()),
+                log_epoch: recovery.log_epoch,
+                manifest_digest: status_hex(recovery.manifest_digest.as_bytes()),
+                first_node_sequence: recovery.first_node_sequence,
+                last_node_sequence: recovery.last_node_sequence,
+                final_commit_sequence: recovery.final_commit_sequence,
+            }),
         code: status_hex(control.code.as_bytes()),
         schema: control.schema,
         next_due_ms: control.next_due_ms,

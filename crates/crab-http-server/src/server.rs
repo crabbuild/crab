@@ -1485,6 +1485,11 @@ async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
         cell_retained_capacity_bytes: cell_runtime.retained_capacity_bytes(),
         cell_local_disk_reserved_bytes: cell_runtime.local_disk_reserved_bytes(),
         cell_local_disk_capacity_bytes: cell_runtime.local_disk_capacity_bytes(),
+        cell_node_log_uncovered_bytes: cell_runtime.unpublished_node_log_bytes(),
+        cell_follower_retained_bytes: server
+            .follower_store
+            .as_ref()
+            .map_or(0, crab_cell_runtime::FollowerStore::retained_bytes),
         admission_available: [
             server.admission.available_permits(),
             server.transfer_admission.available_permits(),

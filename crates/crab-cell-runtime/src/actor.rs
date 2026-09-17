@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -61,6 +61,7 @@ pub struct CellRuntimeStats {
     retained_capacity_bytes: usize,
     local_disk_reserved_bytes: u64,
     local_disk_capacity_bytes: u64,
+    unpublished_node_log_bytes: u64,
 }
 
 impl CellRuntimeStats {
@@ -99,6 +100,12 @@ impl CellRuntimeStats {
     pub const fn local_disk_capacity_bytes(self) -> u64 {
         self.local_disk_capacity_bytes
     }
+
+    /// Returns owner bytes submitted to node logs but not covered by object roots.
+    #[must_use]
+    pub const fn unpublished_node_log_bytes(self) -> u64 {
+        self.unpublished_node_log_bytes
+    }
 }
 
 /// New capability and publication receipt returned by one schema migration.
@@ -117,6 +124,7 @@ pub(super) struct RuntimeInner {
     replica_host: crab_ltx::Host,
     node_lease: Arc<RuntimeNodeLease>,
     node_durability: Arc<OnceLock<NodeDurabilityBinding>>,
+    unpublished_node_log_bytes: Arc<AtomicU64>,
 }
 
 enum RuntimeNodeLease {
@@ -211,7 +219,13 @@ impl CellRuntime {
         let runtime = tokio::runtime::Handle::try_current().map_err(Error::RuntimeStart)?;
         let (sender, receiver) = mpsc::channel(INGRESS_REQUESTS);
         let node_lease = Arc::new(node_lease);
-        runtime.spawn(run(receiver, pool.clone(), Arc::clone(&node_lease)));
+        let unpublished_node_log_bytes = Arc::new(AtomicU64::new(0));
+        runtime.spawn(run(
+            receiver,
+            pool.clone(),
+            Arc::clone(&node_lease),
+            Arc::clone(&unpublished_node_log_bytes),
+        ));
         Ok(Self {
             inner: Arc::new(RuntimeInner {
                 sender,
@@ -223,6 +237,7 @@ impl CellRuntime {
                 replica_host,
                 node_lease,
                 node_durability: Arc::new(OnceLock::new()),
+                unpublished_node_log_bytes,
             }),
         })
     }
@@ -294,6 +309,10 @@ impl CellRuntime {
             retained_capacity_bytes: self.inner.node_retained_bytes,
             local_disk_reserved_bytes: self.inner.replica_host.local_disk_used(),
             local_disk_capacity_bytes: self.inner.replica_host.local_disk_capacity(),
+            unpublished_node_log_bytes: self
+                .inner
+                .unpublished_node_log_bytes
+                .load(Ordering::Acquire),
         }
     }
 
@@ -1080,6 +1099,7 @@ enum TaskResult {
         result: crate::Result<MigrationOutcome>,
         fenced: bool,
         preserve_owner: bool,
+        unpublished_bytes: u64,
     },
     Renewed {
         cell: CellId,
@@ -1106,6 +1126,7 @@ async fn run(
     mut receiver: mpsc::Receiver<Message>,
     pool: SqlWorkerPool,
     node_lease: Arc<RuntimeNodeLease>,
+    unpublished_node_log_bytes: Arc<AtomicU64>,
 ) {
     let mut cells = HashMap::<CellId, ActiveCell>::new();
     let mut transitioning = HashSet::<CellId>::new();
@@ -1139,6 +1160,7 @@ async fn run(
                 &mut tasks,
                 &mut shutdown,
                 &node_lease,
+                &unpublished_node_log_bytes,
             );
             continue;
         }
@@ -1169,7 +1191,7 @@ async fn run(
                     }
                     while let Some(result) = tasks.join_next().await {
                         let Ok(result) = result else { return; };
-                        handle_task(result, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown, &node_lease);
+                        handle_task(result, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown, &node_lease, &unpublished_node_log_bytes);
                     }
                     break;
                 };
@@ -1179,7 +1201,7 @@ async fn run(
                 let Some(Ok(result)) = result else {
                     return;
                 };
-                handle_task(result, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown, &node_lease);
+                handle_task(result, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown, &node_lease, &unpublished_node_log_bytes);
             }
             _ = renewal_tick.tick() => {
                 start_due_renewals(&pool, &mut cells, &mut tasks);
@@ -1641,6 +1663,7 @@ async fn execute_migration(
     interrupt: Arc<crab_ltx::rusqlite::InterruptHandle>,
 ) -> TaskResult {
     let mut preserve_owner = false;
+    let mut unpublished_bytes = 0;
     let deadline = std::time::Instant::now() + SQL_WALL_DEADLINE;
     let operation = pool.migrate(migration.cell, migration.plan, migration.now_ms, deadline);
     tokio::pin!(operation);
@@ -1659,6 +1682,7 @@ async fn execute_migration(
                 result: Err(Error::Deadline),
                 fenced: true,
                 preserve_owner: false,
+                unpublished_bytes: 0,
             };
         }
     };
@@ -1669,6 +1693,7 @@ async fn execute_migration(
                 Err(error) => Err(error),
                 Ok(durability) => {
                     let node_logged = durability.is_some();
+                    let retained_bytes = pending.retained_bytes();
                     let cell = migration.cell;
                     let early_outcome = MigrationOutcome {
                         code: pending.code(),
@@ -1716,6 +1741,9 @@ async fn execute_migration(
                         None => object.await,
                     };
                     preserve_owner = node_logged && result.is_err();
+                    if preserve_owner {
+                        unpublished_bytes = retained_bytes;
+                    }
                     result
                 }
             }
@@ -1733,6 +1761,7 @@ async fn execute_migration(
         result,
         fenced,
         preserve_owner,
+        unpublished_bytes,
     }
 }
 
@@ -2074,6 +2103,7 @@ fn handle_task(
     tasks: &mut JoinSet<TaskResult>,
     shutdown: &mut Option<ShutdownState>,
     node_lease: &RuntimeNodeLease,
+    unpublished_node_log_bytes: &AtomicU64,
 ) {
     match result {
         TaskResult::Activated {
@@ -2200,6 +2230,7 @@ fn handle_task(
                     });
                     if durability.is_some() {
                         active.unpublished_node_logs += 1;
+                        unpublished_node_log_bytes.fetch_add(retained_bytes, Ordering::AcqRel);
                     }
                     start_publication(cell, active, pool, tasks);
                     let pool = pool.clone();
@@ -2258,6 +2289,7 @@ fn handle_task(
             active.publication_bytes = active.publication_bytes.saturating_sub(retained_bytes);
             if node_logged && object_published {
                 active.unpublished_node_logs = active.unpublished_node_logs.saturating_sub(1);
+                subtract_unpublished_bytes(unpublished_node_log_bytes, retained_bytes);
             }
             active.fenced |= fenced || result.is_err();
             if active.fenced {
@@ -2318,6 +2350,7 @@ fn handle_task(
             mut result,
             mut fenced,
             preserve_owner,
+            unpublished_bytes,
         } => {
             let Some(active) = cells.get_mut(&cell) else {
                 send_migration_reply(&mut migration, Err(Error::CellNotActive));
@@ -2332,6 +2365,7 @@ fn handle_task(
             active.publisher = Some(*publisher);
             if preserve_owner {
                 active.unpublished_node_logs = active.unpublished_node_logs.saturating_add(1);
+                unpublished_node_log_bytes.fetch_add(unpublished_bytes, Ordering::AcqRel);
             }
             active.fenced |= fenced;
             match result {
@@ -2402,6 +2436,12 @@ fn handle_task(
             }
         }
     }
+}
+
+fn subtract_unpublished_bytes(total: &AtomicU64, bytes: u64) {
+    let _ = total.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        Some(current.saturating_sub(bytes))
+    });
 }
 
 fn fence_active(active: &mut ActiveCell) {

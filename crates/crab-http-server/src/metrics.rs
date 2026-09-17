@@ -56,6 +56,8 @@ struct MetricsInner {
     cell_retained_capacity_bytes: Gauge,
     cell_local_disk_reserved_bytes: Gauge,
     cell_local_disk_capacity_bytes: Gauge,
+    cell_node_log_uncovered_bytes: Gauge,
+    cell_follower_retained_bytes: Gauge,
     catalog_refresh_failures: Counter,
     transfer_admission_rejections: [Counter; TRANSFER_REJECTION_COUNT],
 }
@@ -87,6 +89,8 @@ pub(crate) struct RuntimeSnapshot {
     pub(crate) cell_retained_capacity_bytes: usize,
     pub(crate) cell_local_disk_reserved_bytes: u64,
     pub(crate) cell_local_disk_capacity_bytes: u64,
+    pub(crate) cell_node_log_uncovered_bytes: u64,
+    pub(crate) cell_follower_retained_bytes: u64,
     pub(crate) admission_available: [usize; ADMISSION_COUNT],
     pub(crate) admission_capacity: [usize; ADMISSION_COUNT],
 }
@@ -160,6 +164,14 @@ impl Metrics {
                     ),
                     &METADATA,
                 ),
+                cell_node_log_uncovered_bytes: recorder.register_gauge(
+                    &Key::from_static_name("crab_cell_node_log_uncovered_bytes"),
+                    &METADATA,
+                ),
+                cell_follower_retained_bytes: recorder.register_gauge(
+                    &Key::from_static_name("crab_cell_follower_retained_bytes"),
+                    &METADATA,
+                ),
                 catalog_refresh_failures: recorder.register_counter(
                     &Key::from_static_name("crab_http_server_catalog_refresh_failures_total"),
                     &METADATA,
@@ -231,6 +243,12 @@ impl Metrics {
         self.inner
             .cell_local_disk_capacity_bytes
             .set(snapshot.cell_local_disk_capacity_bytes as f64);
+        self.inner
+            .cell_node_log_uncovered_bytes
+            .set(snapshot.cell_node_log_uncovered_bytes as f64);
+        self.inner
+            .cell_follower_retained_bytes
+            .set(snapshot.cell_follower_retained_bytes as f64);
         for (index, admission) in self.inner.admission.iter().enumerate() {
             admission
                 .available
@@ -536,6 +554,16 @@ fn describe_metrics(recorder: &impl Recorder) {
         "crab_http_server_cell_runtime_local_disk_capacity_bytes",
         "Startup admission ceiling for local Cell working bytes.",
     );
+    describe_gauge(
+        recorder,
+        "crab_cell_node_log_uncovered_bytes",
+        "Owner LTX bytes retained in node logs but not yet covered by object roots.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_cell_follower_retained_bytes",
+        "Verified follower node-log bytes retained on this node.",
+    );
     describe_counter(
         recorder,
         "crab_http_server_catalog_refresh_failures_total",
@@ -608,6 +636,8 @@ mod tests {
             cell_retained_capacity_bytes: 4_096,
             cell_local_disk_reserved_bytes: 0,
             cell_local_disk_capacity_bytes: 8_192,
+            cell_node_log_uncovered_bytes: 128,
+            cell_follower_retained_bytes: 256,
             admission_available: [16, 3, 8, 1],
             admission_capacity: [16, 4, 8, 2],
         }
@@ -644,6 +674,8 @@ mod tests {
         assert!(rendered.contains("crab_http_server_cell_runtime_retained_capacity_bytes 4096"));
         assert!(rendered.contains("crab_http_server_cell_runtime_local_disk_reserved_bytes 0"));
         assert!(rendered.contains("crab_http_server_cell_runtime_local_disk_capacity_bytes 8192"));
+        assert!(rendered.contains("crab_cell_node_log_uncovered_bytes 128"));
+        assert!(rendered.contains("crab_cell_follower_retained_bytes 256"));
         assert!(
             rendered
                 .contains("crab_http_server_admission_available_permits{class=\"git_transfer\"} 3")

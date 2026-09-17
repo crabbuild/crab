@@ -131,6 +131,9 @@ sequence_before="$(jq --raw-output '.root.commit_sequence' <<<"$control_before")
 root_before_state="$(jq --compact-output '.root' <<<"$control_before")"
 jq --exit-status \
   '.state == "serving" and .owner.endpoint == "https://localhost:8889/" and
+   .owner_lease.state == "live" and
+   .owner_lease.expires_at_ms > .owner_lease.observed_at_ms and
+   .recovery == null and
    .root.commit_sequence >= 1' <<<"$control_before" >/dev/null
 
 log_ready=false
@@ -185,6 +188,20 @@ jq --exit-status \
    .advertisement.log.active == true and
    (.advertisement.log.member_nodes | length) == 2' \
   <<<"$node_fleet_only" >/dev/null
+metrics_owner_fleet_only="$("${compose[@]}" exec -T server-b crab-http-server \
+  --config /etc/crab/server.toml cells metrics)"
+metrics_follower_fleet_only="$("${compose[@]}" exec -T server-c crab-http-server \
+  --config /etc/crab/server.toml cells metrics)"
+owner_uncovered_bytes="$(awk \
+  '$1 == "crab_cell_node_log_uncovered_bytes" { print $2 }' \
+  <<<"$metrics_owner_fleet_only")"
+follower_retained_bytes="$(awk \
+  '$1 == "crab_cell_follower_retained_bytes" { print $2 }' \
+  <<<"$metrics_follower_fleet_only")"
+awk '$1 == "crab_cell_node_log_uncovered_bytes" && $2 + 0 > 0 { found = 1 }
+     END { exit !found }' <<<"$metrics_owner_fleet_only"
+awk '$1 == "crab_cell_follower_retained_bytes" && $2 + 0 > 0 { found = 1 }
+     END { exit !found }' <<<"$metrics_follower_fleet_only"
 
 "${compose[@]}" kill --signal KILL server-b >/dev/null
 "${compose[@]}" rm --force --stop server-b >/dev/null
@@ -242,6 +259,9 @@ jq --exit-status \
   --argjson sequence_before "$sequence_before" \
   '.state == "serving" and .owner.endpoint == "https://localhost:8989/" and
    .owner.session != $session_before and .epoch > $epoch_before and
+   .owner_lease.state == "live" and
+   .owner_lease.expires_at_ms > .owner_lease.observed_at_ms and
+   .recovery == null and
    .root.commit_sequence > $sequence_before' <<<"$control_after" >/dev/null
 
 for _ in $(seq 1 6); do
@@ -273,6 +293,9 @@ jq --exit-status \
   --arg session_after "$session_after" \
   --argjson sequence_before "$sequence_before" \
   '.owner.session == $session_after and
+   .owner_lease.state == "live" and
+   .owner_lease.expires_at_ms > .owner_lease.observed_at_ms and
+   .recovery == null and
    .root.commit_sequence > $sequence_before' \
   <<<"$control_continued" >/dev/null
 
@@ -295,6 +318,9 @@ jq --exit-status \
   --argjson sequence_continued "$sequence_continued" \
   '.state == "serving" and .owner.session == $session_after and
    .owner.endpoint == "https://localhost:8989/" and .epoch == $epoch_after and
+   .owner_lease.state == "live" and
+   .owner_lease.expires_at_ms > .owner_lease.observed_at_ms and
+   .recovery == null and
    .root.commit_sequence == $sequence_continued' \
   <<<"$control_after_rejoin" >/dev/null
 
@@ -315,8 +341,10 @@ jq --null-input \
   --argjson fleet_only_response "$fleet_only_response" \
   --argjson restored_labels "$restored_labels" \
   --argjson control_fleet_only "$control_fleet_only" \
+  --argjson owner_uncovered_bytes "$owner_uncovered_bytes" \
+  --argjson follower_retained_bytes "$follower_retained_bytes" \
   '{
-    version: 3,
+    version: 4,
     project: $project,
     owner_loss: {
       session_before: $session_before,
@@ -333,6 +361,8 @@ jq --null-input \
       response: $fleet_only_response,
       restored_labels: $restored_labels,
       control_before_owner_loss: $control_fleet_only,
+      owner_uncovered_bytes: $owner_uncovered_bytes,
+      follower_retained_bytes: $follower_retained_bytes,
       immutable_object_put_rejected: true,
       owner_disk_removed_before_policy_restore: true
     },

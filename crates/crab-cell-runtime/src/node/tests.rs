@@ -223,6 +223,28 @@ async fn stable_follower_node_resolves_a_new_session_for_old_log_recovery() {
 }
 
 #[tokio::test]
+async fn operational_inspection_preserves_expired_lease_evidence_without_reviving_it() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    let session = SessionId::from_bytes([8; 16]);
+    directory
+        .create(advertisement_for(session, &key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+
+    let expired_at = NOW_MS + 10_000;
+    assert!(!directory.is_live(session, expired_at).await.unwrap());
+    let inspected = directory
+        .inspect_advertisement(session, expired_at)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(inspected.session(), session);
+    assert_eq!(inspected.expires_at_ms(), expired_at);
+    assert!(directory.load(session, expired_at).await.is_err());
+}
+
+#[tokio::test]
 async fn overlapping_live_sessions_for_one_node_fail_closed() {
     let key = SigningKey::from_bytes(&[7; 32]);
     let directory = directory();

@@ -529,6 +529,27 @@ impl NodeDirectory {
         }))
     }
 
+    /// Inspects one signed advertisement without requiring its lease to remain live.
+    ///
+    /// This is an operational read only: callers must use [`Self::load`] or
+    /// [`Self::is_live`] for admission and takeover decisions.
+    pub async fn inspect_advertisement(
+        &self,
+        session: SessionId,
+        now_ms: i64,
+    ) -> Result<Option<NodeAdvertisement>> {
+        let Some((advertisement, _)) = self.load_canonical(session).await? else {
+            return Ok(None);
+        };
+        advertisement.validate_shape()?;
+        advertisement.verify_signature()?;
+        self.validate_scope(&advertisement)?;
+        if advertisement.issued_at_ms > now_ms.saturating_add(MAX_CLOCK_SKEW_MS) {
+            return Err(Error::Node("advertisement issue time is in the future"));
+        }
+        Ok(Some(advertisement))
+    }
+
     /// Reports whether an exact canonical session is currently live.
     ///
     /// Missing and expired sessions return `false`. Malformed, misplaced, or

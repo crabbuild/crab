@@ -10,7 +10,7 @@ before a successor opens SQLite.
 | Content type | Low-level target design |
 | Audience | `crab-ltx`, `crab-cell-runtime`, and `crab-http-server` implementers |
 | Goal | Define the persistence, wire, gating, recovery, lifecycle, and proof contracts needed for Celld-style follower durability |
-| Status | Failover correctness implemented; bounded hot-Cell pipelining and live multi-node qualification remain |
+| Status | Non-streaming failover, bounded hot-Cell pipelining, and Compose owner-loss qualification implemented; target-load and extended fault qualification remain |
 | Reference | Celld commit `10cb1303dac710dcb3b557e318e08c855261f68b` |
 
 [Back to the Cell runtime index](README.md)
@@ -1274,13 +1274,17 @@ crab_cell_self_fences_total{reason}
 Cell ID, repository name, request ID, session ID, and object digest belong in
 structured logs or bounded administrative queries, never metric labels.
 
-`cells status --owner OWNER --name REPOSITORY --json` adds:
+`cells status --owner OWNER --name REPOSITORY --json` reports from persistent
+control and signed node-session state:
 
 - Current owner session and Cell epoch
 - Owner-session lease state and expiry
-- Published and logical commit sequences when queried on the owner
 - Pending recovery overlay, if any
-- Last durability source
+
+The published commit sequence is the control root. Logical commit sequence and
+last durability source are live actor state; they require a future
+owner-introspection channel and must not be guessed by an out-of-process CLI or
+derived from the node-log sequence.
 
 `cells node --session SESSION --json` reports the signed advertisement's log
 state, epoch, stable member node IDs, activation bit, tiered sequence, follower

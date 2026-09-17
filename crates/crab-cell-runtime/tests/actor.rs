@@ -790,6 +790,7 @@ async fn follower_proofs_advance_logical_head_and_bound_the_object_backlog() {
         .unwrap()
         .unwrap();
     assert_eq!(blocked.value().root.as_ref().unwrap().commit_sequence, 0);
+    assert!(runtime.stats().unpublished_node_log_bytes() > 0);
 
     pausing.release();
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), &mut sixty_fifth)
@@ -801,6 +802,7 @@ async fn follower_proofs_advance_logical_head_and_bound_the_object_backlog() {
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(runtime.stats().unpublished_node_log_bytes(), 0);
     runtime.shutdown().await.unwrap();
     let released = CellAuthority::new(fixture.layout.clone())
         .load(fixture.target.cell_id())
@@ -915,6 +917,7 @@ async fn fleet_proof_retains_owner_when_object_publication_fails_first() {
     assert_eq!(fenced.value().state, ControlState::Serving);
     assert_eq!(fenced.value().owner.as_ref().unwrap().session, session);
     assert_eq!(fenced.value().root.as_ref().unwrap().commit_sequence, 0);
+    assert!(runtime.stats().unpublished_node_log_bytes() > 0);
     store.allow_puts();
     assert!(matches!(
         runtime.shutdown().await,

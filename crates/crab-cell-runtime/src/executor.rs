@@ -154,6 +154,15 @@ impl PendingMigration {
     pub const fn cuts(&self) -> &CaptureBatch {
         &self.cuts
     }
+
+    #[must_use]
+    pub(crate) fn retained_bytes(&self) -> u64 {
+        self.cuts
+            .segments
+            .iter()
+            .map(|segment| segment.info().size_bytes)
+            .sum()
+    }
 }
 
 /// Durably proven identity of one completed schema migration.
