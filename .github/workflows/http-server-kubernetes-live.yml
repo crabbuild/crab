@@ -51,6 +51,14 @@ on:
         description: Dedicated qualification repository name
         required: true
         type: string
+      node_profile:
+        description: Resource profile every qualified Pod must match
+        required: true
+        type: choice
+        options:
+          - small
+          - medium
+          - large
       approve_rollout:
         description: I approve a write and rolling restart of this deployment
         required: true
@@ -354,6 +362,7 @@ jobs:
           CRAB_HTTP_SERVER_EXPECTED_IMAGE: ${{ steps.release-record.outputs.expected_image }}
           CRAB_HTTP_SERVER_RELEASE_TAG: ${{ steps.release.outputs.tag }}
           CRAB_HTTP_SERVER_SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+          CRAB_HTTP_SERVER_NODE_PROFILE: ${{ inputs.node_profile }}
           CRAB_HTTP_SERVER_APPROVE_ROLLOUT: "true"
           CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS: "true"
         run: |
@@ -373,6 +382,7 @@ jobs:
           ORIGIN: ${{ inputs.origin }}
           OWNER: ${{ inputs.owner }}
           REPOSITORY: ${{ inputs.repository }}
+          NODE_PROFILE: ${{ inputs.node_profile }}
           EXPECTED_CHART: ${{ steps.release-record.outputs.expected_chart }}
           EXPECTED_IMAGE: ${{ steps.release-record.outputs.expected_image }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
@@ -390,9 +400,13 @@ jobs:
             --arg image "$EXPECTED_IMAGE" \
             --arg release_tag "$RELEASE_TAG" \
             --arg source_sha "$SOURCE_SHA" \
-            '.schema == 9 and .provider == $provider and
+            --arg node_profile "$NODE_PROFILE" \
+            '.schema == 10 and .provider == $provider and
              .namespace == $namespace and .deployment == $deployment and
              .origin == $origin and .repository == $repository and
+             .node_profile == $node_profile and
+             (.scratch_limit_bytes | type) == "number" and
+             .scratch_limit_bytes > 0 and
              .image == $image and .chart == $chart and
              .qualification_source.release_tag == $release_tag and
              .qualification_source.commit == $source_sha and
@@ -410,6 +424,7 @@ jobs:
              .checks.workload_identity_only == true and
              .checks.management_network_isolation == true and
              .checks.capacity_envelopes == true and
+             .checks.node_profile_resources == true and
              .checks.cross_replica_git == true and
              .checks.cross_replica_lfs == true and
              .checks.durable_lfs_lock == true and
@@ -449,11 +464,16 @@ jobs:
              (.payload_sha256 | test("^[0-9a-f]{64}$"))' \
             "$receipt" >/dev/null
           capacity_validator=crates/crab-http-server/deploy/helm/crab-http-server/qualification/validate-capacity-envelope.jq
+          profile_validator=crates/crab-http-server/deploy/helm/crab-http-server/qualification/validate-node-profile.jq
           for phase in before_traffic after_rollout after_owner_loss; do
             phase_label="${phase//_/-}"
             jq --arg phase "$phase" '.capacity[$phase]' "$receipt" \
               | jq --exit-status --arg phase "$phase_label" \
                   --from-file "$capacity_validator" >/dev/null
+            jq --arg phase "$phase" '.capacity[$phase]' "$receipt" \
+              | jq --exit-status --arg profile "$NODE_PROFILE" \
+                  --argjson disk_limit_bytes "$(jq '.scratch_limit_bytes' "$receipt")" \
+                  --from-file "$profile_validator" >/dev/null
           done
 
       - name: Attest the qualification receipt

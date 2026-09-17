@@ -178,16 +178,22 @@ to a fleet member during takeover qualification.
 
 The capacity command with `--live` reads the startup envelope retained by the
 running server: process memory limit, free local disk, file descriptor limit,
-CPU-derived job credits, and the resulting admission budgets. Without `--live`,
-it calculates a preflight envelope for the short-lived command process instead.
-Neither mode claims a throughput result. Capture the live report before every
-capacity run and compare it with the node-wide gauges during the workload.
+the configured local-disk limit, CPU-derived job credits, and the resulting
+admission budgets. `disk_capacity_bytes` is the smaller of that limit and the
+backing filesystem total. The limit is Crab's admission ceiling and, in the
+Helm deployment, the same byte count configures `emptyDir.sizeLimit`. Without
+`--live`, the command calculates a preflight envelope for its short-lived
+process instead. Neither mode claims a throughput result. Capture the live
+report before every capacity run and compare it with the node-wide gauges
+during the workload.
 
 ```json
 {
   "version": 1,
   "resources": {
     "memory_bytes": 2147483648,
+    "disk_limit_bytes": 64424509440,
+    "disk_capacity_bytes": 64424509440,
     "free_disk_bytes": 53687091200,
     "available_file_descriptors": 1048570,
     "job_credits": 2

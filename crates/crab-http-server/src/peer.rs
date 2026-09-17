@@ -86,6 +86,7 @@ pub(crate) struct NodePublisher {
     release: Digest,
     module_digests: Vec<Digest>,
     data_dir: PathBuf,
+    local_disk_limit_bytes: u64,
     scheduler: crate::cells::SchedulerStatus,
     follower_store: Option<crab_cell_runtime::FollowerStore>,
     lease: OnceLock<crab_cell_runtime::NodeLeaseGuard>,
@@ -95,6 +96,8 @@ pub(crate) struct NodePublisher {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LocalResources {
     pub(crate) memory_bytes: u64,
+    pub(crate) disk_limit_bytes: u64,
+    pub(crate) disk_capacity_bytes: u64,
     pub(crate) free_disk_bytes: u64,
     pub(crate) available_file_descriptors: usize,
     pub(crate) job_credits: usize,
@@ -117,6 +120,7 @@ impl NodePublisher {
         release: Digest,
         module_digests: Vec<Digest>,
         data_dir: PathBuf,
+        local_disk_limit_bytes: u64,
         scheduler: crate::cells::SchedulerStatus,
     ) -> crate::Result<Self> {
         std::fs::create_dir_all(&data_dir)?;
@@ -140,6 +144,7 @@ impl NodePublisher {
             release,
             module_digests,
             data_dir,
+            local_disk_limit_bytes,
             scheduler,
             follower_store: None,
             lease: OnceLock::new(),
@@ -200,7 +205,7 @@ impl NodePublisher {
     }
 
     pub(crate) fn local_resources(&self) -> crate::Result<LocalResources> {
-        local_resources(&self.data_dir)
+        local_resources(&self.data_dir, self.local_disk_limit_bytes)
     }
 
     pub(crate) async fn recruit_node_durability(
@@ -360,7 +365,11 @@ impl NodePublisher {
                     .map_or(0, |_| crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION),
             }
         } else {
-            node_capacity(&self.data_dir, self.follower_store.as_ref())?
+            node_capacity(
+                &self.data_dir,
+                self.local_disk_limit_bytes,
+                self.follower_store.as_ref(),
+            )?
         };
         Ok(NodeAdvertisement::sign(
             self.node,
@@ -1022,12 +1031,13 @@ fn remaining_timeout(started: Instant, original_ms: u32) -> crab_cell_runtime::R
 
 fn node_capacity(
     data_dir: &Path,
+    local_disk_limit_bytes: u64,
     follower_store: Option<&crab_cell_runtime::FollowerStore>,
 ) -> crate::Result<NodeCapacity> {
     let mut system = sysinfo::System::new();
     system.refresh_memory();
     let free_memory_bytes = effective_memory_available(system.available_memory());
-    let free_disk_bytes = fs4::available_space(data_dir)?;
+    let free_disk_bytes = fs4::available_space(data_dir)?.min(local_disk_limit_bytes);
     let job_credits = std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1)
@@ -1047,7 +1057,10 @@ fn node_capacity(
     })
 }
 
-pub(crate) fn local_resources(data_dir: &Path) -> crate::Result<LocalResources> {
+pub(crate) fn local_resources(
+    data_dir: &Path,
+    local_disk_limit_bytes: u64,
+) -> crate::Result<LocalResources> {
     let mut system = sysinfo::System::new();
     system.refresh_memory();
     let pid = sysinfo::get_current_pid()
@@ -1064,9 +1077,13 @@ pub(crate) fn local_resources(data_dir: &Path) -> crate::Result<LocalResources> 
     ))?;
     // Startup budgets use the stable process limit. Reusing advertised free
     // memory would make transient boot load permanently shrink Cell admission.
+    let disk = fs4::statvfs(data_dir)?;
+    let disk_capacity_bytes = disk.total_space().min(local_disk_limit_bytes);
     Ok(LocalResources {
         memory_bytes: effective_memory_limit(system.total_memory()),
-        free_disk_bytes: fs4::available_space(data_dir)?,
+        disk_limit_bytes: local_disk_limit_bytes,
+        disk_capacity_bytes,
+        free_disk_bytes: disk.available_space().min(disk_capacity_bytes),
         available_file_descriptors: file_limit.saturating_sub(open_files),
         job_credits: std::thread::available_parallelism()
             .map(usize::from)
@@ -1345,12 +1362,15 @@ mod tests {
     #[test]
     fn local_resources_include_process_file_capacity() {
         let directory = TempDir::new().unwrap();
-        let resources = local_resources(directory.path()).unwrap();
+        let resources = local_resources(directory.path(), 32 * 1024 * 1024 * 1024).unwrap();
         assert!(
             resources.memory_bytes > 0
                 && resources.free_disk_bytes > 0
                 && resources.available_file_descriptors > 0
         );
+        assert_eq!(resources.disk_limit_bytes, 32 * 1024 * 1024 * 1024);
+        assert!(resources.disk_capacity_bytes <= resources.disk_limit_bytes);
+        assert!(resources.free_disk_bytes <= resources.disk_capacity_bytes);
     }
 
     fn repository() -> RepositoryConfig {
@@ -1677,6 +1697,7 @@ mod tests {
             release,
             vec![Digest::from_bytes([16; 32])],
             data_dir.path().into(),
+            32 * 1024 * 1024 * 1024,
             crate::cells::SchedulerStatus::new(now_ms().unwrap()).unwrap(),
         )
         .unwrap();
@@ -1729,6 +1750,7 @@ mod tests {
             release,
             vec![Digest::from_bytes([16; 32])],
             data_dir.path().into(),
+            32 * 1024 * 1024 * 1024,
             crate::cells::SchedulerStatus::new(now_ms().unwrap()).unwrap(),
         )
         .unwrap();
@@ -1746,6 +1768,7 @@ mod tests {
                 release,
                 vec![Digest::from_bytes([16; 32])],
                 data_dir.path().into(),
+                32 * 1024 * 1024 * 1024,
                 crate::cells::SchedulerStatus::new(now_ms().unwrap()).unwrap(),
             )
             .is_err()

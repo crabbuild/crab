@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname -- "$0")" && pwd)"
 validator="${script_dir}/validate-capacity-envelope.jq"
+profile_validator="${script_dir}/validate-node-profile.jq"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/crab-capacity-contract.XXXXXX")"
 trap 'rm -rf -- "$work_dir"' EXIT
 valid="${work_dir}/valid.json"
@@ -20,6 +21,8 @@ jq --null-input '[
     version: 1,
     resources: {
       memory_bytes: 8589934592,
+      disk_limit_bytes: 128849018880,
+      disk_capacity_bytes: 128849018880,
       free_disk_bytes: 107374182400,
       available_file_descriptors: 1048576,
       job_credits: 8
@@ -53,6 +56,17 @@ jq --null-input '[
 })' > "$valid"
 
 jq --exit-status --arg phase before-traffic --from-file "$validator" "$valid" >/dev/null
+jq --exit-status --arg profile medium --argjson disk_limit_bytes 128849018880 \
+  --from-file "$profile_validator" "$valid" >/dev/null
+
+for profile in small large invalid; do
+  if jq --exit-status --arg profile "$profile" \
+      --argjson disk_limit_bytes 128849018880 \
+      --from-file "$profile_validator" "$valid" >/dev/null; then
+    echo "node profile validator accepted ${profile} resources as medium" >&2
+    exit 1
+  fi
+done
 
 reject() {
   local name="$1"
@@ -70,6 +84,10 @@ reject "a reused Pod UID" '.[1].pod_uid = .[0].pod_uid'
 reject "an invalid Pod UID" '.[0].pod_uid = "pod-uid"'
 reject "a mismatched phase" '.[0].phase = "after-rollout"'
 reject "zero active Cell capacity" '.[0].envelope.admission.active_cells = 0'
+reject "free disk above total disk" \
+  '.[0].envelope.resources.free_disk_bytes = 128849018881'
+reject "effective disk above configured limit" \
+  '.[0].envelope.resources.disk_capacity_bytes = 128849018881'
 reject "dirty jobs above blocking jobs" \
   '.[0].envelope.admission.dirty_jobs = 9'
 reject "recovery jobs above dirty jobs" \
@@ -90,3 +108,24 @@ reject "local disk reservations above capacity" \
   '.[0].metrics.local_disk_reserved_bytes = 64424509441'
 reject "a local disk capacity outside the envelope" \
   '.[0].metrics.local_disk_capacity_bytes = 64424509439'
+
+jq '.[0].envelope.resources.job_credits = 3' "$valid" > "$invalid"
+if jq --exit-status --arg profile medium --argjson disk_limit_bytes 128849018880 \
+    --from-file "$profile_validator" "$invalid" >/dev/null; then
+  echo "node profile validator accepted too few CPU credits" >&2
+  exit 1
+fi
+
+if jq --exit-status --arg profile medium --argjson disk_limit_bytes 107374182400 \
+    --from-file "$profile_validator" "$valid" >/dev/null; then
+  echo "node profile validator accepted a report above the mounted disk limit" >&2
+  exit 1
+fi
+
+jq 'map(.envelope.resources.disk_capacity_bytes = 85899345920 |
+        .envelope.resources.free_disk_bytes = 75161927680)' "$valid" > "$invalid"
+if jq --exit-status --arg profile medium --argjson disk_limit_bytes 128849018880 \
+    --from-file "$profile_validator" "$invalid" >/dev/null; then
+  echo "node profile validator accepted an undersized backing filesystem" >&2
+  exit 1
+fi

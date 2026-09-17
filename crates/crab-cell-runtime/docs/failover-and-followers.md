@@ -812,6 +812,21 @@ This is an intentional throughput-versus-complexity decision:
 | Multiple publishers, branch heads, or an unbounded publication queue | More speculative concurrency | Reordering, unbounded recovery state, and ambiguous CAS ownership | Rejected |
 | Let a stream follow the moving logical head without per-chunk gates | Low-latency live output | Bytes could escape after lease loss or observe state newer than the stream's proof | Rejected |
 
+#### Revisit result: keep the bounded pipeline
+
+The dual-watermark pipeline remains the best Crab trade-off and is implemented,
+so it is not a remaining delivery item. It pays for one extra monotonic
+watermark and one bounded queue to remove object-store latency from consecutive
+commands. It deliberately stops before a general publication graph: one actor,
+one SQLite writer, one ordered publisher, and one Cell-control CAS owner remain.
+
+State-observing streaming remains a separate, demand-gated delivery. Crab
+should implement it only with the first Rust API that can read mutable Cell
+state after the response head. Shipping an unused stream scheduler now would
+add lifecycle and admission state without improving current bounded responses;
+shipping such an API later without the per-output gate would violate the
+durability contract.
+
 The dual-watermark model earns its extra state only because it changes current
 command throughput. It is the narrowest design that gives Crab all three of
 these properties:

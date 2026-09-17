@@ -128,6 +128,7 @@ management_listen = "127.0.0.1:8789"
 
 [cells]
 data_dir = "/var/lib/crab/cells"
+local_disk_limit_bytes = 34359738368
 peer_advertise = "https://localhost:8789"
 failure_zone = "local"
 failure_host = "development-node"
@@ -238,12 +239,13 @@ open SQLite, acquire ownership, or extend a lease.
 
 `cells capacity --json --live` is a read-only mTLS request to the running
 process. It reports that process's retained startup memory limit, free Cell
-volume bytes, available file descriptors, CPU-derived job credits, and the
-resulting active-Cell, retained-byte, local-disk, scratch, blocking-job,
-dirty-job and full-recovery admission limits. The full-recovery limit stays at
-two even when the node can run more blocking or capture jobs. Omitting `--live`
-calculates a preflight envelope for the command process. Both are qualification
-inputs, not measured performance evidence.
+volume bytes, configured Cell-volume limit, available file descriptors,
+CPU-derived job credits, and the resulting active-Cell, retained-byte,
+local-disk, scratch, blocking-job, dirty-job and full-recovery admission
+limits. The full-recovery limit stays at two even when the node can run more
+blocking or capture jobs. Omitting `--live` calculates a preflight envelope for
+the command process. Both are qualification inputs, not measured performance
+evidence.
 
 `cells backup create` observes all 256 catalog heads before traversing their
 immutable pages. It binds the selected release record and descriptors, the
@@ -696,6 +698,7 @@ management_listen = "0.0.0.0:8789"
 
 [cells]
 data_dir = "/var/lib/crab/cells"
+local_disk_limit_bytes = 34359738368
 peer_advertise = "https://node-1.internal.example:8789"
 failure_zone = "us-west-2a"
 failure_host = "worker-17"

@@ -16,6 +16,7 @@ management_listen = "0.0.0.0:8789"
 
 [cells]
 data_dir = "/var/lib/crab/tmp/cells"
+local_disk_limit_bytes = 34359738368
 peer_advertise = "https://127.0.0.1:8789"
 peer_tls_server_name = "crab-http-server-peer"
 peer_certificate = "/var/lib/crab/tmp/peer.crt"

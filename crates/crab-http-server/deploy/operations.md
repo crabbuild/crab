@@ -233,9 +233,11 @@ drain state.
 Before a capacity qualification run, save `cells capacity --json --live` and
 `cells metrics` from every pod. They record the running server's startup memory, disk, descriptor and CPU inputs and
 the resulting active-Cell, retained-byte, blocking-job, dirty-job, recovery-job
-and scratch budgets. Treat it as admission evidence only: latency, throughput,
-RSS, descriptors, local bytes and object-store cost still require a measured
-workload receipt.
+and scratch budgets. The reported disk limit must equal the Pod's
+`emptyDir.sizeLimit`; otherwise the application and kubelet enforce different
+ceilings. Treat it as admission evidence only: latency, throughput, RSS,
+descriptors, local bytes and object-store cost still require a measured workload
+receipt.
 
 ## Roll back a failed release
 
@@ -352,6 +354,7 @@ export CRAB_HTTP_SERVER_EXPECTED_IMAGE="$(jq --raw-output .image.reference crab-
 export CRAB_HTTP_SERVER_EXPECTED_CHART="$(jq --raw-output .chart.reference crab-http-server-release.json)"
 export CRAB_HTTP_SERVER_RELEASE_TAG="$(jq --raw-output .tag crab-http-server-release.json)"
 export CRAB_HTTP_SERVER_SOURCE_SHA="$(jq --raw-output .source_commit crab-http-server-release.json)"
+export CRAB_HTTP_SERVER_NODE_PROFILE=medium
 export CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true
 export CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true
 

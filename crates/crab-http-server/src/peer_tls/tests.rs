@@ -84,6 +84,7 @@ impl IdentityFiles {
     pub(crate) fn config(&self, endpoint: Url) -> CellsConfig {
         CellsConfig {
             data_dir: self._directory.path().join("cells"),
+            local_disk_limit_bytes: 32 * 1024 * 1024 * 1024,
             peer_advertise: endpoint,
             failure_zone: None,
             failure_host: None,

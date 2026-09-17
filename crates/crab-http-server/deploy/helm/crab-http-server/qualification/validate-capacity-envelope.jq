@@ -1,7 +1,11 @@
 def valid_capacity_envelope:
   .version == 1 and
   .resources.memory_bytes > 0 and
+  .resources.disk_limit_bytes > 0 and
+  .resources.disk_capacity_bytes > 0 and
+  .resources.disk_capacity_bytes <= .resources.disk_limit_bytes and
   .resources.free_disk_bytes > 0 and
+  .resources.free_disk_bytes <= .resources.disk_capacity_bytes and
   .resources.available_file_descriptors > 0 and
   .resources.job_credits > 0 and
   .admission.active_cells > 0 and

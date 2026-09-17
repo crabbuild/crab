@@ -3,6 +3,7 @@ management_listen = "127.0.0.1:8889"
 
 [cells]
 data_dir = "/var/lib/crab/cells"
+local_disk_limit_bytes = 34359738368
 peer_advertise = "https://localhost:8889"
 failure_zone = "compose-local"
 failure_host = "node-b"

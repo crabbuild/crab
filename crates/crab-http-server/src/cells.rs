@@ -797,6 +797,7 @@ fn backup_store(
         .tempdir_in(&config.cells.data_dir)?;
     let budget = crate::server::CellRuntimeBudget::from_resources(crate::peer::local_resources(
         &config.cells.data_dir,
+        config.cells.local_disk_limit_bytes,
     )?)?;
     let local_disk = budget.local_disk();
     let host = budget.replica_host(local_disk, scratch.path().to_owned());
@@ -1289,6 +1290,7 @@ pub(crate) async fn enter_maintenance(
     let session = SessionId::from_bytes(Uuid::now_v7().into_bytes());
     let budget = crate::server::CellRuntimeBudget::from_resources(crate::peer::local_resources(
         &config.cells.data_dir,
+        config.cells.local_disk_limit_bytes,
     )?)?;
     let local_disk = budget.local_disk();
     let retention_host = budget.replica_host(local_disk.clone(), session_dir.path().to_owned());

@@ -118,6 +118,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         identity,
         &registry,
         initialize_dir.path(),
+        32 * 1024 * 1024 * 1024,
         "https://localhost:1".into(),
         repository_id,
     )
@@ -158,6 +159,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             registry.release_digest(),
             registry.module_digests(),
             ingress_dir.path().to_path_buf(),
+            32 * 1024 * 1024 * 1024,
             crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap()).unwrap(),
         )
         .unwrap(),
@@ -175,6 +177,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             registry.release_digest(),
             registry.module_digests(),
             owner_dir.path().to_path_buf(),
+            32 * 1024 * 1024 * 1024,
             crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap()).unwrap(),
         )
         .unwrap(),

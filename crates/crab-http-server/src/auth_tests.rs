@@ -263,6 +263,7 @@ impl Harness {
             cell_identity,
             &registry,
             cell_dir.path(),
+            32 * 1024 * 1024 * 1024,
             "https://initializer.test:8081".into(),
             repository.id,
         )

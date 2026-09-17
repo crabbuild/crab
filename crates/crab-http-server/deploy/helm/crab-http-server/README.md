@@ -191,6 +191,7 @@ Replace or verify every example value across the two overlays:
 | `config.auth.*` | Your OIDC issuer, client ID, and public HTTPS URL |
 | `cells.existingSecret` | Secret containing the peer certificate, Ed25519 key, and CA |
 | `cells.tlsServerName` | DNS identity covered by the peer certificate, shared only for TLS name verification |
+| `scratch.sizeBytes` | Integer byte limit for both Crab admission and the Pod `emptyDir` |
 | `serviceAccount.*` | Your provider workload identity |
 | `ingress` and `networkPolicy.publicIngressFrom` | Your HTTPS host, ingress class, TLS Secret, and allowed controller source |
 | `metrics` and `networkPolicy.metricsIngressFrom` | Your private Prometheus discovery and allowed scraper source |
@@ -219,7 +220,9 @@ remain protected by `minAvailable`.
 complete `server.toml`. Do not combine it with the generated provider overlay,
 because that overlay intentionally sets `config.storageUrl`; instead, carry
 only its `serviceAccount`, `podLabels`, and permitted region values into a
-separate overlay. The chart accepts exactly one configuration source.
+separate overlay. The chart accepts exactly one configuration source. Its
+`cells.local_disk_limit_bytes` must equal `scratch.sizeBytes`; live
+qualification rejects a mismatch.
 
 ## Create the application and peer Secrets
 
@@ -408,6 +411,7 @@ export CRAB_HTTP_SERVER_EXPECTED_IMAGE="$(jq --raw-output .image.reference crab-
 export CRAB_HTTP_SERVER_EXPECTED_CHART="$(jq --raw-output .chart.reference crab-http-server-release.json)"
 export CRAB_HTTP_SERVER_RELEASE_TAG="$(jq --raw-output .tag crab-http-server-release.json)"
 export CRAB_HTTP_SERVER_SOURCE_SHA="$(jq --raw-output .source_commit crab-http-server-release.json)"
+export CRAB_HTTP_SERVER_NODE_PROFILE=medium
 export CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true
 export CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true
 
@@ -433,7 +437,10 @@ The test fails unless it can prove all of these boundaries:
   identity contract: EKS Pod Identity token injection, GKE's annotated
   Kubernetes-to-Google service account link, or AKS Workload ID token injection
 - Every original, rolled, and owner-loss replacement Pod returns a valid live
-  Cell capacity envelope bound to its Kubernetes Pod UID
+  Cell capacity envelope bound to its Kubernetes Pod UID, and its effective
+  CPU, memory, and local-disk capacity match the selected node profile. Disk
+  capacity is the smaller of backing filesystem size and configured limit; the
+  reported limit must equal the Deployment's `emptyDir.sizeLimit`
 - The Deployment uses an immutable digest, a private ClusterIP Service, the
   signed release's chart version, the chart NetworkPolicy, TLS ingress,
   hardened containers, and no automatic Kubernetes API token
@@ -459,8 +466,9 @@ The test fails unless it can prove all of these boundaries:
 The script writes a secret-free JSON evidence receipt containing the provider,
 image and chart digests, release tag and source commit, workload identity
 mechanism and Kubernetes ServiceAccount, repository, qualification branch and
-commit, payload digest, per-Pod capacity envelopes before traffic, after the
-rollout, and after owner loss, rollout probes and failures, and explicit
+commit, payload digest, selected node profile, per-Pod capacity envelopes
+before traffic, after the rollout, and after owner loss, rollout probes and
+failures, and explicit
 successful checks including the installed chart version,
 management-network-isolation result, deleted owner Pod UID, old/new owner
 sessions, takeover epochs, the complete root before and after takeover, and the

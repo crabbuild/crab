@@ -31,6 +31,7 @@ pub struct StorageConfig {
 #[serde(deny_unknown_fields)]
 pub struct CellsConfig {
     pub data_dir: PathBuf,
+    pub local_disk_limit_bytes: u64,
     pub peer_advertise: Url,
     #[serde(default)]
     pub failure_zone: Option<String>,
@@ -182,6 +183,11 @@ fn validate_cells(cells: &CellsConfig, management_listen: SocketAddr) -> Result<
     {
         return Err(Error::Config(
             "Cell data and peer identity paths must be absolute",
+        ));
+    }
+    if cells.local_disk_limit_bytes == 0 {
+        return Err(Error::Config(
+            "cells.local_disk_limit_bytes must be greater than zero",
         ));
     }
     let endpoint = &cells.peer_advertise;
@@ -336,7 +342,7 @@ pub(crate) fn validate_identity_url(url: &Url, allow_loopback_http: bool) -> Res
 mod tests {
     use super::*;
 
-    const CELLS: &str = "\n[cells]\ndata_dir='/var/lib/crab/cells'\npeer_advertise='https://127.0.0.1:8789'\npeer_certificate='/run/secrets/crab/peer.crt'\npeer_private_key='/run/secrets/crab/peer.key'\npeer_ca='/run/secrets/crab/peer-ca.crt'\n";
+    const CELLS: &str = "\n[cells]\ndata_dir='/var/lib/crab/cells'\nlocal_disk_limit_bytes=34359738368\npeer_advertise='https://127.0.0.1:8789'\npeer_certificate='/run/secrets/crab/peer.crt'\npeer_private_key='/run/secrets/crab/peer.key'\npeer_ca='/run/secrets/crab/peer-ca.crt'\n";
 
     fn local_config(storage_url: &str) -> Config {
         toml::from_str(&format!(
@@ -427,6 +433,10 @@ mod tests {
         }
         let mut config = local_config("s3://bucket/repositories");
         config.cells.data_dir = "relative".into();
+        assert!(config.validate().is_err());
+
+        let mut config = local_config("s3://bucket/repositories");
+        config.cells.local_disk_limit_bytes = 0;
         assert!(config.validate().is_err());
 
         let mut config = local_config("s3://bucket/repositories");

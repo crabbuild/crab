@@ -651,6 +651,7 @@ mod tests {
             },
             cells: crab_http_server::CellsConfig {
                 data_dir: "/var/lib/crab/cells".into(),
+                local_disk_limit_bytes: 32 * 1024 * 1024 * 1024,
                 peer_advertise: "https://10.42.3.17:8789".parse().unwrap(),
                 failure_zone: None,
                 failure_host: None,

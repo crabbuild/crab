@@ -88,6 +88,8 @@ pub(crate) struct CellCapacityReport {
 #[derive(Clone, Serialize)]
 struct CellCapacityResources {
     memory_bytes: u64,
+    disk_limit_bytes: u64,
+    disk_capacity_bytes: u64,
     free_disk_bytes: u64,
     available_file_descriptors: usize,
     job_credits: usize,
@@ -229,6 +231,8 @@ impl CellCapacityReport {
             version: 1,
             resources: CellCapacityResources {
                 memory_bytes: resources.memory_bytes,
+                disk_limit_bytes: resources.disk_limit_bytes,
+                disk_capacity_bytes: resources.disk_capacity_bytes,
                 free_disk_bytes: resources.free_disk_bytes,
                 available_file_descriptors: resources.available_file_descriptors,
                 job_credits: resources.job_credits,
@@ -254,8 +258,14 @@ impl CellCapacityReport {
     }
 }
 
-pub(crate) fn cell_capacity_report(data_dir: &std::path::Path) -> Result<Vec<u8>> {
-    encode_cell_capacity_report(crate::peer::local_resources(data_dir)?)
+pub(crate) fn cell_capacity_report(
+    data_dir: &std::path::Path,
+    local_disk_limit_bytes: u64,
+) -> Result<Vec<u8>> {
+    encode_cell_capacity_report(crate::peer::local_resources(
+        data_dir,
+        local_disk_limit_bytes,
+    )?)
 }
 
 fn encode_cell_capacity_report(resources: crate::peer::LocalResources) -> Result<Vec<u8>> {
@@ -269,6 +279,8 @@ fn encode_cell_capacity_report(resources: crate::peer::LocalResources) -> Result
 pub(crate) fn test_cell_capacity_report() -> CellCapacityReport {
     let resources = crate::peer::LocalResources {
         memory_bytes: 2 * GIB,
+        disk_limit_bytes: 30 * GIB,
+        disk_capacity_bytes: 30 * GIB,
         free_disk_bytes: 30 * GIB,
         available_file_descriptors: 10_000,
         job_credits: 2,
@@ -778,6 +790,7 @@ pub async fn serve(config: Config) -> Result<()> {
         registry.release_digest(),
         registry.module_digests(),
         config.cells.data_dir.clone(),
+        config.cells.local_disk_limit_bytes,
         scheduler_status.clone(),
     )?;
     let node = node_publisher.node();
@@ -1819,6 +1832,8 @@ mod tests {
     ) -> crate::peer::LocalResources {
         crate::peer::LocalResources {
             memory_bytes,
+            disk_limit_bytes: free_disk_bytes,
+            disk_capacity_bytes: free_disk_bytes,
             free_disk_bytes,
             available_file_descriptors,
             job_credits: 16,
@@ -1852,6 +1867,8 @@ mod tests {
 
         assert_eq!(report["version"], 1);
         assert_eq!(report["resources"]["memory_bytes"], 2 * GIB);
+        assert_eq!(report["resources"]["disk_limit_bytes"], 30 * GIB);
+        assert_eq!(report["resources"]["disk_capacity_bytes"], 30 * GIB);
         assert_eq!(report["resources"]["free_disk_bytes"], 30 * GIB);
         assert_eq!(report["admission"]["active_cells"], 1_125);
         assert_eq!(report["admission"]["blocking_jobs"], 16);
@@ -1979,6 +1996,8 @@ mod tests {
         assert!(
             CellRuntimeBudget::from_resources(crate::peer::LocalResources {
                 memory_bytes: 2 * GIB,
+                disk_limit_bytes: 30 * GIB,
+                disk_capacity_bytes: 30 * GIB,
                 free_disk_bytes: 30 * GIB,
                 available_file_descriptors: FILE_DESCRIPTOR_RESERVE_MINIMUM,
                 job_credits: 16,

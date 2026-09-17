@@ -8,7 +8,8 @@ unset GIT_CURL_VERBOSE GIT_TRACE GIT_TRACE_CURL GIT_TRACE_CURL_NO_DATA \
 usage() {
   echo "usage: qualify-kubernetes.sh PROVIDER NAMESPACE DEPLOYMENT HTTPS_ORIGIN OWNER REPOSITORY EVIDENCE_FILE" >&2
   echo "Set CRAB_HTTP_SERVER_GIT_TOKEN, CRAB_HTTP_SERVER_EXPECTED_IMAGE, CRAB_HTTP_SERVER_EXPECTED_CHART," >&2
-  echo "CRAB_HTTP_SERVER_RELEASE_TAG, CRAB_HTTP_SERVER_SOURCE_SHA, CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true," >&2
+  echo "CRAB_HTTP_SERVER_RELEASE_TAG, CRAB_HTTP_SERVER_SOURCE_SHA, CRAB_HTTP_SERVER_NODE_PROFILE," >&2
+  echo "CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true," >&2
   echo "and CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true." >&2
   exit 2
 }
@@ -50,6 +51,14 @@ if [[ ! "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
   echo "CRAB_HTTP_SERVER_SOURCE_SHA must be a lowercase 40-character Git commit." >&2
   exit 2
 fi
+node_profile="${CRAB_HTTP_SERVER_NODE_PROFILE:?set CRAB_HTTP_SERVER_NODE_PROFILE to small, medium, or large}"
+case "$node_profile" in
+  small | medium | large) ;;
+  *)
+    echo "CRAB_HTTP_SERVER_NODE_PROFILE must be small, medium, or large." >&2
+    exit 2
+    ;;
+esac
 
 case "$provider" in
   eks | gke | aks) ;;
@@ -300,6 +309,12 @@ jq --exit-status '
     any(.projected.sources[]?.secret.items[]?; .path == "peer/tls.key") and
     any(.projected.sources[]?.secret.items[]?; .path == "peer/ca.crt"))
 ' "$deployment_json" >/dev/null
+scratch_limit_bytes="$(jq --exit-status --raw-output '
+  .spec.template.spec.volumes[] |
+  select(.name == "scratch") |
+  .emptyDir.sizeLimit | tonumber
+' "$deployment_json")"
+test "$scratch_limit_bytes" -gt 0
 release_version="${release_tag#crab-http-server-v}"
 expected_chart_label="crab-http-server-${release_version}"
 jq --exit-status \
@@ -484,6 +499,9 @@ capture_capacity_envelopes() {
   jq --slurp . "$entries" > "$output"
   jq --exit-status --arg phase "$phase" --from-file \
     "$(dirname -- "$0")/validate-capacity-envelope.jq" "$output" >/dev/null
+  jq --exit-status --arg profile "$node_profile" \
+    --argjson disk_limit_bytes "$scratch_limit_bytes" --from-file \
+    "$(dirname -- "$0")/validate-node-profile.jq" "$output" >/dev/null
 }
 
 check_workload_identity() {
@@ -997,6 +1015,7 @@ jq --null-input \
   --arg chart "$expected_chart" \
   --arg release_tag "$release_tag" \
   --arg source_sha "$source_sha" \
+  --arg node_profile "$node_profile" \
   --arg service_account "$service_account" \
   --arg workload_identity_mechanism "$workload_identity_mechanism" \
   --arg repository "${owner}/${repository}" \
@@ -1021,14 +1040,16 @@ jq --null-input \
   --argjson rollout_probe_failures "$probe_failures" \
   --argjson replica_count "$replica_count" \
   --argjson zone_count "$zone_count" \
+  --argjson scratch_limit_bytes "$scratch_limit_bytes" \
   --argjson old_pod_uids "$old_uids" \
   --argjson new_pod_uids "$new_uids" \
   --slurpfile capacity_before_traffic "$capacity_before_traffic" \
   --slurpfile capacity_after_rollout "$capacity_after_rollout" \
   --slurpfile capacity_after_owner_loss "$capacity_after_owner_loss" \
-  '{schema: 9, provider: $provider, namespace: $namespace, deployment: $deployment,
+  '{schema: 10, provider: $provider, namespace: $namespace, deployment: $deployment,
     origin: $origin, image: $image, chart: $chart,
     qualification_source: {release_tag: $release_tag, commit: $source_sha},
+    node_profile: $node_profile, scratch_limit_bytes: $scratch_limit_bytes,
     workload_identity: {
       service_account: $service_account,
       mechanism: $workload_identity_mechanism
@@ -1066,6 +1087,7 @@ jq --null-input \
       workload_identity_only: true,
       management_network_isolation: true,
       capacity_envelopes: true,
+      node_profile_resources: true,
       cross_replica_git: true,
       cross_replica_lfs: true,
       durable_lfs_lock: true,

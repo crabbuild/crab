@@ -227,4 +227,4 @@ spec:
                       path: peer/ca.crt
         - name: scratch
           emptyDir:
-            sizeLimit: {{ .Values.scratch.sizeLimit }}
+            sizeLimit: {{ .Values.scratch.sizeBytes | quote }}

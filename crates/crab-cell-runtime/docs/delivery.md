@@ -307,15 +307,20 @@ The target workload is 1,000 to 10,000 active databases per node, 100 MB to 5,00
 
 Qualify each node profile separately:
 
-| Profile | Required matrix |
-| --- | --- |
-| Small | Minimum supported workload, admission behavior, drain under pressure |
-| Medium | Mixed repository sizes, sustained command target, sparse takeover |
-| Large | Maximum active-Cell target, 5,000 MB restore, compaction and renewal load |
+| Profile | Process-visible resources | Required matrix |
+| --- | --- | --- |
+| Small | 1–2 CPU credits, 2–4 GiB memory, 50–100 GiB SSD | Minimum supported workload, admission behavior, drain under pressure |
+| Medium | 4–8 CPU credits, 8–16 GiB memory, 100–200 GiB SSD | Mixed repository sizes, sustained command target, sparse takeover |
+| Large | 16 CPU credits, 32–64 GiB memory, 500–1,000 GiB SSD | Maximum active-Cell target, 5,000 MB restore, compaction and renewal load |
 
 Before starting traffic, capture the exact resource-derived envelope from every
 node. A profile label or Kubernetes request is not evidence of the resources
-visible to the process.
+visible to the process. The live Kubernetes qualifier rejects a Pod whose
+cgroup-aware CPU credits, effective memory limit, or configured and enforced
+local-disk capacity falls outside the selected profile. Effective capacity is
+the smaller of the backing filesystem and the configured limit. The report
+also binds that limit to the Pod's `emptyDir.sizeLimit`; current filesystem
+free space remains a separate admission input.
 
 ```bash
 kubectl --namespace crab exec POD -- \
