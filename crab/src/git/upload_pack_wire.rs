@@ -1824,6 +1824,7 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
         .thin_pack
         .then_some(plan.common_haves.as_slice())
         .unwrap_or_default();
+    let allow_external_bases = external_thin_pack_eligible(request, &plan);
     if request.haves.is_empty() && request.done {
         // Identical cache waiters do not perform repository reads while the
         // producer builds the immutable response artifact.
@@ -1851,9 +1852,15 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
                 .await
         }
     } else {
-        repository
-            .generate_pack_with_bases(&plan.object_ids, thin_bases, cancellation)
-            .await
+        if allow_external_bases {
+            repository
+                .generate_pack_with_external_bases(&plan.object_ids, thin_bases, cancellation)
+                .await
+        } else {
+            repository
+                .generate_pack_with_bases(&plan.object_ids, thin_bases, cancellation)
+                .await
+        }
     };
     let pack = match generated {
         Ok(pack) => pack,
@@ -1894,6 +1901,16 @@ fn request_pack_preplanning_cache_eligible(request: &FetchRequest) -> bool {
         && request.deepen.is_none()
         && !request.deepen_relative
         && matches!(request.filter, UploadPackFilter::None)
+}
+
+fn external_thin_pack_eligible(request: &FetchRequest, plan: &crab_read::PackPlan) -> bool {
+    request.thin_pack
+        && request.shallow.is_empty()
+        && request.deepen.is_none()
+        && !request.deepen_relative
+        && matches!(request.filter, UploadPackFilter::None)
+        && !plan.common_haves.is_empty()
+        && plan.common_haves.len() == request.haves.len()
 }
 
 fn native_shallow_pack_eligible(request: &FetchRequest) -> bool {
@@ -2112,6 +2129,42 @@ mod tests {
         };
         assert!(request_pack_preplanning_cache_eligible(&changed));
         assert!(native_shallow_pack_eligible(&changed));
+    }
+
+    #[test]
+    fn external_thin_pack_requires_a_complete_unfiltered_transition() {
+        let first =
+            ObjectId::from_hex(b"1111111111111111111111111111111111111111").expect("object ID");
+        let second =
+            ObjectId::from_hex(b"2222222222222222222222222222222222222222").expect("object ID");
+        let plan = crab_read::PackPlan {
+            wants: vec![second],
+            common_haves: vec![first],
+            filter: UploadPackFilter::None,
+            include_tags: false,
+            object_ids: vec![second],
+            required_bases: Vec::new(),
+            shallow: Vec::new(),
+            unshallow: Vec::new(),
+        };
+        let request = FetchRequest {
+            wants: vec![second],
+            haves: vec![first],
+            thin_pack: true,
+            ..FetchRequest::default()
+        };
+
+        assert!(external_thin_pack_eligible(&request, &plan));
+
+        let mut changed = request.clone();
+        changed.filter = UploadPackFilter::BlobNone;
+        assert!(!external_thin_pack_eligible(&changed, &plan));
+        changed = request.clone();
+        changed.shallow = vec![first];
+        assert!(!external_thin_pack_eligible(&changed, &plan));
+        changed = request;
+        changed.thin_pack = false;
+        assert!(!external_thin_pack_eligible(&changed, &plan));
     }
 
     #[test]

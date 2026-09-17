@@ -1089,8 +1089,10 @@ async fn visibility_object_selection(
         objects
     };
 
-    objects.sort_unstable();
-    objects.dedup();
+    deduplicate_visibility_objects(
+        &mut objects,
+        matches!(visibility, VisibilitySource::Catalog(_)),
+    );
     let actual = u64::try_from(objects.len()).unwrap_or(u64::MAX);
     if actual > maximum_objects {
         return Err(RemoteGitError::LimitExceeded {
@@ -1103,6 +1105,16 @@ async fn visibility_object_selection(
         objects,
         common_haves,
     }))
+}
+
+fn deduplicate_visibility_objects(objects: &mut Vec<ObjectId>, preserve_physical_order: bool) {
+    if preserve_physical_order {
+        let mut seen = HashSet::with_capacity(objects.len());
+        objects.retain(|object| seen.insert(*object));
+    } else {
+        objects.sort_unstable();
+        objects.dedup();
+    }
 }
 
 #[cfg(test)]
@@ -2218,6 +2230,24 @@ mod tests {
                 peeled: None,
             },
         ]
+    }
+
+    #[test]
+    fn catalog_selection_deduplicates_without_losing_pack_order() {
+        let mut objects = vec![oid('3'), oid('1'), oid('3'), oid('2')];
+
+        deduplicate_visibility_objects(&mut objects, true);
+
+        assert_eq!(objects, [oid('3'), oid('1'), oid('2')]);
+    }
+
+    #[test]
+    fn legacy_selection_deduplicates_in_canonical_oid_order() {
+        let mut objects = vec![oid('3'), oid('1'), oid('3'), oid('2')];
+
+        deduplicate_visibility_objects(&mut objects, false);
+
+        assert_eq!(objects, [oid('1'), oid('2'), oid('3')]);
     }
 
     #[test]

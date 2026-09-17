@@ -615,7 +615,7 @@ impl RemoteGitRepository {
         object_ids: &[ObjectId],
         cancellation: &CancellationToken,
     ) -> Result<GeneratedPack> {
-        self.generate_pack_with_bases_mode(object_ids, &[], false, cancellation)
+        self.generate_pack_with_bases_mode(object_ids, &[], false, false, cancellation)
             .await
     }
 
@@ -707,7 +707,25 @@ impl RemoteGitRepository {
         thin_bases: &[ObjectId],
         cancellation: &CancellationToken,
     ) -> Result<GeneratedPack> {
-        self.generate_pack_with_bases_mode(object_ids, thin_bases, false, cancellation)
+        self.generate_pack_with_bases_mode(object_ids, thin_bases, false, false, cancellation)
+            .await
+    }
+
+    /// Generate a thin pack for an unfiltered, non-shallow client whose common
+    /// haves prove the complete prior object closure.
+    ///
+    /// Callers must only use this for the terminal Git negotiation where the
+    /// request has no filter or shallow boundary and the client advertised
+    /// `thin-pack`. Git's common-have contract then permits delta entries to
+    /// retain any base already reachable from those haves; other requests use
+    /// [`Self::generate_pack_with_bases`] and materialize those bases.
+    pub async fn generate_pack_with_external_bases(
+        &self,
+        object_ids: &[ObjectId],
+        thin_bases: &[ObjectId],
+        cancellation: &CancellationToken,
+    ) -> Result<GeneratedPack> {
+        self.generate_pack_with_bases_mode(object_ids, thin_bases, false, true, cancellation)
             .await
     }
 
@@ -716,8 +734,10 @@ impl RemoteGitRepository {
         object_ids: &[ObjectId],
         thin_bases: &[ObjectId],
         allow_dense_selected_assembly: bool,
+        allow_external_bases: bool,
         cancellation: &CancellationToken,
     ) -> Result<GeneratedPack> {
+        let allow_external_bases = allow_external_bases && !thin_bases.is_empty();
         let operation = self
             .operation(OperationKind::UploadPack, cancellation)
             .await?;
@@ -792,6 +812,7 @@ impl RemoteGitRepository {
                                                     &unique,
                                                     thin_bases,
                                                     None,
+                                                    allow_external_bases,
                                                     "packed_entries",
                                                     cancellation,
                                                 )
@@ -807,6 +828,7 @@ impl RemoteGitRepository {
                                 &unique,
                                 thin_bases,
                                 None,
+                                allow_external_bases,
                                 "packed_entries",
                                 cancellation,
                             )
@@ -856,6 +878,7 @@ impl RemoteGitRepository {
             object_ids,
             &[],
             Some(&selected_objects),
+            false,
             "selected_packed_entries",
             cancellation,
         )
@@ -1733,6 +1756,7 @@ async fn produce_cached_pack_under_lease(
                 object_ids,
                 &[],
                 allow_dense_selected_assembly,
+                false,
                 cancellation,
             )
             .await?;
@@ -1768,7 +1792,13 @@ async fn produce_cached_pack_without_lease(
         return Ok(pack);
     }
     let generated = repository
-        .generate_pack_with_bases_mode(object_ids, &[], allow_dense_selected_assembly, cancellation)
+        .generate_pack_with_bases_mode(
+            object_ids,
+            &[],
+            allow_dense_selected_assembly,
+            false,
+            cancellation,
+        )
         .await?;
     publish_cached_pack(
         repository,
@@ -2528,6 +2558,7 @@ async fn generate_pack_with_operation(
     object_ids: &[ObjectId],
     thin_bases: &[ObjectId],
     selected_objects: Option<&HashSet<ObjectId>>,
+    allow_external_bases: bool,
     strategy: &'static str,
     cancellation: &CancellationToken,
 ) -> Result<GeneratedPack> {
@@ -2567,9 +2598,11 @@ async fn generate_pack_with_operation(
             None => operation.read_packed_entries(batch).await?,
         };
         // Selected dense responses preserve REF_DELTA dependencies by object
-        // ID. The conservative path still orders entries for its historical
-        // OFS_DELTA handling and thin-pack behavior.
-        let entries = if selected_objects.is_none() {
+        // ID. Conservative responses order entries for their historical
+        // OFS_DELTA handling. External thin packs rewrite OFS_DELTA entries
+        // to REF_DELTA and have a client-proven base closure, so sorting the
+        // full batch only adds CPU and memory without changing correctness.
+        let entries = if selected_objects.is_none() && !allow_external_bases {
             order_packed_entries(entries)?
         } else {
             entries
@@ -2577,13 +2610,12 @@ async fn generate_pack_with_operation(
         let materialize = entries
             .iter()
             .filter_map(|entry| {
-                let materialize = selected_objects.map_or_else(
-                    || {
-                        entry.base_oid.is_some_and(|base| {
-                            !emitted.contains(&base) && !thin_bases.contains(&base)
-                        })
-                    },
-                    |selected| should_materialize_selected_entry(entry, selected, &thin_bases),
+                let materialize = should_materialize_entry(
+                    entry,
+                    selected_objects,
+                    &emitted,
+                    &thin_bases,
+                    allow_external_bases,
                 );
                 if selected_objects.is_none() {
                     emitted.insert(entry.oid);
@@ -2627,6 +2659,7 @@ async fn generate_pack_with_operation(
         copied_entries = stats.copied_entries,
         converted_deltas = stats.converted_deltas,
         materialized_entries = stats.materialized_entries,
+        external_bases = allow_external_bases,
         source_bytes = stats.source_bytes,
         response_bytes = size,
         pack_generation_ms = started.elapsed().as_millis() as u64,
@@ -2643,6 +2676,24 @@ fn should_materialize_selected_entry(
     entry
         .base_oid
         .is_some_and(|base| !selected.contains(&base) && !thin_bases.contains(&base))
+}
+
+fn should_materialize_entry(
+    entry: &crate::reader::RemoteGitPackedEntry,
+    selected_objects: Option<&HashSet<ObjectId>>,
+    emitted: &HashSet<ObjectId>,
+    thin_bases: &HashSet<ObjectId>,
+    allow_external_bases: bool,
+) -> bool {
+    selected_objects.map_or_else(
+        || {
+            !allow_external_bases
+                && entry
+                    .base_oid
+                    .is_some_and(|base| !emitted.contains(&base) && !thin_bases.contains(&base))
+        },
+        |selected| should_materialize_selected_entry(entry, selected, thin_bases),
+    )
 }
 
 fn order_packed_entries(
@@ -3360,6 +3411,28 @@ mod tests {
             &entry,
             &selected,
             &HashSet::new(),
+        ));
+    }
+
+    #[test]
+    fn external_thin_pack_retains_a_delta_without_materializing_its_base() {
+        let entry = packed_entry(2, Some(1));
+        let emitted = HashSet::new();
+        let thin_bases = HashSet::new();
+
+        assert!(!should_materialize_entry(
+            &entry,
+            None,
+            &emitted,
+            &thin_bases,
+            true,
+        ));
+        assert!(should_materialize_entry(
+            &entry,
+            None,
+            &emitted,
+            &thin_bases,
+            false,
         ));
     }
 

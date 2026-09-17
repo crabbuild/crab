@@ -1144,6 +1144,19 @@ snapshot, but each pointer file hash reached by the replay must have its
 verified recipe and an active path lease (a latest-only recipe is correctly
 rejected).
 
+The focused installed-binary run `v2-tiny-external-final-20260917` exercised the
+post-control-suffix terminal Git path against fresh RustFS state with a
+two-commit repository. Both incremental pushes completed successfully in
+304–327 ms with exactly eight object-store operations each; the two fetches
+completed in 225–247 ms with nine operations, and the independent final clone
+completed in 501 ms with 18 operations. The final remote tip matched the
+source and strict Git fsck passed. The run also covers the complete unfiltered
+thin-pack transition admission used by the optimized reader: only a request
+with no shallow/deepen/filter boundary and a complete authenticated common-have
+set may retain external delta bases; all other requests keep the conservative
+self-contained path. This is a focused correctness/performance proof, not a
+substitute for the large-repository and hosted-provider gates below.
+
 The parity pass also removed legacy-layout admission from `crab compact`, moved
 GC/fsck stability revalidation to the authenticated checkpoint control suffix,
 and made protected receives and path-scoped capsule views select a present v2
