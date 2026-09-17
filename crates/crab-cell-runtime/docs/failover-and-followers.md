@@ -151,11 +151,11 @@ recovery path.
 
 | Working now | Still gated before fleet durability may serve traffic |
 | --- | --- |
-| Strict frame codec plus capacity-aware deterministic selection, authoritative enrollment, activation, coverage, recovery claims, and object-covered epoch rotation | Failure-domain-aware automatic recruitment |
+| Strict frame codec plus capacity-aware deterministic selection, authoritative enrollment, activation, coverage, recovery claims, object-covered epoch rotation, and clean log close | Failure-domain-aware automatic recruitment |
 | Crash-safe, node-budgeted follower store under a persisted physical `NodeId`, authenticated remote append/seal/tail/retire transport, and a bounded node-wide batched shipper | Recovery-only startup listener ordering |
 | Write-all durability gate with contiguous object watermark | Actor submission and response-gate integration |
 | Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | Recovery-only startup listener ordering |
-| Cell control attachment and takeover consumption of overlays | Graceful drain, obsolete-marker collection, and live multi-node proof |
+| Cell control attachment and takeover consumption of overlays | Server drain wiring, obsolete-marker collection, and live multi-node proof |
 
 The session record now owns one CAS-protected log epoch, its exact sorted member
 set, activation bit, contiguous object watermark, and renewable recovery claim.
@@ -912,6 +912,13 @@ Clean node shutdown is broader:
 
 A crash at any step leaves `open` or `recovering` state and returns to the same
 dead-session recovery path.
+
+The runtime now exposes `close_node_log` for steps 3 through 5. It stops ticket
+issuance only after every issued sequence is object-covered, best-effort writes
+exact retire fences to reachable followers, and CAS-clears the session log.
+That clear makes later appends unauthorized and allows exact session
+withdrawal. The server still must call it between actor drain and lease
+withdrawal.
 
 ## Start and stop in recovery-safe order
 

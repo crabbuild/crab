@@ -511,6 +511,54 @@ async fn node_log_enrollment_activation_and_coverage_are_authoritative() {
 }
 
 #[tokio::test]
+async fn clean_node_log_close_clears_authority_before_session_withdrawal() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    let leader = SessionId::from_bytes([1; 16]);
+    let member = SessionId::from_bytes([2; 16]);
+    let created = directory
+        .create(advertisement_for(leader, &key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    directory
+        .create(advertisement_for(member, &key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    let enrolled = directory
+        .recruit_log(&created, 4, 1, 2, NOW_MS + 1)
+        .await
+        .unwrap();
+    let active = directory.activate_log(&enrolled, NOW_MS + 2).await.unwrap();
+    let covered = directory
+        .advance_log_coverage(&active, 2, NOW_MS + 3)
+        .await
+        .unwrap();
+    let gate = crate::DurabilityGate::new(leader, node(leader), 4, [node(member)]).unwrap();
+    let ticket = gate.issue(2).unwrap();
+    gate.prove_object(ticket).unwrap();
+
+    let closed = crate::close_node_log(
+        &directory,
+        Arc::new(UnavailableFollowerTransport),
+        &covered,
+        &gate,
+        NOW_MS + 4,
+    )
+    .await
+    .unwrap();
+
+    assert!(closed.advertisement().log().is_none());
+    assert!(
+        directory
+            .authorize_log_append(leader, node(member), 4, NOW_MS + 5)
+            .await
+            .is_err()
+    );
+    directory.withdraw(&closed, NOW_MS + 5).await.unwrap();
+    assert!(directory.load(leader, NOW_MS + 6).await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn expired_enrolled_log_becomes_a_renewable_recovery_claim() {
     let key = SigningKey::from_bytes(&[7; 32]);
     let directory = directory();

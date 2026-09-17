@@ -492,25 +492,7 @@ pub async fn rotate_node_log(
     now_ms: i64,
 ) -> Result<RotatedNodeLog> {
     let barrier = gate.begin_rotation()?;
-    let retirements = join_all(barrier.members().iter().map(|member| {
-        let transport = Arc::clone(&transport);
-        let member = *member;
-        let request = RetireRequest {
-            leader_session: barrier.leader_session(),
-            log_epoch: barrier.log_epoch(),
-            covered_through: barrier.covered_through(),
-        };
-        async move { transport.retire(member, request).await }
-    }))
-    .await;
-    let expected_base = barrier.covered_through().saturating_add(1);
-    for receipt in retirements.into_iter().flatten() {
-        if receipt.base_sequence != expected_base
-            || receipt.durable_through != barrier.covered_through()
-        {
-            return Err(Error::Node("follower retire receipt differs"));
-        }
-    }
+    retire_node_log(transport, &barrier).await?;
     let enrollment = directory
         .rotate_log(
             observed,
@@ -531,6 +513,48 @@ pub async fn rotate_node_log(
         log.members().iter().copied(),
     )?;
     Ok(RotatedNodeLog { enrollment, gate })
+}
+
+/// Best-effort retires a covered epoch and CAS-clears it for clean withdrawal.
+///
+/// Unreachable followers may retain inert bytes. The authoritative clear
+/// rejects every later append before the session can be withdrawn.
+pub async fn close_node_log(
+    directory: &NodeDirectory,
+    transport: Arc<dyn NodeLogTransport>,
+    observed: &VersionedNodeAdvertisement,
+    gate: &DurabilityGate,
+    now_ms: i64,
+) -> Result<VersionedNodeAdvertisement> {
+    let barrier = gate.begin_rotation()?;
+    retire_node_log(transport, &barrier).await?;
+    directory.close_log(observed, &barrier, now_ms).await
+}
+
+async fn retire_node_log(
+    transport: Arc<dyn NodeLogTransport>,
+    barrier: &NodeLogRotationBarrier,
+) -> Result<()> {
+    let retirements = join_all(barrier.members().iter().map(|member| {
+        let transport = Arc::clone(&transport);
+        let member = *member;
+        let request = RetireRequest {
+            leader_session: barrier.leader_session(),
+            log_epoch: barrier.log_epoch(),
+            covered_through: barrier.covered_through(),
+        };
+        async move { transport.retire(member, request).await }
+    }))
+    .await;
+    let expected_base = barrier.covered_through().saturating_add(1);
+    for receipt in retirements.into_iter().flatten() {
+        if receipt.base_sequence != expected_base
+            || receipt.durable_through != barrier.covered_through()
+        {
+            return Err(Error::Node("follower retire receipt differs"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_ticket(state: &GateState, ticket: CommitTicket) -> Result<()> {

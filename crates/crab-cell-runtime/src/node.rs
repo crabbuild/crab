@@ -1314,6 +1314,36 @@ impl NodeDirectory {
         self.update_advertisement(observed, next, now_ms).await
     }
 
+    /// CAS-clears one fully object-covered log before clean session withdrawal.
+    pub async fn close_log(
+        &self,
+        observed: &VersionedNodeAdvertisement,
+        barrier: &NodeLogRotationBarrier,
+        now_ms: i64,
+    ) -> Result<VersionedNodeAdvertisement> {
+        self.validate(&observed.advertisement, now_ms)?;
+        let current = observed
+            .advertisement
+            .log
+            .as_ref()
+            .ok_or(Error::Node("node session has no enrolled log"))?;
+        if current.phase() != NodeLogPhase::Open
+            || barrier.leader_session() != observed.advertisement.session
+            || barrier.log_epoch() != current.epoch()
+            || barrier.members() != current.members()
+            || barrier.covered_through() != current.tiered_through()
+        {
+            return Err(Error::Node("node-log close barrier differs"));
+        }
+        let mut next = observed.advertisement.clone();
+        next.generation = next
+            .generation
+            .checked_add(1)
+            .ok_or(Error::Node("node session generation overflow"))?;
+        next.log = None;
+        self.update_advertisement(observed, next, now_ms).await
+    }
+
     fn validate(&self, advertisement: &NodeAdvertisement, now_ms: i64) -> Result<()> {
         advertisement.validate_at(now_ms)?;
         advertisement.verify_signature()?;
