@@ -604,7 +604,7 @@ Initial protocol bounds are compile-time contracts:
 | One LTX frame body | 64 MiB |
 | One append batch | 64 frames or 64 MiB, whichever comes first |
 | Outstanding batches per follower lane | 8 |
-| Tail chunk | 1 MiB |
+| Tail page | 1 MiB or 4,096 frames; one individually bounded frame may exceed 1 MiB |
 | Append/follower request deadline | Remaining caller deadline, at most 30s |
 | Recovery claim heartbeat | 10s |
 | Recovery claim expiry | 30s |
@@ -612,6 +612,15 @@ Initial protocol bounds are compile-time contracts:
 The leader applies backpressure before the window fills. It does not spawn one
 task or connection per Cell. One lane per selected follower carries all Cells
 for that owner session.
+
+`tail_page` is the recovery path used by the current implementation. Its
+default transport adapter can page a legacy `tail` result in memory, while the
+HTTP transport and `LocalFollowerTransport` provide native paging. A page with
+one frame may be larger than the 1 MiB network target, but that frame is still
+bounded by the configured capture limit; a multi-frame page may not exceed the
+target. Recovery rejects oversized, non-contiguous, or unverifiable pages
+before attaching any overlay. The large-single-frame regression is covered by
+`node_log_recovery::tests::active_lane_requires_and_returns_a_complete_follower_tail`.
 
 ## Select and change the follower ensemble
 
@@ -1365,13 +1374,16 @@ does not expose unchecked constructors for server code.
 
 ```rust,ignore
 pub trait NodeLogTransport: Send + Sync {
-    async fn open_append(&self, member: NodeId) -> Result<AppendLane>;
-    async fn seal(&self, member: NodeId, request: SealRequest)
-        -> Result<SealReceipt>;
-    async fn tail(&self, member: NodeId, request: TailRequest)
-        -> Result<TailStream>;
-    async fn tail_page(&self, member: NodeId, request: TailRequest)
-        -> Result<FollowerTailPage>;
+    fn append(&self, member: NodeId, request: AppendRequest)
+        -> BoxFuture<'_, Result<FollowerReceipt>>;
+    fn seal(&self, member: NodeId, request: SealRequest)
+        -> BoxFuture<'_, Result<FollowerReceipt>>;
+    fn retire(&self, member: NodeId, request: RetireRequest)
+        -> BoxFuture<'_, Result<FollowerReceipt>>;
+    fn tail(&self, member: NodeId, request: TailRequest)
+        -> BoxFuture<'_, Result<Vec<Bytes>>>;
+    fn tail_page(&self, member: NodeId, request: TailRequest)
+        -> BoxFuture<'_, Result<FollowerTailPage>>;
 }
 
 pub struct DurabilityGate;
@@ -1394,8 +1406,7 @@ impl NodeLogShipper {
 pub struct NodeLogRecovery;
 
 impl NodeLogRecovery {
-    pub async fn ensure_sealed(&self, predecessor: SessionId)
-        -> Result<SealedSession>;
+    pub async fn ensure_sealed(&self) -> Result<SealedSession>;
 }
 
 pub struct NodeTakeoverProof { /* private validated fields */ }
