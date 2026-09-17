@@ -2167,8 +2167,9 @@ pub fn format_capabilities(has_commit_graph: bool) -> String {
     format_capabilities_with_v2(has_commit_graph, false)
 }
 
-/// Build the remote-helper capability response, including terminal v2 only
-/// when the generation-bound remote upload-pack proof is available.
+/// Build the remote-helper capability response, including the terminal
+/// upload-pack wire when the selected repository has a verified read path.
+/// Legacy manifests use the same wire with their own snapshot authority.
 pub fn format_capabilities_with_v2(has_commit_graph: bool, v2_ready: bool) -> String {
     let mut caps = String::from("fetch\npush\noption\ncheck-connectivity\n");
     if has_commit_graph {
