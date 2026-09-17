@@ -652,6 +652,7 @@ mod tests {
 
     fn verified_frame(
         sequence: u64,
+        commit_sequence: u64,
         cell: [u8; 32],
         incarnation: [u8; 16],
         segment: &crab_ltx::LocalSegment,
@@ -665,7 +666,7 @@ mod tests {
                 cell,
                 incarnation,
                 cell_epoch: 3,
-                commit_sequence: 2,
+                commit_sequence,
             },
             segment.info().clone(),
             Bytes::from(std::fs::read(segment.path()).unwrap()),
@@ -797,11 +798,13 @@ mod tests {
         let frames = vec![
             verified_frame(
                 1,
+                2,
                 left_cell,
                 left_incarnation,
                 left_tail.segments.first().unwrap(),
             ),
             verified_frame(
+                2,
                 2,
                 right_cell,
                 right_incarnation,
@@ -841,5 +844,88 @@ mod tests {
         assert_eq!(recovered[1].overlay.final_position(), right_tail.position);
         left.close().unwrap();
         right.close().unwrap();
+    }
+
+    #[test]
+    fn recovery_witness_splits_two_interleaved_cuts_from_one_thousand_cells() {
+        const CELLS: usize = 1_000;
+
+        let limits = crab_ltx::Limits::default();
+        let directory = tempfile::TempDir::new().unwrap();
+        let mut database =
+            crab_ltx::ManagedDb::open(&directory.path().join("source.sqlite"), limits).unwrap();
+        database
+            .transaction(|transaction| {
+                transaction.execute_batch(
+                    "CREATE TABLE events(id INTEGER PRIMARY KEY, body TEXT NOT NULL);\
+                     INSERT INTO events(body) VALUES ('base')",
+                )
+            })
+            .unwrap();
+        let base = database.capture().unwrap();
+        database
+            .transaction(|transaction| {
+                transaction.execute("INSERT INTO events(body) VALUES ('first')", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let first = database.capture().unwrap();
+        database
+            .transaction(|transaction| {
+                transaction.execute("INSERT INTO events(body) VALUES ('second')", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let second = database.capture().unwrap();
+        let incarnation = [5; 16];
+        let mut bases = Vec::with_capacity(CELLS);
+        let mut cells = Vec::with_capacity(CELLS);
+        for index in 0..CELLS {
+            let mut cell = [0_u8; 32];
+            cell[..8].copy_from_slice(&(index as u64 + 1).to_be_bytes());
+            cells.push(cell);
+            bases.push(RecoveryBase {
+                application: [9; 16],
+                cell_epoch: 3,
+                root: crab_ltx::RootRef {
+                    cell,
+                    incarnation,
+                    digest: *blake3::hash(&cell).as_bytes(),
+                    position: base.position,
+                    commit_sequence: 1,
+                },
+            });
+        }
+        let mut frames = Vec::with_capacity(CELLS * 2);
+        for (index, cell) in cells.iter().copied().enumerate() {
+            frames.push(verified_frame(
+                index as u64 + 1,
+                2,
+                cell,
+                incarnation,
+                first.segments.first().unwrap(),
+            ));
+        }
+        for (index, cell) in cells.iter().copied().enumerate() {
+            frames.push(verified_frame(
+                CELLS as u64 + index as u64 + 1,
+                3,
+                cell,
+                incarnation,
+                second.segments.first().unwrap(),
+            ));
+        }
+
+        let recovered = build_recovery_overlays(frames, &bases, limits).unwrap();
+
+        assert_eq!(recovered.len(), CELLS);
+        for (index, tail) in recovered.into_iter().enumerate() {
+            assert_eq!(tail.overlay.predecessor().cell, cells[index]);
+            assert_eq!(tail.first_node_sequence, index as u64 + 1);
+            assert_eq!(tail.last_node_sequence, CELLS as u64 + index as u64 + 1);
+            assert_eq!(tail.overlay.final_position(), second.position);
+            assert_eq!(tail.overlay.final_commit_sequence(), 3);
+        }
+        database.close().unwrap();
     }
 }
