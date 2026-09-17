@@ -110,7 +110,21 @@ not be reintroduced without a new architecture decision. Later SQL migrations
 operate only on already-native Cells through the release maintenance protocol;
 they are not a path for reading deleted object documents.
 
-## Future schema and format upgrades
+## Evolve the development format in place
+
+Crab has not shipped persistent Cell data. Keep one canonical `cells/v1`
+storage tree throughout current development. A structural change updates its
+encoder, decoder, validators, fixtures, diagrams, and all callers atomically;
+operators may discard and recreate development Cells. The `v1` path component
+and document `version: 1` fields are format identity guards, not counters to
+increment whenever a field or state transition changes.
+
+Do not create a new versioned prefix, old-format reader, dual writer, fallback,
+or data migration for unshipped Cell data. Such compatibility machinery is
+justified only after a persistent format has shipped and its retention contract
+has been recorded explicitly.
+
+## Upgrade a shipped schema or encoding
 
 Record SQL schema version, migration checksum, module code, manifest format,
 decoder capability and minimum writer/reader generation. An incompatible node

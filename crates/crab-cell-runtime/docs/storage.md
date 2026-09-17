@@ -15,6 +15,13 @@ in-place session-record evolution and control-pinned recovery overlay needed
 before follower fsync may release a response are specified in
 [Follower durability and warm failover](failover-and-followers.md).
 
+`v1` names the one current development format; it is not a release counter.
+Until Crab ships a persistent Cell format, storage changes update this layout,
+its document schemas, all readers and writers, tests, and documentation in one
+change. Development data may be recreated. Do not introduce a new `cells/vN`
+prefix, dual readers, compatibility branches, or migration code merely because
+the structure changes.
+
 ## Derive stable identities
 
 Tenant, application, namespace, session, incarnation, and request IDs are 16 bytes. Cell IDs and BLAKE3 digests are 32 bytes.
