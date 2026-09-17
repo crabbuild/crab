@@ -4679,6 +4679,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn classic_capsule_shallow_excludes_visible_ref_ancestry() {
+        let (_source, store, router, commits, _tag) = capsule_history_fixture().await;
+        let target = tempfile::tempdir().expect("target repository");
+        run_git(target.path(), &["init", "-q"]);
+        let git_dir = target.path().join(".git");
+        let _target_guard = GitEnvCwdGuard::set(target.path(), &git_dir, target.path());
+        let tip = commits.last().expect("history tip");
+
+        let input = format!("option deepen-not refs/tags/v1\nfetch {tip} refs/heads/main\n\n");
+        let context = test_context(
+            store,
+            router.repo_prefix(),
+            target.path().join("push-state"),
+        );
+        let (output, result) =
+            run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
+        result.expect("excluded-ref shallow fetch");
+        assert_eq!(output, "ok\n\n");
+        assert_eq!(
+            crate::git::shallow::read_shallow_file(&git_dir)
+                .await
+                .expect("read excluded-ref boundary"),
+            vec![tip.clone()]
+        );
+        assert!(git_object_exists(target.path(), tip));
+        assert!(!git_object_exists(target.path(), &commits[1]));
+        assert!(!git_object_exists(target.path(), &commits[0]));
+    }
+
+    #[tokio::test]
     async fn capsule_promisor_fetch_installs_the_authorized_object() {
         let (store, router, blob) = capsule_promisor_fixture().await;
         let target = tempfile::tempdir().expect("target repository");
