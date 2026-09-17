@@ -1,9 +1,8 @@
 //! `crab fsck` — repository integrity checker.
 //!
-//! Checks Crab manifests, pack/index presence, data-chain metadata, and
-//! coordination state. The production object-store checker does not yet run
-//! full Git connectivity or enumerate multipart uploads outside Crab's local
-//! recovery journal.
+//! Checks capsule or legacy metadata, Git object connectivity, pack/index
+//! presence, the Crab data chain, and coordination state. Multipart
+//! enumeration is provider-backed when a local recovery journal is available.
 
 use std::io::Stdout;
 use std::time::{Duration, SystemTime};

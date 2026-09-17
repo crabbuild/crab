@@ -38,6 +38,9 @@ const MAX_FSCK_REF_BYTES: u64 = 64 * 1024;
 const MAX_FSCK_LOCK_BYTES: u64 = 64 * 1024;
 const MAX_FSCK_CAPSULE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_FSCK_FRONTIER_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const MAX_FSCK_GIT_OBJECTS: usize = 2_000_000;
+const MAX_FSCK_GIT_LOOKUPS: usize = 8_000_000;
+const MAX_FSCK_GIT_ALLOCATION_BYTES: usize = 64 * 1024 * 1024;
 
 /// Result of proving source-reachable Crab pointer recipes against remote data.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,6 +218,39 @@ impl StoreChecker {
         }
 
         Ok(issues)
+    }
+
+    async fn check_capsule_git_connectivity(&self, state: &CapsuleFsckState) -> Result<()> {
+        let workspace = tempfile::tempdir()?;
+        crab_read::capsule_protocol::install_git_packs(
+            &state.view,
+            workspace.path(),
+            MAX_FSCK_FRONTIER_BYTES,
+        )
+        .await?;
+        let refs = state
+            .view
+            .refs()
+            .iter()
+            .map(|(name, oid)| (name.clone(), oid.clone()))
+            .collect::<Vec<_>>();
+        let git_dir = workspace.path().to_owned();
+        let scan = tokio::task::spawn_blocking(move || {
+            crab_git::walk::scan_pointers(
+                &git_dir,
+                &refs,
+                crab_git::walk::PointerScanLimits {
+                    objects: MAX_FSCK_GIT_OBJECTS,
+                    lookups: MAX_FSCK_GIT_LOOKUPS,
+                    allocation_bytes: MAX_FSCK_GIT_ALLOCATION_BYTES,
+                },
+                &|| false,
+            )
+        })
+        .await
+        .map_err(|error| CrabError::Internal(format!("Git connectivity scan failed: {error}")))??;
+        crab_git::batch::verify_git_dir_blobs(workspace.path(), &scan.unchecked_blobs, &|| false)
+            .map_err(CrabError::Io)
     }
 
     async fn check_capsule_root_stability(&self, state: &CapsuleFsckState) -> Result<()> {
@@ -1167,8 +1203,13 @@ impl FsckChecker for StoreChecker {
     {
         Box::pin(async move {
             if self.capsule.is_some() {
-                // Root decoding authenticates and validates every advertised ref.
-                // Pack bodies and sidecars are checked by check_pack_list.
+                // Pack installation validates every advertised pack. The reachable
+                // walker then proves each ref's commit/tree/blob closure instead of
+                // treating an authenticated ref OID as sufficient evidence.
+                let state = self.capsule.as_ref().ok_or_else(|| {
+                    CrabError::Internal("capsule fsck state disappeared".to_owned())
+                })?;
+                self.check_capsule_git_connectivity(state).await?;
                 return Ok(Vec::new());
             }
             // Git-object connectivity requires a local git repo and gix-fsck.
@@ -1261,14 +1302,9 @@ impl FsckChecker for StoreChecker {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<FsckIssue>>> + Send + '_>>
     {
         Box::pin(async move {
-            if let Some(state) = &self.capsule {
-                let directory = tempfile::tempdir()?;
-                crab_read::capsule_protocol::install_git_packs(
-                    &state.view,
-                    directory.path(),
-                    MAX_FSCK_FRONTIER_BYTES,
-                )
-                .await?;
+            if self.capsule.is_some() {
+                // Git pack installation and connectivity are covered by the
+                // first fsck phase; avoid downloading every pack twice.
                 return Ok(Vec::new());
             }
             let mut issues = Vec::new();
@@ -1920,6 +1956,25 @@ mod tests {
         let root = crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
             .await
             .unwrap();
+        let cleanup_transaction = CapsuleTransaction::new(
+            root.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                Some("2".repeat(40)),
+                None,
+                None,
+            )],
+        )
+        .unwrap();
+        let cleanup_capsule = Capsule::build(&cleanup_transaction, Vec::new(), Vec::new()).unwrap();
+        let root = crab_write::capsule_protocol::publish(
+            &layout,
+            root,
+            &cleanup_transaction,
+            &cleanup_capsule,
+        )
+        .await
+        .unwrap();
         (store, prefix, root, xorb_hash, shard_hash)
     }
 
@@ -2011,6 +2066,53 @@ mod tests {
                 .is_empty()
         );
         assert!(checker.check_orphan_file_index().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn capsule_checker_rejects_ref_to_missing_git_object() {
+        use crab_metadata::capsule_protocol::{
+            Capsule, CapsuleGitPack, CapsuleRefEdit, CapsuleTransaction,
+        };
+
+        let (store, prefix, base, _, _) = capsule_checker_fixture().await;
+        let router = StoreLayout::new(store.clone(), prefix.clone());
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let transaction = CapsuleTransaction::new(
+            base.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let pack = CapsuleGitPack::new(
+            Bytes::from_static(b"not-a-git-pack"),
+            Bytes::from_static(b"not-an-index"),
+            Bytes::from_static(b"not-a-reverse-index"),
+            Bytes::from_static(b"not-a-locator"),
+            "4".repeat(40),
+            1,
+        )
+        .unwrap();
+        let capsule = Capsule::build(&transaction, vec![pack], Vec::new()).unwrap();
+        let root = crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+            .await
+            .unwrap();
+        let checker = StoreChecker::for_capsule_repository(store, prefix, root)
+            .await
+            .unwrap();
+
+        let error = checker
+            .check_git_objects()
+            .await
+            .expect_err("missing reachable Git object must fail fsck");
+        assert!(error.to_string().contains("Git"));
     }
 
     #[tokio::test]
