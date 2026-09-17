@@ -319,9 +319,10 @@ impl FollowerStore {
             epoch: candidate.epoch,
         };
         let lock = self.lane_lock(lane)?;
+        let cleanup_lock = Arc::clone(&lock);
         let root = self.root.clone();
         let retained = Arc::clone(&self.retained);
-        tokio::task::spawn_blocking(move || {
+        let removed = tokio::task::spawn_blocking(move || {
             let retained = retained
                 .lock()
                 .map_err(|_| Error::Node("follower disk reservation lock poisoned"))?;
@@ -330,10 +331,24 @@ impl FollowerStore {
                 .map_err(|_| Error::Node("follower lane lock poisoned"))?;
             let removed = remove_retired_sync(&root, lane, candidate, retired_before_ms)?;
             retained.resize(follower_bytes(&root)?)?;
-            Ok(removed)
+            Ok::<bool, Error>(removed)
         })
         .await
-        .map_err(Error::FollowerWorkerJoin)?
+        .map_err(Error::FollowerWorkerJoin)??;
+        if removed {
+            let mut lanes = self
+                .lanes
+                .lock()
+                .map_err(|_| Error::Node("follower store lock poisoned"))?;
+            if lanes
+                .get(&lane)
+                .is_some_and(|current| Arc::ptr_eq(current, &cleanup_lock))
+                && Arc::strong_count(&cleanup_lock) == 2
+            {
+                lanes.remove(&lane);
+            }
+        }
+        Ok(removed)
     }
 
     fn lane_lock(&self, lane: Lane) -> Result<Arc<Mutex<Option<LaneMemory>>>> {
