@@ -145,8 +145,8 @@ authorized standalone-contract decision.
 
 Local proof completed:
 
-- `crab-cell-runtime`: 200 library tests passed (one provider test ignored),
-  38 actor tests passed (one provider test ignored), and all primitive,
+- `crab-cell-runtime`: 203 library tests passed (one provider test ignored),
+  39 actor tests passed (one provider test ignored), and all primitive,
   migration, publication, simulator, and workflow suites pass. The ignored
   source-loss and retention tests also pass against an isolated local RustFS
   bucket when their provider variables are supplied. The shared
@@ -154,7 +154,9 @@ Local proof completed:
   usage/capacity metrics) and schema-v3 receipt evidence path are covered by
   focused tests; user SQL commands now hold bounded worker
   reservations for their full queued/executing lifetime, and pending
-  publication bytes remain ledger-reserved until publication completes.
+  publication bytes remain ledger-reserved until publication completes. Active
+  Cell admission also reserves a fixed descriptor cost in that ledger, and
+  runtime statistics/Prometheus gauges expose descriptor usage and capacity.
 - `crab-ltx --features replica`: 45 unit tests, 74 integration tests, and 5
   doctests, plus the new streaming, cache restart, concurrent-fill, and
   fault-injection coverage pass; the ignored RustFS round trip also passes
