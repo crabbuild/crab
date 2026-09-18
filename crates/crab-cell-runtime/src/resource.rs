@@ -370,19 +370,30 @@ mod tests {
 
     #[test]
     fn concurrent_reservations_release_to_the_same_baseline() {
-        let ledger = ResourceLedger::new(ResourceCost::active_cell().with_active_cells(4));
+        let ledger = ResourceLedger::new(
+            ResourceCost::active_cell()
+                .with_active_cells(4)
+                .with_resident_bytes(4 * ACTIVE_CELL_NATIVE_BYTES)
+                .with_file_descriptors(4 * ACTIVE_CELL_FILE_DESCRIPTORS),
+        );
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+        let successful = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         std::thread::scope(|scope| {
             for _ in 0..16 {
                 let ledger = ledger.clone();
                 let barrier = std::sync::Arc::clone(&barrier);
+                let successful = std::sync::Arc::clone(&successful);
                 scope.spawn(move || {
                     let reservation = ledger.try_reserve(ResourceCost::active_cell()).ok();
+                    if reservation.is_some() {
+                        successful.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     barrier.wait();
                     drop(reservation);
                 });
             }
         });
+        assert_eq!(successful.load(std::sync::atomic::Ordering::Relaxed), 4);
         assert_eq!(ledger.snapshot().unwrap().used, ResourceCost::zero());
     }
 
