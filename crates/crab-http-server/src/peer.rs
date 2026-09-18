@@ -1226,22 +1226,28 @@ fn effective_memory_available(system_available: u64) -> u64 {
 
 #[cfg(target_os = "linux")]
 fn cgroup_available_memory(limit_path: &str, usage_path: &str) -> Option<u64> {
-    let limit = cgroup_memory_limit(limit_path)?;
-    let usage = std::fs::read_to_string(usage_path)
-        .ok()?
-        .trim()
-        .parse::<u64>()
-        .ok()?;
-    limit.checked_sub(usage)
+    let limit = std::fs::read_to_string(limit_path).ok()?;
+    let usage = std::fs::read_to_string(usage_path).ok()?;
+    parse_cgroup_available(&limit, &usage)
 }
 
 #[cfg(target_os = "linux")]
 fn cgroup_memory_limit(path: &str) -> Option<u64> {
-    let limit = std::fs::read_to_string(path).ok()?;
-    if limit.trim() == "max" {
-        return None;
-    }
-    limit.trim().parse().ok()
+    parse_cgroup_limit(&std::fs::read_to_string(path).ok()?)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_cgroup_limit(value: &str) -> Option<u64> {
+    let value = value.trim();
+    (!value.is_empty() && value != "max")
+        .then(|| value.parse::<u64>().ok())
+        .flatten()
+        .filter(|limit| *limit != 0)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_cgroup_available(limit: &str, usage: &str) -> Option<u64> {
+    parse_cgroup_limit(limit)?.checked_sub(usage.trim().parse().ok()?)
 }
 
 fn encode_session(session: SessionId) -> String {
@@ -1480,6 +1486,19 @@ mod tests {
         assert_eq!(resources.disk_limit_bytes, 32 * 1024 * 1024 * 1024);
         assert!(resources.disk_capacity_bytes <= resources.disk_limit_bytes);
         assert!(resources.free_disk_bytes <= resources.disk_capacity_bytes);
+    }
+
+    #[test]
+    fn cgroup_probe_parsing_is_fail_closed_and_monotonic() {
+        assert_eq!(parse_cgroup_limit(" 4096\n"), Some(4096));
+        assert_eq!(parse_cgroup_limit("max"), None);
+        assert_eq!(parse_cgroup_limit(""), None);
+        assert_eq!(parse_cgroup_limit("not-a-number"), None);
+        assert_eq!(parse_cgroup_limit("0"), None);
+        assert_eq!(parse_cgroup_available("4096", "1024"), Some(3072));
+        assert_eq!(parse_cgroup_available("4096", "4097"), None);
+        assert_eq!(parse_cgroup_available("max", "1024"), None);
+        assert_eq!(parse_cgroup_available("4096", "invalid"), None);
     }
 
     fn repository() -> RepositoryConfig {
