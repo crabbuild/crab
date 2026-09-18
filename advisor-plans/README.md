@@ -145,8 +145,8 @@ authorized standalone-contract decision.
 
 Local proof completed:
 
-- `crab-cell-runtime`: 207 library tests passed (one provider test ignored),
-  42 actor tests passed (one provider test ignored), and all primitive,
+- `crab-cell-runtime`: 210 library tests passed (one provider test ignored),
+  43 actor tests passed (one provider test ignored), and all primitive,
   migration, publication, simulator, and workflow suites pass. The ignored
   source-loss and retention tests also pass against an isolated local RustFS
   bucket when their provider variables are supplied. The shared
@@ -157,14 +157,14 @@ Local proof completed:
   publication bytes remain ledger-reserved until publication completes. Active
   Cell admission also reserves a fixed descriptor cost in that ledger, and
   runtime statistics/Prometheus gauges expose descriptor usage and capacity.
-- `crab-ltx --features replica`: 45 unit tests, 75 integration tests, and 5
-  doctests, plus the new streaming, cache restart, concurrent-fill, and
-  fault-injection coverage pass; the ignored RustFS round trip also passes
-  against the isolated local provider.
+- `crab-ltx --features replica`: 45 unit tests, 79 integration test cases
+  (one provider case ignored), and 5 doctests, plus the new streaming, cache
+  restart, concurrent-fill, and fault-injection coverage pass; the ignored
+  RustFS round trip also passes against the isolated local provider.
 - `crab-ltx --no-default-features`: 12 unit tests, 21 integration/doc tests,
   and 5 doctests pass, so the standalone/minimal feature boundary remains
   buildable.
-- `crab-http-server --lib`: 190 tests pass (four provider/browser tests remain
+- `crab-http-server --lib`: 196 tests pass (four provider/browser tests remain
   explicitly ignored); the local RustFS collaboration/takeover, native-push,
   and receive-fault qualifications pass when run with an isolated prefix. The
   architecture target, architecture regression tests, Clippy, formatting,
