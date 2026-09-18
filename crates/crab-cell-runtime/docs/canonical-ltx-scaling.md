@@ -157,14 +157,14 @@ decision is pending; no standalone surface is removed by this design.
 | Sparse hydration | [`ManagedDb::hydration` and `hydrate_step`](../../crab-ltx/src/managed.rs) are driven by the actor's bounded hydration tick through the existing SQL worker; cancellation/restart and post-promotion zero-I/O qualification remain. |
 | Fleet observation | [`NodePublisher`](../../crab-http-server/src/peer.rs) signs short-lived live capacity observations; `NodeAdvertisement` carries a versioned placement signature, server memory capacity uses bounded cgroup-v1/v2 fallback probes, and cold activation sends a bounded direct-node hint before normal authority acquisition. Unified ledger CPU/disk probes and multi-process movement proof remain. |
 | Existing rendezvous | [`preferred_scanner`](../src/scheduler.rs) elects a catalog scheduler scanner. It does not rank or move Cell owners. |
-| Transition safety | [`Control`](../src/control.rs) validates named single-record transitions; [`coordination.rs`](../src/coordination.rs) allocates and retires typed per-effect intents/IDs, while the actor fences completions by activation generation and effect family, drains the kernel-owned pending-effect set before fenced deactivation, and keeps effect timing coupled to the production publisher. |
+| Transition safety | [`Control`](../src/control.rs) validates named single-record transitions; [`coordination.rs`](../src/coordination.rs) allocates and retires typed per-effect intents/IDs, while the actor fences completions by activation generation and effect family, drains the kernel-owned pending-effect set before fenced deactivation, and keeps effect timing coupled to the production publisher. Background hydration, renewal, and persisted-work inventory refresh also pass queue/publication/lease observations through the same kernel before an adapter starts work. |
 
 ### Implementation evidence and remaining qualification
 
 The first implementation slices now have one code path each: the architecture
 guard rejects production `crab-ltx` imports from `crab-http-server`; the actor
 uses a private coordination state machine for admission, scheduling, fencing,
-publication, renewal, migration, and drain, while the kernel allocates and retires typed
+publication, renewal, migration, inventory refresh, and drain, while the kernel allocates and retires typed
 effect intents/IDs and the actor fences completions by activation generation
 and effect family before fenced
 deactivation; the deterministic simulator and bounded TLA+ model exercise the same lifecycle

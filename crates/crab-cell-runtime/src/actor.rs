@@ -2190,7 +2190,7 @@ fn start_background_hydration(
             match active.coordination.step(CoordinationInput::BeginHydration {
                 queue_empty: active.queue.is_empty(),
                 publication_idle: active.coordination.publication_count() == 0,
-                lease_live: true,
+                lease_live: node_lease.check().is_ok(),
             }) {
                 CoordinationDecision::Started => {}
                 CoordinationDecision::Fence => {
@@ -2239,21 +2239,21 @@ fn start_background_inventory(
     tasks: &mut JoinSet<TaskResult>,
     node_lease: &RuntimeNodeLease,
 ) {
-    if node_lease.check().is_err() {
-        return;
-    }
     let candidates = cells
         .iter_mut()
         .filter_map(|(cell, active)| {
-            if !active.persisted_work.is_unknown()
-                || active.inventory_refreshing
-                || active.busy()
-                || active.renewing()
-                || active.fenced()
-                || active.draining()
-                || !active.queue.is_empty()
-                || active.coordination.publication_count() != 0
-            {
+            let decision = active.coordination.step(CoordinationInput::BeginInventory {
+                queue_empty: active.queue.is_empty(),
+                publication_idle: active.coordination.publication_count() == 0,
+                inventory_unknown: active.persisted_work.is_unknown(),
+                refreshing: active.inventory_refreshing,
+                lease_live: node_lease.check().is_ok(),
+            });
+            if matches!(decision, CoordinationDecision::Fence) {
+                fence_active(active);
+                return None;
+            }
+            if !matches!(decision, CoordinationDecision::Started) {
                 return None;
             }
             let effect_id = active.begin_task(CoordinationEffect::Inventory);

@@ -193,6 +193,8 @@ The actor scheduling seam now supplies queue, deactivation, publication
 high-water, and lease observations to that same kernel. Dispatch, wait, fence,
 and deactivation are selected by `CoordinationInput::Schedule`; `start_next`
 does not duplicate busy/renewal/fence or lease policy. Pure tests cover
-publication backpressure and lease loss. Hydration and renewal now pass their
-queue/publication/lease observations through the kernel as well; the actor
-only owns resource reservation and effect execution after a `Started` result.
+publication backpressure and lease loss. Hydration, renewal, and persisted-work
+inventory refresh now pass their queue/publication/unknown-work/lease
+observations through the kernel as well; the actor only owns resource
+reservation, effect execution, and generation-matched inventory application
+after a `Started` result.

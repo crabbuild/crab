@@ -104,6 +104,13 @@ pub(crate) enum CoordinationInput {
         publication_idle: bool,
         lease_live: bool,
     },
+    BeginInventory {
+        queue_empty: bool,
+        publication_idle: bool,
+        inventory_unknown: bool,
+        refreshing: bool,
+        lease_live: bool,
+    },
     FinishHydration {
         complete: bool,
         stale: bool,
@@ -500,6 +507,30 @@ impl CoordinationState {
                     CoordinationDecision::Started
                 }
             }
+            CoordinationInput::BeginInventory {
+                queue_empty,
+                publication_idle,
+                inventory_unknown,
+                refreshing,
+                lease_live,
+            } => {
+                if !lease_live {
+                    self.lifecycle = Lifecycle::Fenced;
+                    self.busy = false;
+                    self.renewing = false;
+                    CoordinationDecision::Fence
+                } else if self.is_fenced() {
+                    CoordinationDecision::Reject(RejectReason::Fenced)
+                } else if self.is_draining() {
+                    CoordinationDecision::Reject(RejectReason::Draining)
+                } else if self.busy {
+                    CoordinationDecision::Reject(RejectReason::Busy)
+                } else if !queue_empty || !publication_idle || !inventory_unknown || refreshing {
+                    CoordinationDecision::Ignored
+                } else {
+                    CoordinationDecision::Started
+                }
+            }
             CoordinationInput::FinishHydration { complete, stale } => {
                 self.busy = false;
                 if !stale {
@@ -725,6 +756,44 @@ mod tests {
             CoordinationDecision::Ignored
         );
         assert_eq!(hydration.residency(), Residency::Sparse);
+    }
+
+    #[test]
+    fn inventory_refresh_requires_quiescence_and_live_lease() {
+        let mut state = CoordinationState::serving(true);
+        assert_eq!(
+            state.step(CoordinationInput::BeginInventory {
+                queue_empty: false,
+                publication_idle: true,
+                inventory_unknown: true,
+                refreshing: false,
+                lease_live: true,
+            }),
+            CoordinationDecision::Ignored
+        );
+        assert_eq!(
+            state.step(CoordinationInput::BeginInventory {
+                queue_empty: true,
+                publication_idle: true,
+                inventory_unknown: true,
+                refreshing: false,
+                lease_live: true,
+            }),
+            CoordinationDecision::Started
+        );
+
+        let mut fenced = CoordinationState::serving(true);
+        assert_eq!(
+            fenced.step(CoordinationInput::BeginInventory {
+                queue_empty: true,
+                publication_idle: true,
+                inventory_unknown: true,
+                refreshing: false,
+                lease_live: false,
+            }),
+            CoordinationDecision::Fence
+        );
+        assert!(fenced.is_fenced());
     }
 
     #[test]

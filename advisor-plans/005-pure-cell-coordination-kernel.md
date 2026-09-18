@@ -1,6 +1,6 @@
 # Extract the pure Cell coordination kernel
 
-Status: IN PROGRESS — pure lifecycle state, typed kernel-owned effect intents/IDs, actor admission/drain/scheduling seams, activation-generation fencing, and in-flight completion drain are wired and tested; scheduling now owns busy/renewal/fence/lease/high-water policy, while complete decision extraction and parity coverage remain
+Status: IN PROGRESS — pure lifecycle state, typed kernel-owned effect intents/IDs, actor admission/drain/scheduling seams, activation-generation fencing, and in-flight completion drain are wired and tested; scheduling plus hydration, renewal, and persisted-work inventory now own their observation gates, while complete decision extraction and parity coverage remain
 Priority: P0
 Effort: XL
 Risk: High
@@ -172,7 +172,9 @@ Background hydration and renewal use the same observation-only boundary:
 foreground queue state, publication quiescence, and node-lease liveness are
 inputs to the kernel, while the actor only reserves resources and executes a
 `Started` effect. Fence decisions close admission before the adapter launches
-the task.
+the task. Persisted-work inventory refresh uses the same boundary and fences
+on lease loss; the actor only records the returned inventory after matching the
+generation and typed effect identity.
 
 ### 6. Update documentation
 
