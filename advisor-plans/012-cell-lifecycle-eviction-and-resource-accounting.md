@@ -1,6 +1,6 @@
 # Cell quiescing, idle eviction, and unified resource accounting
 
-Status: IN PROGRESS — RAII ledger shared by active Cells, resident native bytes, active-Cell file descriptors, SQL work, hydration jobs, retained publication bytes, primitive activity/effect/migration/recovery jobs, canonical LTX `DiskBudget`, and embedded-host I/O/blocking/recovery/dirty/scratch admissions; deterministic victim selection, actor eviction, pressure pacing, retained-byte accounting, and fail-closed persisted-work refresh are wired; unknown persisted-work inventory is explicitly ineligible for eviction; descriptor admission/metrics and shared local-disk consumer wiring are now explicit; bounded two-slot/three-Cell churn and retained-work eviction guard tests prove canonical capacity reuse and fail-closed obligation handling; runtime Prometheus gauges now expose every ledger class; restart-churn, process-wide codec accounting, advertised-placement parity, and measured mixed-workload inventory proof remain
+Status: IN PROGRESS — RAII ledger shared by active Cells, resident native bytes, active-Cell file descriptors, SQL work, hydration jobs, retained publication bytes, primitive activity/effect/migration/recovery jobs, canonical LTX `DiskBudget`, and embedded-host I/O/blocking/recovery/dirty/scratch admissions; deterministic victim selection, actor eviction, pressure pacing, retained-byte accounting, and fail-closed persisted-work refresh are wired; unknown persisted-work inventory is explicitly ineligible for eviction; descriptor admission/metrics and shared local-disk consumer wiring are now explicit; bounded two-slot/three-Cell churn and retained-work eviction guard tests prove canonical capacity reuse and fail-closed obligation handling; runtime Prometheus gauges now expose every ledger class; stale session restart inventory now reserves every regular file outside the fresh process session and rejects ambiguous layouts before serving; process-wide codec accounting, advertised-placement parity, and measured mixed-workload inventory proof remain
 Priority: P0
 Effort: XL
 Risk: High
@@ -168,7 +168,7 @@ mutating the database behind the actor.
       without allowing a failed admission to leak bytes.
 - [ ] Advertised/metric totals reconcile with actor state and measured local
       disk within a documented tolerance.
-- [ ] Restart inventory does not undercount existing owned files.
+- [x] Restart inventory does not undercount existing owned files.
 - [x] Primitive jobs participate in the same limits; activity/effect scheduler
       work, release migrations, node-log recovery, and user SQL commands use
       bounded RAII reservations, while Queue and Workflow durable rows are
@@ -196,12 +196,26 @@ LTX host now obtains one runtime admission token for each bounded object-store
 I/O operation, blocking host job, recovery cohort, dirty-memory cohort, and
 scratch MiB. Tokens follow cancellation-safe work until completion, while the
 existing LTX semaphores remain the local waiters. The remaining ledger gates are
-codec accounting, restart inventory reconciliation, complete advertised-metric
-parity, advertised-placement parity, and measured mixed-workload proof; those
-require qualification rather than another local counter. HTTP Prometheus
+process-wide codec accounting, complete advertised-metric parity,
+advertised-placement parity, and measured mixed-workload proof; those require
+qualification rather than another local counter. HTTP Prometheus
 metrics now export usage and capacity for every host-ledger class, but the
 placement advertisement still publishes its narrower job-credit contract until
 qualification proves a compatible expanded observation shape.
+
+On server restart, `LocalStaging::new_with_restart_inventory` walks the
+dedicated `cells/sessions` namespace before runtime startup. The newly created
+session is excluded because its active database, WAL, cache, and transfer
+reservations are established by their owning handles; every prior session is
+treated as retained/quarantined local state and its regular-file bytes are
+reserved on the same `DiskBudget`. Symlinks, special files, non-directory
+session entries, path escapes, and capacity overflow fail closed. The
+reservation is held by the server's staging owner, so the runtime's disk
+admission and Prometheus totals include the inventory before any Cell can be
+activated. Focused tests cover nested cache files, current-session exclusion,
+symlink rejection, and capacity rejection; follower storage and directory
+cache constructors continue to reconcile their own durable namespaces through
+the same budget.
 
 The actor churn test is the canonical local regression for this maintenance
 path: it uses the same runtime admission, actor eviction, authority release,

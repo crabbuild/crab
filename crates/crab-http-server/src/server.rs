@@ -803,10 +803,12 @@ pub async fn serve(config: Config) -> Result<()> {
     let cell_budget = CellRuntimeBudget::from_resources(local_resources)?;
     let cell_capacity = CellCapacityReport::new(local_resources, cell_budget);
     let local_disk = cell_budget.local_disk();
-    let local_staging = crate::local_disk::LocalStaging::new(
+    let local_staging = crate::local_disk::LocalStaging::new_with_restart_inventory(
         session_dir.join("transfers"),
         local_disk.clone(),
         cell_budget.disk_reserve_bytes,
+        &config.cells.data_dir,
+        &session_dir,
     )
     .map_err(|source| crate::Error::LocalStaging {
         source: Box::new(source),

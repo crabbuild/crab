@@ -184,7 +184,10 @@ Queue/Workflow rows are re-inspected after durable work before eviction; the
 eviction seam now has a pure
 deterministic selector that
 excludes unsafe obligations; directory-cache files are restart-persistent,
-verified, and charged to the shared local-disk budget; native and bundle
+verified, and charged to the shared local-disk budget, while the HTTP startup
+path inventories every regular file in prior process session directories and
+holds those bytes in the same budget, rejecting symlinked or special layouts;
+native and bundle
 publication share the authenticated LTX inspection path with replayable scratch
 sources; placement/pressure decisions are pure fixed-point functions with
 versioned signed observations whose advertised free headroom is reconciled with
@@ -1187,9 +1190,10 @@ the pinned TLC runner has positive and deliberately broken configurations; and
 `CellRuntime::resident_handle` is attempted before catalog/control reads while
 bounded worker hydration promotes only verified sparse roots. Slices 10–12 also
 have pure resource, eviction, placement, pressure, and movement-budget
-contracts, with the runtime/SQL/hydration/primitive-job ledger and actor-owned
-movement seam wired; complete process-wide consumer registration, cold-placement
-execution, and multi-process qualification remain open. The version-3 receipt
+contracts, with the runtime/SQL/hydration/primitive-job ledger, stale-session
+restart inventory, and actor-owned movement seam wired; complete process-wide
+codec/consumer registration, cold-placement execution, and multi-process
+qualification remain open. The version-3 receipt
 type is versioned and size-bounded, with signing, artifact binding,
 fault/artifact/ownership evidence, runner emission, and exact source/image
 release binding implemented.

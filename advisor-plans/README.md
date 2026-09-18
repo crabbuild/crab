@@ -199,9 +199,21 @@ Scheduler maintenance is also ledger-visible: migration and node-log recovery
 tasks now retain a `NodeJobReservation` until their spawned futures finish,
 alongside the existing per-cell/session guards. This closes the untracked
 background-job path without adding a second capacity owner; process-wide
-codec accounting, restart inventory, advertised-placement parity, and measured
+codec accounting, advertised-placement parity, and measured
 mixed-workload proof are still explicit Plan 012 qualification gates. Runtime
 Prometheus metrics now expose usage and capacity for every host-ledger class.
+
+Restart inventory is now fail-closed at the HTTP composition boundary. Each
+process gets a fresh `cells/sessions/<session-id>` directory; before the
+runtime starts, `LocalStaging::new_with_restart_inventory` recursively counts
+every regular file in older session directories and holds one shared
+`DiskBudget` reservation for those bytes. The fresh session is excluded because
+its active database/WAL/cache/transfer owners reserve bytes as they open; the
+follower store and directory-cache constructors independently import their
+durable namespaces into that same budget. Symlinks, special files, malformed
+session roots, and over-capacity inventories fail closed instead of being
+silently treated as free space. Focused HTTP tests cover nested stale files,
+current-session exclusion, ambiguous symlink rejection, and capacity failure.
 
 The embedded canonical LTX host is now ledger-visible too. `CellRuntime` installs
 one weak runtime admission on its `ReplicaHost`; every bounded host I/O, blocking
