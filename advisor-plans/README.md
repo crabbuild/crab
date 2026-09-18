@@ -253,8 +253,11 @@ receiver activation failure after the idle takeover CAS and verifies the
 exact root returns to unowned `Idle`. Its takeover counterpart,
 `failed_takeover_receiver_does_not_leave_authority_owned`, proves the same
 rollback after fencing an old owner; pinned recovery overlays remain owned
-until replay is sealed. Protected three-Pod movement and membership receipts
-remain open.
+until replay is sealed. The feature-gated
+`independent_process_receiver_failure_returns_exact_idle_root` probe repeats
+the idle receiver failure in a separate OS process against the shared
+filesystem CAS authority and verifies the exact root returns to unowned
+`Idle`. Protected three-Pod movement and membership receipts remain open.
 
 Restart inventory is now fail-closed at the HTTP composition boundary. Each
 process gets a fresh `cells/sessions/<session-id>` directory; before the
