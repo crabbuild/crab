@@ -9,7 +9,7 @@ use crab_metadata::git_visibility::GitVisibilityIndex;
 use crab_remote_git::{
     CorruptionStage, Error as RemoteGitError, GitCatalogVisibilityIndex, ObjectLimits,
     OperationContext, OperationKind, OperationLimits, RemoteGitObject, RemoteGitRepository,
-    RepositoryOptions, RepositoryRef, RepositoryStateError,
+    RepositoryOptions, RepositoryRef, RepositoryStateError, Revision,
 };
 use gix_hash::ObjectId;
 use tokio_util::sync::CancellationToken;
@@ -332,6 +332,10 @@ pub struct UploadPackRequest {
     pub shallow: Vec<ObjectId>,
     /// Requested depth from each want.
     pub deepen: Option<u32>,
+    /// Include commits at or newer than this committer timestamp.
+    pub deepen_since: Option<i64>,
+    /// Exclude commits reachable from these visible references.
+    pub deepen_not: Vec<String>,
     /// Whether the requested depth extends the existing shallow boundary.
     pub deepen_relative: bool,
     /// Whether annotated tags pointing at transferred commits should be added.
@@ -732,6 +736,14 @@ async fn plan_with_operation(
         .filter_map(|(visible, oid)| visible.then_some(*oid))
         .collect::<HashSet<_>>();
     let existing_shallow = request.shallow.iter().copied().collect::<HashSet<_>>();
+    let excluded_commits = resolve_excluded_commits(
+        repository,
+        operation,
+        visible_ref_names,
+        &request.deepen_not,
+        cancellation,
+    )
+    .await?;
     let deduplicate_by_oid = should_deduplicate_by_oid(request);
     let sparse_matchers =
         prepare_sparse_matchers(operation, visibility, visible_ref_names, &request.filter).await?;
@@ -833,6 +845,9 @@ async fn plan_with_operation(
                         invariant: "batched upload-pack read is missing an object",
                     })?
             };
+            if excluded_commits.contains(&item.oid) && !roots.contains(&item.oid) {
+                continue;
+            }
             let include = !common_haves.contains(&item.oid)
                 && (roots.contains(&item.oid)
                     || filter_accepts(&request.filter, &object, &item, &sparse_matchers));
@@ -845,6 +860,8 @@ async fn plan_with_operation(
                 request,
                 maximum_objects,
                 &existing_shallow,
+                Some(operation),
+                &excluded_commits,
                 &sparse_matchers,
                 &mut queue,
                 &mut queued,
@@ -949,6 +966,8 @@ fn visibility_selection_request_supported(request: &UploadPackRequest) -> bool {
     !request.wants.is_empty()
         && request.shallow.is_empty()
         && request.deepen.is_none()
+        && request.deepen_since.is_none()
+        && request.deepen_not.is_empty()
         && !request.deepen_relative
 }
 
@@ -1089,8 +1108,10 @@ async fn visibility_object_selection(
         objects
     };
 
-    objects.sort_unstable();
-    objects.dedup();
+    deduplicate_visibility_objects(
+        &mut objects,
+        matches!(visibility, VisibilitySource::Catalog(_)),
+    );
     let actual = u64::try_from(objects.len()).unwrap_or(u64::MAX);
     if actual > maximum_objects {
         return Err(RemoteGitError::LimitExceeded {
@@ -1103,6 +1124,16 @@ async fn visibility_object_selection(
         objects,
         common_haves,
     }))
+}
+
+fn deduplicate_visibility_objects(objects: &mut Vec<ObjectId>, preserve_physical_order: bool) {
+    if preserve_physical_order {
+        let mut seen = HashSet::with_capacity(objects.len());
+        objects.retain(|object| seen.insert(*object));
+    } else {
+        objects.sort_unstable();
+        objects.dedup();
+    }
 }
 
 #[cfg(test)]
@@ -1294,7 +1325,7 @@ async fn plan_from_visibility_catalog(
     if !request.filter.is_catalog_exact() || !visibility_selection_request_supported(request) {
         return Ok(None);
     }
-    if request.haves.is_empty() {
+    if request.haves.is_empty() && matches!(visibility, VisibilitySource::Catalog(_)) {
         return plan_from_visibility_catalog_ordinals(
             operation,
             references,
@@ -1317,19 +1348,29 @@ async fn plan_from_visibility_catalog(
     else {
         return Ok(None);
     };
-    let object_bytes = selection
-        .objects
-        .iter()
-        .map(|oid| {
-            oid.as_bytes()
-                .try_into()
-                .map_err(|_| RemoteGitError::Corrupt {
-                    stage: CorruptionStage::Locator,
+    let kinds = match visibility {
+        VisibilitySource::Materialized(_) => operation
+            .pinned_object_metadata(&selection.objects)
+            .await?
+            .into_iter()
+            .map(|metadata| metadata.kind)
+            .collect(),
+        VisibilitySource::Catalog(_) => {
+            let object_bytes = selection
+                .objects
+                .iter()
+                .map(|oid| {
+                    oid.as_bytes()
+                        .try_into()
+                        .map_err(|_| RemoteGitError::Corrupt {
+                            stage: CorruptionStage::Locator,
+                        })
                 })
-        })
-        .collect::<std::result::Result<Vec<[u8; 20]>, RemoteGitError>>()?;
-    let kinds = operation.catalog_object_kinds(&object_bytes).await?;
-    if kinds.iter().any(Option::is_none) {
+                .collect::<std::result::Result<Vec<[u8; 20]>, RemoteGitError>>()?;
+            operation.catalog_object_kinds(&object_bytes).await?
+        }
+    };
+    if kinds.len() != selection.objects.len() || kinds.iter().any(Option::is_none) {
         tracing::debug!(
             requested_objects = selection.objects.len(),
             "published Git object-kind metadata is incomplete; using bounded upload-pack traversal"
@@ -1543,6 +1584,8 @@ fn shallow_closure_request_supported(request: &UploadPackRequest) -> bool {
         && request.haves.is_empty()
         && request.shallow.is_empty()
         && request.deepen.is_some_and(|depth| depth > 0)
+        && request.deepen_since.is_none()
+        && request.deepen_not.is_empty()
         && !request.deepen_relative
         && matches!(request.filter, UploadPackFilter::None)
 }
@@ -1803,6 +1846,101 @@ fn admit_batch(
     Ok(object_ids)
 }
 
+async fn special_parent_allowed(
+    operation: Option<&OperationContext>,
+    parent: ObjectId,
+    request: &UploadPackRequest,
+    excluded_commits: &HashSet<ObjectId>,
+    cancellation: &CancellationToken,
+) -> crab_remote_git::Result<bool> {
+    if cancellation.is_cancelled() {
+        return Err(RemoteGitError::Cancelled);
+    }
+    if excluded_commits.contains(&parent) {
+        return Ok(false);
+    }
+    let Some(since) = request.deepen_since else {
+        return Ok(true);
+    };
+    let operation = operation.ok_or(RemoteGitError::InternalInvariant {
+        invariant: "timestamp-bounded traversal has no operation",
+    })?;
+    let object = operation.read_object(parent).await?;
+    if object.kind != gix_object::Kind::Commit {
+        return Err(RemoteGitError::Corrupt {
+            stage: CorruptionStage::Commit,
+        });
+    }
+    let commit =
+        gix_object::CommitRef::from_bytes(&object.data, gix_hash::Kind::Sha1).map_err(|_| {
+            RemoteGitError::Corrupt {
+                stage: CorruptionStage::Commit,
+            }
+        })?;
+    Ok(commit
+        .time()
+        .map_err(|_| RemoteGitError::Corrupt {
+            stage: CorruptionStage::Commit,
+        })?
+        .seconds
+        >= since)
+}
+
+async fn resolve_excluded_commits(
+    repository: &RemoteGitRepository,
+    operation: &OperationContext,
+    visible_ref_names: &[String],
+    references: &[String],
+    cancellation: &CancellationToken,
+) -> crab_remote_git::Result<HashSet<ObjectId>> {
+    if references.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let visible = visible_ref_names.iter().collect::<HashSet<_>>();
+    let mut queue = VecDeque::new();
+    let mut excluded = HashSet::new();
+    for name in references {
+        let resolved = repository
+            .resolve(&Revision::Reference(name.clone()), operation)
+            .await?;
+        if resolved
+            .reference
+            .as_ref()
+            .is_none_or(|reference| !visible.contains(reference))
+        {
+            return Err(RemoteGitError::AuthorizationDenied);
+        }
+        queue.push_back(resolved.commit);
+    }
+    while let Some(oid) = queue.pop_front() {
+        if cancellation.is_cancelled() {
+            return Err(RemoteGitError::Cancelled);
+        }
+        if !excluded.insert(oid) {
+            continue;
+        }
+        let object = operation.read_object(oid).await?;
+        if object.kind != gix_object::Kind::Commit {
+            return Err(RemoteGitError::Corrupt {
+                stage: CorruptionStage::Commit,
+            });
+        }
+        let commit = gix_object::CommitRef::from_bytes(&object.data, gix_hash::Kind::Sha1)
+            .map_err(|_| RemoteGitError::Corrupt {
+                stage: CorruptionStage::Commit,
+            })?;
+        queue.extend(commit.parents());
+        if u64::try_from(excluded.len()).unwrap_or(u64::MAX) > operation.max_logical_objects() {
+            return Err(RemoteGitError::LimitExceeded {
+                limit: "deepen-not excluded commits",
+                actual: u64::try_from(excluded.len()).unwrap_or(u64::MAX),
+                maximum: operation.max_logical_objects(),
+            });
+        }
+    }
+    Ok(excluded)
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "object traversal carries the bounded protocol policy explicitly"
@@ -1813,6 +1951,8 @@ async fn enqueue_children(
     request: &UploadPackRequest,
     maximum_objects: u64,
     existing_shallow: &HashSet<ObjectId>,
+    operation: Option<&OperationContext>,
+    excluded_commits: &HashSet<ObjectId>,
     sparse_matchers: &SparseMatchers,
     queue: &mut VecDeque<QueueItem>,
     queued: &mut HashSet<QueueKey>,
@@ -1847,11 +1987,35 @@ async fn enqueue_children(
                 maximum_objects,
                 deduplicate_by_oid,
             )?;
+            if let Some(since) = request.deepen_since {
+                let timestamp = commit
+                    .time()
+                    .map_err(|_| RemoteGitError::Corrupt {
+                        stage: CorruptionStage::Commit,
+                    })?
+                    .seconds;
+                if timestamp < since {
+                    shallow.insert(item.oid);
+                    return Ok(());
+                }
+            }
             match item.depth {
                 TraversalDepth::RelativeBoundary => {
                     if existing_shallow.contains(&item.oid) {
                         unshallow.insert(item.oid);
                         for parent in commit.parents() {
+                            if !special_parent_allowed(
+                                operation,
+                                parent,
+                                request,
+                                excluded_commits,
+                                cancellation,
+                            )
+                            .await?
+                            {
+                                shallow.insert(item.oid);
+                                continue;
+                            }
                             enqueue(
                                 QueueItem {
                                     oid: parent,
@@ -1869,6 +2033,18 @@ async fn enqueue_children(
                         }
                     } else {
                         for parent in commit.parents() {
+                            if !special_parent_allowed(
+                                operation,
+                                parent,
+                                request,
+                                excluded_commits,
+                                cancellation,
+                            )
+                            .await?
+                            {
+                                shallow.insert(item.oid);
+                                continue;
+                            }
                             enqueue(
                                 QueueItem {
                                     oid: parent,
@@ -1887,14 +2063,18 @@ async fn enqueue_children(
                     }
                 }
                 TraversalDepth::Absolute(distance) => {
+                    let mut selector_crossed_boundary = false;
                     if existing_shallow.contains(&item.oid) {
-                        let Some(limit) = request.deepen else {
-                            return Ok(());
-                        };
-                        if distance.saturating_add(1) >= limit {
+                        if let Some(limit) = request.deepen {
+                            if distance.saturating_add(1) >= limit {
+                                return Ok(());
+                            }
+                            unshallow.insert(item.oid);
+                        } else if request.deepen_since.is_some() || !request.deepen_not.is_empty() {
+                            selector_crossed_boundary = true;
+                        } else {
                             return Ok(());
                         }
-                        unshallow.insert(item.oid);
                     } else if let Some(limit) = request.deepen
                         && distance.saturating_add(1) >= limit
                     {
@@ -1902,6 +2082,18 @@ async fn enqueue_children(
                         return Ok(());
                     }
                     for parent in commit.parents() {
+                        if !special_parent_allowed(
+                            operation,
+                            parent,
+                            request,
+                            excluded_commits,
+                            cancellation,
+                        )
+                        .await?
+                        {
+                            shallow.insert(item.oid);
+                            continue;
+                        }
                         enqueue(
                             QueueItem {
                                 oid: parent,
@@ -1917,6 +2109,9 @@ async fn enqueue_children(
                             deduplicate_by_oid,
                         )?;
                     }
+                    if selector_crossed_boundary && !shallow.contains(&item.oid) {
+                        unshallow.insert(item.oid);
+                    }
                 }
                 TraversalDepth::Relative(distance) => {
                     if let Some(limit) = request.deepen
@@ -1926,6 +2121,18 @@ async fn enqueue_children(
                         return Ok(());
                     }
                     for parent in commit.parents() {
+                        if !special_parent_allowed(
+                            operation,
+                            parent,
+                            request,
+                            excluded_commits,
+                            cancellation,
+                        )
+                        .await?
+                        {
+                            shallow.insert(item.oid);
+                            continue;
+                        }
                         enqueue(
                             QueueItem {
                                 oid: parent,
@@ -2208,6 +2415,24 @@ mod tests {
                 peeled: None,
             },
         ]
+    }
+
+    #[test]
+    fn catalog_selection_deduplicates_without_losing_pack_order() {
+        let mut objects = vec![oid('3'), oid('1'), oid('3'), oid('2')];
+
+        deduplicate_visibility_objects(&mut objects, true);
+
+        assert_eq!(objects, [oid('3'), oid('1'), oid('2')]);
+    }
+
+    #[test]
+    fn legacy_selection_deduplicates_in_canonical_oid_order() {
+        let mut objects = vec![oid('3'), oid('1'), oid('3'), oid('2')];
+
+        deduplicate_visibility_objects(&mut objects, false);
+
+        assert_eq!(objects, [oid('1'), oid('2'), oid('3')]);
     }
 
     #[test]
@@ -2936,6 +3161,8 @@ mod tests {
             &item,
             &UploadPackRequest::default(),
             10,
+            &HashSet::new(),
+            None,
             &HashSet::new(),
             &SparseMatchers {
                 patterns: HashMap::new(),

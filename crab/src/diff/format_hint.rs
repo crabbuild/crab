@@ -56,6 +56,17 @@ pub trait FormatHint: Send + Sync {
     fn format_name(&self) -> &'static str;
 }
 
+/// Select the newest available chunk while tolerating a missing side of an
+/// added or deleted file. Empty bytes are the explicit marker used by the
+/// diff reader when a version has no corresponding span.
+fn preferred_annotation_chunk(chunk_data: &[Bytes]) -> Option<&Bytes> {
+    chunk_data
+        .iter()
+        .rev()
+        .find(|bytes| !bytes.is_empty())
+        .or_else(|| chunk_data.first())
+}
+
 // ---------------------------------------------------------------------------
 // detect_format_hint — extension-based dispatch
 // ---------------------------------------------------------------------------
@@ -110,11 +121,8 @@ impl FormatHint for SafetensorsHint {
         if chunk_data.is_empty() || changed_ranges.is_empty() {
             return Vec::new();
         }
-        // Try to parse the new version's header (index 1 if available, else 0).
-        let header_bytes = if chunk_data.len() > 1 {
-            &chunk_data[1]
-        } else {
-            &chunk_data[0]
+        let Some(header_bytes) = preferred_annotation_chunk(chunk_data) else {
+            return Vec::new();
         };
         let Some(tensors) = parse_safetensors_header(header_bytes) else {
             return Vec::new();
@@ -239,11 +247,8 @@ impl FormatHint for ParquetHint {
         if chunk_data.is_empty() || changed_ranges.is_empty() {
             return Vec::new();
         }
-        // Try to parse the new version's footer (index 1 if available, else 0).
-        let footer_bytes = if chunk_data.len() > 1 {
-            &chunk_data[1]
-        } else {
-            &chunk_data[0]
+        let Some(footer_bytes) = preferred_annotation_chunk(chunk_data) else {
+            return Vec::new();
         };
         let Some(row_groups) = parse_parquet_footer(footer_bytes) else {
             return Vec::new();
@@ -431,6 +436,19 @@ mod tests {
         assert_eq!(annotations.len(), 1);
         assert!(annotations[0].contains("layer.weight"));
         assert!(annotations[0].contains("modified"));
+    }
+
+    #[test]
+    fn safetensors_annotate_uses_available_side_for_deleted_file() {
+        let hint = SafetensorsHint;
+        let header = build_safetensors_header(&[("layer.weight", 0, 1024)]);
+        let header_len = {
+            let hl = u64::from_le_bytes(header[..8].try_into().unwrap()) as u64;
+            8 + hl
+        };
+        let annotations = hint.annotate(&[header, Bytes::new()], &[(header_len, 512)]);
+        assert_eq!(annotations.len(), 1);
+        assert!(annotations[0].contains("layer.weight"));
     }
 
     #[test]

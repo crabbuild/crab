@@ -1,8 +1,7 @@
 use std::collections::HashSet;
 
 use bytes::Bytes;
-use crab_metadata::{layout_descriptor::read_canonical_layout, manifest_store::read_manifest};
-use crab_storage::{ETag, StorageError, StoreLayout};
+use crab_storage::{ETag, StorageError};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -30,6 +29,8 @@ pub enum CatalogError {
     Initialize(#[from] crab_write::WriteError),
     #[error("repository metadata validation failed")]
     Metadata(#[from] crab_metadata::error::MetadataError),
+    #[error("repository content validation failed")]
+    Read(#[from] crab_read::ReadError),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -207,15 +208,14 @@ impl CatalogStore {
         let runtime = record.runtime_config(&self.root, &default_branch)?;
         crate::config::validate_repository(&runtime)
             .map_err(|_| CatalogError::Invalid("repository record failed validation"))?;
-        let layout = StoreLayout::new(self.root.store.clone(), runtime.prefix.clone());
-        crab_write::initialize::initialize_repository(
-            &self.root.store,
+        let layout = self.root.repository_layout(runtime.prefix.clone());
+        crab_write::capsule_protocol::initialize(
             &layout,
+            blake3::hash(record.id.as_bytes()).to_hex().as_ref(),
             &format!("refs/heads/{default_branch}"),
         )
         .await?;
-        read_canonical_layout(&self.root.store, &layout).await?;
-        read_manifest(&self.root.store, &layout).await?;
+        crab_metadata::capsule_protocol::load_root(&layout).await?;
         self.insert(record).await
     }
 
@@ -241,9 +241,29 @@ impl CatalogStore {
         let runtime = record.runtime_config(&self.root, "main")?;
         crate::config::validate_repository(&runtime)
             .map_err(|_| CatalogError::Invalid("repository record failed validation"))?;
-        let layout = StoreLayout::new(self.root.store.clone(), runtime.prefix);
-        read_canonical_layout(&self.root.store, &layout).await?;
-        read_manifest(&self.root.store, &layout).await?;
+        let layout = self.root.repository_layout(runtime.prefix);
+        let view = crab_read::capsule_protocol::open_view(
+            &layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+                max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+            },
+        )
+        .await?;
+        crab_read::capsule_protocol::verify_reachable_dependencies(
+            &layout,
+            &view,
+            crab_read::capsule_protocol::CapsuleDependencyLimits {
+                max_git_bytes: 2 * 1024 * 1024 * 1024,
+                pointer_scan: crab_git::walk::PointerScanLimits {
+                    objects: 2_000_000,
+                    lookups: 8_000_000,
+                    allocation_bytes: 64 * 1024 * 1024,
+                },
+            },
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await?;
         self.insert(record).await
     }
 
@@ -382,6 +402,7 @@ mod tests {
     use std::sync::Arc;
 
     use object_store::memory::InMemory;
+    use sha2::Digest as _;
 
     use super::*;
 
@@ -425,23 +446,189 @@ mod tests {
                 vec![],
             )
             .await;
-        assert!(matches!(result, Err(CatalogError::Metadata(_))));
+        assert!(matches!(result, Err(CatalogError::Read(_))));
+    }
+
+    #[tokio::test]
+    async fn adopt_rejects_a_v2_root_with_missing_scoped_pointer_data() {
+        let catalog = catalog();
+        let layout = catalog
+            .root
+            .repository_layout(catalog.root.repository_prefix("team/project").unwrap());
+        let base = crab_write::capsule_protocol::initialize(
+            &layout,
+            blake3::hash(b"team-project").to_hex().as_ref(),
+            "refs/heads/main",
+        )
+        .await
+        .unwrap();
+        let mut pointers = crab_metadata::capsule_protocol::PointerCatalog::new();
+        pointers
+            .insert_xorb(
+                "1".repeat(64),
+                crab_metadata::capsule_protocol::XorbCatalogEntry::new(
+                    1,
+                    "2".repeat(64),
+                    vec![crab_metadata::capsule_protocol::XorbChunkEntry::new(
+                        "3".repeat(64),
+                        1,
+                    )],
+                ),
+            )
+            .unwrap();
+        let transaction = crab_metadata::capsule_protocol::CapsuleTransaction::new(
+            base.record().digest(),
+            vec![crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("4".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule = crab_metadata::capsule_protocol::Capsule::build(
+            &transaction,
+            vec![
+                crab_metadata::capsule_protocol::CapsuleGitPack::new(
+                    Bytes::from_static(b"pack"),
+                    Bytes::from_static(b"index"),
+                    Bytes::from_static(b"reverse"),
+                    Bytes::from_static(b"locator"),
+                    "5".repeat(40),
+                    1,
+                )
+                .unwrap(),
+            ],
+            vec![crab_metadata::capsule_protocol::CapsuleSection::new(
+                crab_metadata::capsule_protocol::CapsuleSectionKind::CatalogDelta,
+                pointers.encode_delta().unwrap(),
+            )],
+        )
+        .unwrap();
+        crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+            .await
+            .unwrap();
+
+        let result = catalog
+            .adopt_repository(
+                "team".into(),
+                "project".into(),
+                "team/project".into(),
+                String::new(),
+                vec![],
+            )
+            .await;
+
+        assert!(matches!(result, Err(CatalogError::Read(_))));
+        assert!(catalog.load().await.unwrap().0.repositories.is_empty());
+    }
+
+    #[tokio::test]
+    async fn adopt_rejects_a_reachable_lfs_pointer_without_its_object() {
+        let catalog = catalog();
+        let layout = catalog
+            .root
+            .repository_layout(catalog.root.repository_prefix("team/project").unwrap());
+        let pointer = crab_git::LfsPointer {
+            oid: [0x42; 32],
+            size: 7,
+            extensions: Vec::new(),
+        };
+        crate::test_git::publish_blob(&layout, &pointer.serialize()).await;
+
+        let result = catalog
+            .adopt_repository(
+                "team".into(),
+                "project".into(),
+                "team/project".into(),
+                String::new(),
+                vec![],
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(CatalogError::Read(crab_read::ReadError::Lfs(
+                crab_lfs::LfsError::ObjectMissing { .. }
+            )))
+        ));
+        assert!(catalog.load().await.unwrap().0.repositories.is_empty());
+    }
+
+    #[tokio::test]
+    async fn adopt_rejects_a_reachable_crab_pointer_absent_from_the_catalog() {
+        let catalog = catalog();
+        let layout = catalog
+            .root
+            .repository_layout(catalog.root.repository_prefix("team/project").unwrap());
+        let pointer = format!(
+            "version https://crab.build/spec/v1\nfile-hash {}\nsize 7\n",
+            "31".repeat(32)
+        );
+        crate::test_git::publish_blob(&layout, pointer.as_bytes()).await;
+
+        let result = catalog
+            .adopt_repository(
+                "team".into(),
+                "project".into(),
+                "team/project".into(),
+                String::new(),
+                vec![],
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(CatalogError::Read(crab_read::ReadError::CorruptObject {
+                reason,
+                ..
+            })) if reason.contains("absent from the catalog")
+        ));
+        assert!(catalog.load().await.unwrap().0.repositories.is_empty());
+    }
+
+    #[tokio::test]
+    async fn adopt_accepts_a_reachable_lfs_pointer_with_verified_content() {
+        let catalog = catalog();
+        let layout = catalog
+            .root
+            .repository_layout(catalog.root.repository_prefix("team/project").unwrap());
+        let content = Bytes::from_static(b"content");
+        let oid: [u8; 32] = sha2::Sha256::digest(&content).into();
+        let pointer = crab_git::LfsPointer {
+            oid,
+            size: content.len() as u64,
+            extensions: Vec::new(),
+        };
+        crate::test_git::publish_blob(&layout, &pointer.serialize()).await;
+        crab_lfs::LfsObjectStore::new(layout.store().clone(), layout.repo_prefix())
+            .put(&oid, content)
+            .await
+            .unwrap();
+
+        let result = catalog
+            .adopt_repository(
+                "team".into(),
+                "project".into(),
+                "team/project".into(),
+                String::new(),
+                vec![],
+            )
+            .await;
+
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn adopted_repository_requires_empty_cell_and_ready_transition_is_idempotent() {
         let catalog = catalog();
-        let layout = StoreLayout::new(
-            catalog.root.store.clone(),
-            catalog.root.repository_prefix("team/project").unwrap(),
-        );
-        crab_write::initialize::initialize_repository(
-            &catalog.root.store,
-            &layout,
-            "refs/heads/main",
-        )
-        .await
-        .unwrap();
+        let layout = catalog
+            .root
+            .repository_layout(catalog.root.repository_prefix("team/project").unwrap());
+        let repository_id = blake3::hash(b"team-project").to_hex().to_string();
+        crab_write::capsule_protocol::initialize(&layout, &repository_id, "refs/heads/main")
+            .await
+            .unwrap();
         let runtime = catalog
             .adopt_repository(
                 "team".into(),

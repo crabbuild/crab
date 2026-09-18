@@ -22,6 +22,9 @@ crab doctor [OPTIONS]
 `crab doctor` runs a series of diagnostic checks on your Crab repository:
 filter driver registration, credential validity, bucket connectivity,
 repository initialization, staging area health, and metadata consistency.
+Remote initialization checks validate a capsule-v2 root first and report its
+generation. They use the canonical-v1 layout only when no v2 root exists, and
+report a corrupt v2 root as a failure instead of masking it with v1 metadata.
 
 Local-cache checks share the non-mutating report from
 [`crab cache stats`](/docs/cli/reference/crab-cache#stats): root privacy,

@@ -113,8 +113,9 @@ docker compose --file crates/crab-http-server/deploy/compose.yaml run --rm \
 
 Create returns only after the initial repository SQLite/LTX root has been
 published, restored, identity-checked and marked `cell_ready`. Adopted
-repositories follow the same empty-Cell initialization and readiness transition;
-old collaboration application data is not imported.
+repositories first verify their complete capsule-v2 Git and shard/xorb closure,
+then follow the same empty-Cell initialization and readiness transition; old
+collaboration application data is not imported.
 
 Inspect or stop the stack without deleting repositories:
 

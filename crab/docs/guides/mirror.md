@@ -17,7 +17,7 @@ or convert repository contents into Crab-native tracked files.
 
 Full mirroring initializes a genuinely empty destination prefix before reading
 its refs, preserving the source's symbolic HEAD as its initial default branch.
-Existing repositories still require a valid layout and manifest;
+Existing repositories still require a valid authenticated v2 root;
 mirroring does not repair missing or invalid metadata in place. Integrity
 inspection (`--check`) remains read-only and requires an initialized destination.
 

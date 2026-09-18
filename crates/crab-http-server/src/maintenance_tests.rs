@@ -1,15 +1,13 @@
 use super::*;
 use axum::body::Body;
-use crab_coordination::{
-    CoordinationError, GIT_GENERATION_OWNER_RESOURCE, GIT_MANIFEST_RESOURCE, GcFenceLease,
-    PushLock, internal_lock_path,
+use crab_metadata::capsule_protocol::{
+    Capsule, CapsuleGitPack, CapsuleRefEdit, CapsuleSection, CapsuleSectionKind,
+    CapsuleTransaction, CapsuleVisibilityDelta,
 };
-use crab_metadata::{manifest_store, ref_journal::RefJournalEdit};
-use crab_write::WriteError;
-use http_body_util::BodyExt;
+use crab_metadata::git_visibility::GitVisibilityEdit;
 use tower::ServiceExt;
 
-const TTL: Duration = Duration::from_secs(60);
+use crate::test_git::history as git_history;
 
 struct UnavailableRoundTrip;
 
@@ -26,11 +24,11 @@ impl crab_cell_runtime::PeerRoundTrip for UnavailableRoundTrip {
     }
 }
 
-async fn fixture_without_cells() -> Arc<Server> {
+pub(crate) async fn fixture_without_cells() -> Arc<Server> {
     let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
     let admission_store = store.clone();
     let layout = StoreLayout::new(store.clone(), "maintenance".into());
-    crab_write::initialize::initialize_repository(&store, &layout, "refs/heads/main")
+    crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
         .await
         .unwrap();
     Arc::new(Server {
@@ -53,6 +51,7 @@ async fn fixture_without_cells() -> Arc<Server> {
                 layout,
                 pinned: Mutex::new(None),
                 maintenance: Mutex::new(None),
+                integrity: crate::integrity::Status::default(),
             },
         )])
         .into(),
@@ -177,59 +176,7 @@ fn repository(server: &Server) -> Arc<Repository> {
         .unwrap()
 }
 
-pub(super) async fn commit_without_proof(repo: &Repository) -> PushLock {
-    let lease = PushLock::acquire_ref(
-        repo.store.inner(),
-        repo.layout.repo_prefix(),
-        "refs/heads/main",
-        TTL,
-    )
-    .await
-    .unwrap();
-    let snapshot = manifest_store::read_repository_snapshot(&repo.store, &repo.layout)
-        .await
-        .unwrap();
-    crab_write::journal::commit_edits(
-        &repo.store,
-        &repo.layout,
-        &snapshot,
-        vec![RefJournalEdit {
-            ref_name: "refs/heads/main".into(),
-            old_oid: None,
-            new_oid: Some("a".repeat(40)),
-            peeled_oid: None,
-            lock_holder: Some(lease.holder().to_owned()),
-            visibility_evidence_hash: None,
-        }],
-        None,
-        vec![],
-        vec![],
-        crab_write::journal::CommitOptions::new(TTL, &tokio_util::sync::CancellationToken::new()),
-    )
-    .await
-    .unwrap();
-    lease
-}
-
-async fn assert_released(repo: &Repository) {
-    let owner = PushLock::acquire_internal(
-        repo.store.inner(),
-        repo.layout.repo_prefix(),
-        GIT_GENERATION_OWNER_RESOURCE,
-        TTL,
-    )
-    .await
-    .unwrap();
-    owner.release().await.unwrap();
-    for domain in [repo.layout.global_prefix(), repo.layout.repo_prefix()] {
-        let sweep = GcFenceLease::acquire_sweep(repo.store.inner(), domain, TTL)
-            .await
-            .unwrap();
-        sweep.release().await.unwrap();
-    }
-}
-
-async fn close(server: &Server) {
+pub(crate) async fn close(server: &Server) {
     server.cancellation.cancel();
     server.finish_maintenance().await.unwrap();
     server.shutdown_runtimes().await.unwrap();
@@ -321,7 +268,6 @@ async fn readiness_rejects_a_server_that_is_draining() {
     );
     close(&server).await;
 }
-
 #[tokio::test]
 async fn readiness_rejects_a_draining_cell_runtime() {
     let mut server = fixture().await;
@@ -393,13 +339,56 @@ async fn readiness_requires_the_first_cell_scheduler_cycle() {
 }
 
 #[tokio::test]
-async fn readiness_rejects_a_repository_that_still_needs_indexing() {
-    let mut server = fixture().await;
-    enable_catalog_readiness(&mut server);
-    let repo = repository(&server);
-    let lease = commit_without_proof(&repo).await;
+async fn integrity_proof_is_reported_separately_from_readiness() {
+    let server = fixture_without_cells().await;
+    let management = management_router(Arc::clone(&server));
+    let pending = management
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/integrityz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pending.status(), StatusCode::ACCEPTED);
+    let repository = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
+    crate::integrity::scrub(
+        &repository,
+        Arc::clone(&server.maintenance_admission),
+        &server.cancellation,
+    )
+    .await
+    .unwrap();
 
-    let response = management_router(Arc::clone(&server))
+    let complete = management
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/integrityz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(complete.status(), StatusCode::OK);
+    let body = http_body_util::BodyExt::collect(complete.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let report: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(report["status"], "complete");
+    assert_eq!(report["repositories"][0]["proof"]["state"], "complete");
+    assert!(
+        report["repositories"][0]["proof"]["last_complete"]["state_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.len() == 64)
+    );
+    let readiness = management
         .oneshot(
             Request::builder()
                 .uri("/readyz")
@@ -408,205 +397,268 @@ async fn readiness_rejects_a_repository_that_still_needs_indexing() {
         )
         .await
         .unwrap();
-
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(
-        response
-            .headers()
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok()),
-        Some("5")
-    );
-    assert_released(&repo).await;
-    lease.release().await.unwrap();
+    assert_eq!(readiness.status(), StatusCode::SERVICE_UNAVAILABLE);
     close(&server).await;
 }
 
-#[tokio::test]
-async fn expired_browser_cache_observes_journal_and_reports_missing_proof_without_rollback() {
-    let server = fixture().await;
-    let repo = repository(&server);
-    repo.open(&server, &CancellationToken::new()).await.unwrap();
-    repo.pinned.lock().await.as_mut().unwrap().0 = Instant::now() - Duration::from_secs(3);
-    let before = manifest_store::read_manifest(&repo.store, &repo.layout)
-        .await
-        .unwrap()
-        .1;
-    let lease = commit_without_proof(&repo).await;
-    assert_eq!(
-        before,
-        manifest_store::read_manifest(&repo.store, &repo.layout)
-            .await
-            .unwrap()
-            .1
-    );
-
-    let response = router(Arc::clone(&server))
-        .oneshot(
-            Request::builder()
-                .uri("/api/repos/team/repo/refs")
-                .header("host", "localhost:8788")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(body["error"]["code"], "indexing_failed");
-    let after = manifest_store::read_repository_snapshot(&repo.store, &repo.layout)
-        .await
-        .unwrap();
-    assert_eq!(after.manifest.refs["refs/heads/main"], "a".repeat(40));
-    assert!(after.journal.transactions.is_empty());
-    assert_released(&repo).await;
-    lease.release().await.unwrap();
-    close(&server).await;
+fn capsule(
+    transaction: &CapsuleTransaction,
+    old: Option<String>,
+    new: String,
+    pack: Option<CapsuleGitPack>,
+) -> Capsule {
+    let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+        "refs/heads/main".to_owned(),
+        GitVisibilityEdit::from_replacement_objects(old, new.clone(), vec![new]),
+    )]))
+    .unwrap();
+    Capsule::build(
+        transaction,
+        pack.into_iter().collect(),
+        vec![CapsuleSection::new(
+            CapsuleSectionKind::VisibilityDelta,
+            visibility.encode().unwrap(),
+        )],
+    )
+    .unwrap()
 }
 
-#[tokio::test]
-async fn another_generation_owner_keeps_publication_authority() {
-    let server = fixture().await;
-    let repo = repository(&server);
-    let lease = commit_without_proof(&repo).await;
-    let mut owner = PushLock::acquire_internal(
-        repo.store.inner(),
-        repo.layout.repo_prefix(),
-        GIT_GENERATION_OWNER_RESOURCE,
-        TTL,
+async fn publish_next(
+    repo: &Repository,
+    base: crab_write::capsule_protocol::RootSnapshot,
+    old: Option<String>,
+    new: String,
+    pack: Option<CapsuleGitPack>,
+) -> (crab_write::capsule_protocol::RootSnapshot, String) {
+    let transaction = CapsuleTransaction::new(
+        base.record().digest(),
+        vec![CapsuleRefEdit::new(
+            "refs/heads/main",
+            old.clone(),
+            Some(new.clone()),
+            None,
+        )],
+    )
+    .unwrap();
+    let base = crab_write::capsule_protocol::publish(
+        &repo.layout,
+        base,
+        &transaction,
+        &capsule(&transaction, old, new.clone(), pack),
     )
     .await
     .unwrap();
-    let before = manifest_store::read_manifest(&repo.store, &repo.layout)
+    (base, new)
+}
+
+#[tokio::test]
+async fn checkpoint_bounds_ref_frontier_and_next_push_starts_fresh() {
+    let history = git_history(33);
+    let server = fixture().await;
+    let repo = repository(&server);
+    let mut base = crab_write::capsule_protocol::open_root(&repo.layout)
         .await
         .unwrap();
-    let result = repo
-        .open_current(&server, server.options, &CancellationToken::new())
+    let mut old = None;
+    for sequence in 0..32 {
+        let result = publish_next(
+            &repo,
+            base,
+            old,
+            history.oids[sequence].clone(),
+            (sequence == 0).then(|| history.pack.clone()),
+        )
         .await;
-    assert!(matches!(
-        result,
-        Err(crate::Error::Remote(
-            crab_remote_git::Error::RepositoryIndexing { .. }
-        ))
-    ));
+        base = result.0;
+        let new = result.1;
+        old = Some(new);
+    }
+
+    crate::maintenance::run(
+        repo.layout.clone(),
+        Arc::clone(&server.maintenance_admission),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    let checkpoint = crab_write::capsule_protocol::open_root(&repo.layout)
+        .await
+        .unwrap();
+    assert!(checkpoint.record().root().checkpoint().is_some());
     assert_eq!(
-        before,
-        manifest_store::read_manifest(&repo.store, &repo.layout)
-            .await
-            .unwrap()
+        checkpoint
+            .record()
+            .root()
+            .compacted_ref_transactions()
+            .len(),
+        1
     );
-    owner.renew().await.unwrap();
-    owner.release().await.unwrap();
-    lease.release().await.unwrap();
+    let new = history.oids[32].clone();
+    let transaction = CapsuleTransaction::new(
+        checkpoint.record().digest(),
+        vec![CapsuleRefEdit::new(
+            "refs/heads/main",
+            old.clone(),
+            Some(new.clone()),
+            None,
+        )],
+    )
+    .unwrap();
+    crab_write::capsule_protocol::publish(
+        &repo.layout,
+        checkpoint,
+        &transaction,
+        &capsule(&transaction, old, new, None),
+    )
+    .await
+    .unwrap();
+
+    let path =
+        repo.layout
+            .capsule_ref_head_path(&crab_metadata::capsule_protocol::capsule_ref_name_key(
+                "refs/heads/main",
+            ));
+    let (body, _) = repo.store.get_with_etag(&path).await.unwrap();
+    let head = crab_metadata::capsule_protocol::CapsuleRefHead::decode(&body).unwrap();
+    assert_eq!(
+        head.visible(&std::collections::BTreeSet::new())
+            .frontier()
+            .iter()
+            .map(crab_metadata::capsule_protocol::CapsulePointer::capsule_count)
+            .sum::<u32>(),
+        1
+    );
     close(&server).await;
 }
 
 #[tokio::test]
-async fn gc_sweep_blocks_publication_and_releases_preceding_leases() {
-    for global in [true, false] {
-        let server = fixture().await;
-        let repo = repository(&server);
-        let lease = commit_without_proof(&repo).await;
-        let domain = if global {
-            repo.layout.global_prefix()
-        } else {
-            repo.layout.repo_prefix()
-        };
-        let sweep = GcFenceLease::acquire_sweep(repo.store.inner(), domain, TTL)
-            .await
-            .unwrap();
-        let before = manifest_store::read_manifest(&repo.store, &repo.layout)
-            .await
-            .unwrap();
-        let result = repo
-            .open_current(&server, server.options, &CancellationToken::new())
-            .await;
-        assert!(matches!(
-            result,
-            Err(crate::Error::Maintenance(WriteError::Coordination(
-                CoordinationError::GcFenceHeld { .. }
-            )))
-        ));
-        assert_eq!(
-            before,
-            manifest_store::read_manifest(&repo.store, &repo.layout)
-                .await
-                .unwrap()
-        );
-        sweep.renew().await.unwrap();
-        sweep.release().await.unwrap();
-        assert_released(&repo).await;
-        lease.release().await.unwrap();
-        close(&server).await;
+async fn lagging_checkpoint_preserves_concurrent_ref_suffix() {
+    let history = git_history(35);
+    let server = fixture().await;
+    let repo = repository(&server);
+    let mut base = crab_write::capsule_protocol::open_root(&repo.layout)
+        .await
+        .unwrap();
+    let mut old = None;
+    for sequence in 0..32 {
+        let result = publish_next(
+            &repo,
+            base,
+            old,
+            history.oids[sequence].clone(),
+            (sequence == 0).then(|| history.pack.clone()),
+        )
+        .await;
+        base = result.0;
+        old = Some(result.1);
     }
+
+    let captured = crab_read::capsule_protocol::open_view(
+        &repo.layout,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+            max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+        },
+    )
+    .await
+    .unwrap();
+    let checkpoint = crab_metadata::capsule_protocol::Checkpoint::build_with_catalogs(
+        captured.root().root().generation(),
+        captured.root().digest(),
+        captured.checkpoint_git_packs().unwrap(),
+        captured.pointer_catalog().unwrap(),
+        Some(
+            crab_metadata::capsule_protocol::CapsuleVisibilitySnapshot::from_index(
+                &captured.git_visibility_index().unwrap(),
+            )
+            .unwrap(),
+        ),
+    )
+    .unwrap();
+
+    for sequence in 32..34 {
+        let result = publish_next(&repo, base, old, history.oids[sequence].clone(), None).await;
+        base = result.0;
+        old = Some(result.1);
+    }
+    base = crab_write::capsule_protocol::publish_ref_checkpoint(
+        &repo.layout,
+        captured.root_snapshot().clone(),
+        &checkpoint,
+        captured.refs().clone(),
+        captured.peeled_refs().clone(),
+        captured.visible_ref_transactions().clone(),
+        captured.capsule_run_pointers().to_vec(),
+    )
+    .await
+    .unwrap();
+
+    let result = publish_next(&repo, base, old, history.oids[34].clone(), None).await;
+    assert_eq!(result.1, history.oids[34]);
+    let view = crab_read::capsule_protocol::open_view(
+        &repo.layout,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+            max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(view.refs().get("refs/heads/main"), Some(&history.oids[34]));
+    assert_eq!(
+        view.capsule_run_pointers()
+            .iter()
+            .map(crab_metadata::capsule_protocol::CapsulePointer::capsule_count)
+            .sum::<u32>(),
+        3
+    );
+    assert_eq!(view.ref_capsule_count("refs/heads/main"), 3);
+    close(&server).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn disconnected_reader_retains_publication_until_retry_or_shutdown_drains_it() {
-    for shutdown in [false, true] {
-        let server = fixture().await;
-        let repo = repository(&server);
-        let lease = commit_without_proof(&repo).await;
-        let manifest = PushLock::acquire_internal(
-            repo.store.inner(),
-            repo.layout.repo_prefix(),
-            GIT_MANIFEST_RESOURCE,
-            TTL,
+#[tokio::test]
+async fn foreground_checkpoint_preserves_headroom_before_the_hard_bound() {
+    let history = git_history(57);
+    let server = fixture().await;
+    let repo = repository(&server);
+    let mut base = crab_write::capsule_protocol::open_root(&repo.layout)
+        .await
+        .unwrap();
+    let mut old = None;
+    for sequence in 0..crate::maintenance::FOREGROUND_CAPSULE_THRESHOLD as usize {
+        let result = publish_next(
+            &repo,
+            base,
+            old,
+            history.oids[sequence].clone(),
+            (sequence == 0).then(|| history.pack.clone()),
         )
-        .await
-        .unwrap();
-        let cancel = CancellationToken::new();
-        let request_server = Arc::clone(&server);
-        let request_cancel = cancel.clone();
-        let request = tokio::spawn(async move {
-            repository(&request_server)
-                .open_current(&request_server, request_server.options, &request_cancel)
-                .await
-        });
-        let owner_path =
-            internal_lock_path(repo.layout.repo_prefix(), GIT_GENERATION_OWNER_RESOURCE).unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while repo.store.head(&owner_path.as_str().into()).await.is_err() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        cancel.cancel();
-        assert!(matches!(
-            request.await.unwrap(),
-            Err(crate::Error::Remote(crab_remote_git::Error::Cancelled))
-        ));
-        assert!(
-            repo.maintenance
-                .lock()
-                .await
-                .as_ref()
-                .is_some_and(|task| !task.is_finished())
-        );
-        assert_eq!(server.maintenance_admission.available_permits(), 1);
-        if shutdown {
-            tokio::time::timeout(Duration::from_secs(5), close(&server))
-                .await
-                .unwrap();
-            manifest.release().await.unwrap();
-        } else {
-            manifest.release().await.unwrap();
-            let result = repo
-                .open_current(&server, server.options, &CancellationToken::new())
-                .await;
-            assert!(matches!(
-                result,
-                Err(crate::Error::Maintenance(
-                    WriteError::VisibilityUnavailable { .. }
-                ))
-            ));
-            close(&server).await;
-        }
-        assert_eq!(server.maintenance_admission.available_permits(), 2);
-        assert!(repo.maintenance.lock().await.is_none());
-        assert_released(&repo).await;
-        lease.release().await.unwrap();
+        .await;
+        base = result.0;
+        old = Some(result.1);
     }
+    let before = repo.open_view().await.unwrap();
+    assert_eq!(
+        before.ref_capsule_count("refs/heads/main"),
+        crate::maintenance::FOREGROUND_CAPSULE_THRESHOLD
+    );
+
+    repo.checkpoint_now(&server, &CancellationToken::new())
+        .await
+        .unwrap();
+    let checkpoint = repo.open_view().await.unwrap();
+    assert_eq!(checkpoint.ref_capsule_count("refs/heads/main"), 0);
+    let result = publish_next(
+        &repo,
+        checkpoint.root_snapshot().clone(),
+        old,
+        history.oids[56].clone(),
+        None,
+    )
+    .await;
+    let after = repo.open_view().await.unwrap();
+    assert_eq!(after.refs().get("refs/heads/main"), Some(&result.1));
+    assert_eq!(after.ref_capsule_count("refs/heads/main"), 1);
+    close(&server).await;
 }

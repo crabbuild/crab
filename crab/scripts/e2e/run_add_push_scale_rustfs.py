@@ -17,8 +17,10 @@ import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 from run_add_commit_push_rustfs_smoke import AddCommitPushSmoke, sha256_file
+from run_concurrent_push_smoke import RequestCountingProxy
 
 MIB = 1024 * 1024
 
@@ -36,32 +38,78 @@ def verify_parallel_proofs(runner: AddCommitPushSmoke, paths: list[Path]) -> Non
                         name=f"proof classification with {jobs} workers")
         inventories.append(runner.staging_payload_inventory(repo))
     runner.env["CRAB_CACHE_DIR"] = source_cache
-    runner.check("parallel-proof-classification-preserves-serial-coverage",
-                 inventories[0]["recipe_remote_chunks"] > 0 and inventories[0] == inventories[1],
-                 {"serial": inventories[0], "parallel": inventories[1]})
+    reused = (
+        inventories[0]["recipe_remote_chunks"]
+        + inventories[0]["prepared_payload_chunks"]
+    )
+    runner.check(
+        "parallel-proof-classification-preserves-serial-coverage",
+        reused > 0 and inventories[0] == inventories[1],
+        {"serial": inventories[0], "parallel": inventories[1]},
+    )
+
+
+def write_transport_report(
+    runner: AddCommitPushSmoke, records: list[dict[str, Any]], total: dict[str, Any]
+) -> None:
+    path = runner.artifacts / "capsule-xet-transport.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"versions": records, "total": total}, indent=2, sort_keys=True) + "\n"
+    )
+    runner.report.artifacts["capsule_xet_transport"] = str(path)
+    runner.write_report()
+
+
+def object_inventory(runner: AddCommitPushSmoke, prefix: str) -> dict[str, int]:
+    payload = runner.aws_json(
+        f"inventory {prefix}",
+        ["list-objects-v2", "--bucket", runner.args.bucket, "--prefix", prefix],
+    )
+    if payload.get("IsTruncated"):
+        raise RuntimeError(f"inventory exceeded one page: {prefix}")
+    entries = payload.get("Contents", [])
+    return {
+        "objects": len(entries),
+        "bytes": sum(int(entry.get("Size", 0)) for entry in entries),
+    }
 
 
 def run(args: argparse.Namespace) -> None:
+    proxy = RequestCountingProxy(args.endpoint_url, args.bucket)
+    proxy.start()
     runner = AddCommitPushSmoke(args)
+    runner.env["AWS_ENDPOINT_URL"] = proxy.url
+    runner.env["AWS_ENDPOINT_URL_S3"] = proxy.url
+    records: list[dict[str, Any]] = []
     if runner.run_root.exists():
+        proxy.close()
         raise RuntimeError("use a fresh run directory")
     try:
-        verify(args, runner)
+        verify(args, runner, proxy, records)
     except Exception as error:
         runner.report.status = "failed"
         runner.report.artifacts["failure"] = str(error)
+        write_transport_report(runner, records, proxy.snapshot())
         runner.write_report()
         raise
+    finally:
+        proxy.close()
 
 
-def verify(args: argparse.Namespace, runner: AddCommitPushSmoke) -> None:
+def verify(
+    args: argparse.Namespace,
+    runner: AddCommitPushSmoke,
+    proxy: RequestCountingProxy,
+    transport_records: list[dict[str, Any]],
+) -> None:
     status, _, _ = runner.signed_s3_request("HEAD", "")
     runner.check("fresh-bucket", status == 404, {"head_status": status})
     runner.preflight()
     required = args.files * args.file_mib * MIB * 2 + 20 * 1024**3
     runner.check("disk-capacity", shutil.disk_usage(args.root).free >= required,
                  {"required_bytes": required})
-    repo, remote, _ = runner.prepare_repo("scale")
+    repo, remote, repo_prefix = runner.prepare_repo("scale")
     outside = runner.run_root / "symlink-target"
     outside.mkdir()
     (outside / "model.bin").write_bytes(b"external bytes must not enter staging")
@@ -116,13 +164,62 @@ def verify(args: argparse.Namespace, runner: AddCommitPushSmoke) -> None:
                            for path in paths[:2]]
                 for result in pending:
                     result.result()
-        runner.run_crab(repo, ["add", "--jsonl", "models/"], name=f"v{version} add")
+        before_add = proxy.snapshot()
+        add = runner.run_crab(
+            repo, ["add", "--jsonl", "models/"], name=f"v{version} add"
+        )
+        add_transport = RequestCountingProxy.delta(before_add, proxy.snapshot())
         runner.run_git(repo, ["add", "src"])
         runner.run_git(repo, ["commit", "-m", f"version {version}"])
-        runner.run_crab(repo, ["push", "--jsonl", "origin", "HEAD:refs/heads/main"],
-                        name=f"v{version} push", timeout=args.push_timeout)
+        before_push = proxy.snapshot()
+        push = runner.run_crab(
+            repo,
+            ["push", "--jsonl", "origin", "HEAD:refs/heads/main"],
+            name=f"v{version} push",
+            timeout=args.push_timeout,
+        )
+        push_transport = RequestCountingProxy.delta(before_push, proxy.snapshot())
+        transport_records.append(
+            {
+                "version": version,
+                "add_duration_ms": add.duration_ms,
+                "add": add_transport,
+                "push_duration_ms": push.duration_ms,
+                "push": push_transport,
+                "xorbs": object_inventory(runner, ".crab/xorbs/"),
+                "shards": object_inventory(runner, ".crab/shards/"),
+            }
+        )
+        write_transport_report(runner, transport_records, proxy.snapshot())
         if version == 0:
+            runner.check(
+                "capsule-root-published",
+                bool(runner.list_keys(f"{repo_prefix}/v2/root")),
+                {"repo_prefix": repo_prefix},
+            )
+            runner.check(
+                "capsule-run-published",
+                bool(runner.list_keys(f"{repo_prefix}/v2/capsules/")),
+                {"repo_prefix": repo_prefix},
+            )
             verify_parallel_proofs(runner, paths)
+
+    initial = transport_records[0]
+    final = transport_records[-1]
+    logical_history_bytes = args.files * size * args.versions
+    retained_ratio = final["xorbs"]["bytes"] / logical_history_bytes
+    runner.check(
+        "versioned-xet-content-is-deduplicated",
+        initial["xorbs"]["objects"] > 0
+        and final["shards"]["objects"] >= args.versions
+        and retained_ratio < 0.25,
+        {
+            "logical_history_bytes": logical_history_bytes,
+            "unique_xorb_bytes": final["xorbs"]["bytes"],
+            "retained_ratio": retained_ratio,
+            "versions": args.versions,
+        },
+    )
 
     expected = {str(path.relative_to(repo)): sha256_file(path)
                 for path in [*paths, *sorted(code.iterdir())]}
@@ -142,10 +239,18 @@ def verify(args: argparse.Namespace, runner: AddCommitPushSmoke) -> None:
     runner.check("cold-consumer-exceeds-one-candidate-page", inventory["chunk_payloads"] > 4096, inventory)
     runner.run_git(consumer, ["commit", "-m", "reuse chunks with a distinct file hash"])
     before = runner.list_keys(".crab/xorbs/")
+    before_inventory = object_inventory(runner, ".crab/xorbs/")
     runner.run_crab(consumer, ["push", "--log-level", "debug", "origin", "HEAD:refs/heads/main"],
                     name="cold cross-repository push", timeout=args.push_timeout)
     added = runner.list_keys(".crab/xorbs/") - before
-    runner.check("cold-consumer-reuses-shared-chunks", len(added) <= 1, {"new_xorbs": len(added)})
+    after_inventory = object_inventory(runner, ".crab/xorbs/")
+    added_bytes = after_inventory["bytes"] - before_inventory["bytes"]
+    # Appending changes the prior EOF chunk boundary, so the terminal xorb and
+    # the tail may both be new even when every stable source chunk is reused.
+    runner.check("cold-consumer-reuses-shared-chunks",
+                 len(added) <= 2 and added_bytes < consumer_file.stat().st_size // 4,
+                 {"new_xorbs": len(added), "new_xorb_bytes": added_bytes,
+                  "logical_bytes": consumer_file.stat().st_size})
     runner.env["CRAB_CACHE_DIR"] = str(runner.run_root / "consumer-clone-cache")
     consumer_clone = runner.run_root / "consumer-clone"
     runner.run_cmd("consumer clone", [runner.crab_bin, "clone", consumer_remote, str(consumer_clone)], runner.run_root)
@@ -167,6 +272,7 @@ def verify(args: argparse.Namespace, runner: AddCommitPushSmoke) -> None:
     runner.run_git(clone, ["fsck", "--full", "--strict"])
     runner.check_credential_disclosure()
     runner.report.status = "passed"
+    write_transport_report(runner, transport_records, proxy.snapshot())
     runner.write_report()
     if args.cleanup:
         # All targets were created by this invocation; retain reports and logs.
@@ -195,8 +301,8 @@ def main() -> None:
     parser.add_argument("--versions", type=int, default=3)
     parser.add_argument("--cleanup", action="store_true")
     args = parser.parse_args()
-    if args.files < 1 or args.file_mib < 1024 or not 1 <= args.versions <= 10 or args.code_files < 1:
-        parser.error("require positive file counts, >=1024 MiB/file, and 1–10 versions")
+    if args.files < 1 or args.file_mib < 500 or not 1 <= args.versions <= 11 or args.code_files < 1:
+        parser.error("require positive file counts, >=500 MiB/file, and 1–11 versions")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.run_id):
         parser.error("run-id must be a single safe directory name")
     args.access_key = "crab"

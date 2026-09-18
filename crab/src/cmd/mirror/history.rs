@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(all(test, feature = "testing"))]
 use crab_metadata::manifest_store::RepositorySnapshot;
 use crab_remote_git::{OperationContext, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions};
 use crab_storage::{Store, StoreLayout};
@@ -12,6 +13,8 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum Error {
+    #[error(transparent)]
+    Read(#[from] crab_read::ReadError),
     #[error(transparent)]
     Remote(#[from] crab_remote_git::Error),
     #[error(transparent)]
@@ -30,6 +33,71 @@ pub(super) enum Error {
     Worker(#[from] tokio::task::JoinError),
 }
 
+pub(super) async fn load_changed_capsule_history(
+    cache: Arc<crab_cache::lifecycle::CacheUseGuard>,
+    source: &BTreeMap<String, String>,
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    layout: StoreLayout<Store>,
+    cancel: &CancellationToken,
+) -> Result<(), Error> {
+    let roots = source
+        .iter()
+        .filter_map(|(name, oid)| view.refs().get(name).filter(|other| *other != oid))
+        .map(|oid| gix_hash::ObjectId::from_hex(oid.as_bytes()))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if roots.is_empty() {
+        return Ok(());
+    }
+    let cancellation = cancel.child_token();
+    let _cancel_on_drop = cancellation.clone().drop_guard();
+    let bucket = layout.store().bucket_identity();
+    let provider = format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container);
+    let identity = RepositoryIdentity::new(provider, layout.repo_prefix().to_owned(), 2)?;
+    let runtime = Arc::new(RemoteGitRuntime::default());
+    let options = RepositoryOptions::default();
+    let repository = view
+        .git_repository(
+            identity,
+            Arc::clone(&runtime),
+            options,
+            options.operation_limits().max_inflated_bytes,
+            &cancellation,
+        )
+        .await?;
+    let opened = repository
+        .operation(crab_remote_git::OperationKind::Repository, &cancellation)
+        .await;
+    match opened {
+        Ok(operation) => {
+            let executor = tokio::runtime::Handle::current();
+            tokio::task::spawn_blocking(move || {
+                executor.block_on(async move {
+                    let result =
+                        populate(&cache.path().join("objects"), roots, &operation, options).await;
+                    let result = match result {
+                        Err(Error::Remote(error)) => {
+                            operation.finish(Err(error)).await.map_err(Error::Remote)
+                        }
+                        result => {
+                            let close = operation.finish(Ok(())).await;
+                            result.and(close.map_err(Error::Remote))
+                        }
+                    };
+                    runtime.shutdown().await;
+                    result
+                })
+            })
+            .await
+            .map_err(Error::Worker)?
+        }
+        Err(error) => {
+            runtime.shutdown().await;
+            Err(Error::Remote(error))
+        }
+    }
+}
+
+#[cfg(all(test, feature = "testing"))]
 pub(super) async fn load_changed_history(
     cache: Arc<crab_cache::lifecycle::CacheUseGuard>,
     source: &BTreeMap<String, String>,

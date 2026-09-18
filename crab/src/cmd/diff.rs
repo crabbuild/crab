@@ -1,13 +1,15 @@
 //! `crab diff` — chunk-level diff between two git refs.
 //!
-//! Compares crab-tracked files using only metadata (file-index + shards),
-//! producing per-file reports of which chunks changed, bytes affected,
-//! and reuse ratio — with zero data transfer.
+//! Compares crab-tracked files using file-index and shard metadata, producing
+//! per-file reports of changed chunks, affected bytes, and reuse ratio. The
+//! optional format-aware annotations fetch only the bounded header/footer
+//! chunks declared by their format hint.
 
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
+use bytes::Bytes;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -17,7 +19,7 @@ use crate::cache::LocalCache;
 use crate::core::config::Config;
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::emit_json;
-use crate::diff::format_hint::detect_format_hint;
+use crate::diff::format_hint::{ChunkRequest, FileVersion, detect_format_hint};
 use crate::diff::formatter::format_diff;
 use crate::diff::term_resolver::TermResolver;
 use crab_diff::chunk_sequence::{ChunkSequence, compare_sequences};
@@ -169,7 +171,11 @@ pub async fn run_diff(args: DiffArgs, config: Config, cancel: CancellationToken)
         }
     }
 
-    // Stage 3: Resolve chunk sequences.
+    // Stage 3: Resolve chunk sequences. Keep the read facade and router alive
+    // for the optional format-aware annotation pass below; both share the
+    // resolver's verified xorb cache and therefore do not duplicate metadata
+    // reads.
+    let mut annotation_context = None;
     let sequences = if hashes_to_resolve.is_empty() {
         HashMap::new()
     } else {
@@ -179,14 +185,21 @@ pub async fn run_diff(args: DiffArgs, config: Config, cancel: CancellationToken)
             crate::storage::Store::from_storage(store.origin().clone()),
             prefix,
         );
-        let resolver = TermResolver::new(store, router, cache, config.download_concurrency)?;
-        resolver
+        let resolver = TermResolver::new(
+            store.clone(),
+            router.clone(),
+            cache,
+            config.download_concurrency,
+        )?;
+        let sequences = resolver
             .resolve_sequences_batch(
                 &hashes_to_resolve,
                 ChunkSequenceSourceKind::Committed,
                 &cancel,
             )
-            .await?
+            .await?;
+        annotation_context = Some((store, router));
+        sequences
     };
     check_cancelled(&cancel)?;
 
@@ -195,7 +208,7 @@ pub async fn run_diff(args: DiffArgs, config: Config, cancel: CancellationToken)
     for (path, status, old_ptr, new_ptr) in &pairs {
         check_cancelled(&cancel)?;
 
-        let report = match status {
+        let mut report = match status {
             FileStatus::Modified => {
                 let old_hash = old_ptr.as_ref().map(|p| MerkleHash::from(p.file_hash));
                 let new_hash = new_ptr.as_ref().map(|p| MerkleHash::from(p.file_hash));
@@ -203,13 +216,7 @@ pub async fn run_diff(args: DiffArgs, config: Config, cancel: CancellationToken)
                 let new_sequence = new_hash.and_then(|h| sequences.get(&h));
 
                 if let (Some(old_seq), Some(new_seq)) = (old_sequence, new_sequence) {
-                    let mut report = compare_sequences(path, old_seq, new_seq);
-
-                    // Apply format hints if annotations are enabled.
-                    if !args.no_annotations {
-                        apply_annotations(&mut report);
-                    }
-                    report
+                    compare_sequences(path, old_seq, new_seq)
                 } else {
                     // Graceful degradation: metadata unavailable.
                     warn!(path = %path, "chunk-level diff unavailable, reporting as git-native");
@@ -222,11 +229,7 @@ pub async fn run_diff(args: DiffArgs, config: Config, cancel: CancellationToken)
 
                 if let Some(new_seq) = new_sequence {
                     let empty_old = empty_sequence(ChunkSequenceSourceKind::Committed);
-                    let mut report = compare_sequences(path, &empty_old, new_seq);
-                    if !args.no_annotations {
-                        apply_annotations(&mut report);
-                    }
-                    report
+                    compare_sequences(path, &empty_old, new_seq)
                 } else {
                     warn!(path = %path, "chunk-level diff unavailable for added file");
                     make_git_native_report(path, old_ptr.as_ref(), new_ptr.as_ref())
@@ -248,6 +251,26 @@ pub async fn run_diff(args: DiffArgs, config: Config, cancel: CancellationToken)
                 make_git_native_report(path, old_ptr.as_ref(), new_ptr.as_ref())
             }
         };
+
+        if !args.no_annotations {
+            let old_sequence = old_ptr
+                .as_ref()
+                .and_then(|pointer| sequences.get(&MerkleHash::from(pointer.file_hash)));
+            let new_sequence = new_ptr
+                .as_ref()
+                .and_then(|pointer| sequences.get(&MerkleHash::from(pointer.file_hash)));
+            if let Some((store, router)) = annotation_context.as_ref() {
+                apply_annotations(
+                    &mut report,
+                    old_sequence,
+                    new_sequence,
+                    store,
+                    router,
+                    &cancel,
+                )
+                .await?;
+            }
+        }
 
         entries.push(FileDiffEntry { report });
     }
@@ -386,28 +409,184 @@ fn make_git_native_report(
 }
 
 /// Apply format-aware annotations to a diff report using the two-phase
-/// FormatHint protocol. Only the metadata-based annotation path is used
-/// here (no chunk downloads for the MVP — annotations use canonical
-/// byte ranges to produce byte-range-based annotations).
-fn apply_annotations(report: &mut ChunkDiffReport) {
+/// `FormatHint` protocol and bounded, verified xorb reads.
+async fn apply_annotations(
+    report: &mut ChunkDiffReport,
+    old_sequence: Option<&ChunkSequence>,
+    new_sequence: Option<&ChunkSequence>,
+    store: &crab_cache_store::CachingStore,
+    router: &crate::storage::StoreLayout,
+    cancel: &CancellationToken,
+) -> Result<()> {
     if report.changed_byte_ranges.is_empty() {
-        return;
+        return Ok(());
     }
 
     let Some(hint) = detect_format_hint(&report.path) else {
-        return;
+        return Ok(());
     };
+
+    let file_size = report.new_size.max(report.old_size);
+    let num_segments = new_sequence
+        .or(old_sequence)
+        .map_or(0, |sequence| sequence.spans.len());
+    let requests = hint.required_chunks(file_size, num_segments);
+    if requests.is_empty() {
+        return Ok(());
+    }
+
+    let chunk_data =
+        fetch_annotation_chunks(&requests, old_sequence, new_sequence, store, router, cancel)
+            .await?;
 
     debug!(
         path = %report.path,
         format = hint.format_name(),
-        "format hint detected (chunk download not yet wired)"
+        chunks = chunk_data.iter().filter(|bytes| !bytes.is_empty()).count(),
+        "format hint chunks fetched"
     );
+    report.annotations = hint.annotate(&chunk_data, &report.changed_byte_ranges);
+    Ok(())
+}
 
-    // Full two-phase annotation requires downloading header/footer chunks
-    // from the store. For now, annotations are left empty — the format
-    // hint infrastructure is wired and ready for when chunk download is
-    // integrated in a follow-up task.
+/// Fetch the bounded chunks requested by a format hint.
+///
+/// Requests are grouped by xorb and coalesced before reading. A single xorb
+/// therefore incurs one cache/origin read for all requested chunks, even when
+/// both file versions use it. The non-installing reader keeps an annotation
+/// probe from pinning a large xorb in the local cache. Missing origins are
+/// represented by empty bytes so format parsers retain best-effort behavior.
+async fn fetch_annotation_chunks(
+    requests: &[ChunkRequest],
+    old_sequence: Option<&ChunkSequence>,
+    new_sequence: Option<&ChunkSequence>,
+    store: &crab_cache_store::CachingStore,
+    router: &crate::storage::StoreLayout,
+    cancel: &CancellationToken,
+) -> Result<Vec<Bytes>> {
+    let mut selected = Vec::with_capacity(requests.len());
+    let mut ranges_by_xorb: HashMap<MerkleHash, Vec<(u32, u32)>> = HashMap::new();
+
+    for request in requests {
+        check_cancelled(cancel)?;
+        let sequence = match request.version {
+            FileVersion::Old => old_sequence,
+            FileVersion::New => new_sequence,
+        };
+        let Some(span) = sequence.and_then(|sequence| sequence.spans.get(request.segment_index))
+        else {
+            selected.push(None);
+            continue;
+        };
+        let Some(xorb_hash) = span.origin.xorb_hash else {
+            selected.push(None);
+            continue;
+        };
+        let Some(xorb_chunk_index) = span.origin.xorb_chunk_index else {
+            selected.push(None);
+            continue;
+        };
+        let end = xorb_chunk_index
+            .checked_add(1)
+            .ok_or_else(|| CrabError::CorruptObject {
+                path: format!("xorb:{}", xorb_hash.hex()),
+                reason: "annotation chunk index overflows u32".to_owned(),
+            })?;
+        ranges_by_xorb
+            .entry(xorb_hash)
+            .or_default()
+            .push((xorb_chunk_index, end));
+        selected.push(Some((xorb_hash, xorb_chunk_index)));
+    }
+
+    let mut chunk_bytes: HashMap<(MerkleHash, u32), Bytes> = HashMap::new();
+    for (xorb_hash, ranges) in ranges_by_xorb {
+        check_cancelled(cancel)?;
+        let ranges = coalesce_annotation_ranges(ranges);
+        let (data, offsets) = store
+            .get_xorb_chunks_without_install(&router.xorb_path(&xorb_hash), &xorb_hash, &ranges)
+            .await
+            .map_err(CrabError::from)?;
+        let mut offset_index = 0usize;
+        for (start, end) in ranges {
+            for xorb_chunk_index in start..end {
+                let begin =
+                    offsets
+                        .get(offset_index)
+                        .copied()
+                        .ok_or_else(|| CrabError::CorruptObject {
+                            path: format!("xorb:{}", xorb_hash.hex()),
+                            reason: "annotation response omitted chunk offset".to_owned(),
+                        })?;
+                let finish = offsets.get(offset_index + 1).copied().ok_or_else(|| {
+                    CrabError::CorruptObject {
+                        path: format!("xorb:{}", xorb_hash.hex()),
+                        reason: "annotation response omitted chunk end offset".to_owned(),
+                    }
+                })?;
+                let begin = usize::try_from(begin).map_err(|_| CrabError::CorruptObject {
+                    path: format!("xorb:{}", xorb_hash.hex()),
+                    reason: "annotation chunk offset overflows usize".to_owned(),
+                })?;
+                let finish = usize::try_from(finish).map_err(|_| CrabError::CorruptObject {
+                    path: format!("xorb:{}", xorb_hash.hex()),
+                    reason: "annotation chunk end offset overflows usize".to_owned(),
+                })?;
+                if begin > finish || finish > data.len() {
+                    return Err(CrabError::CorruptObject {
+                        path: format!("xorb:{}", xorb_hash.hex()),
+                        reason: "annotation chunk offsets exceed response bytes".to_owned(),
+                    });
+                }
+                chunk_bytes.insert((xorb_hash, xorb_chunk_index), data.slice(begin..finish));
+                offset_index += 1;
+            }
+        }
+        if offset_index + 1 != offsets.len() {
+            return Err(CrabError::CorruptObject {
+                path: format!("xorb:{}", xorb_hash.hex()),
+                reason: "annotation response returned unexpected chunk offsets".to_owned(),
+            });
+        }
+    }
+
+    Ok(selected
+        .into_iter()
+        .map(|selected| {
+            selected
+                .and_then(|key| chunk_bytes.get(&key).cloned())
+                .unwrap_or_default()
+        })
+        .collect())
+}
+
+fn coalesce_annotation_ranges(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+    ranges.sort_unstable();
+    ranges.dedup();
+    let mut coalesced = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        if let Some((_, previous_end)) = coalesced.last_mut()
+            && start <= *previous_end
+        {
+            *previous_end = (*previous_end).max(end);
+        } else {
+            coalesced.push((start, end));
+        }
+    }
+    coalesced
+}
+
+#[cfg(test)]
+mod tests {
+    use super::coalesce_annotation_ranges;
+
+    #[test]
+    fn coalesce_annotation_ranges_deduplicates_and_merges_adjacent_chunks() {
+        assert_eq!(
+            coalesce_annotation_ranges(vec![(4, 5), (1, 2), (2, 3), (4, 5), (8, 9)]),
+            vec![(1, 3), (4, 5), (8, 9)]
+        );
+    }
 }
 
 /// Discover the `.git` directory from the current working directory.

@@ -41,7 +41,9 @@ pub trait ReadMetrics: Send + Sync {
 }
 
 #[async_trait::async_trait]
+/// Checks whether an immutable xorb or shard object must be restored before a read.
 pub trait XorbAvailability: Send + Sync {
+    /// Ensure the object addressed by `path` is readable from the origin.
     async fn ensure_available(&self, path: &object_store::path::Path) -> Result<()>;
 }
 
@@ -108,6 +110,11 @@ impl StoreClient {
     #[must_use]
     pub fn with_availability(mut self, availability: Arc<dyn XorbAvailability>) -> Self {
         self.availability = Some(availability);
+        self
+    }
+
+    pub(crate) fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
+        self.cancellation = cancellation;
         self
     }
 
@@ -310,6 +317,13 @@ impl StoreClient {
 
     async fn load_shard(&self, shard_hash: &MerkleHash) -> Result<ShardReader> {
         let path = self.router.shard_path(shard_hash);
+        if let Some(availability) = &self.availability {
+            tokio::select! {
+                biased;
+                () = self.cancellation.cancelled() => return Err(ReadError::Cancelled),
+                result = availability.ensure_available(&path) => result?,
+            }
+        }
         debug!(shard_hash = %shard_hash.hex(), "read store_client: downloading shard");
         let (data, _) = self
             .store

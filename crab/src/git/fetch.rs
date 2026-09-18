@@ -748,7 +748,7 @@ async fn download_packs_concurrent<S: PackStore + 'static>(
     Ok(installed)
 }
 
-struct FetchInstallLock {
+pub(crate) struct FetchInstallLock {
     _file: std::fs::File,
 }
 
@@ -756,7 +756,7 @@ struct FetchInstallLock {
 // Independent git/crab processes can share the same `.git/objects`
 // directory. Without this advisory lock, one process can rename a pack while
 // another process validates requested tips against the local ODB snapshot.
-async fn acquire_fetch_install_lock(pack_dir: &Path) -> Result<FetchInstallLock> {
+pub(crate) async fn acquire_fetch_install_lock(pack_dir: &Path) -> Result<FetchInstallLock> {
     let pack_dir = pack_dir.to_owned();
     tokio::task::spawn_blocking(move || -> Result<FetchInstallLock> {
         use fs4::fs_std::FileExt as LockFileExt;
@@ -1292,6 +1292,8 @@ mod tests {
         let store = Arc::new(TestPackStore::new(Vec::new()));
         let fetch_options = FetchOptions {
             depth: None,
+            deepen_since: None,
+            deepen_not: Vec::new(),
             deepen_relative: false,
             filter: Some(crate::git::remote_helper::FilterSpec::BlobNone),
         };
@@ -1562,6 +1564,8 @@ mod tests {
             Some(&graph),
             &FetchOptions {
                 depth: Some(u32::MAX),
+                deepen_since: None,
+                deepen_not: Vec::new(),
                 deepen_relative: false,
                 filter: None,
             },
@@ -2209,6 +2213,8 @@ mod tests {
 
         let fetch_opts = FetchOptions {
             depth: Some(3),
+            deepen_since: None,
+            deepen_not: Vec::new(),
             deepen_relative: false,
             filter: None,
         };
@@ -2248,6 +2254,8 @@ mod tests {
 
         let fetch_opts = FetchOptions {
             depth: Some(0),
+            deepen_since: None,
+            deepen_not: Vec::new(),
             deepen_relative: false,
             filter: None,
         };
@@ -2286,6 +2294,8 @@ mod tests {
         // depth=0 but no .git/shallow file — not an unshallow, just normal.
         let fetch_opts = FetchOptions {
             depth: Some(0),
+            deepen_since: None,
+            deepen_not: Vec::new(),
             deepen_relative: false,
             filter: None,
         };

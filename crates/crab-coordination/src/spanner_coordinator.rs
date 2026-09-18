@@ -1788,6 +1788,7 @@ mod tests {
             writer: "west".to_owned(),
             region: "us-west1".to_owned(),
             manifest_generation: 2,
+            capsule_publication: None,
             refs: vec![CoordinatedRefUpdate {
                 name: "refs/heads/main".to_owned(),
                 expected: expected.map(str::to_owned),

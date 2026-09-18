@@ -6,9 +6,9 @@
 //! - `migrate info`   — show which file patterns would benefit from migration.
 //! - `migrate from-dvc` — convert a DVC pipeline to crab format.
 //!
-//! This is the crab equivalent of `git lfs migrate`. It rewrites git
-//! history using `git filter-repo` (or a built-in tree walker) to replace
-//! large blobs with crab pointer files, or vice versa.
+//! This is the crab equivalent of `git lfs migrate`. It rewrites Git history
+//! with the built-in fast-export/fast-import engine to replace large blobs
+//! with Crab pointer files, or vice versa.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -826,7 +826,7 @@ pub fn run_migrate_info_in(root: &Path, args: &MigrateInfoArgs) -> Result<()> {
     Ok(())
 }
 
-/// Rewrite history to convert matching files to crab pointers.
+/// Rewrite history to convert matching files to Crab pointers.
 pub fn run_migrate_import(args: &MigrateImportArgs) -> Result<()> {
     if args.include.is_empty() {
         return Err(CrabError::Configuration {
@@ -845,39 +845,19 @@ pub fn run_migrate_import(args: &MigrateImportArgs) -> Result<()> {
         return Ok(());
     }
 
-    // Check that git-filter-repo is available.
-    let check = Command::new("git")
-        .args(["filter-repo", "--version"])
-        .output();
-
-    match check {
-        Ok(o) if o.status.success() => {
-            tracing::info!("git-filter-repo available, proceeding with history rewrite");
-        }
-        _ => {
-            eprintln!(
-                "error: git-filter-repo is required for history rewriting.\n\
-                 Install it with: pip install git-filter-repo\n\
-                 Or see: https://github.com/newren/git-filter-repo"
-            );
-            return Err(CrabError::Configuration {
-                key: "git-filter-repo not found".into(),
-                origin: "PATH".into(),
-            });
-        }
-    }
-
     eprintln!(
-        "crab migrate import: history rewriting is a destructive operation.\n\
-         Back up your repository before proceeding.\n\
-         Patterns: {:?}",
-        args.include,
+        "crab migrate import: rewriting history is destructive; back up the repository before proceeding."
     );
-
-    Err(CrabError::LfsUnsupported {
-        command: "migrate import".to_owned(),
-        reason: "history rewrite engine is not yet wired; no changes were made".to_owned(),
-    })
+    crate::lfs::migrate::migrate_import_to_crab_with_options(
+        crate::lfs::migrate::CrabMigrateImportOptions {
+            include: &args.include,
+            exclude: &args.exclude,
+            above: (args.above != 0).then_some(args.above),
+            everything: args.everything,
+            yes: false,
+            verbose: false,
+        },
+    )
 }
 
 /// Rewrite history to convert crab pointers back to full files.
@@ -889,10 +869,23 @@ pub fn run_migrate_export(args: &MigrateExportArgs) -> Result<()> {
         return Ok(());
     }
 
-    Err(CrabError::LfsUnsupported {
-        command: "migrate export".to_owned(),
-        reason: "history rewrite engine is not yet wired; no changes were made".to_owned(),
-    })
+    if args.include.is_empty() {
+        return Err(CrabError::Configuration {
+            key: "at least one --include pattern is required".into(),
+            origin: "crab migrate export".into(),
+        });
+    }
+
+    eprintln!(
+        "crab migrate export: rewriting history is destructive; back up the repository before proceeding."
+    );
+    crate::lfs::migrate::migrate_export_crab_with_options(
+        crate::lfs::migrate::CrabMigrateExportOptions {
+            include: &args.include,
+            yes: false,
+            verbose: false,
+        },
+    )
 }
 
 /// Convert a DVC pipeline (`dvc.yaml`) to `crab.yaml`.
@@ -3031,13 +3024,13 @@ mod tests {
     }
 
     #[test]
-    fn migrate_export_non_dry_run_fails_closed_until_rewrite_engine_exists() {
+    fn migrate_export_requires_include_before_rewriting() {
         let args = MigrateExportArgs {
-            include: vec!["*.bin".into()],
+            include: vec![],
             dry_run: false,
         };
         let result = run_migrate_export(&args);
-        assert!(matches!(result, Err(CrabError::LfsUnsupported { .. })));
+        assert!(matches!(result, Err(CrabError::Configuration { .. })));
     }
 
     #[test]

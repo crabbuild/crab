@@ -20,6 +20,7 @@ pub(crate) struct RepositoryState {
     pub(crate) identity: RepositoryIdentity,
     pub(crate) options: RepositoryOptions,
     pub(crate) generation: u64,
+    pub(crate) pack_index_hash: Arc<str>,
     pub(crate) git_validation_digest: Arc<str>,
     pub(crate) manifest_etag: String,
     pub(crate) shard_index_hash: Arc<str>,

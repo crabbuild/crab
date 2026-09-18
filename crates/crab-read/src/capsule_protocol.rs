@@ -1,0 +1,3325 @@
+//! Verified loading of one capsule-protocol root and its bounded capsule frontier.
+
+use bytes::Bytes;
+use crab_metadata::capsule_protocol::{
+    Capsule, CapsuleGitPackDescriptor, CapsulePointer, CapsuleRun, Checkpoint, CheckpointControl,
+    CheckpointPointer, PointerCatalog, RootRecord, load_root,
+};
+use crab_storage::{Store, StoreLayout};
+use futures_util::future::try_join_all;
+use futures_util::{StreamExt, TryStreamExt};
+use object_store::ObjectMeta;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
+
+use crate::{ReadError, Result};
+
+/// Caller-owned memory admission for one capsule-protocol repository view.
+#[derive(Debug, Clone, Copy)]
+pub struct CapsuleReadLimits {
+    /// Largest individual capsule body accepted by this reader.
+    pub max_capsule_bytes: u64,
+    /// Largest aggregate capsule frontier accepted by this reader.
+    pub max_frontier_bytes: u64,
+}
+
+/// Bounds for a complete reachable dependency proof of one capsule view.
+#[derive(Debug, Clone, Copy)]
+pub struct CapsuleDependencyLimits {
+    /// Largest aggregate Git pack intake accepted by the temporary verifier.
+    pub max_git_bytes: u64,
+    /// Bounds for the complete reachable Git pointer scan.
+    pub pointer_scan: crab_git::walk::PointerScanLimits,
+}
+
+/// Counts returned by a complete reachable dependency proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapsuleDependencyProof {
+    /// File recipes authenticated by the complete pointer catalog.
+    pub catalog_files: u64,
+    /// Shard bodies authenticated and hash-verified by the proof.
+    pub catalog_shards: u64,
+    /// Xorb bodies authenticated and hash-verified by the proof.
+    pub catalog_xorbs: u64,
+    /// Reachable Crab pointer blobs bound to catalog file recipes.
+    pub reachable_crab_pointers: u64,
+    /// Distinct reachable LFS bodies read and hash-verified from origin.
+    pub reachable_lfs_objects: u64,
+}
+
+/// One authenticated repository root and every post-checkpoint capsule it names.
+#[derive(Debug, Clone)]
+pub struct CapsuleRepositoryView {
+    root: crab_metadata::capsule_protocol::RootSnapshot,
+    checkpoint: Option<CheckpointData>,
+    capsules: Vec<Capsule>,
+    refs: BTreeMap<String, String>,
+    peeled_refs: BTreeMap<String, String>,
+    visible_ref_transactions: BTreeMap<String, String>,
+    ref_capsule_counts: BTreeMap<String, u32>,
+    capsule_run_pointers: Vec<CapsulePointer>,
+}
+
+#[derive(Debug, Clone)]
+enum CheckpointData {
+    Complete(Checkpoint),
+    Control(CheckpointControl),
+}
+
+/// One authenticated root and its transaction-consistent mutable ref state.
+///
+/// This view intentionally excludes checkpoint and capsule payloads. Writers
+/// may use it for ref policy and expected-old validation, but consumers of Git
+/// objects or pointer catalogs must open a [`CapsuleRepositoryView`].
+#[derive(Debug, Clone)]
+pub struct CapsuleRefView {
+    root: crab_metadata::capsule_protocol::RootSnapshot,
+    refs: BTreeMap<String, String>,
+    peeled_refs: BTreeMap<String, String>,
+    visible_ref_transactions: BTreeMap<String, String>,
+}
+
+impl CapsuleRefView {
+    /// Return the authoritative repository root captured with this ref state.
+    #[must_use]
+    pub fn root_snapshot(&self) -> &crab_metadata::capsule_protocol::RootSnapshot {
+        &self.root
+    }
+
+    /// Return refs materialized from the compacted root and captured heads.
+    #[must_use]
+    pub fn refs(&self) -> &BTreeMap<String, String> {
+        &self.refs
+    }
+
+    /// Return peeled refs materialized from the same captured heads.
+    #[must_use]
+    pub fn peeled_refs(&self) -> &BTreeMap<String, String> {
+        &self.peeled_refs
+    }
+
+    /// Return the transaction identity visible at each captured ref.
+    #[must_use]
+    pub fn visible_ref_transactions(&self) -> &BTreeMap<String, String> {
+        &self.visible_ref_transactions
+    }
+
+    /// Return the symbolic HEAD target owned by the compacted root.
+    #[must_use]
+    pub fn head(&self) -> &str {
+        self.root.record().root().head()
+    }
+}
+
+impl From<CapsuleRepositoryView> for CapsuleRefView {
+    fn from(view: CapsuleRepositoryView) -> Self {
+        Self {
+            root: view.root,
+            refs: view.refs,
+            peeled_refs: view.peeled_refs,
+            visible_ref_transactions: view.visible_ref_transactions,
+        }
+    }
+}
+
+/// Payload-free fingerprint used by background maintenance polling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapsuleRepositoryActivity {
+    state_digest: String,
+    capsule_count: u64,
+    ref_count: u64,
+}
+
+impl CapsuleRepositoryActivity {
+    /// Return the digest covering the root and every visible per-ref position.
+    #[must_use]
+    pub fn state_digest(&self) -> &str {
+        &self.state_digest
+    }
+
+    /// Return the total immutable capsule count in the visible frontier.
+    #[must_use]
+    pub const fn capsule_count(&self) -> u64 {
+        self.capsule_count
+    }
+
+    /// Return the number of refs in the transaction-consistent view.
+    #[must_use]
+    pub const fn ref_count(&self) -> u64 {
+        self.ref_count
+    }
+}
+
+impl CapsuleRepositoryView {
+    /// Return the authoritative repository generation and ref state.
+    #[must_use]
+    pub fn root(&self) -> &RootRecord {
+        self.root.record()
+    }
+
+    /// Return the provider CAS token bound to the loaded root.
+    #[must_use]
+    pub fn root_snapshot(&self) -> &crab_metadata::capsule_protocol::RootSnapshot {
+        &self.root
+    }
+
+    /// Return the complete base checkpoint, when the root names one.
+    #[must_use]
+    pub fn checkpoint(&self) -> Option<&Checkpoint> {
+        match self.checkpoint.as_ref() {
+            Some(CheckpointData::Complete(checkpoint)) => Some(checkpoint),
+            Some(CheckpointData::Control(_)) | None => None,
+        }
+    }
+
+    /// Return the authenticated checkpoint control suffix, when loaded.
+    #[must_use]
+    pub fn checkpoint_control(&self) -> Option<&CheckpointControl> {
+        match self.checkpoint.as_ref() {
+            Some(CheckpointData::Control(control)) => Some(control),
+            Some(CheckpointData::Complete(_)) | None => None,
+        }
+    }
+
+    /// Return every verified post-checkpoint capsule in publication order.
+    #[must_use]
+    pub fn capsules(&self) -> &[Capsule] {
+        &self.capsules
+    }
+
+    /// Return the refs materialized from the compacted root and per-ref heads.
+    #[must_use]
+    pub fn refs(&self) -> &BTreeMap<String, String> {
+        &self.refs
+    }
+
+    /// Return the peeled refs materialized from the same stable view.
+    #[must_use]
+    pub fn peeled_refs(&self) -> &BTreeMap<String, String> {
+        &self.peeled_refs
+    }
+
+    /// Return the symbolic HEAD target owned by the compacted control root.
+    #[must_use]
+    pub fn head(&self) -> &str {
+        self.root.record().root().head()
+    }
+
+    /// Return the visible per-ref transaction positions captured by this view.
+    #[must_use]
+    pub fn visible_ref_transactions(&self) -> &BTreeMap<String, String> {
+        &self.visible_ref_transactions
+    }
+
+    /// Return the post-checkpoint capsule count for one independently mutable ref.
+    #[must_use]
+    pub fn ref_capsule_count(&self, ref_name: &str) -> u32 {
+        self.ref_capsule_counts
+            .get(ref_name)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Return every immutable capsule run reachable from this exact view.
+    #[must_use]
+    pub fn capsule_run_pointers(&self) -> &[CapsulePointer] {
+        &self.capsule_run_pointers
+    }
+
+    /// Return the total immutable capsule count represented by the visible frontier.
+    pub fn capsule_count(&self) -> Result<u64> {
+        self.capsule_run_pointers
+            .iter()
+            .try_fold(0_u64, |total, pointer| {
+                total
+                    .checked_add(u64::from(pointer.capsule_count()))
+                    .ok_or_else(|| ReadError::internal("capsule frontier count overflowed"))
+            })
+    }
+
+    /// Return the number of Git packs authenticated by this exact view.
+    #[must_use]
+    pub fn git_pack_count(&self) -> usize {
+        self.checkpoint_descriptors()
+            .map_or(0, <[_]>::len)
+            .saturating_add(
+                self.capsules
+                    .iter()
+                    .map(|capsule| capsule.git_packs().len())
+                    .sum(),
+            )
+    }
+
+    /// Return the total authenticated Git pack-body bytes in this exact view.
+    pub fn git_pack_bytes(&self) -> Result<u64> {
+        let checkpoint_bytes = match self.checkpoint.as_ref() {
+            Some(CheckpointData::Complete(checkpoint)) => checkpoint
+                .git_packs()
+                .iter()
+                .map(|pack| checkpoint.section_bytes(pack.pack_section()))
+                .try_fold(0_u64, |total, bytes| {
+                    total.checked_add(bytes?.len() as u64).ok_or_else(|| {
+                        ReadError::internal("checkpoint Git pack byte total overflowed")
+                    })
+                })?,
+            Some(CheckpointData::Control(control)) => control
+                .git_packs()
+                .iter()
+                .map(|pack| control.section_location(pack.pack_section()))
+                .try_fold(0_u64, |total, location| {
+                    total.checked_add(location?.length()).ok_or_else(|| {
+                        ReadError::internal("checkpoint Git pack byte total overflowed")
+                    })
+                })?,
+            None => 0,
+        };
+        self.capsules
+            .iter()
+            .flat_map(|capsule| capsule.git_packs().iter().map(move |pack| (capsule, pack)))
+            .try_fold(checkpoint_bytes, |total, (capsule, pack)| {
+                total
+                    .checked_add(capsule.section_bytes(pack.pack_section())?.len() as u64)
+                    .ok_or_else(|| ReadError::internal("capsule Git pack byte total overflowed"))
+            })
+    }
+
+    /// Return the total Git objects declared by the authenticated pack inventory.
+    pub fn git_object_count(&self) -> Result<u64> {
+        self.checkpoint_descriptors()
+            .into_iter()
+            .flatten()
+            .chain(self.capsules.iter().flat_map(Capsule::git_packs))
+            .try_fold(0_u64, |total, pack| {
+                total
+                    .checked_add(pack.object_count())
+                    .ok_or_else(|| ReadError::internal("capsule Git object count overflowed"))
+            })
+    }
+
+    /// Return a digest that changes with the root or any visible per-ref position.
+    #[must_use]
+    pub fn state_digest(&self) -> String {
+        state_digest(self.root.record(), &self.visible_ref_transactions)
+    }
+
+    /// Materialize the complete generation-pinned external pointer catalog.
+    pub fn pointer_catalog(&self) -> Result<PointerCatalog> {
+        let mut catalog = match self.checkpoint.as_ref() {
+            Some(CheckpointData::Complete(checkpoint)) => checkpoint.pointer_catalog()?,
+            Some(CheckpointData::Control(control)) => control.pointer_catalog()?,
+            None => PointerCatalog::new(),
+        };
+        for capsule in &self.capsules {
+            if let Some(delta) = capsule.pointer_catalog_delta()? {
+                catalog.apply(&delta)?;
+            }
+        }
+        Ok(catalog)
+    }
+
+    /// Return complete verified packs suitable for a checkpoint over this view.
+    pub fn checkpoint_git_packs(
+        &self,
+    ) -> Result<Vec<crab_metadata::capsule_protocol::CapsuleGitPack>> {
+        if self.checkpoint_control().is_some() {
+            return Err(ReadError::internal(
+                "complete checkpoint bytes are required to build a replacement checkpoint",
+            ));
+        }
+        self.checkpoint()
+            .into_iter()
+            .cloned()
+            .map(GitPackContainer::Checkpoint)
+            .chain(self.capsules.iter().cloned().map(GitPackContainer::Capsule))
+            .flat_map(|container| {
+                let descriptors = container.git_packs().to_vec();
+                descriptors.into_iter().map(move |descriptor| {
+                    crab_metadata::capsule_protocol::CapsuleGitPack::new(
+                        container.section_bytes(descriptor.pack_section())?,
+                        container.section_bytes(descriptor.index_section())?,
+                        container.section_bytes(descriptor.reverse_index_section())?,
+                        container.section_bytes(descriptor.locator_section())?,
+                        descriptor.git_checksum(),
+                        descriptor.object_count(),
+                    )
+                    .map_err(Into::into)
+                })
+            })
+            .collect()
+    }
+
+    /// Open the authenticated embedded Git packs as a filesystem-free repository.
+    ///
+    /// The returned handle is pinned to this exact root and uses a private
+    /// in-memory object store. This lets protocol-v2 upload-pack reuse the
+    /// bounded remote Git reader without publishing legacy manifests or pack
+    /// sidecars alongside the capsule protocol.
+    pub async fn git_repository(
+        &self,
+        identity: crab_remote_git::RepositoryIdentity,
+        runtime: Arc<crab_remote_git::RemoteGitRuntime>,
+        options: crab_remote_git::RepositoryOptions,
+        max_input_bytes: u64,
+        cancellation: &CancellationToken,
+    ) -> Result<crab_remote_git::RemoteGitRepository> {
+        if cancellation.is_cancelled() {
+            return Err(ReadError::Cancelled);
+        }
+        if self.checkpoint_control().is_some() {
+            return Err(ReadError::internal(
+                "complete checkpoint bytes are required to open a Git repository",
+            ));
+        }
+        let workspace = tempfile::tempdir()?;
+        let installed = install_git_packs(self, workspace.path(), max_input_bytes).await?;
+        let artifacts = self
+            .checkpoint()
+            .into_iter()
+            .cloned()
+            .map(GitPackContainer::Checkpoint)
+            .chain(self.capsules.iter().cloned().map(GitPackContainer::Capsule))
+            .flat_map(|container| {
+                let descriptors = container.git_packs().to_vec();
+                descriptors.into_iter().map(move |descriptor| {
+                    let locator = container.section_bytes(descriptor.locator_section());
+                    locator.map(|locator| (descriptor, locator))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if installed.len() != artifacts.len() {
+            return Err(ReadError::internal(
+                "capsule Git installation changed descriptor cardinality",
+            ));
+        }
+
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let layout = StoreLayout::new(store.clone(), "capsule-snapshot".to_owned());
+        let mut packs = Vec::with_capacity(installed.len());
+        let mut inline_locators = std::collections::HashMap::new();
+        for (pack_path, (descriptor, locator_bytes)) in installed.into_iter().zip(artifacts) {
+            if cancellation.is_cancelled() {
+                return Err(ReadError::Cancelled);
+            }
+            let pack = Bytes::from(tokio::fs::read(&pack_path).await?);
+            let index = Bytes::from(tokio::fs::read(pack_path.with_extension("idx")).await?);
+            let reverse = Bytes::from(tokio::fs::read(pack_path.with_extension("rev")).await?);
+            let pack_id = blake3::hash(&pack).to_hex().to_string();
+            let locations = crab_git::pack_locator::PackLocationIter::open(
+                &pack_path.with_extension("idx"),
+                &pack_path.with_extension("rev"),
+                pack.len() as u64,
+            )
+            .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+            let locator_entries =
+                crab_git::pack_locator::decode_pack_kind_metadata_with_external_deltas(
+                    &locator_bytes,
+                    locations,
+                )
+                .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+            let locator_locations = crab_git::pack_locator::PackLocationIter::open(
+                &pack_path.with_extension("idx"),
+                &pack_path.with_extension("rev"),
+                pack.len() as u64,
+            )
+            .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+            let locator_pack_id = crab_xet::hash::MerkleHash::from_hex(&pack_id)
+                .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+            for (ordinal, ((oid, kind, delta_base_oid), location)) in locator_entries
+                .into_iter()
+                .zip(locator_locations)
+                .enumerate()
+            {
+                let location = location
+                    .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+                let oid_bytes = oid
+                    .as_bytes()
+                    .try_into()
+                    .map_err(|_| ReadError::internal("capsule Git locator is not SHA-1"))?;
+                let ordinal = u32::try_from(ordinal)
+                    .map_err(|_| ReadError::internal("capsule Git locator ordinal overflowed"))?;
+                let kind = match kind {
+                    gix_object::Kind::Commit => {
+                        crab_metadata::git_object_locator::GitObjectKind::Commit
+                    }
+                    gix_object::Kind::Tree => {
+                        crab_metadata::git_object_locator::GitObjectKind::Tree
+                    }
+                    gix_object::Kind::Blob => {
+                        crab_metadata::git_object_locator::GitObjectKind::Blob
+                    }
+                    gix_object::Kind::Tag => crab_metadata::git_object_locator::GitObjectKind::Tag,
+                };
+                inline_locators.insert(
+                    oid_bytes,
+                    crab_metadata::git_object_locator::GitObjectLocator {
+                        ordinal,
+                        pack_id: locator_pack_id,
+                        location: crab_metadata::git_object_locator::GitObjectLocation {
+                            pack_offset: location.pack_offset,
+                            entry_len: location.entry_len,
+                            crc32: location.crc32,
+                        },
+                        metadata: crab_metadata::git_object_locator::GitObjectMetadata {
+                            kind: Some(kind),
+                            logical_size: None,
+                            delta_base_oid: delta_base_oid
+                                .map(|oid| oid.as_bytes().try_into())
+                                .transpose()
+                                .map_err(|_| {
+                                    ReadError::internal("capsule Git delta base is not SHA-1")
+                                })?,
+                        },
+                    },
+                );
+            }
+            let pack_object = layout.pack_path(&pack_id);
+            let index_object = layout.pack_index_path(&pack_id);
+            let reverse_object = layout.pack_reverse_index_path(&pack_id);
+            tokio::try_join!(
+                store.put(&pack_object, pack.clone()),
+                store.put(&index_object, index),
+                store.put(&reverse_object, reverse),
+            )?;
+            packs.push(crab_metadata::manifests::PackManifestEntry {
+                pack_id: pack_id.clone(),
+                size: pack.len() as u64,
+                content_hash: pack_id,
+                ref_tips: Vec::new(),
+                object_count: descriptor.object_count(),
+            });
+        }
+
+        let manifest = self.git_manifest(&packs)?;
+        let root = self.root();
+        let snapshot = crab_metadata::manifest_store::RepositorySnapshot {
+            layout: crab_metadata::layout_descriptor::LayoutDescriptor::canonical(),
+            manifest: manifest.clone(),
+            manifest_etag: root.digest().to_owned(),
+            journal: crab_metadata::ref_journal::RefJournalSnapshot {
+                refs: manifest.refs.clone(),
+                peeled_refs: manifest.peeled_refs.clone(),
+                head: manifest.head.clone(),
+                packs,
+                shards: Vec::new(),
+                transactions: Vec::new(),
+                ordered_edits: Vec::new(),
+                visible_heads: std::collections::BTreeMap::new(),
+                state_digest: root.digest().to_owned(),
+            },
+        };
+        crab_remote_git::RemoteGitRepository::from_snapshot_with_inline_locators(
+            layout,
+            &snapshot,
+            identity,
+            runtime,
+            options,
+            inline_locators,
+            cancellation,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Open a Git repository using checkpoint ranges and inline capsule packs.
+    ///
+    /// The control suffix is fetched before this method is called. Checkpoint
+    /// pack bodies are read by the remote Git reader only for requested object
+    /// ranges; capsule packs remain inline because they are already bounded
+    /// frontier payloads.
+    pub async fn git_repository_from_store(
+        &self,
+        layout: crab_storage::StoreLayout<crab_storage::Store>,
+        identity: crab_remote_git::RepositoryIdentity,
+        runtime: Arc<crab_remote_git::RemoteGitRuntime>,
+        options: crab_remote_git::RepositoryOptions,
+        max_input_bytes: u64,
+        cancellation: &CancellationToken,
+    ) -> Result<crab_remote_git::RemoteGitRepository> {
+        let Some(control) = self.checkpoint_control().cloned() else {
+            return self
+                .git_repository(identity, runtime, options, max_input_bytes, cancellation)
+                .await;
+        };
+        if cancellation.is_cancelled() {
+            return Err(ReadError::Cancelled);
+        }
+        let workspace = tempfile::tempdir()?;
+        let checkpoint_path = layout.capsule_checkpoint_path(control.hash());
+        let mut packs = Vec::new();
+        let mut pack_sources = std::collections::HashMap::new();
+        let mut inline_locators = std::collections::HashMap::new();
+        for descriptor in control.git_packs() {
+            let pack_location = control.section_location(descriptor.pack_section())?;
+            let pack_id = crab_xet::hash::MerkleHash::from_hex(pack_location.blake3())
+                .map_err(|error| corrupt_path("capsule Git pack", error.to_string()))?;
+            let index = control.section_bytes(descriptor.index_section())?;
+            let reverse = control.section_bytes(descriptor.reverse_index_section())?;
+            let locator = control.section_bytes(descriptor.locator_section())?;
+            let index_path =
+                workspace
+                    .path()
+                    .join(format!("{}-{}.idx", pack_id, descriptor.pack_section()));
+            let reverse_path =
+                workspace
+                    .path()
+                    .join(format!("{}-{}.rev", pack_id, descriptor.pack_section()));
+            std::fs::write(&index_path, &index)?;
+            std::fs::write(&reverse_path, &reverse)?;
+            let locations = crab_git::pack_locator::PackLocationIter::open(
+                &index_path,
+                &reverse_path,
+                pack_location.length(),
+            )
+            .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+            if locations.object_count() != descriptor.object_count()
+                || locations.pack_checksum().to_string() != descriptor.git_checksum()
+            {
+                return Err(corrupt_path(
+                    "capsule Git locator",
+                    "checkpoint pack descriptor does not match its authenticated index",
+                ));
+            }
+            crab_git::pack_locator::validate_pack_kind_metadata(
+                &locator,
+                locations.pack_checksum(),
+                locations.object_count(),
+            )
+            .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+            inline_locators.extend(inline_locators_for_pack(
+                descriptor,
+                pack_id,
+                &index_path,
+                &reverse_path,
+                &locator,
+                pack_location.length(),
+            )?);
+            pack_sources.insert(
+                pack_id,
+                crab_remote_git::RemoteGitPackSource::embedded(
+                    checkpoint_path.clone(),
+                    pack_location.offset(),
+                    pack_location.length(),
+                    index,
+                    reverse,
+                    Some(locator),
+                )?,
+            );
+            packs.push(crab_metadata::manifests::PackManifestEntry {
+                pack_id: pack_id.to_string(),
+                size: pack_location.length(),
+                content_hash: pack_id.to_string(),
+                ref_tips: Vec::new(),
+                object_count: descriptor.object_count(),
+            });
+        }
+        for capsule in &self.capsules {
+            for descriptor in capsule.git_packs() {
+                let pack = capsule.section_bytes(descriptor.pack_section())?;
+                let pack_size = pack.len() as u64;
+                let index = capsule.section_bytes(descriptor.index_section())?;
+                let reverse = capsule.section_bytes(descriptor.reverse_index_section())?;
+                let locator = capsule.section_bytes(descriptor.locator_section())?;
+                let pack_id =
+                    crab_xet::hash::MerkleHash::from_hex(blake3::hash(&pack).to_hex().as_ref())
+                        .map_err(|error| corrupt_path("capsule Git pack", error.to_string()))?;
+                let index_path =
+                    workspace
+                        .path()
+                        .join(format!("{}-{}.idx", pack_id, descriptor.pack_section()));
+                let reverse_path =
+                    workspace
+                        .path()
+                        .join(format!("{}-{}.rev", pack_id, descriptor.pack_section()));
+                std::fs::write(&index_path, &index)?;
+                std::fs::write(&reverse_path, &reverse)?;
+                let locations = crab_git::pack_locator::PackLocationIter::open(
+                    &index_path,
+                    &reverse_path,
+                    pack.len() as u64,
+                )
+                .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+                if locations.object_count() != descriptor.object_count()
+                    || locations.pack_checksum().to_string() != descriptor.git_checksum()
+                {
+                    return Err(corrupt_path(
+                        "capsule Git locator",
+                        "capsule pack descriptor does not match its authenticated index",
+                    ));
+                }
+                crab_git::pack_locator::validate_pack_kind_metadata(
+                    &locator,
+                    locations.pack_checksum(),
+                    locations.object_count(),
+                )
+                .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+                inline_locators.extend(inline_locators_for_pack(
+                    descriptor,
+                    pack_id,
+                    &index_path,
+                    &reverse_path,
+                    &locator,
+                    pack_size,
+                )?);
+                pack_sources.insert(
+                    pack_id,
+                    crab_remote_git::RemoteGitPackSource::inline(
+                        pack,
+                        index,
+                        reverse,
+                        Some(locator),
+                    )?,
+                );
+                packs.push(crab_metadata::manifests::PackManifestEntry {
+                    pack_id: pack_id.to_string(),
+                    size: pack_size,
+                    content_hash: pack_id.to_string(),
+                    ref_tips: Vec::new(),
+                    object_count: descriptor.object_count(),
+                });
+            }
+        }
+        let manifest = self.git_manifest(&packs)?;
+        let root = self.root();
+        let snapshot = crab_metadata::manifest_store::RepositorySnapshot {
+            layout: crab_metadata::layout_descriptor::LayoutDescriptor::canonical(),
+            manifest: manifest.clone(),
+            manifest_etag: root.digest().to_owned(),
+            journal: crab_metadata::ref_journal::RefJournalSnapshot {
+                refs: manifest.refs.clone(),
+                peeled_refs: manifest.peeled_refs.clone(),
+                head: manifest.head.clone(),
+                packs,
+                shards: Vec::new(),
+                transactions: Vec::new(),
+                ordered_edits: Vec::new(),
+                visible_heads: std::collections::BTreeMap::new(),
+                state_digest: root.digest().to_owned(),
+            },
+        };
+        crab_remote_git::RemoteGitRepository::from_snapshot_with_inline_locators_and_pack_sources(
+            layout,
+            &snapshot,
+            identity,
+            runtime,
+            options,
+            inline_locators,
+            pack_sources,
+            cancellation,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Materialize the complete view-bound Git visibility proof.
+    pub fn git_visibility_index(
+        &self,
+    ) -> Result<crab_metadata::git_visibility::GitVisibilityIndex> {
+        let visibility = match self.checkpoint.as_ref() {
+            Some(CheckpointData::Complete(checkpoint)) => checkpoint.visibility_snapshot()?,
+            Some(CheckpointData::Control(control)) => control.visibility_snapshot()?,
+            None => None,
+        };
+        let mut index = visibility
+            .map(|snapshot| snapshot.to_index(0, &"0".repeat(64), &"0".repeat(64)))
+            .transpose()?
+            .unwrap_or(crab_metadata::git_visibility::GitVisibilityIndex::new(
+                0,
+                "",
+                "0".repeat(64),
+                BTreeMap::new(),
+            )?);
+
+        for capsule in &self.capsules {
+            apply_capsule_visibility_index(capsule, &mut index)?;
+        }
+
+        let packs = self.git_pack_manifest_entries()?;
+        let manifest = self.git_manifest(&packs)?;
+        let refs = index.ref_closures();
+        if refs.keys().ne(manifest.refs.keys())
+            || manifest.refs.iter().any(|(name, tip)| {
+                refs.get(name)
+                    .is_none_or(|objects| objects.binary_search(tip).is_err())
+            })
+            || manifest.peeled_refs.iter().any(|(name, peeled)| {
+                refs.get(name)
+                    .is_none_or(|objects| objects.binary_search(peeled).is_err())
+            })
+        {
+            return Err(corrupt_path(
+                "capsule Git visibility",
+                "materialized visibility does not cover the pinned root",
+            ));
+        }
+        index.bind_identity(
+            manifest.generation,
+            &manifest.pack_index_hash,
+            &manifest.git_validation_digest,
+        )?;
+        Ok(index)
+    }
+
+    /// Materialize visibility after one candidate capsule without publishing it.
+    pub fn candidate_git_visibility(
+        &self,
+        candidate: &Capsule,
+    ) -> Result<BTreeMap<String, Vec<String>>> {
+        let mut refs = self.git_visibility_index()?.ref_closures();
+        if !capsule_is_ready(candidate, &self.refs, &refs)? {
+            return Err(corrupt_path(
+                "candidate capsule Git visibility",
+                "candidate does not extend the pinned repository view",
+            ));
+        }
+        apply_capsule_visibility(candidate, &mut refs)?;
+        Ok(refs)
+    }
+
+    fn git_pack_manifest_entries(
+        &self,
+    ) -> Result<Vec<crab_metadata::manifests::PackManifestEntry>> {
+        let mut entries = Vec::new();
+        match self.checkpoint.as_ref() {
+            Some(CheckpointData::Complete(checkpoint)) => {
+                for descriptor in checkpoint.git_packs() {
+                    let pack = checkpoint.section_bytes(descriptor.pack_section())?;
+                    let pack_id = blake3::hash(&pack).to_hex().to_string();
+                    entries.push(crab_metadata::manifests::PackManifestEntry {
+                        pack_id: pack_id.clone(),
+                        size: pack.len() as u64,
+                        content_hash: pack_id,
+                        ref_tips: Vec::new(),
+                        object_count: descriptor.object_count(),
+                    });
+                }
+            }
+            Some(CheckpointData::Control(control)) => {
+                for descriptor in control.git_packs() {
+                    let location = control.section_location(descriptor.pack_section())?;
+                    entries.push(crab_metadata::manifests::PackManifestEntry {
+                        pack_id: location.blake3().to_owned(),
+                        size: location.length(),
+                        content_hash: location.blake3().to_owned(),
+                        ref_tips: Vec::new(),
+                        object_count: descriptor.object_count(),
+                    });
+                }
+            }
+            None => {}
+        }
+        for capsule in &self.capsules {
+            for descriptor in capsule.git_packs() {
+                let pack = capsule.section_bytes(descriptor.pack_section())?;
+                let pack_id = blake3::hash(&pack).to_hex().to_string();
+                entries.push(crab_metadata::manifests::PackManifestEntry {
+                    pack_id: pack_id.clone(),
+                    size: pack.len() as u64,
+                    content_hash: pack_id,
+                    ref_tips: Vec::new(),
+                    object_count: descriptor.object_count(),
+                });
+            }
+        }
+        Ok(entries)
+    }
+
+    fn checkpoint_descriptors(&self) -> Option<&[CapsuleGitPackDescriptor]> {
+        match self.checkpoint.as_ref() {
+            Some(CheckpointData::Complete(checkpoint)) => Some(checkpoint.git_packs()),
+            Some(CheckpointData::Control(control)) => Some(control.git_packs()),
+            None => None,
+        }
+    }
+
+    fn git_manifest(
+        &self,
+        packs: &[crab_metadata::manifests::PackManifestEntry],
+    ) -> Result<crab_metadata::manifests::Manifest> {
+        let root = self.root().root();
+        let mut manifest = crab_metadata::manifests::Manifest::default_for_repo(self.head());
+        manifest.generation = root.generation();
+        manifest.refs = self.refs.clone();
+        manifest.peeled_refs = self.peeled_refs.clone();
+        if !packs.is_empty() {
+            manifest.pack_index_hash =
+                crab_metadata::manifests::compact_pack_index(manifest.generation, packs)?.0;
+        }
+        manifest.seal_git_validation();
+        Ok(manifest)
+    }
+}
+
+/// Install every capsule Git pack into a local Git object database.
+///
+/// Pack bodies, indexes, reverse indexes, and locator metadata are validated
+/// as one descriptor before any new pack becomes visible in the destination.
+pub async fn install_git_packs(
+    view: &CapsuleRepositoryView,
+    git_dir: &Path,
+    max_input_bytes: u64,
+) -> Result<Vec<PathBuf>> {
+    install_git_packs_with_candidates(view, &[], git_dir, max_input_bytes).await
+}
+
+/// Verify every Git and external content dependency reachable from one view.
+///
+/// This is a deep administrative proof, not a foreground read-path check. It
+/// validates the complete shard/xorb catalog, installs and validates all Git
+/// packs in an isolated object database, proves every reachable Crab pointer
+/// is represented by that catalog, and hashes every reachable LFS object from
+/// the origin store. Cancellation never turns a partial scan into success.
+pub async fn verify_reachable_dependencies(
+    layout: &StoreLayout<Store>,
+    view: &CapsuleRepositoryView,
+    limits: CapsuleDependencyLimits,
+    cancellation: &CancellationToken,
+) -> Result<CapsuleDependencyProof> {
+    let catalog = view.pointer_catalog()?;
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(ReadError::Cancelled),
+        result = crate::verify_capsule_pointer_catalog_objects(layout, &catalog) => {
+            result?;
+        }
+    }
+
+    let workspace = tempfile::tempdir()?;
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(ReadError::Cancelled),
+        result = install_git_packs(view, workspace.path(), limits.max_git_bytes) => {
+            result?;
+        }
+    }
+    let refs = view
+        .refs()
+        .iter()
+        .map(|(name, oid)| (name.clone(), oid.clone()))
+        .collect::<Vec<_>>();
+    let git_dir = workspace.path().to_owned();
+    let scan_cancel = cancellation.child_token();
+    let worker_cancel = scan_cancel.clone();
+    let scan = tokio::task::spawn_blocking(move || -> Result<_> {
+        let scan = crab_git::walk::scan_pointers(&git_dir, &refs, limits.pointer_scan, &|| {
+            worker_cancel.is_cancelled()
+        })?;
+        crab_git::batch::verify_git_dir_blobs(&git_dir, &scan.unchecked_blobs, &|| {
+            worker_cancel.is_cancelled()
+        })?;
+        Ok(scan)
+    });
+    tokio::pin!(scan);
+    let scan = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => {
+            scan_cancel.cancel();
+            // The worker borrows the temporary Git database by path. Drain it
+            // before that database and any caller-owned admission are released.
+            let _ = scan.await;
+            return Err(ReadError::Cancelled);
+        }
+        result = &mut scan => result
+            .map_err(|error| ReadError::Internal(format!("Git dependency scan failed: {error}")))??,
+    };
+
+    for pointer in &scan.pointers {
+        let hash = crab_types::pointer::hex_encode(&pointer.file_hash);
+        let Some(entry) = catalog.files().get(&hash) else {
+            return Err(ReadError::CorruptObject {
+                path: gix_hash::ObjectId::Sha1(pointer.oid).to_string(),
+                reason: format!("reachable Crab pointer {hash} is absent from the catalog"),
+            });
+        };
+        if entry.size() != pointer.size {
+            return Err(ReadError::CorruptObject {
+                path: gix_hash::ObjectId::Sha1(pointer.oid).to_string(),
+                reason: format!(
+                    "reachable Crab pointer {hash} declares size {}, catalog declares {}",
+                    pointer.size,
+                    entry.size()
+                ),
+            });
+        }
+    }
+
+    let lfs = crab_lfs::LfsObjectStore::new(layout.store().clone(), layout.repo_prefix());
+    let mut lfs_objects = BTreeMap::new();
+    for blob in scan.lfs_pointers {
+        if let Some(previous) = lfs_objects.insert(blob.pointer.oid, blob.pointer.size)
+            && previous != blob.pointer.size
+        {
+            return Err(ReadError::CorruptObject {
+                path: gix_hash::ObjectId::Sha1(blob.oid).to_string(),
+                reason: "reachable LFS pointers declare conflicting sizes for one object"
+                    .to_owned(),
+            });
+        }
+    }
+    for (oid, size) in &lfs_objects {
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(ReadError::Cancelled),
+            result = lfs.verify_origin(oid, *size) => result?,
+        }
+    }
+
+    Ok(CapsuleDependencyProof {
+        catalog_files: catalog.files().len() as u64,
+        catalog_shards: catalog.shards().len() as u64,
+        catalog_xorbs: catalog.xorbs().len() as u64,
+        reachable_crab_pointers: scan.pointers.len() as u64,
+        reachable_lfs_objects: lfs_objects.len() as u64,
+    })
+}
+
+/// Install the pinned view plus additional verified candidate capsules.
+///
+/// The caller must separately bind each candidate transaction to the pinned
+/// root. Pack intake and the aggregate byte limit cover both base and candidate
+/// data before anything becomes visible in the destination object database.
+pub async fn install_git_packs_with_candidates(
+    view: &CapsuleRepositoryView,
+    candidates: &[Capsule],
+    git_dir: &Path,
+    max_input_bytes: u64,
+) -> Result<Vec<PathBuf>> {
+    if view.checkpoint_control().is_some() {
+        return Err(ReadError::internal(
+            "complete checkpoint bytes are required for this installation path",
+        ));
+    }
+    let checkpoint = view.checkpoint().cloned();
+    let capsules = view.capsules.clone();
+    let candidates = candidates.to_vec();
+    let mut payloads = Vec::new();
+    if let Some(checkpoint) = checkpoint {
+        payloads.extend(payloads_from_container(GitPackContainer::Checkpoint(
+            checkpoint,
+        ))?);
+    }
+    for capsule in capsules.into_iter().chain(candidates) {
+        payloads.extend(payloads_from_container(GitPackContainer::Capsule(capsule))?);
+    }
+    install_git_pack_payloads(git_dir, payloads, max_input_bytes).await
+}
+
+#[derive(Debug)]
+struct GitPackPayload {
+    descriptor: CapsuleGitPackDescriptor,
+    pack: Option<Bytes>,
+    index: Bytes,
+    reverse_index: Bytes,
+    locator: Bytes,
+    content_hash: String,
+}
+
+fn payloads_from_container(container: GitPackContainer) -> Result<Vec<GitPackPayload>> {
+    let descriptors = container.git_packs().to_vec();
+    descriptors
+        .into_iter()
+        .map(|descriptor| {
+            let pack = container.section_bytes(descriptor.pack_section())?;
+            let index = container.section_bytes(descriptor.index_section())?;
+            let reverse_index = container.section_bytes(descriptor.reverse_index_section())?;
+            let locator = container.section_bytes(descriptor.locator_section())?;
+            let content_hash = blake3::hash(&pack).to_hex().to_string();
+            Ok(GitPackPayload {
+                descriptor,
+                pack: Some(pack),
+                index,
+                reverse_index,
+                locator,
+                content_hash,
+            })
+        })
+        .collect()
+}
+
+async fn install_git_pack_payloads(
+    git_dir: impl Into<PathBuf>,
+    payloads: Vec<GitPackPayload>,
+    max_input_bytes: u64,
+) -> Result<Vec<PathBuf>> {
+    let git_dir = git_dir.into();
+    tokio::task::spawn_blocking(move || {
+        let pack_dir = git_dir.join("objects").join("pack");
+        std::fs::create_dir_all(&pack_dir)?;
+        let mut total = 0_u64;
+        let mut installed = Vec::new();
+        for GitPackPayload {
+            descriptor,
+            pack,
+            index,
+            reverse_index,
+            locator,
+            content_hash,
+        } in payloads
+        {
+            let has_download = pack.is_some();
+            let final_pack = pack_dir.join(format!("pack-{content_hash}.pack"));
+            let final_index = pack_dir.join(format!("pack-{content_hash}.idx"));
+            let final_reverse = pack_dir.join(format!("pack-{content_hash}.rev"));
+            let pack_size = match pack.as_ref() {
+                Some(pack) => pack.len() as u64,
+                None => std::fs::metadata(&final_pack)?.len(),
+            };
+            if has_download {
+                total = total.checked_add(pack_size).ok_or_else(|| {
+                    ReadError::internal("capsule-protocol Git intake size overflowed")
+                })?;
+                if max_input_bytes > 0 && total > max_input_bytes {
+                    return Err(ReadError::CapsuleReadLimit {
+                        resource: "Git pack intake",
+                        maximum: max_input_bytes,
+                    });
+                }
+            }
+            let temporary = tempfile::Builder::new()
+                .prefix(".crab-capsule-pack-")
+                .tempdir_in(&pack_dir)?;
+            let pack_path = temporary.path().join("pack.pack");
+            let index_path = temporary.path().join("pack.idx");
+            let reverse_path = temporary.path().join("pack.rev");
+            let (index_for_validation, reverse_for_validation) =
+                if let Some(pack) = pack {
+                    std::fs::write(&pack_path, &pack)?;
+                    std::fs::write(&index_path, &index)?;
+                    std::fs::write(&reverse_path, &reverse_index)?;
+                    (&index_path, &reverse_path)
+                } else {
+                    if !final_pack.exists() || !final_index.exists() || !final_reverse.exists() {
+                        return Err(corrupt_path(
+                            "capsule Git pack",
+                            "checkpoint pack disappeared before its range was installed",
+                        ));
+                    }
+                    let mut file = std::fs::File::open(&final_pack)?;
+                    let mut hasher = blake3::Hasher::new();
+                    let mut buffer = [0_u8; 64 * 1024];
+                    loop {
+                        let read = std::io::Read::read(&mut file, &mut buffer)?;
+                        if read == 0 {
+                            break;
+                        }
+                        hasher.update(&buffer[..read]);
+                    }
+                    if hasher.finalize().to_hex().as_str() != content_hash {
+                        return Err(corrupt_path(
+                            "capsule Git pack",
+                            "local checkpoint pack content hash does not match its authenticated section",
+                        ));
+                    }
+                    if std::fs::read(&final_index)? != index.as_ref()
+                        || std::fs::read(&final_reverse)? != reverse_index.as_ref()
+                    {
+                        return Err(corrupt_path(
+                            "capsule Git pack",
+                            "local checkpoint sidecar does not match its authenticated section",
+                        ));
+                    }
+                    (&final_index, &final_reverse)
+                };
+            let locations = crab_git::pack_locator::PackLocationIter::open(
+                index_for_validation,
+                reverse_for_validation,
+                pack_size,
+            )
+            .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+            if locations.object_count() != descriptor.object_count()
+                || locations.pack_checksum().to_string() != descriptor.git_checksum()
+            {
+                return Err(corrupt_path(
+                    "capsule Git locator",
+                    "pack descriptor does not match its index",
+                ));
+            }
+            crab_git::pack_locator::validate_pack_kind_metadata(
+                &locator,
+                locations.pack_checksum(),
+                locations.object_count(),
+            )
+            .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+            let result = if has_download {
+                if final_pack.exists() || final_index.exists() || final_reverse.exists() {
+                    return Err(corrupt_path(
+                        "capsule Git pack",
+                        "pack installation destination already exists with different contents",
+                    ));
+                }
+                crab_git::pack::install_pack_files_from_paths(
+                    &pack_dir,
+                    &pack_path,
+                    &index_path,
+                    &reverse_path,
+                    &content_hash,
+                    max_input_bytes,
+                    descriptor.object_count(),
+                )
+            } else {
+                crab_git::pack::install_pack_file_from_path(
+                    &pack_dir,
+                    &final_pack,
+                    &content_hash,
+                    0,
+                    false,
+                )
+            }
+            .map_err(|error| corrupt_path("capsule Git pack", error.to_string()))?;
+            if result.git_sha1 != descriptor.git_checksum() {
+                return Err(corrupt_path(
+                    "capsule Git pack",
+                    "installed pack checksum does not match its descriptor",
+                ));
+            }
+            installed.push(result.pack_path);
+        }
+        Ok(installed)
+    })
+    .await
+    .map_err(|error| ReadError::Internal(format!("capsule pack install worker failed: {error}")))?
+}
+
+/// Install packs from a view, range-reading only checkpoint pack bodies that
+/// are not already present in the destination Git object database.
+pub async fn install_git_packs_from_store(
+    view: &CapsuleRepositoryView,
+    store: &Store,
+    router: &StoreLayout<Store>,
+    git_dir: &Path,
+    max_input_bytes: u64,
+) -> Result<Vec<PathBuf>> {
+    let Some(control) = view.checkpoint_control().cloned() else {
+        return install_git_packs(view, git_dir, max_input_bytes).await;
+    };
+    let pack_dir = git_dir.join("objects").join("pack");
+    tokio::fs::create_dir_all(&pack_dir).await?;
+    let mut payloads = Vec::new();
+    for descriptor in control.git_packs() {
+        let location = control.section_location(descriptor.pack_section())?;
+        let content_hash = location.blake3().to_owned();
+        let final_pack = pack_dir.join(format!("pack-{content_hash}.pack"));
+        let final_index = pack_dir.join(format!("pack-{content_hash}.idx"));
+        let final_reverse = pack_dir.join(format!("pack-{content_hash}.rev"));
+        let pack_exists = final_pack.exists();
+        let index_exists = final_index.exists();
+        let reverse_exists = final_reverse.exists();
+        let pack = if pack_exists || index_exists || reverse_exists {
+            if !(pack_exists && index_exists && reverse_exists) {
+                return Err(corrupt_path(
+                    "capsule Git pack",
+                    "local checkpoint pack installation is incomplete",
+                ));
+            }
+            None
+        } else {
+            let end = location
+                .offset()
+                .checked_add(location.length())
+                .ok_or_else(|| corrupt_path("capsule Git pack", "pack range overflowed"))?;
+            let path = router.capsule_checkpoint_path(control.hash());
+            Some(store.range_get(&path, location.offset()..end).await?)
+        };
+        payloads.push(GitPackPayload {
+            descriptor: descriptor.clone(),
+            pack,
+            index: control.section_bytes(descriptor.index_section())?,
+            reverse_index: control.section_bytes(descriptor.reverse_index_section())?,
+            locator: control.section_bytes(descriptor.locator_section())?,
+            content_hash,
+        });
+    }
+    for capsule in view.capsules.iter().cloned() {
+        payloads.extend(payloads_from_container(GitPackContainer::Capsule(capsule))?);
+    }
+    install_git_pack_payloads(git_dir, payloads, max_input_bytes).await
+}
+
+enum GitPackContainer {
+    Checkpoint(Checkpoint),
+    Capsule(Capsule),
+}
+
+fn inline_locators_for_pack(
+    descriptor: &CapsuleGitPackDescriptor,
+    pack_id: crab_xet::hash::MerkleHash,
+    index_path: &Path,
+    reverse_path: &Path,
+    locator_bytes: &Bytes,
+    pack_size: u64,
+) -> Result<std::collections::HashMap<[u8; 20], crab_metadata::git_object_locator::GitObjectLocator>>
+{
+    let locations =
+        crab_git::pack_locator::PackLocationIter::open(index_path, reverse_path, pack_size)
+            .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+    let locator_entries = crab_git::pack_locator::decode_pack_kind_metadata_with_external_deltas(
+        locator_bytes,
+        locations,
+    )
+    .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+    let locator_locations =
+        crab_git::pack_locator::PackLocationIter::open(index_path, reverse_path, pack_size)
+            .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+    let mut inline = std::collections::HashMap::new();
+    for (ordinal, ((oid, kind, delta_base_oid), location)) in locator_entries
+        .into_iter()
+        .zip(locator_locations)
+        .enumerate()
+    {
+        let location =
+            location.map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+        let oid_bytes = oid
+            .as_bytes()
+            .try_into()
+            .map_err(|_| ReadError::internal("capsule Git locator is not SHA-1"))?;
+        let ordinal = u32::try_from(ordinal)
+            .map_err(|_| ReadError::internal("capsule Git locator ordinal overflowed"))?;
+        let kind = match kind {
+            gix_object::Kind::Commit => crab_metadata::git_object_locator::GitObjectKind::Commit,
+            gix_object::Kind::Tree => crab_metadata::git_object_locator::GitObjectKind::Tree,
+            gix_object::Kind::Blob => crab_metadata::git_object_locator::GitObjectKind::Blob,
+            gix_object::Kind::Tag => crab_metadata::git_object_locator::GitObjectKind::Tag,
+        };
+        inline.insert(
+            oid_bytes,
+            crab_metadata::git_object_locator::GitObjectLocator {
+                ordinal,
+                pack_id,
+                location: crab_metadata::git_object_locator::GitObjectLocation {
+                    pack_offset: location.pack_offset,
+                    entry_len: location.entry_len,
+                    crc32: location.crc32,
+                },
+                metadata: crab_metadata::git_object_locator::GitObjectMetadata {
+                    kind: Some(kind),
+                    logical_size: None,
+                    delta_base_oid: delta_base_oid
+                        .map(|oid| oid.as_bytes().try_into())
+                        .transpose()
+                        .map_err(|_| ReadError::internal("capsule Git delta base is not SHA-1"))?,
+                },
+            },
+        );
+    }
+    if inline.len() as u64 != descriptor.object_count() {
+        return Err(corrupt_path(
+            "capsule Git locator",
+            "locator metadata count does not match its pack descriptor",
+        ));
+    }
+    Ok(inline)
+}
+
+impl GitPackContainer {
+    fn git_packs(&self) -> &[CapsuleGitPackDescriptor] {
+        match self {
+            Self::Checkpoint(checkpoint) => checkpoint.git_packs(),
+            Self::Capsule(capsule) => capsule.git_packs(),
+        }
+    }
+
+    fn section_bytes(&self, section: u32) -> Result<Bytes> {
+        match self {
+            Self::Checkpoint(checkpoint) => Ok(checkpoint.section_bytes(section)?),
+            Self::Capsule(capsule) => Ok(capsule.section_bytes(section)?),
+        }
+    }
+}
+
+/// Load a root and its bounded capsule frontier with one request per object.
+///
+/// Capsule bodies are fetched concurrently, then checked against the exact
+/// size, content identity, transaction, and base-root bindings in the root.
+pub async fn open_view(
+    router: &StoreLayout<Store>,
+    limits: CapsuleReadLimits,
+) -> Result<CapsuleRepositoryView> {
+    let snapshot = load_root(router).await?;
+    open_view_from_root(router, snapshot, limits).await
+}
+
+/// Read the complete transaction-consistent ref map without fetching capsule payloads.
+///
+/// Ref-head bodies and any transaction records that make prepared multi-ref updates
+/// visible are still verified. Callers that consume Git objects must open a full view
+/// before trusting the immutable payloads named by those refs.
+pub async fn read_visible_refs(router: &StoreLayout<Store>) -> Result<BTreeMap<String, String>> {
+    let snapshot = load_root(router).await?;
+    read_visible_refs_from_root(router, &snapshot).await
+}
+
+/// Read current refs from an already verified root without fetching capsule payloads.
+pub async fn read_visible_refs_from_root(
+    router: &StoreLayout<Store>,
+    snapshot: &crab_metadata::capsule_protocol::RootSnapshot,
+) -> Result<BTreeMap<String, String>> {
+    Ok(open_ref_view_from_root(router, snapshot.clone())
+        .await?
+        .refs)
+}
+
+/// Capture every current ref without fetching checkpoint or capsule payloads.
+pub async fn open_ref_view_from_root(
+    router: &StoreLayout<Store>,
+    snapshot: crab_metadata::capsule_protocol::RootSnapshot,
+) -> Result<CapsuleRefView> {
+    let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
+    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?;
+    Ok(CapsuleRefView {
+        root: snapshot,
+        refs: visible.refs,
+        peeled_refs: visible.peeled_refs,
+        visible_ref_transactions: visible.transactions,
+    })
+}
+
+/// Inspect one root and every visible per-ref position without loading payloads.
+///
+/// Maintenance polling uses this to detect quiescence without repeatedly
+/// downloading stable capsule or checkpoint bodies.
+pub async fn read_activity_from_root(
+    router: &StoreLayout<Store>,
+    snapshot: &crab_metadata::capsule_protocol::RootSnapshot,
+) -> Result<CapsuleRepositoryActivity> {
+    let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
+    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?;
+    let capsule_count = visible.pointers.iter().try_fold(0_u64, |total, pointer| {
+        total
+            .checked_add(u64::from(pointer.capsule_count()))
+            .ok_or_else(|| ReadError::internal("capsule frontier count overflowed"))
+    })?;
+    Ok(CapsuleRepositoryActivity {
+        state_digest: state_digest(snapshot.record(), &visible.transactions),
+        capsule_count,
+        ref_count: u64::try_from(visible.refs.len())
+            .map_err(|_| ReadError::internal("capsule ref count overflowed"))?,
+    })
+}
+
+/// Read only requested current refs from an already verified root.
+///
+/// Missing and deleted refs are omitted. The result is authoritative only for
+/// `ref_names` and never includes compacted values for unchecked sibling refs.
+pub async fn read_visible_refs_from_root_for_refs(
+    router: &StoreLayout<Store>,
+    snapshot: &crab_metadata::capsule_protocol::RootSnapshot,
+    ref_names: &BTreeSet<String>,
+) -> Result<BTreeMap<String, String>> {
+    Ok(
+        open_ref_view_from_root_for_refs(router, snapshot.clone(), ref_names)
+            .await?
+            .refs,
+    )
+}
+
+/// Capture only requested current refs without fetching immutable payloads.
+///
+/// The result is authoritative only for `ref_names`; absent entries represent
+/// missing or deleted selected refs rather than knowledge of sibling refs.
+pub async fn open_ref_view_from_root_for_refs(
+    router: &StoreLayout<Store>,
+    snapshot: crab_metadata::capsule_protocol::RootSnapshot,
+    ref_names: &BTreeSet<String>,
+) -> Result<CapsuleRefView> {
+    let (heads, active) =
+        capture_selected_ref_heads(router, snapshot.record().root(), ref_names).await?;
+    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?;
+    Ok(CapsuleRefView {
+        root: snapshot,
+        refs: visible
+            .refs
+            .into_iter()
+            .filter(|(ref_name, _)| ref_names.contains(ref_name))
+            .collect(),
+        peeled_refs: visible
+            .peeled_refs
+            .into_iter()
+            .filter(|(ref_name, _)| ref_names.contains(ref_name))
+            .collect(),
+        visible_ref_transactions: visible
+            .transactions
+            .into_iter()
+            .filter(|(ref_name, _)| ref_names.contains(ref_name))
+            .collect(),
+    })
+}
+
+/// Load the immutable objects named by one already authenticated root.
+///
+/// Remote-helper sessions use this entry point to bind advertisement and
+/// transfer to one root while avoiding a redundant mutable-root request.
+pub async fn open_view_from_root(
+    router: &StoreLayout<Store>,
+    snapshot: crab_metadata::capsule_protocol::RootSnapshot,
+    limits: CapsuleReadLimits,
+) -> Result<CapsuleRepositoryView> {
+    let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
+    assemble_view(
+        router,
+        snapshot,
+        limits,
+        heads,
+        active,
+        CheckpointLoad::Complete,
+    )
+    .await
+}
+
+/// Load a repository view with only the range-addressable checkpoint control suffix.
+///
+/// This path is used by ordinary fetch. It authenticates checkpoint metadata and
+/// leaves pack bodies available for selective range reads, so an existing local
+/// clone does not download its checkpoint again.
+pub async fn open_view_from_root_with_control(
+    router: &StoreLayout<Store>,
+    snapshot: crab_metadata::capsule_protocol::RootSnapshot,
+    limits: CapsuleReadLimits,
+) -> Result<CapsuleRepositoryView> {
+    let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
+    assemble_view(
+        router,
+        snapshot,
+        limits,
+        heads,
+        active,
+        CheckpointLoad::Control,
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CheckpointLoad {
+    Complete,
+    Control,
+}
+
+async fn assemble_view(
+    router: &StoreLayout<Store>,
+    snapshot: crab_metadata::capsule_protocol::RootSnapshot,
+    limits: CapsuleReadLimits,
+    heads: Vec<crab_metadata::capsule_protocol::CapsuleRefHead>,
+    active: BTreeSet<String>,
+    checkpoint_load: CheckpointLoad,
+) -> Result<CapsuleRepositoryView> {
+    let mut refs = snapshot.record().root().refs().clone();
+    let mut peeled_refs = snapshot.record().root().peeled_refs().clone();
+    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?;
+    let expected_refs = visible.refs;
+    let expected_peeled = visible.peeled_refs;
+    let visible_ref_transactions = visible.transactions;
+    let ref_frontiers = visible.frontiers;
+    let pointers = visible.pointers;
+    admit_frontier(&pointers, limits)?;
+    let checkpoint = async {
+        match snapshot.record().root().checkpoint() {
+            Some(pointer) => match checkpoint_load {
+                CheckpointLoad::Complete => load_checkpoint(router, pointer, limits)
+                    .await
+                    .map(CheckpointData::Complete),
+                CheckpointLoad::Control => load_checkpoint_control(router, pointer, limits)
+                    .await
+                    .map(CheckpointData::Control),
+            }
+            .map(Some),
+            None => Ok(None),
+        }
+    };
+    let runs = try_join_all(pointers.iter().map(|pointer| load_run(router, pointer)));
+    let (checkpoint, runs) = tokio::try_join!(checkpoint, runs)?;
+    let root_transactions = snapshot
+        .record()
+        .root()
+        .capsule_frontier()
+        .iter()
+        .flat_map(|pointer| pointer.transaction_ids().iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let runs = runs
+        .into_iter()
+        .map(|run| (run.hash().to_owned(), run))
+        .collect::<BTreeMap<_, _>>();
+    let mut required_transactions = BTreeSet::new();
+    let mut transaction_predecessors = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut ref_capsule_counts = BTreeMap::new();
+    for (ref_name, (checkpoint_transaction_id, frontier)) in &ref_frontiers {
+        let transaction_ids = frontier
+            .iter()
+            .map(|pointer| {
+                runs.get(pointer.hash())
+                    .ok_or_else(|| ReadError::internal("loaded capsule run disappeared"))
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flat_map(|run| run.capsules().iter().map(Capsule::transaction_id))
+            .collect::<Vec<_>>();
+        let start = match snapshot
+            .record()
+            .root()
+            .compacted_ref_transactions()
+            .get(ref_name)
+        {
+            Some(compacted) => match transaction_ids
+                .iter()
+                .position(|transaction_id| *transaction_id == compacted)
+            {
+                Some(index) => index + 1,
+                None if checkpoint_transaction_id.as_deref() == Some(compacted.as_str()) => 0,
+                None => {
+                    return Err(corrupt_path(
+                        "capsule-protocol ref heads",
+                        format!("ref {ref_name} does not extend its compacted transaction"),
+                    ));
+                }
+            },
+            None if checkpoint_transaction_id.is_none() => 0,
+            None => {
+                return Err(corrupt_path(
+                    "capsule-protocol ref heads",
+                    format!("ref {ref_name} names a checkpoint absent from the repository root"),
+                ));
+            }
+        };
+        let required = &transaction_ids[start..];
+        ref_capsule_counts.insert(
+            ref_name.clone(),
+            u32::try_from(required.len())
+                .map_err(|_| ReadError::internal("ref capsule count overflowed"))?,
+        );
+        required_transactions.extend(
+            required
+                .iter()
+                .map(|transaction_id| (*transaction_id).to_owned()),
+        );
+        // Expected-old OIDs cannot order A -> B -> A histories. Preserve the
+        // authenticated per-ref frontier order so a later A successor waits.
+        for pair in required.windows(2) {
+            transaction_predecessors
+                .entry(pair[1].to_owned())
+                .or_default()
+                .insert(pair[0].to_owned());
+        }
+    }
+    let mut root_capsules = Vec::new();
+    let mut root_capsule_identities = BTreeMap::new();
+    for pointer in snapshot.record().root().capsule_frontier() {
+        let run = runs
+            .get(pointer.hash())
+            .ok_or_else(|| ReadError::internal("loaded root capsule run disappeared"))?;
+        for capsule in run.capsules() {
+            match root_capsule_identities.get(capsule.transaction_id()) {
+                Some(existing) if existing != capsule => {
+                    return Err(corrupt_path(
+                        "capsule-protocol root frontier",
+                        "transaction identity names conflicting capsules",
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    root_capsule_identities
+                        .insert(capsule.transaction_id().to_owned(), capsule.clone());
+                    root_capsules.push(capsule.clone());
+                }
+            }
+        }
+    }
+    let mut journal_capsules = BTreeMap::new();
+    for capsule in runs.values().flat_map(|run| run.capsules().iter().cloned()) {
+        if root_transactions.contains(capsule.transaction_id()) {
+            continue;
+        }
+        if !required_transactions.contains(capsule.transaction_id()) {
+            continue;
+        }
+        match journal_capsules.get(capsule.transaction_id()) {
+            Some(existing) if existing != &capsule => {
+                return Err(corrupt_path(
+                    "capsule-protocol ref heads",
+                    "transaction identity names conflicting capsules",
+                ));
+            }
+            Some(_) => {}
+            None => {
+                journal_capsules.insert(capsule.transaction_id().to_owned(), capsule);
+            }
+        }
+    }
+    let mut visibility_refs = checkpoint
+        .as_ref()
+        .map(|checkpoint| match checkpoint {
+            CheckpointData::Complete(checkpoint) => checkpoint.visibility_snapshot(),
+            CheckpointData::Control(control) => control.visibility_snapshot(),
+        })
+        .transpose()?
+        .flatten()
+        .map(|visibility| visibility.refs().clone())
+        .unwrap_or_default();
+    for capsule in &root_capsules {
+        if capsule.visibility_delta()?.is_some() {
+            apply_capsule_visibility(capsule, &mut visibility_refs)?;
+        }
+    }
+    let ordered = order_ref_capsules(
+        snapshot.record().root().refs(),
+        snapshot.record().root().peeled_refs(),
+        &visibility_refs,
+        &transaction_predecessors,
+        journal_capsules,
+    )?;
+    for capsule in &ordered {
+        apply_capsule_refs(capsule, &mut refs, &mut peeled_refs)?;
+    }
+    if refs != expected_refs || peeled_refs != expected_peeled {
+        return Err(corrupt_path(
+            "capsule-protocol ref heads",
+            "materialized capsules do not match visible ref-head state",
+        ));
+    }
+    root_capsules.extend(ordered);
+    Ok(CapsuleRepositoryView {
+        root: snapshot,
+        checkpoint,
+        capsules: root_capsules,
+        refs,
+        peeled_refs,
+        visible_ref_transactions,
+        ref_capsule_counts,
+        capsule_run_pointers: pointers,
+    })
+}
+
+struct VisibleRefHeads {
+    refs: BTreeMap<String, String>,
+    peeled_refs: BTreeMap<String, String>,
+    transactions: BTreeMap<String, String>,
+    frontiers: BTreeMap<String, (Option<String>, Vec<CapsulePointer>)>,
+    pointers: Vec<CapsulePointer>,
+}
+
+fn state_digest(root: &RootRecord, transactions: &BTreeMap<String, String>) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"crab capsule repository view v2\0");
+    hasher.update(root.digest().as_bytes());
+    for (ref_name, transaction_id) in transactions {
+        hasher.update(ref_name.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(transaction_id.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn materialize_visible_ref_heads(
+    root: &crab_metadata::capsule_protocol::RepositoryRoot,
+    heads: &[crab_metadata::capsule_protocol::CapsuleRefHead],
+    active: &BTreeSet<String>,
+) -> Result<VisibleRefHeads> {
+    let mut refs = root.refs().clone();
+    let mut peeled_refs = root.peeled_refs().clone();
+    let mut transactions = BTreeMap::new();
+    let mut frontiers = BTreeMap::new();
+    let mut pointers = root.capsule_frontier().to_vec();
+    for head in heads {
+        let state = head.visible(active);
+        if let Some(transaction_id) = state.transaction_id() {
+            transactions.insert(head.ref_name().to_owned(), transaction_id.to_owned());
+        }
+        if state.transaction_id()
+            == root
+                .compacted_ref_transactions()
+                .get(head.ref_name())
+                .map(String::as_str)
+        {
+            continue;
+        }
+        match state.oid() {
+            Some(oid) => {
+                refs.insert(head.ref_name().to_owned(), oid.to_owned());
+                match state.peeled_oid() {
+                    Some(peeled) => {
+                        peeled_refs.insert(head.ref_name().to_owned(), peeled.to_owned());
+                    }
+                    None => {
+                        peeled_refs.remove(head.ref_name());
+                    }
+                }
+            }
+            None => {
+                refs.remove(head.ref_name());
+                peeled_refs.remove(head.ref_name());
+            }
+        }
+        for pointer in state.frontier() {
+            match pointers
+                .iter()
+                .find(|candidate| candidate.hash() == pointer.hash())
+            {
+                Some(candidate) if candidate != pointer => {
+                    return Err(corrupt_path(
+                        "capsule-protocol ref heads",
+                        "capsule run identity has conflicting authenticated metadata",
+                    ));
+                }
+                Some(_) => {}
+                None => pointers.push(pointer.clone()),
+            }
+        }
+        frontiers.insert(
+            head.ref_name().to_owned(),
+            (
+                state.checkpoint_transaction_id().map(str::to_owned),
+                state.frontier().to_vec(),
+            ),
+        );
+    }
+    Ok(VisibleRefHeads {
+        refs,
+        peeled_refs,
+        transactions,
+        frontiers,
+        pointers,
+    })
+}
+
+async fn load_ref_heads(
+    router: &StoreLayout<Store>,
+    objects: &[ObjectMeta],
+) -> Result<Option<Vec<crab_metadata::capsule_protocol::CapsuleRefHead>>> {
+    let loaded = futures_util::stream::iter(objects.iter().cloned().map(|object| async move {
+        let (body, etag) = router.store().get_with_etag(&object.location).await?;
+        let head = crab_metadata::capsule_protocol::CapsuleRefHead::decode(&body)?;
+        let expected = router.capsule_ref_head_path(
+            &crab_metadata::capsule_protocol::capsule_ref_name_key(head.ref_name()),
+        );
+        if expected != object.location {
+            return Err(corrupt(
+                &object.location,
+                "capsule ref-head key does not match its ref name",
+            ));
+        }
+        Ok::<_, ReadError>((head, listed_version_matches(&object, &etag)))
+    }))
+    .buffer_unordered(32)
+    .try_collect::<Vec<_>>()
+    .await?;
+    if loaded.iter().any(|(_, matched)| !matched) {
+        return Ok(None);
+    }
+    let mut heads = loaded.into_iter().map(|(head, _)| head).collect::<Vec<_>>();
+    heads.sort_unstable_by(|left, right| left.ref_name().cmp(right.ref_name()));
+    Ok(Some(heads))
+}
+
+async fn capture_ref_heads(
+    router: &StoreLayout<Store>,
+    root: &crab_metadata::capsule_protocol::RepositoryRoot,
+) -> Result<(
+    Vec<crab_metadata::capsule_protocol::CapsuleRefHead>,
+    BTreeSet<String>,
+)> {
+    for _ in 0..8 {
+        let before = list_ref_head_objects(router).await?;
+        let Some(heads) = load_ref_heads(router, &before).await? else {
+            continue;
+        };
+        let heads = heads
+            .into_iter()
+            .filter(|head| head.ref_epoch() == root.ref_epoch())
+            .collect::<Vec<_>>();
+        let active = resolve_referenced_activations(router, &heads).await?;
+        let after = list_ref_head_objects(router).await?;
+        if before != after {
+            continue;
+        }
+        for head in &heads {
+            let visible = head.visible(&active);
+            let base_oid = root.refs().get(head.ref_name()).map(String::as_str);
+            if visible.transaction_id().is_none() && visible.oid() != base_oid {
+                return Err(corrupt_path(
+                    "capsule-protocol ref heads",
+                    "capsule ref head without a transaction differs from the compacted root",
+                ));
+            }
+        }
+        return Ok((heads, active));
+    }
+    Err(ReadError::internal(
+        "capsule ref snapshot changed during every bounded capture attempt",
+    ))
+}
+
+async fn capture_selected_ref_heads(
+    router: &StoreLayout<Store>,
+    root: &crab_metadata::capsule_protocol::RepositoryRoot,
+    ref_names: &BTreeSet<String>,
+) -> Result<(
+    Vec<crab_metadata::capsule_protocol::CapsuleRefHead>,
+    BTreeSet<String>,
+)> {
+    for _ in 0..8 {
+        let before = load_selected_ref_heads(router, ref_names).await?;
+        let heads = before
+            .iter()
+            .filter_map(|entry| entry.as_ref().map(|(head, _)| head.clone()))
+            .filter(|head| head.ref_epoch() == root.ref_epoch())
+            .collect::<Vec<_>>();
+        let active = resolve_referenced_activations(router, &heads).await?;
+        let after = load_selected_ref_heads(router, ref_names).await?;
+        if before != after {
+            continue;
+        }
+        for head in &heads {
+            let visible = head.visible(&active);
+            let base_oid = root.refs().get(head.ref_name()).map(String::as_str);
+            if visible.transaction_id().is_none() && visible.oid() != base_oid {
+                return Err(corrupt_path(
+                    "capsule-protocol ref heads",
+                    "capsule ref head without a transaction differs from the compacted root",
+                ));
+            }
+        }
+        return Ok((heads, active));
+    }
+    Err(ReadError::internal(
+        "selected capsule ref heads changed during every bounded capture attempt",
+    ))
+}
+
+async fn load_selected_ref_heads(
+    router: &StoreLayout<Store>,
+    ref_names: &BTreeSet<String>,
+) -> Result<
+    Vec<
+        Option<(
+            crab_metadata::capsule_protocol::CapsuleRefHead,
+            crab_storage::ETag,
+        )>,
+    >,
+> {
+    futures_util::stream::iter(ref_names.iter().map(|ref_name| async move {
+        let path = router.capsule_ref_head_path(
+            &crab_metadata::capsule_protocol::capsule_ref_name_key(ref_name),
+        );
+        let (body, etag) = match router.store().get_with_etag(&path).await {
+            Ok(value) => value,
+            Err(crab_storage::StorageError::NotFound { .. }) => return Ok(None),
+            Err(error) => return Err(ReadError::from(error)),
+        };
+        let head = crab_metadata::capsule_protocol::CapsuleRefHead::decode(&body)?;
+        if head.ref_name() != ref_name {
+            return Err(corrupt(
+                &path,
+                "capsule ref-head key does not match its ref name",
+            ));
+        }
+        Ok(Some((head, etag)))
+    }))
+    .buffered(32)
+    .try_collect()
+    .await
+}
+
+async fn list_ref_head_objects(router: &StoreLayout<Store>) -> Result<Vec<ObjectMeta>> {
+    let mut objects = router
+        .store()
+        .list_prefix_bounded(
+            &router.capsule_ref_heads_prefix(),
+            crab_metadata::capsule_protocol::MAX_CAPSULE_REF_HEADS,
+        )
+        .await?
+        .ok_or_else(|| ReadError::internal("capsule ref-head limit exceeded"))?;
+    objects.sort_unstable_by(|left, right| left.location.cmp(&right.location));
+    Ok(objects)
+}
+
+fn listed_version_matches(object: &ObjectMeta, etag: &crab_storage::ETag) -> bool {
+    object
+        .e_tag
+        .as_ref()
+        .is_none_or(|listed| etag.e_tag.as_ref() == Some(listed))
+        && object
+            .version
+            .as_ref()
+            .is_none_or(|listed| etag.version.as_ref() == Some(listed))
+}
+
+async fn resolve_referenced_activations(
+    router: &StoreLayout<Store>,
+    heads: &[crab_metadata::capsule_protocol::CapsuleRefHead],
+) -> Result<BTreeSet<String>> {
+    let referenced = heads
+        .iter()
+        .filter_map(|head| head.prepared_activation_id())
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    futures_util::stream::iter(referenced.into_iter().map(|activation_id| async move {
+        let path = router.capsule_transaction_path(&activation_id);
+        let (body, _) = router
+            .store()
+            .get_with_etag_bounded(
+                &path,
+                crab_metadata::capsule_protocol::MAX_CAPSULE_TRANSACTION_RECORD_BYTES,
+            )
+            .await?;
+        let record = crab_metadata::capsule_protocol::CapsuleTransactionRecord::decode(&body)?;
+        if record.activation_id() != activation_id {
+            return Err(corrupt(
+                &path,
+                "capsule transaction record does not match its activation key",
+            ));
+        }
+        if heads.iter().any(|head| {
+            head.prepared_activation_id() == Some(activation_id.as_str())
+                && head
+                    .visible(&BTreeSet::from([activation_id.clone()]))
+                    .transaction_id()
+                    != Some(record.transaction_id())
+        }) {
+            return Err(corrupt(
+                &path,
+                "capsule transaction record does not match its prepared ref heads",
+            ));
+        }
+        Ok::<_, ReadError>((
+            activation_id,
+            record.status() == crab_metadata::capsule_protocol::CapsuleTransactionStatus::Committed,
+        ))
+    }))
+    .buffer_unordered(32)
+    .try_filter_map(
+        |(activation_id, committed)| async move { Ok(committed.then_some(activation_id)) },
+    )
+    .try_collect()
+    .await
+}
+
+fn order_ref_capsules(
+    base_refs: &BTreeMap<String, String>,
+    base_peeled: &BTreeMap<String, String>,
+    base_visibility: &BTreeMap<String, Vec<String>>,
+    predecessors: &BTreeMap<String, BTreeSet<String>>,
+    mut pending: BTreeMap<String, Capsule>,
+) -> Result<Vec<Capsule>> {
+    let mut refs = base_refs.clone();
+    let mut peeled = base_peeled.clone();
+    let mut visibility = base_visibility.clone();
+    let tracked = pending
+        .values()
+        .map(|capsule| capsule.transaction_id().to_owned())
+        .collect::<BTreeSet<_>>();
+    let mut applied = BTreeSet::new();
+    let mut ordered = Vec::with_capacity(pending.len());
+    while !pending.is_empty() {
+        let ready = pending
+            .iter()
+            .find_map(|(id, capsule)| {
+                if predecessors
+                    .get(capsule.transaction_id())
+                    .is_some_and(|required| {
+                        required.iter().any(|transaction_id| {
+                            tracked.contains(transaction_id) && !applied.contains(transaction_id)
+                        })
+                    })
+                {
+                    return None;
+                }
+                match capsule_is_ready(capsule, &refs, &visibility) {
+                    Ok(true) => Some(Ok(id.clone())),
+                    Ok(false) => None,
+                    Err(error) => Some(Err(error)),
+                }
+            })
+            .transpose()?;
+        let Some(ready) = ready else {
+            return Err(corrupt_path(
+                "capsule-protocol ref heads",
+                "capsule ref history is cyclic or does not extend the compacted root",
+            ));
+        };
+        let capsule = pending
+            .remove(&ready)
+            .ok_or_else(|| ReadError::internal("ready capsule disappeared"))?;
+        apply_capsule_refs(&capsule, &mut refs, &mut peeled)?;
+        if capsule.visibility_delta()?.is_some() {
+            apply_capsule_visibility(&capsule, &mut visibility)?;
+        }
+        applied.insert(capsule.transaction_id().to_owned());
+        ordered.push(capsule);
+    }
+    Ok(ordered)
+}
+
+fn capsule_is_ready(
+    capsule: &Capsule,
+    refs: &BTreeMap<String, String>,
+    visibility_refs: &BTreeMap<String, Vec<String>>,
+) -> Result<bool> {
+    let transaction = capsule.transaction()?;
+    if transaction
+        .edits()
+        .iter()
+        .any(|edit| refs.get(edit.ref_name()).map(String::as_str) != edit.expected_old())
+    {
+        return Ok(false);
+    }
+    let Some(delta) = capsule.visibility_delta()? else {
+        // Ref ordering is authenticated by expected-old links. Visibility is a
+        // separate read-admission proof and remains fail-closed when requested.
+        return Ok(true);
+    };
+    let mut evidence = delta.edits().clone();
+    for edit in transaction.edits() {
+        let Some(new_oid) = edit.new_oid() else {
+            if evidence.remove(edit.ref_name()).is_some() {
+                return Err(corrupt_path(
+                    "capsule Git visibility",
+                    "deleted ref has visibility evidence",
+                ));
+            }
+            continue;
+        };
+        let Some(visibility) = evidence.remove(edit.ref_name()) else {
+            return Err(corrupt_path(
+                "capsule Git visibility",
+                "live ref edit has no visibility evidence",
+            ));
+        };
+        visibility.validate()?;
+        if visibility.new_oid != new_oid {
+            return Err(corrupt_path(
+                "capsule Git visibility",
+                "visibility evidence does not match its ref edit",
+            ));
+        }
+        match edit.expected_old() {
+            Some(expected_old) => {
+                if visibility.old_oid.as_deref() != Some(expected_old) {
+                    return Err(corrupt_path(
+                        "capsule Git visibility",
+                        "visibility evidence does not match the expected old ref",
+                    ));
+                }
+                if !visibility_refs.contains_key(edit.ref_name()) {
+                    return Ok(false);
+                }
+            }
+            None if visibility.replaces => {}
+            None => {
+                let Some(old_oid) = visibility.old_oid.as_deref() else {
+                    continue;
+                };
+                if !visibility_refs.values().any(|objects| {
+                    objects
+                        .binary_search_by(|oid| oid.as_str().cmp(old_oid))
+                        .is_ok()
+                }) {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    if !evidence.is_empty() {
+        return Err(corrupt_path(
+            "capsule Git visibility",
+            "visibility evidence contains an uncommitted ref",
+        ));
+    }
+    Ok(true)
+}
+
+fn apply_capsule_visibility(
+    capsule: &Capsule,
+    refs: &mut BTreeMap<String, Vec<String>>,
+) -> Result<()> {
+    let pack_index_hash = if refs.is_empty() {
+        String::new()
+    } else {
+        "0".repeat(64)
+    };
+    let mut index = crab_metadata::git_visibility::GitVisibilityIndex::new(
+        0,
+        pack_index_hash,
+        "0".repeat(64),
+        std::mem::take(refs),
+    )?;
+    apply_capsule_visibility_index(capsule, &mut index)?;
+    *refs = index.ref_closures();
+    Ok(())
+}
+
+fn apply_capsule_visibility_index(
+    capsule: &Capsule,
+    index: &mut crab_metadata::git_visibility::GitVisibilityIndex,
+) -> Result<()> {
+    let transaction = capsule.transaction()?;
+    let delta = capsule.visibility_delta()?;
+    let mut evidence = delta.map(|delta| delta.edits().clone()).unwrap_or_default();
+    for edit in transaction.edits() {
+        let Some(new_oid) = edit.new_oid() else {
+            if evidence.remove(edit.ref_name()).is_some() {
+                return Err(corrupt_path(
+                    "capsule Git visibility",
+                    "deleted ref has visibility evidence",
+                ));
+            }
+            index.remove_ref(edit.ref_name());
+            continue;
+        };
+        let visibility = evidence.remove(edit.ref_name()).ok_or_else(|| {
+            corrupt_path(
+                "capsule Git visibility",
+                "live ref edit has no visibility evidence",
+            )
+        })?;
+        if visibility.new_oid != new_oid {
+            return Err(corrupt_path(
+                "capsule Git visibility",
+                "visibility evidence does not match its ref edit",
+            ));
+        }
+        if let Some(expected_old) = edit.expected_old()
+            && visibility.old_oid.as_deref() != Some(expected_old)
+        {
+            return Err(corrupt_path(
+                "capsule Git visibility",
+                "visibility evidence does not match the expected old ref",
+            ));
+        }
+        index.apply_ref_edit(edit.ref_name().to_owned(), &visibility)?;
+    }
+    if !evidence.is_empty() {
+        return Err(corrupt_path(
+            "capsule Git visibility",
+            "visibility evidence contains an uncommitted ref",
+        ));
+    }
+    Ok(())
+}
+
+fn apply_capsule_refs(
+    capsule: &Capsule,
+    refs: &mut BTreeMap<String, String>,
+    peeled_refs: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    for edit in capsule.transaction()?.edits() {
+        if refs.get(edit.ref_name()).map(String::as_str) != edit.expected_old() {
+            return Err(corrupt_path(
+                "capsule-protocol ref heads",
+                "capsule expected-old ref does not match its parent state",
+            ));
+        }
+        match edit.new_oid() {
+            Some(oid) => {
+                refs.insert(edit.ref_name().to_owned(), oid.to_owned());
+                match edit.peeled_oid() {
+                    Some(peeled) => {
+                        peeled_refs.insert(edit.ref_name().to_owned(), peeled.to_owned());
+                    }
+                    None => {
+                        peeled_refs.remove(edit.ref_name());
+                    }
+                }
+            }
+            None => {
+                refs.remove(edit.ref_name());
+                peeled_refs.remove(edit.ref_name());
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn load_checkpoint(
+    router: &StoreLayout<Store>,
+    pointer: &CheckpointPointer,
+    limits: CapsuleReadLimits,
+) -> Result<Checkpoint> {
+    if pointer.size() > limits.max_capsule_bytes {
+        return Err(ReadError::CapsuleReadLimit {
+            resource: "checkpoint bytes",
+            maximum: limits.max_capsule_bytes,
+        });
+    }
+    let path = router.capsule_checkpoint_path(pointer.hash());
+    let (bytes, _) = router
+        .store()
+        .get_with_etag_bounded(&path, pointer.size())
+        .await?;
+    let checkpoint = Checkpoint::decode(bytes)?;
+    let object_count = checkpoint
+        .git_packs()
+        .iter()
+        .try_fold(0_u64, |total, pack| total.checked_add(pack.object_count()))
+        .ok_or_else(|| ReadError::internal("checkpoint object count overflowed"))?;
+    if checkpoint.hash() != pointer.hash()
+        || checkpoint.bytes().len() as u64 != pointer.size()
+        || checkpoint.control_offset() != pointer.control_offset()
+        || checkpoint.control_size() != pointer.control_size()
+        || checkpoint.footer_hash() != pointer.footer_hash()
+        || checkpoint.covered_generation() != pointer.covered_generation()
+        || checkpoint.covered_root_digest() != pointer.covered_root_digest()
+        || checkpoint.git_packs().len() as u32 != pointer.pack_count()
+        || object_count != pointer.object_count()
+    {
+        return Err(corrupt(
+            &path,
+            "checkpoint does not match its authenticated root pointer",
+        ));
+    }
+    Ok(checkpoint)
+}
+
+/// Load and verify only a checkpoint's authenticated control suffix.
+pub async fn load_checkpoint_control(
+    router: &StoreLayout<Store>,
+    pointer: &CheckpointPointer,
+    limits: CapsuleReadLimits,
+) -> Result<CheckpointControl> {
+    if pointer.control_size() > limits.max_capsule_bytes {
+        return Err(ReadError::CapsuleReadLimit {
+            resource: "checkpoint control bytes",
+            maximum: limits.max_capsule_bytes,
+        });
+    }
+    let path = router.capsule_checkpoint_path(pointer.hash());
+    let bytes = router
+        .store()
+        .range_get(&path, pointer.control_offset()..pointer.size())
+        .await?;
+    let control = Checkpoint::decode_control(
+        bytes,
+        pointer.size(),
+        pointer.hash(),
+        pointer.control_offset(),
+        pointer.control_size(),
+        pointer.footer_hash(),
+    )?;
+    let object_count = control
+        .git_packs()
+        .iter()
+        .try_fold(0_u64, |total, pack| total.checked_add(pack.object_count()))
+        .ok_or_else(|| corrupt(&path, "checkpoint object count overflowed"))?;
+    if control.covered_generation() != pointer.covered_generation()
+        || control.covered_root_digest() != pointer.covered_root_digest()
+        || control.git_packs().len() as u32 != pointer.pack_count()
+        || object_count != pointer.object_count()
+    {
+        return Err(corrupt(
+            &path,
+            "checkpoint control does not match its authenticated root pointer",
+        ));
+    }
+    Ok(control)
+}
+
+fn admit_frontier(pointers: &[CapsulePointer], limits: CapsuleReadLimits) -> Result<()> {
+    let mut total = 0u64;
+    for pointer in pointers {
+        if pointer.size() > limits.max_capsule_bytes {
+            return Err(ReadError::CapsuleReadLimit {
+                resource: "individual capsule bytes",
+                maximum: limits.max_capsule_bytes,
+            });
+        }
+        total = total
+            .checked_add(pointer.size())
+            .ok_or(ReadError::CapsuleReadLimit {
+                resource: "frontier bytes",
+                maximum: limits.max_frontier_bytes,
+            })?;
+        if total > limits.max_frontier_bytes {
+            return Err(ReadError::CapsuleReadLimit {
+                resource: "frontier bytes",
+                maximum: limits.max_frontier_bytes,
+            });
+        }
+    }
+    Ok(())
+}
+
+async fn load_run(router: &StoreLayout<Store>, pointer: &CapsulePointer) -> Result<CapsuleRun> {
+    let path = router.capsule_path(pointer.hash());
+    let (bytes, _) = router
+        .store()
+        .get_with_etag_bounded(&path, pointer.size())
+        .await?;
+    let actual_size = u64::try_from(bytes.len())
+        .map_err(|_| ReadError::internal("capsule size cannot be represented as u64"))?;
+    if actual_size != pointer.size() {
+        return Err(corrupt(
+            &path,
+            format!(
+                "capsule size is {actual_size} bytes; root declares {}",
+                pointer.size()
+            ),
+        ));
+    }
+    let run = CapsuleRun::decode(bytes)?;
+    if run.hash() != pointer.hash()
+        || run.level() != pointer.level()
+        || run.transaction_ids() != pointer.transaction_ids()
+        || run.newest_base_root_digest() != pointer.newest_base_root_digest()
+    {
+        return Err(corrupt(
+            &path,
+            "capsule run does not match its authenticated root pointer",
+        ));
+    }
+    Ok(run)
+}
+
+fn corrupt(path: &object_store::path::Path, reason: impl Into<String>) -> ReadError {
+    ReadError::CorruptObject {
+        path: path.to_string(),
+        reason: reason.into(),
+    }
+}
+
+fn corrupt_path(path: impl Into<String>, reason: impl Into<String>) -> ReadError {
+    ReadError::CorruptObject {
+        path: path.into(),
+        reason: reason.into(),
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test assertions")]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use bytes::Bytes;
+    use crab_metadata::capsule_protocol::{
+        CapsuleGitPack, CapsuleRefEdit, CapsuleSection, CapsuleSectionKind, CapsuleTransaction,
+        CapsuleVisibilityDelta, Checkpoint, CheckpointPointer, HistorySegment, HistorySegmentState,
+        RepositoryRoot,
+    };
+    use crab_metadata::git_visibility::GitVisibilityEdit;
+    use crab_storage::{StorageObservation, StorageObserver, StorageOperation, StorageOutcome};
+    use object_store::memory::InMemory;
+
+    use super::*;
+
+    const TEST_LIMITS: CapsuleReadLimits = CapsuleReadLimits {
+        max_capsule_bytes: 1024 * 1024,
+        max_frontier_bytes: 8 * 1024 * 1024,
+    };
+
+    #[derive(Default)]
+    struct RecordingObserver {
+        observations: Mutex<Vec<StorageObservation>>,
+    }
+
+    impl StorageObserver for RecordingObserver {
+        fn started(&self, _operation: StorageOperation) {}
+
+        fn finished(&self, observation: StorageObservation) {
+            self.observations.lock().unwrap().push(observation);
+        }
+    }
+
+    async fn seed_one_capsule(inner: Arc<InMemory>, pointer_transaction_id: Option<String>) {
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "repositories/test".to_owned());
+        let initial = RootRecord::encode(
+            RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
+        )
+        .unwrap();
+        let transaction = CapsuleTransaction::new(
+            initial.digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule = Capsule::build(
+            &transaction,
+            vec![
+                CapsuleGitPack::new(
+                    Bytes::from_static(b"PACK capsule-protocol read test"),
+                    Bytes::from_static(b"index"),
+                    Bytes::from_static(b"reverse"),
+                    Bytes::from_static(b"locator"),
+                    "4".repeat(40),
+                    1,
+                )
+                .unwrap(),
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+        let run = CapsuleRun::leaf(capsule).unwrap();
+        store
+            .put(&router.capsule_path(run.hash()), run.bytes().clone())
+            .await
+            .unwrap();
+        let mut transaction_ids = run.transaction_ids();
+        if let Some(pointer_transaction_id) = pointer_transaction_id {
+            transaction_ids[0] = pointer_transaction_id;
+        }
+        let pointer_transaction_id = transaction_ids[0].clone();
+        let pointer = CapsulePointer::new(
+            run.hash(),
+            run.bytes().len() as u64,
+            run.level(),
+            transaction_ids,
+            run.newest_base_root_digest(),
+        )
+        .unwrap();
+        let next = initial
+            .root()
+            .advance(
+                initial.digest(),
+                std::collections::BTreeMap::from([("refs/heads/main".to_owned(), "2".repeat(40))]),
+                std::collections::BTreeMap::new(),
+                vec![pointer],
+                &pointer_transaction_id,
+            )
+            .unwrap();
+        let root = RootRecord::encode(next).unwrap();
+        store
+            .create_strict(&router.capsule_root_path(), root.bytes().clone())
+            .await
+            .unwrap();
+    }
+
+    async fn seed_prepared_multi_ref(
+        inner: Arc<InMemory>,
+        commit_record: bool,
+        publish_marker: bool,
+    ) {
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "repositories/test".to_owned());
+        let initial = RootRecord::encode(
+            RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
+        )
+        .unwrap();
+        store
+            .create_strict(&router.capsule_root_path(), initial.bytes().clone())
+            .await
+            .unwrap();
+        let transaction = CapsuleTransaction::new(
+            initial.digest(),
+            vec![
+                CapsuleRefEdit::new("refs/heads/main", None, Some("2".repeat(40)), None),
+                CapsuleRefEdit::new("refs/heads/feature", None, Some("3".repeat(40)), None),
+            ],
+        )
+        .unwrap();
+        let transaction_id = transaction.id().unwrap();
+        let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([
+            (
+                "refs/heads/main".to_owned(),
+                GitVisibilityEdit::from_delta_objects(
+                    None,
+                    "2".repeat(40),
+                    vec!["2".repeat(40)],
+                    Vec::new(),
+                ),
+            ),
+            (
+                "refs/heads/feature".to_owned(),
+                GitVisibilityEdit::from_delta_objects(
+                    None,
+                    "3".repeat(40),
+                    vec!["3".repeat(40)],
+                    Vec::new(),
+                ),
+            ),
+        ]))
+        .unwrap();
+        let capsule = Capsule::build(
+            &transaction,
+            vec![
+                CapsuleGitPack::new(
+                    Bytes::from_static(b"PACK capsule-protocol multi-ref read test"),
+                    Bytes::from_static(b"index"),
+                    Bytes::from_static(b"reverse"),
+                    Bytes::from_static(b"locator"),
+                    "4".repeat(40),
+                    1,
+                )
+                .unwrap(),
+            ],
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::VisibilityDelta,
+                visibility.encode().unwrap(),
+            )],
+        )
+        .unwrap();
+        let run = CapsuleRun::leaf(capsule).unwrap();
+        store
+            .put(&router.capsule_path(run.hash()), run.bytes().clone())
+            .await
+            .unwrap();
+        let pointer = CapsulePointer::new(
+            run.hash(),
+            run.bytes().len() as u64,
+            run.level(),
+            run.transaction_ids(),
+            run.newest_base_root_digest(),
+        )
+        .unwrap();
+        let activation_id = "5".repeat(64);
+        for edit in transaction.edits() {
+            let head = crab_metadata::capsule_protocol::CapsuleRefHead::from_root(
+                edit.ref_name(),
+                initial.root().ref_epoch().to_owned(),
+                None,
+                None,
+            )
+            .unwrap();
+            let state = head
+                .successor_state(
+                    &BTreeSet::new(),
+                    edit.new_oid().map(str::to_owned),
+                    edit.peeled_oid().map(str::to_owned),
+                    transaction_id.clone(),
+                    vec![pointer.clone()],
+                )
+                .unwrap();
+            let prepared = head
+                .prepare(
+                    head.visible(&BTreeSet::new()).clone(),
+                    activation_id.clone(),
+                    state,
+                )
+                .unwrap();
+            store
+                .create_strict(
+                    &router.capsule_ref_head_path(
+                        &crab_metadata::capsule_protocol::capsule_ref_name_key(edit.ref_name()),
+                    ),
+                    prepared.encode().unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+        let preparing = crab_metadata::capsule_protocol::CapsuleTransactionRecord::preparing(
+            activation_id.clone(),
+            transaction_id,
+        )
+        .unwrap();
+        let record = if commit_record {
+            preparing.commit().unwrap()
+        } else {
+            preparing
+        };
+        store
+            .create_strict(
+                &router.capsule_transaction_path(&activation_id),
+                record.encode().unwrap(),
+            )
+            .await
+            .unwrap();
+        if publish_marker {
+            store
+                .create_strict(
+                    &router.capsule_committed_transaction_path(&activation_id),
+                    record.encode().unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_ref_epoch_is_invisible_to_ref_reads() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "repositories/test".to_owned());
+        let root = RootRecord::encode(
+            RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
+        )
+        .unwrap();
+        store
+            .create_strict(&router.capsule_root_path(), root.bytes().clone())
+            .await
+            .unwrap();
+        let transaction_id = "2".repeat(64);
+        let pointer = CapsulePointer::new(
+            "3".repeat(64),
+            1,
+            0,
+            vec![transaction_id.clone()],
+            root.digest(),
+        )
+        .unwrap();
+        let old = crab_metadata::capsule_protocol::CapsuleRefHead::from_root(
+            "refs/heads/main",
+            "9".repeat(64),
+            None,
+            None,
+        )
+        .unwrap();
+        let state = old
+            .successor_state(
+                &BTreeSet::new(),
+                Some("4".repeat(40)),
+                None,
+                transaction_id,
+                vec![pointer],
+            )
+            .unwrap();
+        let stale = old.commit(state).unwrap();
+        store
+            .create_strict(
+                &router.capsule_ref_head_path(
+                    &crab_metadata::capsule_protocol::capsule_ref_name_key("refs/heads/main"),
+                ),
+                stale.encode().unwrap(),
+            )
+            .await
+            .unwrap();
+        let snapshot = load_root(&router).await.unwrap();
+
+        let refs = read_visible_refs_from_root(&router, &snapshot)
+            .await
+            .unwrap();
+
+        assert!(refs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn one_compacted_capsule_view_captures_stable_transaction_and_ref_indexes() {
+        let inner = Arc::new(InMemory::new());
+        seed_one_capsule(inner.clone(), None).await;
+        let observer = Arc::new(RecordingObserver::default());
+        let store = Store::new(inner).with_storage_observer(observer.clone());
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+
+        let view = open_view(&router, TEST_LIMITS).await.unwrap();
+
+        assert_eq!(view.root().root().generation(), 1);
+        assert_eq!(view.capsules().len(), 1);
+        let operations = observer
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|observation| observation.outcome == StorageOutcome::Success)
+            .map(|observation| observation.operation)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            operations,
+            vec![
+                StorageOperation::Get,
+                StorageOperation::List,
+                StorageOperation::List,
+                StorageOperation::Get,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn control_view_range_reads_checkpoint_suffix_without_pack_body() {
+        let inner = Arc::new(InMemory::new());
+        seed_one_capsule(inner.clone(), None).await;
+        let seed_store = Store::new(inner.clone());
+        let seed_router = StoreLayout::new(seed_store.clone(), "repositories/test".to_owned());
+        let current = load_root(&seed_router).await.unwrap();
+        let checkpoint = Checkpoint::build_with_pointer_catalog(
+            current.record().root().generation(),
+            current.record().digest(),
+            vec![
+                CapsuleGitPack::new(
+                    Bytes::from_static(b"PACK checkpoint control test body"),
+                    Bytes::from_static(b"index"),
+                    Bytes::from_static(b"reverse"),
+                    Bytes::from_static(b"locator"),
+                    "4".repeat(40),
+                    1,
+                )
+                .unwrap(),
+            ],
+            crab_metadata::capsule_protocol::PointerCatalog::new(),
+        )
+        .unwrap();
+        let checkpoint_pointer = CheckpointPointer::new(
+            checkpoint.hash(),
+            checkpoint.bytes().len() as u64,
+            checkpoint.control_offset(),
+            checkpoint.control_size(),
+            checkpoint.footer_hash(),
+            checkpoint.covered_generation(),
+            checkpoint.covered_root_digest(),
+            checkpoint.git_packs().len() as u32,
+            checkpoint
+                .git_packs()
+                .iter()
+                .map(|pack| pack.object_count())
+                .sum(),
+        )
+        .unwrap();
+        let history = HistorySegment::build(
+            checkpoint_pointer.clone(),
+            None,
+            HistorySegmentState::new(
+                current.record().root().refs().clone(),
+                current.record().root().peeled_refs().clone(),
+                current.record().root().head().to_owned(),
+                current.record().root().compacted_ref_transactions().clone(),
+                current.record().root().capsule_frontier().to_vec(),
+            ),
+        )
+        .unwrap();
+        let root = current
+            .record()
+            .root()
+            .install_checkpoint(
+                current.record().digest(),
+                checkpoint_pointer,
+                Some(history.pointer().unwrap()),
+            )
+            .unwrap();
+        let root = RootRecord::encode(root).unwrap();
+        seed_store
+            .put(
+                &seed_router.capsule_checkpoint_path(checkpoint.hash()),
+                checkpoint.bytes().clone(),
+            )
+            .await
+            .unwrap();
+        seed_store
+            .update(
+                &seed_router.capsule_root_path(),
+                root.bytes().clone(),
+                current.etag().clone(),
+            )
+            .await
+            .unwrap();
+
+        let observer = Arc::new(RecordingObserver::default());
+        let store = Store::new(inner).with_storage_observer(observer.clone());
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        let view = open_view_from_root_with_control(
+            &router,
+            load_root(&router).await.unwrap(),
+            TEST_LIMITS,
+        )
+        .await
+        .unwrap();
+
+        assert!(view.checkpoint().is_none());
+        assert!(view.checkpoint_control().is_some());
+        let operations = observer
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|observation| observation.outcome == StorageOutcome::Success)
+            .map(|observation| observation.operation)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            operations,
+            vec![
+                StorageOperation::Get,
+                StorageOperation::List,
+                StorageOperation::List,
+                StorageOperation::Range
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn ref_view_does_not_fetch_capsule_payloads() {
+        let inner = Arc::new(InMemory::new());
+        seed_one_capsule(inner.clone(), None).await;
+        let observer = Arc::new(RecordingObserver::default());
+        let store = Store::new(inner).with_storage_observer(observer.clone());
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+
+        let root = load_root(&router).await.unwrap();
+        let view = open_ref_view_from_root(&router, root).await.unwrap();
+
+        assert_eq!(view.refs().get("refs/heads/main"), Some(&"2".repeat(40)));
+        let operations = observer
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|observation| observation.outcome == StorageOutcome::Success)
+            .map(|observation| observation.operation)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            operations,
+            vec![
+                StorageOperation::Get,
+                StorageOperation::List,
+                StorageOperation::List,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn activity_poll_matches_full_view_without_fetching_capsules() {
+        let inner = Arc::new(InMemory::new());
+        seed_one_capsule(inner.clone(), None).await;
+        let observer = Arc::new(RecordingObserver::default());
+        let store = Store::new(inner).with_storage_observer(observer.clone());
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+
+        let root = load_root(&router).await.unwrap();
+        let activity = read_activity_from_root(&router, &root).await.unwrap();
+        let poll_operations = observer
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|observation| observation.outcome == StorageOutcome::Success)
+            .map(|observation| observation.operation)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            poll_operations,
+            vec![
+                StorageOperation::Get,
+                StorageOperation::List,
+                StorageOperation::List,
+            ]
+        );
+
+        let view = open_view_from_root(&router, root, TEST_LIMITS)
+            .await
+            .unwrap();
+        assert_eq!(activity.state_digest(), view.state_digest());
+        assert_eq!(activity.capsule_count(), view.capsule_count().unwrap());
+        assert_eq!(activity.ref_count(), view.refs().len() as u64);
+        assert_eq!(view.git_object_count().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn capsule_must_match_every_root_pointer_identity() {
+        let inner = Arc::new(InMemory::new());
+        seed_one_capsule(inner.clone(), Some("3".repeat(64))).await;
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+
+        let error = open_view(&router, TEST_LIMITS)
+            .await
+            .expect_err("mismatched transaction identity must fail");
+
+        assert!(matches!(error, ReadError::CorruptObject { .. }));
+    }
+
+    #[tokio::test]
+    async fn multi_ref_prepared_heads_are_visible_from_their_committed_record() {
+        let preparing = Arc::new(InMemory::new());
+        seed_prepared_multi_ref(preparing.clone(), false, false).await;
+        let router = StoreLayout::new(Store::new(preparing), "repositories/test".to_owned());
+        let old = open_view(&router, TEST_LIMITS).await.unwrap();
+        assert!(old.refs().is_empty());
+        assert!(old.capsules().is_empty());
+
+        let without_marker = Arc::new(InMemory::new());
+        seed_prepared_multi_ref(without_marker.clone(), true, false).await;
+        let router = StoreLayout::new(Store::new(without_marker), "repositories/test".to_owned());
+        let recovered = open_view(&router, TEST_LIMITS).await.unwrap();
+        assert_eq!(
+            recovered.refs().get("refs/heads/main"),
+            Some(&"2".repeat(40))
+        );
+        assert_eq!(
+            recovered.refs().get("refs/heads/feature"),
+            Some(&"3".repeat(40))
+        );
+        assert_eq!(recovered.capsules().len(), 1);
+
+        let with_marker = Arc::new(InMemory::new());
+        seed_prepared_multi_ref(with_marker.clone(), true, true).await;
+        let router = StoreLayout::new(Store::new(with_marker), "repositories/test".to_owned());
+        let new = open_view(&router, TEST_LIMITS).await.unwrap();
+        assert_eq!(new.refs().get("refs/heads/main"), Some(&"2".repeat(40)));
+        assert_eq!(new.refs().get("refs/heads/feature"), Some(&"3".repeat(40)));
+        assert_eq!(new.capsules().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn visible_ref_read_resolves_committed_multi_ref_updates() {
+        let inner = Arc::new(InMemory::new());
+        seed_prepared_multi_ref(inner.clone(), true, false).await;
+        let router = StoreLayout::new(Store::new(inner), "repositories/test".to_owned());
+
+        let refs = read_visible_refs(&router).await.unwrap();
+
+        assert_eq!(refs.get("refs/heads/main"), Some(&"2".repeat(40)));
+        assert_eq!(refs.get("refs/heads/feature"), Some(&"3".repeat(40)));
+    }
+
+    #[tokio::test]
+    async fn selected_visible_ref_read_avoids_repository_wide_objects() {
+        let inner = Arc::new(InMemory::new());
+        seed_prepared_multi_ref(inner.clone(), true, false).await;
+        let observer = Arc::new(RecordingObserver::default());
+        let store = Store::new(inner).with_storage_observer(observer.clone());
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        let root = load_root(&router).await.unwrap();
+
+        let refs = read_visible_refs_from_root_for_refs(
+            &router,
+            &root,
+            &BTreeSet::from(["refs/heads/feature".to_owned()]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            refs,
+            BTreeMap::from([("refs/heads/feature".to_owned(), "3".repeat(40))])
+        );
+        let operations = observer
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|observation| observation.outcome == StorageOutcome::Success)
+            .map(|observation| observation.operation)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            operations,
+            vec![
+                StorageOperation::Get,
+                StorageOperation::Get,
+                StorageOperation::Get,
+                StorageOperation::Get,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn frontier_admission_fails_before_capsule_gets() {
+        let inner = Arc::new(InMemory::new());
+        seed_one_capsule(inner.clone(), None).await;
+        let observer = Arc::new(RecordingObserver::default());
+        let store = Store::new(inner).with_storage_observer(observer.clone());
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+
+        let error = open_view(
+            &router,
+            CapsuleReadLimits {
+                max_capsule_bytes: 1,
+                max_frontier_bytes: 1,
+            },
+        )
+        .await
+        .expect_err("oversized frontier must fail admission");
+
+        assert!(matches!(error, ReadError::CapsuleReadLimit { .. }));
+        let operations = observer
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|observation| observation.outcome == StorageOutcome::Success)
+            .map(|observation| observation.operation)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            operations,
+            vec![
+                StorageOperation::Get,
+                StorageOperation::List,
+                StorageOperation::List,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn candidate_git_packs_share_the_base_intake_limit() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        let initial = RootRecord::encode(
+            RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
+        )
+        .unwrap();
+        crab_metadata::capsule_protocol::create_root(&router, initial.clone())
+            .await
+            .unwrap();
+        let view = open_view(&router, TEST_LIMITS).await.unwrap();
+        let transaction = CapsuleTransaction::new(
+            initial.digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let candidate = Capsule::build(
+            &transaction,
+            vec![
+                CapsuleGitPack::new(
+                    Bytes::from_static(b"PACK candidate"),
+                    Bytes::from_static(b"index"),
+                    Bytes::from_static(b"reverse"),
+                    Bytes::from_static(b"locator"),
+                    "4".repeat(40),
+                    1,
+                )
+                .unwrap(),
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+        let git_dir = tempfile::tempdir().unwrap();
+
+        let error = install_git_packs_with_candidates(&view, &[candidate], git_dir.path(), 1)
+            .await
+            .expect_err("candidate pack must count against the shared intake limit");
+
+        assert!(matches!(error, ReadError::CapsuleReadLimit { .. }));
+    }
+
+    #[tokio::test]
+    async fn candidate_visibility_materializes_without_publication() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        let initial = RootRecord::encode(
+            RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
+        )
+        .unwrap();
+        crab_metadata::capsule_protocol::create_root(&router, initial.clone())
+            .await
+            .unwrap();
+        let view = open_view(&router, TEST_LIMITS).await.unwrap();
+        let tip = "2".repeat(40);
+        let transaction = CapsuleTransaction::new(
+            initial.digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some(tip.clone()),
+                None,
+            )],
+        )
+        .unwrap();
+        let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            "refs/heads/main".to_owned(),
+            GitVisibilityEdit::from_replacement_objects(None, tip.clone(), vec![tip.clone()]),
+        )]))
+        .unwrap();
+        let candidate = Capsule::build(
+            &transaction,
+            Vec::new(),
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::VisibilityDelta,
+                visibility.encode().unwrap(),
+            )],
+        )
+        .unwrap();
+
+        let actual = view.candidate_git_visibility(&candidate).unwrap();
+
+        assert_eq!(
+            actual,
+            BTreeMap::from([("refs/heads/main".to_owned(), vec![tip])])
+        );
+        assert!(view.refs().is_empty());
+    }
+
+    #[test]
+    fn capsule_visibility_retains_incremental_fetch_transition() {
+        let old_tip = "a".repeat(40);
+        let new_tip = "b".repeat(40);
+        let added = "c".repeat(40);
+        let transaction = CapsuleTransaction::new(
+            &"1".repeat(64),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                Some(old_tip.clone()),
+                Some(new_tip.clone()),
+                None,
+            )],
+        )
+        .unwrap();
+        let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            "refs/heads/main".to_owned(),
+            GitVisibilityEdit::from_delta_objects(
+                Some(old_tip),
+                new_tip.clone(),
+                vec![added, new_tip],
+                Vec::new(),
+            ),
+        )]))
+        .unwrap();
+        let capsule = Capsule::build(
+            &transaction,
+            Vec::new(),
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::VisibilityDelta,
+                visibility.encode().unwrap(),
+            )],
+        )
+        .unwrap();
+        let mut index = crab_metadata::git_visibility::GitVisibilityIndex::new(
+            0,
+            "0".repeat(64),
+            "0".repeat(64),
+            BTreeMap::from([("refs/heads/main".to_owned(), vec!["a".repeat(40)])]),
+        )
+        .unwrap();
+
+        apply_capsule_visibility_index(&capsule, &mut index).unwrap();
+
+        assert_eq!(
+            index.incremental_objects("refs/heads/main", &[0xbb; 20], &[[0xaa; 20]]),
+            Some(vec![[0xbb; 20], [0xcc; 20]])
+        );
+    }
+
+    #[test]
+    fn ref_capsules_wait_for_cross_ref_visibility_dependencies() {
+        let old_tip = "1".repeat(40);
+        let new_tip = "2".repeat(40);
+        let source_transaction = CapsuleTransaction::new(
+            &"a".repeat(64),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                Some(old_tip.clone()),
+                Some(new_tip.clone()),
+                None,
+            )],
+        )
+        .unwrap();
+        let source_visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            "refs/heads/main".to_owned(),
+            GitVisibilityEdit::from_delta_objects(
+                Some(old_tip.clone()),
+                new_tip.clone(),
+                vec![new_tip.clone()],
+                Vec::new(),
+            ),
+        )]))
+        .unwrap();
+        let source = Capsule::build(
+            &source_transaction,
+            Vec::new(),
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::VisibilityDelta,
+                source_visibility.encode().unwrap(),
+            )],
+        )
+        .unwrap();
+
+        let branch_transaction = CapsuleTransaction::new(
+            &"a".repeat(64),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/feature",
+                None,
+                Some(new_tip.clone()),
+                None,
+            )],
+        )
+        .unwrap();
+        let branch_visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            "refs/heads/feature".to_owned(),
+            GitVisibilityEdit::from_delta_objects(
+                Some(new_tip.clone()),
+                new_tip.clone(),
+                Vec::new(),
+                Vec::new(),
+            ),
+        )]))
+        .unwrap();
+        let branch = Capsule::build(
+            &branch_transaction,
+            Vec::new(),
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::VisibilityDelta,
+                branch_visibility.encode().unwrap(),
+            )],
+        )
+        .unwrap();
+        let pending = BTreeMap::from([
+            ("a-branch".to_owned(), branch.clone()),
+            ("z-source".to_owned(), source.clone()),
+        ]);
+
+        let ordered = order_ref_capsules(
+            &BTreeMap::from([("refs/heads/main".to_owned(), old_tip.clone())]),
+            &BTreeMap::new(),
+            &BTreeMap::from([("refs/heads/main".to_owned(), vec![old_tip])]),
+            &BTreeMap::new(),
+            pending,
+        )
+        .unwrap();
+
+        assert_eq!(
+            ordered
+                .iter()
+                .map(Capsule::transaction_id)
+                .collect::<Vec<_>>(),
+            vec![source.transaction_id(), branch.transaction_id()]
+        );
+    }
+
+    #[test]
+    fn ref_capsules_follow_authenticated_predecessors_when_oid_repeats() {
+        let oid_a = "1".repeat(40);
+        let oid_b = "2".repeat(40);
+        let oid_c = "3".repeat(40);
+        let capsule = |expected_old: Option<String>, new_oid: String| {
+            let transaction = CapsuleTransaction::new(
+                &"a".repeat(64),
+                vec![CapsuleRefEdit::new(
+                    "refs/heads/main",
+                    expected_old,
+                    Some(new_oid),
+                    None,
+                )],
+            )
+            .unwrap();
+            Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap()
+        };
+        let first = capsule(None, oid_a.clone());
+        let second = capsule(Some(oid_a.clone()), oid_b.clone());
+        let third = capsule(Some(oid_b), oid_a.clone());
+        let fourth = capsule(Some(oid_a), oid_c.clone());
+        let predecessors = BTreeMap::from([
+            (
+                second.transaction_id().to_owned(),
+                BTreeSet::from([first.transaction_id().to_owned()]),
+            ),
+            (
+                third.transaction_id().to_owned(),
+                BTreeSet::from([second.transaction_id().to_owned()]),
+            ),
+            (
+                fourth.transaction_id().to_owned(),
+                BTreeSet::from([third.transaction_id().to_owned()]),
+            ),
+        ]);
+        let pending = BTreeMap::from([
+            ("a-first".to_owned(), first.clone()),
+            ("b-fourth".to_owned(), fourth.clone()),
+            ("c-second".to_owned(), second.clone()),
+            ("d-third".to_owned(), third.clone()),
+        ]);
+
+        let ordered = order_ref_capsules(
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &predecessors,
+            pending,
+        )
+        .unwrap();
+
+        assert_eq!(
+            ordered
+                .iter()
+                .map(Capsule::transaction_id)
+                .collect::<Vec<_>>(),
+            vec![
+                first.transaction_id(),
+                second.transaction_id(),
+                third.transaction_id(),
+                fourth.transaction_id(),
+            ]
+        );
+        let mut refs = BTreeMap::new();
+        let mut peeled = BTreeMap::new();
+        for capsule in &ordered {
+            apply_capsule_refs(capsule, &mut refs, &mut peeled).unwrap();
+        }
+        assert_eq!(refs["refs/heads/main"], oid_c);
+    }
+}

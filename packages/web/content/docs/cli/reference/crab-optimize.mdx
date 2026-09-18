@@ -62,7 +62,10 @@ without touching remote storage.
 
 `crab optimize repo` and `crab doctor --cost` require a configured Crab remote
 and currently use live inventory. The explicit provider-report source is
-reserved until report discovery and freshness metadata are wired.
+reserved until report discovery and freshness metadata are wired. Live reports
+cover shared Crab content and the complete configured repository prefix, so v2
+capsules, checkpoints, ref heads, transactions, releases, and workflow objects
+are included while sibling repository prefixes are excluded.
 
 The `tiers` group preserves lifecycle-provider safety: plan and dry-run remain
 available, while apply and rollback require a qualified conditional-write
@@ -85,11 +88,11 @@ confirmation but does not weaken recent-object protection. Optimize-owned LFS,
 cache-clean, and journal-GC work honors Ctrl-C between bounded scan, verify, and
 mutation units; failed conversions always run their rollback manifest cleanup.
 
-Xorb source-shard inventory is disk-backed: each canonical Xet shard is
-downloaded to a bounded maintenance workspace, hash-verified, and parsed
-through its file-info stream before the temporary file is removed. This keeps
-large-repository planning from retaining several full metadata shards in heap
-memory at once.
+For v2 repositories, Xorb planning reads only the authenticated file/shard
+catalog and its reachable Xorbs; it does not scan unrelated objects in the
+shared global namespace. Apply downloads each canonical Xet shard into a
+bounded maintenance workspace, hash-verifies it, and parses its file-info
+stream before the temporary file is removed.
 
 For Xet-backed large files, use both storage layers when needed: `shards`
 compacts the metadata that maps file/chunk identities to storage, while

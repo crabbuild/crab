@@ -896,7 +896,7 @@ enum Cmd {
         /// Glob patterns to adopt (e.g. `*.bin`, `*.safetensors`).
         #[arg(long, short)]
         pattern: Vec<String>,
-        /// Rewrite git history (requires --force). Not yet implemented.
+        /// Rewrite git history (requires --force) with Crab's built-in fast-export/import engine.
         #[arg(long)]
         rewrite_history: bool,
         /// Required with --rewrite-history.
@@ -3121,7 +3121,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             Some(StatCmd::Classes { json: classes_json }) => {
                 let _span = tracing::info_span!("stat_classes").entered();
                 let mode = OutputMode::from_flags(json || classes_json, false);
-                crab::cmd::stat::run_classes(mode).await?;
+                crab::cmd::stat::run_classes(mode, &cancel).await?;
                 Ok(ExitCode::SUCCESS)
             }
             Some(StatCmd::PushPlan {
@@ -3278,6 +3278,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                     command,
                     &selection.store,
                     selection.router.repo_prefix(),
+                    selection.capsule_root,
                     &cancel,
                 )
                 .await?;
@@ -3751,7 +3752,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 let (repos, shards) = crab::cmd::gc::bucket::repair_ref_registry(&store).await?;
                 if !mode.is_machine() {
                     eprintln!(
-                        "crab gc: ref-registry repaired from {repos} repo manifest(s), {shards} shard root(s)."
+                        "crab gc: ref-registry repaired from {repos} repository root(s), {shards} shard root(s)."
                     );
                 }
                 return Ok(ExitCode::SUCCESS);
@@ -4077,9 +4078,9 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 })?;
             let parsed = crab::git::url::CrabUrl::parse(url)?;
             let prefix = parsed.repo_path.clone();
-            let store = create_cli_store(&parsed.bucket, &config, "fsck", &cancel).await?;
-            let router = crab::storage::StoreLayout::new(store.clone(), prefix.clone());
-            crab::core::remote_layout::open(&store, &router).await?;
+            let (store, root) =
+                crab::auth::build_repository_url_store_with_root(&config, parsed, "fsck", &cancel)
+                    .await?;
 
             let multipart_journal_path =
                 crab::git::discover::resolve_main_worktree_root().map(|root| {
@@ -4102,8 +4103,13 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             .map(|registry| {
                 std::sync::Arc::new(crab::storage::store::MultipartJournal::new(registry))
             });
-            let checker = crab::cmd::fsck_store::StoreChecker::new(store.clone(), prefix.clone())
-                .with_multipart_journal(multipart_journal.clone());
+            let checker = crab::cmd::fsck_store::StoreChecker::for_capsule_repository(
+                store.clone(),
+                prefix.clone(),
+                root,
+            )
+            .await?
+            .with_multipart_journal(multipart_journal.clone());
             let repairer: Box<dyn crab::cmd::fsck::FsckRepairer> = if repair {
                 Box::new(
                     crab::cmd::fsck_store::StoreRepairer::new(store, prefix)
@@ -5631,8 +5637,6 @@ async fn run_compact_command(
         crab::replication::ensure_active_active_maintenance_admitted(&config, "compaction")?;
     }
     let store = create_cli_store(&bucket, &config, "compact", cancel).await?;
-    let router = crab::storage::StoreLayout::new(store.clone(), repo.clone());
-    crab::core::remote_layout::open(&store, &router).await?;
     let args = crab::cmd::compact::CompactArgs {
         repo,
         bucket,
@@ -5668,9 +5672,8 @@ async fn run_repack_command(
     let parsed = crab::git::url::CrabUrl::parse(url)?;
     let prefix = parsed.repo_path.clone();
 
-    let store = create_cli_store(&parsed.bucket, &config, "repack", cancel).await?;
-    let router = crab::storage::StoreLayout::new(store.clone(), prefix.clone());
-    crab::core::remote_layout::open(&store, &router).await?;
+    let (store, root) =
+        crab::auth::build_repository_url_store_with_root(&config, parsed, "repack", cancel).await?;
 
     let repack_config = crab::cmd::repack::RepackConfig {
         lock_ttl: std::time::Duration::from_secs(config.push_lock_ttl_secs),
@@ -5680,7 +5683,9 @@ async fn run_repack_command(
         workspace_root: crab::cache::default_cache_root().join("maintenance"),
     };
 
-    let outcome = crab::cmd::repack::run_repack(&store, &prefix, &repack_config, cancel).await?;
+    let outcome =
+        crab::cmd::repack::run_repack_from_root(&store, &prefix, root, &repack_config, cancel)
+            .await?;
     let summary = outcome.to_summary();
 
     match mode {

@@ -84,11 +84,8 @@ async fn disconnected_receive_drains_intake_and_returns_transfer_capacity() {
         .repositories
         .get(&("team".into(), "repo".into()))
         .unwrap();
-    let snapshot =
-        crab_metadata::manifest_store::read_repository_snapshot(&repo.store, &repo.layout)
-            .await
-            .unwrap();
-    assert!(snapshot.manifest.refs.is_empty() && snapshot.journal.transactions.is_empty());
+    let view = repo.open_view().await.unwrap();
+    assert!(view.refs().is_empty() && view.capsules().is_empty());
     server.cancellation.cancel();
     server.shutdown_runtimes().await.unwrap();
 }
@@ -167,9 +164,13 @@ async fn native_http_push_rustfs() {
         crab_storage::build_static_env_store(&bucket, crab_storage::StorageProviderKind::S3)
             .unwrap();
     let layout = StoreLayout::new(store.clone(), prefix.clone());
-    crab_write::initialize::initialize_repository(&store, &layout, "refs/heads/main")
-        .await
-        .unwrap();
+    crab_write::capsule_protocol::initialize(
+        &layout,
+        blake3::hash(prefix.as_bytes()).to_hex().as_ref(),
+        "refs/heads/main",
+    )
+    .await
+    .unwrap();
     let mut server = maintenance_tests::fixture().await;
     let repo = Arc::get_mut(&mut server)
         .unwrap()
@@ -231,10 +232,9 @@ async fn exercise(server: Arc<Server>, branch: &str) {
         .repositories
         .get(&("team".into(), "repo".into()))
         .unwrap();
-    let before = crab_metadata::manifest_store::read_repository_snapshot(&repo.store, &repo.layout)
-        .await
-        .unwrap();
-    assert!(before.journal.refs.is_empty());
+    let before = repo.open_view().await.unwrap();
+    assert!(before.refs().is_empty());
+    assert!(before.capsules().is_empty());
     assert!(
         repo.store
             .list_prefix(&repo.layout.repo_path("packs"))
@@ -257,10 +257,15 @@ async fn exercise(server: Arc<Server>, branch: &str) {
         .repositories
         .get(&("team".into(), "repo".into()))
         .unwrap();
-    let (manifest, _) = crab_metadata::manifest_store::read_manifest(&repo.store, &repo.layout)
-        .await
-        .unwrap();
-    assert!(manifest.commit_graph_hash.is_some());
+    let tag_view = repo.open_view().await.unwrap();
+    assert!(!tag_view.capsules().is_empty());
+    assert_eq!(tag_view.head(), "refs/heads/main");
+    assert!(matches!(
+        crab_metadata::manifest_store::read_manifest(&repo.store, &repo.layout).await,
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. }
+        })
+    ));
     let reader = tempfile::tempdir().unwrap();
     success(
         reader.path(),

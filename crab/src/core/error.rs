@@ -1102,6 +1102,8 @@ impl From<crab_read::ReadError> for CrabError {
             crab_read::ReadError::Storage(source) => Self::from(source),
             crab_read::ReadError::Metadata(source) => Self::from(source),
             crab_read::ReadError::RemoteGit(source) => Self::Protocol(source.to_string()),
+            crab_read::ReadError::GitWalk(source) => Self::from(source),
+            crab_read::ReadError::Lfs(source) => Self::from(source),
             crab_read::ReadError::Xet(source) => Self::from(source),
             crab_read::ReadError::Io(source) => Self::Io(source),
             crab_read::ReadError::Configuration { key, origin } => {
@@ -1130,10 +1132,14 @@ impl From<crab_read::ReadError> for CrabError {
             error @ (crab_read::ReadError::Availability { .. }
             | crab_read::ReadError::Runtime(_)
             | crab_read::ReadError::ResolutionTask(_)
+            | crab_read::ReadError::ReadinessTask(_)
             | crab_read::ReadError::Reconstruction { .. }) => Self::Read(ReadFailure(error)),
             crab_read::ReadError::UnauthorizedObject => {
                 Self::Protocol("requested object is outside the visible generation".to_owned())
             }
+            crab_read::ReadError::CapsuleReadLimit { resource, maximum } => Self::Protocol(
+                format!("capsule-protocol read exceeds {resource} limit ({maximum} bytes)"),
+            ),
             crab_read::ReadError::Internal(message) => Self::Internal(message),
         }
     }
@@ -1971,6 +1977,22 @@ impl From<crab_write::WriteError> for CrabError {
                 path,
                 expected_etag: None,
             },
+            crab_write::WriteError::CapsuleRootChanged { path } => Self::CasConflict {
+                path,
+                expected_etag: None,
+            },
+            crab_write::WriteError::CapsuleRefEpochChanged { path, .. } => Self::CasConflict {
+                path,
+                expected_etag: None,
+            },
+            crab_write::WriteError::CapsuleGcFenced {
+                fence_id,
+                expires_at_unix,
+            } => Self::PushLockHeld {
+                ref_name: "capsule-protocol-gc".to_owned(),
+                holder: fence_id,
+                expires_at_unix: Some(expires_at_unix),
+            },
             crab_write::WriteError::Timestamp(source) => Self::from(source),
             crab_write::WriteError::Storage(source) => Self::from(source),
             crab_write::WriteError::Coordination(source) => Self::from(source),
@@ -1985,6 +2007,10 @@ impl From<crab_write::WriteError> for CrabError {
             crab_write::WriteError::Cancelled => Self::Cancelled,
             error @ (crab_write::WriteError::Namespace(_)
             | crab_write::WriteError::InitialHead { .. }
+            | crab_write::WriteError::CapsuleCommitUncertain { .. }
+            | crab_write::WriteError::CapsuleCheckpointCommitUncertain { .. }
+            | crab_write::WriteError::CapsuleMaintenanceCommitUncertain { .. }
+            | crab_write::WriteError::CapsuleHeadCommitUncertain { .. }
             | crab_write::WriteError::Worker(_)
             | crab_write::WriteError::VisibilityUnavailable { .. }
             | crab_write::WriteError::PackIdentity { .. }
@@ -2015,6 +2041,7 @@ impl From<crab_metadata::error::MetadataError> for CrabError {
             }
             error @ (crab_metadata::error::MetadataError::FileLookupAdmission { .. }
             | crab_metadata::error::MetadataError::FileLookupWorker { .. }
+            | crab_metadata::error::MetadataError::CapsuleContract { .. }
             | crab_metadata::error::MetadataError::PlanAlreadyAttempted { .. }
             | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }
             | crab_metadata::error::MetadataError::ManifestCommitUncertain { .. }) => {
@@ -3972,6 +3999,21 @@ mod tests {
         assert_eq!(error.is_retryable(), previous.is_retryable());
     }
 
+    #[tokio::test]
+    async fn replica_readiness_task_source_survives_cli_conversion() {
+        use std::error::Error;
+
+        let worker = tokio::spawn(async { panic!("readiness worker fixture") });
+        let error = CrabError::from(crab_read::ReadError::ReadinessTask(
+            worker.await.unwrap_err(),
+        ));
+        let source = std::iter::successors(error.source(), |source| (*source).source())
+            .find_map(|source| source.downcast_ref::<tokio::task::JoinError>())
+            .expect("CLI conversion must preserve the task failure");
+
+        assert!(source.is_panic());
+    }
+
     #[test]
     fn availability_preserves_product_diagnostics() {
         use std::error::Error;
@@ -4043,6 +4085,60 @@ mod tests {
             maximum: 4,
         });
         assert_eq!(error.code(), "CRAB-E0060");
+    }
+
+    #[test]
+    fn capsule_protocol_read_limit_is_a_protocol_rejection() {
+        let error = CrabError::from(crab_read::ReadError::CapsuleReadLimit {
+            resource: "frontier bytes",
+            maximum: 1024,
+        });
+        assert_eq!(error.code(), "CRAB-E0060");
+    }
+
+    #[test]
+    fn dependency_verifier_errors_keep_cli_semantics() {
+        let cancelled = CrabError::from(crab_read::ReadError::GitWalk(
+            crab_git::walk::WalkError::Cancelled,
+        ));
+        assert!(matches!(cancelled, CrabError::Cancelled));
+
+        let missing = CrabError::from(crab_read::ReadError::Lfs(
+            crab_lfs::LfsError::ObjectMissing {
+                oid: "a".repeat(64),
+            },
+        ));
+        assert!(matches!(
+            missing,
+            CrabError::LfsObjectMissing { oid } if oid == "a".repeat(64)
+        ));
+    }
+
+    #[test]
+    fn capsule_root_change_is_a_cas_conflict() {
+        let error = CrabError::from(crab_write::WriteError::CapsuleRootChanged {
+            path: "repositories/test/root".to_owned(),
+        });
+        assert!(
+            matches!(error, CrabError::CasConflict { path, .. } if path == "repositories/test/root")
+        );
+    }
+
+    #[test]
+    fn capsule_protocol_contract_error_retains_its_source() {
+        let error = CrabError::from(crab_metadata::error::MetadataError::CapsuleContract {
+            record: "root",
+            reason: "invalid digest".to_owned(),
+        });
+        let CrabError::Io(error) = error else {
+            panic!("expected typed I/O error");
+        };
+        assert!(
+            error
+                .get_ref()
+                .and_then(|source| { source.downcast_ref::<crab_metadata::error::MetadataError>() })
+                .is_some()
+        );
     }
 
     #[tokio::test]

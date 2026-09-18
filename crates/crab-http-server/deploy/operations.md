@@ -17,11 +17,13 @@ flowchart TB
     Catalog[.crab/http-server/v1/catalog.json]
     Auth[.crab/http-server/v1/auth/]
     Repositories[Cataloged repository prefixes]
+    Shared[.crab xorbs, shards, and ref registry]
     Git[Git, refs, packs, manifests, LFS]
     Cells[cells/v1 SQLite roots and LTX objects]
     Root --> Catalog
     Root --> Auth
     Root --> Repositories
+    Root --> Shared
     Repositories --> Git
     Repositories --> Cells
     Pod[Pod scratch] -. disposable .-> Repositories
@@ -411,7 +413,9 @@ Enable provider-native versioning before writing repositories. Configure cross-r
 Test restore without overwriting the active root:
 
 1. Select one consistent provider backup or version timestamp.
-2. Restore the complete configured root to a new isolated root prefix.
+2. Restore the complete configured root to a new isolated bucket or container.
+   That root includes its shared `.crab/` xorbs, shards, and coordination
+   records.
 3. Create a separate configuration that points only to the restored root.
 4. Start one isolated server with no public ingress.
 5. Run `repository list` and compare every cataloged owner, name, and prefix.
@@ -428,11 +432,12 @@ all three providers, use an independently retained backup for recovery points
 outside the object-version window.
 
 The container gate repeats the portable core of this drill against RustFS. It
-stops source writers, performs an object-store-to-object-store copy, compares
-the complete relative key and size set, hashes every source/restored body, and
-starts an isolated server against the restored prefix. An independent client
-then verifies the catalog, Git commit, issue, and LFS object before the source
-stack returns to service.
+stops source writers, copies the complete configured root into a distinct bucket,
+compares the complete key and size set, and hashes every source/restored body.
+An explicit object in the root's shared `.crab/` namespace proves that external
+Crab data is included. The gate starts an isolated server against the restored
+bucket, then an independent client verifies the catalog, Git commit, issue, and
+LFS object before the source stack returns to service.
 
 Do not round-trip a Crab root through an ordinary filesystem sync. Object
 storage can contain both a key such as `locks/internal/gc-fence/state` and
@@ -482,7 +487,7 @@ Record these gates against a dedicated storage root:
 - Lock an LFS-tracked path, confirm another writer sees it in `theirs`, verify that writer's standard pre-push hook stops, then unlock it
 - Replace one pod during fetch, push, and archive scenarios
 - Upgrade and roll back one release without losing committed state
-- Restore the complete root to an isolated prefix and repeat read verification
+- Restore the complete root to an isolated bucket or container and repeat read verification
 - Confirm the management listener is unreachable through Service, ingress, and peer pods
 - Scrape every pod and exercise request, body-error, admission, catalog-health, and drain signals
 - Confirm no static provider credential exists in Secret, ConfigMap, pod environment, or rendered manifests

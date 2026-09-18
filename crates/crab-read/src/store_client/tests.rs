@@ -76,6 +76,34 @@ fn store_client_uses_caching_store_local_cache() {
     assert!(Arc::ptr_eq(&expected, client.store.local_cache()));
 }
 
+#[tokio::test]
+async fn load_shard_checks_availability_before_fetching_external_object() {
+    struct RecordingAvailability(Arc<std::sync::Mutex<Vec<String>>>);
+
+    #[async_trait::async_trait]
+    impl XorbAvailability for RecordingAvailability {
+        async fn ensure_available(&self, path: &object_store::path::Path) -> Result<()> {
+            self.0
+                .lock()
+                .expect("recording lock")
+                .push(path.to_string());
+            Ok(())
+        }
+    }
+
+    let (client, _cache_dir) = test_client();
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let client = client.with_availability(Arc::new(RecordingAvailability(Arc::clone(&calls))));
+    let shard_hash = hash_from_seed(77);
+
+    let _ = client.load_shard(&shard_hash).await;
+
+    assert_eq!(
+        calls.lock().expect("recording lock").as_slice(),
+        &[client.router.shard_path(&shard_hash).to_string()]
+    );
+}
+
 async fn seed_file_index(client: &StoreClient, entries: &[(MerkleHash, MerkleHash)]) {
     crab_metadata::layout_descriptor::ensure_canonical_layout(
         client.store.origin(),

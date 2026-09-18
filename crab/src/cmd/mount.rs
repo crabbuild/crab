@@ -2065,7 +2065,54 @@ async fn resolve_mount_read_context_from_remote_url(
             crate::storage::StoreLayout::new(resolved.store, resolved.repository_prefix)
         }
     };
-    build_mount_read_context(&config, layout)
+    let read_layout = crab_storage::StoreLayout::with_global_prefix(
+        layout.store().as_storage().clone(),
+        layout.repo_prefix().to_owned(),
+        layout.global_prefix().to_owned(),
+    );
+    let pinned_lookup = match crab_metadata::capsule_protocol::load_root(&read_layout).await {
+        Ok(root) => {
+            let maximum = if config.uploadpack_max_egress_bytes == 0 {
+                u64::MAX
+            } else {
+                config.uploadpack_max_egress_bytes
+            };
+            let view = crab_read::capsule_protocol::open_view_from_root_with_control(
+                &read_layout,
+                root,
+                crab_read::capsule_protocol::CapsuleReadLimits {
+                    max_capsule_bytes: maximum,
+                    max_frontier_bytes: maximum,
+                },
+            )
+            .await
+            .ok()?;
+            let catalog = view.pointer_catalog().ok()?;
+            Some(
+                crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
+                    read_layout.clone(),
+                    &catalog,
+                )
+                .ok()?,
+            )
+        }
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        }) => None,
+        Err(error) => {
+            warn!(error = %error, "v2 mount read view could not be authenticated");
+            return None;
+        }
+    };
+    let restore_availability = crate::cmd::hydrate_restore::build_restore_availability(
+        &config,
+        layout.store(),
+        layout.repo_prefix(),
+        config.hydrate.auto_restore,
+    )
+    .await
+    .ok()?;
+    build_mount_read_context(&config, layout, pinned_lookup, restore_availability)
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -2113,6 +2160,8 @@ where
 fn build_mount_read_context(
     config: &crate::core::config::Config,
     layout: crate::storage::StoreLayout,
+    pinned_lookup: Option<crab_metadata::file_index_lookup::SharedFileIndexLookup>,
+    restore_availability: Option<std::sync::Arc<dyn crab_read::XorbAvailability>>,
 ) -> Option<crate::vfs::MountReadContext> {
     let origin = layout.store().as_storage().clone();
     let store_layout = crab_storage::StoreLayout::with_global_prefix(
@@ -2122,6 +2171,14 @@ fn build_mount_read_context(
     );
     let caching_store = crab_cache_store::CachingStore::new(origin, &config.cache).ok()?;
     let hydrator = crate::read::build_shared_hydrator(caching_store, layout, config).ok()?;
+    let hydrator = match pinned_lookup {
+        Some(lookup) => hydrator.with_file_index_lookup(lookup),
+        None => hydrator,
+    };
+    let hydrator = match restore_availability {
+        Some(availability) => hydrator.with_availability(availability),
+        None => hydrator,
+    };
 
     Some(crate::vfs::MountReadContext {
         store_layout,
@@ -2334,6 +2391,14 @@ async fn build_mount_components(
 
     let cancel = CancellationToken::new();
 
+    // A Crab URL requires the authenticated v2 read context. Continuing with
+    // stub resolvers would let a mount start successfully and fail only when a
+    // pointer is first opened, hiding corrupt or unavailable repository state.
+    let read_context = require_remote_mount_read_context(
+        &source,
+        resolve_mount_read_context_from_config(crab_dir).await,
+    )?;
+
     let config = PipelineConfig {
         source,
         git_dir: git_dir.clone(),
@@ -2342,9 +2407,6 @@ async fn build_mount_components(
         cache_dir: crab_dir.to_path_buf(),
         cancel_token: cancel,
     };
-
-    // Attempt to construct a StoreLayout from the crab remote config.
-    let read_context = resolve_mount_read_context_from_config(crab_dir).await;
 
     let mut builder = MountPipelineBuilder::new(config);
     if let Some(context) = read_context {
@@ -2379,7 +2441,8 @@ fn read_remote_url_from_crab_dir(crab_dir: &Path) -> Result<String> {
 /// Reads the remote URL from `crab.toml`, parses it as a Crab URL,
 /// builds an authenticated object store, and returns the layout. Returns
 /// `None` if any step fails (e.g. no remote configured, auth unavailable).
-/// Pointer-file hydration will fall back to stub resolvers in that case.
+/// Callers must reject `None` for `crab://` sources; local mounts may still
+/// use the Git object database fallback.
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 async fn resolve_mount_read_context_from_config(
     crab_dir: &Path,
@@ -2387,6 +2450,20 @@ async fn resolve_mount_read_context_from_config(
     let url_str = read_remote_url_from_crab_dir(crab_dir).ok()?;
 
     resolve_mount_read_context_from_remote_url(&url_str).await
+}
+
+#[cfg(any(feature = "fuse", feature = "nfs"))]
+fn require_remote_mount_read_context(
+    source: &str,
+    context: Option<crate::vfs::MountReadContext>,
+) -> Result<Option<crate::vfs::MountReadContext>> {
+    if source.trim_start().starts_with("crab://") && context.is_none() {
+        return Err(CrabError::Configuration {
+            key: "object-store read layout unavailable for remote mount".into(),
+            origin: "crab mount".into(),
+        });
+    }
+    Ok(context)
 }
 
 // ---------------------------------------------------------------------------
@@ -6097,6 +6174,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn remote_mount_without_read_context_fails_closed() {
+        let result = require_remote_mount_read_context("crab://bucket/repo", None);
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("remote mounts must not start with stub readers"),
+        };
+        assert!(matches!(
+            error,
+            CrabError::Configuration { ref key, ref origin }
+                if key == "object-store read layout unavailable for remote mount"
+                    && origin == "crab mount"
+        ));
+    }
+
+    #[test]
+    fn local_mount_without_read_context_keeps_local_fallback() {
+        assert!(
+            require_remote_mount_read_context("/tmp/local-repo", None)
+                .expect("local mounts may use the Git object database")
+                .is_none()
+        );
+    }
+
     // --- build_local_pipeline_config tests ---
 
     /// Verify that `build_local_pipeline_config` validates the local repo
@@ -6322,35 +6423,6 @@ mod unmount_tests {
     use super::*;
     use crate::vfs::mounts_registry::{self, MountEntry};
 
-    struct HomeGuard {
-        original: Option<std::ffi::OsString>,
-    }
-
-    impl HomeGuard {
-        fn set(home: &Path) -> Self {
-            let original = std::env::var_os("HOME");
-            // SAFETY: these tests update HOME before starting any worker
-            // threads and restore it before returning to the harness.
-            unsafe {
-                std::env::set_var("HOME", home);
-            }
-            Self { original }
-        }
-    }
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            // SAFETY: restores the process environment for this test scope.
-            unsafe {
-                if let Some(original) = &self.original {
-                    std::env::set_var("HOME", original);
-                } else {
-                    std::env::remove_var("HOME");
-                }
-            }
-        }
-    }
-
     fn sample_entry(mountpoint: &str, pid: u32) -> MountEntry {
         MountEntry {
             mountpoint: mountpoint.to_owned(),
@@ -6529,7 +6601,7 @@ mod unmount_tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        let _home = HomeGuard::set(tmp.path());
+        let _home = set_test_home(tmp.path());
         let raw_mountpoint = tmp.path().join("view");
         std::fs::create_dir_all(&raw_mountpoint).unwrap();
         let mountpoint = normalize_unmount_path(&raw_mountpoint);

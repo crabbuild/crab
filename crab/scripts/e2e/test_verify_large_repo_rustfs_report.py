@@ -241,6 +241,62 @@ class ReplayCheckpointTests(unittest.TestCase):
         with self.assertRaisesRegex(QUALIFICATION.QualificationError, "not contiguous"):
             QUALIFICATION.completed_replay_ordinal([{"ordinal": 0}, {"ordinal": 2}])
 
+    def test_capsule_owner_accepts_checkpoint_convergence(self) -> None:
+        snapshots = [
+            {
+                "protocol": "capsule-v2",
+                "generation": 0,
+                "action": "capsule_checkpoint",
+                "visibility": "embedded",
+                "superseded": True,
+            },
+            {
+                "protocol": "capsule-v2",
+                "generation": 1,
+                "action": "none",
+                "visibility": "embedded",
+                "superseded": False,
+            },
+        ]
+
+        self.assertTrue(QUALIFICATION.capsule_owner_is_current(snapshots))
+
+    def test_capsule_owner_rejects_checkpoint_without_convergence(self) -> None:
+        snapshots = [
+            {
+                "protocol": "capsule-v2",
+                "generation": 0,
+                "action": "capsule_checkpoint",
+                "visibility": "embedded",
+                "superseded": True,
+            }
+        ]
+
+        self.assertFalse(QUALIFICATION.capsule_owner_is_current(snapshots))
+
+    def test_capsule_owner_rejects_external_visibility(self) -> None:
+        snapshots = [
+            {
+                "protocol": "capsule-v2",
+                "generation": 1,
+                "action": "none",
+                "visibility": "published",
+                "superseded": False,
+            }
+        ]
+
+        self.assertFalse(QUALIFICATION.capsule_owner_is_current(snapshots))
+
+    def test_resume_preserves_recorded_capsule_acceleration_duration(self) -> None:
+        stages = {
+            "visibility_owner_seed": {"duration_ms": 42},
+            "acceleration_seed": {"protocol": "capsule-v2", "action": "none"},
+        }
+
+        QUALIFICATION.normalize_capsule_acceleration_evidence(stages)
+
+        self.assertEqual(stages["acceleration_seed"]["duration_ms"], 42)
+
 
 def valid_report() -> dict[str, Any]:
     replay_count = 3
@@ -560,6 +616,26 @@ class ReportVerificationTests(unittest.TestCase):
         path = self.root / name
         path.write_text(json.dumps(report), encoding="utf-8")
         return path
+
+    def test_capsule_acceleration_evidence_is_accepted(self) -> None:
+        report = valid_report()
+        for checkpoint in ("seed", "1", "3"):
+            report["stages"][f"acceleration_{checkpoint}"] = {
+                "duration_ms": 1,
+                "protocol": "capsule-v2",
+                "generation": 1,
+                "action": "none",
+                "visibility": "embedded",
+                "superseded": False,
+                "owner_actions": ["capsule_checkpoint", "none"],
+            }
+
+        result = VERIFY.verify_report(
+            self.write("capsule-acceleration.json", report),
+            allow_smoke=True,
+        )
+
+        self.assertEqual(result.replay_count, 3)
 
     def test_telemetry_parser_accepts_debug_enum_cache_events(self) -> None:
         path = self.root / "stderr.log"

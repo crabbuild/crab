@@ -77,13 +77,17 @@ provider-specific DynamoDB, Spanner, and Cosmos DB implementations share the
 same CAS-backed state contract.
 
 For production publication, use `commit_uploaded_push_refs` after uploading
-immutable objects, then persist the regional manifest projection before calling
-`mark_region_materialized`. Both CLI push and protected receive use this order:
+immutable objects, then persist the regional v1 manifest projection or materialize
+the exact v2 capsule transaction before calling `mark_region_materialized`:
 
 ```text
-upload objects → commit_uploaded_push_refs → persist regional projection
+upload objects → commit_uploaded_push_refs → persist regional authority
                                                  → mark_region_materialized
 ```
+
+Protocol-v2 requests carry the exact base-root, transaction, activation, capsule-run
+hash, and run size. Coordinator outcomes assign a monotonic commit sequence so repair
+replays regional gaps in consensus order rather than operation-ID order.
 
 `commit_uploaded_push` combines the coordinator transitions and immediately
 marks the writer region materialized. It does not write a manifest projection;
@@ -106,6 +110,7 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
             writer: "writer-a".into(),
             region: "west".into(),
             manifest_generation: 7,
+            capsule_publication: None,
             refs: vec![],
             uploaded_objects: vec!["objects/manifest-7".into()],
             target_regions: vec!["west".into()],

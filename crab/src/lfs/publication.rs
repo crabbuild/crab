@@ -28,9 +28,23 @@ pub(crate) async fn publish_reachable(
     remote_tips: Vec<String>,
     cancel: &CancellationToken,
 ) -> Result<()> {
+    publish_reachable_objects(store, prefix, git_dir, tips, remote_tips, cancel)
+        .await
+        .map(|_| ())
+}
+
+/// Publish reachable LFS objects and return their canonical object-store keys.
+pub(crate) async fn publish_reachable_objects(
+    store: crab_storage::Store,
+    prefix: String,
+    git_dir: PathBuf,
+    tips: Vec<String>,
+    remote_tips: Vec<String>,
+    cancel: &CancellationToken,
+) -> Result<Vec<String>> {
     check_cancelled(cancel)?;
     if tips.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let scan_dir = git_dir.clone();
@@ -63,7 +77,7 @@ pub(crate) async fn publish_reachable(
     }
 
     if entries.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     check_locks(&store, &prefix, &entries).await?;
@@ -87,6 +101,10 @@ pub(crate) async fn publish_reachable(
     let config = LfsConfig::resolve(&lfs_config_root(&git_dir))?;
     let remote = Arc::new(LfsObjectStore::new(store, &prefix));
     let local_lfs_dir = config.storage_dir(&git_dir);
+    let object_keys = pointers
+        .keys()
+        .map(|oid| LfsObjectStore::object_path_for_prefix(&prefix, oid).to_string())
+        .collect::<Vec<_>>();
     let pointers = Arc::new(pointers);
     let requests = pointers.values().map(transfer_request).collect::<Vec<_>>();
 
@@ -122,7 +140,7 @@ pub(crate) async fn publish_reachable(
 
     let missing = std::mem::take(&mut *missing.lock().await);
     if missing.is_empty() {
-        return Ok(());
+        return Ok(object_keys);
     }
 
     // The upload operation validates the local cache bytes, streams them to
@@ -181,7 +199,7 @@ pub(crate) async fn publish_reachable(
         )
         .await?;
 
-    Ok(())
+    Ok(object_keys)
 }
 
 fn locally_available_remote_tips(git_dir: &std::path::Path, remote_tips: &[String]) -> Vec<String> {
@@ -335,7 +353,7 @@ mod tests {
         crate::lfs::cache::install_bytes(&lfs_dir, &pointer.oid, pointer.size, &content).unwrap();
         let store = crab_storage::Store::new(Arc::new(InMemory::new()));
 
-        publish_reachable(
+        let objects = publish_reachable_objects(
             store.clone(),
             "repo".to_owned(),
             git_dir,
@@ -347,6 +365,10 @@ mod tests {
         .unwrap();
 
         let remote = LfsObjectStore::new(store, "repo");
+        assert_eq!(
+            objects,
+            vec![remote.object_path_for(&pointer.oid).to_string()]
+        );
         assert_eq!(
             remote.verify(&pointer.oid).await.unwrap(),
             Bytes::from(content)

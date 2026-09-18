@@ -23,14 +23,19 @@ use crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES;
 use serde::Serialize;
 
 use crate::error::{AuthServerError, Result};
+use crate::git_pointer_scan::scan_reachable_pointers;
 
+mod capsule;
 mod git_workspace;
 mod objects;
 mod repack;
 
+use capsule::{
+    publish as publish_filtered_capsule_view, verify_ready as verify_capsule_view_ready,
+};
 use git_workspace::{
     GeneratedViewPack, ViewGitWorkspace, clone_bare, count_pack_objects, generate_view_pack,
-    list_view_refs, resolve_view_head, scan_reachable_pointers,
+    list_view_refs, resolve_view_head,
 };
 use objects::{commit_view_metadb, upload_view_crab_objects};
 use repack::{ViewCrabObjects, ViewCrabRepacker, materialize_crab_pointers_in_fast_export};
@@ -39,6 +44,18 @@ use repack::{ViewCrabObjects, ViewCrabRepacker, materialize_crab_pointers_in_fas
 use git_workspace::{path_str, run_git, run_git_capture, run_git_owned};
 
 type StoreLayout = crab_storage::StoreLayout<Store>;
+
+#[derive(Clone, Copy)]
+enum ViewProtocol {
+    Manifest,
+    Capsule,
+}
+
+struct SourceViewIdentity {
+    protocol: ViewProtocol,
+    generation: u64,
+    digest: String,
+}
 
 async fn read_manifest(store: &Store, router: &StoreLayout) -> Result<(Manifest, String)> {
     manifest_store::read_manifest(store, router)
@@ -53,6 +70,38 @@ async fn read_repository_snapshot(
     manifest_store::read_repository_snapshot(store, router)
         .await
         .map_err(AuthServerError::from)
+}
+
+async fn read_source_view_identity(router: &StoreLayout) -> Result<SourceViewIdentity> {
+    match crab_metadata::capsule_protocol::load_root(router).await {
+        Ok(root) => {
+            let view = crab_read::capsule_protocol::open_view_from_root_with_control(
+                router,
+                root,
+                crab_read::capsule_protocol::CapsuleReadLimits {
+                    max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+                    max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+                },
+            )
+            .await?;
+            Ok(SourceViewIdentity {
+                protocol: ViewProtocol::Capsule,
+                generation: view.root().root().generation(),
+                digest: view.state_digest(),
+            })
+        }
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        }) => {
+            let snapshot = read_repository_snapshot(router.store(), router).await?;
+            Ok(SourceViewIdentity {
+                protocol: ViewProtocol::Manifest,
+                generation: snapshot.manifest.generation,
+                digest: snapshot.journal.state_digest,
+            })
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(test)]
@@ -210,15 +259,16 @@ pub async fn materialize_view_with_store_and_credentials(
 
     let parsed = CrabUrl::parse(repo_url).map_err(AuthServerError::from)?;
     let source_router = StoreLayout::new(store.clone(), parsed.repo_path.clone());
-    crab_metadata::layout_descriptor::read_canonical_layout(&store, &source_router).await?;
-    let snapshot = read_repository_snapshot(&store, &source_router).await?;
-    let manifest = snapshot.manifest;
-    let source_manifest_hash = snapshot.journal.state_digest;
+    let source = read_source_view_identity(&source_router).await?;
+    if matches!(source.protocol, ViewProtocol::Manifest) {
+        crab_metadata::layout_descriptor::read_canonical_layout(&store, &source_router).await?;
+    }
     let repo_prefix = view_prefix(
         &parsed.repo_path,
         scope_hash,
-        manifest.generation,
-        &source_manifest_hash,
+        source.protocol,
+        source.generation,
+        &source.digest,
     );
     let global_prefix = format!("{repo_prefix}/.crab");
     let output = ViewOutput {
@@ -226,14 +276,18 @@ pub async fn materialize_view_with_store_and_credentials(
         global_prefix,
         source_repo: parsed.repo_path.clone(),
         scope_hash: scope_hash.to_ascii_lowercase(),
-        source_generation: manifest.generation,
-        source_manifest_hash,
+        source_generation: source.generation,
+        source_manifest_hash: source.digest.clone(),
         cache_hit: false,
     };
 
     let view_router = StoreLayout::new(store.clone(), repo_prefix.clone());
-    match read_manifest(&store, &view_router).await {
-        Ok(_) => {
+    let cached = match source.protocol {
+        ViewProtocol::Manifest => read_manifest(&store, &view_router).await.map(|_| ()),
+        ViewProtocol::Capsule => verify_capsule_view_ready(&view_router, &source.digest).await,
+    };
+    match cached {
+        Ok(()) => {
             crab_metadata::layout_descriptor::read_canonical_layout(&store, &view_router).await?;
             verify_existing_view(
                 &parsed.bucket,
@@ -256,18 +310,23 @@ pub async fn materialize_view_with_store_and_credentials(
         repo_url,
         &parsed.repo_path,
         &repo_prefix,
-        manifest.generation,
+        &source,
         &store,
         &include,
         &deny,
         git_credentials.as_ref(),
     )
     .await?;
-    read_manifest(&store, &view_router)
-        .await
-        .map_err(|e| AuthServerError::AuthFailed {
-            path: format!("filtered view push did not produce a manifest: {e}"),
-        })?;
+    match source.protocol {
+        ViewProtocol::Manifest => {
+            read_manifest(&store, &view_router)
+                .await
+                .map_err(|e| AuthServerError::AuthFailed {
+                    path: format!("filtered view push did not produce a manifest: {e}"),
+                })?;
+        }
+        ViewProtocol::Capsule => verify_capsule_view_ready(&view_router, &source.digest).await?,
+    }
 
     Ok(output)
 }
@@ -285,7 +344,7 @@ async fn build_filtered_view(
     source_url: &str,
     source_repo: &str,
     repo_prefix: &str,
-    view_generation: u64,
+    source: &SourceViewIdentity,
     store: &Store,
     include: &[String],
     deny: &[String],
@@ -302,15 +361,31 @@ async fn build_filtered_view(
     .await?;
     workspace.import_repacked_history()?;
     workspace.validate_git_state()?;
-    publish_filtered_view(
-        source_repo,
-        repo_prefix,
-        view_generation,
-        store,
-        workspace.filtered_git(),
-        repacker.finish()?,
-    )
-    .await?;
+    let crab_objects = repacker.finish()?;
+    match source.protocol {
+        ViewProtocol::Manifest => {
+            publish_filtered_view(
+                source_repo,
+                repo_prefix,
+                source.generation,
+                store,
+                workspace.filtered_git(),
+                crab_objects,
+            )
+            .await?;
+        }
+        ViewProtocol::Capsule => {
+            publish_filtered_capsule_view(
+                source_repo,
+                repo_prefix,
+                &source.digest,
+                store,
+                workspace.filtered_git(),
+                crab_objects,
+            )
+            .await?;
+        }
+    }
     verify_filtered_view_content(workspace.filtered_git(), store, source_repo, repo_prefix).await
 }
 
@@ -585,6 +660,7 @@ async fn upload_view_git_pack(
         bytes: pack_bytes,
         index,
         reverse_index,
+        ..
     } = generate_view_pack(filtered_git)?;
     verify_pack_sha1(&pack_bytes).map_err(AuthServerError::from)?;
     let object_count = count_pack_objects(&pack_bytes);
@@ -755,11 +831,16 @@ fn validate_scope_hash(scope_hash: &str) -> Result<()> {
 fn view_prefix(
     source_repo: &str,
     scope_hash: &str,
+    protocol: ViewProtocol,
     generation: u64,
     manifest_hash: &str,
 ) -> String {
+    let version = match protocol {
+        ViewProtocol::Manifest => "v1",
+        ViewProtocol::Capsule => "v2",
+    };
     format!(
-        "{}/acl-views/v1/{}/{}-{}",
+        "{}/acl-views/{version}/{}/{}-{}",
         source_repo.trim_matches('/'),
         scope_hash.to_ascii_lowercase(),
         generation,
@@ -786,7 +867,13 @@ mod tests {
 
     #[test]
     fn view_prefix_includes_source_scope_generation_and_manifest_hash() {
-        let prefix = view_prefix("org/repo", &"A".repeat(64), 7, "deadbeef");
+        let prefix = view_prefix(
+            "org/repo",
+            &"A".repeat(64),
+            ViewProtocol::Manifest,
+            7,
+            "deadbeef",
+        );
 
         assert_eq!(
             prefix,
@@ -985,7 +1072,11 @@ mod tests {
             path_str(&source_bare).unwrap(),
             source_repo,
             view_prefix,
-            1,
+            &SourceViewIdentity {
+                protocol: ViewProtocol::Manifest,
+                generation: 1,
+                digest: "source-state".to_owned(),
+            },
             &store,
             &["src/**".to_owned()],
             &["secret/**".to_owned()],
@@ -1169,6 +1260,102 @@ mod tests {
                 .await
                 .unwrap(),
             content
+        );
+    }
+
+    #[tokio::test]
+    async fn capsule_view_publication_is_readable_and_retry_safe() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let temp = tempfile::tempdir().unwrap();
+        let work = temp.path().join("work");
+        fs::create_dir_all(&work).unwrap();
+        run_git(["init", "-b", "main", path_str(&work).unwrap()], None).unwrap();
+        run_git(
+            [
+                "-C",
+                path_str(&work).unwrap(),
+                "config",
+                "user.email",
+                "view-test@example.com",
+            ],
+            None,
+        )
+        .unwrap();
+        run_git(
+            [
+                "-C",
+                path_str(&work).unwrap(),
+                "config",
+                "user.name",
+                "View Test",
+            ],
+            None,
+        )
+        .unwrap();
+        fs::write(work.join("allowed.txt"), b"visible").unwrap();
+        run_git(["-C", path_str(&work).unwrap(), "add", "."], None).unwrap();
+        run_git(
+            ["-C", path_str(&work).unwrap(), "commit", "-m", "visible"],
+            None,
+        )
+        .unwrap();
+        let filtered_git = temp.path().join("filtered.git");
+        run_git(
+            [
+                "clone",
+                "--bare",
+                path_str(&work).unwrap(),
+                path_str(&filtered_git).unwrap(),
+            ],
+            None,
+        )
+        .unwrap();
+
+        let repo_prefix = "org/repo/acl-views/v2/scope/view";
+        let source_digest = "a".repeat(64);
+        for _ in 0..2 {
+            publish_filtered_capsule_view(
+                "org/repo",
+                repo_prefix,
+                &source_digest,
+                &store,
+                &filtered_git,
+                ViewCrabObjects {
+                    files: Vec::new(),
+                    xorbs: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let router = view_store_layout(&store, repo_prefix);
+        assert!(
+            store.head(&router.layout_descriptor_path()).await.is_err(),
+            "capsule view publication must not create legacy layout metadata"
+        );
+        verify_capsule_view_ready(&router, &source_digest)
+            .await
+            .unwrap();
+        let view = crab_read::capsule_protocol::open_view(
+            &router,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: u64::MAX,
+                max_frontier_bytes: u64::MAX,
+            },
+        )
+        .await
+        .unwrap();
+        let expected =
+            run_git_capture(["-C", path_str(&work).unwrap(), "rev-parse", "HEAD"], None).unwrap();
+        assert_eq!(
+            view.refs().get("refs/heads/main").map(String::as_str),
+            Some(expected.trim())
+        );
+        assert!(
+            view.git_visibility_index()
+                .unwrap()
+                .contains_hex_in_ref("refs/heads/main", expected.trim())
         );
     }
 }

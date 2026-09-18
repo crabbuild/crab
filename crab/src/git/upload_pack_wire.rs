@@ -9,9 +9,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-#[cfg(test)]
 use crab_metadata::git_visibility::GitVisibilityIndex;
-#[cfg(test)]
 use crab_read::plan_upload_pack;
 use crab_read::upload_pack_wire::{
     FetchRequest, LsRefsRequest, MAX_PACKET_BYTES, flush_cancellable, parse_fetch, parse_ls_refs,
@@ -107,7 +105,6 @@ enum VisibilityRequirement {
 }
 
 enum UploadPackVisibilityProof {
-    #[cfg(test)]
     Materialized(GitVisibilityIndex),
     Catalog(GitCatalogVisibilityIndex),
 }
@@ -116,24 +113,12 @@ impl UploadPackVisibilityProof {
     fn as_catalog(&self) -> Option<&GitCatalogVisibilityIndex> {
         match self {
             Self::Catalog(visibility) => Some(visibility),
-            #[cfg(test)]
             Self::Materialized(_) => None,
-        }
-    }
-
-    fn into_catalog(self) -> Result<GitCatalogVisibilityIndex> {
-        match self {
-            Self::Catalog(visibility) => Ok(visibility),
-            #[cfg(test)]
-            Self::Materialized(_) => Err(CrabError::Internal(
-                "catalog upload-pack proof was not returned".to_owned(),
-            )),
         }
     }
 
     fn object_count_for_refs(&self, refs: &[String]) -> usize {
         match self {
-            #[cfg(test)]
             Self::Materialized(visibility) => {
                 visibility.object_count_for_refs(refs.iter().map(String::as_str))
             }
@@ -145,7 +130,6 @@ impl UploadPackVisibilityProof {
 
     fn authorization_digest_for_refs(&self, refs: &[String]) -> [u8; 32] {
         match self {
-            #[cfg(test)]
             Self::Materialized(visibility) => {
                 visibility.authorization_digest_for_refs(refs.iter().map(String::as_str))
             }
@@ -351,10 +335,6 @@ fn visibility_index_needs_repair(error: &RemoteGitError) -> bool {
     )
 }
 
-pub(crate) fn hidden_ref_patterns_are_valid(patterns: &[String]) -> bool {
-    compile_hidden_refs(patterns).is_ok()
-}
-
 /// Serve one terminal `stateless-connect git-upload-pack` helper session.
 pub async fn serve<R, W>(
     reader: &mut R,
@@ -364,6 +344,7 @@ pub async fn serve<R, W>(
     hidden_ref_patterns: &[String],
     fetch_policy: &FetchAdmissionPolicy,
     progress: bool,
+    capsule_root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
     cancellation: &CancellationToken,
 ) -> Result<()>
 where
@@ -381,6 +362,7 @@ where
         hidden_ref_patterns,
         fetch_policy,
         progress,
+        capsule_root,
         cancellation,
     )
     .await;
@@ -398,6 +380,52 @@ async fn acquire_read_admission(
     cancellation: &CancellationToken,
 ) -> Result<crab_coordination::ReadAdmissionTicket> {
     acquire_read_admission_with_wait(store, prefix, cancellation, READ_ADMISSION_WAIT).await
+}
+
+/// Run one non-terminal upload-pack operation under the shared reader limit.
+pub(crate) async fn with_read_admission<T>(
+    store: &crab_storage::Store,
+    prefix: &str,
+    cancellation: &CancellationToken,
+    operation: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    let mut admission = acquire_read_admission(store.inner(), prefix, cancellation).await?;
+    let renewal_interval = (admission.ttl() / 3).max(Duration::from_secs(1));
+    let mut ticker = tokio::time::interval(renewal_interval);
+    ticker.tick().await;
+    tokio::pin!(operation);
+    let mut renewal_error = None;
+    let result = loop {
+        tokio::select! {
+            result = &mut operation => {
+                break match result {
+                    Err(error) => Err(error),
+                    Ok(value) => match renewal_error {
+                        Some(error) => Err(CrabError::from(error)),
+                        None => Ok(value),
+                    },
+                };
+            }
+            _ = ticker.tick(), if renewal_error.is_none() => {
+                if let Err(error) = admission.renew().await {
+                    cancellation.cancel();
+                    renewal_error = Some(error);
+                }
+            }
+        }
+    };
+    let release = admission.release().await.map_err(CrabError::from);
+    match (result, release) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(release_error)) => {
+            tracing::warn!(
+                error = %release_error,
+                "upload-pack read admission release failed after operation failure"
+            );
+            Err(error)
+        }
+    }
 }
 
 async fn acquire_read_admission_with_wait(
@@ -513,6 +541,7 @@ async fn serve_with_read_admission<R, W>(
     hidden_ref_patterns: &[String],
     fetch_policy: &FetchAdmissionPolicy,
     progress: bool,
+    capsule_root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
     cancellation: &CancellationToken,
 ) -> Result<()>
 where
@@ -535,6 +564,7 @@ where
         hidden_ref_patterns,
         fetch_policy,
         progress,
+        capsule_root,
         &admission,
         cancellation,
     );
@@ -604,6 +634,7 @@ async fn serve_admitted<R, W>(
     hidden_ref_patterns: &[String],
     fetch_policy: &FetchAdmissionPolicy,
     progress: bool,
+    capsule_root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
     admission: &Arc<tokio::sync::Mutex<Option<crab_coordination::ReadAdmissionTicket>>>,
     cancellation: &CancellationToken,
 ) -> Result<()>
@@ -611,22 +642,59 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let (refs, mut discovery_packs) = {
-        let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
-        let snapshot = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Err(CrabError::Cancelled),
-            result = crab_metadata::manifest_store::read_repository_snapshot(store, &layout) => result?,
-        };
-        let manifest = snapshot.materialized_manifest();
-        let refs = RepositoryRefs::try_from(&manifest).map_err(remote_error)?;
-        (refs, snapshot.journal.packs)
+    let (refs, mut discovery_packs, mut fetch_snapshot) = match capsule_root {
+        Some(root) => {
+            let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
+            let options = upload_pack_repository_options().map_err(remote_error)?;
+            let maximum = options.operation_limits().max_fetched_bytes;
+            let view = crab_read::capsule_protocol::open_view_from_root_with_control(
+                &layout,
+                root,
+                crab_read::capsule_protocol::CapsuleReadLimits {
+                    max_capsule_bytes: maximum,
+                    max_frontier_bytes: maximum,
+                },
+            )
+            .await?;
+            let bucket = store.bucket_identity();
+            let provider = format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container);
+            let identity =
+                RepositoryIdentity::new(provider, prefix.to_owned(), 1).map_err(remote_error)?;
+            let visibility = if view.refs().is_empty() {
+                None
+            } else {
+                Some(UploadPackVisibilityProof::Materialized(
+                    view.git_visibility_index()?,
+                ))
+            };
+            let repository = view
+                .git_repository_from_store(
+                    layout.clone(),
+                    identity,
+                    Arc::new(RemoteGitRuntime::default()),
+                    options,
+                    maximum,
+                    cancellation,
+                )
+                .await?;
+            let refs = repository.refs().clone();
+            (refs, Vec::new(), Some((repository, visibility)))
+        }
+        None => {
+            let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
+            let snapshot = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(CrabError::Cancelled),
+                result = crab_metadata::manifest_store::read_repository_snapshot(store, &layout) => result?,
+            };
+            let manifest = snapshot.materialized_manifest();
+            let refs = RepositoryRefs::try_from(&manifest).map_err(remote_error)?;
+            (refs, snapshot.journal.packs, None)
+        }
     };
     let visible_ref_names = visible_ref_names(&refs, hidden_ref_patterns)?;
     // Discovery reads canonical metadata, even if payloads or derived indexes
     // are damaged. Fetch still requires its complete verified admission path.
-    let mut fetch_snapshot = None;
-
     // The remote-helper positive response is one raw blank line. Only after
     // this acknowledgement does the stdio stream become protocol-v2 bytes.
     tracing::debug!(
@@ -725,11 +793,9 @@ where
                     )
                     .await;
                 };
-                if let Err(error) = validate_fetch_admission_catalog(
+                if let Err(error) = validate_fetch_admission(
                     repository,
-                    proof.as_catalog().ok_or_else(|| {
-                        CrabError::Internal("upload-pack did not retain catalog proof".to_owned())
-                    })?,
+                    proof,
                     &visible_ref_names,
                     &fetch,
                     fetch_policy,
@@ -740,18 +806,9 @@ where
                     return reject_protocol_request(writer, error, cancellation).await;
                 }
                 if !fetch.done {
-                    let common_haves = common_haves_catalog(
-                        repository,
-                        proof.as_catalog().ok_or_else(|| {
-                            CrabError::Internal(
-                                "upload-pack did not retain catalog proof".to_owned(),
-                            )
-                        })?,
-                        &fetch,
-                        &visible_ref_names,
-                        cancellation,
-                    )
-                    .await?;
+                    let common_haves =
+                        common_haves(repository, proof, &fetch, &visible_ref_names, cancellation)
+                            .await?;
                     if common_haves.is_empty() {
                         write_acknowledgments(writer, cancellation).await?;
                     } else {
@@ -800,7 +857,6 @@ where
     }
 }
 
-#[cfg(test)]
 fn validate_fetch_wants(
     advertised_tips: &HashSet<ObjectId>,
     visibility: &GitVisibilityIndex,
@@ -823,6 +879,46 @@ fn validate_fetch_wants(
         )));
     }
     Ok(())
+}
+
+async fn validate_fetch_admission(
+    repository: &RemoteGitRepository,
+    proof: &UploadPackVisibilityProof,
+    visible_ref_names: &[String],
+    request: &FetchRequest,
+    policy: &FetchAdmissionPolicy,
+    cancellation: &CancellationToken,
+) -> Result<()> {
+    match proof {
+        UploadPackVisibilityProof::Materialized(visibility) => {
+            let advertised_tips = repository
+                .refs()
+                .entries
+                .iter()
+                .filter(|reference| visible_ref_names.contains(&reference.name))
+                .flat_map(|reference| [Some(reference.target), reference.peeled])
+                .flatten()
+                .collect::<HashSet<_>>();
+            validate_fetch_wants(
+                &advertised_tips,
+                visibility,
+                visible_ref_names,
+                request,
+                policy,
+            )
+        }
+        UploadPackVisibilityProof::Catalog(visibility) => {
+            validate_fetch_admission_catalog(
+                repository,
+                visibility,
+                visible_ref_names,
+                request,
+                policy,
+                cancellation,
+            )
+            .await
+        }
+    }
 }
 
 async fn validate_fetch_admission_catalog(
@@ -1080,35 +1176,6 @@ async fn open_repository_with_visibility_requirement(
     }))
 }
 
-pub(crate) async fn open_repository_with_catalog_visibility(
-    store: &crab_storage::Store,
-    prefix: &str,
-    cancellation: &CancellationToken,
-) -> Result<(RemoteGitRepository, GitCatalogVisibilityIndex)> {
-    let (repository, proof) =
-        open_repository_with_optional_catalog_visibility(store, prefix, cancellation).await?;
-    let proof = proof.ok_or_else(|| remote_error(RemoteGitError::EmptyRepository))?;
-    Ok((repository, proof))
-}
-
-pub(crate) async fn open_repository_with_optional_catalog_visibility(
-    store: &crab_storage::Store,
-    prefix: &str,
-    cancellation: &CancellationToken,
-) -> Result<(RemoteGitRepository, Option<GitCatalogVisibilityIndex>)> {
-    let (repository, proof) = open_repository_with_visibility_requirement(
-        store,
-        prefix,
-        cancellation,
-        VisibilityRequirement::Catalog,
-    )
-    .await?;
-    let proof = proof
-        .map(UploadPackVisibilityProof::into_catalog)
-        .transpose()?;
-    Ok((repository, proof))
-}
-
 #[cfg(test)]
 pub(crate) async fn open_repository_with_visibility(
     store: &crab_storage::Store,
@@ -1227,7 +1294,7 @@ async fn write_capabilities<W: AsyncWrite + Unpin>(
     write_data(writer, b"ls-refs=unborn\n", cancellation).await?;
     write_data(
         writer,
-        b"fetch=shallow deepen deepen-relative filter thin-pack no-progress include-tag ofs-delta\n",
+        b"fetch=shallow deepen deepen-relative deepen-since deepen-not filter thin-pack no-progress include-tag ofs-delta\n",
         cancellation,
     )
     .await?;
@@ -1316,6 +1383,37 @@ async fn common_haves_catalog(
         .zip(visible)
         .filter_map(|(have, visible)| visible.then_some(have))
         .collect())
+}
+
+async fn common_haves(
+    repository: &RemoteGitRepository,
+    proof: &UploadPackVisibilityProof,
+    request: &FetchRequest,
+    visible_ref_names: &[String],
+    cancellation: &CancellationToken,
+) -> Result<Vec<ObjectId>> {
+    match proof {
+        UploadPackVisibilityProof::Materialized(visibility) => Ok(request
+            .haves
+            .iter()
+            .copied()
+            .filter(|have| {
+                have.as_bytes().try_into().ok().is_some_and(|oid| {
+                    visibility.contains_for_refs(visible_ref_names.iter().map(String::as_str), &oid)
+                })
+            })
+            .collect()),
+        UploadPackVisibilityProof::Catalog(visibility) => {
+            common_haves_catalog(
+                repository,
+                visibility,
+                request,
+                visible_ref_names,
+                cancellation,
+            )
+            .await
+        }
+    }
 }
 
 async fn visible_objects_catalog(
@@ -1496,7 +1594,6 @@ async fn write_preplanned_cached_fetch_response<W: AsyncWrite + Unpin>(
             }
         }
         let plan = match proof {
-            #[cfg(test)]
             UploadPackVisibilityProof::Materialized(visibility) => {
                 plan_upload_pack(
                     repository,
@@ -1614,6 +1711,8 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
         haves: request.haves.clone(),
         shallow: request.shallow.clone(),
         deepen: request.deepen,
+        deepen_since: request.deepen_since,
+        deepen_not: request.deepen_not.clone(),
         deepen_relative: request.deepen_relative,
         include_tags: request.include_tags,
         filter: request.filter.clone(),
@@ -1637,7 +1736,6 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
         .await;
     }
     let plan = match match proof {
-        #[cfg(test)]
         UploadPackVisibilityProof::Materialized(visibility) => {
             plan_upload_pack(
                 repository,
@@ -1728,6 +1826,7 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
         .thin_pack
         .then_some(plan.common_haves.as_slice())
         .unwrap_or_default();
+    let allow_external_bases = external_thin_pack_eligible(request, &plan);
     if request.haves.is_empty() && request.done {
         // Identical cache waiters do not perform repository reads while the
         // producer builds the immutable response artifact.
@@ -1755,9 +1854,15 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
                 .await
         }
     } else {
-        repository
-            .generate_pack_with_bases(&plan.object_ids, thin_bases, cancellation)
-            .await
+        if allow_external_bases {
+            repository
+                .generate_pack_with_external_bases(&plan.object_ids, thin_bases, cancellation)
+                .await
+        } else {
+            repository
+                .generate_pack_with_bases(&plan.object_ids, thin_bases, cancellation)
+                .await
+        }
     };
     let pack = match generated {
         Ok(pack) => pack,
@@ -1796,8 +1901,22 @@ fn request_pack_preplanning_cache_eligible(request: &FetchRequest) -> bool {
     !request.haves.is_empty()
         && !request.shallow.is_empty()
         && request.deepen.is_none()
+        && request.deepen_since.is_none()
+        && request.deepen_not.is_empty()
         && !request.deepen_relative
         && matches!(request.filter, UploadPackFilter::None)
+}
+
+fn external_thin_pack_eligible(request: &FetchRequest, plan: &crab_read::PackPlan) -> bool {
+    request.thin_pack
+        && request.shallow.is_empty()
+        && request.deepen.is_none()
+        && request.deepen_since.is_none()
+        && request.deepen_not.is_empty()
+        && !request.deepen_relative
+        && matches!(request.filter, UploadPackFilter::None)
+        && !plan.common_haves.is_empty()
+        && plan.common_haves.len() == request.haves.len()
 }
 
 fn native_shallow_pack_eligible(request: &FetchRequest) -> bool {
@@ -1825,6 +1944,22 @@ fn preplanned_pack_request_digest(request: &FetchRequest) -> [u8; 32] {
             hash.update(&[0]);
         }
     }
+    match request.deepen_since {
+        Some(timestamp) => {
+            hash.update(&[1]);
+            hash.update(&timestamp.to_be_bytes());
+        }
+        None => {
+            hash.update(&[0]);
+        }
+    }
+    let mut deepen_not = request.deepen_not.clone();
+    deepen_not.sort_unstable();
+    hash.update(&(deepen_not.len() as u64).to_be_bytes());
+    for reference in deepen_not {
+        hash.update(&(reference.len() as u64).to_be_bytes());
+        hash.update(reference.as_bytes());
+    }
     for objects in [
         request.wants.as_slice(),
         request.haves.as_slice(),
@@ -1843,6 +1978,8 @@ fn preplanned_pack_request_digest(request: &FetchRequest) -> [u8; 32] {
 fn dense_selected_response(request: &FetchRequest) -> bool {
     request.shallow.is_empty()
         && request.deepen.is_none()
+        && request.deepen_since.is_none()
+        && request.deepen_not.is_empty()
         && !request.deepen_relative
         && request.filter.is_catalog_exact()
 }
@@ -2016,6 +2153,42 @@ mod tests {
         };
         assert!(request_pack_preplanning_cache_eligible(&changed));
         assert!(native_shallow_pack_eligible(&changed));
+    }
+
+    #[test]
+    fn external_thin_pack_requires_a_complete_unfiltered_transition() {
+        let first =
+            ObjectId::from_hex(b"1111111111111111111111111111111111111111").expect("object ID");
+        let second =
+            ObjectId::from_hex(b"2222222222222222222222222222222222222222").expect("object ID");
+        let plan = crab_read::PackPlan {
+            wants: vec![second],
+            common_haves: vec![first],
+            filter: UploadPackFilter::None,
+            include_tags: false,
+            object_ids: vec![second],
+            required_bases: Vec::new(),
+            shallow: Vec::new(),
+            unshallow: Vec::new(),
+        };
+        let request = FetchRequest {
+            wants: vec![second],
+            haves: vec![first],
+            thin_pack: true,
+            ..FetchRequest::default()
+        };
+
+        assert!(external_thin_pack_eligible(&request, &plan));
+
+        let mut changed = request.clone();
+        changed.filter = UploadPackFilter::BlobNone;
+        assert!(!external_thin_pack_eligible(&changed, &plan));
+        changed = request.clone();
+        changed.shallow = vec![first];
+        assert!(!external_thin_pack_eligible(&changed, &plan));
+        changed = request;
+        changed.thin_pack = false;
+        assert!(!external_thin_pack_eligible(&changed, &plan));
     }
 
     #[test]
@@ -2276,6 +2449,7 @@ mod tests {
                 &hidden_refs,
                 &FetchAdmissionPolicy::default(),
                 false,
+                None,
                 &CancellationToken::new(),
             )
             .await;
@@ -2355,6 +2529,7 @@ mod tests {
             &["refs/heads/secret".to_owned()],
             &FetchAdmissionPolicy::default(),
             false,
+            None,
             &CancellationToken::new(),
         )
         .await
@@ -2396,6 +2571,7 @@ mod tests {
                 &[],
                 &FetchAdmissionPolicy::default(),
                 false,
+                None,
                 &CancellationToken::new(),
             ))
             .await
@@ -2563,10 +2739,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_every_unadvertised_fetch_argument_before_planning() {
+    fn rejects_unadvertised_fetch_arguments_before_planning() {
         for argument in [
-            "deepen-since 1",
-            "deepen-not refs/heads/main",
             "want-ref refs/heads/main",
             "packfile-uris https",
             "wait-for-done",

@@ -133,6 +133,43 @@ def completed_replay_ordinal(pushes: list[dict[str, Any]]) -> int:
     return ordinals[-1]
 
 
+def capsule_owner_is_current(snapshots: list[dict[str, Any]]) -> bool:
+    if not snapshots:
+        return False
+    final = snapshots[-1]
+    generation = final.get("generation")
+    return (
+        all(snapshot.get("protocol") == "capsule-v2" for snapshot in snapshots)
+        and isinstance(generation, int)
+        and not isinstance(generation, bool)
+        and generation >= 0
+        and final.get("action") == "none"
+        and final.get("visibility") == "embedded"
+        and final.get("superseded") is False
+    )
+
+
+def normalize_capsule_acceleration_evidence(stages: dict[str, Any]) -> None:
+    for name, acceleration in stages.items():
+        if (
+            not name.startswith("acceleration_")
+            or not isinstance(acceleration, dict)
+            or acceleration.get("protocol") != "capsule-v2"
+            or "duration_ms" in acceleration
+        ):
+            continue
+        owner = stages.get(name.replace("acceleration_", "visibility_owner_", 1))
+        if not isinstance(owner, dict):
+            continue
+        duration_ms = owner.get("duration_ms")
+        if (
+            isinstance(duration_ms, int)
+            and not isinstance(duration_ms, bool)
+            and duration_ms >= 0
+        ):
+            acceleration["duration_ms"] = duration_ms
+
+
 def redact_text(value: str, secrets: Iterable[str]) -> str:
     result = value
     for secret in sorted({secret for secret in secrets if secret}, key=len, reverse=True):
@@ -672,6 +709,7 @@ class LargeRepositoryQualification:
         ]
         self.command_index = max(log_indexes, default=len(report.get("commands", [])))
         self.report = report
+        normalize_capsule_acceleration_evidence(self.report.get("stages", {}))
         prior_error = self.report.get("error")
         self.report["status"] = "running"
         self.report["error"] = None
@@ -1250,17 +1288,6 @@ class LargeRepositoryQualification:
                     )
                 sweep[counter] = value
             locator_sweeps.append(sweep)
-        doctor = self.run_crab(
-            self.replay_repo,
-            ["doctor", "--metadb", "--json"],
-            f"acceleration diagnosis {stage}",
-            timeout=self.args.clone_timeout,
-        )
-        payload = json.loads(self.stdout(doctor))
-        data = payload.get("data", payload)
-        acceleration = data.get("acceleration")
-        if not isinstance(acceleration, dict):
-            raise QualificationError("doctor --metadb JSON is missing acceleration state")
         self.report["stages"][f"visibility_owner_{stage}"] = {
             "duration_ms": sum(run["duration_ms"] for run in owner_runs),
             "passes": len(owner_runs),
@@ -1294,6 +1321,36 @@ class LargeRepositoryQualification:
             ),
             "locator_sweep": locator_sweeps,
         }
+        if owner_snapshots[-1].get("protocol") == "capsule-v2":
+            final = owner_snapshots[-1]
+            state = {
+                "duration_ms": sum(run["duration_ms"] for run in owner_runs),
+                "protocol": "capsule-v2",
+                "generation": final.get("generation"),
+                "action": final.get("action"),
+                "visibility": final.get("visibility"),
+                "superseded": final.get("superseded"),
+                "owner_actions": actions,
+            }
+            self.report["stages"][f"acceleration_{stage}"] = state
+            self.check(
+                f"acceleration-current-{stage}",
+                capsule_owner_is_current(owner_snapshots),
+                state,
+            )
+            self.write_report()
+            return
+        doctor = self.run_crab(
+            self.replay_repo,
+            ["doctor", "--metadb", "--json"],
+            f"acceleration diagnosis {stage}",
+            timeout=self.args.clone_timeout,
+        )
+        payload = json.loads(self.stdout(doctor))
+        data = payload.get("data", payload)
+        acceleration = data.get("acceleration")
+        if not isinstance(acceleration, dict):
+            raise QualificationError("doctor --metadb JSON is missing acceleration state")
         self.report["stages"][f"acceleration_{stage}"] = {
             "duration_ms": doctor["duration_ms"],
             "manifest_generation": acceleration.get("manifest_generation"),
@@ -1927,6 +1984,30 @@ class LargeRepositoryQualification:
                 fsck=False,
             )
             completed = 0
+        if self.resume and completed == 0:
+            acceleration = self.report["stages"].get("acceleration_seed")
+            if not (
+                isinstance(acceleration, dict)
+                and acceleration.get("protocol") == "capsule-v2"
+                and acceleration.get("action") == "none"
+                and acceleration.get("visibility") == "embedded"
+                and acceleration.get("superseded") is False
+            ):
+                self.acceleration_snapshot("seed")
+            if "pack_inventory_seed" not in self.report["stages"]:
+                self.active_pack_snapshot("seed")
+            if not any(
+                snapshot.get("stage") == "seed"
+                for snapshot in self.report["store_snapshots"]
+            ):
+                self.store_snapshot("seed")
+            if not self.incremental_clone.is_dir():
+                self.clone(
+                    "incremental_seed_clone",
+                    self.incremental_clone,
+                    ["--single-branch", "--branch", "main"],
+                    fsck=False,
+                )
         checkpoints = replay_checkpoints(
             self.args.replay_count,
             self.args.incremental_fetch_interval,

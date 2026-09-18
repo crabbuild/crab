@@ -62,7 +62,7 @@ impl AddRemoteCandidateCache {
         let mut connection =
             Connection::open(path).map_err(|error| database_error("open", error))?;
         connection
-            .busy_timeout(Duration::from_millis(250))
+            .busy_timeout(Duration::from_secs(1))
             .map_err(|error| database_error("configure timeout", error))?;
         connection
             .execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")

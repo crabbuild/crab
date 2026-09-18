@@ -1,7 +1,7 @@
 //! File-backed consolidation of the Git packs selected by a repository manifest.
 
 use crab_write::generation::CommittedManifestAnchor;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -186,11 +186,151 @@ pub async fn run_repack(
     config: &RepackConfig,
     cancel: &CancellationToken,
 ) -> Result<RepackOutcome> {
-    match run_repack_with_budget(store, prefix, config, cancel, None).await? {
-        RepackRunResult::Completed { outcome, .. } => Ok(outcome),
-        RepackRunResult::Deferred { .. } => Err(CrabError::Internal(
-            "unbounded repack unexpectedly exceeded a maintenance budget".to_owned(),
-        )),
+    run_capsule_repack(store, prefix, config, cancel, None).await
+}
+
+/// Checkpoint a repository using an already authenticated protocol-v2 root.
+pub async fn run_repack_from_root(
+    store: &Store,
+    prefix: &str,
+    root: crab_metadata::capsule_protocol::RootSnapshot,
+    config: &RepackConfig,
+    cancel: &CancellationToken,
+) -> Result<RepackOutcome> {
+    run_capsule_repack(store, prefix, config, cancel, Some(root)).await
+}
+
+async fn run_capsule_repack(
+    store: &Store,
+    prefix: &str,
+    config: &RepackConfig,
+    cancel: &CancellationToken,
+    root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
+) -> Result<RepackOutcome> {
+    const MAX_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+    let started = Instant::now();
+    check_cancelled(cancel)?;
+    let router = StoreLayout::new(store.clone(), prefix.to_owned());
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let limits = crab_read::capsule_protocol::CapsuleReadLimits {
+        max_capsule_bytes: MAX_CHECKPOINT_BYTES,
+        max_frontier_bytes: MAX_CHECKPOINT_BYTES,
+    };
+    let view = match root {
+        Some(root) => {
+            crab_read::capsule_protocol::open_view_from_root(&layout, root, limits).await?
+        }
+        None => crab_read::capsule_protocol::open_view(&layout, limits).await?,
+    };
+    let root = view.root().root();
+    if view.refs().is_empty() {
+        return Err(CrabError::Protocol(
+            "cannot checkpoint an unborn repository".to_owned(),
+        ));
+    }
+    let consolidated = crab_remote::checkpoint::consolidate_git_packs(
+        &view,
+        MAX_CHECKPOINT_BYTES,
+        MAX_CHECKPOINT_BYTES,
+        cancel,
+    )
+    .await
+    .map_err(map_checkpoint_error)?;
+    let packs_before = consolidated.source_pack_count();
+    let bytes_before = consolidated.source_pack_bytes();
+    let packs = consolidated.into_packs();
+    let visibility = crab_metadata::capsule_protocol::CapsuleVisibilitySnapshot::from_index(
+        &view.git_visibility_index()?,
+    )?;
+    let pack_sizes = packs
+        .iter()
+        .map(crab_metadata::capsule_protocol::CapsuleGitPack::pack_size)
+        .collect::<Vec<_>>();
+    let checkpoint = crab_metadata::capsule_protocol::Checkpoint::build_with_catalogs(
+        root.generation(),
+        view.root().digest(),
+        packs,
+        view.pointer_catalog()?,
+        Some(visibility),
+    )?;
+    if !config.dry_run {
+        check_cancelled(cancel)?;
+        let visible_ref_transactions = view.visible_ref_transactions();
+        let capsule_runs = view.capsule_run_pointers();
+        if checkpoint_can_reuse_existing_history(
+            root.compacted_ref_transactions(),
+            visible_ref_transactions,
+            capsule_runs,
+        )? {
+            crab_write::capsule_protocol::publish_checkpoint(
+                &layout,
+                view.root_snapshot().clone(),
+                &checkpoint,
+            )
+            .await?;
+        } else {
+            crab_write::capsule_protocol::publish_ref_checkpoint(
+                &layout,
+                view.root_snapshot().clone(),
+                &checkpoint,
+                view.refs().clone(),
+                view.peeled_refs().clone(),
+                visible_ref_transactions.clone(),
+                capsule_runs.to_vec(),
+            )
+            .await?;
+        }
+    }
+    Ok(RepackOutcome {
+        packs_before,
+        packs_after: checkpoint.git_packs().len(),
+        bytes_before,
+        bytes_after: pack_sizes.iter().sum(),
+        bytes_read: bytes_before,
+        bytes_written: if config.dry_run {
+            0
+        } else {
+            checkpoint.bytes().len() as u64
+        },
+        elapsed: started.elapsed(),
+    })
+}
+
+fn checkpoint_can_reuse_existing_history(
+    compacted_ref_transactions: &BTreeMap<String, String>,
+    visible_ref_transactions: &BTreeMap<String, String>,
+    capsule_runs: &[crab_metadata::capsule_protocol::CapsulePointer],
+) -> Result<bool> {
+    if !capsule_runs.is_empty() {
+        return Ok(false);
+    }
+    if visible_ref_transactions
+        .iter()
+        .all(|(ref_name, transaction_id)| {
+            compacted_ref_transactions.get(ref_name) == Some(transaction_id)
+        })
+    {
+        return Ok(true);
+    }
+    Err(CrabError::Protocol(
+        "capsule ref view has visible transactions without retained capsule runs".to_owned(),
+    ))
+}
+
+fn map_checkpoint_error(error: crab_remote::checkpoint::CheckpointError) -> CrabError {
+    match error {
+        crab_remote::checkpoint::CheckpointError::Cancelled => CrabError::Cancelled,
+        crab_remote::checkpoint::CheckpointError::Read(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Repack(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Pack(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Metadata(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Io(source) => source.into(),
+        other => CrabError::Internal(other.to_string()),
     }
 }
 
@@ -1375,6 +1515,20 @@ mod tests {
 
     use super::*;
 
+    async fn run_legacy_test_repack(
+        store: &Store,
+        prefix: &str,
+        config: &RepackConfig,
+        cancel: &CancellationToken,
+    ) -> Result<RepackOutcome> {
+        match run_repack_with_budget(store, prefix, config, cancel, None).await? {
+            RepackRunResult::Completed { outcome, .. } => Ok(outcome),
+            RepackRunResult::Deferred { .. } => Err(CrabError::Internal(
+                "unbounded legacy test repack unexpectedly deferred".to_owned(),
+            )),
+        }
+    }
+
     fn budget_pack(size: u64, object_count: u64) -> PackManifestEntry {
         PackManifestEntry {
             pack_id: format!("{object_count:064x}"),
@@ -1383,6 +1537,32 @@ mod tests {
             ref_tips: vec!["a".to_owned()],
             object_count,
         }
+    }
+
+    #[test]
+    fn checkpoint_reuses_history_only_for_compacted_ref_transactions() {
+        let tx1 = "a".repeat(64);
+        let tx2 = "b".repeat(64);
+        let compacted = BTreeMap::from([("refs/heads/main".to_owned(), tx1.clone())]);
+        let visible = BTreeMap::from([("refs/heads/main".to_owned(), tx1)]);
+        assert!(checkpoint_can_reuse_existing_history(&compacted, &visible, &[]).unwrap());
+
+        let uncheckpointed = BTreeMap::from([("refs/heads/main".to_owned(), tx2.clone())]);
+        let error = checkpoint_can_reuse_existing_history(&compacted, &uncheckpointed, &[])
+            .expect_err("unretained ref transaction must fail closed");
+        assert!(error.to_string().contains("without retained capsule runs"));
+
+        let run = crab_metadata::capsule_protocol::CapsulePointer::new(
+            "a".repeat(64),
+            1,
+            0,
+            vec![tx2],
+            "b".repeat(64),
+        )
+        .unwrap();
+        assert!(
+            !checkpoint_can_reuse_existing_history(&compacted, &uncheckpointed, &[run],).unwrap()
+        );
     }
 
     #[test]
@@ -1722,7 +1902,7 @@ mod tests {
         )
         .await?;
 
-        let outcome = run_repack(
+        let outcome = run_legacy_test_repack(
             &store,
             prefix,
             &RepackConfig {
@@ -1860,7 +2040,7 @@ mod tests {
         manifest.seal_git_validation();
         crate::metadata::manifest::create_manifest(&store, &router, &manifest).await?;
 
-        let outcome = run_repack(
+        let outcome = run_legacy_test_repack(
             &store,
             prefix,
             &RepackConfig {

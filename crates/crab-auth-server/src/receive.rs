@@ -43,10 +43,12 @@ use crab_xet::xorb::parser::{XorbParser, xorb_payload_digest_from_footer};
 use object_store::path::Path as ObjectPath;
 use serde::{Deserialize, Serialize};
 
-pub use crab_remote::protected::ProtectedPushPlan;
+pub use crab_remote::protected::{ProtectedCapsulePushPlan, ProtectedPushPlan};
 
 use crate::error::{AuthServerError, Result};
 
+mod capsule;
+mod capsule_dependencies;
 mod finalize;
 mod git_workspace;
 mod session;
@@ -124,6 +126,8 @@ pub struct PushPrepareRecord {
     pub push_id: String,
     pub source_manifest_generation: u64,
     pub source_manifest_etag: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_root_digest: Option<String>,
     pub view_ref_updates: Vec<PushRefUpdate>,
     pub source_ref_updates: Vec<PushRefUpdate>,
     pub view_scope: Option<PreparedViewScope>,
@@ -403,9 +407,73 @@ pub fn validate_staged_object_shapes(
     repo_prefix: &str,
     push_id: &str,
 ) -> Result<()> {
+    validate_staged_write_shapes(&plan.staged_objects, repo_prefix, push_id)
+}
+
+/// Validates the bounded identity and staged-object shape of a v2 push plan.
+pub fn validate_protected_capsule_plan_shape(
+    plan: &ProtectedCapsulePushPlan,
+    repo_prefix: &str,
+    push_id: &str,
+) -> Result<()> {
+    if plan.schema_version != crab_remote::protected::PROTECTED_CAPSULE_PUSH_PLAN_SCHEMA_VERSION {
+        return Err(invalid("unsupported capsule push-plan schema_version"));
+    }
+    if plan.repo_prefix != repo_prefix {
+        return Err(invalid("push-plan repo_prefix does not match repo_url"));
+    }
+    if plan.push_id != push_id {
+        return Err(invalid("push-plan push_id does not match request"));
+    }
+    let expected_prefix = format!("{repo_prefix}/staging/{push_id}/");
+    if plan.upload_prefix.trim_matches('/') != expected_prefix.trim_matches('/') {
+        return Err(invalid("push-plan upload_prefix does not match push_id"));
+    }
+    validate_hash_component(&plan.base_root_digest, "base root digest")?;
+    validate_hash_component(&plan.transaction_id, "transaction id")?;
+    validate_hash_component(&plan.run_hash, "capsule run hash")?;
+    if plan.run_size == 0 {
+        return Err(invalid("capsule push-plan declares an empty capsule"));
+    }
+    if plan.ref_updates.is_empty() {
+        return Err(invalid("protected push requires at least one ref update"));
+    }
+    if plan.ref_updates.len() > MAX_PUSH_REF_UPDATES {
+        return Err(invalid("push-plan contains too many ref updates"));
+    }
+    if plan.staged_objects.len() > MAX_PUSH_STAGED_OBJECTS {
+        return Err(invalid("push-plan contains too many staged objects"));
+    }
+    validate_push_ref_updates(&plan.ref_updates).map_err(|error| invalid(error.to_string()))?;
+    validate_staged_write_shapes(&plan.staged_objects, repo_prefix, push_id)?;
+
+    let partition = &plan.run_hash[..2];
+    let capsule_key = format!(
+        "{}/v2/capsules/{partition}/{}",
+        repo_prefix.trim_matches('/'),
+        plan.run_hash
+    );
+    if let Some(capsule) = plan
+        .staged_objects
+        .iter()
+        .find(|object| object.canonical_key == capsule_key)
+        && (capsule.blake3 != plan.run_hash || capsule.size != plan.run_size)
+    {
+        return Err(invalid(
+            "staged capsule metadata differs from the push-plan capsule",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_staged_write_shapes(
+    staged_objects: &[StagedWrite],
+    repo_prefix: &str,
+    push_id: &str,
+) -> Result<()> {
     let mut canonical_keys = BTreeSet::new();
     let mut staged_keys = BTreeSet::new();
-    for object in &plan.staged_objects {
+    for object in staged_objects {
         if !canonical_keys.insert(object.canonical_key.as_str()) {
             return Err(invalid("push-plan contains duplicate canonical object key"));
         }
@@ -576,7 +644,14 @@ async fn promote_pack_metadata_union(
 /// Callers must first run [`validate_staged_object_shapes`]. Staged bytes are
 /// re-read and revalidated immediately before the canonical write.
 pub async fn promote_staged_objects(store: &Store, plan: &ProtectedPushPlan) -> Result<()> {
-    for object in &plan.staged_objects {
+    promote_staged_writes(store, &plan.staged_objects).await
+}
+
+pub(super) async fn promote_staged_writes(
+    store: &Store,
+    staged_objects: &[StagedWrite],
+) -> Result<()> {
+    for object in staged_objects {
         let canonical = ObjectPath::from(object.canonical_key.clone());
         let bytes = read_verified_staged_object(store, object).await?;
         if is_pack_metadata_key(&object.canonical_key) {
@@ -823,6 +898,38 @@ pub fn build_prepare_record(
         push_id: push_id.to_owned(),
         source_manifest_generation: base.0.generation,
         source_manifest_etag: base.1.to_owned(),
+        source_root_digest: None,
+        view_ref_updates,
+        source_ref_updates,
+        view_scope,
+    })
+}
+
+/// Builds a prepared session record from one authenticated capsule view.
+pub fn build_capsule_prepare_record(
+    repo_prefix: &str,
+    push_id: &str,
+    source_generation: u64,
+    source_root_digest: &str,
+    source_refs: &BTreeMap<String, String>,
+    view_ref_updates: Vec<PushRefUpdate>,
+    view_scope: Option<PreparedViewScope>,
+) -> Result<PushPrepareRecord> {
+    validate_prepared_ref_updates(&view_ref_updates)?;
+    validate_hash_component(source_root_digest, "source root digest")?;
+    if let Some(scope) = view_scope.as_ref() {
+        validate_prepared_view_scope(scope, repo_prefix)?;
+    }
+    let source_ref_updates = source_ref_updates_for_refs(source_refs, &view_ref_updates)?;
+    Ok(PushPrepareRecord {
+        schema_version: 2,
+        repo_prefix: repo_prefix.to_owned(),
+        push_id: push_id.to_owned(),
+        // Keep the shipped response field stable while schema v2 identifies
+        // this value as a capsule-root generation, not a v1 manifest.
+        source_manifest_generation: source_generation,
+        source_manifest_etag: String::new(),
+        source_root_digest: Some(source_root_digest.to_owned()),
         view_ref_updates,
         source_ref_updates,
         view_scope,
@@ -835,8 +942,30 @@ pub fn validate_prepare_record_shape(
     repo_prefix: &str,
     push_id: &str,
 ) -> Result<()> {
-    if record.schema_version != 1 {
-        return Err(invalid("unsupported prepare record schema_version"));
+    match record.schema_version {
+        1 if record.source_manifest_etag.trim().is_empty()
+            || record.source_root_digest.is_some() =>
+        {
+            return Err(invalid(
+                "manifest prepare record has invalid source identity",
+            ));
+        }
+        2 => {
+            if !record.source_manifest_etag.is_empty() {
+                return Err(invalid(
+                    "capsule prepare record cannot contain a manifest etag",
+                ));
+            }
+            validate_hash_component(
+                record
+                    .source_root_digest
+                    .as_deref()
+                    .ok_or_else(|| invalid("capsule prepare record is missing its root digest"))?,
+                "source root digest",
+            )?;
+        }
+        1 => {}
+        _ => return Err(invalid("unsupported prepare record schema_version")),
     }
     if record.repo_prefix != repo_prefix {
         return Err(invalid(
@@ -845,9 +974,6 @@ pub fn validate_prepare_record_shape(
     }
     if record.push_id != push_id {
         return Err(invalid("prepare record push_id does not match request"));
-    }
-    if record.source_manifest_etag.trim().is_empty() {
-        return Err(invalid("prepare record source_manifest_etag is empty"));
     }
     validate_prepared_ref_updates(&record.view_ref_updates)?;
     validate_prepared_ref_updates(&record.source_ref_updates)?;
@@ -892,9 +1018,16 @@ pub fn source_ref_updates_for(
     base: &Manifest,
     ref_updates: &[PushRefUpdate],
 ) -> Result<Vec<PushRefUpdate>> {
+    source_ref_updates_for_refs(&base.refs, ref_updates)
+}
+
+fn source_ref_updates_for_refs(
+    refs: &BTreeMap<String, String>,
+    ref_updates: &[PushRefUpdate],
+) -> Result<Vec<PushRefUpdate>> {
     let mut updates = Vec::with_capacity(ref_updates.len());
     for update in ref_updates {
-        let current = base.refs.get(&update.ref_name);
+        let current = refs.get(&update.ref_name);
         if let Some(current) = current {
             validate_sha1(current, "source ref oid")?;
         }
@@ -2528,6 +2661,12 @@ pub fn validate_staged_xorb(
             )));
         }
     }
+    parser
+        .verify_payload_digest()
+        .map_err(|error| AuthServerError::CorruptObject {
+            path: canonical_key.to_owned(),
+            reason: format!("staged xorb payload digest is invalid: {error}"),
+        })?;
     Ok(())
 }
 
@@ -2579,6 +2718,37 @@ fn is_allowed_repo_key(relative: &str) -> bool {
     is_allowed_global_key(relative)
         || is_allowed_pack_key(relative)
         || is_allowed_metadata_key(relative)
+        || is_allowed_capsule_key(relative)
+        || is_allowed_lfs_key(relative)
+}
+
+fn is_allowed_capsule_key(relative: &str) -> bool {
+    let Some(rest) = relative.strip_prefix("v2/capsules/") else {
+        return false;
+    };
+    let Some((partition, hash)) = rest.split_once('/') else {
+        return false;
+    };
+    partition.len() == 2
+        && hash.starts_with(partition)
+        && validate_hash_component(hash, "capsule hash").is_ok()
+}
+
+fn is_allowed_lfs_key(relative: &str) -> bool {
+    let Some(rest) = relative.strip_prefix("lfs/objects/") else {
+        return false;
+    };
+    let mut parts = rest.split('/');
+    let (Some(first), Some(second), Some(oid), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    first.len() == 2
+        && second.len() == 2
+        && oid.starts_with(first)
+        && oid.get(2..4) == Some(second)
+        && validate_hash_component(oid, "LFS object id").is_ok()
 }
 
 fn is_allowed_pack_key(relative: &str) -> bool {
@@ -2621,6 +2791,12 @@ fn validate_key_content_hash(key: &str, actual_blake3: &str) -> Result<()> {
 }
 
 fn expected_blake3_from_key(key: &str) -> Option<&str> {
+    if let Some(hash) = key.split_once("/v2/capsules/").map(|(_, rest)| rest)
+        && let Some((partition, hash)) = hash.split_once('/')
+        && hash.starts_with(partition)
+    {
+        return Some(hash);
+    }
     if let Some(rest) = key.rsplit_once("/pack-").map(|(_, rest)| rest) {
         return rest.strip_suffix(".pack");
     }
@@ -2746,6 +2922,29 @@ mod tests {
                 )),
                 staged_object(format!("org/repo/metadata/pack/indexes/{}.json", hash('d'))),
             ],
+        }
+    }
+
+    fn capsule_push_plan() -> ProtectedCapsulePushPlan {
+        let run_hash = hash('a');
+        ProtectedCapsulePushPlan {
+            schema_version: crab_remote::protected::PROTECTED_CAPSULE_PUSH_PLAN_SCHEMA_VERSION,
+            repo_prefix: "org/repo".to_owned(),
+            push_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+            upload_prefix: "org/repo/staging/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/".to_owned(),
+            base_root_digest: hash('c'),
+            transaction_id: hash('d'),
+            run_hash: run_hash.clone(),
+            run_size: 7,
+            ref_updates: vec![ref_update(Some(oid('1')), oid('2'))],
+            staged_objects: vec![StagedWrite {
+                canonical_key: format!("org/repo/v2/capsules/aa/{run_hash}"),
+                staged_key: format!(
+                    "org/repo/staging/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/objects/org/repo/v2/capsules/aa/{run_hash}"
+                ),
+                blake3: run_hash,
+                size: 7,
+            }],
         }
     }
 
@@ -3042,6 +3241,31 @@ mod tests {
         assert!(
             validate_push_plan_shape(&plan, "org/repo", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").is_ok()
         );
+    }
+
+    #[test]
+    fn capsule_push_plan_shape_binds_staged_capsule() {
+        validate_protected_capsule_plan_shape(
+            &capsule_push_plan(),
+            "org/repo",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .expect("valid capsule plan");
+    }
+
+    #[test]
+    fn capsule_push_plan_shape_rejects_mismatched_staged_capsule() {
+        let mut plan = capsule_push_plan();
+        plan.staged_objects[0].size += 1;
+
+        let error = validate_protected_capsule_plan_shape(
+            &plan,
+            "org/repo",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .expect_err("capsule metadata mismatch must be rejected");
+
+        assert!(error.to_string().contains("staged capsule metadata"));
     }
 
     #[test]

@@ -21,7 +21,6 @@ use crab_cell_runtime::{
     CellRuntime, Digest, NodeDirectory, Owner, PeerRoundTrip, PeerSigner, ReleaseState,
     ReleaseStore, ReplicaHost, ScratchMonitor, SessionId, SqlWorkerPool,
 };
-use crab_metadata::manifest_store::read_manifest;
 use crab_remote_git::{
     OperationLimits, RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
 };
@@ -37,7 +36,7 @@ use crate::catalog::CatalogStore;
 use crate::{
     Config, RepositoryConfig, Result, api, app, archive, assets, assignees,
     auth::{self, Authentication, Principal},
-    branches, checks, contents, git, issues, labels, lfs, maintenance, pulls, receive, releases,
+    branches, checks, contents, git, issues, labels, lfs, pulls, receive, releases,
     repository_settings::{self, BranchProtections, RepositoryLifecycle},
     statuses,
     transfer_admission::TransferAdmission,
@@ -440,7 +439,8 @@ pub(crate) struct Repository {
     pub layout: StoreLayout<Store>,
     pub identity: RepositoryIdentity,
     pinned: Mutex<Option<(Instant, RemoteGitRepository)>>,
-    maintenance: Mutex<Option<tokio::task::JoinHandle<crab_write::Result<()>>>>,
+    maintenance: Mutex<Option<tokio::task::JoinHandle<crate::maintenance::Result<()>>>>,
+    pub(crate) integrity: crate::integrity::Status,
 }
 
 pub(crate) struct RepositorySet {
@@ -562,6 +562,103 @@ impl Repository {
         *self.pinned.lock().await = None;
     }
 
+    pub(crate) async fn schedule_maintenance(&self, server: &Server) {
+        let mut task = self.maintenance.lock().await;
+        if task.as_ref().is_some_and(|task| !task.is_finished()) {
+            return;
+        }
+        if let Some(completed) = task.take() {
+            match completed.await {
+                Ok(Ok(())) | Ok(Err(crate::maintenance::Error::Cancelled)) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "repository checkpoint failed"),
+                Err(error) => tracing::warn!(%error, "repository checkpoint task failed"),
+            }
+        }
+        *task = Some(tokio::spawn(crate::maintenance::run(
+            self.layout.clone(),
+            Arc::clone(&server.maintenance_admission),
+            server.cancellation.clone(),
+        )));
+    }
+
+    pub(crate) async fn checkpoint_now(
+        &self,
+        server: &Server,
+        cancellation: &CancellationToken,
+    ) -> Result<()> {
+        crate::maintenance::run(
+            self.layout.clone(),
+            Arc::clone(&server.maintenance_admission),
+            cancellation.clone(),
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn open_view(
+        &self,
+    ) -> Result<crab_read::capsule_protocol::CapsuleRepositoryView> {
+        crab_read::capsule_protocol::open_view(
+            &self.layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+                max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+            },
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    pub(crate) async fn open_ref_view(
+        &self,
+    ) -> Result<crab_read::capsule_protocol::CapsuleRefView> {
+        let root = crab_metadata::capsule_protocol::load_root(&self.layout)
+            .await
+            .map_err(|source| crate::Error::Settings {
+                source: Box::new(source),
+            })?;
+        crab_read::capsule_protocol::open_ref_view_from_root(&self.layout, root)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(crate) async fn open_capsule_repository(
+        &self,
+        server: &Server,
+        options: RepositoryOptions,
+        cancellation: &CancellationToken,
+    ) -> Result<(
+        crab_read::capsule_protocol::CapsuleRepositoryView,
+        RemoteGitRepository,
+    )> {
+        let root = crab_metadata::capsule_protocol::load_root(&self.layout)
+            .await
+            .map_err(|source| crate::Error::Settings {
+                source: Box::new(source),
+            })?;
+        let view = crab_read::capsule_protocol::open_view_from_root_with_control(
+            &self.layout,
+            root,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+                max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+            },
+        )
+        .await?;
+        let repository = view
+            .git_repository_from_store(
+                self.layout.clone(),
+                self.identity.clone(),
+                Arc::clone(&server.runtime),
+                options,
+                2 * 1024 * 1024 * 1024,
+                cancellation,
+            )
+            .await?;
+        Ok((view, repository))
+    }
+
     pub async fn open(
         &self,
         server: &Server,
@@ -591,63 +688,9 @@ impl Repository {
         options: RepositoryOptions,
         cancellation: &CancellationToken,
     ) -> Result<RemoteGitRepository> {
-        let open = || {
-            RemoteGitRepository::open(
-                self.store.clone(),
-                self.layout.clone(),
-                self.identity.clone(),
-                Arc::clone(&server.runtime),
-                options,
-                cancellation,
-            )
-        };
-        match open().await {
-            Ok(repository)
-                if repository.refs().is_empty() || repository.commit_graph_available() =>
-            {
-                return Ok(repository);
-            }
-            Ok(_) => {}
-            Err(crab_remote_git::Error::RepositoryIndexing { .. }) => {}
-            Err(error) => return Err(error.into()),
-        }
-        let mut worker = tokio::select! {
-            () = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled.into()),
-            worker = self.maintenance.lock() => worker,
-        };
-        if worker.is_none() {
-            // A preceding request may have finished maintenance while this one waited.
-            match open().await {
-                Ok(repository)
-                    if repository.refs().is_empty() || repository.commit_graph_available() =>
-                {
-                    return Ok(repository);
-                }
-                Ok(_) => {}
-                Err(crab_remote_git::Error::RepositoryIndexing { .. }) => {}
-                Err(error) => return Err(error.into()),
-            }
-            *worker = Some(tokio::spawn(maintenance::run(
-                self.store.clone(),
-                self.layout.clone(),
-                self.identity.clone(),
-                Arc::clone(&server.runtime),
-                options,
-                Arc::clone(&server.maintenance_admission),
-                server.cancellation.clone(),
-            )));
-        }
-        if let Some(task) = worker.as_mut() {
-            // A cancelled reader leaves the handle in this slot. A later reader
-            // or server shutdown must drain publication and its lease cleanup.
-            let result = tokio::select! {
-                () = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled.into()),
-                result = task => result,
-            };
-            *worker = None;
-            result??;
-        }
-        open().await.map_err(Into::into)
+        self.open_capsule_repository(server, options, cancellation)
+            .await
+            .map(|(_, repository)| repository)
     }
 }
 
@@ -665,11 +708,11 @@ pub(crate) struct Server {
     pub transfer_admission: TransferAdmission,
     pub(crate) local_staging: crate::local_disk::LocalStaging,
     pub app_admission: Semaphore,
-    maintenance_admission: Arc<Semaphore>,
+    pub(crate) maintenance_admission: Arc<Semaphore>,
     pub cancellation: CancellationToken,
     pub receives: tokio_util::task::TaskTracker,
     pub auth: Option<Authentication>,
-    catalog: Option<CatalogStore>,
+    pub(crate) catalog: Option<CatalogStore>,
     catalog_healthy: AtomicBool,
     pub(crate) node_healthy: AtomicBool,
     scheduler_status: crate::cells::SchedulerStatus,
@@ -707,7 +750,7 @@ impl Server {
         for repository in self.repositories.values() {
             if let Some(task) = repository.maintenance.lock().await.take() {
                 let completed = match task.await {
-                    Ok(Ok(())) | Ok(Err(crab_write::WriteError::Cancelled)) => Ok(()),
+                    Ok(Ok(())) | Ok(Err(crate::maintenance::Error::Cancelled)) => Ok(()),
                     Ok(Err(error)) => Err(crate::Error::from(error)),
                     Err(error) => Err(crate::Error::from(error)),
                 };
@@ -1074,6 +1117,8 @@ pub async fn serve(config: Config) -> Result<()> {
     server.node_healthy.store(true, Ordering::Release);
     let app = router(Arc::clone(&server));
     tracing::info!(address = %listener.local_addr()?, "public listener started");
+    let integrity_server = Arc::clone(&server);
+    let integrity = tokio::spawn(async move { crate::integrity::run(integrity_server).await });
     let public_shutdown = cancellation.clone();
     let public = async move {
         axum::serve(listener, app)
@@ -1128,6 +1173,7 @@ pub async fn serve(config: Config) -> Result<()> {
             Ok(result) => result,
             Err(error) => Err(error.into()),
         };
+        let integrity = integrity.await.map_err(crate::Error::from);
         let release_watch = match release_watch.await {
             Ok(result) => result,
             Err(error) => Err(error.into()),
@@ -1162,6 +1208,7 @@ pub async fn serve(config: Config) -> Result<()> {
             .and(heartbeat)
             .and(lease_watch)
             .and(scheduler)
+            .and(integrity)
             .and(release_watch)
             .and(durability_recruiter)
             .and(durability_rotator)
@@ -1353,20 +1400,20 @@ async fn materialize_catalog(
     for record in document.repositories {
         let store = catalog.root().store.clone();
         let prefix = catalog.root().repository_prefix(&record.prefix)?;
-        let layout = StoreLayout::new(store.clone(), prefix.clone());
-        let (manifest, _) =
-            read_manifest(&store, &layout)
-                .await
-                .map_err(|source| crate::Error::Settings {
-                    source: Box::new(source),
-                })?;
-        let default_branch =
-            manifest
-                .head
-                .strip_prefix("refs/heads/")
-                .ok_or(crate::Error::Config(
-                    "catalog repository HEAD must name a branch",
-                ))?;
+        let layout = catalog.root().repository_layout(prefix.clone());
+        let root = crab_metadata::capsule_protocol::load_root(&layout)
+            .await
+            .map_err(|source| crate::Error::Settings {
+                source: Box::new(source),
+            })?;
+        let default_branch = root
+            .record()
+            .root()
+            .head()
+            .strip_prefix("refs/heads/")
+            .ok_or(crate::Error::Config(
+                "catalog repository HEAD must name a branch",
+            ))?;
         let entry = record.runtime_config(catalog.root(), default_branch)?;
         let repository = Repository {
             id: record.id,
@@ -1380,6 +1427,7 @@ async fn materialize_catalog(
             store,
             pinned: Mutex::new(None),
             maintenance: Mutex::new(None),
+            integrity: crate::integrity::Status::default(),
         };
         repositories.insert(
             (entry.owner.clone(), entry.name.clone()),
@@ -1583,6 +1631,7 @@ fn management_router(server: Arc<Server>) -> Router {
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/readyz", get(readiness))
         .route("/capacity", get(render_capacity))
+        .route("/integrityz", get(integrity_status))
         .route("/metrics", get(render_metrics))
         .merge(application)
         .merge(recovery)
@@ -1604,6 +1653,38 @@ async fn render_capacity(State(server): State<Arc<Server>>) -> Response {
     (
         [(axum::http::header::CACHE_CONTROL, "no-store")],
         Json(server.cell_capacity.clone()),
+    )
+        .into_response()
+}
+
+async fn integrity_status(State(server): State<Arc<Server>>) -> Response {
+    let mut failed = false;
+    let mut complete = true;
+    let repositories = server
+        .repositories
+        .values()
+        .into_iter()
+        .map(|repository| {
+            let snapshot = repository.integrity.snapshot();
+            failed |= snapshot.state == crate::integrity::State::Failed;
+            complete &= snapshot.state == crate::integrity::State::Complete;
+            json!({
+                "owner": repository.config.owner,
+                "name": repository.config.name,
+                "proof": snapshot,
+            })
+        })
+        .collect::<Vec<_>>();
+    let (status, state) = if failed {
+        (StatusCode::SERVICE_UNAVAILABLE, "failed")
+    } else if complete {
+        (StatusCode::OK, "complete")
+    } else {
+        (StatusCode::ACCEPTED, "pending")
+    };
+    (
+        status,
+        Json(json!({"status": state, "repositories": repositories})),
     )
         .into_response()
 }
@@ -1931,7 +2012,7 @@ fn integration_api_path(path: &str) -> bool {
 
 #[cfg(test)]
 #[path = "maintenance_tests.rs"]
-mod maintenance_tests;
+pub(crate) mod maintenance_tests;
 
 #[cfg(test)]
 #[path = "server_peer_e2e_tests.rs"]
@@ -2303,7 +2384,7 @@ mod tests {
                 assert_eq!(value["error"]["code"], "repository_not_found");
             }
         }
-        for path in ["/healthz", "/readyz"] {
+        for path in ["/healthz", "/readyz", "/integrityz"] {
             let response = app
                 .clone()
                 .oneshot(
@@ -2321,6 +2402,7 @@ mod tests {
         for (path, expected) in [
             ("/healthz", StatusCode::OK),
             ("/readyz", StatusCode::SERVICE_UNAVAILABLE),
+            ("/integrityz", StatusCode::OK),
         ] {
             let response = management
                 .clone()

@@ -2054,6 +2054,7 @@ dependencies = [
  "crab-staging",
  "crab-storage",
  "crab-types",
+ "crab-write",
  "crab-xet",
  "gix-hash",
  "gix-object",
@@ -2389,10 +2390,12 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "blake3",
+ "bstr",
  "bytes",
  "crab-storage",
  "crab-xet",
  "futures-util",
+ "gix-validate",
  "object_store",
  "proptest",
  "rusqlite",
@@ -2404,6 +2407,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

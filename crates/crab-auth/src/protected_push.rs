@@ -530,6 +530,7 @@ mod tests {
             writer: "writer-a".to_owned(),
             region: "us-west-2".to_owned(),
             manifest_generation: 42,
+            commit_sequence: 0,
             state: PushTransactionState::Materialized,
         };
 

@@ -342,15 +342,15 @@ implemented exception that must not be hidden by that description:
 
 | Noncanonical key relative to `R` | Current caller and behavior | Standardization status |
 | --- | --- | --- |
-| `manifests/shard-list` | CLI `run_compact_command` calls `run_compact_with_cancel`; `run_compact_inner` reads this standalone JSON list, CAS-updates it, then unions registry roots | Inconsistent with the canonical manifest's segmented shard-index path; not an alternate root used by `read_repository_snapshot` |
+| `manifests/shard-list` | When no capsule-v2 root exists, CLI shard compaction reads this standalone JSON list, CAS-updates it, then unions registry roots. A present v2 root instead selects its authenticated pointer catalog and publishes an exact-root-CAS checkpoint without reading or creating this key | Retained only as the legacy-v1 compaction owner; inconsistent with the canonical v1 manifest's segmented shard-index path and not an alternate root used by `read_repository_snapshot` |
 
-`read_shard_list` in the compactor returns an empty default when that key is
-absent. Therefore a canonical-only repository can produce the compactor's
-“no shards” path despite having manifest-referenced shards. This is a source
-inference from the caller and callee, not an E2E result for the inspected repo.
-Resolve the ownership/publication mismatch before declaring all CLI paths
-conformant. See [compactor](../../src/cmd/compact.rs) and
-[CLI dispatch](../../src/main.rs).
+`read_shard_list` in the legacy branch returns an empty default when that key
+is absent. Therefore a v1 canonical-only repository can still produce the
+compactor's “no shards” path despite having manifest-referenced shards. V2 does
+not inherit that mismatch: its source set comes from the authenticated pointer
+catalog and its replacement catalog is committed in a checkpoint. The v1
+ownership discrepancy remains open. See [compactor](../../src/cmd/compact.rs)
+and [CLI dispatch](../../src/main.rs).
 
 The optional bulk ref-registry field needs a release/ownership decision before
 being promoted as an actively published format or removed as an unused one.
@@ -810,7 +810,7 @@ claims that data loss occurred in the inspected repository.
 | Historical catalog serving | Integrity readers use an exact self-contained proof after an old catalog checkpoint retires; ordinal serving still requires that checkpoint | Retain or rebuild exact checkpoints for any promised historical accelerated-read window and keep repair qualification |
 | Views and sessions | Service-owned cleanup exists for sessions; a complete view-retirement contract was not established | Document owner, active-reader protection, TTL/retention semantics, and retry behavior |
 | Physical key validation | Normative byte-preservation conflicts with generic SDK conversion | Add exact writer/list/reader conformance at the final boundary |
-| CLI shard compaction | Reachable CLI path reads/CAS-updates `manifests/shard-list`; canonical snapshot reads use segmented indexes | Reconcile the compactor with canonical publication and scoped roots; test a repository that only has canonical metadata |
+| CLI shard compaction | V2 reads its authenticated pointer catalog, verifies replacement shard/Xorb closure, and publishes an exact-root-CAS checkpoint; v1 still reads/CAS-updates `manifests/shard-list` while canonical snapshot reads use segmented indexes | Reconcile or retire the remaining v1 standalone-list owner; add live provider, concurrent-ref, crash-boundary, and historical-retention qualification for v2 |
 | LFS receipt retirement | `LfsObjectStore::delete` removes the body; the inspected lifecycle paths enumerate only `lfs/objects/` | Define receipt cleanup at the LFS owner and prove concurrent verification/repair behavior |
 
 The two repo-GC paths must share the same reachability invariant. A fix only

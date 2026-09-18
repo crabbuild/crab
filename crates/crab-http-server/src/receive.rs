@@ -62,6 +62,8 @@ pub(crate) enum ReceiveError {
     Prepare(#[from] crab_git::incoming_pack::PreparePackError),
     #[error("remote lookup failed")]
     Remote(#[from] crab_remote_git::Error),
+    #[error("capsule repository read failed")]
+    Read(#[from] crab_read::ReadError),
     #[error("repository service failed")]
     Service(#[from] crate::Error),
     #[error("repository default branch changed")]

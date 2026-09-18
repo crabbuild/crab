@@ -2558,7 +2558,7 @@ pub enum FfOutcome {
 /// clients that don't have the old tip locally hit this path; the
 /// caller should fall back to the commit-graph summary ancestry.
 #[must_use]
-fn is_missing_object_error(stderr: &str) -> bool {
+pub(super) fn is_missing_object_error(stderr: &str) -> bool {
     stderr.contains("Not a valid commit name")
         || stderr.contains("not our ref")
         || stderr.contains("bad revision")
@@ -2951,6 +2951,9 @@ pub struct PushConfig {
     /// Explicit git directory for callers that publish a repository
     /// other than the process current directory.
     pub git_dir: Option<PathBuf>,
+    /// Include the complete outgoing Git and LFS closure instead of excluding
+    /// objects reachable from current remote tips.
+    pub force_full_graph: bool,
     /// Validated internal mirror-plan identity for durable commit attribution.
     pub mirror_plan_id: Option<String>,
     pub protected_push: Option<ProtectedPushSession>,
@@ -3022,6 +3025,7 @@ impl Default for PushConfig {
             active_active_coordinator: None,
             perf_phase_sink: None,
             git_dir: None,
+            force_full_graph: false,
             mirror_plan_id: None,
             protected_push: None,
         }
@@ -3075,6 +3079,7 @@ impl PushConfig {
             active_active_coordinator: None,
             perf_phase_sink: None,
             git_dir: None,
+            force_full_graph: false,
             mirror_plan_id: None,
             protected_push: None,
         }
@@ -3624,6 +3629,20 @@ fn uncertain_commit_identity(error: &CrabError) -> Option<&str> {
         return None;
     };
     let source = io_error.get_ref()?;
+    if let Some(write_error) = source.downcast_ref::<crab_write::WriteError>() {
+        return match write_error {
+            crab_write::WriteError::CapsuleCommitUncertain { transaction_id, .. } => {
+                Some(transaction_id)
+            }
+            crab_write::WriteError::CapsuleCheckpointCommitUncertain {
+                checkpoint_hash, ..
+            } => Some(checkpoint_hash),
+            crab_write::WriteError::CapsuleMaintenanceCommitUncertain { fence_id, .. } => {
+                Some(fence_id)
+            }
+            _ => None,
+        };
+    }
     match source.downcast_ref::<crab_metadata::error::MetadataError>()? {
         crab_metadata::error::MetadataError::RefJournalCommitUncertain {
             transaction_id, ..
@@ -3818,6 +3837,20 @@ pub struct PushResult {
     pub active_active_commit: Option<PushCommitMetadata>,
     /// Pipeline stage responsible for a rejected batch, when known.
     pub failure_stage: Option<PushFailureStage>,
+    /// Immutable payloads uploaded by this push. `None` for rejected pushes
+    /// that did not enter the transfer pipeline.
+    pub transfer_stats: Option<PushTransferStats>,
+}
+
+/// Counts of newly uploaded immutable payloads for one push.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PushTransferStats {
+    /// Number of xorb payloads written to the origin.
+    pub xorbs_uploaded: u64,
+    /// Number of shard payloads written to the origin.
+    pub shards_uploaded: u64,
+    /// Bytes in newly uploaded xorb payloads.
+    pub xorb_bytes_uploaded: u64,
 }
 
 /// Coordinator metadata attached to a successful active-active push.
@@ -3864,6 +3897,7 @@ impl PushResult {
             outcomes,
             active_active_commit: None,
             failure_stage: None,
+            transfer_stats: None,
         }
     }
 
@@ -3881,6 +3915,12 @@ impl PushResult {
     #[must_use]
     pub fn with_failure_stage(mut self, stage: PushFailureStage) -> Self {
         self.failure_stage = Some(stage);
+        self
+    }
+
+    #[must_use]
+    pub fn with_transfer_stats(mut self, stats: PushTransferStats) -> Self {
+        self.transfer_stats = Some(stats);
         self
     }
 
@@ -4124,6 +4164,12 @@ pub struct PushPipeline {
     connectivity_frontier_tips: tokio::sync::Mutex<Vec<String>>,
     /// Shard hashes uploaded in step 9, consumed by step 11 for shard-list CAS.
     uploaded_shard_hashes: tokio::sync::Mutex<Vec<MerkleHash>>,
+    /// Number of shard payloads that were not already verified on the origin.
+    uploaded_shards: std::sync::atomic::AtomicU64,
+    /// Number of xorb payloads successfully accepted by the upload stage.
+    uploaded_xorb_count: std::sync::atomic::AtomicU64,
+    /// Bytes in xorb payloads successfully accepted by the upload stage.
+    uploaded_xorb_bytes: std::sync::atomic::AtomicU64,
     /// Set of chunk hashes classified as "new" (class C) by step 4.
     /// Step 5 only packs chunks in this set. `None` means classification did
     /// not run and every pinned recipe chunk must be packed.
@@ -6663,6 +6709,9 @@ impl PushPipeline {
             prepared_git_pack: tokio::sync::Mutex::new(None),
             connectivity_frontier_tips: tokio::sync::Mutex::new(Vec::new()),
             uploaded_shard_hashes: tokio::sync::Mutex::new(Vec::new()),
+            uploaded_shards: std::sync::atomic::AtomicU64::new(0),
+            uploaded_xorb_count: std::sync::atomic::AtomicU64::new(0),
+            uploaded_xorb_bytes: std::sync::atomic::AtomicU64::new(0),
             new_chunk_hashes: tokio::sync::Mutex::new(None),
             planned_xorb_bytes: std::sync::atomic::AtomicU64::new(0),
             planned_git_bytes: std::sync::atomic::AtomicU64::new(0),
@@ -12136,6 +12185,10 @@ impl PushPipeline {
             match handle.await {
                 Ok(Ok((uploaded_xorb, bytes, multipart_progress))) => {
                     uploaded += 1;
+                    self.uploaded_xorb_count
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.uploaded_xorb_bytes
+                        .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
                     // Collected test paths retain the body for cache-warm
                     // coverage. The production stream keeps only remote
                     // identity metadata so its payload permit is reusable.
@@ -12804,6 +12857,10 @@ impl PushPipeline {
         )
         .await?;
         let skipped_shards = existing_shards.verified.len();
+        self.uploaded_shards.store(
+            shard_count.saturating_sub(skipped_shards) as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         let store_for_shards = store.clone();
         futures_util::stream::iter(
@@ -16861,6 +16918,18 @@ impl PushPipeline {
             }
             PushResult::new(outcomes)
         };
+        let transfer_stats = PushTransferStats {
+            xorbs_uploaded: self
+                .uploaded_xorb_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            shards_uploaded: self
+                .uploaded_shards
+                .load(std::sync::atomic::Ordering::Relaxed),
+            xorb_bytes_uploaded: self
+                .uploaded_xorb_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+        };
+        let result = result.with_transfer_stats(transfer_stats);
         Ok(match active_active_commit {
             Some(commit) => result.with_active_active_commit(commit),
             None => result,
@@ -18194,7 +18263,7 @@ fn visibility_base_oid(git_dir: &Path, new_oid: &str) -> Result<Option<String>> 
     Ok(parents.into_iter().next())
 }
 
-fn enumerate_visibility_difference(
+pub(crate) fn enumerate_visibility_difference(
     git_dir: &Path,
     include: &str,
     exclude: Option<&str>,
@@ -18867,9 +18936,16 @@ mod tests {
     }
 
     async fn initialize_test_repository(store: &Store, router: &StoreLayout) {
-        crate::cmd::init::initialize_remote_repository_store(store, router, "refs/heads/main")
+        crate::core::remote_layout::initialize(store, router)
             .await
             .expect("initialize canonical test repository");
+        crate::metadata::manifest::create_manifest(
+            store,
+            router,
+            &Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .expect("initialize canonical v1 test manifest");
     }
 
     async fn ensure_test_layout(store: &Store, router: &StoreLayout) {
@@ -23075,6 +23151,17 @@ mod tests {
     fn push_result_all_ok_on_empty() {
         let result = PushResult::empty();
         assert!(result.all_ok());
+    }
+
+    #[test]
+    fn push_result_retains_transfer_stats() {
+        let stats = PushTransferStats {
+            xorbs_uploaded: 2,
+            shards_uploaded: 3,
+            xorb_bytes_uploaded: 4096,
+        };
+        let result = PushResult::empty().with_transfer_stats(stats);
+        assert_eq!(result.transfer_stats, Some(stats));
     }
 
     #[test]
@@ -37071,6 +37158,7 @@ mod tests {
             writer: "east".to_owned(),
             region: "us-east-1".to_owned(),
             manifest_generation: 0,
+            capsule_publication: None,
             refs: vec![CoordinatedRefUpdate {
                 name: "refs/heads/main".to_owned(),
                 expected: None,

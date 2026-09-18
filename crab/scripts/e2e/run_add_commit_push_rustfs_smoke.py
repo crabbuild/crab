@@ -2058,6 +2058,46 @@ class AddCommitPushSmoke:
 
     def run_gc_fence_upgrade_case(self) -> None:
         repo, remote, domain = self.prepare_git_repo("gc-fence-upgrade")
+
+        # Keep a legacy v1 descriptor beside the v2 root so the rollback
+        # writer reaches the upgraded fence instead of failing admission on a
+        # deliberately absent v1 layout. The v2 root remains authoritative for
+        # the migration command under test.
+        legacy_layout = json.dumps({
+            "schema_version": 1,
+            "layout": "partitioned",
+            "chunk_partition_bits": 8,
+            "file_partition_bits": 8,
+            "receipt_partition_bits": 8,
+            "recipe_page_entries": 512,
+            "recipe_page_max_bytes": 65536,
+            "digest": "67991fbbc08a032d74558b1fbecfa32a04c54cf02f1e36afa10fba14d46078f6",
+        }).encode()
+        layout_status, _, _ = self.signed_s3_request(
+            "PUT", f"{domain}/layout", body=legacy_layout,
+            extra_headers={"if-none-match": "*"},
+        )
+        self.check("legacy-layout-fixture-created-only-if-absent", layout_status == 200)
+        legacy_manifest = json.dumps({
+            "version": 1,
+            "generation": 0,
+            "created_at": "",
+            "pusher": None,
+            "session_id": "",
+            "refs": {},
+            "peeled_refs": {},
+            "head": "refs/heads/main",
+            "shard_index_hash": "",
+            "pack_index_hash": "",
+            "git_validation_digest": "7e9adc65b2225882ef7ae62b6cdfd8b13383f536152b55c47a9f54ce3db37ea8",
+            "commit_graph_hash": None,
+            "ref_registry_hash": None,
+        }).encode()
+        manifest_status, _, _ = self.signed_s3_request(
+            "PUT", f"{domain}/manifest", body=legacy_manifest,
+            extra_headers={"if-none-match": "*"},
+        )
+        self.check("legacy-manifest-fixture-created-only-if-absent", manifest_status == 200)
         key = f"{domain}/locks/internal/gc-fence/state"
         legacy = json.dumps({
             "schema_version": 1, "epoch": 0, "writer_epoch": 0,

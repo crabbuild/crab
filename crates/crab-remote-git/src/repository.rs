@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::commit_graph::CommitGraphIndex;
 use crate::operation::{TrackedLocatorSession, finish_with_close};
-use crate::reader::{ReaderLimits, RemoteGitReader};
+use crate::reader::{ReaderLimits, RemoteGitPackSource, RemoteGitReader};
 use crate::state::RepositoryState;
 use crate::{
     Error, HeadReference, OperationContext, OperationKind, RemoteGitRuntime, RemoteGitSnapshot,
@@ -337,6 +337,65 @@ impl RemoteGitRepository {
             options,
             cancellation,
             None,
+            None,
+            None,
+        )
+    }
+
+    /// Open a snapshot with an authenticated in-memory object locator.
+    ///
+    /// Capsule readers use this after validating the embedded pack indexes and
+    /// locator sidecars, avoiding a repeated full pack-index scan per object batch.
+    pub async fn from_snapshot_with_inline_locators(
+        layout: StoreLayout<Store>,
+        snapshot: &crab_metadata::manifest_store::RepositorySnapshot,
+        identity: RepositoryIdentity,
+        runtime: Arc<RemoteGitRuntime>,
+        options: RepositoryOptions,
+        inline_locators: std::collections::HashMap<
+            [u8; 20],
+            crab_metadata::git_object_locator::GitObjectLocator,
+        >,
+        cancellation: &CancellationToken,
+    ) -> Result<Self> {
+        Self::from_snapshot_parts(
+            layout,
+            snapshot,
+            identity,
+            runtime,
+            options,
+            cancellation,
+            None,
+            Some(Arc::new(inline_locators)),
+            None,
+        )
+    }
+
+    /// Open a snapshot with inline locators and authenticated non-canonical
+    /// pack sources such as ranges inside a checkpoint object.
+    pub async fn from_snapshot_with_inline_locators_and_pack_sources(
+        layout: StoreLayout<Store>,
+        snapshot: &crab_metadata::manifest_store::RepositorySnapshot,
+        identity: RepositoryIdentity,
+        runtime: Arc<RemoteGitRuntime>,
+        options: RepositoryOptions,
+        inline_locators: std::collections::HashMap<
+            [u8; 20],
+            crab_metadata::git_object_locator::GitObjectLocator,
+        >,
+        pack_sources: std::collections::HashMap<MerkleHash, RemoteGitPackSource>,
+        cancellation: &CancellationToken,
+    ) -> Result<Self> {
+        Self::from_snapshot_parts(
+            layout,
+            snapshot,
+            identity,
+            runtime,
+            options,
+            cancellation,
+            None,
+            Some(Arc::new(inline_locators)),
+            Some(pack_sources),
         )
     }
 
@@ -364,9 +423,15 @@ impl RemoteGitRepository {
             options,
             cancellation,
             catalog_tail,
+            None,
+            None,
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the constructor keeps snapshot, runtime, catalog, and pack-source ownership explicit"
+    )]
     fn from_snapshot_parts(
         layout: StoreLayout<Store>,
         snapshot: &crab_metadata::manifest_store::RepositorySnapshot,
@@ -375,6 +440,15 @@ impl RemoteGitRepository {
         options: RepositoryOptions,
         cancellation: &CancellationToken,
         catalog_tail: Option<(GitObjectCatalogIdentity, Vec<GitPackInventoryEntry>)>,
+        inline_locators: Option<
+            Arc<
+                std::collections::HashMap<
+                    [u8; 20],
+                    crab_metadata::git_object_locator::GitObjectLocator,
+                >,
+            >,
+        >,
+        pack_sources: Option<std::collections::HashMap<MerkleHash, RemoteGitPackSource>>,
     ) -> Result<Self> {
         RepositoryOptions::new(options.object_limits(), options.operation_limits())?;
         check_cancelled(cancellation)?;
@@ -401,11 +475,16 @@ impl RemoteGitRepository {
             Some((identity, packs)) => (Some(identity), Some(packs)),
             None => (None, None),
         };
+        let mut lookup_sources =
+            crate::reader::ReaderLookupSources::new(preferred_pack_indexes, inline_locators);
+        if let Some(pack_sources) = pack_sources {
+            lookup_sources = lookup_sources.with_pack_sources(pack_sources);
+        }
         let reader = Arc::new(RemoteGitReader::from_pinned_with_preferred_pack_indexes(
             layout.store().clone(),
             layout.repo_prefix(),
             inventory.values().copied(),
-            preferred_pack_indexes,
+            lookup_sources,
             ReaderLimits::from_options(options),
             Arc::clone(&runtime),
             identity.clone(),
@@ -419,6 +498,7 @@ impl RemoteGitRepository {
                 identity,
                 options,
                 generation: manifest.generation,
+                pack_index_hash: Arc::from(manifest.pack_index_hash.as_str()),
                 git_validation_digest: Arc::from(manifest.git_validation_digest.as_str()),
                 shard_index_hash: Arc::from(manifest.shard_index_hash.as_str()),
                 manifest_etag: snapshot.manifest_etag.clone(),
@@ -556,6 +636,7 @@ impl RemoteGitRepository {
                     identity,
                     options,
                     generation: manifest.generation,
+                    pack_index_hash: Arc::from(manifest.pack_index_hash.as_str()),
                     git_validation_digest: Arc::from(manifest.git_validation_digest.as_str()),
                     shard_index_hash: Arc::from(manifest.shard_index_hash.as_str()),
                     manifest_etag,
@@ -694,6 +775,7 @@ impl RemoteGitRepository {
                     identity,
                     options,
                     generation: manifest.generation,
+                    pack_index_hash: Arc::from(manifest.pack_index_hash.as_str()),
                     git_validation_digest: Arc::from(manifest.git_validation_digest.as_str()),
                     shard_index_hash: Arc::from(manifest.shard_index_hash.as_str()),
                     manifest_etag,
@@ -1060,12 +1142,7 @@ impl RemoteGitRepository {
         &self,
         cancellation: &CancellationToken,
     ) -> Result<crab_metadata::git_visibility::GitVisibilityIndex> {
-        let pack_index_hash = self
-            .state
-            .coverage()
-            .map(|coverage| coverage.pack_index_hash.to_string())
-            .unwrap_or_default();
-        crate::visibility::rebuild(self, pack_index_hash, cancellation).await
+        crate::visibility::rebuild(self, self.state.pack_index_hash.to_string(), cancellation).await
     }
 
     /// Check whether the canonical manifest still names this pinned generation.

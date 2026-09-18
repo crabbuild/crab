@@ -1,9 +1,8 @@
 //! `crab fsck` — repository integrity checker.
 //!
-//! Checks Crab manifests, pack/index presence, data-chain metadata, and
-//! coordination state. The production object-store checker does not yet run
-//! full Git connectivity or enumerate multipart uploads outside Crab's local
-//! recovery journal.
+//! Checks capsule or legacy metadata, Git object connectivity, pack/index
+//! presence, the Crab data chain, and coordination state. Multipart
+//! enumeration is provider-backed when a local recovery journal is available.
 
 use std::io::Stdout;
 use std::time::{Duration, SystemTime};
@@ -11,7 +10,7 @@ use std::time::{Duration, SystemTime};
 use serde::Serialize;
 use tracing::{debug, info, warn};
 
-use crate::core::error::{Result, check_cancelled};
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::event_payloads::WarningPayload;
 use crate::core::output::{JsonlStream, OutputMode};
 
@@ -73,6 +72,12 @@ pub enum IssueKind {
     },
     /// A shard references a xorb that doesn't exist.
     MissingXorb { xorb_hash: String },
+    /// The authenticated capsule catalog references a shard that doesn't exist.
+    MissingShard { shard_hash: String },
+    /// A catalogued xorb fails its size, digest, framing, or chunk proof.
+    CorruptXorb { xorb_hash: String, detail: String },
+    /// A catalogued shard fails its size, identity, closure, or recipe proof.
+    CorruptShard { shard_hash: String, detail: String },
     /// A shard exists in storage but is not referenced by any xorb chain.
     OrphanShard { shard_key: String },
     /// Pack-list references a key not found in storage.
@@ -96,6 +101,8 @@ pub enum IssueKind {
     /// Informational only — file-index entries are immutable, tiny, and
     /// content-addressed, so orphans are harmless.
     OrphanFileIndex { key: String },
+    /// One integrity phase could not establish a result.
+    CheckFailure { phase: String, detail: String },
 }
 
 impl FsckIssue {
@@ -193,6 +200,38 @@ impl FsckIssue {
         }
     }
 
+    pub(crate) fn missing_shard(shard_hash: impl Into<String>) -> Self {
+        Self {
+            kind: IssueKind::MissingShard {
+                shard_hash: shard_hash.into(),
+            },
+            severity: IssueSeverity::Error,
+            repairable: false,
+        }
+    }
+
+    pub(crate) fn corrupt_xorb(xorb_hash: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            kind: IssueKind::CorruptXorb {
+                xorb_hash: xorb_hash.into(),
+                detail: detail.into(),
+            },
+            severity: IssueSeverity::Error,
+            repairable: false,
+        }
+    }
+
+    pub(crate) fn corrupt_shard(shard_hash: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            kind: IssueKind::CorruptShard {
+                shard_hash: shard_hash.into(),
+                detail: detail.into(),
+            },
+            severity: IssueSeverity::Error,
+            repairable: false,
+        }
+    }
+
     pub(crate) fn orphan_shard(shard_key: impl Into<String>) -> Self {
         Self {
             kind: IssueKind::OrphanShard {
@@ -258,6 +297,17 @@ impl FsckIssue {
             repairable: false,
         }
     }
+
+    fn check_failure(phase: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            kind: IssueKind::CheckFailure {
+                phase: phase.into(),
+                detail: detail.into(),
+            },
+            severity: IssueSeverity::Error,
+            repairable: false,
+        }
+    }
 }
 
 impl std::fmt::Display for FsckIssue {
@@ -301,6 +351,15 @@ impl std::fmt::Display for FsckIssue {
             IssueKind::MissingXorb { xorb_hash } => {
                 write!(f, "{prefix}: missing xorb {xorb_hash}")
             }
+            IssueKind::MissingShard { shard_hash } => {
+                write!(f, "{prefix}: missing shard {shard_hash}")
+            }
+            IssueKind::CorruptXorb { xorb_hash, detail } => {
+                write!(f, "{prefix}: corrupt xorb {xorb_hash}: {detail}")
+            }
+            IssueKind::CorruptShard { shard_hash, detail } => {
+                write!(f, "{prefix}: corrupt shard {shard_hash}: {detail}")
+            }
             IssueKind::OrphanShard { shard_key } => {
                 write!(f, "{prefix}: orphan shard {shard_key}")
             }
@@ -335,6 +394,9 @@ impl std::fmt::Display for FsckIssue {
             }
             IssueKind::OrphanFileIndex { key } => {
                 write!(f, "{prefix}: orphan file-index entry {key}")
+            }
+            IssueKind::CheckFailure { phase, detail } => {
+                write!(f, "{prefix}: {phase} check could not complete: {detail}")
             }
         }
     }
@@ -584,7 +646,11 @@ pub async fn run_fsck(
     debug!("checking git object connectivity");
     match checker.check_git_objects().await {
         Ok(issues) => all_issues.extend(issues),
-        Err(e) => warn!(error = %e, "git object check failed"),
+        Err(CrabError::Cancelled) => return Err(CrabError::Cancelled),
+        Err(e) => {
+            warn!(error = %e, "git object check failed");
+            all_issues.push(FsckIssue::check_failure("Git object", e.to_string()));
+        }
     }
 
     // Phase 2: Crab data chain (pointer → file-index → shard → xorb).
@@ -592,7 +658,11 @@ pub async fn run_fsck(
     debug!("checking crab data chain");
     match checker.check_data_chain().await {
         Ok(issues) => all_issues.extend(issues),
-        Err(e) => warn!(error = %e, "data chain check failed"),
+        Err(CrabError::Cancelled) => return Err(CrabError::Cancelled),
+        Err(e) => {
+            warn!(error = %e, "data chain check failed");
+            all_issues.push(FsckIssue::check_failure("data chain", e.to_string()));
+        }
     }
 
     // Phase 3: Pack-list vs storage divergence.
@@ -600,7 +670,11 @@ pub async fn run_fsck(
     debug!("checking pack-list consistency");
     match checker.check_pack_list().await {
         Ok(issues) => all_issues.extend(issues),
-        Err(e) => warn!(error = %e, "pack-list check failed"),
+        Err(CrabError::Cancelled) => return Err(CrabError::Cancelled),
+        Err(e) => {
+            warn!(error = %e, "pack-list check failed");
+            all_issues.push(FsckIssue::check_failure("pack inventory", e.to_string()));
+        }
     }
 
     // Phase 4: Expired push locks.
@@ -613,7 +687,11 @@ pub async fn run_fsck(
                 all_issues.push(FsckIssue::expired_push_lock(&lock.key, age));
             }
         }
-        Err(e) => warn!(error = %e, "push lock check failed"),
+        Err(CrabError::Cancelled) => return Err(CrabError::Cancelled),
+        Err(e) => {
+            warn!(error = %e, "push lock check failed");
+            all_issues.push(FsckIssue::check_failure("push lock", e.to_string()));
+        }
     }
 
     // Phase 5: Abandoned multipart uploads.
@@ -628,7 +706,11 @@ pub async fn run_fsck(
                 all_issues.push(FsckIssue::abandoned_multipart(&upload, age));
             }
         }
-        Err(e) => warn!(error = %e, "multipart upload check failed"),
+        Err(CrabError::Cancelled) => return Err(CrabError::Cancelled),
+        Err(e) => {
+            warn!(error = %e, "multipart upload check failed");
+            all_issues.push(FsckIssue::check_failure("multipart upload", e.to_string()));
+        }
     }
 
     // Phase 6: PersistentChunkIndex / shard-list divergence.
@@ -636,7 +718,11 @@ pub async fn run_fsck(
     debug!("checking shard-list divergence");
     match checker.check_shard_list_divergence().await {
         Ok(issues) => all_issues.extend(issues),
-        Err(e) => warn!(error = %e, "shard-list divergence check failed"),
+        Err(CrabError::Cancelled) => return Err(CrabError::Cancelled),
+        Err(e) => {
+            warn!(error = %e, "shard-list divergence check failed");
+            all_issues.push(FsckIssue::check_failure("shard inventory", e.to_string()));
+        }
     }
 
     // Phase 7: Orphan file-index entries (informational).
@@ -644,7 +730,14 @@ pub async fn run_fsck(
     debug!("checking orphan file-index entries");
     match checker.check_orphan_file_index().await {
         Ok(issues) => all_issues.extend(issues),
-        Err(e) => warn!(error = %e, "orphan file-index check failed"),
+        Err(CrabError::Cancelled) => return Err(CrabError::Cancelled),
+        Err(e) => {
+            warn!(error = %e, "orphan file-index check failed");
+            all_issues.push(FsckIssue::check_failure(
+                "repository snapshot",
+                e.to_string(),
+            ));
+        }
     }
 
     // Tally issues by severity.
@@ -696,12 +789,16 @@ fn issue_code(kind: &IssueKind) -> String {
         IssueKind::GitVisibilityDamage { .. } => "fsck-git-visibility-damage",
         IssueKind::GitVisibilityBackfill { .. } => "fsck-git-visibility-backfill",
         IssueKind::MissingXorb { .. } => "fsck-missing-xorb",
+        IssueKind::MissingShard { .. } => "fsck-missing-shard",
+        IssueKind::CorruptXorb { .. } => "fsck-corrupt-xorb",
+        IssueKind::CorruptShard { .. } => "fsck-corrupt-shard",
         IssueKind::OrphanShard { .. } => "fsck-orphan-shard",
         IssueKind::PackListDivergence { .. } => "fsck-pack-list-divergence",
         IssueKind::ExpiredPushLock { .. } => "fsck-expired-push-lock",
         IssueKind::AbandonedMultipart { .. } => "fsck-abandoned-multipart",
         IssueKind::ShardListDivergence { .. } => "fsck-shard-list-divergence",
         IssueKind::OrphanFileIndex { .. } => "fsck-orphan-file-index",
+        IssueKind::CheckFailure { .. } => "fsck-check-failure",
     }
     .to_owned()
 }
@@ -710,7 +807,14 @@ fn issue_code(kind: &IssueKind) -> String {
 fn issue_path(kind: &IssueKind) -> Option<String> {
     match kind {
         IssueKind::DanglingRef { ref_name, .. } => Some(ref_name.clone()),
-        IssueKind::MissingXorb { xorb_hash } => Some(xorb_hash.clone()),
+        IssueKind::MissingXorb { xorb_hash: hash }
+        | IssueKind::MissingShard { shard_hash: hash }
+        | IssueKind::CorruptXorb {
+            xorb_hash: hash, ..
+        }
+        | IssueKind::CorruptShard {
+            shard_hash: hash, ..
+        } => Some(hash.clone()),
         IssueKind::OrphanShard { shard_key } => Some(shard_key.clone()),
         IssueKind::PackListDivergence { key, .. }
         | IssueKind::ExpiredPushLock { key, .. }
@@ -807,13 +911,13 @@ async fn repair_issues(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::error::CrabError;
     use tokio_util::sync::CancellationToken;
 
     // --- Mock checker that returns configurable issues ---
 
     #[derive(Default)]
     struct MockChecker {
+        git_failure: bool,
         git_issues: Vec<FsckIssue>,
         data_chain_issues: Vec<FsckIssue>,
         pack_list_issues: Vec<FsckIssue>,
@@ -828,6 +932,9 @@ mod tests {
             &self,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<FsckIssue>>> + Send + '_>>
         {
+            if self.git_failure {
+                return Box::pin(async { Err(CrabError::Internal("git checker failed".into())) });
+            }
             let issues = self.git_issues.clone();
             Box::pin(async move { Ok(issues) })
         }
@@ -990,6 +1097,7 @@ mod tests {
     async fn fsck_detects_all_issue_categories() {
         let now = SystemTime::now();
         let checker = MockChecker {
+            git_failure: false,
             git_issues: vec![
                 FsckIssue::dangling_ref("refs/heads/main", "deadbeef"),
                 FsckIssue::missing_tree("aaa111", "bbb222"),
@@ -1061,6 +1169,28 @@ mod tests {
         assert_eq!(issues[0].severity, IssueSeverity::Info);
         assert_eq!(outcome.errors, 0);
         assert_eq!(outcome.info_count, 1);
+    }
+
+    #[tokio::test]
+    async fn fsck_checker_failure_is_a_hard_error() {
+        let checker = MockChecker {
+            git_failure: true,
+            ..MockChecker::default()
+        };
+        let (issues, outcome) = run_fsck(
+            &FsckArgs::default(),
+            &checker,
+            &NullRepairer,
+            &CancellationToken::new(),
+            Duration::from_secs(3600),
+            None,
+        )
+        .await
+        .expect("checker failure should produce an fsck outcome");
+
+        assert!(matches!(issues[0].kind, IssueKind::CheckFailure { .. }));
+        assert_eq!(outcome.errors, 1);
+        assert!(!outcome.to_summary().passed);
     }
 
     #[tokio::test]

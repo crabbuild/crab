@@ -12,6 +12,7 @@ use crab_remote_git::{
     OperationContext, RemoteGitRepository, RemoteGitRuntime, RemoteGitSnapshot, RepositoryOptions,
     Revision,
 };
+use crab_storage::{Store, StoreLayout};
 use gix_hash::ObjectId;
 use tokio::sync::{Mutex, OnceCell, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -24,6 +25,28 @@ const CATALOG_MAINTENANCE_EPOCHS: u64 = 64;
 const MAX_CACHED_SNAPSHOTS: usize = 64;
 const MAX_CACHED_MANIFESTS: usize = 16;
 const MAX_CACHED_OBJECT_ATTRIBUTES: usize = 256;
+const MAX_CAPSULE_READ_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const CAPSULE_CHECKPOINT_THRESHOLD: u32 = 32;
+
+#[derive(Debug, thiserror::Error)]
+enum MaintenanceError {
+    #[error("repository protocol detection failed")]
+    Metadata(#[from] crab_metadata::error::MetadataError),
+    #[error("legacy repository maintenance failed")]
+    Legacy(#[from] crab_write::WriteError),
+    #[error("capsule repository maintenance failed")]
+    Capsule(#[from] crab_remote::checkpoint::CheckpointError),
+}
+
+async fn is_capsule_repository(repository: &StoreLayout<Store>) -> Result<bool, MaintenanceError> {
+    match crab_metadata::capsule_protocol::load_root(repository).await {
+        Ok(_) => Ok(true),
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        }) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReadViewKey {
@@ -43,6 +66,7 @@ type ObjectAttributeCell = Arc<OnceCell<Option<crate::attributes::ObjectAttribut
 pub(crate) struct ReadView {
     key: ReadViewKey,
     remote: RemoteGitRepository,
+    capsule_ref_counts: Option<HashMap<String, u32>>,
     snapshots: Mutex<HashMap<String, Arc<OnceCell<RemoteGitSnapshot>>>>,
     manifests: Mutex<HashMap<ObjectId, Arc<OnceCell<Arc<crate::attributes::Manifest>>>>>,
     objects: Mutex<HashMap<ObjectAttributeKey, ObjectAttributeCell>>,
@@ -51,6 +75,12 @@ pub(crate) struct ReadView {
 impl ReadView {
     pub(crate) fn remote(&self) -> &RemoteGitRepository {
         &self.remote
+    }
+
+    pub(crate) fn capsule_ref_count(&self, ref_name: &str) -> Option<u32> {
+        self.capsule_ref_counts
+            .as_ref()
+            .map(|counts| counts.get(ref_name).copied().unwrap_or_default())
     }
 
     pub(crate) async fn snapshot(
@@ -260,6 +290,18 @@ pub(crate) fn schedule_catalog_maintenance(
     let maintenance = Arc::clone(&repository.maintenance);
     let cancel = cancel.child_token();
     tokio::spawn(async move {
+        match is_capsule_repository(&layout).await {
+            Ok(true) => {
+                maintenance.finish_catalog_maintenance();
+                return;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                maintenance.finish_catalog_maintenance();
+                tracing::warn!(%error, "S3 repository protocol detection failed");
+                return;
+            }
+        }
         let result = crab_write::generation::ensure_catalog_readable(
             &store,
             &layout,
@@ -295,6 +337,68 @@ impl ReadViewCache {
         let _refresh = self.refresh.lock().await;
         if let Some(view) = self.observed_since(requested_at).await {
             return Ok(view);
+        }
+        match crab_metadata::capsule_protocol::load_root(&repository.layout).await {
+            Ok(root) => {
+                let capsule = crab_read::capsule_protocol::open_view_from_root_with_control(
+                    &repository.layout,
+                    root,
+                    crab_read::capsule_protocol::CapsuleReadLimits {
+                        max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
+                        max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
+                    },
+                )
+                .await?;
+                let observed_at = tokio::time::Instant::now();
+                let key = ReadViewKey {
+                    generation: capsule.root().root().generation(),
+                    snapshot_digest: capsule.state_digest(),
+                };
+                let existing = self
+                    .cached
+                    .read()
+                    .await
+                    .as_ref()
+                    .filter(|cached| cached.view.key == key)
+                    .map(|cached| Arc::clone(&cached.view));
+                let view = match existing {
+                    Some(view) => view,
+                    None => {
+                        let capsule_ref_counts = capsule
+                            .refs()
+                            .keys()
+                            .map(|name| (name.clone(), capsule.ref_capsule_count(name)))
+                            .collect();
+                        let remote = capsule
+                            .git_repository_from_store(
+                                repository.layout.clone(),
+                                repository.identity.clone(),
+                                runtime,
+                                options,
+                                MAX_CAPSULE_READ_BYTES,
+                                cancel,
+                            )
+                            .await?;
+                        Arc::new(ReadView {
+                            key,
+                            remote,
+                            capsule_ref_counts: Some(capsule_ref_counts),
+                            snapshots: Mutex::new(HashMap::new()),
+                            manifests: Mutex::new(HashMap::new()),
+                            objects: Mutex::new(HashMap::new()),
+                        })
+                    }
+                };
+                *self.cached.write().await = Some(CachedReadView {
+                    observed_at,
+                    view: Arc::clone(&view),
+                });
+                return Ok(view);
+            }
+            Err(crab_metadata::error::MetadataError::Storage {
+                source: crab_storage::StorageError::NotFound { .. },
+            }) => {}
+            Err(error) => return Err(error.into()),
         }
         let mut snapshot = crab_metadata::manifest_store::read_repository_snapshot(
             &repository.store,
@@ -364,6 +468,7 @@ impl ReadViewCache {
                 Arc::new(ReadView {
                     key,
                     remote,
+                    capsule_ref_counts: None,
                     snapshots: Mutex::new(HashMap::new()),
                     manifests: Mutex::new(HashMap::new()),
                     objects: Mutex::new(HashMap::new()),
@@ -408,27 +513,46 @@ pub(crate) fn schedule_readability(
             return;
         }
         loop {
-            let result = crab_write::generation::ensure_readable(
-                &store,
-                &layout,
-                &identity,
-                Arc::clone(&runtime),
-                options,
-                MAINTENANCE_TTL,
-                &cancel,
-            )
-            .await;
+            let result = match is_capsule_repository(&layout).await {
+                Ok(true) => crab_remote::checkpoint::publish_capsule_checkpoint(
+                    &layout,
+                    CAPSULE_CHECKPOINT_THRESHOLD,
+                    MAX_CAPSULE_READ_BYTES,
+                    &cancel,
+                )
+                .await
+                .map(|_| ())
+                .map_err(MaintenanceError::from),
+                Ok(false) => crab_write::generation::ensure_readable(
+                    &store,
+                    &layout,
+                    &identity,
+                    Arc::clone(&runtime),
+                    options,
+                    MAINTENANCE_TTL,
+                    &cancel,
+                )
+                .await
+                .map(|_| ())
+                .map_err(MaintenanceError::from),
+                Err(error) => Err(error),
+            };
             if let Err(error) = result {
                 maintenance.stop();
                 match error {
-                    crab_write::WriteError::VisibilityUnavailable { generation } => {
+                    MaintenanceError::Legacy(crab_write::WriteError::VisibilityUnavailable {
+                        generation,
+                    }) => {
                         tracing::warn!(
                             generation,
                             recovery = "run `crab fsck --repair`, then `crab metadb owner --once`, against this repository",
                             "S3 repository requires verified Git visibility repair"
                         );
                     }
-                    crab_write::WriteError::Cancelled if cancel.is_cancelled() => {}
+                    MaintenanceError::Legacy(crab_write::WriteError::Cancelled)
+                    | MaintenanceError::Capsule(
+                        crab_remote::checkpoint::CheckpointError::Cancelled,
+                    ) if cancel.is_cancelled() => {}
                     error => {
                         tracing::warn!(%error, "S3 repository background read maintenance failed");
                     }
@@ -464,6 +588,25 @@ async fn wait_for_idle(
 mod tests {
     use super::*;
     use crate::{RepositoryAccess, RepositoryConfig};
+
+    fn repository_config(prefix: &str) -> RepositoryConfig {
+        RepositoryConfig {
+            name: "repo".to_owned(),
+            provider: crab_storage::StorageProviderKind::Local,
+            bucket: "memory".to_owned(),
+            prefix: prefix.to_owned(),
+            default_branch: "main".to_owned(),
+            members: vec![crate::RepositoryMember {
+                principal: "user".to_owned(),
+                access: RepositoryAccess::Read,
+            }],
+            protected_branches: Vec::new(),
+            git_blob_max_bytes: 1024 * 1024,
+            max_active_multipart_uploads: 16,
+            multipart_staging_bytes_per_upload: 50_000_000_000_000,
+            multipart_upload_ttl_seconds: 604_800,
+        }
+    }
 
     #[test]
     fn foreground_write_cancels_only_maintenance_that_has_not_started() {
@@ -530,28 +673,8 @@ mod tests {
         crab_write::initialize::initialize_repository(&store, &layout, "refs/heads/main")
             .await
             .unwrap();
-        let repository = Arc::new(
-            Repository::new(
-                RepositoryConfig {
-                    name: "repo".to_owned(),
-                    provider: crab_storage::StorageProviderKind::Local,
-                    bucket: "memory".to_owned(),
-                    prefix: "read-view-test".to_owned(),
-                    default_branch: "main".to_owned(),
-                    members: vec![crate::RepositoryMember {
-                        principal: "user".to_owned(),
-                        access: RepositoryAccess::Read,
-                    }],
-                    protected_branches: Vec::new(),
-                    git_blob_max_bytes: 1024 * 1024,
-                    max_active_multipart_uploads: 16,
-                    multipart_staging_bytes_per_upload: 50_000_000_000_000,
-                    multipart_upload_ttl_seconds: 604_800,
-                },
-                store,
-            )
-            .unwrap(),
-        );
+        let repository =
+            Arc::new(Repository::new(repository_config("read-view-test"), store).unwrap());
         let runtime = Arc::new(RemoteGitRuntime::default());
         let barrier = Arc::new(tokio::sync::Barrier::new(16));
         let mut reads = tokio::task::JoinSet::new();
@@ -577,6 +700,70 @@ mod tests {
         while let Some(result) = reads.join_next().await {
             assert!(Arc::ptr_eq(&first, &result.unwrap()));
         }
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn capsule_repository_read_view_does_not_create_v1_metadata() {
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(store.clone(), "capsule-read-view".to_owned());
+        crab_write::capsule_protocol::initialize(&layout, &"a".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let repository =
+            Repository::new(repository_config("capsule-read-view"), store.clone()).unwrap();
+        let runtime = Arc::new(RemoteGitRuntime::default());
+
+        let view = repository
+            .read_views
+            .current(
+                &repository,
+                Arc::clone(&runtime),
+                RepositoryOptions::default(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(view.key.generation, 0);
+        assert!(matches!(
+            store.head(&layout.manifest_path()).await,
+            Err(crab_storage::StorageError::NotFound { .. })
+        ));
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn corrupt_capsule_root_never_falls_back_to_v1() {
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(store.clone(), "dual-read-view".to_owned());
+        crab_write::initialize::initialize_repository(&store, &layout, "refs/heads/main")
+            .await
+            .unwrap();
+        store
+            .put_overwrite(
+                &layout.capsule_root_path(),
+                bytes::Bytes::from_static(b"corrupt v2 authority"),
+            )
+            .await
+            .unwrap();
+        let repository = Repository::new(repository_config("dual-read-view"), store).unwrap();
+        let runtime = Arc::new(RemoteGitRuntime::default());
+
+        let result = repository
+            .read_views
+            .current(
+                &repository,
+                Arc::clone(&runtime),
+                RepositoryOptions::default(),
+                &CancellationToken::new(),
+            )
+            .await;
+        let Err(error) = result else {
+            panic!("corrupt capsule authority unexpectedly opened through v1");
+        };
+
+        assert!(matches!(error, crate::Error::Metadata(_)), "{error:?}");
         runtime.shutdown().await;
     }
 }

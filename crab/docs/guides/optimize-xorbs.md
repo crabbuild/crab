@@ -12,8 +12,10 @@ and grouping profile for cost and performance optimization. This is not
 | `dataset` | 64 MiB | — | — | LZ4 |
 | `code` | 16 MiB | — | — | LZ4 |
 
-When `--profile` is omitted, Crab scans the live xorb inventory and selects a
-profile from median source-object size:
+When `--profile` is omitted, Crab scans the live repository Xorb inventory and
+selects a profile from median source-object size. V2 inventory comes only from
+Xorbs reachable through the authenticated file/shard catalog, not every object
+in the shared global namespace:
 
 - p50 > 100 MiB: `ml`
 - p50 >= 1 MiB: `dataset`
@@ -52,12 +54,13 @@ crab optimize xorbs --profile ml --apply
 ```
 
 Apply writes immutable destination xorbs, records progress in a WAL journal,
-verifies source and destination size/hash, and reconciles file-index and shard
-metadata through a manifest CAS. Candidate indexes are published before the
-manifest becomes visible, and old roots remain protected until reconciliation
-completes. If the process is interrupted, rerun with `--resume`; uploaded
-immutable objects are safe to reuse and old objects remain eligible for normal
-garbage collection.
+and verifies source and destination size/hash. V2 rebuilds affected shards,
+verifies the complete replacement dependency closure, and publishes it in an
+exact-root-CAS checkpoint without creating legacy metadata. V1 retains its
+manifest-CAS path. Old roots remain protected until reconciliation completes.
+If the process is interrupted, rerun with `--resume`; uploaded immutable
+objects are safe to reuse and old objects remain eligible for normal garbage
+collection.
 
 Resume an interrupted run:
 
@@ -84,6 +87,12 @@ Archive-class source xorbs are restored before processing when included:
 
 - `--include-cold=false`: skip archive xorbs.
 - `--restore-tier=<tier>`: restore tier for archive sources.
+- `--output-class=<class>`: provider-native class for newly created destinations.
+
+Crab validates and canonicalizes the output class before starting the run. An
+already present content-addressed destination is verified and reused without
+changing its storage class; local stores ignore this cloud-only placement
+setting.
 
 ## Structured Output
 
@@ -95,3 +104,5 @@ Archive-class source xorbs are restored before processing when included:
 - Two `crab optimize xorbs` runs: second fails with `CRAB-E0332`.
 - `crab gc` + `crab optimize xorbs`: `ConcurrentMaintenance [E0333]`.
 - `crab push` + `crab optimize xorbs --dry-run`: safe; dry-run performs no writes.
+- `crab push` + `crab optimize xorbs --apply`: authority CAS retries from the
+  winning push, so current file roots are preserved.

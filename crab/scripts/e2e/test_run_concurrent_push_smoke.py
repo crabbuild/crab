@@ -160,6 +160,7 @@ class PushFailureStagesTest(unittest.TestCase):
 class UpstreamHandler(BaseHTTPRequestHandler):
     put_bodies: list[bytes] = []
     put_status = 200
+    reject_put_before_body = False
 
     def do_GET(self) -> None:
         self.send_response(200)
@@ -172,6 +173,13 @@ class UpstreamHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_PUT(self) -> None:
+        if self.reject_put_before_body:
+            self.send_response(self.put_status)
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            return
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         self.put_bodies.append(body)
         self.send_response(self.put_status)
@@ -187,6 +195,7 @@ class RequestCountingProxyTest(unittest.TestCase):
     def setUp(self) -> None:
         UpstreamHandler.put_bodies.clear()
         UpstreamHandler.put_status = 200
+        UpstreamHandler.reject_put_before_body = False
         self.upstream = ThreadingHTTPServer(("127.0.0.1", 0), UpstreamHandler)
         self.upstream.daemon_threads = True
         self.upstream_thread = threading.Thread(
@@ -232,6 +241,25 @@ class RequestCountingProxyTest(unittest.TestCase):
             content_length = response.headers["Content-Length"]
 
         self.assertEqual(content_length, "123")
+
+    def test_preserves_early_precondition_response_during_large_put(self) -> None:
+        UpstreamHandler.put_status = 412
+        UpstreamHandler.reject_put_before_body = True
+        body = b"x" * (32 * 1024 * 1024)
+        request = urllib.request.Request(
+            self.proxy.url + "/crab/.crab/xorbs/aa/content-address",
+            data=body,
+            method="PUT",
+        )
+
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request)
+
+        self.assertEqual(raised.exception.code, 412)
+        raised.exception.close()
+        snapshot = self.proxy.snapshot()
+        self.assertEqual(snapshot["statuses"], {"4xx": 1})
+        self.assertEqual(snapshot["request_body_bytes"], len(body))
 
     def test_list_uses_query_prefix_for_repository_category(self) -> None:
         request = urllib.request.Request(
@@ -285,6 +313,18 @@ class RequestCountingProxyTest(unittest.TestCase):
         self.assert_ref_journal_gate_waits(
             "prepared-head",
             "/crab/e2e-concurrent-push/run/refs/journal/heads/abc.json",
+        )
+
+    def test_v2_capsule_gate_waits_before_ref_visibility(self) -> None:
+        self.assert_ref_journal_gate_waits(
+            "prepared-head",
+            "/crab/e2e-concurrent-push/run/v2/capsules/aa/capsule",
+        )
+
+    def test_v2_ref_gate_waits_after_ref_visibility(self) -> None:
+        self.assert_ref_journal_gate_waits(
+            "active-marker",
+            "/crab/e2e-concurrent-push/run/v2/refs/heads/abc.json",
         )
 
     def assert_active_marker_fault(self, phase: str, forwarded: bool) -> None:

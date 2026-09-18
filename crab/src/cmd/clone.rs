@@ -10,13 +10,12 @@
 //! is fast even for multi-GB repos. Users can then selectively hydrate
 //! with `crab hydrate *.safetensors`.
 
-use std::fmt::Write as _;
 use std::future::Future;
-use std::io::{Stdout, Write as _};
+use std::io::Stdout;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -27,7 +26,6 @@ use crate::core::output::event_payloads::{
 };
 use crate::core::output::{JsonlStream, OutputMode};
 use crate::core::perf_phase::PhaseTimer;
-use crate::git::progress::{format_bytes, format_rate, is_tty};
 
 /// Arguments for the `crab clone` command.
 #[derive(Clone)]
@@ -85,131 +83,6 @@ fn emit_phase(stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>, payload: P
         let output = s.emit_schema_event(PERF_PHASE_SCHEMA, "event", payload);
         crate::core::output::report_progress_output(output);
     }
-}
-
-const CLONE_PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
-
-struct ClonePackProgressReporter {
-    mode: OutputMode,
-    jsonl_stream: Option<Arc<Mutex<JsonlStream<Stdout>>>>,
-    started: OnceLock<Instant>,
-    state: Mutex<ClonePackProgressState>,
-}
-
-#[derive(Default)]
-struct ClonePackProgressState {
-    last_report: Option<Instant>,
-    tty_line_open: bool,
-}
-
-impl ClonePackProgressReporter {
-    fn new(mode: OutputMode, jsonl_stream: Option<Arc<Mutex<JsonlStream<Stdout>>>>) -> Self {
-        Self {
-            mode,
-            jsonl_stream,
-            started: OnceLock::new(),
-            state: Mutex::new(ClonePackProgressState::default()),
-        }
-    }
-
-    fn report(&self, progress: crab_remote_git::PackDownloadProgress) {
-        let elapsed = self
-            .started
-            .get_or_init(Instant::now)
-            .elapsed()
-            .as_secs_f64();
-        let rate = if elapsed > 0.0 {
-            progress.bytes_downloaded as f64 / elapsed
-        } else {
-            0.0
-        };
-
-        match self.mode {
-            OutputMode::Json => {}
-            OutputMode::Jsonl => {
-                if let Some(stream) = &self.jsonl_stream
-                    && let Ok(mut stream) = stream.lock()
-                {
-                    let output = stream.emit_progress(ProgressPayload {
-                        operation: "downloading_git_packs".to_owned(),
-                        current: progress.packs_completed,
-                        total: progress.packs_total,
-                        bytes: progress.bytes_downloaded,
-                        total_bytes: progress.total_bytes,
-                        rate_bytes_per_sec: rate,
-                        xorbs_produced: None,
-                    });
-                    crate::core::output::report_progress_output(output);
-                }
-            }
-            OutputMode::Text => self.report_text(progress, rate),
-        }
-    }
-
-    fn report_text(&self, progress: crab_remote_git::PackDownloadProgress, rate: f64) {
-        let now = Instant::now();
-        let complete = progress.packs_completed == progress.packs_total
-            && progress.bytes_downloaded == progress.total_bytes;
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
-        if !complete
-            && state
-                .last_report
-                .is_some_and(|last| now.duration_since(last) < CLONE_PROGRESS_INTERVAL)
-        {
-            return;
-        }
-
-        let message = format_clone_pack_progress(progress, rate);
-        if is_tty() {
-            eprint!("\r\x1b[2K{message}");
-            let _ = std::io::stderr().flush();
-            state.tty_line_open = true;
-            if complete {
-                eprintln!();
-                state.tty_line_open = false;
-            }
-        } else {
-            eprintln!("{message}");
-        }
-        state.last_report = Some(now);
-    }
-}
-
-impl Drop for ClonePackProgressReporter {
-    fn drop(&mut self) {
-        if self.mode == OutputMode::Text
-            && let Ok(state) = self.state.lock()
-            && state.tty_line_open
-        {
-            eprintln!();
-        }
-    }
-}
-
-fn format_clone_pack_progress(
-    progress: crab_remote_git::PackDownloadProgress,
-    rate_bytes_per_sec: f64,
-) -> String {
-    let percent = if progress.total_bytes == 0 {
-        0
-    } else {
-        ((u128::from(progress.bytes_downloaded) * 100) / u128::from(progress.total_bytes)).min(100)
-            as u64
-    };
-    let mut message = format!(
-        "Downloading Git packs: {percent}% ({} / {}, {}/{} packs",
-        format_bytes(progress.bytes_downloaded),
-        format_bytes(progress.total_bytes),
-        progress.packs_completed,
-        progress.packs_total,
-    );
-    if rate_bytes_per_sec > 0.0 {
-        let _ = write!(&mut message, ", {}", format_rate(rate_bytes_per_sec));
-    }
-    message.push(')');
-    message
 }
 
 /// Clone a repository, creating the target directory under `parent`.
@@ -307,26 +180,10 @@ pub async fn run_clone_in(
     }
 
     let phase = PhaseTimer::start("clone", "pack_fetch");
-    let pack_progress = ClonePackProgressReporter::new(args.mode, jsonl_stream.clone());
-    if args.depth.is_none()
-        && let Some(prepared) = Box::pin(prepare_complete_clone_inventory(
-            target_dir.parent().unwrap_or(parent),
-            args,
-            cancel,
-            &pack_progress,
-        ))
-        .await?
-    {
-        if !args.mode.is_machine() {
-            eprintln!("Creating local Git repository...");
-        }
-        run_complete_inventory_clone(parent, args, &target_dir, &prepared)?;
-    } else {
-        if !args.mode.is_machine() {
-            eprintln!("Fetching Git history...");
-        }
-        run_git_clone_no_checkout(parent, args, &target_dir)?;
+    if !args.mode.is_machine() {
+        eprintln!("Fetching Git history...");
     }
+    run_git_clone_no_checkout(parent, args, &target_dir)?;
     scrub_git_pack_appledouble_files(&target_dir)?;
     emit_phase(jsonl_stream.as_deref(), phase.finish(0, 0, 1));
 
@@ -883,185 +740,6 @@ fn run_git_clone_no_checkout_from(
         )));
     }
 
-    Ok(())
-}
-
-async fn prepare_complete_clone_inventory(
-    workspace_parent: &Path,
-    args: &CloneArgs,
-    cancel: &CancellationToken,
-    progress: &ClonePackProgressReporter,
-) -> Result<Option<PreparedCompleteClone>> {
-    let config = crate::core::config::Config::resolve_local()?;
-    let parsed = crate::git::url::CrabUrl::parse(&args.url)?;
-    let selection =
-        crate::replication::select_read_store(&config, &parsed, "clone:pack-bootstrap", cancel)
-            .await?;
-    let (repository, Some(visibility)) = Box::pin(
-        crate::git::upload_pack_wire::open_repository_with_optional_catalog_visibility(
-            selection.store.as_storage(),
-            selection.router.repo_prefix(),
-            cancel,
-        ),
-    )
-    .await?
-    else {
-        return Ok(None);
-    };
-    let visible_refs = crate::git::upload_pack_wire::visible_ref_names(
-        repository.refs(),
-        &config.transfer_hide_refs,
-    )?;
-    let head_visible = repository
-        .refs()
-        .head
-        .as_ref()
-        .is_some_and(|head| visible_refs.iter().any(|name| name == &head.name))
-        || repository
-            .refs()
-            .unborn_head
-            .as_ref()
-            .is_some_and(|head| visible_refs.iter().any(|name| name == head));
-    if !head_visible {
-        return Ok(None);
-    }
-    let report_progress = |update| progress.report(update);
-    let inventory = repository
-        .download_complete_pack_inventory(
-            &visibility,
-            &visible_refs,
-            workspace_parent,
-            cancel,
-            Some(&report_progress),
-        )
-        .await
-        .map_err(|error| CrabError::Protocol(error.to_string()))?;
-    Ok(inventory.map(|inventory| PreparedCompleteClone {
-        inventory,
-        refs: repository.refs().clone(),
-        visible_ref_names: visible_refs,
-    }))
-}
-
-struct PreparedCompleteClone {
-    inventory: crab_remote_git::DownloadedPackInventory,
-    refs: crab_remote_git::RepositoryRefs,
-    visible_ref_names: Vec<String>,
-}
-
-fn run_complete_inventory_clone(
-    parent: &Path,
-    args: &CloneArgs,
-    target: &Path,
-    prepared: &PreparedCompleteClone,
-) -> Result<()> {
-    // Git owns clone ref/config semantics while hard-linking the verified
-    // committed pack inventory, avoiding repository-sized re-indexing.
-    let workspace = tempfile::tempdir_in(target.parent().unwrap_or(parent))?;
-    let source = workspace.path().join("source.git");
-    let status = Command::new("git")
-        .args(["init", "--bare", "--quiet", "--"])
-        .arg(&source)
-        .current_dir(parent)
-        .status()?;
-    if !status.success() {
-        return Err(CrabError::Protocol(format!(
-            "git init --bare exited with status {}",
-            status.code().unwrap_or(-1),
-        )));
-    }
-    install_complete_clone_inventory(&source.join("objects/pack"), &prepared.inventory)?;
-    install_complete_clone_refs(&source, &prepared.refs, &prepared.visible_ref_names)?;
-    run_git_clone_no_checkout_from(parent, args, target, source.as_os_str(), true)?;
-    run_git_at(target, &["remote", "set-url", "origin", &args.url])?;
-    Ok(())
-}
-
-fn install_complete_clone_inventory(
-    pack_dir: &Path,
-    inventory: &crab_remote_git::DownloadedPackInventory,
-) -> Result<()> {
-    for source in inventory.packs() {
-        crab_git::pack::install_pack_files_from_paths_with_identity(
-            pack_dir,
-            &source.path,
-            &source.index_path,
-            &source.reverse_index_path,
-            &source.canonical_id,
-            source.size,
-            source.object_count,
-            source.verified_identity,
-        )?;
-    }
-
-    Ok(())
-}
-
-fn install_complete_clone_refs(
-    target: &Path,
-    refs: &crab_remote_git::RepositoryRefs,
-    visible_ref_names: &[String],
-) -> Result<()> {
-    let visible = |name: &str| visible_ref_names.iter().any(|entry| entry == name);
-    let mut updates = String::new();
-    for reference in &refs.entries {
-        if !visible(&reference.name) {
-            continue;
-        }
-        writeln!(
-            &mut updates,
-            "update {} {}",
-            reference.name, reference.target
-        )
-        .map_err(|error| CrabError::Internal(error.to_string()))?;
-    }
-    run_update_ref_stdin(target, updates.as_bytes())?;
-    let head = refs
-        .head
-        .as_ref()
-        .map(|head| head.name.as_str())
-        .or(refs.unborn_head.as_deref())
-        .filter(|name| visible(name))
-        .ok_or_else(|| CrabError::Protocol("remote HEAD is not visible".to_owned()))?;
-    run_git_at(target, &["symbolic-ref", "HEAD", head])
-}
-
-fn run_update_ref_stdin(target: &Path, input: &[u8]) -> Result<()> {
-    let mut child = Command::new("git")
-        .args(["update-ref", "--stdin"])
-        .current_dir(target)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    child
-        .stdin
-        .as_mut()
-        .ok_or_else(|| CrabError::Internal("git update-ref stdin is unavailable".to_owned()))?
-        .write_all(input)?;
-    drop(child.stdin.take());
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        return Err(CrabError::Protocol(format!(
-            "git update-ref failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(())
-}
-
-fn run_git_at(target: &Path, args: &[&str]) -> Result<()> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(target)
-        .output()?;
-    if !output.status.success() {
-        return Err(CrabError::Protocol(format!(
-            "git {} failed: {}",
-            args.first().copied().unwrap_or("command"),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
     Ok(())
 }
 
@@ -1681,21 +1359,6 @@ fn record_pointer_extension(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn clone_pack_progress_reports_bytes_packs_and_rate() {
-        let progress = crab_remote_git::PackDownloadProgress {
-            packs_completed: 1,
-            packs_total: 3,
-            bytes_downloaded: 40 * 1024 * 1024,
-            total_bytes: 1024 * 1024 * 1024,
-        };
-
-        assert_eq!(
-            format_clone_pack_progress(progress, 12.5 * 1024.0 * 1024.0),
-            "Downloading Git packs: 3% (40.0 MiB / 1.0 GiB, 1/3 packs, 12.5 MiB/s)"
-        );
-    }
 
     fn git_in(repo: &Path, args: &[&str]) {
         let status = std::process::Command::new("git")

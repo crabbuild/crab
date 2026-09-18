@@ -276,6 +276,28 @@ pub fn repack_repository_geometric(
     sources: &[RepackSource],
     refs: &BTreeSet<String>,
 ) -> Result<GeometricRepackedRepository, RepackError> {
+    repack_repository(sources, refs, RepositoryRepackMode::Geometric)
+}
+
+/// Consolidates every object reachable from the supplied refs into one pack.
+pub fn repack_repository_complete(
+    sources: &[RepackSource],
+    refs: &BTreeSet<String>,
+) -> Result<GeometricRepackedRepository, RepackError> {
+    repack_repository(sources, refs, RepositoryRepackMode::Complete)
+}
+
+#[derive(Clone, Copy)]
+enum RepositoryRepackMode {
+    Geometric,
+    Complete,
+}
+
+fn repack_repository(
+    sources: &[RepackSource],
+    refs: &BTreeSet<String>,
+    mode: RepositoryRepackMode,
+) -> Result<GeometricRepackedRepository, RepackError> {
     if refs.is_empty() {
         return Err(RepackError::EmptyRefs);
     }
@@ -290,17 +312,22 @@ pub fn repack_repository_geometric(
         });
     let _ = install_source_packs(&pack_dir, sources, concurrency, false)?;
     pin_refs_and_fsck(&source_git, refs, "validate source repository")?;
-    run_git(
-        Command::new("git")
-            .arg(format!("--git-dir={}", source_git.display()))
-            .arg("repack")
-            .arg("-q")
-            .arg("-d")
-            .arg("-g")
-            .arg("2")
-            .arg("--depth=64"),
-        "geometrically repack source repository",
-    )?;
+    let mut command = Command::new("git");
+    command
+        .arg(format!("--git-dir={}", source_git.display()))
+        .arg("repack")
+        .arg("-q")
+        .arg("-d");
+    match mode {
+        RepositoryRepackMode::Geometric => {
+            command.arg("-g").arg("2");
+        }
+        RepositoryRepackMode::Complete => {
+            command.arg("-a");
+        }
+    }
+    command.arg("--depth=64");
+    run_git(&mut command, "repack source repository")?;
 
     let source_ids = sources
         .iter()
@@ -324,7 +351,7 @@ pub fn repack_repository_geometric(
     if pack_paths.is_empty() {
         return Err(RepackError::SourceIntegrity {
             pack_id: "geometric-repack".to_owned(),
-            reason: "geometric repack produced no pack files".to_owned(),
+            reason: "repository repack produced no pack files".to_owned(),
         });
     }
 
@@ -353,7 +380,7 @@ pub fn repack_repository_geometric(
                 .arg("-v")
                 .arg(&index_path)
                 .stdout(Stdio::null()),
-            "verify geometrically repacked pack",
+            "verify repacked pack",
         )?;
         let (pack_hash, hashed_pack_size) = hash_file(&pack_path)?;
         if hashed_pack_size != pack_size {
@@ -1629,7 +1656,12 @@ fn pin_refs_and_fsck(
     operation: &'static str,
 ) -> Result<(), RepackError> {
     for (index, oid) in refs.iter().enumerate() {
-        let name = format!("refs/heads/crab-repack-{index}");
+        // A visible ref may legally target a tag, tree, or blob (for
+        // example an annotated tag or a Git-generated namespace). Pinning
+        // every object under `refs/heads` makes Git reject valid inventories
+        // before fsck can verify them. Temporary tags accept every Git object
+        // type while keeping the complete reachable closure visible.
+        let name = format!("refs/tags/crab-repack-{index}");
         run_git(
             Command::new("git")
                 .arg(format!("--git-dir={}", repository.display()))
@@ -1638,16 +1670,6 @@ fn pin_refs_and_fsck(
                 .arg(oid),
             operation,
         )?;
-        if index == 0 {
-            run_git(
-                Command::new("git")
-                    .arg(format!("--git-dir={}", repository.display()))
-                    .arg("symbolic-ref")
-                    .arg("HEAD")
-                    .arg(&name),
-                operation,
-            )?;
-        }
     }
     run_git(
         Command::new("git")
@@ -2056,7 +2078,14 @@ mod tests {
                 .args(["rev-parse", "HEAD"]),
             "resolve test tip",
         )?;
-        let refs = BTreeSet::from([tip]);
+        let blob = git_output(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["rev-parse", "HEAD:first.txt"]),
+            "resolve visible blob ref",
+        )?;
+        let refs = BTreeSet::from([tip, blob]);
         let sources = [source_descriptor(first)?, source_descriptor(second)?];
 
         let geometric = repack_repository_geometric(&sources, &refs)?;
@@ -2067,6 +2096,9 @@ mod tests {
             assert!(pack.index_path().is_file());
             assert!(pack.reverse_index_path().is_file());
         }
+        let complete = repack_repository_complete(&sources, &refs)?;
+        assert_eq!(complete.packs().len(), 1);
+        assert!(complete.packs()[0].object_count <= sources.iter().map(|s| s.object_count).sum());
         let selected = consolidate_pack_suffix_with_concurrency(&sources, 2)?;
         assert_eq!(selected.packs().len(), 1);
         assert!(selected.packs()[0].object_count <= sources.iter().map(|s| s.object_count).sum());

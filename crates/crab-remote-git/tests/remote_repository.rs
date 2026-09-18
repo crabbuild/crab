@@ -1728,6 +1728,22 @@ async fn thin_subset_pack_uses_only_client_proven_delta_bases() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn external_thin_subset_pack_keeps_the_proven_base_outside_the_pack() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let base = fixture_ref_delta_base(&fixture);
+
+    let generated = fixture
+        .repository
+        .generate_pack_with_external_bases(&[fixture.target], &[base], &CancellationToken::new())
+        .await
+        .expect("generate external-base thin subset pack");
+
+    assert_eq!(generated.object_count(), 1);
+    strict_thin_pack(generated.path(), &fixture.source_git_dir);
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn incoming_thin_pack_resolves_bases_through_bounded_remote_reads() {
     use crab_git::incoming_pack::{BaseObject, ReceiveLimits, quarantine};
 

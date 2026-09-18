@@ -42,7 +42,7 @@ pub use pack::{
     PackDownloadProgress,
 };
 pub use path::GitPath;
-pub use reader::{RemoteGitObject, RemoteGitObjectMetadata};
+pub use reader::{RemoteGitObject, RemoteGitObjectMetadata, RemoteGitPackSource};
 pub use refs::{HeadReference, RepositoryRef, RepositoryRefs};
 pub use repository::RemoteGitRepository;
 pub use repository::{ObjectLimits, OperationLimits, RepositoryIdentity, RepositoryOptions};

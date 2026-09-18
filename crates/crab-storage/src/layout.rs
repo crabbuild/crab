@@ -176,6 +176,81 @@ impl<S> StoreLayout<S> {
         self.repo_path("layout")
     }
 
+    /// Path to the capsule-protocol repository root.
+    #[must_use]
+    pub fn capsule_root_path(&self) -> ObjectPath {
+        self.repo_path("v2/root")
+    }
+
+    /// Path to one immutable capsule-protocol capsule.
+    #[must_use]
+    pub fn capsule_path(&self, hash: &str) -> ObjectPath {
+        let partition = hash.get(..GLOBAL_CONTENT_FANOUT_WIDTH).unwrap_or(hash);
+        self.repo_path(&format!("v2/capsules/{partition}/{hash}"))
+    }
+
+    /// Path to one immutable capsule-protocol checkpoint.
+    #[must_use]
+    pub fn capsule_checkpoint_path(&self, hash: &str) -> ObjectPath {
+        let partition = hash.get(..GLOBAL_CONTENT_FANOUT_WIDTH).unwrap_or(hash);
+        self.repo_path(&format!("v2/checkpoints/{partition}/{hash}"))
+    }
+
+    /// Path to one immutable capsule-protocol history segment.
+    #[must_use]
+    pub fn capsule_history_segment_path(&self, hash: &str) -> ObjectPath {
+        let partition = hash.get(..GLOBAL_CONTENT_FANOUT_WIDTH).unwrap_or(hash);
+        self.repo_path(&format!("v2/history/{partition}/{hash}"))
+    }
+
+    /// Prefix containing independently mutable capsule-protocol ref heads.
+    #[must_use]
+    pub fn capsule_ref_heads_prefix(&self) -> ObjectPath {
+        self.repo_path("v2/refs/heads")
+    }
+
+    /// Path to one independently mutable capsule-protocol ref head.
+    #[must_use]
+    pub fn capsule_ref_head_path(&self, ref_name_key: &str) -> ObjectPath {
+        self.repo_path(&format!("v2/refs/heads/{ref_name_key}.json"))
+    }
+
+    /// Prefix containing independently coordinated multi-ref transactions.
+    #[must_use]
+    pub fn capsule_transactions_prefix(&self) -> ObjectPath {
+        self.repo_path("v2/transactions/records")
+    }
+
+    /// Path to one capsule-protocol multi-ref transaction record.
+    #[must_use]
+    pub fn capsule_transaction_path(&self, activation_id: &str) -> ObjectPath {
+        self.repo_path(&format!("v2/transactions/records/{activation_id}.json"))
+    }
+
+    /// Prefix containing immutable committed multi-ref publication markers.
+    #[must_use]
+    pub fn capsule_committed_transactions_prefix(&self) -> ObjectPath {
+        self.repo_path("v2/transactions/committed")
+    }
+
+    /// Path to one immutable committed multi-ref publication marker.
+    #[must_use]
+    pub fn capsule_committed_transaction_path(&self, activation_id: &str) -> ObjectPath {
+        self.repo_path(&format!("v2/transactions/committed/{activation_id}.json"))
+    }
+
+    /// Path to the immutable pre-commit binding for one reviewed mirror plan.
+    #[must_use]
+    pub fn capsule_plan_intent_path(&self, plan_id: &str) -> ObjectPath {
+        self.repo_path(&format!("v2/plans/{plan_id}/intent.json"))
+    }
+
+    /// Path to the immutable terminal receipt for one reviewed mirror plan.
+    #[must_use]
+    pub fn capsule_plan_receipt_path(&self, plan_id: &str) -> ObjectPath {
+        self.repo_path(&format!("v2/plans/{plan_id}/terminal.json"))
+    }
+
     /// Path to the fresh-clone replica discovery document.
     #[must_use]
     pub fn replica_discovery_path(&self) -> ObjectPath {
@@ -518,6 +593,58 @@ mod tests {
         let layout = test_layout();
         let path = layout.repo_path("refs/heads/main");
         assert_eq!(path.as_ref(), "org/models/refs/heads/main");
+    }
+
+    #[test]
+    fn capsule_protocol_paths_stay_inside_repository_prefix() {
+        let layout = test_layout();
+        let hash = format!("ab{}", "1".repeat(62));
+
+        assert_eq!(layout.capsule_root_path().as_ref(), "org/models/v2/root");
+        assert_eq!(
+            layout.capsule_path(&hash).as_ref(),
+            format!("org/models/v2/capsules/ab/{hash}")
+        );
+        assert_eq!(
+            layout.capsule_checkpoint_path(&hash).as_ref(),
+            format!("org/models/v2/checkpoints/ab/{hash}")
+        );
+        assert_eq!(
+            layout.capsule_history_segment_path(&hash).as_ref(),
+            format!("org/models/v2/history/ab/{hash}")
+        );
+        assert_eq!(
+            layout.capsule_ref_heads_prefix().as_ref(),
+            "org/models/v2/refs/heads"
+        );
+        assert_eq!(
+            layout.capsule_ref_head_path("deadbeef").as_ref(),
+            "org/models/v2/refs/heads/deadbeef.json"
+        );
+        assert_eq!(
+            layout.capsule_transactions_prefix().as_ref(),
+            "org/models/v2/transactions/records"
+        );
+        assert_eq!(
+            layout.capsule_transaction_path(&hash).as_ref(),
+            format!("org/models/v2/transactions/records/{hash}.json")
+        );
+        assert_eq!(
+            layout.capsule_committed_transactions_prefix().as_ref(),
+            "org/models/v2/transactions/committed"
+        );
+        assert_eq!(
+            layout.capsule_committed_transaction_path(&hash).as_ref(),
+            format!("org/models/v2/transactions/committed/{hash}.json")
+        );
+        assert_eq!(
+            layout.capsule_plan_intent_path(&hash).as_ref(),
+            format!("org/models/v2/plans/{hash}/intent.json")
+        );
+        assert_eq!(
+            layout.capsule_plan_receipt_path(&hash).as_ref(),
+            format!("org/models/v2/plans/{hash}/terminal.json")
+        );
     }
 
     #[test]

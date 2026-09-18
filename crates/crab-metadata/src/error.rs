@@ -6,6 +6,12 @@ pub type Result<T> = std::result::Result<T, MetadataError>;
 /// Errors raised by metadata schema and local index helpers.
 #[derive(thiserror::Error, Debug)]
 pub enum MetadataError {
+    /// A locally constructed capsule-protocol record violates its wire contract.
+    #[error("invalid capsule-protocol {record}: {reason}")]
+    CapsuleContract {
+        record: &'static str,
+        reason: String,
+    },
     /// A file lookup could not acquire process-wide execution capacity.
     #[cfg(feature = "file-index-reader")]
     #[error("file lookup admission closed")]

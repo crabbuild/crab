@@ -1,15 +1,11 @@
-//! CLI surface for `crab metadb` — operator tooling for the two
-//! SlateDB metadata databases.
+//! CLI surface for `crab metadb` — operator tooling for v2 capsule metadata
+//! and the two legacy SlateDB metadata databases.
 //!
 //! Subcommands:
 //!
-//! - `diagnose` — read-only health snapshot of the system keys
-//!   (`sys:format_version`, `sys:epoch`, `sys:created_at`,
-//!   `sys:gc_generation`). Optional `--db` filter narrows to a single
-//!   instance. Deeper integrity checks (WAL replay, bloom validity)
-//!   would live here too, but the public `slatedb` crate does not
-//!   expose those surfaces yet; the diagnose output records the gap
-//!   rather than claiming a check ran.
+//! - `diagnose` — read-only v2 authority/catalog diagnosis or a v1 health
+//!   snapshot of the SlateDB system keys (`sys:format_version`, `sys:epoch`,
+//!   `sys:created_at`, `sys:gc_generation`).
 //! - `rebuild` — disaster-recovery reconstruction of one or both
 //!   databases from the durable shards under `.crab/shards/`. The
 //!   MVP implementation is append-only: every entry is
@@ -133,8 +129,38 @@ pub enum MetadbCommand {
 /// Structured payload for `crab metadb diagnose --json`.
 #[derive(Debug, Serialize)]
 pub struct DiagnosePayload {
+    pub protocol: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capsule: Option<CapsuleDiagnosis>,
     pub file_index: Option<DbDiagnosis>,
     pub chunk_index: Option<DbDiagnosis>,
+}
+
+/// Protocol-v2 authority and optional full-catalog diagnosis.
+#[derive(Debug, Serialize)]
+pub struct CapsuleDiagnosis {
+    pub root_path: String,
+    pub generation: u64,
+    pub root_digest: String,
+    pub state_digest: String,
+    pub visible_refs: u64,
+    pub visible_capsules: u64,
+    pub checkpoint_present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deep_integrity: Option<CapsuleDeepIntegrity>,
+}
+
+/// Results of authenticating every v2 metadata and Git-pack container.
+#[derive(Debug, Serialize)]
+pub struct CapsuleDeepIntegrity {
+    pub git_packs: u64,
+    pub git_pack_bytes: u64,
+    pub git_closure_verified: bool,
+    pub file_entries: Option<u64>,
+    pub shard_entries: u64,
+    pub xorb_entries: Option<u64>,
+    pub pointer_objects_read: u64,
+    pub verdict: &'static str,
 }
 
 /// Per-database system-key summary.
@@ -360,6 +386,8 @@ fn build_metadb(
 struct GenerationOwnerSample {
     #[serde(skip)]
     identity: GenerationOwnerIdentity,
+    protocol: &'static str,
+    inventory_loaded: bool,
     generation: u64,
     action: &'static str,
     maintenance_reason: &'static str,
@@ -381,11 +409,16 @@ struct GenerationOwnerSample {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct GenerationOwnerIdentity {
-    generation: u64,
-    pack_index_hash: String,
-    git_validation_digest: String,
-    commit_graph_hash: Option<String>,
+enum GenerationOwnerIdentity {
+    Legacy {
+        generation: u64,
+        pack_index_hash: String,
+        git_validation_digest: String,
+        commit_graph_hash: Option<String>,
+    },
+    Capsule {
+        state_digest: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -396,7 +429,7 @@ struct GenerationOwnerActivity {
 
 impl From<&crab_metadata::manifests::Manifest> for GenerationOwnerIdentity {
     fn from(manifest: &crab_metadata::manifests::Manifest) -> Self {
-        Self {
+        Self::Legacy {
             generation: manifest.generation,
             pack_index_hash: manifest.pack_index_hash.clone(),
             git_validation_digest: manifest.git_validation_digest.clone(),
@@ -434,6 +467,8 @@ const GENERATION_OWNER_ONCE_RETRY_INTERVAL_SECS: u64 = 2;
 const GENERATION_OWNER_MIN_QUIESCENCE: std::time::Duration = std::time::Duration::from_secs(5);
 const GENERATION_OWNER_STABLE_REVALIDATION: std::time::Duration =
     std::time::Duration::from_mins(10);
+const CAPSULE_OWNER_CHECKPOINT_THRESHOLD: u32 = 32;
+const CAPSULE_OWNER_MAX_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 fn generation_owner_repack_has_priority(
     geometric_repack_packs: u64,
@@ -445,6 +480,13 @@ fn generation_owner_repack_has_priority(
 
 fn generation_owner_quiescence(interval_secs: u64) -> std::time::Duration {
     std::time::Duration::from_secs(interval_secs).max(GENERATION_OWNER_MIN_QUIESCENCE)
+}
+
+fn capsule_checkpoint_due(once: bool, has_checkpoint: bool, capsule_count: u64) -> bool {
+    if has_checkpoint && capsule_count == 0 {
+        return false;
+    }
+    once || capsule_count >= u64::from(CAPSULE_OWNER_CHECKPOINT_THRESHOLD)
 }
 
 async fn run_generation_owner(
@@ -462,6 +504,12 @@ async fn run_generation_owner(
     let (inner, repo_prefix, bucket_identity, config) = resolve_repo_store(cancel).await?;
     let store = crate::storage::store::Store::new(inner).with_bucket_identity(bucket_identity);
     let router = crate::storage::StoreLayout::new(store.clone(), repo_prefix.clone());
+    let capsule_layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let capsule_root = capsule_owner_root(&capsule_layout).await?;
     let lock_ttl = std::time::Duration::from_secs(config.push_lock_ttl_secs);
     let owner_cancel = cancel.child_token();
     let mut owner = crab_coordination::PushLock::acquire_internal(
@@ -478,6 +526,7 @@ async fn run_generation_owner(
         generation_owner_loop(
             &store,
             &router,
+            capsule_root.as_ref().map(|_| &capsule_layout),
             once,
             interval_secs,
             jsonl,
@@ -496,9 +545,222 @@ async fn run_generation_owner(
     operation
 }
 
+async fn capsule_owner_root(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+) -> Result<Option<crab_metadata::capsule_protocol::RootSnapshot>> {
+    match crab_metadata::capsule_protocol::load_root(layout).await {
+        Ok(root) => Ok(Some(root)),
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        }) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn capsule_generation_owner_sample(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    once: bool,
+    interval_secs: u64,
+    quiescence: std::time::Duration,
+    observed_activity: &mut Option<(GenerationOwnerActivity, std::time::Instant)>,
+    completed_work: Option<&CompletedGenerationOwnerWork>,
+    cancel: &CancellationToken,
+) -> Result<GenerationOwnerSample> {
+    let started = std::time::Instant::now();
+    let root = crab_metadata::capsule_protocol::load_root(layout).await?;
+    let generation = root.record().root().generation();
+    let activity = crab_read::capsule_protocol::read_activity_from_root(layout, &root).await?;
+    let identity = GenerationOwnerIdentity::Capsule {
+        state_digest: activity.state_digest().to_owned(),
+    };
+    let quiet = once
+        || generation_owner_activity_is_quiet(
+            GenerationOwnerActivity {
+                identity: identity.clone(),
+                active_transactions_digest: [0; 32],
+            },
+            observed_activity,
+            std::time::Instant::now(),
+            quiescence,
+        );
+    if !quiet {
+        return Ok(capsule_owner_sample(
+            identity,
+            generation,
+            "quiescence_wait",
+            interval_secs,
+            0,
+            0,
+            false,
+            false,
+            started,
+        ));
+    }
+    if let Some(completed) = completed_work
+        && completed.sample.identity == identity
+        && completed.completed_at.elapsed() < GENERATION_OWNER_STABLE_REVALIDATION
+    {
+        let mut sample = completed.sample.clone();
+        sample.action = "idle";
+        sample.maintenance_reason = generation_owner_reason("idle");
+        sample.next_eligibility_secs = interval_secs;
+        sample.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        return Ok(sample);
+    }
+    if !capsule_checkpoint_due(
+        once,
+        root.record().root().checkpoint().is_some(),
+        activity.capsule_count(),
+    ) {
+        return Ok(capsule_owner_sample(
+            identity,
+            generation,
+            "none",
+            interval_secs,
+            0,
+            0,
+            false,
+            false,
+            started,
+        ));
+    }
+    let view = crab_read::capsule_protocol::open_view_from_root(
+        layout,
+        root,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+            max_frontier_bytes: CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+        },
+    )
+    .await?;
+    let view_identity = GenerationOwnerIdentity::Capsule {
+        state_digest: view.state_digest(),
+    };
+    if !once
+        && !generation_owner_activity_is_quiet(
+            GenerationOwnerActivity {
+                identity: view_identity.clone(),
+                active_transactions_digest: [0; 32],
+            },
+            observed_activity,
+            std::time::Instant::now(),
+            quiescence,
+        )
+    {
+        return Ok(capsule_owner_sample(
+            view_identity,
+            view.root().root().generation(),
+            "quiescence_wait",
+            interval_secs,
+            u64::try_from(view.git_pack_count()).unwrap_or(u64::MAX),
+            view.git_pack_bytes()?,
+            true,
+            false,
+            started,
+        ));
+    }
+    let active_packs = u64::try_from(view.git_pack_count()).unwrap_or(u64::MAX);
+    let active_pack_bytes = view.git_pack_bytes()?;
+    if active_packs == 0 {
+        return Ok(capsule_owner_sample(
+            view_identity,
+            view.root().root().generation(),
+            "none",
+            interval_secs,
+            active_packs,
+            active_pack_bytes,
+            true,
+            false,
+            started,
+        ));
+    }
+    let threshold = if once {
+        0
+    } else {
+        CAPSULE_OWNER_CHECKPOINT_THRESHOLD
+    };
+    let checkpointed = crab_remote::checkpoint::publish_capsule_checkpoint_from_view(
+        layout,
+        &view,
+        threshold,
+        CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+        cancel,
+    )
+    .await
+    .map_err(map_capsule_owner_error)?;
+    Ok(capsule_owner_sample(
+        view_identity,
+        view.root().root().generation(),
+        if checkpointed {
+            "capsule_checkpoint"
+        } else {
+            "none"
+        },
+        if checkpointed { 0 } else { interval_secs },
+        active_packs,
+        active_pack_bytes,
+        true,
+        checkpointed,
+        started,
+    ))
+}
+
+fn capsule_owner_sample(
+    identity: GenerationOwnerIdentity,
+    generation: u64,
+    action: &'static str,
+    next_eligibility_secs: u64,
+    active_packs: u64,
+    active_pack_bytes: u64,
+    inventory_loaded: bool,
+    superseded: bool,
+    started: std::time::Instant,
+) -> GenerationOwnerSample {
+    GenerationOwnerSample {
+        identity,
+        protocol: "capsule-v2",
+        inventory_loaded,
+        generation,
+        action,
+        maintenance_reason: generation_owner_reason(action),
+        next_eligibility_secs,
+        locator_advanced: false,
+        visibility: "embedded",
+        active_packs,
+        active_pack_bytes,
+        geometric_repack_packs: 0,
+        catalog_layers: 0,
+        catalog_bytes: 0,
+        locator_sweep: Default::default(),
+        commit_graph_layers: 0,
+        commit_graph_bytes: 0,
+        maintenance_bytes_read: 0,
+        maintenance_bytes_written: 0,
+        superseded,
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    }
+}
+
+fn map_capsule_owner_error(error: crab_remote::checkpoint::CheckpointError) -> CrabError {
+    match error {
+        crab_remote::checkpoint::CheckpointError::Cancelled => CrabError::Cancelled,
+        crab_remote::checkpoint::CheckpointError::Read(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Repack(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Pack(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Metadata(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Write(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Io(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Worker(source) => {
+            CrabError::Io(std::io::Error::other(source))
+        }
+        other => CrabError::Internal(other.to_string()),
+    }
+}
+
 async fn generation_owner_loop(
     store: &crate::storage::store::Store,
     router: &crate::storage::StoreLayout,
+    capsule_layout: Option<&crab_storage::StoreLayout<crab_storage::Store>>,
     once: bool,
     interval_secs: u64,
     jsonl: bool,
@@ -516,6 +778,18 @@ async fn generation_owner_loop(
             return Ok(());
         }
         let sample = async {
+            if let Some(layout) = capsule_layout {
+                return capsule_generation_owner_sample(
+                    layout,
+                    once,
+                    interval_secs,
+                    quiescence,
+                    &mut observed_activity,
+                    completed_work.as_ref(),
+                    cancel,
+                )
+                .await;
+            }
             let maintenance_ready = if once {
                 true
             } else {
@@ -790,6 +1064,8 @@ async fn generation_owner_sample(
     if locator_advanced {
         return Ok(GenerationOwnerSample {
             identity,
+            protocol: "manifest-v1",
+            inventory_loaded: true,
             generation,
             action: "catalog_advance",
             maintenance_reason: generation_owner_reason("catalog_advance"),
@@ -843,6 +1119,8 @@ async fn generation_owner_sample(
         };
         return Ok(GenerationOwnerSample {
             identity,
+            protocol: "manifest-v1",
+            inventory_loaded: true,
             generation,
             action,
             maintenance_reason: generation_owner_reason(action),
@@ -899,6 +1177,8 @@ async fn generation_owner_sample(
     }
     Ok(GenerationOwnerSample {
         identity,
+        protocol: "manifest-v1",
+        inventory_loaded: true,
         generation,
         action: graph.action,
         maintenance_reason: generation_owner_reason(graph.action),
@@ -1008,6 +1288,8 @@ fn repack_owner_sample(
 ) -> GenerationOwnerSample {
     GenerationOwnerSample {
         identity: GenerationOwnerIdentity::from(manifest),
+        protocol: "manifest-v1",
+        inventory_loaded: true,
         generation: manifest.generation,
         action: repack.action,
         maintenance_reason: generation_owner_reason(repack.action),
@@ -1060,6 +1342,8 @@ fn empty_owner_sample(
 ) -> GenerationOwnerSample {
     GenerationOwnerSample {
         identity,
+        protocol: "manifest-v1",
+        inventory_loaded: true,
         generation,
         action,
         maintenance_reason: generation_owner_reason(action),
@@ -1096,6 +1380,7 @@ fn generation_owner_reason(action: &str) -> &'static str {
         "geometric_repack" => "geometric_pack_threshold",
         "geometric_repack_bounded" => "geometric_pack_budget",
         "geometric_repack_deferred" => "maintenance_budget",
+        "capsule_checkpoint" => "capsule_frontier_threshold",
         "superseded" => "manifest_superseded",
         _ => "no_maintenance_due",
     }
@@ -1316,6 +1601,8 @@ fn render_generation_owner_sample(sample: &GenerationOwnerSample, jsonl: bool) -
         stream.emit_snapshot(sample)?;
     } else {
         info!(
+            protocol = sample.protocol,
+            inventory_loaded = sample.inventory_loaded,
             generation = sample.generation,
             action = sample.action,
             locator_advanced = sample.locator_advanced,
@@ -1363,6 +1650,25 @@ async fn run_diagnose(
 ) -> Result<()> {
     check_cancelled(cancel)?;
     let (store, repo_prefix, bucket_identity, config) = resolve_repo_store(cancel).await?;
+    let storage = crate::storage::store::Store::new(Arc::clone(&store))
+        .with_bucket_identity(bucket_identity.clone());
+    let router = crate::storage::StoreLayout::new(storage.clone(), repo_prefix.clone());
+    let capsule_layout = crab_storage::StoreLayout::with_global_prefix(
+        storage.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    if let Some(root) = capsule_owner_root(&capsule_layout).await? {
+        let payload = DiagnosePayload {
+            protocol: "capsule-v2",
+            capsule: Some(diagnose_capsule(&capsule_layout, root, db, deep, cancel).await?),
+            file_index: None,
+            chunk_index: None,
+        };
+        check_cancelled(cancel)?;
+        render_diagnose(&payload, mode)?;
+        return Ok(());
+    }
     let metadb_config = config.build_metadb_config(&repo_prefix);
     // Diagnose only reads sys:* keys — open read-only so a
     // concurrent push is not fenced.
@@ -1387,6 +1693,8 @@ async fn run_diagnose(
     };
 
     let payload = DiagnosePayload {
+        protocol: "manifest-v1",
+        capsule: None,
         file_index,
         chunk_index,
     };
@@ -1395,6 +1703,98 @@ async fn run_diagnose(
     check_cancelled(cancel)?;
     render_diagnose(&payload, mode)?;
     Ok(())
+}
+
+async fn diagnose_capsule(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    root: crab_metadata::capsule_protocol::RootSnapshot,
+    db: DbSelector,
+    deep: bool,
+    cancel: &CancellationToken,
+) -> Result<CapsuleDiagnosis> {
+    let (state_digest, visible_refs, visible_capsules, deep_integrity) = if deep {
+        let view = crab_read::capsule_protocol::open_view_from_root(
+            layout,
+            root.clone(),
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+                max_frontier_bytes: CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+            },
+        )
+        .await?;
+        let catalog = view.pointer_catalog()?;
+        view.git_visibility_index()?;
+        let pointer_stats = tokio::select! {
+            () = cancel.cancelled() => return Err(CrabError::Cancelled),
+            result = crab_read::verify_capsule_pointer_catalog_objects(layout, &catalog) => result?,
+        };
+        let git_pack_count = view.git_pack_count();
+        if git_pack_count > 0 {
+            crab_remote::checkpoint::consolidate_git_packs(
+                &view,
+                CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+                CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+                cancel,
+            )
+            .await
+            .map_err(map_capsule_owner_error)?;
+        }
+        check_cancelled(cancel)?;
+        let current_root = crab_metadata::capsule_protocol::load_root(layout).await?;
+        let current_activity =
+            crab_read::capsule_protocol::read_activity_from_root(layout, &current_root).await?;
+        if current_activity.state_digest() != view.state_digest() {
+            return Err(CrabError::Protocol(
+                "repository state changed during deep metadata diagnosis; retry against one stable view"
+                    .to_owned(),
+            ));
+        }
+        (
+            view.state_digest(),
+            diagnosis_count(view.refs().len(), "capsule ref")?,
+            view.capsule_count()?,
+            Some(CapsuleDeepIntegrity {
+                git_packs: u64::try_from(git_pack_count).map_err(|_| {
+                    CrabError::Internal("capsule Git pack count overflowed".to_owned())
+                })?,
+                git_pack_bytes: view.git_pack_bytes()?,
+                git_closure_verified: true,
+                file_entries: db
+                    .includes_file_index()
+                    .then(|| diagnosis_count(catalog.files().len(), "capsule file entry"))
+                    .transpose()?,
+                shard_entries: diagnosis_count(catalog.shards().len(), "capsule shard entry")?,
+                xorb_entries: db
+                    .includes_chunk_index()
+                    .then(|| diagnosis_count(catalog.xorbs().len(), "capsule xorb entry"))
+                    .transpose()?,
+                pointer_objects_read: pointer_stats.object_read_count,
+                verdict: "OK — root, ref heads, capsules, checkpoint, catalogs, visibility, and Git packs authenticated",
+            }),
+        )
+    } else {
+        let activity = crab_read::capsule_protocol::read_activity_from_root(layout, &root).await?;
+        (
+            activity.state_digest().to_owned(),
+            activity.ref_count(),
+            activity.capsule_count(),
+            None,
+        )
+    };
+    Ok(CapsuleDiagnosis {
+        root_path: layout.capsule_root_path().to_string(),
+        generation: root.record().root().generation(),
+        root_digest: root.record().digest().to_owned(),
+        state_digest,
+        visible_refs,
+        visible_capsules,
+        checkpoint_present: root.record().root().checkpoint().is_some(),
+        deep_integrity,
+    })
+}
+
+fn diagnosis_count(count: usize, label: &str) -> Result<u64> {
+    u64::try_from(count).map_err(|_| CrabError::Internal(format!("{label} count overflowed")))
 }
 
 async fn diagnose_file_index(
@@ -1803,6 +2203,10 @@ fn render_diagnose(payload: &DiagnosePayload, mode: OutputMode) -> Result<()> {
     }
 
     println!("crab metadb diagnose\n");
+    println!("protocol: {}\n", payload.protocol);
+    if let Some(capsule) = &payload.capsule {
+        render_capsule_diagnosis(capsule);
+    }
     for db in [payload.file_index.as_ref(), payload.chunk_index.as_ref()]
         .into_iter()
         .flatten()
@@ -1810,6 +2214,36 @@ fn render_diagnose(payload: &DiagnosePayload, mode: OutputMode) -> Result<()> {
         render_db_diagnosis(db);
     }
     Ok(())
+}
+
+fn render_capsule_diagnosis(diagnosis: &CapsuleDiagnosis) {
+    println!("[capsule_repository]  path={}", diagnosis.root_path);
+    println!("  status: open");
+    println!("  generation: {}", diagnosis.generation);
+    println!("  root_digest: {}", diagnosis.root_digest);
+    println!("  state_digest: {}", diagnosis.state_digest);
+    println!("  visible_refs: {}", diagnosis.visible_refs);
+    println!("  visible_capsules: {}", diagnosis.visible_capsules);
+    println!("  checkpoint_present: {}", diagnosis.checkpoint_present);
+    match &diagnosis.deep_integrity {
+        Some(deep) => {
+            println!("  deep_integrity:");
+            println!("    verdict: {}", deep.verdict);
+            println!("    git_packs: {}", deep.git_packs);
+            println!("    git_pack_bytes: {}", deep.git_pack_bytes);
+            println!("    git_closure_verified: {}", deep.git_closure_verified);
+            if let Some(file_entries) = deep.file_entries {
+                println!("    file_entries: {file_entries}");
+            }
+            println!("    shard_entries: {}", deep.shard_entries);
+            if let Some(xorb_entries) = deep.xorb_entries {
+                println!("    xorb_entries: {xorb_entries}");
+            }
+            println!("    pointer_objects_read: {}", deep.pointer_objects_read);
+        }
+        None => println!("  deep_integrity: not requested (use --deep to enable)"),
+    }
+    println!();
 }
 
 fn render_db_diagnosis(d: &DbDiagnosis) {
@@ -1875,13 +2309,24 @@ fn render_db_diagnosis(d: &DbDiagnosis) {
 
 #[derive(Debug, Serialize)]
 struct RebuildPayload {
+    protocol: &'static str,
     repo_prefix: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoint_published: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    catalog_files_verified: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    catalog_shards_verified: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    catalog_xorbs_verified: Option<u64>,
     file_index_entries_written: u64,
     chunk_index_entries_written: u64,
     shards_processed: u64,
     shards_failed: u64,
     git_packs_processed: u64,
     git_packs_failed: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_objects_verified: Option<u64>,
     git_objects_written: u64,
     elapsed_ms: u64,
     notes: Vec<String>,
@@ -2142,23 +2587,39 @@ async fn run_rebuild(db: DbSelector, mode: OutputMode, cancel: &CancellationToke
     )?;
     let storage = crate::storage::Store::new(Arc::clone(&store))
         .with_bucket_identity(bucket_identity.clone());
+    let router = crate::storage::StoreLayout::new(storage.clone(), repo_prefix.clone());
+    let capsule_layout = crab_storage::StoreLayout::with_global_prefix(
+        storage.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
     let lease = crate::maintenance::RepositoryMaintenanceLease::acquire(
         &storage,
-        crab_storage::GLOBAL_PREFIX,
+        router.global_prefix(),
         &repo_prefix,
         cancel,
     )
     .await?;
-    let operation = run_rebuild_in(
-        store,
-        repo_prefix,
-        &bucket_identity,
-        db,
-        mode,
-        &config,
-        cancel,
-    )
-    .await;
+    // Select authority inside the maintenance operation so queued maintenance
+    // cannot act on a root snapshot captured before it acquired the fence.
+    let operation = match capsule_owner_root(&capsule_layout).await {
+        Err(error) => Err(error),
+        Ok(Some(root)) => {
+            run_capsule_rebuild_in(&capsule_layout, root, &repo_prefix, db, mode, cancel).await
+        }
+        Ok(None) => {
+            run_rebuild_in(
+                store,
+                repo_prefix,
+                &bucket_identity,
+                db,
+                mode,
+                &config,
+                cancel,
+            )
+            .await
+        }
+    };
     let release = lease.release().await;
     match (operation, release) {
         (Ok(()), Ok(())) => Ok(()),
@@ -2168,6 +2629,122 @@ async fn run_rebuild(db: DbSelector, mode: OutputMode, cancel: &CancellationToke
             Err(error)
         }
     }
+}
+
+async fn run_capsule_rebuild_in(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    root: crab_metadata::capsule_protocol::RootSnapshot,
+    repo_prefix: &str,
+    db: DbSelector,
+    mode: OutputMode,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let started = std::time::Instant::now();
+    let view = crab_read::capsule_protocol::open_view_from_root(
+        layout,
+        root,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+            max_frontier_bytes: CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+        },
+    )
+    .await?;
+    let catalog = view.pointer_catalog()?;
+    view.git_visibility_index()?;
+    tokio::select! {
+        () = cancel.cancelled() => return Err(CrabError::Cancelled),
+        result = crab_read::verify_capsule_pointer_catalog_objects(layout, &catalog) => {
+            result?;
+        }
+    }
+    let git_packs = diagnosis_count(view.git_pack_count(), "capsule Git pack")?;
+    let git_objects = view.git_object_count()?;
+    let visible_capsules = view.capsule_count()?;
+    let checkpoint_published = if git_packs == 0 {
+        if !view.refs().is_empty() {
+            crab_remote::checkpoint::consolidate_git_packs(
+                &view,
+                CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+                CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+                cancel,
+            )
+            .await
+            .map_err(map_capsule_owner_error)?;
+        }
+        false
+    } else if visible_capsules == 0 {
+        crab_remote::checkpoint::consolidate_git_packs(
+            &view,
+            CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+            CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+            cancel,
+        )
+        .await
+        .map_err(map_capsule_owner_error)?;
+        false
+    } else {
+        let published = crab_remote::checkpoint::publish_capsule_checkpoint_from_view(
+            layout,
+            &view,
+            0,
+            CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+            cancel,
+        )
+        .await
+        .map_err(map_capsule_owner_error)?;
+        if !published {
+            return Err(CrabError::CasConflict {
+                path: layout.capsule_root_path().to_string(),
+                expected_etag: None,
+            });
+        }
+        true
+    };
+    let mut notes = vec![
+        "v2 catalogs are one authenticated checkpoint unit; rebuild verified the complete file, shard, xorb, visibility, and Git closure".to_owned(),
+    ];
+    if !matches!(db, DbSelector::Both) {
+        notes.push(
+            "--db does not permit a partial v2 checkpoint; the complete catalog was verified"
+                .to_owned(),
+        );
+    }
+    if git_packs == 0 {
+        notes.push("repository has no Git packs; no checkpoint was published".to_owned());
+    } else if visible_capsules == 0 {
+        notes.push(
+            "the current checkpoint already covers the capsule frontier; no checkpoint was published"
+                .to_owned(),
+        );
+    }
+    let payload = RebuildPayload {
+        protocol: "capsule-v2",
+        repo_prefix: repo_prefix.to_owned(),
+        checkpoint_published: Some(checkpoint_published),
+        catalog_files_verified: Some(diagnosis_count(
+            catalog.files().len(),
+            "capsule file entry",
+        )?),
+        catalog_shards_verified: Some(diagnosis_count(
+            catalog.shards().len(),
+            "capsule shard entry",
+        )?),
+        catalog_xorbs_verified: Some(diagnosis_count(
+            catalog.xorbs().len(),
+            "capsule xorb entry",
+        )?),
+        file_index_entries_written: 0,
+        chunk_index_entries_written: 0,
+        shards_processed: diagnosis_count(catalog.shards().len(), "capsule shard entry")?,
+        shards_failed: 0,
+        git_packs_processed: git_packs,
+        git_packs_failed: 0,
+        git_objects_verified: Some(git_objects),
+        git_objects_written: 0,
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        notes,
+    };
+    render_rebuild_payload(&payload, mode)
 }
 
 /// Core rebuild entry point parameterised on the object store and
@@ -2201,8 +2778,10 @@ async fn run_rebuild_in(
     Ok(())
 }
 
-/// Rebuild `file_index_db` for the current repository and verify that
-/// selected file-to-shard mappings are present afterwards.
+/// Verify selected file-to-shard mappings through the repository's authority.
+///
+/// V2 reads the authenticated pointer catalog without creating legacy state;
+/// repositories without a v2 root rebuild and query `file_index_db`.
 pub(crate) async fn rebuild_file_index_for_current_repo_and_verify(
     entries: &[(MerkleHash, MerkleHash)],
 ) -> Result<Vec<bool>> {
@@ -2210,6 +2789,14 @@ pub(crate) async fn rebuild_file_index_for_current_repo_and_verify(
     let (store, repo_prefix, bucket_identity, config) = resolve_repo_store(&cancel).await?;
     let storage = crate::storage::Store::new(Arc::clone(&store));
     let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.clone());
+    let capsule_layout = crab_storage::StoreLayout::with_global_prefix(
+        storage.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    if let Some(root) = capsule_owner_root(&capsule_layout).await? {
+        return verify_capsule_file_index(&capsule_layout, root, entries).await;
+    }
     let gc_writer = crate::maintenance::GcWriterLeases::acquire(
         &storage,
         router.global_prefix(),
@@ -2259,6 +2846,41 @@ pub(crate) async fn rebuild_file_index_for_current_repo_and_verify(
         (Ok(result), Ok(())) => Ok(result),
         (Err(error), _) | (Ok(_), Err(error)) => Err(error),
     }
+}
+
+async fn verify_capsule_file_index(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    root: crab_metadata::capsule_protocol::RootSnapshot,
+    entries: &[(MerkleHash, MerkleHash)],
+) -> Result<Vec<bool>> {
+    let view = crab_read::capsule_protocol::open_view_from_root(
+        layout,
+        root,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+            max_frontier_bytes: CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
+        },
+    )
+    .await?;
+    Ok(capsule_file_index_matches(
+        &view.pointer_catalog()?,
+        entries,
+    ))
+}
+
+fn capsule_file_index_matches(
+    catalog: &crab_metadata::capsule_protocol::PointerCatalog,
+    entries: &[(MerkleHash, MerkleHash)],
+) -> Vec<bool> {
+    entries
+        .iter()
+        .map(|(file_hash, expected_shard)| {
+            catalog
+                .files()
+                .get(&file_hash.hex())
+                .is_some_and(|entry| entry.shard_hash() == expected_shard.hex())
+        })
+        .collect()
 }
 
 async fn close_rebuild_guard<T>(guard: MetaDbGuard, result: Result<T>) -> Result<T> {
@@ -2668,13 +3290,19 @@ async fn rebuild_with_guard(
     }
 
     let payload = RebuildPayload {
+        protocol: "manifest-v1",
         repo_prefix: String::from(repo_prefix),
+        checkpoint_published: None,
+        catalog_files_verified: None,
+        catalog_shards_verified: None,
+        catalog_xorbs_verified: None,
         file_index_entries_written: file_entries_written,
         chunk_index_entries_written: chunk_entries_written,
         shards_processed,
         shards_failed,
         git_packs_processed,
         git_packs_failed,
+        git_objects_verified: None,
         git_objects_written,
         elapsed_ms: start.elapsed().as_millis() as u64,
         notes,
@@ -3176,7 +3804,20 @@ fn render_rebuild_payload(payload: &RebuildPayload, mode: OutputMode) -> Result<
         emit_json("metadb.rebuild", "1.0", payload)?;
     } else {
         println!("\ncrab metadb rebuild\n");
+        println!("  protocol:                    {}", payload.protocol);
         println!("  repo_prefix:                 {}", payload.repo_prefix);
+        if let Some(published) = payload.checkpoint_published {
+            println!("  checkpoint_published:        {published}");
+        }
+        if let Some(count) = payload.catalog_files_verified {
+            println!("  catalog_files_verified:      {count}");
+        }
+        if let Some(count) = payload.catalog_shards_verified {
+            println!("  catalog_shards_verified:     {count}");
+        }
+        if let Some(count) = payload.catalog_xorbs_verified {
+            println!("  catalog_xorbs_verified:      {count}");
+        }
         println!(
             "  shards_processed:            {}",
             payload.shards_processed
@@ -3190,6 +3831,9 @@ fn render_rebuild_payload(payload: &RebuildPayload, mode: OutputMode) -> Result<
             "  git_packs_failed:            {}",
             payload.git_packs_failed
         );
+        if let Some(count) = payload.git_objects_verified {
+            println!("  git_objects_verified:        {count}");
+        }
         println!(
             "  git_objects_written:         {}",
             payload.git_objects_written
@@ -3212,12 +3856,15 @@ fn render_rebuild_payload(payload: &RebuildPayload, mode: OutputMode) -> Result<
     }
 
     info!(
+        protocol = payload.protocol,
+        checkpoint_published = payload.checkpoint_published,
         shards_processed = payload.shards_processed,
         shards_failed = payload.shards_failed,
         file_entries_written = payload.file_index_entries_written,
         chunk_entries_written = payload.chunk_index_entries_written,
         git_packs_processed = payload.git_packs_processed,
         git_packs_failed = payload.git_packs_failed,
+        git_objects_verified = payload.git_objects_verified,
         git_objects_written = payload.git_objects_written,
         elapsed_ms = payload.elapsed_ms,
         "metadb rebuild complete"
@@ -4289,6 +4936,202 @@ mod tests {
         assert!(!sample.locator_advanced);
         assert_eq!(sample.visibility, "published");
         assert!(!sample.superseded);
+    }
+
+    #[tokio::test]
+    async fn capsule_owner_uses_v2_authority_without_creating_a_manifest() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let storage = crab_storage::Store::new(Arc::clone(&inner));
+        let layout = crab_storage::StoreLayout::new(storage, "org/v2-owner".to_owned());
+        crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+            .await
+            .expect("initialize capsule root");
+        assert!(
+            capsule_owner_root(&layout)
+                .await
+                .expect("select capsule authority")
+                .is_some()
+        );
+        let mut observed = None;
+        let sample = capsule_generation_owner_sample(
+            &layout,
+            true,
+            30,
+            std::time::Duration::ZERO,
+            &mut observed,
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("sample capsule owner");
+
+        assert_eq!(sample.protocol, "capsule-v2");
+        assert!(sample.inventory_loaded);
+        assert_eq!(sample.action, "none");
+        assert_eq!(sample.visibility, "embedded");
+        assert_eq!(sample.active_packs, 0);
+        assert!(!sample.superseded);
+        let legacy_manifest = layout.manifest_path();
+        assert!(matches!(
+            inner.head(&legacy_manifest).await,
+            Err(object_store::Error::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn capsule_owner_one_shot_skips_an_already_checkpointed_empty_suffix() {
+        assert!(capsule_checkpoint_due(true, false, 0));
+        assert!(capsule_checkpoint_due(true, true, 1));
+        assert!(!capsule_checkpoint_due(true, true, 0));
+        assert!(!capsule_checkpoint_due(false, true, 31));
+        assert!(capsule_checkpoint_due(false, true, 32));
+    }
+
+    #[tokio::test]
+    async fn capsule_owner_fails_closed_on_corrupt_v2_authority() {
+        let inner = Arc::new(InMemory::new());
+        let storage = crab_storage::Store::new(inner);
+        let layout = crab_storage::StoreLayout::new(storage, "org/corrupt-owner".to_owned());
+        layout
+            .store()
+            .put(
+                &layout.capsule_root_path(),
+                bytes::Bytes::from_static(b"not a capsule root"),
+            )
+            .await
+            .expect("seed corrupt root");
+
+        assert!(matches!(
+            capsule_owner_root(&layout).await,
+            Err(CrabError::CorruptObject { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn capsule_diagnose_verifies_v2_without_legacy_metadata() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let storage = crab_storage::Store::new(Arc::clone(&inner));
+        let layout = crab_storage::StoreLayout::new(storage, "org/v2-diagnose".to_owned());
+        let root =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .expect("initialize capsule root");
+
+        let diagnosis = diagnose_capsule(
+            &layout,
+            root,
+            DbSelector::Both,
+            true,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("diagnose capsule repository");
+
+        assert_eq!(diagnosis.generation, 0);
+        assert_eq!(diagnosis.visible_refs, 0);
+        assert_eq!(diagnosis.visible_capsules, 0);
+        assert!(!diagnosis.checkpoint_present);
+        let deep = diagnosis.deep_integrity.expect("deep diagnosis");
+        assert_eq!(deep.git_packs, 0);
+        assert_eq!(deep.git_pack_bytes, 0);
+        assert!(deep.git_closure_verified);
+        assert_eq!(deep.file_entries, Some(0));
+        assert_eq!(deep.shard_entries, 0);
+        assert_eq!(deep.xorb_entries, Some(0));
+        assert_eq!(deep.pointer_objects_read, 0);
+        let legacy_objects = inner
+            .list(Some(&ObjectPath::from("org/v2-diagnose/file_index_db")))
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("list legacy metadata prefix");
+        assert!(legacy_objects.is_empty());
+    }
+
+    #[tokio::test]
+    async fn capsule_rebuild_verifies_empty_repository_without_legacy_metadata() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let storage = crab_storage::Store::new(Arc::clone(&inner));
+        let layout = crab_storage::StoreLayout::new(storage, "org/v2-rebuild".to_owned());
+        let root =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .expect("initialize capsule root");
+        let digest = root.record().digest().to_owned();
+
+        run_capsule_rebuild_in(
+            &layout,
+            root,
+            "org/v2-rebuild",
+            DbSelector::Both,
+            OutputMode::Text,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("rebuild empty capsule repository");
+
+        let current = crab_metadata::capsule_protocol::load_root(&layout)
+            .await
+            .expect("load capsule root");
+        assert_eq!(current.record().digest(), digest);
+        let legacy_objects = inner
+            .list(Some(&ObjectPath::from("org/v2-rebuild/file_index_db")))
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("list legacy metadata prefix");
+        assert!(legacy_objects.is_empty());
+    }
+
+    #[test]
+    fn capsule_file_index_verification_uses_authenticated_mapping() {
+        let file_hash = MerkleHash::from([1; 32]);
+        let expected_shard = MerkleHash::from([2; 32]);
+        let other_shard = MerkleHash::from([3; 32]);
+        let mut catalog = crab_metadata::capsule_protocol::PointerCatalog::new();
+        catalog
+            .insert_file(
+                file_hash.hex(),
+                crab_metadata::capsule_protocol::FileCatalogEntry::new(42, expected_shard.hex()),
+            )
+            .expect("insert file catalog entry");
+
+        assert_eq!(
+            capsule_file_index_matches(
+                &catalog,
+                &[
+                    (file_hash, expected_shard),
+                    (file_hash, other_shard),
+                    (MerkleHash::from([4; 32]), expected_shard),
+                ],
+            ),
+            vec![true, false, false]
+        );
+    }
+
+    #[tokio::test]
+    async fn capsule_file_index_verification_does_not_create_legacy_metadata() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let storage = crab_storage::Store::new(Arc::clone(&inner));
+        let layout = crab_storage::StoreLayout::new(storage, "org/v2-recover".to_owned());
+        let root =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .expect("initialize capsule root");
+
+        let verified = verify_capsule_file_index(
+            &layout,
+            root,
+            &[(MerkleHash::from([1; 32]), MerkleHash::from([2; 32]))],
+        )
+        .await
+        .expect("verify capsule catalog");
+
+        assert_eq!(verified, vec![false]);
+        let legacy_objects = inner
+            .list(Some(&ObjectPath::from("org/v2-recover/file_index_db")))
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("list legacy metadata prefix");
+        assert!(legacy_objects.is_empty());
     }
 
     #[tokio::test]

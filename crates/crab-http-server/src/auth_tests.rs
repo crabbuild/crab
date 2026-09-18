@@ -231,10 +231,11 @@ impl Harness {
             identity: RepositoryIdentity::new("test", "test", 1).unwrap(),
             pinned: Mutex::new(None),
             maintenance: Mutex::new(None),
+            integrity: crate::integrity::Status::default(),
         };
-        crab_write::initialize::initialize_repository(
-            &repository.store,
+        crab_write::capsule_protocol::initialize(
             &repository.layout,
+            &"1".repeat(64),
             "refs/heads/main",
         )
         .await
@@ -592,11 +593,7 @@ async fn non_members_cannot_trigger_repository_publication() {
         .repositories
         .get(&("team".into(), "private".into()))
         .unwrap();
-    crab_write::initialize::initialize_repository(&repo.store, &repo.layout, "refs/heads/main")
-        .await
-        .unwrap();
-    let lease = super::maintenance_tests::commit_without_proof(&repo).await;
-    let before = crab_metadata::manifest_store::read_manifest(&repo.store, &repo.layout)
+    let before = crab_metadata::capsule_protocol::load_root(&repo.layout)
         .await
         .unwrap();
     let api = h
@@ -623,21 +620,22 @@ async fn non_members_cannot_trigger_repository_publication() {
         (api.status(), git.status()),
         (StatusCode::NOT_FOUND, StatusCode::UNAUTHORIZED)
     );
-    assert!(repo.maintenance.lock().await.is_none());
     assert_eq!(
-        before,
-        crab_metadata::manifest_store::read_manifest(&repo.store, &repo.layout)
+        before.record().digest(),
+        crab_metadata::capsule_protocol::load_root(&repo.layout)
             .await
             .unwrap()
+            .record()
+            .digest()
     );
     assert_eq!(
-        crab_metadata::ref_journal::list_active_transactions(&repo.store, &repo.layout)
+        repo.store
+            .list_prefix(&repo.layout.capsule_ref_heads_prefix())
             .await
             .unwrap()
             .len(),
-        1
+        0
     );
-    lease.release().await.unwrap();
     h.close().await;
 }
 

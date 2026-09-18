@@ -1,34 +1,41 @@
 use std::{sync::Arc, time::Duration};
 
-use crab_remote_git::{RemoteGitRuntime, RepositoryIdentity, RepositoryOptions};
 use crab_storage::{Store, StoreLayout};
-use crab_write::{Result, WriteError};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
-const LEASE_TTL: Duration = Duration::from_secs(60);
+const CAPSULE_THRESHOLD: u32 = 32;
+pub(crate) const FOREGROUND_CAPSULE_THRESHOLD: u32 = 56;
 const PASS_BUDGET: Duration = Duration::from_secs(3 * 60);
+const CHECKPOINT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
-async fn publish(
-    store: &Store,
-    layout: &StoreLayout<Store>,
-    identity: &RepositoryIdentity,
-    runtime: Arc<RemoteGitRuntime>,
-    options: RepositoryOptions,
-    cancel: &CancellationToken,
-) -> Result<()> {
-    crab_write::generation::ensure_readable(
-        store, layout, identity, runtime, options, LEASE_TTL, cancel,
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum Error {
+    #[error("repository checkpoint cancelled")]
+    Cancelled,
+    #[error("repository checkpoint failed")]
+    Checkpoint(#[source] crab_remote::checkpoint::CheckpointError),
+}
+
+pub(crate) type Result<T> = std::result::Result<T, Error>;
+
+async fn publish(layout: &StoreLayout<Store>, cancel: &CancellationToken) -> Result<()> {
+    match crab_remote::checkpoint::publish_capsule_checkpoint(
+        layout,
+        CAPSULE_THRESHOLD,
+        CHECKPOINT_BYTES,
+        cancel,
     )
     .await
+    {
+        Ok(_) => Ok(()),
+        Err(crab_remote::checkpoint::CheckpointError::Cancelled) => Err(Error::Cancelled),
+        Err(error) => Err(Error::Checkpoint(error)),
+    }
 }
 
 pub(crate) async fn run(
-    store: Store,
     layout: StoreLayout<Store>,
-    identity: RepositoryIdentity,
-    runtime: Arc<RemoteGitRuntime>,
-    options: RepositoryOptions,
     admission: Arc<Semaphore>,
     parent: CancellationToken,
 ) -> Result<()> {
@@ -36,10 +43,10 @@ pub(crate) async fn run(
     let operation = async {
         let _permit = tokio::select! {
             biased;
-            () = cancel.cancelled() => return Err(WriteError::Cancelled),
-            permit = admission.acquire_owned() => permit.map_err(|_| WriteError::Cancelled)?,
+            () = cancel.cancelled() => return Err(Error::Cancelled),
+            permit = admission.acquire_owned() => permit.map_err(|_| Error::Cancelled)?,
         };
-        publish(&store, &layout, &identity, runtime, options, &cancel).await
+        publish(&layout, &cancel).await
     };
     tokio::pin!(operation);
     tokio::select! {

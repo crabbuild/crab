@@ -99,6 +99,36 @@ fn pointer() -> crab_types::pointer::Pointer {
     }
 }
 
+fn lfs_pointer() -> crate::LfsPointer {
+    crate::LfsPointer {
+        oid: [0x42; 32],
+        size: 16_384,
+        extensions: Vec::new(),
+    }
+}
+
+#[test]
+fn scan_returns_distinct_crab_and_lfs_dependencies() {
+    let repo = Repo::new();
+    let crab = pointer();
+    let lfs = lfs_pointer();
+    let crab_blob = repo.blob(&crab.serialize());
+    let lfs_blob = repo.blob(&lfs.serialize());
+    let tree = repo.git(
+        &["mktree"],
+        format!("100644 blob {crab_blob}\tcrab\n100644 blob {lfs_blob}\tlfs\n").as_bytes(),
+    );
+    let commit = repo.commit(&tree, None);
+    let refs = [("refs/heads/main".to_owned(), commit)];
+
+    let scan = scan_pointers(repo.0.path(), &refs, limits(), &|| false).unwrap();
+
+    assert_eq!(scan.pointers.len(), 1);
+    assert_eq!(scan.pointers[0].file_hash, crab.file_hash);
+    assert_eq!(scan.lfs_pointers.len(), 1);
+    assert_eq!(scan.lfs_pointers[0].pointer, lfs);
+}
+
 #[test]
 fn scans_history_and_all_tag_target_kinds_without_peel_hints() {
     let repo = Repo::new();

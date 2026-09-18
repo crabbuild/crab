@@ -41,10 +41,12 @@ const MAX_MUTATIONS_PER_BATCH: usize = 32;
 const MAX_BATCHES_PER_FENCE_BURST: usize = 8;
 const MAX_MUTATION_BATCH_BYTES: usize = 32 * 1024 * 1024;
 const MAX_REPREPARE_ATTEMPTS: usize = 8;
+const FOREGROUND_CAPSULE_THRESHOLD: u32 = 56;
 const TREE_PAGE_SIZE: usize = 4_096;
 const CHECKPOINT_PUBLICATION_CONCURRENCY: usize = 4;
 const GENERATED_TREE_DELTA_DEPTH: u32 = 8;
 const MAX_GENERATED_TREE_DELTA_BYTES: usize = 32 * 1024 * 1024;
+const MAX_CAPSULE_READ_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
@@ -76,6 +78,8 @@ pub(crate) enum Error {
     Clock(#[from] std::time::SystemTimeError),
     #[error("repository read failed")]
     Remote(#[from] crab_remote_git::Error),
+    #[error("repository capsule read failed")]
+    Read(#[from] crab_read::ReadError),
     #[error("Git object encoding failed")]
     Object(#[from] gix_object::encode::Error),
     #[error("Git object hashing failed")]
@@ -98,6 +102,8 @@ pub(crate) enum Error {
     Publication(#[from] crab_remote::publication::Error),
     #[error("repository publication failed")]
     Write(#[from] crab_write::WriteError),
+    #[error("repository capsule checkpoint failed")]
+    Checkpoint(#[from] crab_remote::checkpoint::CheckpointError),
     #[error("mutation worker failed")]
     Worker(#[from] tokio::task::JoinError),
     #[error("S3 attribute persistence failed")]
@@ -108,6 +114,7 @@ impl From<crate::Error> for Error {
     fn from(error: crate::Error) -> Self {
         match error {
             crate::Error::Remote(source) => Self::Remote(source),
+            crate::Error::Read(source) => Self::Read(source),
             crate::Error::Metadata(source) => Self::Metadata(source),
             crate::Error::Write(source) => Self::Write(source),
             error => Self::Attributes(Box::new(error)),
@@ -569,6 +576,7 @@ struct CachedBranchState {
     tree: WarmTree,
     bytes: usize,
     batches_since_checkpoint: usize,
+    capsule_count: Option<u32>,
 }
 
 struct BranchState {
@@ -783,6 +791,7 @@ impl BranchState {
         manifest: attributes::Manifest,
         tree: WarmTree,
         batches_since_checkpoint: usize,
+        capsule_count: Option<u32>,
     ) {
         self.clear();
         let bytes = manifest
@@ -805,6 +814,7 @@ impl BranchState {
             tree,
             bytes,
             batches_since_checkpoint,
+            capsule_count,
         };
         *self
             .cached
@@ -1256,39 +1266,70 @@ async fn apply_admitted(
             .await?,
         );
     };
-    if let Some(outcome) = resolved_completion_plan(repository, &completion_plan).await? {
+    let protocol = publication_protocol(repository).await?;
+    if let Some(outcome) = resolved_completion_plan(repository, &completion_plan, &protocol).await?
+    {
         return Ok(outcome);
     }
     let executing_plan_id = completion_plan.id.clone();
-    let result = crab_remote::publication::with_plan(
-        &repository.store,
-        &repository.layout,
-        &completion_plan.id,
-        LOCK_TTL,
-        cancel,
-        |scoped| async move {
-            apply_with_gc_fences(
-                repository,
-                runtime,
-                options,
-                vec![mutation],
-                ApplyRequest {
-                    plan_id: Some(&executing_plan_id),
-                    ..request
+    let result = match protocol {
+        PublicationProtocol::Legacy => {
+            crab_remote::publication::with_plan(
+                &repository.store,
+                &repository.layout,
+                &completion_plan.id,
+                LOCK_TTL,
+                cancel,
+                |scoped| async move {
+                    apply_with_gc_fences(
+                        repository,
+                        runtime,
+                        options,
+                        vec![mutation],
+                        ApplyRequest {
+                            plan_id: Some(&executing_plan_id),
+                            ..request
+                        },
+                        &scoped,
+                    )
+                    .await
+                    .and_then(take_single_result)
                 },
-                &scoped,
             )
             .await
-            .and_then(take_single_result)
-        },
-    )
-    .await;
+        }
+        PublicationProtocol::Capsule(_) => {
+            crab_remote::publication::with_capsule_plan(
+                &repository.store,
+                &repository.layout,
+                &completion_plan.id,
+                LOCK_TTL,
+                cancel,
+                |scoped| async move {
+                    apply_with_gc_fences(
+                        repository,
+                        runtime,
+                        options,
+                        vec![mutation],
+                        ApplyRequest {
+                            plan_id: Some(&executing_plan_id),
+                            ..request
+                        },
+                        &scoped,
+                    )
+                    .await
+                    .and_then(take_single_result)
+                },
+            )
+            .await
+        }
+    };
     match result {
         Err(
             error @ Error::Metadata(crab_metadata::error::MetadataError::PlanAlreadyAttempted {
                 ..
             }),
-        ) => resolved_completion_plan(repository, &completion_plan)
+        ) => resolved_completion_plan(repository, &completion_plan, &protocol)
             .await?
             .ok_or(error),
         result => result,
@@ -1324,22 +1365,48 @@ struct CompletionPlan {
     etag: Option<String>,
 }
 
+#[derive(Clone)]
+enum PublicationProtocol {
+    Legacy,
+    Capsule(Box<crab_metadata::capsule_protocol::RootSnapshot>),
+}
+
+async fn publication_protocol(repository: &Repository) -> Result<PublicationProtocol> {
+    match crab_metadata::capsule_protocol::load_root(&repository.layout).await {
+        Ok(root) => Ok(PublicationProtocol::Capsule(Box::new(root))),
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        }) => Ok(PublicationProtocol::Legacy),
+        Err(error) => Err(error.into()),
+    }
+}
+
 async fn resolved_completion_plan(
     repository: &Repository,
     plan: &CompletionPlan,
+    protocol: &PublicationProtocol,
 ) -> Result<Option<Outcome>> {
-    crab_metadata::plan_receipt::resolve_plan_receipt(
-        &repository.store,
-        &repository.layout,
-        &plan.id,
-    )
-    .await
-    .map(|receipt| {
-        receipt.map(|_| Outcome {
-            etag: plan.etag.clone(),
-        })
-    })
-    .map_err(Into::into)
+    let committed = match protocol {
+        PublicationProtocol::Legacy => crab_metadata::plan_receipt::resolve_plan_receipt(
+            &repository.store,
+            &repository.layout,
+            &plan.id,
+        )
+        .await?
+        .is_some(),
+        PublicationProtocol::Capsule(_) => {
+            crab_metadata::capsule_protocol::resolve_capsule_plan_receipt(
+                &repository.store,
+                &repository.layout,
+                &plan.id,
+            )
+            .await?
+            .is_some()
+        }
+    };
+    Ok(committed.then(|| Outcome {
+        etag: plan.etag.clone(),
+    }))
 }
 
 async fn apply_with_gc_fences(
@@ -1409,6 +1476,7 @@ async fn apply_with_fences(
                     prepared.attributes,
                     prepared.tree,
                     prepared.batches_since_checkpoint,
+                    prepared.capsule_count,
                 );
             }
             request
@@ -1442,6 +1510,7 @@ async fn apply_with_fences(
                         prepared.attributes,
                         prepared.tree,
                         prepared.batches_since_checkpoint,
+                        prepared.capsule_count,
                     );
                 }
                 request
@@ -1463,8 +1532,21 @@ struct UploadedMutation {
     parent: Option<ObjectId>,
     expected_transaction: Option<String>,
     commit: ObjectId,
-    pack: PackManifestEntry,
-    evidence_hash: String,
+    artifacts: UploadedArtifacts,
+}
+
+enum UploadedArtifacts {
+    Legacy {
+        pack: PackManifestEntry,
+        evidence_hash: String,
+    },
+    Capsule(Box<CapsuleMutationArtifacts>),
+}
+
+struct CapsuleMutationArtifacts {
+    base: crab_metadata::capsule_protocol::RootSnapshot,
+    pack: crab_metadata::capsule_protocol::CapsuleGitPack,
+    visibility: git_visibility::GitVisibilityEdit,
 }
 
 struct PreparedBatch {
@@ -1478,6 +1560,7 @@ struct PreparedBatch {
     batches_since_checkpoint: usize,
     checkpoint: bool,
     requires_revalidation: bool,
+    capsule_count: Option<u32>,
 }
 
 struct BuiltBatch {
@@ -1503,42 +1586,83 @@ async fn prepare_and_upload_batch(
     request: ApplyRequest<'_>,
     cancel: &CancellationToken,
 ) -> Result<PreparedBatch> {
+    let mut protocol = publication_protocol(repository).await?;
     if let Some(cached) = request.state.and_then(BranchState::take_latest) {
-        // The ref lease revalidates this optimistic parent before publication;
-        // a competing process forces a cold rebuild against object-store state.
-        match build_batch(
-            None,
-            None,
-            cached.tip,
-            Arc::try_unwrap(cached.manifest).unwrap_or_else(|manifest| (*manifest).clone()),
-            Some(cached.tree),
-            cached.batches_since_checkpoint,
-            mutations,
-        )
-        .await
+        if matches!(&protocol, PublicationProtocol::Capsule(_))
+            && cached
+                .capsule_count
+                .is_some_and(|count| count >= FOREGROUND_CAPSULE_THRESHOLD)
         {
-            Ok(batch) => {
-                return upload_batch(
-                    repository,
-                    request.branch,
-                    batch,
-                    cached.transaction,
-                    true,
-                    cancel,
-                    request.metrics,
-                )
-                .await;
+            crab_remote::checkpoint::publish_capsule_checkpoint(
+                &repository.layout,
+                FOREGROUND_CAPSULE_THRESHOLD,
+                MAX_CAPSULE_READ_BYTES,
+                cancel,
+            )
+            .await?;
+            repository.read_views.invalidate().await;
+            protocol = publication_protocol(repository).await?;
+        } else {
+            // The ref lease revalidates this optimistic parent before publication;
+            // a competing process forces a cold rebuild against object-store state.
+            match build_batch(
+                None,
+                None,
+                cached.tip,
+                Arc::try_unwrap(cached.manifest).unwrap_or_else(|manifest| (*manifest).clone()),
+                Some(cached.tree),
+                cached.batches_since_checkpoint,
+                mutations,
+            )
+            .await
+            {
+                Ok(batch) => {
+                    return upload_batch(
+                        repository,
+                        batch,
+                        BatchUpload {
+                            branch: request.branch,
+                            expected_transaction: cached.transaction,
+                            protocol,
+                            capsule_count: cached.capsule_count,
+                            requires_revalidation: true,
+                            cancel,
+                            metrics: request.metrics,
+                        },
+                    )
+                    .await;
+                }
+                Err(Error::WarmStateMiss) => {}
+                Err(error) => return Err(error),
             }
-            Err(Error::WarmStateMiss) => {}
-            Err(error) => return Err(error),
         }
     }
-    let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
-        &repository.store,
-        &repository.layout,
-    )
-    .await?;
-    if !snapshot.journal.refs.contains_key(request.branch) {
+    let (branch_exists, capsule_count, current_view) = match &protocol {
+        PublicationProtocol::Legacy => (
+            crab_metadata::manifest_store::read_repository_snapshot(
+                &repository.store,
+                &repository.layout,
+            )
+            .await?
+            .journal
+            .refs
+            .contains_key(request.branch),
+            None,
+            None,
+        ),
+        PublicationProtocol::Capsule(_) => {
+            let view = repository
+                .read_views
+                .current(repository, Arc::clone(&runtime), options, cancel)
+                .await?;
+            (
+                view.remote().refs().find(request.branch).is_some(),
+                view.capsule_ref_count(request.branch),
+                Some(view),
+            )
+        }
+    };
+    if !branch_exists {
         // An unborn branch has no Git objects to reconstruct. Publication
         // rechecks absence under the ref lease, so avoid opening the
         // repository-wide locator merely to prove the empty starting tree.
@@ -1554,19 +1678,28 @@ async fn prepare_and_upload_batch(
         .await?;
         return upload_batch(
             repository,
-            request.branch,
             batch,
-            None,
-            false,
-            cancel,
-            request.metrics,
+            BatchUpload {
+                branch: request.branch,
+                expected_transaction: None,
+                protocol,
+                capsule_count,
+                requires_revalidation: false,
+                cancel,
+                metrics: request.metrics,
+            },
         )
         .await;
     }
-    let view = repository
-        .read_views
-        .current(repository, runtime, options, cancel)
-        .await?;
+    let view = match current_view {
+        Some(view) => view,
+        None => {
+            repository
+                .read_views
+                .current(repository, runtime, options, cancel)
+                .await?
+        }
+    };
     let original_parent = view
         .remote()
         .refs()
@@ -1603,12 +1736,16 @@ async fn prepare_and_upload_batch(
     };
     upload_batch(
         repository,
-        request.branch,
         batch,
-        None,
-        false,
-        cancel,
-        request.metrics,
+        BatchUpload {
+            branch: request.branch,
+            expected_transaction: None,
+            protocol,
+            capsule_count,
+            requires_revalidation: false,
+            cancel,
+            metrics: request.metrics,
+        },
     )
     .await
 }
@@ -1681,13 +1818,18 @@ async fn build_batch(
 
 async fn upload_batch(
     repository: &Repository,
-    branch: &str,
     batch: BuiltBatch,
-    expected_transaction: Option<String>,
-    requires_revalidation: bool,
-    cancel: &CancellationToken,
-    metrics: &Metrics,
+    upload: BatchUpload<'_>,
 ) -> Result<PreparedBatch> {
+    let BatchUpload {
+        branch,
+        expected_transaction,
+        protocol,
+        capsule_count,
+        requires_revalidation,
+        cancel,
+        metrics,
+    } = upload;
     let BuiltBatch {
         outcomes,
         commits,
@@ -1709,18 +1851,22 @@ async fn upload_batch(
             batches_since_checkpoint,
             checkpoint: false,
             requires_revalidation,
+            capsule_count,
         });
     };
     let commit_count = commits.len();
     let publication = upload_built_batch(
         repository,
-        branch,
         commits,
         &mut tree,
-        expected_transaction.clone(),
-        checkpoint,
-        cancel,
-        metrics,
+        ArtifactUpload {
+            branch,
+            expected_transaction: expected_transaction.clone(),
+            protocol,
+            checkpoint,
+            cancel,
+            metrics,
+        },
     )
     .await?;
     Ok(PreparedBatch {
@@ -1734,6 +1880,7 @@ async fn upload_batch(
         batches_since_checkpoint,
         checkpoint,
         requires_revalidation,
+        capsule_count: capsule_count.map(|count| count.saturating_add(1)),
     })
 }
 
@@ -1743,6 +1890,30 @@ async fn prepared_parent_is_current(
     expected_tip: Option<ObjectId>,
     expected_transaction: Option<&str>,
 ) -> Result<bool> {
+    if let PublicationProtocol::Capsule(root) = publication_protocol(repository).await? {
+        let view = crab_read::capsule_protocol::open_view_from_root_with_control(
+            &repository.layout,
+            *root,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
+                max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
+            },
+        )
+        .await?;
+        if let Some(expected_transaction) = expected_transaction {
+            return Ok(view
+                .visible_ref_transactions()
+                .get(branch)
+                .is_some_and(|current| current == expected_transaction));
+        }
+        let current = view
+            .refs()
+            .get(branch)
+            .map(|oid| oid.parse::<ObjectId>())
+            .transpose()
+            .map_err(|_| std::io::Error::other("repository ref contains an invalid object ID"))?;
+        return Ok(current == expected_tip);
+    }
     if let Some(expected_transaction) = expected_transaction {
         let head = crab_metadata::ref_journal::read_ref_head(
             &repository.store,
@@ -1767,16 +1938,39 @@ async fn prepared_parent_is_current(
     Ok(current == expected_tip)
 }
 
+struct BatchUpload<'a> {
+    branch: &'a str,
+    expected_transaction: Option<String>,
+    protocol: PublicationProtocol,
+    capsule_count: Option<u32>,
+    requires_revalidation: bool,
+    cancel: &'a CancellationToken,
+    metrics: &'a Metrics,
+}
+
+struct ArtifactUpload<'a> {
+    branch: &'a str,
+    expected_transaction: Option<String>,
+    protocol: PublicationProtocol,
+    checkpoint: bool,
+    cancel: &'a CancellationToken,
+    metrics: &'a Metrics,
+}
+
 async fn upload_built_batch(
     repository: &Repository,
-    branch: &str,
     commits: Vec<BuiltCommit>,
     tree: &mut WarmTree,
-    expected_transaction: Option<String>,
-    checkpoint: bool,
-    cancel: &CancellationToken,
-    metrics: &Metrics,
+    upload: ArtifactUpload<'_>,
 ) -> Result<UploadedMutation> {
+    let ArtifactUpload {
+        branch,
+        expected_transaction,
+        protocol,
+        checkpoint,
+        cancel,
+        metrics,
+    } = upload;
     let mut objects = Vec::new();
     let mut seen = HashMap::new();
     let mut repeated_objects = HashSet::new();
@@ -1820,6 +2014,9 @@ async fn upload_built_batch(
     let mut delta_bases = BTreeMap::new();
     let mut external_delta_bases = BTreeMap::new();
     let mut external_delta_bytes = 0usize;
+    // V2 checkpoint source validation uses generic Git and requires standalone packs.
+    // The v1 remote reader can retain its explicit cross-pack base contract.
+    let allow_external_delta_bases = matches!(&protocol, PublicationProtocol::Legacy);
     for (object, candidates) in delta_candidates {
         // One packed representation must match the final warm lineage. A tree
         // revisited within this batch is therefore emitted as a full entry.
@@ -1828,7 +2025,10 @@ async fn upload_built_batch(
         }
         let candidate = candidates
             .into_iter()
-            .filter(|candidate| seen.contains_key(&candidate.base) || candidate.external.is_some())
+            .filter(|candidate| {
+                seen.contains_key(&candidate.base)
+                    || (allow_external_delta_bases && candidate.external.is_some())
+            })
             .min_by_key(|candidate| (!seen.contains_key(&candidate.base), candidate.base));
         let Some(candidate) = candidate else {
             continue;
@@ -1910,47 +2110,7 @@ async fn upload_built_batch(
             visible_objects,
         ),
     };
-    let pack_upload = async {
-        let path = repository.layout.pack_path(&pack_id);
-        if pack.size() <= GENERATED_PACK_SINGLE_PUT_MAX_BYTES {
-            check_cancelled(cancel)?;
-            repository
-                .store
-                .put_exact(&path, tokio::fs::read(pack.pack_path()).await?.into())
-                .await?;
-        } else {
-            repository
-                .store
-                .put_multipart_file_retry(
-                    &path,
-                    pack.pack_path(),
-                    pack.size(),
-                    *pack.content_hash().as_bytes(),
-                    GENERATED_PACK_SINGLE_PUT_MAX_BYTES as usize,
-                    cancel,
-                    None,
-                )
-                .await?;
-        }
-        Ok::<(), Error>(())
-    };
-    let sidecar_upload = |source: &std::path::Path, target| {
-        let source = source.to_owned();
-        async move {
-            check_cancelled(cancel)?;
-            repository
-                .store
-                .put_exact(&target, tokio::fs::read(source).await?.into())
-                .await?;
-            Ok::<(), Error>(())
-        }
-    };
-    let evidence_upload = async {
-        git_visibility::upload_edit(&repository.store, &repository.layout, &evidence)
-            .await
-            .map_err(Error::from)
-    };
-    let attributes_upload = async {
+    let upload_attributes = || async {
         futures_util::future::try_join_all(attribute_deltas.into_iter().map(
             |(commit, parent, changes, checkpoint, checkpoint_slot)| {
                 attributes::save_delta(
@@ -1967,36 +2127,108 @@ async fn upload_built_batch(
         .map(|_| ())
         .map_err(Error::from)
     };
-    let (_, _, _, _, evidence_hash, _) = tokio::try_join!(
-        pack_upload,
-        sidecar_upload(
-            pack.index_path(),
-            repository.layout.pack_index_path(&pack_id)
-        ),
-        sidecar_upload(
-            pack.reverse_path(),
-            repository.layout.pack_reverse_index_path(&pack_id)
-        ),
-        sidecar_upload(
-            pack.kinds_path(),
-            repository.layout.pack_kind_metadata_path(&pack_id)
-        ),
-        evidence_upload,
-        attributes_upload,
-    )?;
+    let artifacts = match protocol {
+        PublicationProtocol::Legacy => {
+            let pack_upload = async {
+                let path = repository.layout.pack_path(&pack_id);
+                if pack.size() <= GENERATED_PACK_SINGLE_PUT_MAX_BYTES {
+                    check_cancelled(cancel)?;
+                    repository
+                        .store
+                        .put_exact(&path, tokio::fs::read(pack.pack_path()).await?.into())
+                        .await?;
+                } else {
+                    repository
+                        .store
+                        .put_multipart_file_retry(
+                            &path,
+                            pack.pack_path(),
+                            pack.size(),
+                            *pack.content_hash().as_bytes(),
+                            GENERATED_PACK_SINGLE_PUT_MAX_BYTES as usize,
+                            cancel,
+                            None,
+                        )
+                        .await?;
+                }
+                Ok::<(), Error>(())
+            };
+            let sidecar_upload = |source: &std::path::Path, target| {
+                let source = source.to_owned();
+                async move {
+                    check_cancelled(cancel)?;
+                    repository
+                        .store
+                        .put_exact(&target, tokio::fs::read(source).await?.into())
+                        .await?;
+                    Ok::<(), Error>(())
+                }
+            };
+            let evidence_upload = async {
+                git_visibility::upload_edit(&repository.store, &repository.layout, &evidence)
+                    .await
+                    .map_err(Error::from)
+            };
+            let (_, _, _, _, evidence_hash, _) = tokio::try_join!(
+                pack_upload,
+                sidecar_upload(
+                    pack.index_path(),
+                    repository.layout.pack_index_path(&pack_id)
+                ),
+                sidecar_upload(
+                    pack.reverse_path(),
+                    repository.layout.pack_reverse_index_path(&pack_id)
+                ),
+                sidecar_upload(
+                    pack.kinds_path(),
+                    repository.layout.pack_kind_metadata_path(&pack_id)
+                ),
+                evidence_upload,
+                upload_attributes(),
+            )?;
+            UploadedArtifacts::Legacy {
+                pack: PackManifestEntry {
+                    pack_id: pack_id.clone(),
+                    content_hash: pack_id,
+                    size: pack.size(),
+                    object_count: pack.object_count().into(),
+                    ref_tips: vec![final_commit.to_string()],
+                },
+                evidence_hash,
+            }
+        }
+        PublicationProtocol::Capsule(base) => {
+            let read = |path: &std::path::Path| {
+                let path = path.to_owned();
+                async move { tokio::fs::read(path).await.map_err(Error::from) }
+            };
+            let (pack_bytes, index, reverse_index, locator, _) = tokio::try_join!(
+                read(pack.pack_path()),
+                read(pack.index_path()),
+                read(pack.reverse_path()),
+                read(pack.kinds_path()),
+                upload_attributes(),
+            )?;
+            UploadedArtifacts::Capsule(Box::new(CapsuleMutationArtifacts {
+                base: *base,
+                pack: crab_metadata::capsule_protocol::CapsuleGitPack::new(
+                    Bytes::from(pack_bytes),
+                    Bytes::from(index),
+                    Bytes::from(reverse_index),
+                    Bytes::from(locator),
+                    pack.git_sha1().to_string(),
+                    u64::from(pack.object_count()),
+                )?,
+                visibility: evidence,
+            }))
+        }
+    };
     check_cancelled(cancel)?;
     let uploaded = UploadedMutation {
         parent,
         expected_transaction,
         commit: final_commit,
-        pack: PackManifestEntry {
-            pack_id: pack_id.clone(),
-            content_hash: pack_id,
-            size: pack.size(),
-            object_count: pack.object_count().into(),
-            ref_tips: vec![final_commit.to_string()],
-        },
-        evidence_hash,
+        artifacts,
     };
     drop(pack);
     drop(pack_owner);
@@ -2028,6 +2260,94 @@ async fn publish_prepared(
     cancel: &CancellationToken,
 ) -> Result<Publish> {
     check_cancelled(cancel)?;
+    if let UploadedArtifacts::Capsule(artifacts) = &prepared.artifacts {
+        let CapsuleMutationArtifacts {
+            base,
+            pack,
+            visibility,
+        } = artifacts.as_ref();
+        let edit = crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+            branch,
+            prepared.parent.map(|oid| oid.to_string()),
+            Some(prepared.commit.to_string()),
+            None,
+        );
+        let transaction = match plan_id {
+            Some(plan_id) => crab_metadata::capsule_protocol::CapsuleTransaction::for_plan(
+                base.record().digest(),
+                plan_id,
+                vec![edit],
+            )?,
+            None => crab_metadata::capsule_protocol::CapsuleTransaction::new(
+                base.record().digest(),
+                vec![edit],
+            )?,
+        };
+        let transaction_id = transaction.id()?;
+        let visibility = crab_metadata::capsule_protocol::CapsuleVisibilityDelta::new(
+            BTreeMap::from([(branch.to_owned(), visibility.clone())]),
+        )?;
+        let capsule = crab_metadata::capsule_protocol::Capsule::build(
+            &transaction,
+            vec![pack.clone()],
+            vec![crab_metadata::capsule_protocol::CapsuleSection::new(
+                crab_metadata::capsule_protocol::CapsuleSectionKind::VisibilityDelta,
+                visibility.encode()?,
+            )],
+        )?;
+        let published = if prepared.parent.is_none() {
+            let layout = repository.layout.clone();
+            let commit_layout = layout.clone();
+            let base = base.clone();
+            let names = vec![branch.to_owned()];
+            crab_write::with_ref_namespaces(
+                layout.store(),
+                &layout,
+                &names,
+                LOCK_TTL,
+                cancel,
+                move |scoped| async move {
+                    if scoped.is_cancelled() {
+                        return Err(crab_write::WriteError::Cancelled);
+                    }
+                    crab_write::capsule_protocol::validate_ref_namespace(
+                        &commit_layout,
+                        base.record().root(),
+                        transaction.edits(),
+                    )
+                    .await?;
+                    crab_write::capsule_protocol::publish(
+                        &commit_layout,
+                        base,
+                        &transaction,
+                        &capsule,
+                    )
+                    .await
+                },
+            )
+            .await
+        } else {
+            crab_write::capsule_protocol::publish(
+                &repository.layout,
+                base.clone(),
+                &transaction,
+                &capsule,
+            )
+            .await
+        };
+        return match published {
+            Ok(_) => Ok(Publish::Committed(transaction_id)),
+            Err(crab_write::WriteError::RefChanged { .. }) => Ok(Publish::Reprepare),
+            Err(error) => Err(error.into()),
+        };
+    }
+    let UploadedArtifacts::Legacy {
+        pack,
+        evidence_hash,
+    } = &prepared.artifacts
+    else {
+        return Err(std::io::Error::other("mutation publication protocol changed").into());
+    };
     let options = crab_write::journal::CommitOptions::new(LOCK_TTL, cancel);
     let options = match plan_id {
         Some(plan_id) => options.with_plan(plan_id),
@@ -2039,7 +2359,7 @@ async fn publish_prepared(
         new_oid: Some(prepared.commit.to_string()),
         peeled_oid: None,
         lock_holder: Some(holder.to_owned()),
-        visibility_evidence_hash: Some(prepared.evidence_hash.clone()),
+        visibility_evidence_hash: Some(evidence_hash.clone()),
     };
     let committed = if let (Some(expected), Some(_)) =
         (prepared.expected_transaction.as_deref(), prepared.parent)
@@ -2049,7 +2369,7 @@ async fn publish_prepared(
             &repository.layout,
             expected,
             edit,
-            vec![prepared.pack.clone()],
+            vec![pack.clone()],
             options,
         )
         .await
@@ -2075,7 +2395,7 @@ async fn publish_prepared(
             &snapshot,
             vec![edit],
             prepared.parent.is_none().then(|| branch.to_owned()),
-            vec![prepared.pack.clone()],
+            vec![pack.clone()],
             vec![],
             options,
         )
@@ -3455,7 +3775,7 @@ mod tests {
                 attributes::PutAttributes::default(),
             )),
         );
-        cache.store(Some(tip), None, manifest, WarmTree::default(), 0);
+        cache.store(Some(tip), None, manifest, WarmTree::default(), 0, None);
 
         assert!(
             cache
@@ -3472,6 +3792,7 @@ mod tests {
             Arc::try_unwrap(state.manifest).unwrap(),
             state.tree,
             0,
+            state.capsule_count,
         );
         assert!(cache.take(None).is_none());
     }
@@ -3491,6 +3812,7 @@ mod tests {
             attributes::Manifest::default(),
             WarmTree::default(),
             0,
+            None,
         );
 
         let second = admission
@@ -3506,17 +3828,46 @@ mod tests {
         Arc<crab_remote_git::RemoteGitRuntime>,
         CancellationToken,
     ) {
+        fixture_with_protocol(false).await
+    }
+
+    async fn capsule_fixture() -> (
+        Repository,
+        Arc<crab_remote_git::RemoteGitRuntime>,
+        CancellationToken,
+    ) {
+        fixture_with_protocol(true).await
+    }
+
+    async fn fixture_with_protocol(
+        capsule: bool,
+    ) -> (
+        Repository,
+        Arc<crab_remote_git::RemoteGitRuntime>,
+        CancellationToken,
+    ) {
         let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
-        let layout = crab_storage::StoreLayout::new(store.clone(), "s3-test".to_owned());
-        crab_write::initialize::initialize_repository(&store, &layout, "refs/heads/main")
-            .await
-            .unwrap();
+        let prefix = if capsule {
+            "s3-capsule-test"
+        } else {
+            "s3-test"
+        };
+        let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
+        if capsule {
+            crab_write::capsule_protocol::initialize(&layout, &"a".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+        } else {
+            crab_write::initialize::initialize_repository(&store, &layout, "refs/heads/main")
+                .await
+                .unwrap();
+        }
         let repository = Repository::new(
             RepositoryConfig {
                 name: "repo".to_owned(),
                 provider: crab_storage::StorageProviderKind::Local,
                 bucket: "memory".to_owned(),
-                prefix: "s3-test".to_owned(),
+                prefix: prefix.to_owned(),
                 default_branch: "main".to_owned(),
                 members: vec![crate::RepositoryMember {
                     principal: "user".to_owned(),
@@ -3618,6 +3969,154 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn capsule_repository_mutations_publish_and_read_without_v1_metadata() {
+        let (repository, runtime, cancel) = capsule_fixture().await;
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
+            Metrics::new().unwrap(),
+        );
+
+        coordinated_put(&coordinator, &repository, &cancel, "first", b"one").await;
+        coordinated_put(&coordinator, &repository, &cancel, "second", b"two").await;
+
+        assert_eq!(
+            read(&repository, Arc::clone(&runtime), &cancel, "first").await,
+            Bytes::from_static(b"one")
+        );
+        assert_eq!(
+            read(&repository, Arc::clone(&runtime), &cancel, "second").await,
+            Bytes::from_static(b"two")
+        );
+        let root = crab_metadata::capsule_protocol::load_root(&repository.layout)
+            .await
+            .unwrap();
+        let view = crab_read::capsule_protocol::open_view_from_root(
+            &repository.layout,
+            root,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
+                max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(view.ref_capsule_count("refs/heads/main"), 2);
+        assert!(
+            crab_remote::checkpoint::publish_capsule_checkpoint(
+                &repository.layout,
+                2,
+                MAX_CAPSULE_READ_BYTES,
+                &cancel,
+            )
+            .await
+            .unwrap()
+        );
+        repository.read_views.invalidate().await;
+        assert_eq!(
+            read(&repository, Arc::clone(&runtime), &cancel, "second").await,
+            Bytes::from_static(b"two")
+        );
+        let checkpointed = crab_read::capsule_protocol::open_view(
+            &repository.layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
+                max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(checkpointed.checkpoint().is_some());
+        assert_eq!(checkpointed.ref_capsule_count("refs/heads/main"), 0);
+        assert!(matches!(
+            repository
+                .store
+                .head(&repository.layout.manifest_path())
+                .await,
+            Err(crab_storage::StorageError::NotFound { .. })
+        ));
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sustained_capsule_mutations_checkpoint_before_the_ref_frontier_limit() {
+        let (repository, runtime, cancel) = capsule_fixture().await;
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
+            Metrics::new().unwrap(),
+        );
+        let path = crab_remote_git::GitPath::new(b"object".to_vec()).unwrap();
+        for index in 0..FOREGROUND_CAPSULE_THRESHOLD {
+            coordinator
+                .apply(
+                    &repository,
+                    "refs/heads/main",
+                    &path,
+                    Change::Put {
+                        bytes: Bytes::from(index.to_string()),
+                        track_lfs: false,
+                        attributes: Box::default(),
+                        condition: PutCondition::None,
+                    },
+                    "user",
+                    &cancel,
+                )
+                .await
+                .unwrap();
+        }
+        let before = crab_read::capsule_protocol::open_view(
+            &repository.layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
+                max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            before.ref_capsule_count("refs/heads/main"),
+            FOREGROUND_CAPSULE_THRESHOLD
+        );
+
+        coordinator
+            .apply(
+                &repository,
+                "refs/heads/main",
+                &path,
+                Change::Put {
+                    bytes: Bytes::from_static(b"after-checkpoint"),
+                    track_lfs: false,
+                    attributes: Box::default(),
+                    condition: PutCondition::None,
+                },
+                "user",
+                &cancel,
+            )
+            .await
+            .unwrap();
+
+        let after = crab_read::capsule_protocol::open_view(
+            &repository.layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
+                max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(after.checkpoint().is_some());
+        assert_eq!(after.ref_capsule_count("refs/heads/main"), 1);
+        assert_eq!(
+            read(&repository, Arc::clone(&runtime), &cancel, "object").await,
+            Bytes::from_static(b"after-checkpoint")
+        );
+        runtime.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4235,6 +4734,90 @@ mod tests {
         .unwrap();
         let recovered = tip(&repository, Arc::clone(&runtime), &cancel).await;
         assert!(first != overwritten && recovered == overwritten);
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn capsule_multipart_completion_retry_uses_the_v2_receipt() {
+        let (repository, runtime, cancel) = capsule_fixture().await;
+        let path = crab_remote_git::GitPath::new(b"object.bin".to_vec()).unwrap();
+        let change = Change::Put {
+            bytes: Bytes::from_static(b"multipart content"),
+            track_lfs: false,
+            attributes: Box::new(attributes::PutAttributes {
+                etag_override: Some("multipart-etag-1".to_owned()),
+                completion_upload_id: Some("upload-id".to_owned()),
+                ..Default::default()
+            }),
+            condition: PutCondition::None,
+        };
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
+            change.clone(),
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
+        let first = tip(&repository, Arc::clone(&runtime), &cancel).await;
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
+            Change::Put {
+                bytes: Bytes::from_static(b"newer content"),
+                track_lfs: false,
+                attributes: Box::default(),
+                condition: PutCondition::None,
+            },
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
+        let overwritten = tip(&repository, Arc::clone(&runtime), &cancel).await;
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
+            change,
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
+        let recovered = tip(&repository, Arc::clone(&runtime), &cancel).await;
+        let plan_id = crate::multipart::publication_plan_id("upload-id");
+
+        assert!(first != overwritten && recovered == overwritten);
+        assert!(
+            crab_metadata::capsule_protocol::resolve_capsule_plan_receipt(
+                &repository.store,
+                &repository.layout,
+                &plan_id,
+            )
+            .await
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            crab_metadata::plan_receipt::resolve_plan_receipt(
+                &repository.store,
+                &repository.layout,
+                &plan_id,
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
         runtime.shutdown().await;
     }
 

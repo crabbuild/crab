@@ -2,14 +2,12 @@
 //!
 //! Xorb optimization writes destination xorbs before it can know which file versions
 //! are still current. This module turns the completed journal mapping into a
-//! new immutable shard snapshot, generation-pins the file-index acceleration
-//! rows to that snapshot, and then publishes the snapshot through the
-//! repository manifest CAS. The manifest CAS is the visibility boundary:
-//! readers anchored to the previous generation continue to use the old shard
-//! set, while rows written for a failed attempt are ignored by their anchor
-//! validation.
+//! new immutable shard snapshot. Capsule repositories publish the complete
+//! verified pointer catalog through an exact-root checkpoint CAS. Legacy
+//! repositories generation-pin file-index acceleration rows and publish the
+//! snapshot through the manifest CAS.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -44,6 +42,7 @@ const MAX_RECONCILIATION_FILE_ENTRIES: usize = 1_000_000;
 const MAX_RECONCILIATION_XORB_ENTRIES: usize = 1_000_000;
 const MAX_RECONCILIATION_LOADED_CHUNK_ENTRIES: usize = 10_000_000;
 const SOURCES_PER_RECONCILIATION_BATCH: usize = 64;
+const MAX_CAPSULE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Reconciliation outcome
@@ -163,7 +162,9 @@ struct SourcePlacement {
 #[derive(Debug, Default)]
 struct LoadedMapping {
     sources: HashMap<MerkleHash, SourcePlacement>,
+    source_catalog: HashMap<MerkleHash, crab_metadata::capsule_protocol::XorbCatalogEntry>,
     destination_infos: HashMap<MerkleHash, Arc<MDBXorbInfo>>,
+    destination_catalog: HashMap<MerkleHash, crab_metadata::capsule_protocol::XorbCatalogEntry>,
 }
 
 /// Parse a journal hash and retain the error as a corrupt-object report.
@@ -175,11 +176,20 @@ fn parse_hash(value: &str, path: &str) -> Result<MerkleHash> {
 }
 
 /// Read and validate one xorb before using its chunk metadata in a shard.
-async fn load_xorb(store: &Store, router: &StoreLayout, hash: MerkleHash) -> Result<XorbParser> {
+async fn load_xorb(
+    store: &Store,
+    router: &StoreLayout,
+    hash: MerkleHash,
+) -> Result<(
+    XorbParser,
+    crab_metadata::capsule_protocol::XorbCatalogEntry,
+)> {
     let path = router.xorb_path(&hash);
     let (bytes, _) = store
         .get_with_etag_bounded(&path, MAX_XORB_SIZE as u64)
         .await?;
+    let encoded_size = bytes.len() as u64;
+    let body_digest = blake3::hash(&bytes).to_hex().to_string();
     let parser = XorbParser::parse(bytes).map_err(CrabError::from)?;
     if parser.hash() != hash {
         return Err(CrabError::CorruptObject {
@@ -189,7 +199,19 @@ async fn load_xorb(store: &Store, router: &StoreLayout, hash: MerkleHash) -> Res
     }
     parser.verify_payload_digest().map_err(CrabError::from)?;
     parser.verify_all_chunks().map_err(CrabError::from)?;
-    Ok(parser)
+    let chunks = (0..parser.num_chunks())
+        .map(|index| {
+            let chunk = parser.chunk_meta(index).map_err(CrabError::from)?;
+            Ok(crab_metadata::capsule_protocol::XorbChunkEntry::new(
+                chunk.hash.hex(),
+                chunk.uncompressed_len,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok((
+        parser,
+        crab_metadata::capsule_protocol::XorbCatalogEntry::new(encoded_size, body_digest, chunks),
+    ))
 }
 
 fn source_chunks(parser: &XorbParser, path: &str) -> Result<Vec<SourceChunk>> {
@@ -264,7 +286,7 @@ async fn load_mapping(
         check_cancelled(cancel)?;
         let source_hash = parse_hash(source_text, "xorb optimization journal source")?;
         let source_path = router.xorb_path(&source_hash).to_string();
-        let source_parser = load_xorb(store, router, source_hash).await?;
+        let (source_parser, source_catalog) = load_xorb(store, router, source_hash).await?;
         let chunks = source_chunks(&source_parser, &source_path)?;
         loaded_chunk_entries = loaded_chunk_entries
             .checked_add(chunks.len())
@@ -291,7 +313,8 @@ async fn load_mapping(
                 Arc::clone(info)
             } else {
                 let destination_path = router.xorb_path(&destination_hash).to_string();
-                let destination_parser = load_xorb(store, router, destination_hash).await?;
+                let (destination_parser, catalog_entry) =
+                    load_xorb(store, router, destination_hash).await?;
                 let info = xorb_info(destination_hash, &destination_parser, &destination_path)?;
                 loaded_chunk_entries = loaded_chunk_entries
                     .checked_add(info.chunks.len())
@@ -310,6 +333,9 @@ async fn load_mapping(
                 loaded
                     .destination_infos
                     .insert(destination_hash, Arc::clone(&info));
+                loaded
+                    .destination_catalog
+                    .insert(destination_hash, catalog_entry);
                 info
             };
 
@@ -367,6 +393,7 @@ async fn load_mapping(
         loaded
             .sources
             .insert(source_hash, SourcePlacement { chunks, refs });
+        loaded.source_catalog.insert(source_hash, source_catalog);
         if loaded.sources.len() as u64 > MAX_RECONCILIATION_MAPPING_ENTRIES {
             return Err(CrabError::Configuration {
                 key: "xorb optimization reconciliation mapping count".to_owned(),
@@ -396,6 +423,7 @@ struct ShardRewrite {
     new_hash: MerkleHash,
     bytes: Bytes,
     file_entries: Vec<FileIndexEntry>,
+    xorbs: Vec<MerkleHash>,
 }
 
 #[derive(Debug, Default)]
@@ -531,6 +559,7 @@ fn rewrite_shard(
     body: &Bytes,
     old_hash: MerkleHash,
     mapping: &LoadedMapping,
+    selected_files: Option<&HashSet<MerkleHash>>,
 ) -> Result<Option<ShardRewrite>> {
     let reader = ShardReader::from_bytes(body.clone(), old_hash);
     let shard_data = reader.v1_data();
@@ -574,6 +603,10 @@ fn rewrite_shard(
     let mut files_changed = false;
     let mut file_entries = Vec::with_capacity(files.len());
     for file in &files {
+        if selected_files.is_some_and(|selected| !selected.contains(&file.metadata.file_hash)) {
+            files_changed = true;
+            continue;
+        }
         let (rewritten, changed) = rewrite_file_info(file, mapping)?;
         files_changed |= changed;
         let recipe_hash = recipes
@@ -588,6 +621,11 @@ fn rewrite_shard(
             shard_hash: MerkleHash::default(),
         });
         rewritten_files.push(rewritten);
+    }
+    if selected_files.is_some() && rewritten_files.is_empty() {
+        return Err(corrupt_shard(format!(
+            "authenticated shard {old_hash} contains none of its catalog files"
+        )));
     }
 
     let referenced_xorbs: HashSet<MerkleHash> = rewritten_files
@@ -626,6 +664,11 @@ fn rewrite_shard(
         new_hash,
         bytes: Bytes::from(bytes),
         file_entries,
+        xorbs: {
+            let mut xorbs = referenced_xorbs.into_iter().collect::<Vec<_>>();
+            xorbs.sort_unstable_by_key(MerkleHash::hex);
+            xorbs
+        },
     }))
 }
 
@@ -649,6 +692,7 @@ async fn build_plan(
     router: &StoreLayout,
     shard_hashes: &[MerkleHash],
     mapping: &LoadedMapping,
+    selected_files: Option<&HashSet<MerkleHash>>,
     cancel: &CancellationToken,
 ) -> Result<ReconcilePlan> {
     let mut plan = ReconcilePlan::default();
@@ -661,7 +705,7 @@ async fn build_plan(
         }
         check_cancelled(cancel)?;
         let body = read_shard(store, router, shard_hash).await?;
-        if let Some(rewrite) = rewrite_shard(&body, shard_hash, mapping)? {
+        if let Some(rewrite) = rewrite_shard(&body, shard_hash, mapping, selected_files)? {
             replacements_by_old.insert(shard_hash, rewrite.new_hash);
             plan.replaced_sources.insert(shard_hash);
             plan.file_entries
@@ -709,6 +753,7 @@ async fn upload_replacements(
     store: &Store,
     router: &StoreLayout,
     replacements: &[ShardRewrite],
+    publish_gc_closures: bool,
     cancel: &CancellationToken,
 ) -> Result<(u64, u64)> {
     let workspace = tempfile::tempdir().map_err(CrabError::Io)?;
@@ -756,6 +801,16 @@ async fn upload_replacements(
                 ),
             });
         }
+        if publish_gc_closures {
+            crate::cmd::gc::closure::publish(
+                store,
+                router.global_prefix(),
+                &replacement.new_hash,
+                replacement.bytes.clone(),
+                path.as_ref(),
+            )
+            .await?;
+        }
         uploaded += 1;
         bytes += size;
     }
@@ -791,17 +846,149 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     (year, month, day)
 }
 
+fn capsule_selection(
+    catalog: &crab_metadata::capsule_protocol::PointerCatalog,
+) -> Result<(Vec<MerkleHash>, HashSet<MerkleHash>)> {
+    let mut shard_hashes = BTreeSet::new();
+    let mut files = HashSet::with_capacity(catalog.files().len());
+    for (file_hash, entry) in catalog.files() {
+        files.insert(parse_hash(file_hash, "capsule file catalog")?);
+        shard_hashes.insert(entry.shard_hash().to_owned());
+    }
+    let shards = shard_hashes
+        .into_iter()
+        .map(|hash| {
+            if !catalog.shards().contains_key(&hash) {
+                return Err(CrabError::CorruptObject {
+                    path: "capsule-protocol pointer catalog".to_owned(),
+                    reason: format!("file catalog references absent shard {hash}"),
+                });
+            }
+            parse_hash(&hash, "capsule shard catalog")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok((shards, files))
+}
+
+fn capsule_replacement_catalog(
+    current: &crab_metadata::capsule_protocol::PointerCatalog,
+    plan: &ReconcilePlan,
+    mapping: &LoadedMapping,
+) -> Result<crab_metadata::capsule_protocol::PointerCatalog> {
+    use crab_metadata::capsule_protocol::{FileCatalogEntry, PointerCatalog, ShardCatalogEntry};
+
+    let file_shards = plan
+        .file_entries
+        .iter()
+        .map(|entry| (entry.file_hash, entry.shard_hash))
+        .collect::<HashMap<_, _>>();
+    let rewrites = plan
+        .replacements
+        .iter()
+        .map(|replacement| (replacement.new_hash, replacement))
+        .collect::<HashMap<_, _>>();
+
+    let mut catalog = PointerCatalog::new();
+    let mut required_xorbs = BTreeSet::new();
+    for shard_hash in &plan.final_shards {
+        if let Some(rewrite) = rewrites.get(shard_hash) {
+            let xorb_hashes = rewrite
+                .xorbs
+                .iter()
+                .map(MerkleHash::hex)
+                .collect::<Vec<_>>();
+            required_xorbs.extend(xorb_hashes.iter().cloned());
+            catalog.insert_shard(
+                shard_hash.hex(),
+                ShardCatalogEntry::new(rewrite.bytes.len() as u64, xorb_hashes),
+            )?;
+            continue;
+        }
+        let hash = shard_hash.hex();
+        let entry = current
+            .shards()
+            .get(&hash)
+            .ok_or_else(|| CrabError::CorruptObject {
+                path: "capsule-protocol pointer catalog".to_owned(),
+                reason: format!("canonical shard set references absent shard {hash}"),
+            })?;
+        required_xorbs.extend(entry.xorb_hashes().iter().cloned());
+        catalog.insert_shard(hash, entry.clone())?;
+    }
+
+    for xorb_hash in required_xorbs {
+        let parsed = parse_hash(&xorb_hash, "capsule xorb catalog")?;
+        let current_entry = current.xorbs().get(&xorb_hash);
+        let destination_entry = mapping.destination_catalog.get(&parsed);
+        if let (Some(current_entry), Some(destination_entry)) = (current_entry, destination_entry)
+            && current_entry != destination_entry
+        {
+            return Err(CrabError::CorruptObject {
+                path: format!("capsule xorb catalog {xorb_hash}"),
+                reason: "authenticated destination descriptor conflicts with its verified body"
+                    .to_owned(),
+            });
+        }
+        let entry =
+            destination_entry
+                .or(current_entry)
+                .ok_or_else(|| CrabError::CorruptObject {
+                    path: "capsule-protocol pointer catalog".to_owned(),
+                    reason: format!("replacement shard references absent xorb {xorb_hash}"),
+                })?;
+        catalog.insert_xorb(xorb_hash, entry.clone())?;
+    }
+
+    for (file_hash, entry) in current.files() {
+        let parsed = parse_hash(file_hash, "capsule file catalog")?;
+        let source_shard = parse_hash(entry.shard_hash(), "capsule file shard")?;
+        let shard_hash = match file_shards.get(&parsed) {
+            Some(hash) => hash.hex(),
+            None if plan.replaced_sources.contains(&source_shard) => {
+                return Err(CrabError::CorruptObject {
+                    path: "xorb optimization replacement catalog".to_owned(),
+                    reason: format!("rewritten shard lost authenticated file {file_hash}"),
+                });
+            }
+            None => entry.shard_hash().to_owned(),
+        };
+        catalog.insert_file(
+            file_hash.clone(),
+            FileCatalogEntry::new(entry.size(), shard_hash),
+        )?;
+    }
+    catalog.encode()?;
+    Ok(catalog)
+}
+
+fn verify_capsule_sources(
+    catalog: &crab_metadata::capsule_protocol::PointerCatalog,
+    mapping: &LoadedMapping,
+) -> Result<()> {
+    for (hash, actual) in &mapping.source_catalog {
+        if let Some(authenticated) = catalog.xorbs().get(&hash.hex())
+            && authenticated != actual
+        {
+            return Err(CrabError::CorruptObject {
+                path: format!("capsule xorb catalog {}", hash.hex()),
+                reason: "authenticated xorb descriptor does not match its verified body".to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Finalize
 // ---------------------------------------------------------------------------
 
-/// Finalize an xorb optimization run by reconciling the file-index and shard manifest.
+/// Finalize an xorb optimization run against the repository's authoritative format.
 ///
-/// Destination xorbs are immutable. For each CAS attempt this function reads
-/// the current canonical shard set, rewrites every affected `MDBFileInfo`,
-/// uploads the replacement shards and generation-pinned file-index rows, and
-/// finally advances the manifest. A concurrent push causes a bounded retry
-/// against the new manifest, so files added during the run are included.
+/// Destination xorbs are immutable. Each attempt rereads the current canonical
+/// shard set, rewrites every affected `MDBFileInfo`, makes the replacement
+/// closure durable, and atomically advances either the v2 capsule root or the
+/// legacy manifest. Concurrent pushes cause a bounded retry against the newer
+/// authority so their file roots are never lost.
 pub async fn finalize(
     journal: &OptimizeXorbsJournal,
     run_id: &str,
@@ -845,6 +1032,160 @@ pub async fn finalize(
     }
 
     let loaded_mapping = load_mapping(store, router, &src_to_dest, cancel).await?;
+    let capsule_layout =
+        crab_storage::StoreLayout::new(store.as_storage().clone(), router.repo_prefix().to_owned());
+    match crab_metadata::capsule_protocol::load_root(&capsule_layout).await {
+        Ok(root) => {
+            return finalize_capsule(
+                store,
+                router,
+                &capsule_layout,
+                root,
+                &loaded_mapping,
+                entries_updated,
+                entries_unchanged,
+                cancel,
+            )
+            .await;
+        }
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        }) => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    finalize_legacy(
+        store,
+        router,
+        config,
+        run_id,
+        &loaded_mapping,
+        entries_updated,
+        entries_unchanged,
+        cancel,
+    )
+    .await
+}
+
+async fn finalize_capsule(
+    store: &Store,
+    router: &StoreLayout,
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    mut root: crab_metadata::capsule_protocol::RootSnapshot,
+    mapping: &LoadedMapping,
+    entries_updated: u64,
+    entries_unchanged: u64,
+    cancel: &CancellationToken,
+) -> Result<ReconcileOutcome> {
+    let mut total_uploaded = 0;
+    let mut total_bytes = 0;
+
+    for attempt in 1..=MAX_CAS_ATTEMPTS {
+        check_cancelled(cancel)?;
+        let view = crab_read::capsule_protocol::open_view_from_root_with_control(
+            layout,
+            root.clone(),
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: MAX_CAPSULE_BYTES,
+                max_frontier_bytes: MAX_CAPSULE_BYTES,
+            },
+        )
+        .await?;
+        let current = view.pointer_catalog()?;
+        verify_capsule_sources(&current, mapping)?;
+        let (shard_hashes, selected_files) = capsule_selection(&current)?;
+        let plan = build_plan(
+            store,
+            router,
+            &shard_hashes,
+            mapping,
+            Some(&selected_files),
+            cancel,
+        )
+        .await?;
+        if plan.replacements.is_empty() {
+            info!(
+                entries_updated,
+                entries_unchanged,
+                cas_attempts = attempt,
+                protocol = "capsule-v2",
+                "xorb optimization reconciliation found no canonical file entries using source xorbs"
+            );
+            return Ok(ReconcileOutcome {
+                entries_updated,
+                entries_unchanged,
+                shards_uploaded: total_uploaded,
+                shard_bytes: total_bytes,
+                cas_first_attempt: attempt == 1,
+                cas_attempts: attempt,
+            });
+        }
+
+        let replacement = capsule_replacement_catalog(&current, &plan, mapping)?;
+        let (uploaded, bytes) =
+            upload_replacements(store, router, &plan.replacements, true, cancel).await?;
+        total_uploaded += uploaded;
+        total_bytes += bytes;
+        crab_read::verify_capsule_pointer_catalog_objects(layout, &replacement).await?;
+        crab_metadata::ref_registry::union_register_repo_shards(
+            layout.store(),
+            layout,
+            plan.final_shards.iter().map(MerkleHash::hex).collect(),
+        )
+        .await?;
+        let published = crab_remote::checkpoint::publish_capsule_checkpoint_with_catalog_from_view(
+            layout,
+            &view,
+            replacement,
+            MAX_CAPSULE_BYTES,
+            cancel,
+        )
+        .await
+        .map_err(map_checkpoint_error)?;
+        if published {
+            info!(
+                entries_updated,
+                entries_unchanged,
+                shards_uploaded = total_uploaded,
+                shard_bytes = total_bytes,
+                cas_attempts = attempt,
+                protocol = "capsule-v2",
+                "xorb optimization reconciliation complete"
+            );
+            return Ok(ReconcileOutcome {
+                entries_updated,
+                entries_unchanged,
+                shards_uploaded: total_uploaded,
+                shard_bytes: total_bytes,
+                cas_first_attempt: attempt == 1,
+                cas_attempts: attempt,
+            });
+        }
+        if attempt < MAX_CAS_ATTEMPTS {
+            debug!(
+                attempt,
+                "capsule root changed during xorb optimization reconciliation; retrying"
+            );
+            root = crab_metadata::capsule_protocol::load_root(layout).await?;
+        }
+    }
+
+    Err(CrabError::CasConflict {
+        path: layout.capsule_root_path().to_string(),
+        expected_etag: None,
+    })
+}
+
+async fn finalize_legacy(
+    store: &Store,
+    router: &StoreLayout,
+    config: &Config,
+    run_id: &str,
+    loaded_mapping: &LoadedMapping,
+    entries_updated: u64,
+    entries_unchanged: u64,
+    cancel: &CancellationToken,
+) -> Result<ReconcileOutcome> {
     let mut total_uploaded = 0;
     let mut total_bytes = 0;
 
@@ -869,7 +1210,7 @@ pub async fn finalize(
             .iter()
             .map(|hash| parse_hash(hash, "manifest shard index"))
             .collect::<Result<Vec<_>>>()?;
-        let plan = build_plan(store, router, &shard_hashes, &loaded_mapping, cancel).await?;
+        let plan = build_plan(store, router, &shard_hashes, loaded_mapping, None, cancel).await?;
 
         if plan.replacements.is_empty() {
             info!(
@@ -913,7 +1254,7 @@ pub async fn finalize(
         )
         .await?;
         let (uploaded, bytes) =
-            upload_replacements(store, router, &plan.replacements, cancel).await?;
+            upload_replacements(store, router, &plan.replacements, false, cancel).await?;
         total_uploaded += uploaded;
         total_bytes += bytes;
 
@@ -998,6 +1339,19 @@ pub async fn finalize(
     })
 }
 
+fn map_checkpoint_error(error: crab_remote::checkpoint::CheckpointError) -> CrabError {
+    match error {
+        crab_remote::checkpoint::CheckpointError::Cancelled => CrabError::Cancelled,
+        crab_remote::checkpoint::CheckpointError::Read(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Repack(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Pack(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Metadata(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Write(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Io(source) => source.into(),
+        other => CrabError::Internal(other.to_string()),
+    }
+}
+
 /// Check that a CAS repeat is a no-op (idempotency).
 pub fn is_cas_repeat_noop(first_outcome: &ReconcileOutcome) -> bool {
     first_outcome.cas_first_attempt
@@ -1011,6 +1365,10 @@ pub fn is_cas_repeat_noop(first_outcome: &ReconcileOutcome) -> bool {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use object_store::memory::InMemory;
+    use std::collections::BTreeMap;
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
 
     fn hash(seed: u8) -> MerkleHash {
         MerkleHash::from([seed; 32])
@@ -1039,6 +1397,118 @@ mod tests {
             verification: Vec::new(),
             metadata_ext: None,
         }
+    }
+
+    fn git_pack_fixture() -> (String, crab_metadata::capsule_protocol::CapsuleGitPack) {
+        let workspace = tempfile::tempdir().unwrap();
+        let git_dir = workspace.path().join("repository.git");
+        assert!(
+            Command::new("git")
+                .args(["init", "--bare", "--quiet"])
+                .arg(&git_dir)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut hash = Command::new("git")
+            .arg("--git-dir")
+            .arg(&git_dir)
+            .args(["hash-object", "-t", "tree", "-w", "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        hash.stdin.take().unwrap().write_all(b"").unwrap();
+        let tree = String::from_utf8(hash.wait_with_output().unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        let mut commit = Command::new("git")
+            .arg("--git-dir")
+            .arg(&git_dir)
+            .args(["commit-tree", &tree])
+            .env("GIT_AUTHOR_NAME", "Crab Test")
+            .env("GIT_AUTHOR_EMAIL", "crab@example.invalid")
+            .env("GIT_AUTHOR_DATE", "@1 +0000")
+            .env("GIT_COMMITTER_NAME", "Crab Test")
+            .env("GIT_COMMITTER_EMAIL", "crab@example.invalid")
+            .env("GIT_COMMITTER_DATE", "@1 +0000")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        commit.stdin.take().unwrap().write_all(b"commit\n").unwrap();
+        let tip = String::from_utf8(commit.wait_with_output().unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert!(
+            Command::new("git")
+                .arg("--git-dir")
+                .arg(&git_dir)
+                .args(["update-ref", "refs/heads/main", &tip])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("--git-dir")
+                .arg(&git_dir)
+                .args(["repack", "-a", "-d", "--depth=64"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let source_pack = std::fs::read_dir(git_dir.join("objects/pack"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "pack")
+            })
+            .unwrap();
+        let pack_bytes = std::fs::read(&source_pack).unwrap();
+        let canonical_id = blake3::hash(&pack_bytes).to_hex().to_string();
+        let installed_dir = workspace.path().join("installed");
+        std::fs::create_dir_all(&installed_dir).unwrap();
+        let installed = crab_git::pack::install_pack_file_from_path(
+            &installed_dir,
+            &source_pack,
+            &canonical_id,
+            MAX_CAPSULE_BYTES,
+            true,
+        )
+        .unwrap();
+        let mut locations = crab_git::pack_locator::PackLocationIter::open(
+            &installed.idx_path,
+            &installed.rev_path,
+            pack_bytes.len() as u64,
+        )
+        .unwrap();
+        let object_count = locations.object_count();
+        let object_ids = locations
+            .by_ref()
+            .map(|location| location.unwrap().oid)
+            .collect::<Vec<_>>();
+        let kinds = crab_git::pack::object_kinds_from_git_dir(&git_dir, &object_ids).unwrap();
+        let ordered_kinds = object_ids
+            .iter()
+            .map(|oid| *kinds.get(oid).unwrap())
+            .collect::<Vec<_>>();
+        let checksum = gix_hash::ObjectId::from_hex(installed.git_sha1.as_bytes()).unwrap();
+        let locator =
+            crab_git::pack_locator::encode_pack_kind_metadata(checksum, &ordered_kinds).unwrap();
+        let pack = crab_metadata::capsule_protocol::CapsuleGitPack::new(
+            Bytes::from(pack_bytes),
+            Bytes::from(std::fs::read(&installed.idx_path).unwrap()),
+            Bytes::from(std::fs::read(&installed.rev_path).unwrap()),
+            Bytes::from(locator),
+            installed.git_sha1,
+            object_count,
+        )
+        .unwrap();
+        (tip, pack)
     }
 
     #[test]
@@ -1219,7 +1689,9 @@ mod tests {
         };
         let mapping = LoadedMapping {
             sources: HashMap::from([(source_hash, source)]),
+            source_catalog: HashMap::new(),
             destination_infos: HashMap::new(),
+            destination_catalog: HashMap::new(),
         };
         let file = MDBFileInfo {
             metadata: crab_xet::shard::FileDataSequenceHeader::new(hash(5), 1, false, false),
@@ -1274,10 +1746,12 @@ mod tests {
                     )]),
                 },
             )]),
+            source_catalog: HashMap::new(),
             destination_infos: HashMap::from([(destination_hash, destination_info)]),
+            destination_catalog: HashMap::new(),
         };
 
-        let rewrite = rewrite_shard(&Bytes::from(body), old_hash, &mapping)
+        let rewrite = rewrite_shard(&Bytes::from(body), old_hash, &mapping, None)
             .unwrap()
             .unwrap();
         let reader = ShardReader::from_bytes(rewrite.bytes, rewrite.new_hash);
@@ -1288,5 +1762,341 @@ mod tests {
             reader.get_file_info(&file_hash).unwrap().unwrap().segments[0].xorb_hash,
             destination_hash
         );
+    }
+
+    #[test]
+    fn capsule_catalog_replaces_shard_and_prunes_source_xorb() {
+        use crab_metadata::capsule_protocol::{
+            FileCatalogEntry, PointerCatalog, ShardCatalogEntry, XorbCatalogEntry, XorbChunkEntry,
+        };
+
+        let old_shard = hash(20);
+        let new_shard = hash(21);
+        let source_xorb = hash(22);
+        let destination_xorb = hash(23);
+        let file = hash(24);
+        let chunk = hash(25);
+        let source_entry = XorbCatalogEntry::new(
+            10,
+            hash(26).hex(),
+            vec![XorbChunkEntry::new(chunk.hex(), 10)],
+        );
+        let destination_entry = XorbCatalogEntry::new(
+            9,
+            hash(27).hex(),
+            vec![XorbChunkEntry::new(chunk.hex(), 10)],
+        );
+        let mut current = PointerCatalog::new();
+        current
+            .insert_xorb(source_xorb.hex(), source_entry)
+            .unwrap();
+        current
+            .insert_shard(
+                old_shard.hex(),
+                ShardCatalogEntry::new(20, vec![source_xorb.hex()]),
+            )
+            .unwrap();
+        current
+            .insert_file(file.hex(), FileCatalogEntry::new(10, old_shard.hex()))
+            .unwrap();
+        let mapping = LoadedMapping {
+            sources: HashMap::new(),
+            source_catalog: HashMap::new(),
+            destination_infos: HashMap::new(),
+            destination_catalog: HashMap::from([(destination_xorb, destination_entry.clone())]),
+        };
+        let plan = ReconcilePlan {
+            replacements: vec![ShardRewrite {
+                new_hash: new_shard,
+                bytes: Bytes::from_static(b"replacement"),
+                file_entries: vec![FileIndexEntry {
+                    file_hash: file,
+                    recipe_hash: [0; 32],
+                    shard_hash: new_shard,
+                }],
+                xorbs: vec![destination_xorb],
+            }],
+            replaced_sources: HashSet::from([old_shard]),
+            final_shards: vec![new_shard],
+            file_entries: vec![FileIndexEntry {
+                file_hash: file,
+                recipe_hash: [0; 32],
+                shard_hash: new_shard,
+            }],
+        };
+
+        let replacement = capsule_replacement_catalog(&current, &plan, &mapping).unwrap();
+
+        assert_eq!(
+            replacement.files()[&file.hex()].shard_hash(),
+            new_shard.hex()
+        );
+        assert!(replacement.shards().contains_key(&new_shard.hex()));
+        assert!(!replacement.shards().contains_key(&old_shard.hex()));
+        assert_eq!(
+            replacement.xorbs()[&destination_xorb.hex()],
+            destination_entry
+        );
+        assert!(!replacement.xorbs().contains_key(&source_xorb.hex()));
+    }
+
+    #[test]
+    fn capsule_rewrite_strips_foreign_files_from_shared_shard() {
+        let source_xorb = hash(30);
+        let destination_xorb = hash(31);
+        let foreign_xorb = hash(32);
+        let selected_file = hash(33);
+        let foreign_file = hash(34);
+        let selected_chunk = hash(35);
+        let foreign_chunk = hash(36);
+        let mut writer = ShardWriter::new();
+        writer
+            .add_xorb(xorb_info(source_xorb, &[(selected_chunk, 10)]))
+            .unwrap();
+        writer
+            .add_xorb(xorb_info(foreign_xorb, &[(foreign_chunk, 12)]))
+            .unwrap();
+        writer
+            .add_file(file_info(selected_file, source_xorb, 10))
+            .unwrap();
+        writer
+            .add_file(file_info(foreign_file, foreign_xorb, 12))
+            .unwrap();
+        let (body, old_hash) = writer.finalize().unwrap();
+        let mapping = LoadedMapping {
+            sources: HashMap::from([(
+                source_xorb,
+                SourcePlacement {
+                    chunks: vec![SourceChunk {
+                        hash: selected_chunk,
+                        size: 10,
+                    }],
+                    refs: HashMap::from([(
+                        selected_chunk,
+                        XorbRef {
+                            xorb_hash: destination_xorb,
+                            chunk_index: 0,
+                            uncompressed_size: 10,
+                        },
+                    )]),
+                },
+            )]),
+            source_catalog: HashMap::new(),
+            destination_infos: HashMap::from([(
+                destination_xorb,
+                xorb_info(destination_xorb, &[(selected_chunk, 10)]),
+            )]),
+            destination_catalog: HashMap::new(),
+        };
+
+        let rewrite = rewrite_shard(
+            &Bytes::from(body),
+            old_hash,
+            &mapping,
+            Some(&HashSet::from([selected_file])),
+        )
+        .unwrap()
+        .unwrap();
+        let reader = ShardReader::from_bytes(rewrite.bytes, rewrite.new_hash);
+
+        assert!(reader.get_file_info(&selected_file).unwrap().is_some());
+        assert!(reader.get_file_info(&foreign_file).unwrap().is_none());
+        assert!(reader.get_xorb_info(&destination_xorb).unwrap().is_some());
+        assert!(reader.get_xorb_info(&foreign_xorb).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn capsule_finalize_publishes_rewritten_xorbs_without_legacy_manifest() {
+        use crab_metadata::capsule_protocol::{
+            Capsule, CapsuleRefEdit, CapsuleSection, CapsuleSectionKind, CapsuleTransaction,
+            CapsuleVisibilityDelta, FileCatalogEntry, PointerCatalog, ShardCatalogEntry,
+            XorbCatalogEntry, XorbChunkEntry,
+        };
+        use crab_xet::xorb::builder::{RunId, XorbBuilder};
+        use crab_xet::xorb::format::Chunk;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/optimize-v2".to_owned());
+        let layout = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        let root =
+            crab_write::capsule_protocol::initialize(&layout, &hash(40).hex(), "refs/heads/main")
+                .await
+                .unwrap();
+
+        let chunk_a = Chunk::new(Bytes::from(vec![41_u8; 1024]));
+        let chunk_b = Chunk::new(Bytes::from(vec![42_u8; 1024]));
+        let mut source_builder = XorbBuilder::new();
+        source_builder.push(&chunk_a, RunId(0)).unwrap();
+        source_builder.push(&chunk_b, RunId(0)).unwrap();
+        let mut source_results = source_builder.finalize().unwrap();
+        assert_eq!(source_results.len(), 1);
+        let source = source_results.remove(0);
+        let mut destination_a_builder = XorbBuilder::new();
+        destination_a_builder.push(&chunk_a, RunId(0)).unwrap();
+        let destination_a = destination_a_builder.finalize().unwrap().remove(0);
+        let mut destination_b_builder = XorbBuilder::new();
+        destination_b_builder.push(&chunk_b, RunId(0)).unwrap();
+        let destination_b = destination_b_builder.finalize().unwrap().remove(0);
+        assert_ne!(source.hash, destination_a.hash);
+        assert_ne!(source.hash, destination_b.hash);
+
+        let file_hash = hash(43);
+        let source_info = xorb_info(source.hash, &[(chunk_a.hash, 1024), (chunk_b.hash, 1024)]);
+        let mut shard_writer = ShardWriter::new();
+        shard_writer.add_xorb(source_info).unwrap();
+        shard_writer
+            .add_file(MDBFileInfo {
+                metadata: crab_xet::shard::FileDataSequenceHeader::new(file_hash, 1, false, false),
+                segments: vec![FileDataSequenceEntry::new(source.hash, 2048, 0, 2)],
+                verification: Vec::new(),
+                metadata_ext: None,
+            })
+            .unwrap();
+        let (shard_body, shard_hash) = shard_writer.finalize().unwrap();
+        for (xorb_hash, body) in [
+            (source.hash, source.bytes.clone()),
+            (destination_a.hash, destination_a.bytes.clone()),
+            (destination_b.hash, destination_b.bytes.clone()),
+        ] {
+            store
+                .put(&layout.xorb_path(&xorb_hash), Bytes::from(body))
+                .await
+                .unwrap();
+        }
+        store
+            .put(
+                &layout.shard_path(&shard_hash),
+                Bytes::from(shard_body.clone()),
+            )
+            .await
+            .unwrap();
+
+        let mut catalog = PointerCatalog::new();
+        catalog
+            .insert_xorb(
+                source.hash.hex(),
+                XorbCatalogEntry::new(
+                    source.bytes.len() as u64,
+                    blake3::hash(&source.bytes).to_hex().to_string(),
+                    vec![
+                        XorbChunkEntry::new(chunk_a.hash.hex(), 1024),
+                        XorbChunkEntry::new(chunk_b.hash.hex(), 1024),
+                    ],
+                ),
+            )
+            .unwrap();
+        catalog
+            .insert_shard(
+                shard_hash.hex(),
+                ShardCatalogEntry::new(shard_body.len() as u64, vec![source.hash.hex()]),
+            )
+            .unwrap();
+        catalog
+            .insert_file(
+                file_hash.hex(),
+                FileCatalogEntry::new(2048, shard_hash.hex()),
+            )
+            .unwrap();
+
+        let (tip, pack) = git_pack_fixture();
+        let transaction = CapsuleTransaction::new(
+            root.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some(tip.clone()),
+                None,
+            )],
+        )
+        .unwrap();
+        let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            "refs/heads/main".to_owned(),
+            crab_metadata::git_visibility::GitVisibilityEdit::from_replacement_objects(
+                None,
+                tip.clone(),
+                vec![tip],
+            ),
+        )]))
+        .unwrap();
+        let capsule = Capsule::build(
+            &transaction,
+            vec![pack],
+            vec![
+                CapsuleSection::new(
+                    CapsuleSectionKind::CatalogDelta,
+                    catalog.encode_delta().unwrap(),
+                ),
+                CapsuleSection::new(
+                    CapsuleSectionKind::VisibilityDelta,
+                    visibility.encode().unwrap(),
+                ),
+            ],
+        )
+        .unwrap();
+        crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
+            .await
+            .unwrap();
+
+        let journal_dir = tempfile::tempdir().unwrap();
+        let journal = OptimizeXorbsJournal::open(&journal_dir.path().join("journal.db")).unwrap();
+        journal.start_run("capsule-finalize", "{}").unwrap();
+        journal
+            .insert_source("capsule-finalize", &source.hash.hex())
+            .unwrap();
+        journal
+            .update_source_status(
+                "capsule-finalize",
+                &source.hash.hex(),
+                SourceStatus::Done,
+                Some(
+                    &serde_json::to_string(&vec![
+                        destination_a.hash.hex(),
+                        destination_b.hash.hex(),
+                    ])
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+
+        let outcome = finalize(
+            &journal,
+            "capsule-finalize",
+            Some(&store),
+            Some(&router),
+            &Config::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.entries_updated, 1);
+        assert_eq!(outcome.shards_uploaded, 1);
+        let view = crab_read::capsule_protocol::open_view(
+            &layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: MAX_CAPSULE_BYTES,
+                max_frontier_bytes: MAX_CAPSULE_BYTES,
+            },
+        )
+        .await
+        .unwrap();
+        let replacement = view.pointer_catalog().unwrap();
+        assert!(!replacement.xorbs().contains_key(&source.hash.hex()));
+        assert!(replacement.xorbs().contains_key(&destination_a.hash.hex()));
+        assert!(replacement.xorbs().contains_key(&destination_b.hash.hex()));
+        assert_ne!(
+            replacement.files()[&file_hash.hex()].shard_hash(),
+            shard_hash.hex()
+        );
+        crab_read::verify_capsule_pointer_catalog_objects(&layout, &replacement)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.get_with_etag(&router.manifest_path()).await,
+            Err(CrabError::NotFound { .. })
+        ));
     }
 }

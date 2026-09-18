@@ -56,6 +56,7 @@ fn is_reserved_import_component(component: &str) -> bool {
     component.eq_ignore_ascii_case(".git")
         || component.eq_ignore_ascii_case(".crab")
         || component.eq_ignore_ascii_case(".gitattributes")
+        || component.eq_ignore_ascii_case("crab.toml")
 }
 
 pub use crate::cmd::import::VersionsMode;
@@ -109,6 +110,8 @@ mod tests {
             "nested/.crab/file.bin",
             ".gitattributes",
             "nested/.gitattributes",
+            "crab.toml",
+            "nested/crab.toml",
             "bad\npath.bin",
             "bad\rpath.bin",
             "bad\0path.bin",

@@ -1,11 +1,8 @@
 //! Publish stage for `crab import`.
 //!
 //! Once [`run_assemble`](crate::import::assemble::run_assemble) has landed
-//! the commit history locally, publish pushes it to the target bucket.
-//! The wrapper is deliberately thin: it wires a [`PushSpec`] for the
-//! HEAD commit into [`run_push_batch`] using [`PushConfig::default`],
-//! then translates the per-ref outcomes into a structured
-//! [`PublishStats`].
+//! the commit history locally, publish sends it through the canonical capsule
+//! transaction path and translates the per-ref outcomes into [`PublishStats`].
 //!
 //! # What this stage does
 //!
@@ -13,12 +10,9 @@
 //!    `head_commit_oid`. The native-push graph walk picks up all
 //!    ancestors automatically, so we never enumerate intermediate
 //!    commits.
-//! 2. Construct [`StoreLayout::new(target_store, repo_prefix)`] to
-//!    route xorbs / shards / file-index to the shared `.crab/`
-//!    prefix and refs / manifests to `<repo_prefix>/`.
-//! 3. Drive [`run_push_batch`] — fresh imports have nothing to sync
-//!    from the remote before the push, and the pre-push shard-sync
-//!    step has been removed from the push pipeline.
+//! 2. Initialize one unborn protocol-v2 root at the empty target prefix.
+//! 3. Drive the canonical capsule publisher so Git packs, xorbs, shards,
+//!    recipes, and the destination ref share one visibility boundary.
 //! 4. Snapshot [`Metrics`] before and after the push so
 //!    [`PublishStats::bytes_uploaded`] reflects bytes produced by
 //!    *this* publish, not a lifetime counter.
@@ -38,10 +32,10 @@
 //!   objects sit untouched; the push pipeline only writes xorbs,
 //!   shards, and refs to the `StoreLayout`-rooted prefix.
 //!
-//! `caching_store` and `progress` are intentionally not wired yet —
-//! both are V1 nice-to-haves that the import command doesn't need
-//! to ship first cut.
+//! `caching_store` and progress rendering are intentionally not wired yet;
+//! neither changes the publication or reconstruction contract.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -50,7 +44,7 @@ use tracing::{debug, info};
 
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::metrics::Metrics;
-use crate::git::push::{PushConfig, RefPushOutcome, run_push_batch};
+use crate::git::push::{PushConfig, RefPushOutcome};
 use crate::git::remote_helper::PushSpec;
 use crate::import::ingest::ResolvedStore;
 use crate::storage::StoreLayout;
@@ -66,7 +60,7 @@ pub struct PublishInputs {
     /// land. Built by the coordinator from the user's `--to` URL.
     pub target: ResolvedStore,
     /// Per-repo object prefix (e.g. `"repos/v2"`). Passed verbatim to
-    /// [`StoreLayout::new`] so refs and manifests route under
+    /// [`StoreLayout::new`] so refs and capsules route under
     /// `<repo_prefix>/…` while content-addressed objects stay global.
     pub repo_prefix: String,
     /// Open read-only view of the staging area populated by ingest.
@@ -95,16 +89,13 @@ pub struct PublishInputs {
 /// Counters the publish stage folds into the final `ImportSummary`.
 ///
 /// `bytes_uploaded` is sourced from the [`Metrics`] snapshot delta
-/// across the push. `xorbs_uploaded` and `shards_uploaded` are
-/// reserved for future wiring — the push pipeline does not yet expose
-/// dedicated counters for those totals, so V1 reports `0`. Callers
-/// that render these fields should prefer `bytes_uploaded` for actual
-/// throughput reporting today.
+/// across the push. Xorb and shard counts come from the push pipeline's
+/// origin-verified transfer summary and count only newly written payloads.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PublishStats {
-    /// Count of `ok` ref outcomes returned by [`run_push_batch`].
+    /// Count of `ok` ref outcomes returned by the capsule publisher.
     pub refs_pushed: u64,
-    /// Count of `error` ref outcomes returned by [`run_push_batch`].
+    /// Count of rejected ref outcomes returned by the capsule publisher.
     /// Always zero on the happy path; non-zero values accompany a
     /// [`CrabError::Internal`] carrying the combined messages.
     pub refs_failed: u64,
@@ -112,11 +103,9 @@ pub struct PublishStats {
     /// measured as the delta between a `before` and `after`
     /// [`Metrics::snapshot`]. `0` when no metrics handle is provided.
     pub bytes_uploaded: u64,
-    /// Xorbs uploaded this publish. Currently always `0` — see the
-    /// type-level note on V1 scope.
+    /// Xorbs uploaded this publish, excluding origin-reused payloads.
     pub xorbs_uploaded: u64,
-    /// Shards uploaded this publish. Currently always `0` — see the
-    /// type-level note on V1 scope.
+    /// Shards uploaded this publish, excluding origin-reused payloads.
     pub shards_uploaded: u64,
     /// Commit OID of the HEAD this publish pushed; mirrors
     /// [`PublishInputs::head_commit_oid`].
@@ -127,7 +116,7 @@ pub struct PublishStats {
 
 /// Publish the assembled commit history to the target bucket.
 ///
-/// Wraps [`run_push_batch`] with a single [`PushSpec`] for
+/// Wraps the capsule publisher with a single [`PushSpec`] for
 /// `refs/heads/<branch>` pointing at `head_commit_oid`. The push
 /// pipeline handles the commit walk, pointer enumeration, xorb
 /// packing, shard CAS, and ref CAS on its own.
@@ -174,7 +163,24 @@ pub async fn run_publish(inputs: PublishInputs) -> Result<PublishStats> {
     };
 
     let router = StoreLayout::new(target.store.clone(), repo_prefix.clone());
+    let push_config = PushConfig {
+        git_dir: Some(git_dir.clone()),
+        ..PushConfig::default()
+    };
     crate::cmd::init::initialize_remote_repository_store(&target.store, &router, &ref_name).await?;
+    let capsule_layout = crab_storage::StoreLayout::with_global_prefix(
+        target.store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let root = crab_write::capsule_protocol::open_root(&capsule_layout).await?;
+    let requested_refs = BTreeSet::from([ref_name.clone()]);
+    let view = crab_read::capsule_protocol::open_ref_view_from_root_for_refs(
+        &capsule_layout,
+        root,
+        &requested_refs,
+    )
+    .await?;
 
     // Capture a metrics baseline so `bytes_uploaded` reflects this
     // publish, not a lifetime total. Default push config mirrors what
@@ -183,44 +189,41 @@ pub async fn run_publish(inputs: PublishInputs) -> Result<PublishStats> {
 
     debug!(
         ref_name = %ref_name,
-        "publish: invoking run_push_batch"
+        "publish: invoking capsule publisher"
     );
 
-    let push_config = PushConfig {
-        git_dir: Some(git_dir.clone()),
-        ..PushConfig::default()
-    };
-    let result = run_push_batch(
-        &[spec],
+    let (result, _) = crate::git::capsule_push::run(
         &push_config,
-        Some(target.store.clone()),
-        None, // caching_store: V1 — no cache wiring for fresh imports
-        Some(Arc::clone(&staging)),
-        router,
-        metrics.clone(),
-        cancel.clone(),
-        None, // progress: V1 — no native progress hookup
+        &[spec],
+        &target.store,
+        &router,
+        Some(view),
+        &[],
+        Some(&staging),
+        None,
+        metrics.as_deref(),
+        &cancel,
     )
-    .await;
+    .await?;
 
     check_cancelled(&cancel)?;
 
     let (refs_pushed, refs_failed, failure_messages) = summarize_outcomes(&result);
 
-    // Translate metrics deltas into `PublishStats` — see the type
-    // docstring for why `xorbs_uploaded` / `shards_uploaded` are
-    // zero in V1.
+    // Translate metrics deltas and the push transfer summary into
+    // `PublishStats`. The latter is origin-verified and excludes reuse.
     let bytes_uploaded = match (bytes_before, metrics.as_deref()) {
         (Some(before), Some(m)) => m.snapshot().bytes_uploaded.saturating_sub(before),
         _ => 0,
     };
+    let transfer_stats = result.transfer_stats.unwrap_or_default();
 
     let stats = PublishStats {
         refs_pushed,
         refs_failed,
         bytes_uploaded,
-        xorbs_uploaded: 0,
-        shards_uploaded: 0,
+        xorbs_uploaded: transfer_stats.xorbs_uploaded,
+        shards_uploaded: transfer_stats.shards_uploaded,
         head_commit_oid: head_commit_oid.clone(),
         branch: branch.clone(),
     };
@@ -293,7 +296,6 @@ mod tests {
     use crate::import::ingest::{IngestInputs, IngestProgressSink, StageEvent, run_ingest};
     use crate::import::journal::{EntryState, ImportEntry, Journal};
     use crate::import::window::CommitWindow;
-    use crate::metadata::manifest::Manifest;
     use crate::storage::store::{BucketIdentity, Store};
     use crate::test::git_repo::{CacheDirGuard, GIT_DIR_MUTEX};
     use crab_staging::{StagingArea, StagingAreaReadOnly};
@@ -652,16 +654,52 @@ mod tests {
         (stats, listing, git_dir_guard)
     }
 
-    async fn target_manifest(store: &Arc<dyn ObjectStore>, prefix: &str) -> Manifest {
-        let path = ObjectPath::from(format!("{prefix}/manifest"));
-        let body = store
-            .get(&path)
-            .await
-            .expect("target manifest exists")
-            .bytes()
-            .await
-            .expect("target manifest body");
-        serde_json::from_slice(&body).expect("target manifest JSON")
+    async fn target_view(
+        store: &Arc<dyn ObjectStore>,
+        prefix: &str,
+    ) -> (
+        crab_storage::StoreLayout<crab_storage::Store>,
+        crab_read::capsule_protocol::CapsuleRepositoryView,
+    ) {
+        let layout = crab_storage::StoreLayout::new(
+            crab_storage::Store::new(Arc::clone(store)),
+            prefix.to_owned(),
+        );
+        let view = crab_read::capsule_protocol::open_view(
+            &layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 16 * 1024 * 1024,
+                max_frontier_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .await
+        .expect("open imported capsule repository");
+        (layout, view)
+    }
+
+    async fn verify_reconstructed_files(
+        store: &Arc<dyn ObjectStore>,
+        prefix: &str,
+        repo_root: &Path,
+        objects: &[(&str, Vec<u8>)],
+    ) {
+        let (layout, _) = target_view(store, prefix).await;
+        let caching = crab_cache_store::CachingStore::new(
+            layout.store().clone(),
+            &crate::core::config::CacheConfig::default(),
+        )
+        .expect("build import read cache");
+        let hydrator = crab_read::ReadRuntimeBuilder::new(caching, layout, 2)
+            .build()
+            .expect("build import hydrator");
+        for (path, expected) in objects {
+            let pointer = std::fs::read(repo_root.join(path)).expect("read assembled pointer");
+            let reconstructed = hydrator
+                .reconstruct_from_pointer(&pointer)
+                .await
+                .expect("reconstruct imported file");
+            assert_eq!(&reconstructed, expected, "reconstructed {path}");
+        }
     }
 
     // ── Unit: outcome summarization ──────────────────────────────
@@ -699,7 +737,7 @@ mod tests {
     /// Two separate in-memory stores. End-to-end
     /// enumerate-by-hand → ingest → assemble → publish. Source must
     /// see zero writes after publish; target must contain xorbs,
-    /// shards, file-index, refs, and a manifest.
+    /// shards, capsule metadata, and refs.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn cross_bucket_publish_writes_target_only() {
         // Hold `GIT_DIR_MUTEX` for the whole test, with env
@@ -754,12 +792,32 @@ mod tests {
         assert_eq!(stats.refs_failed, 0);
         assert_eq!(stats.branch, "main");
         assert_eq!(stats.head_commit_oid, e2e.head_oid);
-        let manifest = target_manifest(&target_inner, target_prefix).await;
+        assert!(
+            stats.bytes_uploaded > 0,
+            "fresh v2 import must report newly created xorb payload bytes"
+        );
+        let (_, view) = target_view(&target_inner, target_prefix).await;
         assert_eq!(
-            manifest.refs.get("refs/heads/main"),
+            view.refs().get("refs/heads/main"),
             Some(&e2e.head_oid),
             "publish must push the assembled import repo, not the process cwd"
         );
+        let catalog = view
+            .pointer_catalog()
+            .expect("decode imported pointer catalog");
+        for entry in &e2e.staged_entries {
+            let EntryState::Staged { file_hash } = entry.state else {
+                panic!("import entry did not remain staged");
+            };
+            assert!(
+                catalog
+                    .files()
+                    .contains_key(&crab_xet::hash::MerkleHash::from(file_hash).hex()),
+                "catalog missing {}",
+                entry.relative_path
+            );
+        }
+        verify_reconstructed_files(&target_inner, target_prefix, &e2e.repo_root, &objects).await;
 
         // Sanity: the target listing must be non-empty. If the
         // push pipeline stubbed everything out, `target_keys`
@@ -779,7 +837,7 @@ mod tests {
             "cross-bucket publish must not touch the source store"
         );
 
-        // Target must contain the full Crab layout.
+        // Target must contain the request-minimal v2 layout.
         let target_keyset: HashSet<&str> = target_keys.iter().map(String::as_str).collect();
         let have_prefix = |p: &str| target_keyset.iter().any(|k| k.starts_with(p));
 
@@ -791,24 +849,23 @@ mod tests {
             have_prefix(".crab/shards/"),
             "target missing shards: {target_keys:?}"
         );
-        // file-index is now written through the per-repo SlateDB at
-        // `{repo_prefix}/file_index_db/` instead of per-file
-        // `.crab/file-index/{hash}` objects (spec: slatedb
-        // metadata hard cutover).
         assert!(
-            have_prefix(&format!("{target_prefix}/file_index_db/")),
-            "target missing file_index_db: {target_keys:?}"
+            target_keyset.contains(&format!("{target_prefix}/v2/root").as_str()),
+            "target missing v2 root: {target_keys:?}"
         );
         assert!(
-            target_keyset.contains(&format!("{target_prefix}/manifest").as_str()),
-            "target missing manifest pointer: {target_keys:?}"
+            have_prefix(&format!("{target_prefix}/v2/refs/heads/")),
+            "target missing v2 ref head: {target_keys:?}"
         );
         assert!(
-            have_prefix(&format!("{target_prefix}/metadata/pack/segments/"))
-                && have_prefix(&format!("{target_prefix}/metadata/pack/indexes/"))
-                && have_prefix(&format!("{target_prefix}/metadata/shard/segments/"))
-                && have_prefix(&format!("{target_prefix}/metadata/shard/indexes/")),
-            "target missing segmented metadata under {target_prefix}/metadata/: {target_keys:?}"
+            have_prefix(&format!("{target_prefix}/v2/capsules/")),
+            "target missing v2 capsule: {target_keys:?}"
+        );
+        assert!(
+            !target_keyset.contains(&format!("{target_prefix}/manifest").as_str())
+                && !have_prefix(&format!("{target_prefix}/file_index_db/"))
+                && !have_prefix(&format!("{target_prefix}/metadata/")),
+            "v2 import recreated v1 metadata: {target_keys:?}"
         );
 
         // Ingest stats / assemble stats are already validated in
@@ -822,6 +879,49 @@ mod tests {
         // Sanity-check the journal dir exists (publish does not
         // clean it up — that's the coordinator's job).
         assert!(e2e.journal_root.join(".crab").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn large_file_publish_reports_xet_transfers() {
+        let git_dir_guard = GitDirOverride::locked_without_env();
+        let tmp = TempDir::new().unwrap();
+        let source_inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+
+        // Use deterministic incompressible bytes so the file crosses the
+        // xorb minimum-run threshold instead of being folded into Git.
+        let mut body = Vec::with_capacity(20 * 1024 * 1024);
+        let mut state = 0x9e37_79b9_u32;
+        for _ in 0..(20 * 1024 * 1024) {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            body.push((state >> 24) as u8);
+        }
+        let objects = vec![("models/large.bin", body)];
+        for (path, object) in &objects {
+            seed_object(&source_inner, "", path, object).await;
+        }
+
+        let e2e =
+            run_ingest_and_assemble(resolved(Arc::clone(&source_inner), ""), &objects, &tmp).await;
+        let target_inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (stats, _, _git_dir_guard) = run_publish_against(
+            Arc::clone(&target_inner),
+            "repos/v2",
+            e2e.staging_root.clone(),
+            e2e.repo_root.clone(),
+            e2e.head_oid.clone(),
+            git_dir_guard,
+        )
+        .await;
+
+        assert!(
+            stats.xorbs_uploaded > 0,
+            "large file must upload an xorb: {stats:?}"
+        );
+        assert!(
+            stats.shards_uploaded > 0,
+            "large file must upload a shard: {stats:?}"
+        );
+        verify_reconstructed_files(&target_inner, "repos/v2", &e2e.repo_root, &objects).await;
     }
 
     // ── Task 13.4: same-bucket integration ───────────────────────
@@ -888,6 +988,9 @@ mod tests {
 
         assert_eq!(stats.refs_pushed, 1);
         assert_eq!(stats.refs_failed, 0);
+        let (_, view) = target_view(&shared, target_prefix).await;
+        assert_eq!(view.refs().get("refs/heads/main"), Some(&e2e.head_oid));
+        verify_reconstructed_files(&shared, target_prefix, &e2e.repo_root, &objects).await;
 
         // Sanity: publish must produce objects in the shared store.
         assert!(
@@ -918,33 +1021,30 @@ mod tests {
             );
         }
 
-        // Target prefix got the Crab layout:
-        //   - `.crab/xorbs/*`, `.crab/shards/*` (global)
-        //   - `{target_prefix}/file_index_db/*` (per-repo SlateDB)
-        //   - `{target_prefix}/manifest`, `{target_prefix}/metadata/*` (per-repo)
-        // Refs are embedded in the manifest pointer (unified manifest).
+        // Target prefix got the capsule root, ref head, and immutable capsule;
+        // xorbs and shards remain global immutable payloads.
         let key_set: HashSet<&str> = all_keys.iter().map(String::as_str).collect();
         let have_prefix = |p: &str| key_set.iter().any(|k| k.starts_with(p));
 
         assert!(have_prefix(".crab/xorbs/"), "xorbs: {all_keys:?}");
         assert!(have_prefix(".crab/shards/"), "shards: {all_keys:?}");
-        // file-index is now written through the per-repo SlateDB at
-        // `{repo_prefix}/file_index_db/`. See the note in
-        // `cross_bucket_publish_writes_target_only` above.
         assert!(
-            have_prefix(&format!("{target_prefix}/file_index_db/")),
-            "file_index_db: {all_keys:?}"
+            key_set.contains(format!("{target_prefix}/v2/root").as_str()),
+            "v2 root: {all_keys:?}"
         );
         assert!(
-            key_set.contains(format!("{target_prefix}/manifest").as_str()),
-            "target manifest pointer: {all_keys:?}"
+            have_prefix(&format!("{target_prefix}/v2/refs/heads/")),
+            "v2 ref head: {all_keys:?}"
         );
         assert!(
-            have_prefix(&format!("{target_prefix}/metadata/pack/segments/"))
-                && have_prefix(&format!("{target_prefix}/metadata/pack/indexes/"))
-                && have_prefix(&format!("{target_prefix}/metadata/shard/segments/"))
-                && have_prefix(&format!("{target_prefix}/metadata/shard/indexes/")),
-            "target segmented metadata: {all_keys:?}"
+            have_prefix(&format!("{target_prefix}/v2/capsules/")),
+            "v2 capsule: {all_keys:?}"
+        );
+        assert!(
+            !key_set.contains(format!("{target_prefix}/manifest").as_str())
+                && !have_prefix(&format!("{target_prefix}/file_index_db/"))
+                && !have_prefix(&format!("{target_prefix}/metadata/")),
+            "v2 import recreated v1 metadata: {all_keys:?}"
         );
 
         // And the source prefix is still exactly what we seeded —

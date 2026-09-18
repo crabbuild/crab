@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-use bytes::Bytes;
+use object_store::{Attribute, Attributes};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -17,10 +17,10 @@ use tracing::info;
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::optimize::xorbs::journal::{OptimizeXorbsJournal, SourceRow, SourceStatus};
 use crate::optimize::xorbs::profile::Profile;
+use crate::storage::StoreLayout;
 use crate::storage::head_class::head_with_class;
 use crate::storage::store::Store;
 use crate::tier::restore::RestoreOrchestrator;
-use crab_storage::canonical_global_content_path;
 use crab_xet::xorb::builder::{FixedCompression, RunId, XorbBuilder, XorbResult};
 use crab_xet::xorb::format::{CompressionScheme, MAX_XORB_SIZE, MerkleHash};
 use crab_xet::xorb::parser::XorbParser;
@@ -87,6 +87,7 @@ pub async fn execute(
     config: &ExecutorConfig,
     cancel: &CancellationToken,
     store: Option<&Store>,
+    router: Option<&StoreLayout>,
     restore_orchestrator: Option<&RestoreOrchestrator>,
 ) -> Result<ExecutorOutcome> {
     let start = Instant::now();
@@ -122,6 +123,10 @@ pub async fn execute(
         })?;
         let result = match store {
             Some(store) => {
+                let router = router.ok_or_else(|| CrabError::Configuration {
+                    key: "xorb optimization executor".to_owned(),
+                    origin: "a store layout is required with remote storage".to_owned(),
+                })?;
                 process_batch(
                     journal,
                     run_id,
@@ -130,6 +135,7 @@ pub async fn execute(
                     config,
                     compression,
                     store,
+                    router,
                     restore_orchestrator,
                     cancel,
                 )
@@ -220,6 +226,7 @@ async fn process_batch(
     config: &ExecutorConfig,
     compression: CompressionScheme,
     store: &Store,
+    router: &StoreLayout,
     restore_orchestrator: Option<&RestoreOrchestrator>,
     cancel: &CancellationToken,
 ) -> Result<BatchResult> {
@@ -244,7 +251,12 @@ async fn process_batch(
     for (source_index, source_row) in source_rows.iter().enumerate() {
         check_cancelled(cancel)?;
         let source_hash = &source_row.src_xorb;
-        let source_path = canonical_global_content_path("xorbs", source_hash);
+        let parsed_source =
+            MerkleHash::from_hex(source_hash).map_err(|error| CrabError::CorruptObject {
+                path: format!("xorb optimization journal source {source_hash}"),
+                reason: format!("invalid Merkle hash: {error}"),
+            })?;
+        let source_path = router.xorb_path(&parsed_source);
         outcome.processed = outcome.processed.saturating_add(1);
 
         let object = tokio::select! {
@@ -360,7 +372,15 @@ async fn process_batch(
             let _ = builder.push(&chunk, source_run)?;
             while let Some(destination) = builder.take_completed() {
                 outcome.bytes_written = outcome.bytes_written.saturating_add(
-                    upload_destination(store, destination, &mut placements, cancel).await?,
+                    upload_destination(
+                        store,
+                        router,
+                        destination,
+                        &config.output_class,
+                        &mut placements,
+                        cancel,
+                    )
+                    .await?,
                 );
             }
         }
@@ -371,9 +391,17 @@ async fn process_batch(
     }
 
     for destination in builder.finalize()? {
-        outcome.bytes_written = outcome
-            .bytes_written
-            .saturating_add(upload_destination(store, destination, &mut placements, cancel).await?);
+        outcome.bytes_written = outcome.bytes_written.saturating_add(
+            upload_destination(
+                store,
+                router,
+                destination,
+                &config.output_class,
+                &mut placements,
+                cancel,
+            )
+            .await?,
+        );
     }
     check_cancelled(cancel)?;
     for source in prepared {
@@ -404,13 +432,15 @@ async fn process_batch(
 
 async fn upload_destination(
     store: &Store,
+    router: &StoreLayout,
     destination: XorbResult,
+    output_class: &str,
     placements: &mut HashMap<MerkleHash, String>,
     cancel: &CancellationToken,
 ) -> Result<u64> {
     let destination_hash = destination.hash;
     let hash = destination_hash.hex();
-    let path = canonical_global_content_path("xorbs", &hash);
+    let path = router.xorb_path(&destination_hash);
     let size = u64::try_from(destination.bytes.len()).map_err(|_| CrabError::Configuration {
         key: "optimize xorbs destination size".to_owned(),
         origin: format!("destination xorb {hash} size cannot be represented"),
@@ -424,22 +454,23 @@ async fn upload_destination(
         });
     }
 
-    match store
-        .put_multipart_retry_with_xet_hash(
+    check_cancelled(cancel)?;
+    let mut attributes = Attributes::new();
+    if store.bucket_identity().cloud != crab_types::storage::StorageProviderKind::Local {
+        attributes.insert(Attribute::StorageClass, output_class.to_owned().into());
+    }
+    let publication = tokio::select! {
+        result = store.as_storage().create_or_read_immutable_with_attributes(
             &path,
-            Bytes::from(destination.bytes.clone()),
-            destination_hash.into(),
-            8 * 1024 * 1024,
-            cancel,
-            None,
-        )
-        .await
-    {
-        Ok(()) => {}
-        Err(CrabError::CasConflict { .. }) => {
-            let (existing, _) = store
-                .get_with_etag_bounded(&path, MAX_TARGET_XORB_BYTES as u64)
-                .await?;
+            destination.bytes.clone(),
+            MAX_TARGET_XORB_BYTES as u64,
+            attributes,
+        ) => result?,
+        () = cancel.cancelled() => return Err(CrabError::Cancelled),
+    };
+    match publication {
+        crab_storage::ImmutableCreateOutcome::Created => {}
+        crab_storage::ImmutableCreateOutcome::Existing(existing) => {
             let parser = XorbParser::parse(existing).map_err(CrabError::from)?;
             if parser.hash() != destination_hash {
                 return Err(CrabError::CorruptObject {
@@ -450,7 +481,6 @@ async fn upload_destination(
             parser.verify_payload_digest().map_err(CrabError::from)?;
             parser.verify_all_chunks().map_err(CrabError::from)?;
         }
-        Err(error) => return Err(error),
     }
 
     for placement in destination.placements {
@@ -524,6 +554,10 @@ pub fn check_gc_not_running(crab_dir: &std::path::Path) -> Result<()> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use object_store::ObjectStoreExt as _;
+    use object_store::memory::InMemory;
+    use std::sync::Arc;
 
     #[test]
     fn executor_config_defaults() {
@@ -573,6 +607,7 @@ mod tests {
             &CancellationToken::new(),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -596,9 +631,101 @@ mod tests {
             &cancel,
             None,
             None,
+            None,
         )
         .await;
         assert!(matches!(result, Err(CrabError::Cancelled)));
         assert_eq!(journal.count_by_status("run").unwrap().pending, 1);
+    }
+
+    #[tokio::test]
+    async fn destination_upload_uses_scoped_global_layout() {
+        use crab_xet::xorb::format::Chunk;
+
+        let inner = Arc::new(InMemory::new());
+        let store = Store::new(inner.clone())
+            .with_bucket_identity(crab_types::storage::BucketIdentity::new(
+                crab_types::storage::StorageProviderKind::S3,
+                "bucket",
+                "bucket",
+            ))
+            .with_storage_scope(crab_types::storage::StorageScope {
+                repo_prefix: "scoped/repo".to_owned(),
+                global_prefix: "scoped/repo/.crab".to_owned(),
+                source_repo: "org/repo".to_owned(),
+                scope_hash: "a".repeat(64),
+            });
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let chunk = Chunk::new(Bytes::from_static(b"scoped xorb"));
+        let mut builder = XorbBuilder::new();
+        builder.push(&chunk, RunId(0)).unwrap();
+        let destination = builder.finalize().unwrap().remove(0);
+        let hash = destination.hash;
+
+        upload_destination(
+            &store,
+            &router,
+            destination,
+            "STANDARD_IA",
+            &mut HashMap::new(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(store.head(&router.xorb_path(&hash)).await.is_ok());
+        assert_eq!(
+            inner
+                .get(&router.xorb_path(&hash))
+                .await
+                .unwrap()
+                .attributes
+                .get(&Attribute::StorageClass),
+            Some(&"STANDARD_IA".to_owned().into())
+        );
+        assert!(matches!(
+            store
+                .head(&crab_storage::canonical_global_content_path(
+                    "xorbs",
+                    &hash.hex()
+                ))
+                .await,
+            Err(CrabError::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn destination_upload_omits_storage_class_for_local_store() {
+        use crab_xet::xorb::format::Chunk;
+
+        let inner = Arc::new(InMemory::new());
+        let store = Store::new(inner.clone());
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let mut builder = XorbBuilder::new();
+        builder
+            .push(&Chunk::new(Bytes::from_static(b"local xorb")), RunId(0))
+            .unwrap();
+        let destination = builder.finalize().unwrap().remove(0);
+        let hash = destination.hash;
+
+        upload_destination(
+            &store,
+            &router,
+            destination,
+            "STANDARD_IA",
+            &mut HashMap::new(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            inner
+                .get(&router.xorb_path(&hash))
+                .await
+                .unwrap()
+                .attributes
+                .is_empty()
+        );
     }
 }

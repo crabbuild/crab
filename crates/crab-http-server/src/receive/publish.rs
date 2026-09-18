@@ -5,10 +5,9 @@ use std::{
     time::Duration,
 };
 
-use crab_coordination::{GIT_MANIFEST_RESOURCE, LFS_LOCKS_RESOURCE};
+use crab_coordination::LFS_LOCKS_RESOURCE;
 use crab_git::receive_wire;
 use crab_lfs::LfsLockManager;
-use crab_metadata::{git_visibility, manifest_store, ref_journal::RefJournalEdit};
 use crab_read::{dependency_proof::DependencyProofLimits, pointer_proof::PointerProofLimits};
 use crab_remote_git::RepositoryOptions;
 use serde::Serialize;
@@ -70,9 +69,8 @@ struct ReceiveInput {
     visibility_bases: BTreeMap<String, (String, gix_hash::ObjectId)>,
 }
 
-struct PublishAttempt<'a> {
+struct PublishAttempt {
     directory: crate::local_disk::StagingDirectory,
-    holders: &'a BTreeMap<String, String>,
     plan_id: Option<String>,
 }
 
@@ -159,9 +157,6 @@ pub(crate) async fn publish_default_branch(
     if !principal.can_admin(&entry.config) {
         return Err(ReceiveError::Forbidden);
     }
-    entry
-        .open_current(server, RepositoryOptions::default(), cancel)
-        .await?;
     let leased_entry = Arc::clone(&entry);
     crab_remote::publication::with_leases(
         &entry.store,
@@ -169,76 +164,38 @@ pub(crate) async fn publish_default_branch(
         [branch.to_owned()],
         TTL,
         cancel,
-        move |holders, cancel| {
+        move |_holders, cancel| {
             let entry = Arc::clone(&leased_entry);
             async move {
-                let manifest_entry = Arc::clone(&entry);
-                crab_remote::publication::with_internal_lease(
-                    &entry.store,
+                check_cancelled(&cancel)?;
+                let view = entry.open_ref_view().await?;
+                if view.head() != expected_head {
+                    return Err(ReceiveError::DefaultBranchChanged);
+                }
+                let expected_oid = expected_oid.to_string();
+                if view.refs().get(branch) != Some(&expected_oid) {
+                    return Err(ReceiveError::BranchChanged);
+                }
+                if view.head() == branch {
+                    return Ok(());
+                }
+                if !principal.can_admin(&entry.config) {
+                    return Err(ReceiveError::Forbidden);
+                }
+                match crab_write::capsule_protocol::retarget_head(
                     &entry.layout,
-                    GIT_MANIFEST_RESOURCE,
-                    TTL,
-                    &cancel,
-                    move |cancel| async move {
-                        check_cancelled(&cancel)?;
-                        let snapshot = manifest_store::read_repository_snapshot(
-                            &manifest_entry.store,
-                            &manifest_entry.layout,
-                        )
-                        .await?;
-                        if snapshot.journal.head != expected_head {
-                            return Err(ReceiveError::DefaultBranchChanged);
-                        }
-                        let oid = expected_oid.to_string();
-                        if snapshot.journal.refs.get(branch) != Some(&oid) {
-                            return Err(ReceiveError::BranchChanged);
-                        }
-                        if snapshot.journal.head == branch {
-                            return Ok(());
-                        }
-                        let evidence = git_visibility::GitVisibilityEdit::from_delta_objects(
-                            Some(oid.clone()),
-                            oid.clone(),
-                            vec![],
-                            vec![],
-                        );
-                        let evidence_hash = git_visibility::upload_edit(
-                            &manifest_entry.store,
-                            &manifest_entry.layout,
-                            &evidence,
-                        )
-                        .await?;
-                        check_cancelled(&cancel)?;
-                        if !principal.can_admin(&manifest_entry.config) {
-                            return Err(ReceiveError::Forbidden);
-                        }
-                        // Retargeting HEAD needs a journal parent and branch lease. This no-op
-                        // ref edit preserves the branch's immutable visibility closure.
-                        crab_write::journal::commit_edits(
-                            &manifest_entry.store,
-                            &manifest_entry.layout,
-                            &snapshot,
-                            vec![RefJournalEdit {
-                                ref_name: branch.to_owned(),
-                                old_oid: Some(oid.clone()),
-                                new_oid: Some(oid),
-                                peeled_oid: None,
-                                lock_holder: holders.get(branch).cloned(),
-                                visibility_evidence_hash: Some(evidence_hash),
-                            }],
-                            Some(branch.to_owned()),
-                            vec![],
-                            vec![],
-                            crab_write::journal::CommitOptions::new(TTL, &cancel),
-                        )
-                        .await?;
-                        Ok(())
-                    },
+                    view.root_snapshot().clone(),
+                    expected_head,
+                    branch,
                 )
-                .await?;
-                // Release the manifest lease before maintenance reacquires it; keep
-                // GC admission until this readiness attempt finishes. HEAD acceptance
-                // is independent of read readiness.
+                .await
+                {
+                    Ok(_) => {}
+                    Err(crab_write::WriteError::CapsuleRootChanged { .. }) => {
+                        return Err(ReceiveError::DefaultBranchChanged);
+                    }
+                    Err(error) => return Err(error.into()),
+                }
                 let _readiness = crab_remote::publication::finish_committed(async {
                     entry.invalidate().await;
                     let repository = entry
@@ -315,7 +272,7 @@ async fn run_request(
         names,
         TTL,
         cancel,
-        move |holders, cancel| async move {
+        move |_holders, cancel| async move {
             publish(
                 server,
                 principal,
@@ -323,7 +280,6 @@ async fn run_request(
                 &request,
                 input,
                 directory,
-                &holders,
                 &cancel,
             )
             .await
@@ -339,7 +295,6 @@ async fn publish(
     request: &receive_wire::ReceiveRequest,
     input: ReceiveInput,
     directory: crate::local_disk::StagingDirectory,
-    holders: &BTreeMap<String, String>,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>> {
     let Some(plan_id) = input.plan_id.clone() else {
@@ -351,7 +306,6 @@ async fn publish(
             input,
             PublishAttempt {
                 directory,
-                holders,
                 plan_id: None,
             },
             cancel,
@@ -360,10 +314,9 @@ async fn publish(
     };
     let attempt = PublishAttempt {
         directory,
-        holders,
         plan_id: Some(plan_id.clone()),
     };
-    let result = crab_remote::publication::with_plan(
+    let result = crab_remote::publication::with_capsule_plan(
         &entry.store,
         &entry.layout,
         &plan_id,
@@ -395,39 +348,61 @@ async fn publish(
     }
 }
 
-async fn publish_attempt<'a>(
+async fn publish_attempt(
     server: &Server,
     principal: &Principal,
     entry: &Repository,
     request: &receive_wire::ReceiveRequest,
     input: ReceiveInput,
-    attempt: PublishAttempt<'a>,
+    attempt: PublishAttempt,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>> {
     check_cancelled(cancel)?;
     if !principal.can_write(&entry.config) {
         return Err(ReceiveError::Forbidden);
     }
-    let repository = entry
-        .open_current(server, RepositoryOptions::default(), cancel)
+    let (mut view, mut repository) = entry
+        .open_capsule_repository(server, RepositoryOptions::default(), cancel)
         .await?;
-    let snapshot = manifest_store::read_repository_snapshot(&entry.store, &entry.layout).await?;
-    let refs: BTreeMap<_, _> = repository
-        .refs()
-        .entries
-        .iter()
-        .map(|reference| (reference.name.clone(), reference.target.to_string()))
-        .collect();
-    if snapshot.manifest.generation != repository.generation()
-        || snapshot.journal.refs != refs
-        || !snapshot.journal.transactions.is_empty()
-    {
-        return Err(ReceiveError::Request(
-            "Repository changed during receive admission; retry",
-        ));
+    for _ in 0..2 {
+        if request.updates.iter().all(|update| {
+            view.ref_capsule_count(&update.name) < crate::maintenance::FOREGROUND_CAPSULE_THRESHOLD
+        }) {
+            break;
+        }
+        entry.checkpoint_now(server, cancel).await?;
+        (view, repository) = entry
+            .open_capsule_repository(server, RepositoryOptions::default(), cancel)
+            .await?;
     }
+    if request.updates.iter().any(|update| {
+        view.ref_capsule_count(&update.name) >= crate::maintenance::FOREGROUND_CAPSULE_THRESHOLD
+    }) {
+        return Err(crab_write::WriteError::Internal(
+            "repository checkpoint could not bound the selected ref frontier".to_owned(),
+        )
+        .into());
+    }
+    let refs = view.refs().clone();
+    let visibility = view.git_visibility_index()?;
     let has_branch = refs.keys().any(|name| name.starts_with("refs/heads/"));
     let actor = principal.identity().ok_or(ReceiveError::Forbidden)?;
+    let initial_head = (!has_branch)
+        .then(|| {
+            request
+                .updates
+                .iter()
+                .find(|update| update.name.starts_with("refs/heads/") && update.new.is_some())
+        })
+        .flatten()
+        .filter(|update| update.name != view.head())
+        .map(|update| {
+            (
+                view.root_snapshot().clone(),
+                view.head().to_owned(),
+                update.name.clone(),
+            )
+        });
     let protections = entry
         .branch_protections(server, &actor)
         .await
@@ -452,6 +427,7 @@ async fn publish_attempt<'a>(
     let visibility_bases = input.visibility_bases;
     let prepared = match validate::prepare(
         repository.clone(),
+        visibility,
         entry.layout.clone(),
         attempt.directory.path().to_owned(),
         input.pack,
@@ -482,30 +458,15 @@ async fn publish_attempt<'a>(
     };
     let changed_path_hashes = prepared.plan().changed_path_hashes().clone();
     let artifacts = prepared
-        .upload(&snapshot, dependency_limits(), attempt.holders, cancel)
+        .upload_capsule(&view, dependency_limits(), cancel)
         .await
         .map_err(validate::map_error)?;
-    let head = if prepared.plan().refs().is_empty()
-        || prepared.plan().refs().contains_key(&snapshot.manifest.head)
-    {
-        None
-    } else {
-        // Tags can exist before the first branch. Keep HEAD unborn until a
-        // branch is available instead of turning an arbitrary tag into HEAD.
-        prepared
-            .plan()
-            .refs()
-            .keys()
-            .find(|name| name.starts_with("refs/heads/"))
-            .cloned()
-    };
     let outcome = if changed_path_hashes.is_empty() {
         commit_prepared(
             server,
             principal,
             entry,
             artifacts,
-            head,
             attempt.plan_id.as_deref(),
             cancel,
         )
@@ -541,7 +502,6 @@ async fn publish_attempt<'a>(
                     principal,
                     entry,
                     artifacts,
-                    head,
                     attempt.plan_id.as_deref(),
                     &lease_cancel,
                 )
@@ -564,10 +524,19 @@ async fn publish_attempt<'a>(
         }
         Err(error) => return Err(error),
     };
-    if let crab_remote::publication::CommitOutcome::Indeterminate { source, .. } = outcome {
+    if let crab_remote::prepare::CapsuleCommitOutcome::Indeterminate { source, .. } = outcome {
         // The deterministic native plan can recover a committed receipt after
         // transport loss, but an absent receipt is not proof of rejection.
         return Err(ReceiveError::Write(*source));
+    }
+    if let Some((root, expected_head, head)) = initial_head
+        && let Err(error) =
+            crab_write::capsule_protocol::retarget_head(&entry.layout, root, &expected_head, &head)
+                .await
+    {
+        // The ref transaction is already committed and must be acknowledged.
+        // A later admin update can repair an unavailable control-plane root.
+        tracing::error!(%head, %error, "first branch committed but HEAD retargeting failed");
     }
     // Acknowledge known ref commitment even if read indexes remain pending.
     // A lost acknowledgement is indeterminate; matching refs cannot prove it.
@@ -579,6 +548,7 @@ async fn publish_attempt<'a>(
         Ok::<_, crate::Error>(repository.generation())
     })
     .await;
+    entry.schedule_maintenance(server).await;
     let mut bytes = Vec::new();
     if request.report_status {
         receive_wire::report(&mut bytes, &request.updates, None, None)?;
@@ -594,7 +564,7 @@ async fn recover_native_plan(
     cancel: &CancellationToken,
     original: ReceiveError,
 ) -> Result<Vec<u8>> {
-    let receipt = match crab_metadata::plan_receipt::resolve_plan_receipt(
+    let receipt = match crab_metadata::capsule_protocol::resolve_capsule_plan_receipt(
         &entry.store,
         &entry.layout,
         plan_id,
@@ -610,11 +580,24 @@ async fn recover_native_plan(
     let Some(receipt) = receipt else {
         return Err(original);
     };
-    if !matches!(
-        receipt.commit,
-        crab_metadata::plan_receipt::PlanCommit::RefJournal { .. }
-    ) {
-        tracing::error!(%plan_id, "native receive plan receipt used an unexpected commit authority");
+    let receipt_updates = receipt
+        .transaction()
+        .edits()
+        .iter()
+        .map(|edit| (edit.ref_name(), (edit.expected_old(), edit.new_oid())))
+        .collect::<BTreeMap<_, _>>();
+    if request.updates.len() != receipt_updates.len()
+        || request.updates.iter().any(|update| {
+            let expected_old = update.old.map(|oid| oid.to_string());
+            let new_oid = update.new.map(|oid| oid.to_string());
+            receipt_updates
+                .get(update.name.as_str())
+                .is_none_or(|(receipt_old, receipt_new)| {
+                    *receipt_old != expected_old.as_deref() || *receipt_new != new_oid.as_deref()
+                })
+        })
+    {
+        tracing::error!(%plan_id, "native receive plan receipt does not match the wire request");
         return Err(original);
     }
     // The receipt proves the ref visibility boundary. Index readiness remains
@@ -627,6 +610,7 @@ async fn recover_native_plan(
         Ok::<_, crate::Error>(repository.generation())
     })
     .await;
+    entry.schedule_maintenance(server).await;
     let mut bytes = Vec::new();
     if request.report_status {
         receive_wire::report(&mut bytes, &request.updates, None, None)?;
@@ -638,11 +622,10 @@ async fn commit_prepared(
     server: &Server,
     principal: &Principal,
     entry: &Repository,
-    artifacts: crab_remote::prepare::Artifacts<'_>,
-    head: Option<String>,
+    artifacts: crab_remote::prepare::CapsuleArtifacts,
     plan_id: Option<&str>,
     cancel: &CancellationToken,
-) -> Result<crab_remote::publication::CommitOutcome> {
+) -> Result<crab_remote::prepare::CapsuleCommitOutcome> {
     check_cancelled(cancel)?;
     if !principal.can_write(&entry.config) {
         return Err(ReceiveError::Forbidden);
@@ -656,14 +639,8 @@ async fn commit_prepared(
     {
         return Err(ReceiveError::Archived);
     }
-    let options = crab_write::journal::CommitOptions::new(TTL, cancel);
-    let options = if let Some(plan_id) = plan_id {
-        options.with_plan(plan_id)
-    } else {
-        options
-    };
     artifacts
-        .commit(head, options)
+        .commit(plan_id, TTL, cancel)
         .await
         .map_err(validate::map_error)
 }

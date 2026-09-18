@@ -7,6 +7,7 @@ pub(super) use crab_remote::prepare::Prepared;
 
 pub(super) async fn prepare(
     repository: crab_remote_git::RemoteGitRepository,
+    visibility: crab_metadata::git_visibility::GitVisibilityIndex,
     layout: crab_storage::StoreLayout<crab_storage::Store>,
     directory: std::path::PathBuf,
     input: Option<std::io::BufReader<std::fs::File>>,
@@ -19,8 +20,9 @@ pub(super) async fn prepare(
         .head
         .as_ref()
         .map(|head| head.name.clone());
-    crab_remote::prepare::prepare(
+    crab_remote::prepare::prepare_capsule(
         repository,
+        visibility,
         directory,
         input,
         updates,
@@ -64,6 +66,7 @@ pub(super) fn map_error(error: crab_remote::prepare::Error) -> super::ReceiveErr
         Error::Prepare(error) => ReceiveError::Prepare(error),
         Error::Io(error) => ReceiveError::Io(error),
         Error::Dependency(error) => ReceiveError::Dependency(error),
+        Error::CapsuleRead(error) => ReceiveError::Read(error),
         Error::Write(error) => ReceiveError::Write(error),
         Error::Storage(error) => ReceiveError::Storage(error),
         Error::Metadata(error) => ReceiveError::Metadata(error),

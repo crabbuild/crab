@@ -1,5 +1,34 @@
 use super::*;
 use std::cell::Cell;
+use std::process::{Command, Stdio};
+
+fn write_git_blob(git_dir: &Path, body: &[u8]) -> BlobHeader {
+    let mut child = Command::new("git")
+        .args(["hash-object", "-w", "--stdin"])
+        .env("GIT_DIR", git_dir)
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(body).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let oid =
+        gix_hash::ObjectId::from_hex(String::from_utf8(output.stdout).unwrap().trim().as_bytes())
+            .unwrap();
+    BlobHeader {
+        oid: oid.as_slice().try_into().unwrap(),
+        size: body.len() as u64,
+    }
+}
 
 fn frame(body: &[u8]) -> (BlobHeader, Vec<u8>) {
     let mut hash = gix_hash::hasher(gix_hash::Kind::Sha1);
@@ -35,6 +64,24 @@ fn verifies_binary_empty_and_large_blobs_without_large_reads() {
         bytes.extend(wire);
     }
     verify_blob_batch(BoundedReads(io::Cursor::new(bytes)), &expected, &|| false).unwrap();
+}
+
+#[test]
+fn git_dir_verifier_handles_large_output_before_a_large_request_list() {
+    let repo = tempfile::tempdir().unwrap();
+    let output = Command::new("git")
+        .args(["init", "--bare", "--quiet"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let large = write_git_blob(repo.path(), &vec![0x80; 2 * 1024 * 1024]);
+    let small = write_git_blob(repo.path(), b"small");
+    let mut expected = Vec::with_capacity(5_001);
+    expected.push(large);
+    expected.extend(std::iter::repeat_n(small, 5_000));
+
+    verify_git_dir_blobs(repo.path(), &expected, &|| false).unwrap();
 }
 
 #[test]

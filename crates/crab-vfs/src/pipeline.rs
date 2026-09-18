@@ -110,7 +110,8 @@ pub struct MountPipelineBuilder {
     config: PipelineConfig,
     /// Shared chunk cache. If not provided, a per-mount cache is created.
     chunk_cache: Option<Arc<ChunkCache>>,
-    /// Store layout for xorb fetching. `None` uses stub resolvers.
+    /// Store layout for xorb fetching. A layout requires a read context so
+    /// pointer reconstruction uses the authenticated v2 resolver.
     store_layout: Option<StoreLayout>,
     /// Configured read-side hydrator supplied by the CLI integration.
     read_hydrator: Option<Arc<crab_read::ShardHydrator>>,
@@ -677,9 +678,9 @@ pub fn commit_time_from_head(git_dir: &Path) -> Option<i64> {
 
 /// Create a hydration service with the appropriate resolvers.
 ///
-/// When a `StoreLayout` is provided, the xorb fetcher routes through
-/// object storage. Otherwise, stub resolvers are used (suitable for
-/// local mounts where small files come from the git ODB).
+/// A `StoreLayout` is only valid with the authenticated v2 read hydrator.
+/// Without it, the legacy synchronous index/shard adapters are stubs and
+/// would otherwise let a mount start before failing on its first pointer read.
 pub fn create_hydration(
     cache: Arc<ChunkCache>,
     verified: Arc<VerifiedSet>,
@@ -688,6 +689,13 @@ pub fn create_hydration(
     read_hydrator: Option<Arc<crab_read::ShardHydrator>>,
     read_range_cache_dir: Option<PathBuf>,
 ) -> Result<Arc<HydrationService>> {
+    if store_layout.is_some() && read_hydrator.is_none() {
+        return Err(CrabError::Configuration {
+            key: "read_hydrator".into(),
+            origin: "object-store mount requires an authenticated v2 read context".into(),
+        });
+    }
+
     let xorb_fetcher: Arc<dyn crate::data_plane::XorbFetcher> = match store_layout {
         Some(layout) => {
             let rt = tokio::runtime::Handle::current();
@@ -1018,5 +1026,26 @@ ref: refs/heads/main\tHEAD\n\
 
         assert_eq!(builder.refresh_interval, Duration::from_mins(1));
         assert!(builder.no_refresh);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn object_store_hydration_requires_v2_read_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let layout = StoreLayout::new(store, "repo".to_owned());
+        let error = create_hydration(
+            Arc::new(ChunkCache::open(tmp.path().join("chunks"), Some(1024)).unwrap()),
+            Arc::new(VerifiedSet::default()),
+            CancellationToken::new(),
+            Some(layout),
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CrabError::Configuration { key, .. } if key == "read_hydrator"
+        ));
     }
 }

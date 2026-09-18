@@ -178,6 +178,13 @@ Its error source is Tokio's `JoinError`, so diagnostic consumers can distinguish
 worker panic from task cancellation without parsing log text. The CLI preserves
 that source while retaining its internal-error diagnostic classification.
 
+Replica readiness compares the exact authenticated capsule view before reading
+and validating every cataloged shard and xorb body. Large-body hashing and
+parsing run outside the async executor; worker failures remain typed as
+`ReadError::ReadinessTask`. Product caches may skip repeated immutable-body
+validation, but must recheck the replica's authenticated view digest before
+selection.
+
 ## Boundaries
 
 Dependency preflight consumes `crab-git`'s validated pointer contracts and
@@ -199,6 +206,28 @@ fallback; extension transforms stay with the client, as the primary OID/size
 identify the stored bytes. Verification writes no durable evidence and is not
 publication authority. A publisher must hold GC fences and recheck the exact
 base before exposing refs. Native HTTP receive/publication remains unfinished.
+
+`capsule_protocol::open_view` loads the v2 checkpoint root, double-collects
+complete per-ref-head object metadata around concurrent head reads, and retries
+a changing snapshot. It resolves each activation record still referenced by a
+prepared head exactly once; committed selects all prepared states for that
+activation, while preparing or aborted selects every predecessor. It then loads
+the checkpoint and reachable capsule runs with caller-supplied individual and
+aggregate byte limits. Exact size, provider version, BLAKE3 identity,
+transaction identity, base-root binding, and materialized refs are verified
+before the view is returned. Git clone/fetch, pointer catalog lookup, checkout,
+and hydration consume this same view.
+
+`capsule_protocol::open_ref_view_from_root_for_refs` is the explicit-push
+variant. It double-reads only the requested deterministic head keys without
+loading checkpoint or capsule payloads, avoiding repository-wide LIST,
+unrelated-head GET, and immutable-history GET requests. Its non-selected ref
+values are not authoritative; complete advertisement uses
+`open_ref_view_from_root`, while Git transfer and cross-ref pointer catalogs
+must continue to use `open_view`. Protected-push admission uses the narrower
+`read_visible_refs_from_root_for_refs`, which retains the same stable-head and
+atomic-activation checks but returns only requested refs and fetches no capsule
+or checkpoint payloads.
 
 - [`crab-metadata`](../crab-metadata/README.md) defines manifests, file
   indexes, and shard metadata; this crate consumes them.
