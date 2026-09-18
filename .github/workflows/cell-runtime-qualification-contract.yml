@@ -38,7 +38,11 @@ jobs:
       - name: Verify receipt, placement, pressure, and resource contracts
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
-        run: cargo test -p crab-cell-runtime qualification placement pressure resource --locked
+        run: |
+          set -euo pipefail
+          for filter in qualification placement pressure resource; do
+            cargo test -p crab-cell-runtime "${filter}" --locked
+          done
       - name: Verify canonical LTX contracts
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
