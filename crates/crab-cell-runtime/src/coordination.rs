@@ -901,6 +901,23 @@ mod tests {
     }
 
     #[test]
+    fn fenced_work_cannot_start_a_publication_after_completion() {
+        let mut state = CoordinationState::serving(true);
+        state.step(CoordinationInput::BeginWork {
+            kind: AdmissionKind::Command,
+            publisher_ready: true,
+        });
+        assert_eq!(
+            state.step(CoordinationInput::FinishWork { fenced: true }),
+            CoordinationDecision::Fence
+        );
+        assert_eq!(
+            state.step(CoordinationInput::BeginPublication),
+            CoordinationDecision::Reject(RejectReason::Fenced)
+        );
+    }
+
+    #[test]
     fn lost_cas_fences_the_owner_and_releases_the_publication_obligation() {
         let mut state = CoordinationState::serving(true);
         state.step(CoordinationInput::BeginPublication);

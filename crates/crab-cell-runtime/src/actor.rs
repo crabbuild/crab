@@ -3128,7 +3128,7 @@ fn handle_task(
                 result = Err(command.operation.unknown(Error::Fenced));
                 fenced = true;
             }
-            if fenced || active.fenced() {
+            if fenced {
                 finish_work(active, true);
                 send_command_task_reply(&mut command, result);
                 continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
@@ -3145,9 +3145,20 @@ fn handle_task(
                     retained_reservation,
                 }) => {
                     let retained_bytes = pending.retained_bytes();
-                    active
+                    let publication = active
                         .coordination
                         .step(CoordinationInput::BeginPublication);
+                    let CoordinationDecision::Started = publication else {
+                        drop(retained_reservation);
+                        finish_work(active, false);
+                        let error = command.operation.unknown(match publication {
+                            CoordinationDecision::Reject(reason) => rejection_error(reason),
+                            _ => Error::Fenced,
+                        });
+                        send_command_reply(&mut command, Err(error));
+                        continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
+                        return;
+                    };
                     active.publication_bytes =
                         match active.publication_bytes.checked_add(retained_bytes) {
                             Some(bytes) => bytes,
