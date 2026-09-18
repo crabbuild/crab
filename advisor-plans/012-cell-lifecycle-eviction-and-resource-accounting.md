@@ -1,6 +1,6 @@
 # Cell quiescing, idle eviction, and unified resource accounting
 
-Status: IN PROGRESS — RAII ledger shared by active Cells, resident native bytes, active-Cell file descriptors, SQL work, hydration jobs, retained publication bytes, primitive activity/effect/migration/recovery jobs, and the canonical LTX `DiskBudget`; deterministic victim selection, actor eviction, pressure pacing, retained-byte accounting, and fail-closed persisted-work refresh are wired; unknown persisted-work inventory is explicitly ineligible for eviction; descriptor admission/metrics and shared local-disk consumer wiring are now explicit; a bounded two-slot/three-Cell churn test now proves canonical eviction, exact-root idle reacquisition, and capacity reuse; restart-churn, process-wide codec/scratch reconciliation, and measured inventory proof remain
+Status: IN PROGRESS — RAII ledger shared by active Cells, resident native bytes, active-Cell file descriptors, SQL work, hydration jobs, retained publication bytes, primitive activity/effect/migration/recovery jobs, and the canonical LTX `DiskBudget`; deterministic victim selection, actor eviction, pressure pacing, retained-byte accounting, and fail-closed persisted-work refresh are wired; unknown persisted-work inventory is explicitly ineligible for eviction; descriptor admission/metrics and shared local-disk consumer wiring are now explicit; bounded two-slot/three-Cell churn and retained-work eviction guard tests prove canonical capacity reuse and fail-closed obligation handling; restart-churn, process-wide codec/scratch reconciliation, and measured inventory proof remain
 Priority: P0
 Effort: XL
 Risk: High
@@ -148,6 +148,13 @@ runtime reacquires and reads that root, that a third Cell can then bootstrap,
 and that all active reservations return to zero before shutdown. It does not
 claim provider, process-restart, mixed-primitive, multi-GiB, or measured RSS
 qualification.
+
+The companion `persisted_work_blocks_idle_eviction_until_explicit_release`
+test executes a durable mutation, waits for the background inventory refresh,
+and proves `evict_idle` still returns no victim while the request outcome is
+retained. It then uses the explicit drain/release path and verifies the active
+Cell reservation returns to zero. This protects the fail-closed rule without
+mutating the database behind the actor.
 
 ## Acceptance criteria
 

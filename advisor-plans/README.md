@@ -146,7 +146,7 @@ authorized standalone-contract decision.
 Local proof completed:
 
 - `crab-cell-runtime`: 207 library tests passed (one provider test ignored),
-  39 actor tests passed (one provider test ignored), and all primitive,
+  40 actor tests passed (one provider test ignored), and all primitive,
   migration, publication, simulator, and workflow suites pass. The ignored
   source-loss and retention tests also pass against an isolated local RustFS
   bucket when their provider variables are supplied. The shared
@@ -212,6 +212,12 @@ shutdown. It deliberately uses bootstrap roots because durable command
 outcomes are release obligations; mutation-root restoration remains covered by
 the command/publication/cancellation tests, and mixed primitive/source-loss/
 restart qualification is still open under Plan 012.
+
+The companion `persisted_work_blocks_idle_eviction_until_explicit_release`
+regression executes a durable SQL mutation, waits for inventory refresh, and
+proves that retained request outcomes keep `evict_idle` fail-closed until the
+canonical drain/release path runs. It also checks the active-Cell ledger returns
+to zero after release.
 
 The coordination kernel now records a typed intent beside every local effect
 identity. A completion must match both the activation generation and its

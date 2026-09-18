@@ -1481,6 +1481,43 @@ async fn churn_evicts_idle_cells_and_restores_exact_roots() {
     runtime.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn persisted_work_blocks_idle_eviction_until_explicit_release() {
+    let fixture = fixture_for(b"eviction-persisted-work");
+    let session = SessionId::from_bytes([78; 16]);
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 * 1024 * 1024, session).unwrap();
+    let handle = bootstrap_on(&runtime, &fixture, session).await;
+    assert!(matches!(
+        handle
+            .execute(
+                identity(79),
+                Digest::from_bytes([79; 32]),
+                20,
+                64,
+                64,
+                |transaction| {
+                    transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                    Ok(HandlerOutcome::Success(Vec::new()))
+                },
+            )
+            .await
+            .unwrap(),
+        StoredOutcome::Success {
+            commit_sequence: 1,
+            ..
+        }
+    ));
+
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    assert_eq!(runtime.evict_idle(1).await.unwrap(), 0);
+    assert_eq!(runtime.stats().active_cells(), 1);
+
+    handle.drain().await.unwrap();
+    assert_eq!(runtime.stats().active_cells(), 0);
+    runtime.shutdown().await.unwrap();
+}
+
 async fn bootstrap_on(
     runtime: &CellRuntime,
     fixture: &Fixture,
