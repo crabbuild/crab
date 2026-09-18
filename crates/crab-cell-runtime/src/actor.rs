@@ -1379,10 +1379,6 @@ impl ActiveCell {
         self.drain.is_some() || self.coordination.is_draining()
     }
 
-    fn fenced(&self) -> bool {
-        self.coordination.is_fenced()
-    }
-
     fn busy(&self) -> bool {
         self.coordination.is_busy()
     }
@@ -2724,9 +2720,6 @@ fn start_publication(
     pool: &SqlWorkerPool,
     tasks: &mut JoinSet<TaskResult>,
 ) {
-    if active.fenced() {
-        return;
-    }
     let Some(mut publisher) = active.publisher.take() else {
         return;
     };

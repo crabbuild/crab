@@ -1,6 +1,6 @@
 # Extract the pure Cell coordination kernel
 
-Status: IN PROGRESS — pure lifecycle state, typed kernel-owned effect intents/IDs, actor admission/drain/scheduling seams, activation-generation fencing, and in-flight completion drain are wired and tested; scheduling plus hydration, renewal, persisted-work inventory, deactivation observations, migration admission, and simulator movement release now use kernel decisions. The actor's schedule adapter passes queue/publisher observations into one kernel transition, migration admission receives the live-publisher observation without storing a duplicate adapter flag, and work/publication/renewal/hydration completion outcomes now return explicit kernel fence decisions. Complete decision extraction and parity coverage remain
+Status: IN PROGRESS — pure lifecycle state, typed kernel-owned effect intents/IDs, actor admission/drain/scheduling seams, activation-generation fencing, and in-flight completion drain are wired and tested; scheduling plus hydration, renewal, persisted-work inventory, deactivation observations, migration admission, publication admission, and simulator movement release now use kernel decisions. The actor's schedule adapter passes queue/publisher observations into one kernel transition, migration admission receives the live-publisher observation without storing a duplicate adapter flag, and work/publication/renewal/hydration completion outcomes now return explicit kernel fence decisions. Remaining release work is parity/source-audit evidence, not a second implementation
 Priority: P0
 Effort: XL
 Risk: High
@@ -191,6 +191,13 @@ Cell returns `ReadyToDeactivate`. The actor no longer reads `active.fenced()`
 to choose the release adapter; it only executes the release effect named by the
 decision.
 
+Publication dispatch follows the same boundary. `BeginPublication` is the only
+admission transition and `FinishPublication` is the only completion transition;
+`start_publication` now only moves the already-admitted publisher token and
+spawns the effect. Its former actor-side `fenced` guard was redundant policy and
+has been deleted, so a fenced Cell cannot reach the adapter without a kernel
+decision returning `Started`.
+
 ### 6. Update documentation
 
 Update the design's state machine and ownership table with the implemented
@@ -226,7 +233,7 @@ must identify the removed state combinations or duplicate paths that justify it.
 
 ## Acceptance criteria
 
-- [ ] Production actor decisions flow through one pure coordination step API.
+- [x] Production actor decisions flow through one pure coordination step API.
 - [x] The kernel has no async runtime, I/O, filesystem, object-store, SQL,
       clock, or randomness dependency.
 - [x] Persistent `Control` transitions remain canonical in `control.rs`.
@@ -237,7 +244,7 @@ must identify the removed state combinations or duplicate paths that justify it.
 - [x] Plan 004 characterization tests pass unchanged.
 - [x] Public APIs, stored keys, wire messages, and serialized shapes are
       unchanged.
-- [ ] The old decision branches are deleted; no feature flag selects between
+- [x] The old decision branches are deleted; no feature flag selects between
       implementations.
 - [x] All verification commands pass.
 

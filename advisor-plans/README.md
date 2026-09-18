@@ -218,6 +218,13 @@ normal live drain. Release-path selection therefore comes from the kernel
 decision rather than an actor-side fenced-state read, including after node-lease
 loss.
 
+The final publication adapter guard was also removed. Publication admission is
+now exclusively `CoordinationInput::BeginPublication`, completion is exclusively
+`FinishPublication`, and `start_publication` only executes a kernel-approved
+effect. This closes the last actor-side lifecycle predicate in the coordination
+path; the coordination and actor suites pass with no compatibility branch or
+feature flag selecting an alternate decision implementation.
+
 Blob upload lifetimes and Cron first-due windows are validated from the
 mutation-issued timestamp, while the serialized Cell still rejects an upload
 that has expired before acceptance. This keeps absolute caller deadlines stable
