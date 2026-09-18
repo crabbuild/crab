@@ -188,8 +188,10 @@ fn run_worker(receiver: &Mutex<mpsc::Receiver<BlockingJob>>) {
         let result = catch_unwind(AssertUnwindSafe(job.handler))
             .map_err(|_| Error::ActivityPanic)
             .and_then(|result| result);
-        let _ = job.reply.send(result);
+        // Completion is observable only after admission reopens, allowing the
+        // caller to reserve the next worker immediately after execute returns.
         drop(job.permit);
+        let _ = job.reply.send(result);
     }
 }
 

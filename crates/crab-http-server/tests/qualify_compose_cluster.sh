@@ -331,7 +331,12 @@ jq --exit-status \
 node_before_follower_loss="$("${compose[@]}" exec -T server-c crab-http-server \
   --config /etc/crab/server.toml cells node \
   --session "$session_after" --json)"
-node_b_id="$(jq --raw-output '.advertisement.node' <<<"$node_before")"
+node_b_id="$("${compose[@]}" exec -T server-b /bin/sh -ec \
+  'cat /var/lib/crab/cells/node-id')"
+if [[ ! "$node_b_id" =~ ^[0-9a-f]{32}$ ]]; then
+  echo "Rejoined node B did not expose a canonical local node identity." >&2
+  exit 1
+fi
 log_epoch_before_follower_loss="$(jq --raw-output \
   '.advertisement.log.epoch' <<<"$node_before_follower_loss")"
 jq --exit-status \
