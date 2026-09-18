@@ -146,7 +146,7 @@ authorized standalone-contract decision.
 Local proof completed:
 
 - `crab-cell-runtime`: 210 library tests passed (one provider test ignored),
-  43 actor tests passed (one provider test ignored), and all primitive,
+  45 actor tests passed (one provider test ignored), and all primitive,
   migration, publication, simulator, and workflow suites pass. The ignored
   source-loss and retention tests also pass against an isolated local RustFS
   bucket when their provider variables are supplied. The shared
