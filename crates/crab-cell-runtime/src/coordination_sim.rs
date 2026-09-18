@@ -235,7 +235,11 @@ impl Simulation {
                 self.state.step(CoordinationInput::FinishWork)
             }
             Event::BeginRenewal => {
-                let decision = self.state.step(CoordinationInput::BeginRenewal);
+                let decision = self.state.step(CoordinationInput::BeginRenewal {
+                    queue_empty: true,
+                    publication_idle: true,
+                    lease_live: true,
+                });
                 if matches!(decision, CoordinationDecision::Started) {
                     self.renewal_effect =
                         Some(self.state.begin_effect(CoordinationEffect::Renewal));
@@ -256,7 +260,11 @@ impl Simulation {
             Event::BeginMigration => self.state.step(CoordinationInput::BeginMigration),
             Event::FinishMigration => self.state.step(CoordinationInput::FinishMigration),
             Event::BeginHydration => {
-                let decision = self.state.step(CoordinationInput::BeginHydration);
+                let decision = self.state.step(CoordinationInput::BeginHydration {
+                    queue_empty: true,
+                    publication_idle: true,
+                    lease_live: true,
+                });
                 if matches!(decision, CoordinationDecision::Started) {
                     self.hydration_effect =
                         Some(self.state.begin_effect(CoordinationEffect::Hydration));

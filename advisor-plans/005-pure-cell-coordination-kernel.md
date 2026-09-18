@@ -168,6 +168,12 @@ lease loss. They prove that adapter observations cannot dispatch work after a
 lease fence or while retained publication bytes are at the configured
 high-water mark.
 
+Background hydration and renewal use the same observation-only boundary:
+foreground queue state, publication quiescence, and node-lease liveness are
+inputs to the kernel, while the actor only reserves resources and executes a
+`Started` effect. Fence decisions close admission before the adapter launches
+the task.
+
 ### 6. Update documentation
 
 Update the design's state machine and ownership table with the implemented

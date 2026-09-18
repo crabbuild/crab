@@ -1587,7 +1587,7 @@ async fn run(
                     handle_message(message, &mut receiver, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown, &node_lease, &mut pressure, &mut movement, &mut movement_permits, &mut next_generation);
                 }
                 _ = renewal_tick.tick() => {
-                    start_due_renewals(&pool, &mut cells, &mut tasks);
+                    start_due_renewals(&pool, &mut cells, &mut tasks, &node_lease);
                 }
                 _ = hydration_tick.tick() => {
                     start_background_hydration(
@@ -1630,7 +1630,7 @@ async fn run(
                 handle_task(result, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown, &node_lease, &unpublished_node_log_bytes, &mut movement, &mut movement_permits);
             }
             _ = renewal_tick.tick() => {
-                start_due_renewals(&pool, &mut cells, &mut tasks);
+                start_due_renewals(&pool, &mut cells, &mut tasks, &node_lease);
             }
             _ = hydration_tick.tick() => {
                 start_background_hydration(
@@ -2184,25 +2184,24 @@ fn start_background_hydration(
     let candidates = cells
         .iter_mut()
         .filter_map(|(cell, active)| {
-            if active.coordination.residency() != Residency::Sparse
-                || active.busy()
-                || active.renewing()
-                || active.fenced()
-                || active.draining()
-                || !active.queue.is_empty()
-                || active.coordination.publication_count() != 0
-            {
-                return None;
-            }
             let reservation = resources
                 .try_reserve(ResourceCost::zero().with_hydration_jobs(1))
                 .ok()?;
-            if !matches!(
-                active.coordination.step(CoordinationInput::BeginHydration),
-                CoordinationDecision::Started
-            ) {
-                drop(reservation);
-                return None;
+            match active.coordination.step(CoordinationInput::BeginHydration {
+                queue_empty: active.queue.is_empty(),
+                publication_idle: active.coordination.publication_count() == 0,
+                lease_live: true,
+            }) {
+                CoordinationDecision::Started => {}
+                CoordinationDecision::Fence => {
+                    drop(reservation);
+                    fence_active(active);
+                    return None;
+                }
+                _ => {
+                    drop(reservation);
+                    return None;
+                }
             }
             let effect_id = active.begin_task(CoordinationEffect::Hydration);
             Some((*cell, active.generation, effect_id, reservation))
@@ -3614,6 +3613,7 @@ fn start_due_renewals(
     pool: &SqlWorkerPool,
     cells: &mut HashMap<CellId, ActiveCell>,
     tasks: &mut JoinSet<TaskResult>,
+    node_lease: &RuntimeNodeLease,
 ) {
     let active_renewals = cells.values().filter(|active| active.renewing()).count();
     let mut available = MAX_RENEWALS_IN_FLIGHT.saturating_sub(active_renewals);
@@ -3625,24 +3625,24 @@ fn start_due_renewals(
         if available == 0 {
             break;
         }
-        if active.busy()
-            || active.renewing()
-            || active.fenced()
-            || active.draining()
-            || active.coordination.publication_count() != 0
-            || !active.queue.is_empty()
-            || active
-                .publisher
-                .as_ref()
-                .is_none_or(|publisher| !publisher.renewal_due(now))
+        if active
+            .publisher
+            .as_ref()
+            .is_none_or(|publisher| !publisher.renewal_due(now))
         {
             continue;
         }
-        if !matches!(
-            active.coordination.step(CoordinationInput::BeginRenewal),
-            CoordinationDecision::Started
-        ) {
-            continue;
+        match active.coordination.step(CoordinationInput::BeginRenewal {
+            queue_empty: active.queue.is_empty(),
+            publication_idle: active.coordination.publication_count() == 0,
+            lease_live: node_lease.check().is_ok(),
+        }) {
+            CoordinationDecision::Started => {}
+            CoordinationDecision::Fence => {
+                fence_active(active);
+                continue;
+            }
+            _ => continue,
         }
         let Some(mut publisher) = active.publisher.take() else {
             active

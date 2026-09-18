@@ -1170,7 +1170,8 @@ Slices 2–6 now have reviewable seams: `coordination.rs` owns the volatile
 admission/fence/publication/migration/shutdown decisions; scheduling also
 receives lease and publication-pressure observations and centrally decides
 dispatch, wait, or fence, so `actor.rs` does not duplicate those predicates;
-the test-only
+background hydration and renewal use the same queue/publication/lease
+observation boundary; the test-only
 simulator replays fixed seeds and checks acknowledgement/publication invariants;
 the pinned TLC runner has positive and deliberately broken configurations; and
 `CellRuntime::resident_handle` is attempted before catalog/control reads while

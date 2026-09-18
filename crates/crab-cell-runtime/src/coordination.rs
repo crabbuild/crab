@@ -68,7 +68,11 @@ pub(crate) enum CoordinationInput {
     BeginShutdown,
     BeginMigration,
     FinishMigration,
-    BeginRenewal,
+    BeginRenewal {
+        queue_empty: bool,
+        publication_idle: bool,
+        lease_live: bool,
+    },
     FinishRenewal {
         fenced: bool,
     },
@@ -95,7 +99,11 @@ pub(crate) enum CoordinationInput {
         fenced: bool,
         succeeded: bool,
     },
-    BeginHydration,
+    BeginHydration {
+        queue_empty: bool,
+        publication_idle: bool,
+        lease_live: bool,
+    },
     FinishHydration {
         complete: bool,
         stale: bool,
@@ -408,13 +416,24 @@ impl CoordinationState {
                 }
                 CoordinationDecision::Ignored
             }
-            CoordinationInput::BeginRenewal => {
-                if self.is_fenced() || self.is_draining() || self.renewing {
+            CoordinationInput::BeginRenewal {
+                queue_empty,
+                publication_idle,
+                lease_live,
+            } => {
+                if !lease_live {
+                    self.lifecycle = Lifecycle::Fenced;
+                    self.busy = false;
+                    self.renewing = false;
+                    CoordinationDecision::Fence
+                } else if self.is_fenced() || self.is_draining() || self.renewing {
                     CoordinationDecision::Reject(if self.is_fenced() {
                         RejectReason::Fenced
                     } else {
                         RejectReason::Draining
                     })
+                } else if self.busy || !queue_empty || !publication_idle {
+                    CoordinationDecision::Ignored
                 } else {
                     self.renewing = true;
                     CoordinationDecision::Started
@@ -458,14 +477,22 @@ impl CoordinationState {
                     CoordinationDecision::Ignored
                 }
             }
-            CoordinationInput::BeginHydration => {
-                if self.is_fenced() {
+            CoordinationInput::BeginHydration {
+                queue_empty,
+                publication_idle,
+                lease_live,
+            } => {
+                if !lease_live {
+                    self.lifecycle = Lifecycle::Fenced;
+                    self.busy = false;
+                    CoordinationDecision::Fence
+                } else if self.is_fenced() {
                     CoordinationDecision::Reject(RejectReason::Fenced)
                 } else if self.is_draining() {
                     CoordinationDecision::Reject(RejectReason::Draining)
                 } else if self.busy {
                     CoordinationDecision::Reject(RejectReason::Busy)
-                } else if self.residency != Residency::Sparse {
+                } else if !queue_empty || !publication_idle || self.residency != Residency::Sparse {
                     CoordinationDecision::Ignored
                 } else {
                     self.busy = true;
@@ -674,6 +701,33 @@ mod tests {
     }
 
     #[test]
+    fn background_effects_wait_for_foreground_and_publication_quiescence() {
+        let mut renewal = CoordinationState::serving(true);
+        renewal.step(CoordinationInput::BeginWork {
+            kind: AdmissionKind::Query,
+        });
+        assert_eq!(
+            renewal.step(CoordinationInput::BeginRenewal {
+                queue_empty: true,
+                publication_idle: true,
+                lease_live: true,
+            }),
+            CoordinationDecision::Ignored
+        );
+
+        let mut hydration = CoordinationState::serving_with_residency(true, Residency::Sparse);
+        assert_eq!(
+            hydration.step(CoordinationInput::BeginHydration {
+                queue_empty: false,
+                publication_idle: true,
+                lease_live: true,
+            }),
+            CoordinationDecision::Ignored
+        );
+        assert_eq!(hydration.residency(), Residency::Sparse);
+    }
+
+    #[test]
     fn publication_failure_fences_and_cannot_be_released_as_success() {
         let mut state = CoordinationState::serving(true);
         state.step(CoordinationInput::BeginPublication);
@@ -733,7 +787,11 @@ mod tests {
     fn stale_renewal_completion_is_not_a_new_admission() {
         let mut state = CoordinationState::serving(true);
         assert_eq!(
-            state.step(CoordinationInput::BeginRenewal),
+            state.step(CoordinationInput::BeginRenewal {
+                queue_empty: true,
+                publication_idle: true,
+                lease_live: true,
+            }),
             CoordinationDecision::Started
         );
         state.step(CoordinationInput::Fence);
@@ -746,7 +804,11 @@ mod tests {
     fn hydration_promotion_is_bounded_and_fenced_on_failure() {
         let mut state = CoordinationState::serving_with_residency(true, Residency::Sparse);
         assert_eq!(
-            state.step(CoordinationInput::BeginHydration),
+            state.step(CoordinationInput::BeginHydration {
+                queue_empty: true,
+                publication_idle: true,
+                lease_live: true,
+            }),
             CoordinationDecision::Started
         );
         assert_eq!(state.residency(), Residency::Hydrating);
@@ -757,7 +819,11 @@ mod tests {
         assert_eq!(state.residency(), Residency::Resident);
 
         let mut failed = CoordinationState::serving_with_residency(true, Residency::Sparse);
-        failed.step(CoordinationInput::BeginHydration);
+        failed.step(CoordinationInput::BeginHydration {
+            queue_empty: true,
+            publication_idle: true,
+            lease_live: true,
+        });
         failed.step(CoordinationInput::FinishHydration {
             complete: false,
             stale: true,
