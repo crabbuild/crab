@@ -498,20 +498,16 @@ fn constrain_capacity_to_runtime(
     capacity.free_disk_bytes = capacity.free_disk_bytes.min(ledger_disk);
     capacity.follower_free_bytes = capacity.follower_free_bytes.min(capacity.free_disk_bytes);
 
+    // Keep the signed placement scalar on its existing worker/primitive contract;
+    // host-ledger classes have separate metrics until the observation shape grows.
     let running_jobs = runtime
         .worker_jobs()
         .saturating_add(runtime.primitive_jobs())
-        .saturating_add(runtime.hydration_jobs())
-        .saturating_add(runtime.blocking_jobs())
-        .saturating_add(runtime.recovery_jobs())
-        .saturating_add(runtime.dirty_jobs());
+        .saturating_add(runtime.hydration_jobs());
     let job_capacity = runtime
         .worker_job_capacity()
         .saturating_add(runtime.primitive_job_capacity())
-        .saturating_add(runtime.hydration_job_capacity())
-        .saturating_add(runtime.blocking_job_capacity())
-        .saturating_add(runtime.recovery_job_capacity())
-        .saturating_add(runtime.dirty_job_capacity());
+        .saturating_add(runtime.hydration_job_capacity());
     let free_jobs = job_capacity.saturating_sub(running_jobs);
     capacity.job_credits = capacity
         .job_credits
