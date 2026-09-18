@@ -157,7 +157,7 @@ decision is pending; no standalone surface is removed by this design.
 | Sparse hydration | [`ManagedDb::hydration` and `hydrate_step`](../../crab-ltx/src/managed.rs) are driven by the actor's bounded hydration tick through the existing SQL worker; cancellation/restart and post-promotion zero-I/O qualification remain. |
 | Fleet observation | [`NodePublisher`](../../crab-http-server/src/peer.rs) signs short-lived live capacity observations; `NodeAdvertisement` carries a versioned placement signature, advertised memory/disk/job headroom is clamped by the runtime ledger, server memory capacity resolves nested cgroup-v1/v2 membership with fail-closed root fallbacks, and cold activation sends a bounded direct-node hint before normal authority acquisition. Unified process-wide probes and multi-process movement proof remain. |
 | Existing rendezvous | [`preferred_scanner`](../src/scheduler.rs) elects a catalog scheduler scanner. It does not rank or move Cell owners. |
-| Transition safety | [`Control`](../src/control.rs) validates named single-record transitions; [`coordination.rs`](../src/coordination.rs) allocates and retires typed per-effect intents/IDs, while the actor fences completions by activation generation and effect family, drains the kernel-owned pending-effect set before fenced deactivation, and keeps effect timing coupled to the production publisher. Background hydration, renewal, and persisted-work inventory refresh also pass queue/publication/lease observations through the same kernel before an adapter starts work. |
+| Transition safety | [`Control`](../src/control.rs) validates named single-record transitions; [`coordination.rs`](../src/coordination.rs) allocates and retires typed per-effect intents/IDs, while the actor fences completions by activation generation and effect family, drains the kernel-owned pending-effect set before fenced deactivation, and keeps effect timing coupled to the production publisher. Background hydration, renewal, persisted-work inventory refresh, drain, and shutdown pass queue/publisher/lease observations through the same kernel schedule transition before an adapter starts work. |
 
 ### Implementation evidence and remaining qualification
 
@@ -1171,9 +1171,10 @@ passes on the required external workspace target volume; provider, Kubernetes,
 and multi-GiB evidence remains pending.
 
 Slices 2–6 now have reviewable seams: `coordination.rs` owns the volatile
-admission/fence/publication/migration/shutdown decisions; scheduling also
-receives lease and publication-pressure observations and centrally decides
-dispatch, wait, or fence, so `actor.rs` does not duplicate those predicates;
+admission/fence/publication/migration/shutdown decisions; the actor has one
+schedule adapter that passes queue/publisher, lease, and publication-pressure
+observations and the kernel centrally decides dispatch, wait, deactivation, or
+fence, so `actor.rs` does not duplicate those predicates;
 background hydration and renewal use the same queue/publication/lease
 observation boundary; the test-only
 simulator replays fixed seeds and checks acknowledgement/publication invariants;

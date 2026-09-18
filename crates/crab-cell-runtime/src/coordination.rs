@@ -48,14 +48,15 @@ pub(crate) enum CoordinationInput {
     Lookup,
     BeginWork {
         kind: AdmissionKind,
+        publisher_ready: bool,
     },
     /// Schedules the next adapter action from actor-owned queue observations.
     ///
-    /// The actor supplies queue/deactivation facts; lifecycle, busy, renewal,
-    /// and fencing policy remains owned by this pure state machine.
+    /// The actor supplies queue/publisher observations; lifecycle, busy,
+    /// renewal, and fencing policy remains owned by this pure state machine.
     Schedule {
-        queue_nonempty: bool,
-        can_deactivate: bool,
+        queue_empty: bool,
+        publisher_ready: bool,
         publication_blocked: bool,
         lease_live: bool,
     },
@@ -133,12 +134,6 @@ pub(crate) enum CoordinationDecision {
     Fence,
 }
 
-impl CoordinationDecision {
-    pub(crate) const fn is_ready_to_deactivate(self) -> bool {
-        matches!(self, Self::ReadyToDeactivate)
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Lifecycle {
     Serving,
@@ -167,7 +162,6 @@ pub(crate) struct CoordinationState {
     renewing: bool,
     publications: usize,
     follower_proof: bool,
-    publisher_ready: bool,
     residency: Residency,
     shutdown_requested: bool,
     next_effect_id: u64,
@@ -182,14 +176,13 @@ impl CoordinationState {
             reason = "test and simulator constructor for the canonical kernel"
         )
     )]
-    pub(crate) const fn serving(publisher_ready: bool) -> Self {
+    pub(crate) const fn serving(_publisher_ready: bool) -> Self {
         Self {
             lifecycle: Lifecycle::Serving,
             busy: false,
             renewing: false,
             publications: 0,
             follower_proof: false,
-            publisher_ready,
             residency: Residency::Resident,
             shutdown_requested: false,
             next_effect_id: 0,
@@ -198,7 +191,7 @@ impl CoordinationState {
     }
 
     pub(crate) const fn serving_with_residency(
-        publisher_ready: bool,
+        _publisher_ready: bool,
         residency: Residency,
     ) -> Self {
         Self {
@@ -207,7 +200,6 @@ impl CoordinationState {
             renewing: false,
             publications: 0,
             follower_proof: false,
-            publisher_ready,
             residency,
             shutdown_requested: false,
             next_effect_id: 0,
@@ -288,11 +280,7 @@ impl CoordinationState {
     }
 
     pub(crate) fn can_deactivate(&self) -> bool {
-        !self.busy
-            && !self.renewing
-            && self.publications == 0
-            && self.pending_effects.is_empty()
-            && self.publisher_ready
+        !self.busy && !self.renewing && self.publications == 0 && self.pending_effects.is_empty()
     }
 
     /// Combines kernel-owned quiescence with adapter observations needed to
@@ -309,13 +297,16 @@ impl CoordinationState {
                 admission_matches,
             } => self.admit(kind, admission_matches),
             CoordinationInput::Lookup => self.lookup(),
-            CoordinationInput::BeginWork { kind } => {
+            CoordinationInput::BeginWork {
+                kind,
+                publisher_ready,
+            } => {
                 if self.is_fenced() {
                     CoordinationDecision::Reject(RejectReason::Fenced)
                 } else if self.busy {
                     CoordinationDecision::Reject(RejectReason::Busy)
                 } else if matches!(kind, AdmissionKind::Migration)
-                    && (self.publications != 0 || !self.publisher_ready)
+                    && (self.publications != 0 || !publisher_ready)
                 {
                     CoordinationDecision::Reject(RejectReason::PublicationPending)
                 } else {
@@ -324,19 +315,22 @@ impl CoordinationState {
                 }
             }
             CoordinationInput::Schedule {
-                queue_nonempty,
-                can_deactivate,
+                queue_empty,
+                publisher_ready,
                 publication_blocked,
                 lease_live,
             } => {
+                let can_deactivate = self.ready_to_deactivate(queue_empty, publisher_ready);
                 if !lease_live {
                     self.lifecycle = Lifecycle::Fenced;
                     self.busy = false;
                     self.renewing = false;
-                    CoordinationDecision::Fence
-                } else if can_deactivate
-                    && (self.is_fenced() || self.is_draining())
-                    && !queue_nonempty
+                    if self.ready_to_deactivate(queue_empty, publisher_ready) {
+                        CoordinationDecision::ReadyToDeactivate
+                    } else {
+                        CoordinationDecision::Fence
+                    }
+                } else if can_deactivate && (self.is_fenced() || self.is_draining()) && queue_empty
                 {
                     CoordinationDecision::ReadyToDeactivate
                 } else if self.is_fenced()
@@ -346,7 +340,7 @@ impl CoordinationState {
                         .pending_effects
                         .values()
                         .any(|effect| matches!(effect, CoordinationEffect::Inventory))
-                    || !queue_nonempty
+                    || queue_empty
                     || publication_blocked
                 {
                     CoordinationDecision::Ignored
@@ -647,6 +641,7 @@ mod tests {
         assert_eq!(
             state.step(CoordinationInput::BeginWork {
                 kind: AdmissionKind::Command,
+                publisher_ready: true,
             }),
             CoordinationDecision::Started
         );
@@ -672,8 +667,8 @@ mod tests {
         let mut serving = CoordinationState::serving(true);
         assert_eq!(
             serving.step(CoordinationInput::Schedule {
-                queue_nonempty: true,
-                can_deactivate: false,
+                queue_empty: false,
+                publisher_ready: true,
                 publication_blocked: false,
                 lease_live: true,
             }),
@@ -683,11 +678,12 @@ mod tests {
         let mut busy = CoordinationState::serving(true);
         busy.step(CoordinationInput::BeginWork {
             kind: AdmissionKind::Query,
+            publisher_ready: true,
         });
         assert_eq!(
             busy.step(CoordinationInput::Schedule {
-                queue_nonempty: true,
-                can_deactivate: false,
+                queue_empty: false,
+                publisher_ready: true,
                 publication_blocked: false,
                 lease_live: true,
             }),
@@ -698,8 +694,8 @@ mod tests {
         draining.step(CoordinationInput::BeginDrain);
         assert_eq!(
             draining.step(CoordinationInput::Schedule {
-                queue_nonempty: false,
-                can_deactivate: true,
+                queue_empty: true,
+                publisher_ready: true,
                 publication_blocked: false,
                 lease_live: true,
             }),
@@ -712,8 +708,8 @@ mod tests {
         let mut state = CoordinationState::serving(true);
         assert_eq!(
             state.step(CoordinationInput::Schedule {
-                queue_nonempty: true,
-                can_deactivate: false,
+                queue_empty: false,
+                publisher_ready: true,
                 publication_blocked: true,
                 lease_live: true,
             }),
@@ -723,12 +719,36 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_requires_publisher_observation_before_deactivation() {
+        let mut state = CoordinationState::serving(true);
+        state.step(CoordinationInput::BeginDrain);
+        assert_eq!(
+            state.step(CoordinationInput::Schedule {
+                queue_empty: true,
+                publisher_ready: false,
+                publication_blocked: false,
+                lease_live: true,
+            }),
+            CoordinationDecision::Ignored
+        );
+        assert_eq!(
+            state.step(CoordinationInput::Schedule {
+                queue_empty: true,
+                publisher_ready: true,
+                publication_blocked: false,
+                lease_live: true,
+            }),
+            CoordinationDecision::ReadyToDeactivate
+        );
+    }
+
+    #[test]
     fn scheduler_fences_before_dispatch_when_the_node_lease_is_lost() {
         let mut state = CoordinationState::serving(true);
         assert_eq!(
             state.step(CoordinationInput::Schedule {
-                queue_nonempty: true,
-                can_deactivate: false,
+                queue_empty: false,
+                publisher_ready: true,
                 publication_blocked: false,
                 lease_live: false,
             }),
@@ -739,10 +759,26 @@ mod tests {
     }
 
     #[test]
+    fn fenced_scheduler_can_release_after_all_local_obligations_drain() {
+        let mut state = CoordinationState::serving(true);
+        assert_eq!(
+            state.step(CoordinationInput::Schedule {
+                queue_empty: true,
+                publisher_ready: true,
+                publication_blocked: false,
+                lease_live: false,
+            }),
+            CoordinationDecision::ReadyToDeactivate
+        );
+        assert!(state.is_fenced());
+    }
+
+    #[test]
     fn background_effects_wait_for_foreground_and_publication_quiescence() {
         let mut renewal = CoordinationState::serving(true);
         renewal.step(CoordinationInput::BeginWork {
             kind: AdmissionKind::Query,
+            publisher_ready: true,
         });
         assert_eq!(
             renewal.step(CoordinationInput::BeginRenewal {
@@ -791,8 +827,8 @@ mod tests {
         state.begin_effect(CoordinationEffect::Inventory);
         assert_eq!(
             state.step(CoordinationInput::Schedule {
-                queue_nonempty: true,
-                can_deactivate: false,
+                queue_empty: false,
+                publisher_ready: true,
                 publication_blocked: false,
                 lease_live: true,
             }),
@@ -845,6 +881,7 @@ mod tests {
         assert_eq!(
             state.step(CoordinationInput::BeginWork {
                 kind: AdmissionKind::Command,
+                publisher_ready: true,
             }),
             CoordinationDecision::Started
         );
@@ -937,6 +974,20 @@ mod tests {
         assert_eq!(
             state.step(CoordinationInput::BeginWork {
                 kind: AdmissionKind::Migration,
+                publisher_ready: true,
+            }),
+            CoordinationDecision::Reject(RejectReason::PublicationPending)
+        );
+    }
+
+    #[test]
+    fn migration_requires_a_live_publisher_observation() {
+        let mut state = CoordinationState::serving(true);
+        state.step(CoordinationInput::BeginMigration);
+        assert_eq!(
+            state.step(CoordinationInput::BeginWork {
+                kind: AdmissionKind::Migration,
+                publisher_ready: false,
             }),
             CoordinationDecision::Reject(RejectReason::PublicationPending)
         );
@@ -948,6 +999,7 @@ mod tests {
         assert_eq!(
             state.step(CoordinationInput::BeginWork {
                 kind: AdmissionKind::Command,
+                publisher_ready: true,
             }),
             CoordinationDecision::Started
         );
@@ -972,6 +1024,7 @@ mod tests {
         assert_eq!(
             state.step(CoordinationInput::BeginWork {
                 kind: AdmissionKind::Query,
+                publisher_ready: true,
             }),
             CoordinationDecision::Started
         );

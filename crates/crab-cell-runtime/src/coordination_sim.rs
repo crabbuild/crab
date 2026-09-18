@@ -191,6 +191,7 @@ impl Simulation {
             Event::BeginWork => {
                 let decision = self.state.step(CoordinationInput::BeginWork {
                     kind: AdmissionKind::Command,
+                    publisher_ready: true,
                 });
                 if matches!(decision, CoordinationDecision::Started) {
                     self.work_effect = Some(

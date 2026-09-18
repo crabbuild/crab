@@ -1680,11 +1680,12 @@ fn start_shutdown_drain(
         if !active.queue.is_empty() {
             start_next(active, pool, tasks, node_lease);
         }
-        if active
-            .coordination
-            .ready_to_deactivate(active.queue.is_empty(), active.publisher.is_some())
-        {
-            ready.push((*cell, active.fenced(), active.unpublished_node_logs != 0));
+        match schedule(active, node_lease.check().is_ok()) {
+            CoordinationDecision::ReadyToDeactivate => {
+                ready.push((*cell, active.fenced(), active.unpublished_node_logs != 0));
+            }
+            CoordinationDecision::Fence => fence_active(active),
+            _ => {}
         }
     }
     for (cell, fenced, preserve_owner) in ready {
@@ -1930,12 +1931,12 @@ fn handle_message(
                 return;
             }
             active.drain = Some(reply);
-            if decision.is_ready_to_deactivate()
-                || active
-                    .coordination
-                    .ready_to_deactivate(active.queue.is_empty(), active.publisher.is_some())
-            {
-                start_deactivate(cell, pool, cells, transitioning, tasks);
+            match schedule(active, node_lease.check().is_ok()) {
+                CoordinationDecision::ReadyToDeactivate => {
+                    start_deactivate(cell, pool, cells, transitioning, tasks);
+                }
+                CoordinationDecision::Fence => fence_active(active),
+                _ => {}
             }
         }
         Message::EvictIdle { limit, reply } => {
@@ -2091,11 +2092,10 @@ fn begin_idle_evictions(
         active.admission.requests.close();
         active.admission.bytes.close();
         started.push(cell);
-        if decision.is_ready_to_deactivate()
-            || active
-                .coordination
-                .ready_to_deactivate(active.queue.is_empty(), active.publisher.is_some())
-        {
+        if matches!(
+            schedule(active, true),
+            CoordinationDecision::ReadyToDeactivate
+        ) {
             start_deactivate(cell, pool, cells, transitioning, tasks);
         }
     }
@@ -2314,25 +2314,27 @@ fn start_background_inventory(
     }
 }
 
+fn schedule(active: &mut ActiveCell, lease_live: bool) -> CoordinationDecision {
+    let publication_blocked = active.queue.front().is_some_and(|work| {
+        matches!(work, QueuedWork::Command(_))
+            && (active.coordination.publication_count() >= MAX_PENDING_PUBLICATIONS
+                || active.publication_bytes >= PENDING_PUBLICATION_HIGH_WATER_BYTES)
+    });
+    active.coordination.step(CoordinationInput::Schedule {
+        queue_empty: active.queue.is_empty(),
+        publisher_ready: active.publisher.is_some(),
+        publication_blocked,
+        lease_live,
+    })
+}
+
 fn start_next(
     active: &mut ActiveCell,
     pool: &SqlWorkerPool,
     tasks: &mut JoinSet<TaskResult>,
     node_lease: &RuntimeNodeLease,
 ) {
-    let publication_blocked = active.queue.front().is_some_and(|work| {
-        matches!(work, QueuedWork::Command(_))
-            && (active.coordination.publication_count() >= MAX_PENDING_PUBLICATIONS
-                || active.publication_bytes >= PENDING_PUBLICATION_HIGH_WATER_BYTES)
-    });
-    let decision = active.coordination.step(CoordinationInput::Schedule {
-        queue_nonempty: !active.queue.is_empty(),
-        can_deactivate: active
-            .coordination
-            .ready_to_deactivate(active.queue.is_empty(), active.publisher.is_some()),
-        publication_blocked,
-        lease_live: node_lease.check().is_ok(),
-    });
+    let decision = schedule(active, node_lease.check().is_ok());
     if matches!(decision, CoordinationDecision::Fence) {
         fence_active(active);
         return;
@@ -2357,9 +2359,10 @@ fn start_next(
         QueuedWork::Migration(_) => AdmissionKind::Migration,
     };
     if !matches!(
-        active
-            .coordination
-            .step(CoordinationInput::BeginWork { kind }),
+        active.coordination.step(CoordinationInput::BeginWork {
+            kind,
+            publisher_ready: active.publisher.is_some(),
+        }),
         CoordinationDecision::Started
     ) {
         active.queue.push_front(work);
@@ -3559,21 +3562,9 @@ fn continue_cell(
     let Some(active) = cells.get_mut(&cell) else {
         return;
     };
-    let fenced = active.fenced();
-    let decision = active.coordination.step(CoordinationInput::Schedule {
-        queue_nonempty: !active.queue.is_empty(),
-        can_deactivate: active
-            .coordination
-            .ready_to_deactivate(active.queue.is_empty(), active.publisher.is_some()),
-        publication_blocked: active.queue.front().is_some_and(|work| {
-            matches!(work, QueuedWork::Command(_))
-                && (active.coordination.publication_count() >= MAX_PENDING_PUBLICATIONS
-                    || active.publication_bytes >= PENDING_PUBLICATION_HIGH_WATER_BYTES)
-        }),
-        lease_live: node_lease.check().is_ok(),
-    });
+    let decision = schedule(active, node_lease.check().is_ok());
     match decision {
-        CoordinationDecision::ReadyToDeactivate if fenced => {
+        CoordinationDecision::ReadyToDeactivate if active.fenced() => {
             let preserve_owner = active.unpublished_node_logs != 0;
             start_fenced_deactivate(cell, pool, cells, transitioning, tasks, preserve_owner);
         }

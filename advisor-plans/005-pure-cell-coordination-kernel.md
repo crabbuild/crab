@@ -1,6 +1,6 @@
 # Extract the pure Cell coordination kernel
 
-Status: IN PROGRESS — pure lifecycle state, typed kernel-owned effect intents/IDs, actor admission/drain/scheduling seams, activation-generation fencing, and in-flight completion drain are wired and tested; scheduling plus hydration, renewal, persisted-work inventory, deactivation observations, migration admission, and simulator movement release now use kernel decisions, while complete decision extraction and parity coverage remain
+Status: IN PROGRESS — pure lifecycle state, typed kernel-owned effect intents/IDs, actor admission/drain/scheduling seams, activation-generation fencing, and in-flight completion drain are wired and tested; scheduling plus hydration, renewal, persisted-work inventory, deactivation observations, migration admission, and simulator movement release now use kernel decisions. The actor's schedule adapter passes queue/publisher observations into one kernel transition, and migration admission receives the live-publisher observation without storing a duplicate adapter flag; complete decision extraction and parity coverage remain
 Priority: P0
 Effort: XL
 Risk: High
@@ -55,7 +55,7 @@ that production, simulation, and the TLA+ abstraction all follow.
   `drain`, `migrating`, `shutdown`) whose combinations form an implicit state
   machine.
 - `CoordinationInput::Schedule` receives only adapter observations (queue
-  presence, deactivation readiness, publication pressure, and lease liveness);
+  emptiness, publisher readiness, publication pressure, and lease liveness);
   the kernel decides whether to dispatch, fence, wait, or deactivate. The actor
   no longer repeats those policy predicates in `start_next`.
 

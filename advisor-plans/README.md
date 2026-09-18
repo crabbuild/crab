@@ -145,8 +145,8 @@ authorized standalone-contract decision.
 
 Local proof completed:
 
-- `crab-cell-runtime`: 203 library tests passed (one provider test ignored),
-  39 actor tests passed (one provider test ignored), and all primitive,
+- `crab-cell-runtime`: 205 library tests passed (one provider test ignored),
+  38 actor tests passed (one provider test ignored), and all primitive,
   migration, publication, simulator, and workflow suites pass. The ignored
   source-loss and retention tests also pass against an isolated local RustFS
   bucket when their provider variables are supplied. The shared
@@ -193,10 +193,11 @@ so a delayed completion from one adapter cannot release another operation that
 reuses an integer identity. The mismatch rule is covered by a pure transition
 test and the full runtime target suite.
 
-The actor scheduling seam now supplies queue, deactivation, publication
-high-water, and lease observations to that same kernel. Dispatch, wait, fence,
-and deactivation are selected by `CoordinationInput::Schedule`; `start_next`
-does not duplicate busy/renewal/fence or lease policy. Pure tests cover
+The actor scheduling seam now supplies queue, publisher, publication high-water,
+and lease observations to that same kernel. Dispatch, wait, fence, and
+deactivation are selected by `CoordinationInput::Schedule`; `start_next` and
+the drain/shutdown/eviction paths do not duplicate busy/renewal/fence or lease
+policy. Pure tests cover
 publication backpressure and lease loss. Hydration, renewal, and persisted-work
 inventory refresh now pass their queue/publication/unknown-work/lease
 observations through the kernel as well; the actor only owns resource
