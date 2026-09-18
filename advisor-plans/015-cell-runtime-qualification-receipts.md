@@ -85,6 +85,17 @@ all passed. These results close the local provider/fault iteration seam; they
 remain unsigned local evidence and do not satisfy the protected three-Pod,
 multi-GiB RSS, matched-latency, or release-receipt criteria.
 
+The typed primitive owner-loss slice now uses the same fencing and takeover
+boundary as the repository Cell path. `typed_blob_and_cron_recover_after_owner_loss`,
+`typed_kv_namespace_recovers_after_owner_loss`, and
+`typed_queue_namespace_recovers_after_owner_loss` drop the first runtime
+without releasing authority, fence its exact session through `NodeDirectory`,
+take over the published root, and verify the typed read/ack/tick result after
+recovery. Workflow/activity owner loss remains covered by the native activity
+failover test, and SQL publication/source-loss is covered by the actor
+takeover suite. This is local in-memory ownership evidence; it does not close
+the protected three-Pod primitive-fault receipt.
+
 ## Implementation steps
 
 1. Inventory and map every existing test/script to the matrix. Delete no useful

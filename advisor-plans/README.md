@@ -379,3 +379,13 @@ mutation-issued timestamp, while the serialized Cell still rejects an upload
 that has expired before acceptance. This keeps absolute caller deadlines stable
 under queue or transport delay without making an overdue-but-valid Cron schedule
 ineligible; the next Tick owns its durable catch-up.
+
+The typed primitive owner-loss slice now exercises the canonical fence and
+takeover path: `typed_blob_and_cron_recover_after_owner_loss`,
+`typed_kv_namespace_recovers_after_owner_loss`, and
+`typed_queue_namespace_recovers_after_owner_loss` drop the first runtime,
+fence its exact node session, restore the published root, and verify a typed
+read/ack/tick after takeover. Workflow/activity owner loss remains covered by
+the native activity failover test, and SQL publication/source loss remains
+covered by the actor takeover suite. These are local in-memory ownership
+receipts; protected three-Pod primitive-fault evidence remains open.
