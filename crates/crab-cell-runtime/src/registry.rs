@@ -162,6 +162,7 @@ pub struct CommandContext<'borrow, 'connection> {
     target: CellTarget,
     sequence: u64,
     now_ms: i64,
+    issued_at_ms: i64,
     input_limit: u32,
     output_limit: u32,
 }
@@ -186,6 +187,15 @@ impl CommandContext<'_, '_> {
     #[must_use]
     pub const fn now_ms(&self) -> i64 {
         self.now_ms
+    }
+
+    /// Returns the timestamp at which the caller created this mutation.
+    ///
+    /// This remains crate-private because application commands should use the
+    /// logical runtime timestamp for domain decisions. Native primitives use
+    /// it only when validating an absolute expiry that is part of a request.
+    pub(crate) const fn issued_at_ms(&self) -> i64 {
+        self.issued_at_ms
     }
 
     /// Creates the one command-scoped effect identity allocator.
@@ -1401,6 +1411,16 @@ impl Registry {
         transaction: &Transaction<'_>,
         invocation: CommandInvocation<'_>,
     ) -> Result<HandlerOutcome> {
+        let issued_at_ms = invocation.now_ms;
+        self.execute_command_with_issue_time(transaction, invocation, issued_at_ms)
+    }
+
+    pub(crate) fn execute_command_with_issue_time(
+        &self,
+        transaction: &Transaction<'_>,
+        invocation: CommandInvocation<'_>,
+        issued_at_ms: i64,
+    ) -> Result<HandlerOutcome> {
         if invocation.sequence == 0 || invocation.now_ms < 0 {
             return Err(Error::Command("invalid registered command context"));
         }
@@ -1423,6 +1443,7 @@ impl Registry {
             target: invocation.target,
             sequence: invocation.sequence,
             now_ms: invocation.now_ms,
+            issued_at_ms,
             input_limit: operation.input_limit,
             output_limit: operation.output_limit,
         };

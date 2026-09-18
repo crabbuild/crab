@@ -143,10 +143,12 @@ pub fn install_cron_schema(transaction: &Transaction<'_>) -> Result<()> {
 pub fn cron_mutate(
     transaction: &Transaction<'_>,
     now_ms: i64,
+    issued_at_ms: i64,
     targets: &[CronTarget],
     mutation: &CronMutation,
 ) -> Result<CronMutationOutcome> {
     validate_now(now_ms)?;
+    validate_now(issued_at_ms)?;
     match mutation {
         CronMutation::Upsert {
             schedule_id,
@@ -158,7 +160,7 @@ pub fn cron_mutate(
         } => {
             let target = target_at(targets, *target_index)?;
             validate_schedule(
-                now_ms,
+                issued_at_ms,
                 target,
                 target_partition,
                 payload,
@@ -180,7 +182,7 @@ pub fn cron_mutate(
             schedule_id,
             next_due_ms,
         } => {
-            validate_due(now_ms, *next_due_ms)?;
+            validate_due(issued_at_ms, *next_due_ms)?;
             set_enabled(transaction, now_ms, *schedule_id, true, Some(*next_due_ms))
         }
         CronMutation::Delete { schedule_id } => {
@@ -383,7 +385,7 @@ fn decode_schedule(row: &rusqlite::Row<'_>) -> rusqlite::Result<CronSchedule> {
 }
 
 fn validate_schedule(
-    now_ms: i64,
+    issued_at_ms: i64,
     target: CronTarget,
     partition: &[u8],
     payload: &[u8],
@@ -398,7 +400,7 @@ fn validate_schedule(
             "cron interval must be between one second and one year",
         ));
     }
-    validate_due(now_ms, next_due_ms)?;
+    validate_due(issued_at_ms, next_due_ms)?;
     let wrapper_bytes = payload
         .len()
         .checked_add(64)
@@ -409,8 +411,8 @@ fn validate_schedule(
     Ok(())
 }
 
-fn validate_due(now_ms: i64, due_ms: i64) -> Result<()> {
-    if due_ms < now_ms || due_ms > now_ms.saturating_add(MAX_FUTURE_MS) {
+fn validate_due(issued_at_ms: i64, due_ms: i64) -> Result<()> {
+    if due_ms < issued_at_ms || due_ms > issued_at_ms.saturating_add(MAX_FUTURE_MS) {
         return Err(Error::Command("cron due time is outside five-year window"));
     }
     Ok(())
@@ -467,6 +469,7 @@ mod tests {
         install_cron_schema(&transaction).unwrap();
         cron_mutate(
             &transaction,
+            200,
             10,
             TARGETS,
             &CronMutation::Upsert {
@@ -479,9 +482,9 @@ mod tests {
             },
         )
         .unwrap();
-        let mut effects = EffectBatch::new(&transaction, &source, 1, 100).unwrap();
+        let mut effects = EffectBatch::new(&transaction, &source, 1, 200).unwrap();
         assert_eq!(
-            cron_fire_due_bounded(&transaction, &mut effects, &source, 100, TARGETS, 8).unwrap(),
+            cron_fire_due_bounded(&transaction, &mut effects, &source, 200, TARGETS, 8).unwrap(),
             1
         );
         assert_eq!(
@@ -508,7 +511,7 @@ mod tests {
         assert_eq!(schedules.len(), 1);
         assert_eq!(next, None);
         assert_eq!(
-            cron_fire_due_bounded(&transaction, &mut effects, &source, 100, TARGETS, 8).unwrap(),
+            cron_fire_due_bounded(&transaction, &mut effects, &source, 200, TARGETS, 8).unwrap(),
             0
         );
     }

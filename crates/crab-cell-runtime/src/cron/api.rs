@@ -44,6 +44,7 @@ impl<M: CronModule> Command for CronCommand<M> {
         let outcome = cron_mutate(
             context.primitive_transaction(),
             context.now_ms(),
+            context.issued_at_ms(),
             M::CRON_TARGETS,
             &input,
         )?;
