@@ -24,14 +24,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = decode_fixed::<16>(&required(&mut args, "session")?)?;
     let destination = PathBuf::from(required(&mut args, "destination")?);
     let hold_ms = required(&mut args, "hold milliseconds")?.parse::<u64>()?;
-    let crash = match args.next().as_deref() {
-        None | Some("drain") => false,
-        Some("crash") => true,
-        Some(_) => return Err("mode must be drain or crash".into()),
+    let mode = match args.next().as_deref() {
+        None | Some("drain") => ProbeMode::Drain,
+        Some("crash") => ProbeMode::Crash,
+        Some("lost-release") => ProbeMode::LostRelease,
+        Some(_) => return Err("mode must be drain, crash, or lost-release".into()),
     };
     if args.next().is_some() {
         return Err(
-            "usage: cell_movement_probe <store-root> <partition> <session> <destination> <hold-ms>"
+            "usage: cell_movement_probe <store-root> <partition> <session> <destination> <hold-ms> [drain|crash|lost-release]"
                 .into(),
         );
     }
@@ -45,8 +46,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cell = target.cell_id();
     let incarnation = IncarnationId::from_bytes([2; 16]);
     let object_store = process_store::FilesystemCasStore::new(FilePath::new(&store_root))?;
+    let shared_store = object_store.clone();
     let layout = CellStorageLayout::new(
-        Store::new(Arc::new(object_store)),
+        Store::new(Arc::new(shared_store)),
         Path::from("runtime"),
         [3; 16],
     );
@@ -82,13 +84,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(error.into());
         }
     };
+    if matches!(mode, ProbeMode::LostRelease) {
+        object_store.drop_next_update_response();
+    }
     tokio::time::sleep(Duration::from_millis(hold_ms)).await;
-    if crash {
+    if matches!(mode, ProbeMode::Crash) {
         std::process::exit(0);
     }
     handle.drain().await?;
+    if matches!(mode, ProbeMode::LostRelease) && !object_store.dropped_update_response() {
+        return Err("lost-release probe did not inject a committed response loss".into());
+    }
     runtime.shutdown().await?;
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ProbeMode {
+    Drain,
+    Crash,
+    LostRelease,
 }
 
 fn required(args: &mut impl Iterator<Item = String>, name: &str) -> Result<String, String> {

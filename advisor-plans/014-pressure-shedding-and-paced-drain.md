@@ -1,6 +1,6 @@
 # Hysteretic pressure shedding and paced Cell movement
 
-Status: IN PROGRESS — hysteretic classifier, deterministic victim selector, shared actor eviction path, held movement permits, fail-closed Queue/Workflow persisted-work inventory, and deterministic quiesce/durability/release/lost-reply/receiver-failure schedules pass local tests; multi-process fault proof remains
+Status: IN PROGRESS — hysteretic classifier, deterministic victim selector, shared actor eviction path, held movement permits, fail-closed Queue/Workflow persisted-work inventory, deterministic quiesce/durability/release/lost-reply/receiver-failure schedules, and local cross-process winner/crash/lost-response probes pass; protected multi-process fault proof remains
 Priority: P0
 Effort: XL
 Risk: High
@@ -140,9 +140,12 @@ CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-014-process-movement \
 
 The companion `crashed_process_is_fenced_before_successor_restore` case exits
 one acquired process without draining, fences that stale session, and restores
-the exact root in a successor process. These local proofs do not replace the
-protected three-Pod membership-loss or directional-partition receipt required
-for release.
+the exact root in a successor process. The
+`lost_release_response_is_reconciled_before_successor_acquire` case commits
+the release while dropping its response, verifies the publisher reconciles the
+ambiguous result, and restores the unchanged root in a successor runtime.
+These local proofs do not replace the protected three-Pod membership-loss or
+directional-partition receipt required for release.
 
 ## Stop conditions
 

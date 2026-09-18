@@ -238,8 +238,11 @@ idle control between two independent runtimes and verifies the authority owner
 and active-cell reservations never overlap. Its companion
 `crashed_process_is_fenced_before_successor_restore` exits an acquired process
 without draining, fences that stale session, and restores the exact root in a
-successor process; protected three-Pod movement and membership receipts remain
-open.
+successor process. The companion
+`lost_release_response_is_reconciled_before_successor_acquire` probe commits
+the release while dropping its response, verifies reconciliation, and restores
+the unchanged root in a successor runtime; protected three-Pod movement and
+membership receipts remain open.
 
 Restart inventory is now fail-closed at the HTTP composition boundary. Each
 process gets a fresh `cells/sessions/<session-id>` directory; before the

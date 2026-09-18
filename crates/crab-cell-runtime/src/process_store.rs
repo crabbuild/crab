@@ -2,7 +2,10 @@ use std::{
     fmt,
     fs::OpenOptions,
     path::{Path as FilePath, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -25,6 +28,8 @@ use object_store::{
 pub struct FilesystemCasStore {
     inner: Arc<object_store::local::LocalFileSystem>,
     root: Arc<PathBuf>,
+    drop_next_update_response: Arc<AtomicBool>,
+    dropped_update_response: Arc<AtomicBool>,
 }
 
 impl FilesystemCasStore {
@@ -39,7 +44,25 @@ impl FilesystemCasStore {
         Ok(Self {
             inner: Arc::new(inner),
             root: Arc::new(root.to_owned()),
+            drop_next_update_response: Arc::new(AtomicBool::new(false)),
+            dropped_update_response: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Makes the next successful conditional update return a transport error.
+    ///
+    /// The write remains committed, modeling a lost response after the
+    /// authority has durably applied the release.
+    #[cfg_attr(test, allow(dead_code))]
+    pub fn drop_next_update_response(&self) {
+        self.drop_next_update_response
+            .store(true, Ordering::Release);
+    }
+
+    #[must_use]
+    #[cfg_attr(test, allow(dead_code))]
+    pub fn dropped_update_response(&self) -> bool {
+        self.dropped_update_response.load(Ordering::Acquire)
     }
 
     fn lock_path(&self, location: &Path) -> PathBuf {
@@ -95,7 +118,18 @@ impl FilesystemCasStore {
                 });
             }
             options.mode = PutMode::Overwrite;
-            self.inner.put_opts(location, payload, options).await
+            let result = self.inner.put_opts(location, payload, options).await?;
+            if self.drop_next_update_response.swap(false, Ordering::AcqRel) {
+                self.dropped_update_response.store(true, Ordering::Release);
+                return Err(object_store::Error::Generic {
+                    store: "filesystem-cas-store",
+                    source: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "conditional update response lost after commit",
+                    )),
+                });
+            }
+            Ok(result)
         }
         .await;
         FileExt::unlock(&lock).map_err(|source| object_store::Error::Generic {

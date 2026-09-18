@@ -1968,6 +1968,109 @@ async fn crashed_process_is_fenced_before_successor_restore() {
     runtime.shutdown().await.unwrap();
 }
 
+#[cfg(feature = "process-test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn lost_release_response_is_reconciled_before_successor_acquire() {
+    let object_root = tempfile::TempDir::new().unwrap();
+    let fixture = filesystem_fixture(b"process-movement-lost-release", object_root.path());
+    let session = SessionId::from_bytes([87; 16]);
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 * 1024 * 1024, session).unwrap();
+    let handle = bootstrap_on(&runtime, &fixture, session).await;
+    handle.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+
+    let binary = std::env::var("CARGO_BIN_EXE_cell_movement_probe")
+        .expect("Cargo must provide the movement probe binary to integration tests");
+    let status = tokio::task::spawn_blocking({
+        let store_root = object_root.path().to_owned();
+        let destination = fixture
+            ._directory
+            .path()
+            .join("process-lost-release.sqlite");
+        move || {
+            std::process::Command::new(binary)
+                .stderr(std::process::Stdio::null())
+                .args([
+                    store_root.as_os_str().to_string_lossy().as_ref(),
+                    "process-movement-lost-release",
+                    "57575757575757575757575757575757",
+                    destination.to_string_lossy().as_ref(),
+                    "0",
+                    "lost-release",
+                ])
+                .status()
+                .unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    assert!(status.success());
+
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let idle = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(idle.value().state, ControlState::Idle);
+    let root = idle.value().ltx_root().unwrap();
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let successor = SessionId::from_bytes([88; 16]);
+    let successor_runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        8 * 1024 * 1024,
+        successor,
+    )
+    .unwrap();
+    let restored = successor_runtime
+        .acquire_idle_restored(
+            proof,
+            fixture.replica.clone(),
+            authority.clone(),
+            idle,
+            fixture
+                ._directory
+                .path()
+                .join("process-lost-release-successor.sqlite"),
+            Owner {
+                session: successor,
+                endpoint: "https://process-lost-release-successor.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        restored
+            .query(64, 64, |connection| {
+                let value = connection
+                    .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+                Ok(value.to_be_bytes().to_vec())
+            })
+            .await
+            .unwrap(),
+        0_i64.to_be_bytes()
+    );
+    restored.drain().await.unwrap();
+    successor_runtime.shutdown().await.unwrap();
+    assert_eq!(
+        authority
+            .load(fixture.target.cell_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .value()
+            .ltx_root(),
+        Some(root)
+    );
+}
+
 async fn wait_for_persisted_work(
     handle: &crab_cell_runtime::CellHandle,
     role: CatalogRole,
