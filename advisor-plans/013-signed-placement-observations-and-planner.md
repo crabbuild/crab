@@ -1,6 +1,6 @@
 # Signed live placement observations and pure weighted planner
 
-Status: IN PROGRESS — versioned signed placement observations now carry measured memory/disk totals and one coherent runtime Cell/job snapshot; advertised free headroom is clamped by unified runtime reservations and fail-closed Linux cgroup probes; cold activation now uses a bounded authenticated activation hint; process-wide probe parity and multi-process convergence remain
+Status: IN PROGRESS — versioned signed placement observations now carry measured memory/disk totals and one coherent runtime Cell/job snapshot; advertised free headroom is clamped by unified runtime reservations and fail-closed nested Linux cgroup probes; cold activation now uses a bounded authenticated activation hint; process-wide probe parity and multi-process convergence remain
 Priority: P0
 Effort: XL
 Risk: High
@@ -64,8 +64,10 @@ optimistic zero load.
    Preserve decoding of currently live versions only under an explicit mixed-
    version rule. Unknown future versions fail safe for ownership placement.
 2. Add platform-neutral observation traits plus Linux cgroup v2 and host
-   fallbacks. Unit-test fixture files for unlimited, nested, malformed, and
-   changing limits. Do not add a cloud-provider dependency.
+   fallbacks. Resolve the process's nested cgroup membership from the kernel
+   proc files before checking root fallbacks. Unit-test fixture files for
+   unlimited, nested, malformed, and changing limits. Do not add a
+   cloud-provider dependency.
 3. Derive runtime values from plan 012's canonical ledger. Clamp, validate, and
    timestamp the snapshot; sign it with the existing session identity.
 4. Implement a pure planner returning ranked candidates, score components,
