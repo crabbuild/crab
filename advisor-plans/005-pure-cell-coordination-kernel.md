@@ -1,6 +1,6 @@
 # Extract the pure Cell coordination kernel
 
-Status: IN PROGRESS — pure lifecycle state, typed kernel-owned effect intents/IDs, actor admission/drain/scheduling seams, activation-generation fencing, and in-flight completion drain are wired and tested; complete decision extraction and parity coverage remain
+Status: IN PROGRESS — pure lifecycle state, typed kernel-owned effect intents/IDs, actor admission/drain/scheduling seams, activation-generation fencing, and in-flight completion drain are wired and tested; scheduling now owns busy/renewal/fence/lease/high-water policy, while complete decision extraction and parity coverage remain
 Priority: P0
 Effort: XL
 Risk: High
@@ -54,6 +54,10 @@ that production, simulation, and the TLA+ abstraction all follow.
 - `src/actor.rs`'s `ActiveCell` stores flags (`busy`, `renewing`, `fenced`,
   `drain`, `migrating`, `shutdown`) whose combinations form an implicit state
   machine.
+- `CoordinationInput::Schedule` receives only adapter observations (queue
+  presence, deactivation readiness, publication pressure, and lease liveness);
+  the kernel decides whether to dispatch, fence, wait, or deactivate. The actor
+  no longer repeats those policy predicates in `start_next`.
 
 The kernel must decide what happens; adapters still perform I/O. Persisted
 control transitions remain in `control.rs` and are invoked as pure callees.
@@ -158,6 +162,11 @@ same externally visible outcome as the pre-extraction fixtures.
 
 Run a source check that the actor has exactly one call site for each moved
 decision family and no duplicate boolean decision remains.
+
+The scheduling seam has named pure transitions for publication backpressure and
+lease loss. They prove that adapter observations cannot dispatch work after a
+lease fence or while retained publication bytes are at the configured
+high-water mark.
 
 ### 6. Update documentation
 

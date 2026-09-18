@@ -2288,25 +2288,23 @@ fn start_next(
     tasks: &mut JoinSet<TaskResult>,
     node_lease: &RuntimeNodeLease,
 ) {
-    if active.busy() || active.renewing() || active.fenced() {
-        return;
-    }
-    if node_lease.check().is_err() {
-        active.coordination.step(CoordinationInput::Fence);
+    let publication_blocked = active.queue.front().is_some_and(|work| {
+        matches!(work, QueuedWork::Command(_))
+            && (active.coordination.publication_count() >= MAX_PENDING_PUBLICATIONS
+                || active.publication_bytes >= PENDING_PUBLICATION_HIGH_WATER_BYTES)
+    });
+    let decision = active.coordination.step(CoordinationInput::Schedule {
+        queue_nonempty: !active.queue.is_empty(),
+        can_deactivate: active.can_deactivate(),
+        publication_blocked,
+        lease_live: node_lease.check().is_ok(),
+    });
+    if matches!(decision, CoordinationDecision::Fence) {
         fence_active(active);
         return;
     }
-    let Some(work) = active.queue.front() else {
+    if !matches!(decision, CoordinationDecision::StartQueuedWork) {
         return;
-    };
-    match work {
-        QueuedWork::Command(_)
-            if active.coordination.publication_count() >= MAX_PENDING_PUBLICATIONS
-                || active.publication_bytes >= PENDING_PUBLICATION_HIGH_WATER_BYTES =>
-        {
-            return;
-        }
-        _ => {}
     }
     let Some(work) = active.queue.pop_front() else {
         return;
@@ -3531,6 +3529,12 @@ fn continue_cell(
     let decision = active.coordination.step(CoordinationInput::Schedule {
         queue_nonempty: !active.queue.is_empty(),
         can_deactivate: active.can_deactivate(),
+        publication_blocked: active.queue.front().is_some_and(|work| {
+            matches!(work, QueuedWork::Command(_))
+                && (active.coordination.publication_count() >= MAX_PENDING_PUBLICATIONS
+                    || active.publication_bytes >= PENDING_PUBLICATION_HIGH_WATER_BYTES)
+        }),
+        lease_live: node_lease.check().is_ok(),
     });
     match decision {
         CoordinationDecision::ReadyToDeactivate if fenced => {
@@ -3551,6 +3555,9 @@ fn continue_cell(
         | CoordinationDecision::Started
         | CoordinationDecision::EffectCompleted
         | CoordinationDecision::StaleEffect => {}
+        CoordinationDecision::Fence => {
+            fence_active(active);
+        }
     }
 }
 

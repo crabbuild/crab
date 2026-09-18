@@ -56,6 +56,8 @@ pub(crate) enum CoordinationInput {
     Schedule {
         queue_nonempty: bool,
         can_deactivate: bool,
+        publication_blocked: bool,
+        lease_live: bool,
     },
     CompleteEffect {
         effect_id: u64,
@@ -113,6 +115,7 @@ pub(crate) enum CoordinationDecision {
     Ignored,
     ReadyToDeactivate,
     StartQueuedWork,
+    Fence,
 }
 
 impl CoordinationDecision {
@@ -305,10 +308,25 @@ impl CoordinationState {
             CoordinationInput::Schedule {
                 queue_nonempty,
                 can_deactivate,
+                publication_blocked,
+                lease_live,
             } => {
-                if can_deactivate && (self.is_fenced() || self.is_draining()) && !queue_nonempty {
+                if !lease_live {
+                    self.lifecycle = Lifecycle::Fenced;
+                    self.busy = false;
+                    self.renewing = false;
+                    CoordinationDecision::Fence
+                } else if can_deactivate
+                    && (self.is_fenced() || self.is_draining())
+                    && !queue_nonempty
+                {
                     CoordinationDecision::ReadyToDeactivate
-                } else if self.is_fenced() || self.busy || self.renewing || !queue_nonempty {
+                } else if self.is_fenced()
+                    || self.busy
+                    || self.renewing
+                    || !queue_nonempty
+                    || publication_blocked
+                {
                     CoordinationDecision::Ignored
                 } else {
                     CoordinationDecision::StartQueuedWork
@@ -591,6 +609,8 @@ mod tests {
             serving.step(CoordinationInput::Schedule {
                 queue_nonempty: true,
                 can_deactivate: false,
+                publication_blocked: false,
+                lease_live: true,
             }),
             CoordinationDecision::StartQueuedWork
         );
@@ -603,6 +623,8 @@ mod tests {
             busy.step(CoordinationInput::Schedule {
                 queue_nonempty: true,
                 can_deactivate: false,
+                publication_blocked: false,
+                lease_live: true,
             }),
             CoordinationDecision::Ignored
         );
@@ -613,9 +635,42 @@ mod tests {
             draining.step(CoordinationInput::Schedule {
                 queue_nonempty: false,
                 can_deactivate: true,
+                publication_blocked: false,
+                lease_live: true,
             }),
             CoordinationDecision::ReadyToDeactivate
         );
+    }
+
+    #[test]
+    fn scheduler_blocks_publication_pressure_without_leaking_adapter_policy() {
+        let mut state = CoordinationState::serving(true);
+        assert_eq!(
+            state.step(CoordinationInput::Schedule {
+                queue_nonempty: true,
+                can_deactivate: false,
+                publication_blocked: true,
+                lease_live: true,
+            }),
+            CoordinationDecision::Ignored
+        );
+        assert!(!state.is_busy());
+    }
+
+    #[test]
+    fn scheduler_fences_before_dispatch_when_the_node_lease_is_lost() {
+        let mut state = CoordinationState::serving(true);
+        assert_eq!(
+            state.step(CoordinationInput::Schedule {
+                queue_nonempty: true,
+                can_deactivate: false,
+                publication_blocked: false,
+                lease_live: false,
+            }),
+            CoordinationDecision::Fence
+        );
+        assert!(state.is_fenced());
+        assert!(!state.is_busy());
     }
 
     #[test]

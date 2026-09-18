@@ -188,3 +188,9 @@ effect family (work, hydration, inventory, publication, proof, or renewal),
 so a delayed completion from one adapter cannot release another operation that
 reuses an integer identity. The mismatch rule is covered by a pure transition
 test and the full runtime target suite.
+
+The actor scheduling seam now supplies queue, deactivation, publication
+high-water, and lease observations to that same kernel. Dispatch, wait, fence,
+and deactivation are selected by `CoordinationInput::Schedule`; `start_next`
+does not duplicate busy/renewal/fence or lease policy. Pure tests cover
+publication backpressure and lease loss.

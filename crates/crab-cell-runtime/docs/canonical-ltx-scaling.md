@@ -1167,7 +1167,10 @@ passes on the required external workspace target volume; provider, Kubernetes,
 and multi-GiB evidence remains pending.
 
 Slices 2–6 now have reviewable seams: `coordination.rs` owns the volatile
-admission/fence/publication/migration/shutdown decisions; the test-only
+admission/fence/publication/migration/shutdown decisions; scheduling also
+receives lease and publication-pressure observations and centrally decides
+dispatch, wait, or fence, so `actor.rs` does not duplicate those predicates;
+the test-only
 simulator replays fixed seeds and checks acknowledgement/publication invariants;
 the pinned TLC runner has positive and deliberately broken configurations; and
 `CellRuntime::resident_handle` is attempted before catalog/control reads while
