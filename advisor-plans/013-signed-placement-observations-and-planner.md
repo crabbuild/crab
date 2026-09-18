@@ -129,6 +129,9 @@ snapshot, and clamped free headroom against that same runtime and measured
 `CellRuntimeStats::placement_*` methods, so publisher admission clamping and
 signed job/cell totals cannot drift into separate aggregation formulas;
 `placement_capacity_respects_runtime_reservations` locks that contract down.
+The `placement_projection_saturates_large_node_counters` unit test also proves
+that a host-sized counter cannot wrap the bounded `u32` placement wire shape;
+large-node arithmetic fails closed by saturating at the protocol maximum.
 `local_resources_include_process_file_capacity` plus
 the nested cgroup fixture tests cover the host/cgroup probe boundary and its
 fail-closed parsing rules. The remaining process-wide probe parity and

@@ -191,7 +191,8 @@ native and bundle
 publication share the authenticated LTX inspection path with replayable scratch
 sources; placement/pressure decisions are pure fixed-point functions with
 versioned signed observations whose advertised free headroom is reconciled with
-the runtime ledger; and qualification receipts are signed, bounded,
+the runtime ledger; placement's bounded `u32` wire projection saturates
+host-sized counters rather than wrapping; and qualification receipts are signed, bounded,
 artifact-bound records. The `qualification_receipt` binary verifies exact
 source, image, and artifact identity, and the release workflow consumes only
 that bound evidence. The isolated local RustFS LTX, Cell takeover/retention,
