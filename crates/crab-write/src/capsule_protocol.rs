@@ -1074,9 +1074,23 @@ async fn upload_immutable_runs(router: &StoreLayout<Store>, runs: Vec<CapsuleRun
 }
 
 async fn commit_single_ref(router: &StoreLayout<Store>, prepared: PreparedRefHead) -> Result<()> {
-    write_ref_head(router, &prepared.original, &prepared.candidate)
-        .await
-        .map(|_| ())
+    let transaction_id = prepared
+        .candidate
+        .visible(&std::collections::BTreeSet::new())
+        .transaction_id()
+        .ok_or_else(|| {
+            WriteError::Internal("single-ref publication has no transaction identity".to_owned())
+        })?
+        .to_owned();
+    match write_ref_head(router, &prepared.original, &prepared.candidate).await {
+        Ok(_) => Ok(()),
+        Err(WriteError::Storage(source)) => Err(WriteError::CapsuleCommitUncertain {
+            transaction_id,
+            source: Box::new(source),
+            verification: None,
+        }),
+        Err(error) => Err(error),
+    }
 }
 
 async fn commit_multi_ref(
@@ -1906,6 +1920,7 @@ mod tests {
         inner: Arc<InMemory>,
         head_path: String,
         lost: AtomicBool,
+        reject: AtomicBool,
     }
 
     impl fmt::Display for LostHeadReplyStore {
@@ -1922,6 +1937,18 @@ mod tests {
             payload: PutPayload,
             options: PutOptions,
         ) -> object_store::Result<PutResult> {
+            if location.as_ref() == self.head_path
+                && self.reject.load(Ordering::Acquire)
+                && !matches!(options.mode, PutMode::Overwrite)
+            {
+                return Err(object_store::Error::Generic {
+                    store: "capsule-protocol-root-test",
+                    source: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "ref-head update rejected before upstream",
+                    )),
+                });
+            }
             let lose_reply = location.as_ref() == self.head_path
                 && !matches!(options.mode, PutMode::Overwrite)
                 && !self.lost.swap(true, Ordering::AcqRel);
@@ -3162,6 +3189,7 @@ mod tests {
                     ))
                     .to_string(),
                 lost: AtomicBool::new(false),
+                reject: AtomicBool::new(false),
             }),
             crab_storage::RetryPolicy {
                 max_attempts: 1,
@@ -3182,6 +3210,45 @@ mod tests {
             .unwrap();
         let transaction_id = transaction.id().unwrap();
         assert_eq!(head.visible.transaction_id(), Some(transaction_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn rejected_ref_head_update_is_commit_uncertain() {
+        let inner = Arc::new(InMemory::new());
+        let seed_store = Store::new(inner.clone());
+        let seed_router = StoreLayout::new(seed_store.clone(), "repositories/test".to_owned());
+        initialize(&seed_router, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let fault_store = Store::with_retry(
+            Arc::new(LostHeadReplyStore {
+                inner,
+                head_path: seed_router
+                    .capsule_ref_head_path(&crab_metadata::capsule_protocol::capsule_ref_name_key(
+                        "refs/heads/main",
+                    ))
+                    .to_string(),
+                lost: AtomicBool::new(false),
+                reject: AtomicBool::new(true),
+            }),
+            crab_storage::RetryPolicy {
+                max_attempts: 1,
+                base: std::time::Duration::ZERO,
+                cap: std::time::Duration::ZERO,
+            },
+        );
+        let router = StoreLayout::new(fault_store, "repositories/test".to_owned());
+        let base = open_root(&router).await.unwrap();
+        let transaction = transaction(&base, None, &"2".repeat(40));
+
+        let error = publish(&router, base, &transaction, &capsule(&transaction))
+            .await
+            .expect_err("a visibility write that cannot be verified must fail closed");
+        assert!(matches!(
+            error,
+            WriteError::CapsuleCommitUncertain { transaction_id, .. }
+                if transaction_id == transaction.id().unwrap()
+        ));
     }
 
     #[tokio::test]

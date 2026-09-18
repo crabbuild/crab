@@ -713,7 +713,8 @@ async fn run_push_once(
     {
         Ok((result, _)) => result,
         Err(error) => {
-            return retryable.fail(error, PushFailureStage::Discovery, &specs, start.elapsed());
+            let stage = push_error_failure_stage(&error);
+            return retryable.fail(error, stage, &specs, start.elapsed());
         }
     };
 
@@ -902,8 +903,15 @@ fn transient_retry_branch<'a>(
     Some((branch, reason.retry_after_secs()))
 }
 
-fn push_result_from_error(specs: &[PushSpec], error: &CrabError) -> PushResult {
-    push_result_from_reason(specs, PushRejectReason::from_error(error))
+fn push_error_failure_stage(error: &CrabError) -> PushFailureStage {
+    if matches!(
+        PushRejectReason::from_error(error),
+        PushRejectReason::CommitIndeterminate { .. }
+    ) {
+        PushFailureStage::RefCommit
+    } else {
+        PushFailureStage::Discovery
+    }
 }
 
 fn push_result_from_retryable_error(
@@ -913,15 +921,17 @@ fn push_result_from_retryable_error(
 ) -> Option<PushResult> {
     // Publication admission failures do not move a ref, so lock contention is
     // safe to report as a per-ref retryable outcome just like transport
-    // failures. Protected-push preparation remains deliberately narrower
-    // because its legacy session allocation is not idempotent.
+    // failures. A visibility write that may have committed is also surfaced
+    // per-ref, but as indeterminate, so the integration loop cannot retry it.
+    let reason = PushRejectReason::from_error(error);
     matches!(
-        error,
-        CrabError::NetworkTransient(_)
-            | CrabError::Throttled { .. }
-            | CrabError::PushLockHeld { .. }
+        &reason,
+        PushRejectReason::NetworkTransient(_)
+            | PushRejectReason::Throttled { .. }
+            | PushRejectReason::LockContention { .. }
+            | PushRejectReason::CommitIndeterminate { .. }
     )
-    .then(|| push_result_from_error(specs, error).with_failure_stage(stage))
+    .then(|| push_result_from_reason(specs, reason).with_failure_stage(stage))
 }
 
 impl RetryablePushContext<'_> {
@@ -1747,13 +1757,52 @@ mod tests {
             },
         ] {
             let error = CrabError::from(crab_write::WriteError::Metadata(metadata));
-            let result = push_result_from_error(&specs, &error);
+            let result = push_result_from_reason(&specs, PushRejectReason::from_error(&error));
             assert_eq!(
                 result.outcomes[&specs[0].dst].protocol_tag(),
                 "indeterminate"
             );
             assert_eq!(transient_retry_branch(&specs, &result), None);
         }
+    }
+
+    #[test]
+    fn capsule_commit_uncertainty_is_structured_at_ref_commit() {
+        let spec = PushSpec {
+            force: false,
+            src: "HEAD".to_owned(),
+            dst: "refs/heads/main".to_owned(),
+        };
+        let source = crab_storage::StorageError::Throttled {
+            retry_after: None,
+            source: None,
+        };
+        let error = CrabError::from(crab_write::WriteError::CapsuleCommitUncertain {
+            transaction_id: "a".repeat(64),
+            source: Box::new(source),
+            verification: None,
+        });
+        let result = push_result_from_retryable_error(
+            std::slice::from_ref(&spec),
+            &error,
+            PushFailureStage::RefCommit,
+        )
+        .expect("uncertain capsule commit should retain structured outcome");
+        let outcome = result.outcomes.get(&spec.dst).expect("main outcome");
+        assert_eq!(outcome.protocol_tag(), "indeterminate");
+        assert!(matches!(
+            outcome,
+            RefPushOutcome::Rejected(PushRejectReason::CommitIndeterminate { .. })
+        ));
+        assert_eq!(result.failure_stage, Some(PushFailureStage::RefCommit));
+        assert_eq!(
+            push_error_failure_stage(&error),
+            PushFailureStage::RefCommit
+        );
+        assert_eq!(
+            transient_retry_branch(std::slice::from_ref(&spec), &result),
+            None
+        );
     }
 
     #[test]

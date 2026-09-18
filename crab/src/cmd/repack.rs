@@ -1,7 +1,7 @@
 //! File-backed consolidation of the Git packs selected by a repository manifest.
 
 use crab_write::generation::CommittedManifestAnchor;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -260,7 +260,13 @@ async fn run_capsule_repack(
     )?;
     if !config.dry_run {
         check_cancelled(cancel)?;
-        if view.visible_ref_transactions().is_empty() {
+        let visible_ref_transactions = view.visible_ref_transactions();
+        let capsule_runs = view.capsule_run_pointers();
+        if checkpoint_can_reuse_existing_history(
+            root.compacted_ref_transactions(),
+            visible_ref_transactions,
+            capsule_runs,
+        )? {
             crab_write::capsule_protocol::publish_checkpoint(
                 &layout,
                 view.root_snapshot().clone(),
@@ -274,8 +280,8 @@ async fn run_capsule_repack(
                 &checkpoint,
                 view.refs().clone(),
                 view.peeled_refs().clone(),
-                view.visible_ref_transactions().clone(),
-                view.capsule_run_pointers().to_vec(),
+                visible_ref_transactions.clone(),
+                capsule_runs.to_vec(),
             )
             .await?;
         }
@@ -293,6 +299,27 @@ async fn run_capsule_repack(
         },
         elapsed: started.elapsed(),
     })
+}
+
+fn checkpoint_can_reuse_existing_history(
+    compacted_ref_transactions: &BTreeMap<String, String>,
+    visible_ref_transactions: &BTreeMap<String, String>,
+    capsule_runs: &[crab_metadata::capsule_protocol::CapsulePointer],
+) -> Result<bool> {
+    if !capsule_runs.is_empty() {
+        return Ok(false);
+    }
+    if visible_ref_transactions
+        .iter()
+        .all(|(ref_name, transaction_id)| {
+            compacted_ref_transactions.get(ref_name) == Some(transaction_id)
+        })
+    {
+        return Ok(true);
+    }
+    Err(CrabError::Protocol(
+        "capsule ref view has visible transactions without retained capsule runs".to_owned(),
+    ))
 }
 
 fn map_checkpoint_error(error: crab_remote::checkpoint::CheckpointError) -> CrabError {
@@ -1510,6 +1537,32 @@ mod tests {
             ref_tips: vec!["a".to_owned()],
             object_count,
         }
+    }
+
+    #[test]
+    fn checkpoint_reuses_history_only_for_compacted_ref_transactions() {
+        let tx1 = "a".repeat(64);
+        let tx2 = "b".repeat(64);
+        let compacted = BTreeMap::from([("refs/heads/main".to_owned(), tx1.clone())]);
+        let visible = BTreeMap::from([("refs/heads/main".to_owned(), tx1)]);
+        assert!(checkpoint_can_reuse_existing_history(&compacted, &visible, &[]).unwrap());
+
+        let uncheckpointed = BTreeMap::from([("refs/heads/main".to_owned(), tx2.clone())]);
+        let error = checkpoint_can_reuse_existing_history(&compacted, &uncheckpointed, &[])
+            .expect_err("unretained ref transaction must fail closed");
+        assert!(error.to_string().contains("without retained capsule runs"));
+
+        let run = crab_metadata::capsule_protocol::CapsulePointer::new(
+            "a".repeat(64),
+            1,
+            0,
+            vec![tx2],
+            "b".repeat(64),
+        )
+        .unwrap();
+        assert!(
+            !checkpoint_can_reuse_existing_history(&compacted, &uncheckpointed, &[run],).unwrap()
+        );
     }
 
     #[test]
