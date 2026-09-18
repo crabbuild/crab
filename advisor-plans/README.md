@@ -157,6 +157,10 @@ Local proof completed:
   publication bytes remain ledger-reserved until publication completes. Active
   Cell admission also reserves a fixed descriptor cost in that ledger, and
   runtime statistics/Prometheus gauges expose descriptor usage and capacity.
+  `resident_route_reports_zero_origin_reads_and_latency_percentiles` then runs
+  64 resident-handle plus SQL reads through the instrumented store; the latest
+  local run recorded p50 67us, p95 90us, p99 364us, and zero origin reads.
+  This is a repeatable local warm-path proof, not a provider or release receipt.
 - `crab-ltx --features replica`: 45 unit tests, 79 integration test cases
   (one provider case ignored), and 5 doctests, plus the new streaming, cache
   restart, concurrent-fill, and fault-injection coverage pass; the ignored
@@ -180,7 +184,7 @@ headroom is conservatively clamped by the same runtime reservations used for
 admission. Persisted Queue/Workflow rows are
 re-inspected after durable work and an unknown result remains ineligible for
 eviction. Remaining release gates are recorded in plans 009–017:
-post-promotion zero-origin measurement, multi-GiB/RSS and provider-failure
+matched warm-latency/restart receipts, multi-GiB/RSS and provider-failure
 matrix evidence (with one local fail-first immutable PUT proof now covered),
 complete advertised/metric parity and mixed-workload resource accounting,
 multi-process

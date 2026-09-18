@@ -1,6 +1,6 @@
 # Cell runtime production qualification and receipts
 
-Status: IN PROGRESS — schema-v3 receipt binding and local RustFS provider/fault evidence pass; scale, latency, Kubernetes, and release-receipt gates remain
+Status: IN PROGRESS — schema-v3 receipt binding, local RustFS provider/fault evidence, and the instrumented local warm-path probe pass; scale, matched latency, Kubernetes, and release-receipt gates remain
 Priority: P0
 Effort: XL
 Risk: Medium
@@ -64,6 +64,14 @@ fault schedule, timestamps, raw artifact digests, measured percentiles/RSS,
 bucket-call counts, ownership epochs/roots/sequences, pass/fail, and signer/
 attestation identity. Secrets and endpoints with embedded credentials are
 forbidden.
+
+Local warm-path evidence: `resident_route_reports_zero_origin_reads_and_latency_percentiles`
+in `crates/crab-cell-runtime/tests/actor.rs` performs 64 resident-handle plus SQL
+reads after activation through a `Store::with_read_request_observer` seam. The
+latest local run reported p50 67us, p95 90us, p99 364us, max 364us, and zero
+object-store read attempts. These values are a local regression signal only;
+they do not satisfy the matched-hardware, restart, provider, or signed release
+receipt criteria below.
 
 ## Implementation steps
 

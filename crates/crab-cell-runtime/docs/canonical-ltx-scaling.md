@@ -197,12 +197,19 @@ artifact-bound records. The `qualification_receipt` binary verifies exact
 source, image, and artifact identity, and the release workflow consumes only
 that bound evidence. The isolated local RustFS LTX, Cell takeover/retention,
 HTTP collaboration, native-push, and receive-fault qualifications now pass;
-they are provider evidence, not release receipts. Multi-GiB RSS, warm-restart
-zero-origin metrics, complete advertised/metric parity,
+they are provider evidence, not release receipts. Multi-GiB RSS, matched
+warm-restart zero-origin latency receipts, complete advertised/metric parity,
 multi-process movement, protected Kubernetes faults, and a named standalone
 compatibility decision remain release gates. The cold-activation planner seam
 is implemented locally, but its receiver-failure and fleet-convergence proof
 still belongs to the multi-process qualification gate.
+
+The local warm-path regression
+`resident_route_reports_zero_origin_reads_and_latency_percentiles` runs 64
+resident-handle plus SQL reads after activation through an instrumented
+`Store`; the latest run recorded p50 67us, p95 90us, p99 364us, max 364us,
+and zero origin reads. It is intentionally labeled local evidence rather than
+a matched-hardware or signed release receipt.
 
 The upstream comparison is supported by Celld's pinned
 [`docs/testing.md`](https://github.com/denoland/celld/blob/10cb1303dac710dcb3b557e318e08c855261f68b/docs/testing.md),

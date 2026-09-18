@@ -1392,6 +1392,58 @@ async fn resident_lookup_is_invalidated_before_drain_releases_the_cell() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn resident_route_reports_zero_origin_reads_and_latency_percentiles() {
+    let origin_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_reads = Arc::clone(&origin_reads);
+    let store =
+        Store::new(Arc::new(InMemory::new())).with_read_request_observer(Arc::new(move |_kind| {
+            observed_reads.fetch_add(1, Ordering::AcqRel);
+        }));
+    let fixture =
+        fixture_with_limits_and_store(b"resident-warm-qualification", Limits::default(), store);
+    let (runtime, handle, _pool) = activate_runtime(&fixture, 2 * 1024 * 1024).await;
+    origin_reads.store(0, Ordering::Release);
+
+    let mut samples = Vec::with_capacity(64);
+    for _ in 0..64 {
+        let started = std::time::Instant::now();
+        let resident = runtime
+            .resident_handle(&fixture.target, CatalogRole::Repository)
+            .await
+            .unwrap()
+            .expect("bootstrapped Cell must remain resident");
+        let value = resident
+            .query(64, 64, |connection| {
+                let value = connection
+                    .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+                Ok(value.to_be_bytes().to_vec())
+            })
+            .await
+            .unwrap();
+        assert_eq!(i64::from_be_bytes(value.try_into().unwrap()), 0);
+        samples.push(started.elapsed());
+    }
+
+    samples.sort_unstable();
+    let percentile = |percent: usize| {
+        let index = ((samples.len() - 1) * percent).div_ceil(100);
+        samples[index]
+    };
+    println!(
+        "resident warm route: samples={} p50_us={} p95_us={} p99_us={} max_us={}",
+        samples.len(),
+        percentile(50).as_micros(),
+        percentile(95).as_micros(),
+        percentile(99).as_micros(),
+        samples.last().unwrap().as_micros()
+    );
+    assert_eq!(origin_reads.load(Ordering::Acquire), 0);
+
+    handle.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn churn_evicts_idle_cells_and_restores_exact_roots() {
     let first = fixture_for(b"churn-first");
     let second = fixture_for(b"churn-second");
