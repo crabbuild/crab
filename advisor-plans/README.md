@@ -189,6 +189,14 @@ cases. These are provider/fault iteration receipts, not signed release
 evidence; protected three-Pod, multi-GiB RSS, matched-latency, and fleet gates
 remain open.
 
+The same RustFS qualification volume ran the documented `10m`
+`rustfs_replication_scale_load` profile on the current branch: 10,000,000 rows,
+200 published segments, an 838,262,784-byte source database, exact restore of
+42,234,991,936 logical object bytes, 46,993 records/second load throughput,
+212.797 seconds wall time, and 25.619 seconds restore verification. This
+refreshes provider-scale publication/restore evidence only; it is not a peak
+RSS or multi-Pod receipt.
+
 The in-repo placement path now consumes the signed observation block for cold
 activation: the planner selects a live eligible session, sends one authenticated
 activation hint, and the destination enters through the existing router,

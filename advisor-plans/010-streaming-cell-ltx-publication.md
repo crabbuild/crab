@@ -124,6 +124,15 @@ verifies that no head was published, retries the same captured source, and
 restores the resulting head. This is a deterministic failure seam, not a
 substitute for the provider matrix or multi-GiB/RSS receipt.
 
+On 2026-09-18 the release `rustfs_replication_scale_load 10m` example ran
+against RustFS 1.0.0-rc.1 in a fresh isolated bucket. It published 10,000,000
+rows as 200 immutable segments, produced an 838,262,784-byte SQLite source,
+verified 42,234,991,936 logical object bytes after exact restore, and completed
+with 46,993 records/second load throughput (212.797 seconds wall time; 25.619
+seconds restore verification). This is a current provider-scale publication
+and exact-restore receipt; it does not measure peak RSS or prove the bounded
+memory acceptance item, so the multi-GiB/RSS checkbox remains open.
+
 ## Acceptance criteria
 
 - [x] Native and bundled Cell publication share one streaming integrity path.
