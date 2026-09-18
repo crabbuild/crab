@@ -5,7 +5,7 @@ use crate::coordination::{
 use std::env;
 
 const COMMANDS: usize = 2;
-const EVENT_COUNT: usize = 38;
+const EVENT_COUNT: usize = 39;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Event {
@@ -40,6 +40,7 @@ enum Event {
     MovementQuiesce,
     MovementDurability,
     MovementRelease,
+    LostReleaseResponse,
     MovementAcquire,
     ReceiverCrash,
     MembershipLoss,
@@ -445,6 +446,10 @@ impl Simulation {
                 }
                 CoordinationDecision::Ignored
             }
+            // The authority transition already committed; only the caller's
+            // reply is lost. The receiver must still observe the released
+            // owner through the normal authority path.
+            Event::LostReleaseResponse => CoordinationDecision::Ignored,
             Event::MovementAcquire => {
                 if self.movement == MovementPhase::Released
                     && self.receiver_live
@@ -654,8 +659,9 @@ fn event(seed: u64) -> Event {
         32 => Event::MovementQuiesce,
         33 => Event::MovementDurability,
         34 => Event::MovementRelease,
-        35 => Event::MovementAcquire,
-        36 => Event::ReceiverCrash,
+        35 => Event::LostReleaseResponse,
+        36 => Event::MovementAcquire,
+        37 => Event::ReceiverCrash,
         _ => Event::MembershipLoss,
     }
 }
@@ -793,6 +799,8 @@ fn movement_requires_quiesce_durability_release_and_live_acquire() {
     assert_eq!(simulation.movement, MovementPhase::Durability);
     simulation.apply(Event::MovementRelease);
     assert_eq!(simulation.movement, MovementPhase::Released);
+    simulation.apply(Event::LostReleaseResponse);
+    assert_eq!(simulation.owner, None);
     simulation.apply(Event::ReceiverCrash);
     simulation.apply(Event::MovementAcquire);
     assert_eq!(simulation.movement, MovementPhase::Released);

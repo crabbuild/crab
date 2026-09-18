@@ -1,6 +1,6 @@
 # Hysteretic pressure shedding and paced Cell movement
 
-Status: IN PROGRESS — hysteretic classifier, deterministic victim selector, shared actor eviction path, held movement permits, and fail-closed Queue/Workflow persisted-work inventory pass local tests; multi-process fault proof remains
+Status: IN PROGRESS — hysteretic classifier, deterministic victim selector, shared actor eviction path, held movement permits, fail-closed Queue/Workflow persisted-work inventory, and deterministic quiesce/durability/release/lost-reply/receiver-failure schedules pass local tests; multi-process fault proof remains
 Priority: P0
 Effort: XL
 Risk: High
@@ -115,7 +115,9 @@ git diff --check
 - [ ] Movement uses quiesce -> durability -> release -> normal acquire; no
       planner-owned or dual-writer authority exists.
 - [ ] Receiver failure, owner crash, lost release reply, and membership loss
-      preserve single ownership and acknowledged state.
+      preserve single ownership and acknowledged state; the pure simulator now
+      covers the lost-release-reply and receiver-crash ordering, while a
+      multi-process receipt is still required for the owner/membership path.
 - [x] Operator drain and pressure shedding share one controller.
 - [x] Queue/Workflow durable messages, leases, dedup identities, and runs
       participate in eviction eligibility; activity/effect jobs remain covered

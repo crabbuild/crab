@@ -212,6 +212,12 @@ and capacities reach the rendered exposition without a second field mapping.
 Measured local-disk tolerance and provider-scale mixed-workload proof remain
 qualification gates rather than being inferred from this unit proof.
 
+The movement simulator now includes an explicit lost-release-response event:
+after the authoritative release, the reply can disappear without restoring the
+old owner, and a live receiver must still acquire through the normal authority
+path. Its existing receiver-crash and membership-loss guards remain model-only;
+the multi-process movement receipt is still open under Plan 014.
+
 Restart inventory is now fail-closed at the HTTP composition boundary. Each
 process gets a fresh `cells/sessions/<session-id>` directory; before the
 runtime starts, `LocalStaging::new_with_restart_inventory` recursively counts
