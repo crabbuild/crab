@@ -396,7 +396,12 @@ impl NodePublisher {
         now_ms: i64,
         draining: bool,
     ) -> crate::Result<NodeAdvertisement> {
-        let capacity = if draining {
+        let local_resources = if draining {
+            None
+        } else {
+            Some(self.local_resources()?)
+        };
+        let mut capacity = if draining {
             NodeCapacity {
                 free_memory_bytes: 0,
                 free_disk_bytes: 0,
@@ -418,6 +423,10 @@ impl NodePublisher {
                 self.follower_store.as_ref(),
             )?
         };
+        let runtime_stats = self.runtime.as_ref().map(CellRuntime::stats);
+        if let (Some(resources), Some(stats)) = (local_resources, runtime_stats) {
+            constrain_capacity_to_runtime(&mut capacity, resources, stats);
+        }
         let advertisement = NodeAdvertisement::sign(
             self.node,
             self.session,
@@ -438,8 +447,9 @@ impl NodePublisher {
         if draining {
             return Ok(advertisement);
         }
-        let resources = self.local_resources()?;
-        let runtime_stats = self.runtime.as_ref().map(CellRuntime::stats);
+        let resources = local_resources.ok_or(crate::Error::Config(
+            "local resources are missing for a serving advertisement",
+        ))?;
         let placement = NodePlacementCapacity::new(
             resources.memory_bytes,
             resources.disk_capacity_bytes,
@@ -469,6 +479,37 @@ impl NodePublisher {
         )?;
         Ok(advertisement.with_placement_capacity(placement, &self.signing_key)?)
     }
+}
+
+fn constrain_capacity_to_runtime(
+    capacity: &mut NodeCapacity,
+    resources: LocalResources,
+    runtime: crab_cell_runtime::CellRuntimeStats,
+) {
+    let reserved_memory = u64::try_from(runtime.resident_bytes())
+        .unwrap_or(u64::MAX)
+        .saturating_add(u64::try_from(runtime.retained_bytes()).unwrap_or(u64::MAX));
+    let ledger_memory = resources.memory_bytes.saturating_sub(reserved_memory);
+    capacity.free_memory_bytes = capacity.free_memory_bytes.min(ledger_memory);
+
+    let ledger_disk = resources
+        .disk_capacity_bytes
+        .saturating_sub(runtime.local_disk_reserved_bytes());
+    capacity.free_disk_bytes = capacity.free_disk_bytes.min(ledger_disk);
+    capacity.follower_free_bytes = capacity.follower_free_bytes.min(capacity.free_disk_bytes);
+
+    let running_jobs = runtime
+        .worker_jobs()
+        .saturating_add(runtime.primitive_jobs())
+        .saturating_add(runtime.hydration_jobs());
+    let job_capacity = runtime
+        .worker_job_capacity()
+        .saturating_add(runtime.primitive_job_capacity())
+        .saturating_add(runtime.hydration_job_capacity());
+    let free_jobs = job_capacity.saturating_sub(running_jobs);
+    capacity.job_credits = capacity
+        .job_credits
+        .min(u32::try_from(free_jobs).unwrap_or(u32::MAX));
 }
 
 impl NodeLogAuthority for NodePublisher {
@@ -1498,6 +1539,44 @@ mod tests {
         assert_eq!(parse_cgroup_available("4096", "4097"), None);
         assert_eq!(parse_cgroup_available("max", "1024"), None);
         assert_eq!(parse_cgroup_available("4096", "invalid"), None);
+    }
+
+    #[tokio::test]
+    async fn placement_capacity_respects_runtime_reservations() {
+        let runtime = crab_cell_runtime::CellRuntime::new(
+            crab_cell_runtime::SqlWorkerPool::new(2, 4).unwrap(),
+            2_048,
+            SessionId::from_bytes([21; 16]),
+        )
+        .unwrap();
+        let retained = runtime.try_reserve_node_bytes(512).unwrap();
+        let job = runtime.try_reserve_worker_job().unwrap().unwrap();
+        let mut capacity = NodeCapacity {
+            free_memory_bytes: 4_096,
+            free_disk_bytes: 900,
+            follower_free_bytes: 900,
+            job_credits: 10,
+            ..NodeCapacity::default()
+        };
+        constrain_capacity_to_runtime(
+            &mut capacity,
+            LocalResources {
+                memory_bytes: 1_024,
+                disk_limit_bytes: 1_000,
+                disk_capacity_bytes: 1_000,
+                free_disk_bytes: 900,
+                available_file_descriptors: 100,
+                job_credits: 10,
+            },
+            runtime.stats(),
+        );
+        assert_eq!(capacity.free_memory_bytes, 512);
+        assert_eq!(capacity.free_disk_bytes, 900);
+        assert_eq!(capacity.follower_free_bytes, 900);
+        assert_eq!(capacity.job_credits, 5);
+        drop(job);
+        drop(retained);
+        runtime.shutdown().await.unwrap();
     }
 
     fn repository() -> RepositoryConfig {

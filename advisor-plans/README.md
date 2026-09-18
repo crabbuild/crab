@@ -173,7 +173,9 @@ Local proof completed:
 The in-repo placement path now consumes the signed observation block for cold
 activation: the planner selects a live eligible session, sends one authenticated
 activation hint, and the destination enters through the existing router,
-authority CAS, and actor admission. Persisted Queue/Workflow rows are
+authority CAS, and actor admission. Advertised free memory, disk, and job
+headroom is conservatively clamped by the same runtime reservations used for
+admission. Persisted Queue/Workflow rows are
 re-inspected after durable work and an unknown result remains ineligible for
 eviction. Remaining release gates are recorded in plans 009–017:
 post-promotion zero-origin measurement, multi-GiB/RSS and provider-failure

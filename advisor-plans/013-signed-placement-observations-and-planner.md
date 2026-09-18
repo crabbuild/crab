@@ -1,6 +1,6 @@
 # Signed live placement observations and pure weighted planner
 
-Status: IN PROGRESS — versioned signed placement observations now carry measured memory/disk totals and one coherent runtime Cell/job snapshot; Linux cgroup limit parsing is fail-closed and fixture-tested; cold activation now uses a bounded authenticated activation hint; process-wide probe parity and multi-process convergence remain
+Status: IN PROGRESS — versioned signed placement observations now carry measured memory/disk totals and one coherent runtime Cell/job snapshot; advertised free headroom is clamped by unified runtime reservations and fail-closed Linux cgroup probes; cold activation now uses a bounded authenticated activation hint; process-wide probe parity and multi-process convergence remain
 Priority: P0
 Effort: XL
 Risk: High
