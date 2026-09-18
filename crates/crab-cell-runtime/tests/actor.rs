@@ -1356,6 +1356,131 @@ async fn runtime_stats_follow_active_cell_lifecycle() {
     runtime.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn churn_evicts_idle_cells_and_restores_exact_roots() {
+    let first = fixture_for(b"churn-first");
+    let second = fixture_for(b"churn-second");
+    let third = fixture_for(b"churn-third");
+    let session = SessionId::from_bytes([74; 16]);
+    let runtime = CellRuntime::new_with_replica_host(
+        SqlWorkerPool::new(1, 2).unwrap(),
+        16 * 1024 * 1024,
+        session,
+        ReplicaHost::default().with_local_disk_budget(DiskBudget::new(64 * 1024 * 1024)),
+    )
+    .unwrap();
+
+    let first_handle = bootstrap_on(&runtime, &first, session).await;
+    let second_handle = bootstrap_on(&runtime, &second, session).await;
+
+    let authority_first = CellAuthority::new(first.layout.clone());
+    let authority_second = CellAuthority::new(second.layout.clone());
+    let root_first = authority_first
+        .load(first.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap()
+        .value()
+        .ltx_root()
+        .unwrap();
+    let root_second = authority_second
+        .load(second.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap()
+        .value()
+        .ltx_root()
+        .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if runtime.evict_idle(1).await.unwrap() == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let (evicted_fixture, evicted_authority, evicted_root, evicted_idle) =
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let first_control = authority_first
+                    .load(first.target.cell_id())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if first_control.value().state == ControlState::Idle {
+                    break (&first, &authority_first, root_first, first_control);
+                }
+                let second_control = authority_second
+                    .load(second.target.cell_id())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if second_control.value().state == ControlState::Idle {
+                    break (&second, &authority_second, root_second, second_control);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(evicted_idle.value().ltx_root(), Some(evicted_root));
+    assert_eq!(runtime.stats().active_cells(), 1);
+
+    let catalog = crab_cell_runtime::CellCatalog::new(
+        evicted_fixture.layout.clone(),
+        evicted_fixture.target.tenant(),
+    );
+    let proof = catalog
+        .lookup(evicted_fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let restored = runtime
+        .acquire_idle_restored(
+            proof,
+            evicted_fixture.replica.clone(),
+            evicted_authority.clone(),
+            evicted_idle,
+            evicted_fixture
+                ._directory
+                .path()
+                .join("churn-restored.sqlite"),
+            Owner {
+                session,
+                endpoint: "https://churn-successor.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        restored
+            .query(64, 64, |connection| {
+                let value = connection
+                    .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+                Ok(value.to_be_bytes().to_vec())
+            })
+            .await
+            .unwrap(),
+        0_i64.to_be_bytes()
+    );
+    restored.drain().await.unwrap();
+
+    let third_handle = bootstrap_on(&runtime, &third, session).await;
+    assert_eq!(runtime.stats().active_cells(), 2);
+    third_handle.drain().await.unwrap();
+    if evicted_fixture.target.cell_id() == first.target.cell_id() {
+        second_handle.drain().await.unwrap();
+    } else {
+        first_handle.drain().await.unwrap();
+    }
+    assert_eq!(runtime.stats().active_cells(), 0);
+    runtime.shutdown().await.unwrap();
+}
+
 async fn bootstrap_on(
     runtime: &CellRuntime,
     fixture: &Fixture,

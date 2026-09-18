@@ -146,7 +146,7 @@ authorized standalone-contract decision.
 Local proof completed:
 
 - `crab-cell-runtime`: 207 library tests passed (one provider test ignored),
-  38 actor tests passed (one provider test ignored), and all primitive,
+  39 actor tests passed (one provider test ignored), and all primitive,
   migration, publication, simulator, and workflow suites pass. The ignored
   source-loss and retention tests also pass against an isolated local RustFS
   bucket when their provider variables are supplied. The shared
@@ -201,6 +201,17 @@ alongside the existing per-cell/session guards. This closes the untracked
 background-job path without adding a second capacity owner; process-wide
 codec/dirty/scratch reconciliation and restart inventory are still explicit
 Plan 012 qualification gates.
+
+The actor lifecycle path also has a bounded churn regression:
+`churn_evicts_idle_cells_and_restores_exact_roots` runs three independent
+repository fixtures through a two-Cell runtime, waits for persisted-work
+inventory to become known, evicts one idle Cell, reacquires its unchanged root
+through the canonical idle-restore path, bootstraps the third Cell after the
+reservation is released, and asserts a zero active-Cell baseline before
+shutdown. It deliberately uses bootstrap roots because durable command
+outcomes are release obligations; mutation-root restoration remains covered by
+the command/publication/cancellation tests, and mixed primitive/source-loss/
+restart qualification is still open under Plan 012.
 
 The coordination kernel now records a typed intent beside every local effect
 identity. A completion must match both the activation generation and its

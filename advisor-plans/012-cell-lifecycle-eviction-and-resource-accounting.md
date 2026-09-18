@@ -1,6 +1,6 @@
 # Cell quiescing, idle eviction, and unified resource accounting
 
-Status: IN PROGRESS — RAII ledger shared by active Cells, resident native bytes, active-Cell file descriptors, SQL work, hydration jobs, retained publication bytes, primitive activity/effect/migration/recovery jobs, and the canonical LTX `DiskBudget`; deterministic victim selection, actor eviction, pressure pacing, retained-byte accounting, and fail-closed persisted-work refresh are wired; unknown persisted-work inventory is explicitly ineligible for eviction; descriptor admission/metrics and shared local-disk consumer wiring are now explicit; restart-churn, process-wide codec/scratch reconciliation, and measured inventory proof remain
+Status: IN PROGRESS — RAII ledger shared by active Cells, resident native bytes, active-Cell file descriptors, SQL work, hydration jobs, retained publication bytes, primitive activity/effect/migration/recovery jobs, and the canonical LTX `DiskBudget`; deterministic victim selection, actor eviction, pressure pacing, retained-byte accounting, and fail-closed persisted-work refresh are wired; unknown persisted-work inventory is explicitly ineligible for eviction; descriptor admission/metrics and shared local-disk consumer wiring are now explicit; a bounded two-slot/three-Cell churn test now proves canonical eviction, exact-root idle reacquisition, and capacity reuse; restart-churn, process-wide codec/scratch reconciliation, and measured inventory proof remain
 Priority: P0
 Effort: XL
 Risk: High
@@ -101,6 +101,17 @@ maintain unrelated counters with different semantics.
    workflow, hydration, publication, and restart. After each acknowledged
    mutation, evict local state and restore from the exact root to prove no loss.
 
+The first local churn proof is intentionally staged: the actor test uses three
+independent repository fixtures with a two-Cell pool, waits for fail-closed
+persisted-work inventory, evicts one idle Cell, reacquires its exact idle root
+through `CellRuntime::acquire_idle_restored`, and bootstraps the third Cell
+after capacity is released. Bootstrap roots contain no retained request rows,
+so this test proves the lifecycle/capacity path without deleting durable
+contracts behind the runtime's back. Mutation-root restoration is covered by
+the existing command, publication, cancellation, and source-loss tests; the
+mixed primitive/source-loss/restart churn gate below remains open until one
+qualification test exercises those workloads together.
+
 ## Verification
 
 ```bash
@@ -122,6 +133,21 @@ git diff --check
 
 The churn test must emit peak ledger values and final zero/baseline residuals;
 a timeout or process exit is not proof of cleanup.
+
+Local actor proof:
+
+```bash
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
+  cargo test -p crab-cell-runtime --test actor \
+  churn_evicts_idle_cells_and_restores_exact_roots --locked -- --test-threads=1
+```
+
+This test is a local lifecycle/capacity proof only. It asserts that one of two
+active Cells reaches `Idle` with the captured root unchanged, that the same
+runtime reacquires and reads that root, that a third Cell can then bootstrap,
+and that all active reservations return to zero before shutdown. It does not
+claim provider, process-restart, mixed-primitive, multi-GiB, or measured RSS
+qualification.
 
 ## Acceptance criteria
 
@@ -162,3 +188,9 @@ capacity while the actor and effect paths are under load. The remaining ledger
 gate is process-wide codec/dirty/scratch accounting plus restart inventory
 reconciliation, which requires measured qualification rather than another
 local counter.
+
+The actor churn test is the canonical local regression for this maintenance
+path: it uses the same runtime admission, actor eviction, authority release,
+and idle reacquisition APIs that production routing uses. A test that removes
+`sys_requests` or bypasses authority would not be equivalent evidence and must
+not be substituted for the remaining mixed-workload gate.
