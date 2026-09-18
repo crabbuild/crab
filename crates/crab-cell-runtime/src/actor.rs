@@ -971,6 +971,7 @@ impl CellRuntime {
         owner: Owner,
     ) -> crate::Result<CellHandle> {
         self.ensure_running()?;
+        let rollback_node_lease = self.inner.node_lease.guard()?;
         self.claiming_cell(&catalog, &observed, &owner)?;
         if observed.value().state != crate::ControlState::Idle
             || observed.value().owner.is_some()
@@ -998,15 +999,35 @@ impl CellRuntime {
                 current
             }
         };
-        self.activate_restored_reserved(
-            catalog,
-            replica,
-            authority,
-            claimed,
-            destination,
-            reservation,
-        )
-        .await
+        let rollback_authority = authority.clone();
+        let rollback_claim = claimed.clone();
+        let rollback_replica = replica.clone();
+        match self
+            .activate_restored_reserved(
+                catalog,
+                replica,
+                authority,
+                claimed,
+                destination,
+                reservation,
+            )
+            .await
+        {
+            Ok(handle) => Ok(handle),
+            Err(error) => {
+                match rollback_idle_acquisition(
+                    &rollback_authority,
+                    &rollback_claim,
+                    &rollback_replica,
+                    rollback_node_lease,
+                )
+                .await
+                {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(cleanup),
+                }
+            }
+        }
     }
 
     /// Takes over an unchanged owner after its exact node session is fenced.
@@ -1919,14 +1940,33 @@ fn handle_message(
                     }
                 };
                 let (result, persisted_work) = match result {
-                    Ok(hydration) => match pool.interrupt_handle(cell).await {
-                        Ok(interrupt) => {
-                            let persisted_work = pool.persisted_work_inventory(cell, role).await;
-                            (Ok((Arc::new(interrupt), hydration)), persisted_work)
+                    Ok(hydration) => {
+                        match pool.interrupt_handle(cell).await {
+                            Ok(interrupt) => {
+                                let persisted_work =
+                                    pool.persisted_work_inventory(cell, role).await;
+                                (Ok((Arc::new(interrupt), hydration)), persisted_work)
+                            }
+                            Err(error) => {
+                                let result =
+                                    match cleanup_failed_activation(cell, &pool, &mut publisher)
+                                        .await
+                                    {
+                                        Ok(()) => error,
+                                        Err(cleanup) => cleanup,
+                                    };
+                                (Err(result), Err(Error::CellNotActive))
+                            }
                         }
-                        Err(error) => (Err(error), Err(Error::CellNotActive)),
-                    },
-                    Err(error) => (Err(error), Err(Error::CellNotActive)),
+                    }
+                    Err(error) => {
+                        let result =
+                            match cleanup_failed_activation(cell, &pool, &mut publisher).await {
+                                Ok(()) => error,
+                                Err(cleanup) => cleanup,
+                            };
+                        (Err(result), Err(Error::CellNotActive))
+                    }
                 };
                 TaskResult::Activated {
                     cell,
@@ -3913,6 +3953,69 @@ fn start_fenced_deactivate(
             result,
         }
     });
+}
+
+async fn cleanup_failed_activation(
+    cell: CellId,
+    pool: &SqlWorkerPool,
+    publisher: &mut CellPublisher,
+) -> crate::Result<()> {
+    match pool.deactivate(cell).await {
+        Ok(()) | Err(Error::CellNotActive) => {}
+        Err(error) => return Err(error),
+    }
+    if publisher.control().value().root.is_some() {
+        publisher.release().await
+    } else {
+        Ok(())
+    }
+}
+
+async fn rollback_idle_acquisition(
+    authority: &CellAuthority,
+    claimed: &VersionedControl,
+    replica: &crab_ltx::CellReplica,
+    node_lease: Option<NodeLeaseGuard>,
+) -> crate::Result<()> {
+    let current = authority
+        .load(claimed.value().cell)
+        .await?
+        .ok_or(Error::Fenced)?;
+    if current.value().state == crate::ControlState::Idle && current.value().owner.is_none() {
+        return Ok(());
+    }
+    if current.value().epoch != claimed.value().epoch
+        || current.value().owner != claimed.value().owner
+        || current.value().root != claimed.value().root
+        || current.value().recovery != claimed.value().recovery
+        || current.value().code != claimed.value().code
+        || current.value().schema != claimed.value().schema
+    {
+        return Ok(());
+    }
+    let mut publisher =
+        CellPublisher::new(replica.clone(), authority.clone(), current, PathBuf::new());
+    if let Some(node_lease) = node_lease {
+        publisher = publisher.with_node_lease(node_lease);
+    }
+    match publisher.release().await {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let latest = authority
+                .load(claimed.value().cell)
+                .await?
+                .ok_or(Error::Fenced)?;
+            if (latest.value().state == crate::ControlState::Idle && latest.value().owner.is_none())
+                || latest.value().epoch != claimed.value().epoch
+                || latest.value().owner != claimed.value().owner
+                || latest.value().root != claimed.value().root
+            {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 fn start_orphan_deactivate(

@@ -146,7 +146,9 @@ authorized standalone-contract decision.
 Local proof completed:
 
 - `crab-cell-runtime`: 210 library tests passed (one provider test ignored),
-  45 actor tests passed (one provider test ignored), and all primitive,
+  46 default actor tests passed (one provider test ignored), and the
+  process-support actor matrix runs 50 cases with 49 passing and one provider
+  test ignored. All primitive,
   migration, publication, simulator, and workflow suites pass. The ignored
   source-loss and retention tests also pass against an isolated local RustFS
   bucket when their provider variables are supplied. The shared
@@ -245,7 +247,10 @@ without draining, fences that stale session, and restores the exact root in a
 successor process. The companion
 `lost_release_response_is_reconciled_before_successor_acquire` probe commits
 the release while dropping its response, verifies reconciliation, and restores
-the unchanged root in a successor runtime; protected three-Pod movement and
+the unchanged root in a successor runtime. The local
+`failed_idle_receiver_does_not_leave_authority_owned` case then forces a
+receiver activation failure after the idle takeover CAS and verifies the
+exact root returns to unowned `Idle`; protected three-Pod movement and
 membership receipts remain open.
 
 Restart inventory is now fail-closed at the HTTP composition boundary. Each

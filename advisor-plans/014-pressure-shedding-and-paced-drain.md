@@ -1,6 +1,6 @@
 # Hysteretic pressure shedding and paced Cell movement
 
-Status: IN PROGRESS — hysteretic classifier, deterministic victim selector, shared actor eviction path, held movement permits, fail-closed Queue/Workflow persisted-work inventory, deterministic quiesce/durability/release/lost-reply/receiver-failure schedules, and local cross-process winner/crash/lost-response probes pass; protected multi-process fault proof remains
+Status: IN PROGRESS — hysteretic classifier, deterministic victim selector, shared actor eviction path, held movement permits, fail-closed Queue/Workflow persisted-work inventory, deterministic quiesce/durability/release/lost-reply/receiver-failure schedules, and local cross-process winner/crash/lost-response probes pass; failed receiver activation now rolls authority back to Idle; protected multi-process fault proof remains
 Priority: P0
 Effort: XL
 Risk: High
@@ -119,7 +119,9 @@ git diff --check
       owner/active-cell ledger.
 - [ ] Receiver failure, owner crash, lost release reply, and membership loss
       preserve single ownership and acknowledged state; the pure simulator now
-      covers the lost-release-reply and receiver-crash ordering, while a
+      covers the lost-release-reply and receiver-crash ordering, and
+      `failed_idle_receiver_does_not_leave_authority_owned` proves a failed
+      rooted receiver activation returns the Cell to unowned Idle. A protected
       multi-process receipt is still required for the owner/membership path.
 - [x] Operator drain and pressure shedding share one controller.
 - [x] Queue/Workflow durable messages, leases, dedup identities, and runs
@@ -144,6 +146,10 @@ the exact root in a successor process. The
 `lost_release_response_is_reconciled_before_successor_acquire` case commits
 the release while dropping its response, verifies the publisher reconciles the
 ambiguous result, and restores the unchanged root in a successor runtime.
+The local `failed_idle_receiver_does_not_leave_authority_owned` case forces a
+receiver activation failure after the idle takeover CAS and verifies the
+canonical rollback leaves the exact root unowned and available for normal
+acquisition.
 These local proofs do not replace the protected three-Pod membership-loss or
 directional-partition receipt required for release.
 
