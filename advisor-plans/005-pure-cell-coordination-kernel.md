@@ -212,19 +212,19 @@ must identify the removed state combinations or duplicate paths that justify it.
 ## Acceptance criteria
 
 - [ ] Production actor decisions flow through one pure coordination step API.
-- [ ] The kernel has no async runtime, I/O, filesystem, object-store, SQL,
+- [x] The kernel has no async runtime, I/O, filesystem, object-store, SQL,
       clock, or randomness dependency.
-- [ ] Persistent `Control` transitions remain canonical in `control.rs`.
+- [x] Persistent `Control` transitions remain canonical in `control.rs`.
 - [x] Every external effect has an explicit ID, completion event, and stale
       completion rule.
-- [ ] Fence, drain, migration, shutdown, lost-CAS, caller-cancel, and follower
+- [x] Fence, drain, migration, shutdown, lost-CAS, caller-cancel, and follower
       acknowledgement contracts have named transition tests.
-- [ ] Plan 004 characterization tests pass unchanged.
-- [ ] Public APIs, stored keys, wire messages, and serialized shapes are
+- [x] Plan 004 characterization tests pass unchanged.
+- [x] Public APIs, stored keys, wire messages, and serialized shapes are
       unchanged.
 - [ ] The old decision branches are deleted; no feature flag selects between
       implementations.
-- [ ] All verification commands pass.
+- [x] All verification commands pass.
 
 ## Stop conditions
 
