@@ -1,4 +1,4 @@
-# Implement SQL, KV, Queue, and Workflow primitives
+# Implement SQL, KV, Blob, Queue, Cron, and Workflow primitives
 
 All primitives execute through typed Rust bindings and the same Cell actor. They share request deduplication, SQLite transactions, LTX publication, exact-root recovery, admission, and receipts.
 
@@ -161,6 +161,58 @@ The claim command publishes its lease before returning payloads. Consumers valid
 
 A dead-letter transition inserts a typed durable effect in the same transaction. The source row retains its payload until that effect reaches a terminal state.
 
+Queue controls are shard-scoped and use the same request ledger as sends and leases:
+
+- Pause stops new claims and makes published-claim revalidation fail, while live leases may still ack, retry, or extend.
+- Resume reopens claims and advances a monotonic control generation.
+- Purge deletes only non-leased messages in batches of at most 128.
+- Redrive moves dead messages back to ready only after any dead-letter effect is terminal.
+- Info returns bounded aggregate counts instead of scanning message payloads.
+
+## Use Blob for transactional object data
+
+`BlobNamespace<M>` hashes the object key to a stable shard. Multipart uploads, parts, the published manifest, request outcomes, and LTX state commit in one SQLite transaction domain. A completed manifest never points at missing part data after restore or failover.
+
+Blob supports:
+
+- Multipart begin, idempotent part upload, atomic complete, and abort
+- Create-only and ETag compare-and-swap publication or deletion
+- Per-part BLAKE3 integrity verification on write and range read
+- Bounded range reads and lexicographic per-shard listing
+- Atomic replacement followed by deletion of the unreferenced prior upload
+- Scheduler cleanup of expired, unpublished uploads
+
+| Blob contract | Limit or behavior |
+| --- | --- |
+| Key | 1 to 1,024 bytes |
+| Part | 256 KiB |
+| Parts | 4,096 |
+| Object | 1 GiB |
+| Range read | 512 KiB |
+| User metadata | 8 KiB |
+| Upload lifetime | 1 minute to 7 days |
+| List | 128 objects from one explicit shard |
+
+Blob bodies intentionally remain in the Cell database. This makes publication, backup, exact-root recovery, retention, and conditional replacement one failure domain. Moving bodies to a separate object-store path would require a staged-body publication protocol and independent reachability GC before it could preserve the same contract.
+
+## Use Cron for failover-safe recurring triggers
+
+Cron schedules are durable rows advanced only by the serialized Cell Tick. Each due occurrence inserts a typed cross-Cell effect and advances `next_due_ms` in the same transaction.
+
+The destination receives `CronInvocation`, which includes schedule ID, generation, occurrence, scheduled timestamp, and the module payload. Registry construction verifies every compiled target namespace, command ID, codec version, and input limit against the release descriptor.
+
+| Cron contract | Limit or behavior |
+| --- | --- |
+| Minimum interval | 1 second |
+| Maximum interval | 1 year |
+| First due time | Up to 5 years ahead |
+| Payload | 256 KiB |
+| Catch-up | One durable occurrence at a time, bounded by Tick budget |
+| Delivery | Durable effect with destination inbox deduplication |
+| Controls | Upsert, pause, resume at an explicit time, delete |
+
+An owner crash after commit cannot lose an occurrence: the effect and next occurrence are in the same LTX root. A retry cannot execute the destination command twice because its inbox resolves the stable effect identity.
+
 ## Use Workflow for durable state machines
 
 A workflow definition is compiled Rust with a stable digest. New runs pin the current digest; existing runs continue with the retained definition they started with.
@@ -208,6 +260,15 @@ sequenceDiagram
 ```
 
 Workflow IDs select the shard. Signal IDs make delivery idempotent. Activity completion requires the exact lease token and attempt.
+
+Workflow controls preserve the deterministic history boundary:
+
+- Pause is accepted only when no activity lease is live. Ready activities and timers remain durable but cannot be claimed or fired.
+- Resume returns the same run to running state without synthesizing an event.
+- Restart is accepted only for a terminal run. It deletes the terminal local history and starts a new run under a new request-derived run ID and the current definition.
+- Cancel remains an idempotent workflow event and cancels outstanding local work.
+
+The quiescent-pause rule avoids converting an already-running external side effect into a lost completion and unintended replay.
 
 | Workflow contract | Limit or behavior |
 | --- | --- |
@@ -257,19 +318,21 @@ Each mutating procedure recomputes the earliest due timestamp inside its transac
 | KV | Remove expired entries |
 | Queue | Reclaim leases, expire messages, clean terminal rows |
 | Workflow | Fire timers, retry activities, clean terminal runs |
+| Blob | Delete expired unpublished uploads |
+| Cron | Publish due occurrences and advance schedules |
 | Effects | Claim, retry, extend, acknowledge, clean source or inbox rows |
 
 When a Tick reports no local transition, the compiled registry tells the scheduler whether an activity or effect runner can claim work for that namespace.
 
-## Install only primitives with a product caller
+## Install only compiled primitive modules
 
 Primitive mechanics are reusable, but registration is not automatic. A new module must include:
 
-1. A concrete Crab route or activity caller
+1. A concrete native Rust module caller
 2. A stable namespace and shard count
 3. A SQL migration with a checked digest
 4. Typed operation IDs and codec fixtures
 5. Exact-root restore coverage
 6. Capacity and failure tests for its workload
 
-Do not add a public generic SQL, KV, Queue, or Workflow endpoint. Product-specific HTTP handlers remain the external API.
+Do not add a public generic SQL, KV, Blob, Queue, Cron, or Workflow endpoint. Product-specific HTTP handlers remain the external API.

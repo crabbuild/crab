@@ -130,7 +130,9 @@ The primitives share the same actor, transaction, publication, recovery, and adm
 | --- | --- | --- | --- |
 | SQL | Repository-local relational state | Explicit repository UUID | Serializable single-Cell command |
 | KV | Scoped metadata and atomic checks | Scope hash | Atomic batch within one shard |
+| Blob | Multipart object data and range reads | Object-key hash | Atomic manifest and parts within one shard |
 | Queue | Deferred work | Producer hash for send, explicit shard for claim | At least once |
+| Cron | Recurring typed triggers | Schedule-ID hash | Atomic occurrence effect and schedule advance |
 | Workflow | Durable state machines, timers, activities | Workflow ID hash | Deterministic transition plus retryable activity |
 
 Read [primitives.md](primitives.md) for schemas, state transitions, limits, and examples.
@@ -182,7 +184,7 @@ This rule removes compatibility branches from product code. It does not permit d
 | Understand the actor, publication, timeout, or takeover path | [Runtime execution](runtime.md) |
 | Design follower durability, response gating, and warm failover | [Follower durability and warm failover](failover-and-followers.md) |
 | Inspect persistent identities, paths, control JSON, or LTX roots | [Storage and recovery](storage.md) |
-| Implement SQL, KV, Queue, Workflow, or effects | [Primitive contracts](primitives.md) |
+| Implement SQL, KV, Blob, Queue, Cron, Workflow, or effects | [Primitive contracts](primitives.md) |
 | Add a native product feature | [Rust programming model](rust-api.md) |
 | Size or operate a fleet | [Deployment and operations](deployment.md) |
 | Verify implementation coverage and remaining gates | [Delivery and qualification](delivery.md) |
@@ -213,7 +215,9 @@ These values are admission contracts, not benchmark results.
 | SQL query result | 1,000 rows and 1 MiB |
 | KV atomic batch | 128 mutations |
 | KV value | 64 KiB |
+| Blob part / range read | 256 KiB / 512 KiB |
 | Queue payload | 256 KiB |
+| Cron payload / interval | 256 KiB / 1 second to 1 year |
 | Queue or activity lease | 5s to 300s, 30s default |
 | Native transaction wall budget | 5s |
 | Public transport wait | 30s default, 60s maximum |

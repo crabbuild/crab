@@ -8,9 +8,9 @@ use crate::{
 };
 
 use super::{
-    MAX_WORKFLOW_BYTES, WorkflowDefinition, WorkflowOutcome, WorkflowRun, WorkflowSignal,
-    WorkflowStart, WorkflowStatus, workflow_cancel, workflow_signal, workflow_start,
-    workflow_state,
+    MAX_WORKFLOW_BYTES, WorkflowControl, WorkflowControlAction, WorkflowDefinition,
+    WorkflowOutcome, WorkflowRun, WorkflowSignal, WorkflowStart, WorkflowStatus, workflow_cancel,
+    workflow_control, workflow_signal, workflow_start, workflow_state,
 };
 
 const APPLIED_TAG: u8 = 0;
@@ -20,6 +20,10 @@ const IDENTITY_CONFLICT_TAG: u8 = 3;
 const RUN_MISMATCH_TAG: u8 = 4;
 const NOT_RUNNING_TAG: u8 = 5;
 const NOT_DUE_TAG: u8 = 6;
+const BUSY_TAG: u8 = 7;
+const CONTROL_PAUSE_TAG: u8 = 0;
+const CONTROL_RESUME_TAG: u8 = 1;
+const CONTROL_RESTART_TAG: u8 = 2;
 
 /// Compile-time namespace, definition and operation IDs for one Workflow module.
 pub trait WorkflowModule: Send + Sync + 'static {
@@ -31,6 +35,7 @@ pub trait WorkflowModule: Send + Sync + 'static {
     const START_COMMAND_ID: u32;
     const SIGNAL_COMMAND_ID: u32;
     const CANCEL_COMMAND_ID: u32;
+    const CONTROL_COMMAND_ID: u32;
     const GET_QUERY_ID: u32;
 }
 
@@ -42,7 +47,33 @@ pub fn register_workflow<M: WorkflowModule>(registry: &mut RegistryBuilder) -> c
     registry.bind_command::<WorkflowStartCommand<M>>()?;
     registry.bind_command::<WorkflowSignalCommand<M>>()?;
     registry.bind_command::<WorkflowCancelCommand<M>>()?;
+    registry.bind_command::<WorkflowControlCommand<M>>()?;
     registry.bind_query::<WorkflowGetQuery<M>>()
+}
+
+/// Typed Workflow operator control bound to immutable module operation IDs.
+pub struct WorkflowControlCommand<M>(PhantomData<fn() -> M>);
+
+impl<M: WorkflowModule> Command for WorkflowControlCommand<M> {
+    const MODULE: &'static str = M::MODULE;
+    const ID: u32 = M::CONTROL_COMMAND_ID;
+    const CODEC_VERSION: u32 = M::CODEC_VERSION;
+    type Input = WorkflowControl;
+    type Output = WorkflowOutcome;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        input: Self::Input,
+    ) -> crate::Result<CommandResult<Self::Output>> {
+        let source = context.target().clone();
+        classify(workflow_control(
+            context.primitive_transaction(),
+            &source,
+            context.now_ms(),
+            &input,
+            M::CURRENT_DEFINITION,
+        )?)
+    }
 }
 
 /// Typed Workflow start bound to immutable module operation IDs.
@@ -264,6 +295,69 @@ impl<M: WorkflowModule> WorkflowNamespace<M> {
             .await
     }
 
+    /// Pauses a quiescent run so timers and new activity claims stop.
+    pub async fn pause(
+        &self,
+        identity: crate::MutationIdentity,
+        workflow_id: Vec<u8>,
+        run_id: [u8; 16],
+    ) -> std::result::Result<Committed<WorkflowOutcome>, InvocationError<WorkflowOutcome>> {
+        self.control(identity, workflow_id, run_id, WorkflowControlAction::Pause)
+            .await
+    }
+
+    /// Resumes a paused run without changing its deterministic history.
+    pub async fn resume(
+        &self,
+        identity: crate::MutationIdentity,
+        workflow_id: Vec<u8>,
+        run_id: [u8; 16],
+    ) -> std::result::Result<Committed<WorkflowOutcome>, InvocationError<WorkflowOutcome>> {
+        self.control(identity, workflow_id, run_id, WorkflowControlAction::Resume)
+            .await
+    }
+
+    /// Replaces a terminal run with a new run of the current definition.
+    pub async fn restart(
+        &self,
+        identity: crate::MutationIdentity,
+        workflow_id: Vec<u8>,
+        run_id: [u8; 16],
+        event: Vec<u8>,
+    ) -> std::result::Result<Committed<WorkflowOutcome>, InvocationError<WorkflowOutcome>> {
+        let request_id = identity.request_id;
+        self.control(
+            identity,
+            workflow_id,
+            run_id,
+            WorkflowControlAction::Restart { request_id, event },
+        )
+        .await
+    }
+
+    async fn control(
+        &self,
+        identity: crate::MutationIdentity,
+        workflow_id: Vec<u8>,
+        run_id: [u8; 16],
+        action: WorkflowControlAction,
+    ) -> std::result::Result<Committed<WorkflowOutcome>, InvocationError<WorkflowOutcome>> {
+        let target = self
+            .target(&workflow_id)
+            .map_err(InvocationError::NotStarted)?;
+        self.client
+            .command::<WorkflowControlCommand<M>>(
+                &target,
+                identity,
+                WorkflowControl {
+                    workflow_id,
+                    run_id,
+                    action,
+                },
+            )
+            .await
+    }
+
     /// Reads one workflow at an optional minimum publication receipt.
     pub async fn state(
         &self,
@@ -299,7 +393,8 @@ fn classify(outcome: WorkflowOutcome) -> crate::Result<CommandResult<WorkflowOut
         | WorkflowOutcome::IdentityConflict
         | WorkflowOutcome::RunMismatch
         | WorkflowOutcome::NotRunning
-        | WorkflowOutcome::NotDue => CommandResult::Rejected(outcome),
+        | WorkflowOutcome::NotDue
+        | WorkflowOutcome::Busy => CommandResult::Rejected(outcome),
     })
 }
 
@@ -355,6 +450,7 @@ impl WireValue for WorkflowOutcome {
             Self::RunMismatch => encoder.write_u8(RUN_MISMATCH_TAG),
             Self::NotRunning => encoder.write_u8(NOT_RUNNING_TAG),
             Self::NotDue => encoder.write_u8(NOT_DUE_TAG),
+            Self::Busy => encoder.write_u8(BUSY_TAG),
         }
     }
 
@@ -379,8 +475,47 @@ impl WireValue for WorkflowOutcome {
             RUN_MISMATCH_TAG => Ok(Self::RunMismatch),
             NOT_RUNNING_TAG => Ok(Self::NotRunning),
             NOT_DUE_TAG => Ok(Self::NotDue),
+            BUSY_TAG => Ok(Self::Busy),
             _ => Err(CodecError::Invalid("invalid workflow outcome tag")),
         }
+    }
+}
+
+impl WireValue for WorkflowControl {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        encoder.write_bytes(&self.workflow_id)?;
+        encoder.write_bytes(&self.run_id)?;
+        match &self.action {
+            WorkflowControlAction::Pause => encoder.write_u8(CONTROL_PAUSE_TAG),
+            WorkflowControlAction::Resume => encoder.write_u8(CONTROL_RESUME_TAG),
+            WorkflowControlAction::Restart { request_id, event } => {
+                encoder.write_u8(CONTROL_RESTART_TAG)?;
+                encoder.write_bytes(request_id.as_bytes())?;
+                encoder.write_bytes(event)
+            }
+        }
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
+        let workflow_id = decoder.read_bytes()?.to_vec();
+        let run_id = read_fixed(decoder, "workflow run ID length")?;
+        let action = match decoder.read_u8()? {
+            CONTROL_PAUSE_TAG => WorkflowControlAction::Pause,
+            CONTROL_RESUME_TAG => WorkflowControlAction::Resume,
+            CONTROL_RESTART_TAG => WorkflowControlAction::Restart {
+                request_id: RequestId::from_bytes(read_fixed(
+                    decoder,
+                    "workflow restart request ID length",
+                )?),
+                event: decoder.read_bytes()?.to_vec(),
+            },
+            _ => return Err(CodecError::Invalid("invalid workflow control action tag")),
+        };
+        Ok(Self {
+            workflow_id,
+            run_id,
+            action,
+        })
     }
 }
 
@@ -461,6 +596,7 @@ fn encode_status(status: WorkflowStatus, encoder: &mut BoundedEncoder) -> Result
         WorkflowStatus::Completed => 1,
         WorkflowStatus::Failed => 2,
         WorkflowStatus::Cancelled => 3,
+        WorkflowStatus::Paused => 4,
     })
 }
 
@@ -470,6 +606,7 @@ fn decode_status(decoder: &mut BoundedDecoder<'_>) -> Result<WorkflowStatus, Cod
         1 => Ok(WorkflowStatus::Completed),
         2 => Ok(WorkflowStatus::Failed),
         3 => Ok(WorkflowStatus::Cancelled),
+        4 => Ok(WorkflowStatus::Paused),
         _ => Err(CodecError::Invalid("invalid workflow status tag")),
     }
 }
@@ -487,7 +624,8 @@ fn validate_run(run: &WorkflowRun) -> Result<(), CodecError> {
         || run.state.len() > MAX_WORKFLOW_BYTES
         || result_bytes > MAX_WORKFLOW_BYTES
         || run.state.len().saturating_add(result_bytes) > MAX_WORKFLOW_BYTES
-        || (run.status == WorkflowStatus::Running && run.result.is_some())
+        || (matches!(run.status, WorkflowStatus::Running | WorkflowStatus::Paused)
+            && run.result.is_some())
     {
         return Err(CodecError::Invalid("invalid workflow run"));
     }
@@ -556,6 +694,7 @@ mod tests {
         const START_COMMAND_ID: u32 = 1;
         const SIGNAL_COMMAND_ID: u32 = 2;
         const CANCEL_COMMAND_ID: u32 = 3;
+        const CONTROL_COMMAND_ID: u32 = 4;
         const GET_QUERY_ID: u32 = 1;
     }
 
@@ -592,11 +731,25 @@ mod tests {
             WorkflowOutcome::RunMismatch,
             WorkflowOutcome::NotRunning,
             WorkflowOutcome::NotDue,
+            WorkflowOutcome::Busy,
         ] {
             roundtrip(outcome);
         }
         roundtrip(WorkflowGetRequest {
             workflow_id: b"build-42".to_vec(),
+        });
+        roundtrip(WorkflowControl {
+            workflow_id: b"build-42".to_vec(),
+            run_id: [2; 16],
+            action: WorkflowControlAction::Restart {
+                request_id: RequestId::from_bytes([8; 16]),
+                event: b"again".to_vec(),
+            },
+        });
+        roundtrip(WorkflowOutcome::Applied {
+            run_id: [2; 16],
+            status: WorkflowStatus::Paused,
+            event_sequence: 1,
         });
         roundtrip(Some(WorkflowRun {
             workflow_id: b"build-42".to_vec(),

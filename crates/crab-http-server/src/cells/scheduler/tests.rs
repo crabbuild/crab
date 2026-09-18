@@ -40,6 +40,7 @@ const WORKFLOW_COMMANDS: &[OperationDescriptor] = &[
     operation(5, 1 << 20, 1 << 20),
     operation(6, 1 << 20, 64),
     operation(7, 8, 5),
+    operation(8, 1 << 20, 64),
 ];
 const WORKFLOW_QUERIES: &[OperationDescriptor] =
     &[operation(1, 2048, 1 << 20), operation(2, 1 << 20, 1)];
@@ -304,6 +305,7 @@ impl WorkflowModule for SchedulerWorkflow {
     const START_COMMAND_ID: u32 = 1;
     const SIGNAL_COMMAND_ID: u32 = 2;
     const CANCEL_COMMAND_ID: u32 = 3;
+    const CONTROL_COMMAND_ID: u32 = 8;
     const GET_QUERY_ID: u32 = 1;
 }
 

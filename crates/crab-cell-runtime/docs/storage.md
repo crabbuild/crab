@@ -41,8 +41,10 @@ Partition bytes have a 1,024-byte limit. Routing uses stable namespace rules:
 | --- | --- |
 | Repository SQL | Repository UUID |
 | KV | Hash of scope |
+| Blob | Hash of object key |
 | Queue send | Hash of producer ID |
 | Queue claim | Explicit shard number |
+| Cron | Hash of schedule ID; explicit shard for list |
 | Workflow | Hash of workflow ID |
 
 Shard counts are powers of two from 1 through 4,096. An existing namespace cannot change its shard count.

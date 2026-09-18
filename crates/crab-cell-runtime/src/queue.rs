@@ -9,9 +9,10 @@ use crate::{
 mod api;
 
 pub use api::{
-    QueueClaimCommand, QueueClaimRequest, QueueDeadLetterTarget, QueueLeaseCommand,
-    QueueLeaseRequest, QueueModule, QueueNamespace, QueueSendCommand, QueueValidateClaimQuery,
-    QueueValidateRequest, register_queue,
+    QueueClaimCommand, QueueClaimRequest, QueueControlCommand, QueueDeadLetterTarget,
+    QueueInfoQuery, QueueInfoRequest, QueueLeaseCommand, QueueLeaseRequest, QueueModule,
+    QueueNamespace, QueueSendCommand, QueueValidateClaimQuery, QueueValidateRequest,
+    register_queue,
 };
 
 const QUEUE_SCHEMA: &str = include_str!("migrations/queue.sql");
@@ -172,6 +173,35 @@ pub enum QueueLeaseOutcome {
     LeaseLost,
 }
 
+/// Administrative mutation applied to one queue shard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueueControlAction {
+    Pause,
+    Resume,
+    Purge { limit: u32 },
+    Redrive { limit: u32 },
+}
+
+/// Result of one queue control mutation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueueControlOutcome {
+    Paused { generation: u64 },
+    Resumed { generation: u64 },
+    Purged { messages: u32 },
+    Redriven { messages: u32 },
+}
+
+/// Bounded queue shard state returned to operators.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueueInfo {
+    pub paused: bool,
+    pub generation: u64,
+    pub ready: u64,
+    pub leased: u64,
+    pub acked: u64,
+    pub dead: u64,
+}
+
 /// Installs the exact version-one Queue schema inside bootstrap or migration SQL.
 pub fn install_queue_schema(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute_batch(QUEUE_SCHEMA)?;
@@ -267,6 +297,9 @@ pub(crate) fn queue_claim_with_dead_letter(
     if !(MIN_LEASE_MS..=MAX_LEASE_MS).contains(&lease_ms) {
         return Err(Error::Command("queue lease must be in 5..=300 seconds"));
     }
+    if queue_paused(transaction)? {
+        return Ok(Vec::new());
+    }
     queue_reclaim_expired_bounded_with_dead_letter(
         transaction,
         now_ms,
@@ -352,6 +385,9 @@ pub fn queue_validate_claim(
     claimed: &[QueueMessage],
 ) -> Result<bool> {
     validate_now(now_ms)?;
+    if queue_paused(connection)? {
+        return Ok(false);
+    }
     for message in claimed {
         let state = connection
             .query_row(
@@ -383,6 +419,62 @@ pub fn queue_validate_claim(
         }
     }
     Ok(true)
+}
+
+/// Applies a bounded administrative action to one queue shard.
+pub fn queue_control(
+    transaction: &Transaction<'_>,
+    now_ms: i64,
+    action: QueueControlAction,
+) -> Result<QueueControlOutcome> {
+    validate_now(now_ms)?;
+    match action {
+        QueueControlAction::Pause => {
+            let generation = set_queue_paused(transaction, now_ms, true)?;
+            Ok(QueueControlOutcome::Paused { generation })
+        }
+        QueueControlAction::Resume => {
+            let generation = set_queue_paused(transaction, now_ms, false)?;
+            Ok(QueueControlOutcome::Resumed { generation })
+        }
+        QueueControlAction::Purge { limit } => {
+            let messages = purge_queue(transaction, limit)?;
+            Ok(QueueControlOutcome::Purged { messages })
+        }
+        QueueControlAction::Redrive { limit } => {
+            let messages = redrive_queue(transaction, now_ms, limit)?;
+            Ok(QueueControlOutcome::Redriven { messages })
+        }
+    }
+}
+
+/// Returns aggregate state for one queue shard.
+pub fn queue_info(connection: &Connection) -> Result<QueueInfo> {
+    let (paused, generation) = connection.query_row(
+        "SELECT paused, generation FROM queue_control WHERE singleton = 1",
+        [],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    let (ready, leased, acked, dead) = connection.query_row(
+        "SELECT count(*) FILTER (WHERE state = 0), count(*) FILTER (WHERE state = 1), count(*) FILTER (WHERE state = 2), count(*) FILTER (WHERE state = 3) FROM queue_messages",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        },
+    )?;
+    Ok(QueueInfo {
+        paused: paused != 0,
+        generation: nonnegative_u64(generation, "invalid queue control generation")?,
+        ready: nonnegative_u64(ready, "invalid ready queue count")?,
+        leased: nonnegative_u64(leased, "invalid leased queue count")?,
+        acked: nonnegative_u64(acked, "invalid acked queue count")?,
+        dead: nonnegative_u64(dead, "invalid dead queue count")?,
+    })
 }
 
 /// Applies an ack, retry or extension only to the exact live lease token.
@@ -645,6 +737,76 @@ pub(crate) fn queue_expire_ready_bounded_with_dead_letter(
         }
     }
     Ok(expired.len())
+}
+
+fn queue_paused(connection: &Connection) -> Result<bool> {
+    let paused = connection.query_row(
+        "SELECT paused FROM queue_control WHERE singleton = 1",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    Ok(paused != 0)
+}
+
+fn set_queue_paused(transaction: &Transaction<'_>, now_ms: i64, paused: bool) -> Result<u64> {
+    let paused_value = if paused { 1_i64 } else { 0_i64 };
+    transaction.execute(
+        "UPDATE queue_control SET paused = ?1, generation = generation + CASE WHEN paused = ?1 THEN 0 ELSE 1 END, updated_at_ms = ?2 WHERE singleton = 1",
+        (paused_value, now_ms),
+    )?;
+    let generation = transaction.query_row(
+        "SELECT generation FROM queue_control WHERE singleton = 1",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    nonnegative_u64(generation, "invalid queue control generation")
+}
+
+fn purge_queue(transaction: &Transaction<'_>, limit: u32) -> Result<u32> {
+    let limit = control_limit(limit)?;
+    let mut statement = transaction.prepare(
+        "SELECT message_id FROM queue_messages WHERE state != 1 ORDER BY message_id LIMIT ?1",
+    )?;
+    let rows = statement.query_map([i64::from(limit)], |row| row.get::<_, Vec<u8>>(0))?;
+    let ids = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(statement);
+    for id in &ids {
+        transaction.execute("DELETE FROM queue_dedup WHERE message_id = ?1", [id])?;
+        let changed = transaction.execute(
+            "DELETE FROM queue_messages WHERE message_id = ?1 AND state != 1",
+            [id],
+        )?;
+        if changed != 1 {
+            return Err(Error::Command("queue purge lost selected message"));
+        }
+    }
+    u32::try_from(ids.len()).map_err(|_| Error::Command("queue purge count overflow"))
+}
+
+fn redrive_queue(transaction: &Transaction<'_>, now_ms: i64, limit: u32) -> Result<u32> {
+    let limit = control_limit(limit)?;
+    let changed = transaction.execute(
+        "UPDATE queue_messages SET state = 0, attempt = 0, due_at_ms = ?1, expires_at_ms = ?2, token = NULL, lease_until_ms = NULL, result_code = NULL, dead_letter_effect_id = NULL WHERE message_id IN (SELECT message_id FROM queue_messages WHERE state = 3 AND (dead_letter_effect_id IS NULL OR NOT EXISTS (SELECT 1 FROM sys_effects WHERE effect_id = queue_messages.dead_letter_effect_id AND state IN (0, 1))) ORDER BY message_id LIMIT ?3)",
+        (
+            now_ms,
+            now_ms
+                .checked_add(RETENTION_MS)
+                .ok_or(Error::Command("queue redrive expiry overflow"))?,
+            i64::from(limit),
+        ),
+    )?;
+    u32::try_from(changed).map_err(|_| Error::Command("queue redrive count overflow"))
+}
+
+fn control_limit(limit: u32) -> Result<u32> {
+    if !(1..=MAX_RECLAIM_ITEMS as u32).contains(&limit) {
+        return Err(Error::Command("queue control limit must be in 1..=128"));
+    }
+    Ok(limit)
+}
+
+fn nonnegative_u64(value: i64, message: &'static str) -> Result<u64> {
+    u64::try_from(value).map_err(|_| Error::Command(message))
 }
 
 fn validate_maintenance_limit(limit: usize) -> Result<()> {

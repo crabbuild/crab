@@ -242,3 +242,105 @@ fn failed_dead_letter_insert_rolls_back_queue_transition() {
         .unwrap();
     assert_eq!((state, effects), (1, 0));
 }
+
+#[test]
+fn pause_blocks_claims_but_preserves_messages_for_resume() {
+    let mut connection = connection();
+    let transaction = connection.transaction().unwrap();
+    queue_send(
+        &transaction,
+        source_target().namespace(),
+        0,
+        &QueueSendRequest {
+            producer_id: [10; 16],
+            payload: b"work".to_vec(),
+            available_at_ms: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        queue_control(&transaction, 1, QueueControlAction::Pause).unwrap(),
+        QueueControlOutcome::Paused { generation: 1 }
+    );
+    assert!(
+        queue_claim(&transaction, 1, 1, 5_000, &mut SystemQueueTokens)
+            .unwrap()
+            .is_empty()
+    );
+    let info = queue_info(&transaction).unwrap();
+    assert!(info.paused);
+    assert_eq!(info.ready, 1);
+    assert_eq!(
+        queue_control(&transaction, 2, QueueControlAction::Resume).unwrap(),
+        QueueControlOutcome::Resumed { generation: 2 }
+    );
+    assert_eq!(
+        queue_claim(&transaction, 2, 1, 5_000, &mut SystemQueueTokens)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn purge_never_deletes_a_live_lease() {
+    let mut connection = connection();
+    let message_id = insert_leased_message(&mut connection);
+    let transaction = connection.transaction().unwrap();
+    assert_eq!(
+        queue_control(&transaction, 1, QueueControlAction::Purge { limit: 128 },).unwrap(),
+        QueueControlOutcome::Purged { messages: 0 }
+    );
+    assert_eq!(
+        transaction
+            .query_row(
+                "SELECT count(*) FROM queue_messages WHERE message_id = ?1",
+                [message_id.as_slice()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn redrive_waits_for_a_terminal_dead_letter_effect() {
+    let mut connection = connection();
+    let message_id = insert_leased_message(&mut connection);
+    let transaction = connection.transaction().unwrap();
+    let mut effects = EffectBatch::new(&transaction, &source_target(), 1, 10).unwrap();
+    let mut dead_letter = QueueDeadLetterWriter::new(dead_letter_target(1), &mut effects);
+    queue_apply_lease_with_dead_letter(
+        &transaction,
+        10,
+        message_id,
+        [8; 16],
+        QueueLeaseAction::Retry { delay_ms: 0 },
+        Some(&mut dead_letter),
+    )
+    .unwrap();
+    assert_eq!(
+        queue_control(&transaction, 11, QueueControlAction::Redrive { limit: 1 },).unwrap(),
+        QueueControlOutcome::Redriven { messages: 0 }
+    );
+    transaction
+        .execute(
+            "UPDATE sys_effects SET state = 3 WHERE effect_id = (SELECT dead_letter_effect_id FROM queue_messages WHERE message_id = ?1)",
+            [message_id.as_slice()],
+        )
+        .unwrap();
+    assert_eq!(
+        queue_control(&transaction, 12, QueueControlAction::Redrive { limit: 1 },).unwrap(),
+        QueueControlOutcome::Redriven { messages: 1 }
+    );
+    assert_eq!(
+        transaction
+            .query_row(
+                "SELECT state, attempt FROM queue_messages WHERE message_id = ?1",
+                [message_id.as_slice()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap(),
+        (0, 0)
+    );
+}

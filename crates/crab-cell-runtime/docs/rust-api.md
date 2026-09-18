@@ -233,7 +233,7 @@ impl KvModule for RepositoryCache {
 register_kv::<RepositoryCache>(&mut registry)?;
 ```
 
-The namespace descriptor must declare the matching role and shard count. Queue and Workflow modules also implement maintenance registration so the scheduler can advance leases, timers, and retention.
+The namespace descriptor must declare the matching role and shard count. Blob, Queue, Cron, and Workflow modules also implement maintenance registration so the scheduler can advance upload expiry, leases, occurrences, timers, and retention. Cron target bindings are checked against the destination namespace owner, command ID, codec version, and exact input limit before readiness.
 
 Read [primitives.md](primitives.md) before binding a primitive.
 

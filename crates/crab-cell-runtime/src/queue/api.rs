@@ -8,10 +8,11 @@ use crate::{
 };
 
 use super::{
-    MAX_ATTEMPTS, MAX_CLAIM_ITEMS, MAX_PAYLOAD_BYTES, QueueDeadLetterWriter, QueueLeaseAction,
-    QueueLeaseOutcome, QueueMessage, QueueSendOutcome, QueueSendRequest, QueueState,
-    SystemQueueTokens, queue_apply_lease, queue_apply_lease_with_dead_letter, queue_claim,
-    queue_claim_with_dead_letter, queue_send, queue_validate_claim,
+    MAX_ATTEMPTS, MAX_CLAIM_ITEMS, MAX_PAYLOAD_BYTES, QueueControlAction, QueueControlOutcome,
+    QueueDeadLetterWriter, QueueInfo, QueueLeaseAction, QueueLeaseOutcome, QueueMessage,
+    QueueSendOutcome, QueueSendRequest, QueueState, SystemQueueTokens, queue_apply_lease,
+    queue_apply_lease_with_dead_letter, queue_claim, queue_claim_with_dead_letter, queue_control,
+    queue_info, queue_send, queue_validate_claim,
 };
 
 const SENT_TAG: u8 = 0;
@@ -21,6 +22,10 @@ const RETRY_TAG: u8 = 1;
 const EXTEND_TAG: u8 = 2;
 const APPLIED_TAG: u8 = 0;
 const LEASE_LOST_TAG: u8 = 1;
+const PAUSE_TAG: u8 = 0;
+const RESUME_TAG: u8 = 1;
+const PURGE_TAG: u8 = 2;
+const REDRIVE_TAG: u8 = 3;
 
 /// Compile-time routing contract for one Queue namespace's dead-letter target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +83,8 @@ pub trait QueueModule: MaintenanceModule {
     const CLAIM_COMMAND_ID: u32;
     const LEASE_COMMAND_ID: u32;
     const VALIDATE_QUERY_ID: u32;
+    const CONTROL_COMMAND_ID: u32;
+    const INFO_QUERY_ID: u32;
 }
 
 /// Registers all typed Queue bindings contributed by one compiled module.
@@ -92,8 +99,51 @@ pub fn register_queue<M: QueueModule>(registry: &mut RegistryBuilder) -> crate::
     registry.bind_command::<QueueSendCommand<M>>()?;
     registry.bind_command::<QueueClaimCommand<M>>()?;
     registry.bind_command::<QueueLeaseCommand<M>>()?;
+    registry.bind_command::<QueueControlCommand<M>>()?;
     registry.bind_query::<QueueValidateClaimQuery<M>>()?;
+    registry.bind_query::<QueueInfoQuery<M>>()?;
     register_maintenance::<M>(registry)
+}
+
+/// Typed queue control command bound to immutable module operation IDs.
+pub struct QueueControlCommand<M>(PhantomData<fn() -> M>);
+
+impl<M: QueueModule> Command for QueueControlCommand<M> {
+    const MODULE: &'static str = M::MODULE;
+    const ID: u32 = M::CONTROL_COMMAND_ID;
+    const CODEC_VERSION: u32 = M::CODEC_VERSION;
+    type Input = QueueControlAction;
+    type Output = QueueControlOutcome;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        input: Self::Input,
+    ) -> crate::Result<CommandResult<Self::Output>> {
+        Ok(CommandResult::Success(queue_control(
+            context.primitive_transaction(),
+            context.now_ms(),
+            input,
+        )?))
+    }
+}
+
+/// Empty request for queue shard information.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct QueueInfoRequest;
+
+/// Typed queue shard information query.
+pub struct QueueInfoQuery<M>(PhantomData<fn() -> M>);
+
+impl<M: QueueModule> Query for QueueInfoQuery<M> {
+    const MODULE: &'static str = M::MODULE;
+    const ID: u32 = M::INFO_QUERY_ID;
+    const CODEC_VERSION: u32 = M::CODEC_VERSION;
+    type Input = QueueInfoRequest;
+    type Output = QueueInfo;
+
+    fn execute(context: &mut QueryContext<'_>, _: Self::Input) -> crate::Result<Self::Output> {
+        queue_info(context.primitive_connection())
+    }
 }
 
 /// Typed Queue send bound to immutable module operation IDs.
@@ -377,6 +427,81 @@ impl<M: QueueModule> QueueNamespace<M> {
         .await
     }
 
+    /// Pauses new claims while allowing live lease settlement.
+    pub async fn pause(
+        &self,
+        identity: crate::MutationIdentity,
+        shard: u32,
+    ) -> std::result::Result<Committed<QueueControlOutcome>, InvocationError<QueueControlOutcome>>
+    {
+        self.control(identity, shard, QueueControlAction::Pause)
+            .await
+    }
+
+    /// Resumes claims on one queue shard.
+    pub async fn resume(
+        &self,
+        identity: crate::MutationIdentity,
+        shard: u32,
+    ) -> std::result::Result<Committed<QueueControlOutcome>, InvocationError<QueueControlOutcome>>
+    {
+        self.control(identity, shard, QueueControlAction::Resume)
+            .await
+    }
+
+    /// Deletes a bounded batch of non-leased messages.
+    pub async fn purge(
+        &self,
+        identity: crate::MutationIdentity,
+        shard: u32,
+        limit: u32,
+    ) -> std::result::Result<Committed<QueueControlOutcome>, InvocationError<QueueControlOutcome>>
+    {
+        self.control(identity, shard, QueueControlAction::Purge { limit })
+            .await
+    }
+
+    /// Returns a bounded batch of dead messages to ready state.
+    pub async fn redrive(
+        &self,
+        identity: crate::MutationIdentity,
+        shard: u32,
+        limit: u32,
+    ) -> std::result::Result<Committed<QueueControlOutcome>, InvocationError<QueueControlOutcome>>
+    {
+        self.control(identity, shard, QueueControlAction::Redrive { limit })
+            .await
+    }
+
+    /// Reads aggregate control and lifecycle state for one queue shard.
+    pub async fn info(
+        &self,
+        shard: u32,
+        minimum: Option<Receipt>,
+    ) -> std::result::Result<Observed<QueueInfo>, InvocationError<QueueInfo>> {
+        let target = self
+            .shard_target(shard)
+            .map_err(InvocationError::NotStarted)?;
+        self.client
+            .query::<QueueInfoQuery<M>>(&target, minimum, QueueInfoRequest)
+            .await
+    }
+
+    async fn control(
+        &self,
+        identity: crate::MutationIdentity,
+        shard: u32,
+        action: QueueControlAction,
+    ) -> std::result::Result<Committed<QueueControlOutcome>, InvocationError<QueueControlOutcome>>
+    {
+        let target = self
+            .shard_target(shard)
+            .map_err(InvocationError::NotStarted)?;
+        self.client
+            .command::<QueueControlCommand<M>>(&target, identity, action)
+            .await
+    }
+
     async fn apply_lease(
         &self,
         identity: crate::MutationIdentity,
@@ -602,6 +727,110 @@ impl WireValue for QueueValidateRequest {
     }
 }
 
+impl WireValue for QueueControlAction {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        match self {
+            Self::Pause => encoder.write_u8(PAUSE_TAG),
+            Self::Resume => encoder.write_u8(RESUME_TAG),
+            Self::Purge { limit } => {
+                encoder.write_u8(PURGE_TAG)?;
+                encoder.write_u32(*limit)
+            }
+            Self::Redrive { limit } => {
+                encoder.write_u8(REDRIVE_TAG)?;
+                encoder.write_u32(*limit)
+            }
+        }
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
+        match decoder.read_u8()? {
+            PAUSE_TAG => Ok(Self::Pause),
+            RESUME_TAG => Ok(Self::Resume),
+            PURGE_TAG => Ok(Self::Purge {
+                limit: decoder.read_u32()?,
+            }),
+            REDRIVE_TAG => Ok(Self::Redrive {
+                limit: decoder.read_u32()?,
+            }),
+            _ => Err(CodecError::Invalid("invalid queue control action tag")),
+        }
+    }
+}
+
+impl WireValue for QueueControlOutcome {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        match self {
+            Self::Paused { generation } => {
+                encoder.write_u8(PAUSE_TAG)?;
+                encoder.write_u64(*generation)
+            }
+            Self::Resumed { generation } => {
+                encoder.write_u8(RESUME_TAG)?;
+                encoder.write_u64(*generation)
+            }
+            Self::Purged { messages } => {
+                encoder.write_u8(PURGE_TAG)?;
+                encoder.write_u32(*messages)
+            }
+            Self::Redriven { messages } => {
+                encoder.write_u8(REDRIVE_TAG)?;
+                encoder.write_u32(*messages)
+            }
+        }
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
+        match decoder.read_u8()? {
+            PAUSE_TAG => Ok(Self::Paused {
+                generation: decoder.read_u64()?,
+            }),
+            RESUME_TAG => Ok(Self::Resumed {
+                generation: decoder.read_u64()?,
+            }),
+            PURGE_TAG => Ok(Self::Purged {
+                messages: decoder.read_u32()?,
+            }),
+            REDRIVE_TAG => Ok(Self::Redriven {
+                messages: decoder.read_u32()?,
+            }),
+            _ => Err(CodecError::Invalid("invalid queue control outcome tag")),
+        }
+    }
+}
+
+impl WireValue for QueueInfoRequest {
+    fn encode(&self, _: &mut BoundedEncoder) -> Result<(), CodecError> {
+        Ok(())
+    }
+
+    fn decode(_: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
+        Ok(Self)
+    }
+}
+
+impl WireValue for QueueInfo {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        self.paused.encode(encoder)?;
+        encoder.write_u64(self.generation)?;
+        encoder.write_u64(self.ready)?;
+        encoder.write_u64(self.leased)?;
+        encoder.write_u64(self.acked)?;
+        encoder.write_u64(self.dead)
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
+        Ok(Self {
+            paused: bool::decode(decoder)?,
+            generation: decoder.read_u64()?,
+            ready: decoder.read_u64()?,
+            leased: decoder.read_u64()?,
+            acked: decoder.read_u64()?,
+            dead: decoder.read_u64()?,
+        })
+    }
+}
+
 fn encode_state(state: QueueState, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
     encoder.write_u8(match state {
         QueueState::Ready => 0,
@@ -709,6 +938,16 @@ mod tests {
         roundtrip(QueueLeaseOutcome::LeaseLost);
         roundtrip(QueueValidateRequest {
             claimed: vec![message],
+        });
+        roundtrip(QueueControlAction::Purge { limit: 128 });
+        roundtrip(QueueControlOutcome::Paused { generation: 7 });
+        roundtrip(QueueInfo {
+            paused: true,
+            generation: 7,
+            ready: 1,
+            leased: 2,
+            acked: 3,
+            dead: 4,
         });
     }
 
