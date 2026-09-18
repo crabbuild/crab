@@ -2161,12 +2161,33 @@ class ConcurrentPushSmoke:
     def run_fsck(self) -> None:
         if self.args.skip_fsck:
             return
+        repair_record = self.run_crab(
+            self.seed,
+            ["fsck", "--repair", "--json"],
+            name="crab fsck repair",
+        )
+        repair_payload = first_json_object(
+            Path(repair_record.stdout_log).read_text(encoding="utf-8"),
+            "fsck",
+        )
+        repair_data = repair_payload.get("data", {}) if repair_payload else {}
+        self.check(
+            "fsck-repair-completes",
+            repair_data.get("passed") is True
+            and repair_data.get("repair_failures") == 0
+            and repair_data.get("errors", 0) <= repair_data.get("repaired", 0),
+            repair_data,
+        )
         record = self.run_crab(self.seed, ["fsck", "--json"], name="crab fsck")
         payload = first_json_object(Path(record.stdout_log).read_text(encoding="utf-8"), "fsck")
         errors = None
         if payload and payload.get("data"):
             errors = payload["data"].get("errors")
-        self.check("fsck-clean-or-no-errors", errors in (None, 0), {"errors": errors})
+        self.check(
+            "fsck-clean-or-no-errors",
+            errors in (None, 0),
+            {"errors": errors, "repair": repair_data},
+        )
 
     def run(self) -> int:
         try:
