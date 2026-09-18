@@ -2945,6 +2945,73 @@ async fn unchanged_dead_owner_is_taken_over_then_restored() {
 }
 
 #[tokio::test]
+async fn failed_takeover_receiver_does_not_leave_authority_owned() {
+    let fixture = fixture_for(b"takeover-receiver-activation-failure");
+    let handle = activate(&fixture, 16 * 1024 * 1024).await;
+    drop(handle);
+
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let stale = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let expected_root = stale.value().root.clone();
+    let previous = stale.value().owner.as_ref().unwrap().session;
+    let successor = SessionId::from_bytes([44; 16]);
+    let takeover = fence_session(&fixture.layout, previous, successor).await;
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        16 * 1024 * 1024,
+        successor,
+    )
+    .unwrap();
+    let missing_parent = fixture
+        ._directory
+        .path()
+        .join("takeover-receiver-parent-does-not-exist")
+        .join("takeover-receiver.sqlite");
+    assert!(
+        runtime
+            .takeover_restored(
+                proof,
+                fixture.replica.clone(),
+                authority.clone(),
+                stale,
+                takeover.direct_takeover().unwrap(),
+                crab_cell_runtime::RecoveryManifestStore::new(
+                    fixture.layout.clone(),
+                    Limits::default(),
+                ),
+                missing_parent,
+                Owner {
+                    session: successor,
+                    endpoint: "https://takeover-receiver-failure.internal:8081".into(),
+                },
+            )
+            .await
+            .is_err()
+    );
+
+    let current = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.value().state, ControlState::Idle);
+    assert!(current.value().owner.is_none());
+    assert_eq!(current.value().root, expected_root);
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn takeover_resumes_pinned_recovery_before_serving() {
     recover_retained_tail(false).await;
 }

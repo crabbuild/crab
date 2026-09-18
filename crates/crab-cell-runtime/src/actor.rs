@@ -1015,7 +1015,7 @@ impl CellRuntime {
         {
             Ok(handle) => Ok(handle),
             Err(error) => {
-                match rollback_idle_acquisition(
+                match rollback_failed_acquisition(
                     &rollback_authority,
                     &rollback_claim,
                     &rollback_replica,
@@ -1048,6 +1048,9 @@ impl CellRuntime {
     ) -> crate::Result<CellHandle> {
         self.ensure_running()?;
         let replica = self.replica_with_directory_cache(replica, &destination)?;
+        let rollback_node_lease = self.inner.node_lease.guard()?;
+        let rollback_authority = authority.clone();
+        let rollback_replica = replica.clone();
         let cell = self.claiming_cell(&catalog, &observed, &owner)?;
         if owner.session != takeover.claimant() {
             return Err(Error::Fenced);
@@ -1097,10 +1100,28 @@ impl CellRuntime {
                     }
                 }
             };
-            let claimed = self
+            let recovery_rollback_claim = claimed.clone();
+            let claimed = match self
                 .publish_attached_recovery(&replica, &authority, claimed, &recovery_store)
-                .await?;
-            return self
+                .await
+            {
+                Ok(claimed) => claimed,
+                Err(error) => {
+                    match rollback_failed_acquisition(
+                        &rollback_authority,
+                        &recovery_rollback_claim,
+                        &rollback_replica,
+                        rollback_node_lease.clone(),
+                    )
+                    .await
+                    {
+                        Ok(()) => return Err(error),
+                        Err(cleanup) => return Err(cleanup),
+                    }
+                }
+            };
+            let rollback_claim = claimed.clone();
+            return match self
                 .activate_restored_reserved(
                     catalog,
                     replica,
@@ -1109,7 +1130,23 @@ impl CellRuntime {
                     destination,
                     reservation,
                 )
-                .await;
+                .await
+            {
+                Ok(handle) => Ok(handle),
+                Err(error) => {
+                    match rollback_failed_acquisition(
+                        &rollback_authority,
+                        &rollback_claim,
+                        &rollback_replica,
+                        rollback_node_lease,
+                    )
+                    .await
+                    {
+                        Ok(()) => Err(error),
+                        Err(cleanup) => Err(cleanup),
+                    }
+                }
+            };
         }
     }
 
@@ -3971,7 +4008,7 @@ async fn cleanup_failed_activation(
     }
 }
 
-async fn rollback_idle_acquisition(
+async fn rollback_failed_acquisition(
     authority: &CellAuthority,
     claimed: &VersionedControl,
     replica: &crab_ltx::CellReplica,
@@ -3990,6 +4027,7 @@ async fn rollback_idle_acquisition(
         || current.value().recovery != claimed.value().recovery
         || current.value().code != claimed.value().code
         || current.value().schema != claimed.value().schema
+        || current.value().recovery.is_some()
     {
         return Ok(());
     }
@@ -4009,6 +4047,9 @@ async fn rollback_idle_acquisition(
                 || latest.value().epoch != claimed.value().epoch
                 || latest.value().owner != claimed.value().owner
                 || latest.value().root != claimed.value().root
+                || latest.value().recovery != claimed.value().recovery
+                || latest.value().code != claimed.value().code
+                || latest.value().schema != claimed.value().schema
             {
                 Ok(())
             } else {

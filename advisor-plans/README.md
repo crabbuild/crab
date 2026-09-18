@@ -250,8 +250,11 @@ the release while dropping its response, verifies reconciliation, and restores
 the unchanged root in a successor runtime. The local
 `failed_idle_receiver_does_not_leave_authority_owned` case then forces a
 receiver activation failure after the idle takeover CAS and verifies the
-exact root returns to unowned `Idle`; protected three-Pod movement and
-membership receipts remain open.
+exact root returns to unowned `Idle`. Its takeover counterpart,
+`failed_takeover_receiver_does_not_leave_authority_owned`, proves the same
+rollback after fencing an old owner; pinned recovery overlays remain owned
+until replay is sealed. Protected three-Pod movement and membership receipts
+remain open.
 
 Restart inventory is now fail-closed at the HTTP composition boundary. Each
 process gets a fresh `cells/sessions/<session-id>` directory; before the
