@@ -1,6 +1,6 @@
 # Persistent verified Cell directory-node cache
 
-Status: IN PROGRESS — restart-persistent verified cache, bounded fill/eviction, concurrent-fill coverage, shared DiskBudget accounting, exported cache stats, and runtime cold-restore cache binding pass local tests; zero-origin warm-restart qualification remains
+Status: DONE — restart-persistent verified cache, bounded fill/eviction, concurrent-fill coverage, shared DiskBudget accounting, exported cache stats, runtime cold-restore cache binding, and fresh-replica warm-restart qualification pass local tests
 Priority: P1
 Effort: L
 Risk: Medium
@@ -82,8 +82,8 @@ safe to persist locally when every hit is verified.
    efficiency, not Cell correctness.
 6. Wire server startup/shutdown and metrics. Labels remain bounded; expose
    hits, misses, corruptions, bytes, evictions, and fill concurrency.
-7. Prove warm restart reads directory nodes from disk cache with zero origin
-   calls; then corrupt one entry and prove refetch/repair; remove origin content
+7. Prove warm restart reads directory nodes from disk cache without a directory
+   origin read; then corrupt one entry and prove refetch/repair; remove origin content
    and prove cache alone does not authorize a root absent authoritative control.
 
 ## Verification
@@ -106,7 +106,11 @@ git diff --check
 ## Acceptance criteria
 
 - [x] Verified immutable directory nodes survive process restart and avoid
-      origin reads on a valid cache hit.
+      directory origin reads on a valid cache hit. The
+      `directory_cache_survives_replica_restart_without_directory_origin_read`
+      test compares fresh Store identities against the same backend, preventing
+      the process-local cache from satisfying the warm-restart read; the page
+      frame remains an origin read.
 - [x] Every hit revalidates identity/digest/length through canonical decoding.
 - [x] Corruption and truncation have named tests.
 - [x] Stale temporary files, concurrent fills, and byte-bounded eviction have

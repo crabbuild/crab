@@ -7,7 +7,7 @@ use std::sync::{
 
 use bytes::Bytes;
 use crab_ltx::{
-    CaptureBatch, CellReplica, Host, Limits, ManagedDb, RecoveryOverlay, RootRef,
+    CaptureBatch, CellReplica, DiskBudget, Host, Limits, ManagedDb, RecoveryOverlay, RootRef,
     VerifiedLocalPlan,
     bundle::{Bundle, BundleEntry},
     restore_exact,
@@ -497,6 +497,76 @@ async fn directory_nodes_are_shared_across_exact_root_views() {
     let before_second_fault = metadata_reads.load(Ordering::SeqCst);
     second.paged().read_page(1).await.unwrap();
     assert_eq!(metadata_reads.load(Ordering::SeqCst), before_second_fault);
+}
+
+#[tokio::test]
+async fn directory_cache_survives_replica_restart_without_directory_origin_read() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let cache_root = directory.path().join("directory-cache");
+    let mut writer =
+        ManagedDb::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE payload(value BLOB NOT NULL);\
+                 INSERT INTO payload VALUES(randomblob(2000000))",
+            )
+        })
+        .unwrap();
+
+    let backend = Arc::new(InMemory::new());
+    let cell = [85; 32];
+    let incarnation = [86; 16];
+    let cache_host = Host::default()
+        .with_local_disk_budget(DiskBudget::new(64 * 1024 * 1024))
+        .with_directory_cache(cache_root.clone());
+    let first =
+        replica(Store::new(backend.clone()), cell, incarnation).with_host(cache_host.clone());
+    let root = first
+        .prepare(None, &writer.capture().unwrap(), 1, 1)
+        .await
+        .unwrap()
+        .root();
+    let warm_replica =
+        replica(Store::new(backend.clone()), cell, incarnation).with_host(cache_host.clone());
+    let warm = warm_replica.open_root(&root).await.unwrap();
+    assert_eq!(warm.directory_height(), 1);
+    warm.paged().read_page(1).await.unwrap();
+    assert!(cache_host.directory_cache_stats().unwrap().entries() >= 1);
+    drop(first);
+    drop(warm_replica);
+
+    let uncached_reads = Arc::new(AtomicU64::new(0));
+    let observed = Arc::clone(&uncached_reads);
+    let uncached_store =
+        Store::new(backend.clone()).with_read_byte_observer(Arc::new(move |bytes| {
+            observed.fetch_add(bytes, Ordering::SeqCst);
+        }));
+    let uncached = replica(uncached_store, cell, incarnation);
+    let uncached_root = uncached.open_root(&root).await.unwrap();
+    uncached_reads.store(0, Ordering::SeqCst);
+    uncached_root.paged().read_page(1).await.unwrap();
+    let uncached_bytes = uncached_reads.load(Ordering::SeqCst);
+    assert!(uncached_bytes > 0);
+
+    let cached_reads = Arc::new(AtomicU64::new(0));
+    let observed = Arc::clone(&cached_reads);
+    let cached_store = Store::new(backend).with_read_byte_observer(Arc::new(move |bytes| {
+        observed.fetch_add(bytes, Ordering::SeqCst);
+    }));
+    let cached_host = Host::default()
+        .with_local_disk_budget(DiskBudget::new(64 * 1024 * 1024))
+        .with_directory_cache(cache_root);
+    let cached = replica(cached_store, cell, incarnation).with_host(cached_host);
+    let cached_root = cached.open_root(&root).await.unwrap();
+    cached_reads.store(0, Ordering::SeqCst);
+    cached_root.paged().read_page(1).await.unwrap();
+    let cached_bytes = cached_reads.load(Ordering::SeqCst);
+
+    assert!(
+        cached_bytes < uncached_bytes,
+        "a restarted replica must avoid the persisted directory-node origin read"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

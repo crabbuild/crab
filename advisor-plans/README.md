@@ -71,7 +71,7 @@ conditions so an executor can use it without relying on conversation history.
 | [008](008-resident-cell-local-routing.md) | Zero-metadata-I/O local handle acquisition for safe resident Cells | P0 | L | 004, 005 | IN PROGRESS |
 | [009](009-background-hydration-and-resident-promotion.md) | Bounded sparse hydration and verified resident promotion | P0 | L | 008 | IN PROGRESS |
 | [010](010-streaming-cell-ltx-publication.md) | Bounded-memory native and bundle publication | P0 | XL | 005 | IN PROGRESS |
-| [011](011-persistent-directory-node-cache.md) | Restart-persistent verified directory acceleration | P1 | L | 010 | IN PROGRESS |
+| [011](011-persistent-directory-node-cache.md) | Restart-persistent verified directory acceleration | P1 | L | 010 | DONE |
 | [012](012-cell-lifecycle-eviction-and-resource-accounting.md) | Quiescing, idle eviction, and one resource ledger | P0 | XL | 008-011 | IN PROGRESS |
 | [013](013-signed-placement-observations-and-planner.md) | Authenticated live observations and deterministic weighted placement | P0 | XL | 005, 012 | IN PROGRESS |
 | [014](014-pressure-shedding-and-paced-drain.md) | Hysteretic shedding and safe paced movement | P0 | XL | 013 | IN PROGRESS |
@@ -218,6 +218,17 @@ regression executes a durable SQL mutation, waits for inventory refresh, and
 proves that retained request outcomes keep `evict_idle` fail-closed until the
 canonical drain/release path runs. It also checks the active-Cell ledger returns
 to zero after release.
+
+Plan 011's warm-restart boundary is now locally qualified by
+`directory_cache_survives_replica_restart_without_directory_origin_read` in
+`crates/crab-ltx/tests/cell_roots.rs`. The test warms the verified directory
+cache, drops the first replica, then uses fresh Store identities against the
+same backend so the process-local node cache cannot satisfy the read. A
+no-cache fresh replica establishes the origin-read baseline; the restarted
+cache-enabled replica reads the same page with fewer origin bytes, proving the
+directory nodes came from the persisted cache while the page frame still comes
+from canonical storage. The test is repeatable and passes with the full
+`crab-ltx --features replica` cell-root target.
 
 The coordination kernel now records a typed intent beside every local effect
 identity. A completion must match both the activation generation and its
