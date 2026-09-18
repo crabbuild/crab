@@ -65,6 +65,27 @@ fn node_cache() -> &'static Mutex<NodeCache> {
     CACHE.get_or_init(|| Mutex::new(NodeCache::default()))
 }
 
+pub(super) fn cache_uploaded(
+    layout: &CellStorageLayout,
+    cell: &[u8; 32],
+    incarnation: &[u8; 16],
+    digest: [u8; 32],
+    bytes: &[u8],
+) -> Result<()> {
+    let path =
+        layout.incarnation_object_path(cell, incarnation, &digest, CellObjectKind::Directory);
+    let key = CacheKey {
+        store: layout.immutable_cache_identity(),
+        path: path.to_string(),
+        digest,
+    };
+    node_cache()
+        .lock()
+        .map_err(|_| CrabError::InvalidState("Cell directory cache poisoned"))?
+        .insert(key, bytes.to_vec().into());
+    Ok(())
+}
+
 #[derive(Clone)]
 pub(super) struct DirectoryEntry {
     pub page: u32,

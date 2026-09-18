@@ -1,6 +1,6 @@
 # Cell quiescing, idle eviction, and unified resource accounting
 
-Status: IN PROGRESS — RAII ledger shared by active Cells, resident native bytes, SQL work, hydration jobs, retained publication bytes, and primitive activity/effect jobs; deterministic victim selection, actor eviction, pressure pacing, retained-byte accounting, and fail-closed persisted-work refresh are wired; cross-crate consumer registration/restart-churn proof remains
+Status: IN PROGRESS — RAII ledger shared by active Cells, resident native bytes, SQL work, hydration jobs, retained publication bytes, primitive activity/effect jobs, and the canonical LTX `DiskBudget`; deterministic victim selection, actor eviction, pressure pacing, retained-byte accounting, and fail-closed persisted-work refresh are wired; cross-crate consumer registration/restart-churn proof remains
 Priority: P0
 Effort: XL
 Risk: High
@@ -66,6 +66,11 @@ Track and reconcile at least:
 - queue/workflow/activity/effect runnable and leased jobs;
 - local Cell database/scratch disk.
 
+The canonical `crab_ltx::DiskBudget` is installed as a runtime-owned admission
+on `CellRuntime` startup. It imports existing reservations, reconciles every
+reserve/resize/release, and reports the same disk total through runtime stats;
+the hook is weakly held so a dropped runtime is removed on the next admission.
+
 Every reservation has one owner, a limit, and release on all exits. Reported
 totals derive from this ledger plus measured filesystem/resource probes; do not
 maintain unrelated counters with different semantics.
@@ -125,6 +130,8 @@ a timeout or process exit is not proof of cleanup.
       acknowledged exact root.
 - [x] Busy, unpublished, migrating, pinned, or leased work is never selected.
 - [ ] Every listed resource consumer reserves and releases through one ledger.
+- [x] Canonical LTX local-disk reservations reconcile with the runtime ledger
+      without allowing a failed admission to leak bytes.
 - [ ] Advertised/metric totals reconcile with actor state and measured local
       disk within a documented tolerance.
 - [ ] Restart inventory does not undercount existing owned files.

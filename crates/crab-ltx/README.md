@@ -32,6 +32,7 @@ cutover and measured capacity qualification still remain. See the
 | `restore_exact(plan, path)` | Installs a new SQLite file at exactly the verified endpoint; never overwrites |
 | `compact_exact(plan, path)` | Compacts that complete chain into a verified standalone snapshot; never deletes inputs |
 | `Host::with_local_disk_budget(DiskBudget)` | Shares byte-precise WAL/LTX/sparse-page admission across cloned hosts; exhausted write admission occurs before SQL begins |
+| `Host::install_disk_admission(...)` | Reconciles every local-disk reserve, resize, release, and late host installation with the embedding runtime's node ledger |
 | `Host::with_scratch_monitor(ScratchMonitor)` | Rechecks embedding-service disk pressure after process-wide full-job scratch admission and before remote body downloads |
 | `close()` | Releases local connections/read lock; does not upload, publish or release a remote lease |
 

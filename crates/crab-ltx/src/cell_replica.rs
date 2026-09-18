@@ -1330,7 +1330,16 @@ impl CellReplica {
         let path = self
             .layout
             .incarnation_object_path(&self.cell, &self.incarnation, digest, kind);
-        self.layout.store().put(&path, bytes).await?;
+        self.layout.store().put(&path, bytes.clone()).await?;
+        if kind == CellObjectKind::Directory {
+            directory::cache_uploaded(
+                &self.layout,
+                &self.cell,
+                &self.incarnation,
+                *digest,
+                &bytes,
+            )?;
+        }
         Ok(())
     }
 

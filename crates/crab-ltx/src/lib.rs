@@ -19,7 +19,7 @@ mod error;
 mod host;
 #[cfg(feature = "replica")]
 pub use environment::{DirectoryCacheStats, ScratchMonitor};
-pub use environment::{DiskBudget, DiskReservation, Host};
+pub use environment::{DiskBudget, DiskBudgetAdmission, DiskReservation, Host};
 mod ltx;
 mod lz4_block;
 mod managed;

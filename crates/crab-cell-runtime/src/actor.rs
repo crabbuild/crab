@@ -28,8 +28,8 @@ use crate::pressure::{
 };
 use crate::publication::{CellDurabilitySubmitter, NodeDurabilitySlot, PendingDurability};
 use crate::resource::{
-    ACTIVE_CELL_NATIVE_BYTES as ACTIVE_CELL_NATIVE_BYTES_USIZE, ResourceCost, ResourceLedger,
-    ResourceReservation,
+    ACTIVE_CELL_NATIVE_BYTES as ACTIVE_CELL_NATIVE_BYTES_USIZE, LedgerDiskAdmission, ResourceCost,
+    ResourceLedger, ResourceReservation,
 };
 use crate::{
     ApplicationId, CatalogEntry, CatalogProof, CatalogRole, CellAuthority, CellId, CellPublisher,
@@ -301,6 +301,10 @@ impl CellRuntime {
         }
         pool.configure_retained_capacity(node_retained_bytes)?;
         let resources = pool.resource_ledger();
+        resources.set_disk_limit(replica_host.local_disk_capacity())?;
+        replica_host.install_disk_admission(Arc::new(LedgerDiskAdmission {
+            state: resources.weak(),
+        }))?;
         let runtime = tokio::runtime::Handle::try_current().map_err(Error::RuntimeStart)?;
         let (sender, receiver) = mpsc::channel(INGRESS_REQUESTS);
         let node_lease = Arc::new(node_lease);
@@ -483,6 +487,8 @@ impl CellRuntime {
             primitive_job_capacity,
             hydration_jobs,
             hydration_job_capacity,
+            disk_bytes,
+            disk_capacity_bytes,
         ) = self
             .inner
             .resources
@@ -499,9 +505,11 @@ impl CellRuntime {
                     snapshot.limit.primitive_jobs(),
                     snapshot.used.hydration_jobs(),
                     snapshot.limit.hydration_jobs(),
+                    snapshot.used.disk_bytes(),
+                    snapshot.limit.disk_bytes(),
                 )
             })
-            .unwrap_or((0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+            .unwrap_or((0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
         CellRuntimeStats {
             active_cells: self.inner.pool.active_cells(),
             active_cell_capacity: self.inner.pool.active_cell_capacity(),
@@ -515,8 +523,8 @@ impl CellRuntime {
             primitive_job_capacity,
             hydration_jobs,
             hydration_job_capacity,
-            local_disk_reserved_bytes: self.inner.replica_host.local_disk_used(),
-            local_disk_capacity_bytes: self.inner.replica_host.local_disk_capacity(),
+            local_disk_reserved_bytes: disk_bytes,
+            local_disk_capacity_bytes: disk_capacity_bytes,
             unpublished_node_log_bytes: self
                 .inner
                 .unpublished_node_log_bytes

@@ -173,7 +173,10 @@ catalog/control I/O; sparse restored Cells receive bounded
 `ManagedDb::hydrate_step` work on the existing SQL worker; active-cell admission
 uses an exact RAII resource ledger (including resident native bytes, bounded
 SQL-worker, hydration-job, and primitive activity/effect reservations, with
-runtime metrics for hydration usage/capacity); persisted
+runtime metrics for hydration usage/capacity); the runtime installs a weak
+ledger admission on `crab_ltx::DiskBudget`, imports existing local bytes, and
+keeps LTX reserve/resize/release usage identical to the advertised disk total;
+persisted
 Queue/Workflow rows are re-inspected after durable work before eviction; the
 eviction seam now has a pure
 deterministic selector that

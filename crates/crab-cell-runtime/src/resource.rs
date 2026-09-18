@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use crate::{Error, Result};
 
@@ -176,6 +176,10 @@ impl ResourceLedger {
         }
     }
 
+    pub(crate) fn weak(&self) -> Weak<Mutex<ResourceSnapshot>> {
+        Arc::downgrade(&self.state)
+    }
+
     pub(crate) fn try_reserve(&self, cost: ResourceCost) -> Result<ResourceReservation> {
         let mut state = self
             .state
@@ -214,6 +218,31 @@ impl ResourceLedger {
         Ok(())
     }
 
+    pub(crate) fn set_disk_limit(&self, bytes: u64) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| Error::Control("resource ledger lock poisoned"))?;
+        if state.used.disk_bytes() > bytes {
+            return Err(Error::Capacity("resource ledger disk bytes"));
+        }
+        state.limit = state.limit.with_disk_bytes(bytes);
+        Ok(())
+    }
+
+    pub(crate) fn reconcile_disk(&self, bytes: u64) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| Error::Control("resource ledger lock poisoned"))?;
+        let used = state.used.with_disk_bytes(bytes);
+        if !used.fits_within(state.limit) {
+            return Err(Error::Capacity("resource ledger"));
+        }
+        state.used = used;
+        Ok(())
+    }
+
     fn release(&self, cost: ResourceCost) {
         if let Ok(mut state) = self.state.lock()
             && let Some(used) = state.used.checked_sub(cost)
@@ -233,6 +262,26 @@ pub(crate) struct ResourceReservation {
 impl Drop for ResourceReservation {
     fn drop(&mut self) {
         self.ledger.release(self.cost);
+    }
+}
+
+pub(crate) struct LedgerDiskAdmission {
+    pub(crate) state: Weak<Mutex<ResourceSnapshot>>,
+}
+
+impl crab_ltx::DiskBudgetAdmission for LedgerDiskAdmission {
+    fn reconcile(&self, bytes: u64) -> crab_ltx::Result<()> {
+        let Some(state) = self.state.upgrade() else {
+            return Err(crab_ltx::CrabError::InvalidState("runtime ledger closed"));
+        };
+        ResourceLedger { state }
+            .reconcile_disk(bytes)
+            .map_err(|error| crab_ltx::CrabError::Other(Box::new(error)))?;
+        Ok(())
+    }
+
+    fn is_live(&self) -> bool {
+        self.state.strong_count() != 0
     }
 }
 
@@ -309,5 +358,38 @@ mod tests {
             }
         });
         assert_eq!(ledger.snapshot().unwrap().used, ResourceCost::zero());
+    }
+
+    #[test]
+    fn ltx_disk_reservations_share_the_runtime_ledger() {
+        let ledger = ResourceLedger::new(ResourceCost::zero().with_disk_bytes(10));
+        let budget = crab_ltx::DiskBudget::new(20);
+        let existing = budget.try_reserve(1).unwrap();
+        budget
+            .install_admission(Arc::new(LedgerDiskAdmission {
+                state: ledger.weak(),
+            }))
+            .unwrap();
+        assert_eq!(ledger.snapshot().unwrap().used.disk_bytes(), 1);
+        drop(existing);
+        assert_eq!(ledger.snapshot().unwrap().used.disk_bytes(), 0);
+
+        let reservation = budget.try_reserve(4).unwrap();
+        assert_eq!(budget.used(), 4);
+        assert_eq!(ledger.snapshot().unwrap().used.disk_bytes(), 4);
+        reservation.resize(7).unwrap();
+        assert_eq!(ledger.snapshot().unwrap().used.disk_bytes(), 7);
+        assert!(budget.try_reserve(4).is_err());
+        assert_eq!(budget.used(), 7);
+        assert_eq!(ledger.snapshot().unwrap().used.disk_bytes(), 7);
+        assert!(reservation.try_grow(4).is_err());
+        assert_eq!(reservation.bytes(), 7);
+        assert!(reservation.resize(11).is_err());
+        assert_eq!(reservation.bytes(), 7);
+        reservation.resize(2).unwrap();
+        assert_eq!(ledger.snapshot().unwrap().used.disk_bytes(), 2);
+        drop(reservation);
+        assert_eq!(budget.used(), 0);
+        assert_eq!(ledger.snapshot().unwrap().used.disk_bytes(), 0);
     }
 }
