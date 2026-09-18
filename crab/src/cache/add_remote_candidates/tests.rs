@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::{Arc, Barrier};
 use tempfile::tempdir;
 
 #[test]
@@ -140,6 +141,32 @@ fn concurrent_connections_preserve_capacity_and_counts() {
         )
         .expect("count");
     assert_eq!(counts, (MAX_PERSISTENT_ENTRIES, MAX_PERSISTENT_ENTRIES));
+}
+
+#[test]
+fn concurrent_initial_connections_share_schema_initialization() {
+    let dir = tempdir().expect("tempdir");
+    let path = cache_path(&dir);
+    let start = Arc::new(Barrier::new(4));
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            let path = &path;
+            let start = Arc::clone(&start);
+            scope.spawn(move || {
+                start.wait();
+                let cache = AddRemoteCandidateCache::open(path).expect("open cache");
+                cache.load_persistent(&[]).expect("read initialized cache");
+            });
+        }
+    });
+    let cache = AddRemoteCandidateCache::open(&path).expect("reopen");
+    let version: i64 = cache
+        .connection
+        .lock()
+        .expect("database lock")
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("schema version");
+    assert_eq!(version, SCHEMA_VERSION);
 }
 
 #[test]
