@@ -1,6 +1,6 @@
 # Extract the pure Cell coordination kernel
 
-Status: IN PROGRESS — pure lifecycle state, typed kernel-owned effect intents/IDs, actor admission/drain/scheduling seams, activation-generation fencing, and in-flight completion drain are wired and tested; scheduling plus hydration, renewal, persisted-work inventory, deactivation observations, migration admission, and simulator movement release now use kernel decisions. The actor's schedule adapter passes queue/publisher observations into one kernel transition, and migration admission receives the live-publisher observation without storing a duplicate adapter flag; complete decision extraction and parity coverage remain
+Status: IN PROGRESS — pure lifecycle state, typed kernel-owned effect intents/IDs, actor admission/drain/scheduling seams, activation-generation fencing, and in-flight completion drain are wired and tested; scheduling plus hydration, renewal, persisted-work inventory, deactivation observations, migration admission, and simulator movement release now use kernel decisions. The actor's schedule adapter passes queue/publisher observations into one kernel transition, migration admission receives the live-publisher observation without storing a duplicate adapter flag, and work/publication/renewal/hydration completion outcomes now return explicit kernel fence decisions. Complete decision extraction and parity coverage remain
 Priority: P0
 Effort: XL
 Risk: High
@@ -175,6 +175,15 @@ inputs to the kernel, while the actor only reserves resources and executes a
 the task. Persisted-work inventory refresh uses the same boundary and fences
 on lease loss; the actor only records the returned inventory after matching the
 generation and typed effect identity.
+
+Work completion now carries the observed fence result into the kernel instead of
+issuing a separate `Fence` transition from each task branch. `FinishWork` and
+`FinishMigration` release the volatile busy state and return `Fence` when the
+completion is stale or fenced; `FinishPublication`, `FinishRenewal`, and stale
+hydration completion use the same decision contract. The actor maps that single
+decision to admission closure and queued/publication cleanup. A pending command
+still keeps `busy` set until its proof completion, so the extraction does not
+allow a later request to overtake an unpublished result.
 
 ### 6. Update documentation
 

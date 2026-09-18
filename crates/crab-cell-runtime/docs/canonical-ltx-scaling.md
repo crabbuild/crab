@@ -1174,7 +1174,10 @@ Slices 2–6 now have reviewable seams: `coordination.rs` owns the volatile
 admission/fence/publication/migration/shutdown decisions; the actor has one
 schedule adapter that passes queue/publisher, lease, and publication-pressure
 observations and the kernel centrally decides dispatch, wait, deactivation, or
-fence, so `actor.rs` does not duplicate those predicates;
+fence, so `actor.rs` does not duplicate those predicates. Work, migration,
+publication, renewal, and stale-hydration completions also carry their fence
+observation into one kernel transition; the actor only maps the returned `Fence`
+decision to cleanup, while pending commands remain busy until proof;
 background hydration and renewal use the same queue/publication/lease
 observation boundary; the test-only
 simulator replays fixed seeds and checks acknowledgement/publication invariants;

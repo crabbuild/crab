@@ -204,6 +204,14 @@ observations through the kernel as well; the actor only owns resource
 reservation, effect execution, and generation-matched inventory application
 after a `Started` result.
 
+Task completions now carry their fence observation into the same pure API.
+`FinishWork`, `FinishMigration`, `FinishPublication`, `FinishRenewal`, and stale
+hydration completion return an explicit `Fence` decision; the actor performs
+cleanup only after that decision. Pending commands remain busy until proof, and
+the new transition tests cover fenced work and migration completion so a task
+cannot accidentally reopen a serving Cell or let a later request overtake an
+unpublished result.
+
 Blob upload lifetimes and Cron first-due windows are validated from the
 mutation-issued timestamp, while the serialized Cell still rejects an upload
 that has expired before acceptance. This keeps absolute caller deadlines stable

@@ -233,7 +233,8 @@ impl Simulation {
             Event::FinishWork => {
                 let effect_id = self.work_effect.take();
                 self.complete_effect(effect_id, CoordinationEffect::Work(AdmissionKind::Command));
-                self.state.step(CoordinationInput::FinishWork)
+                self.state
+                    .step(CoordinationInput::FinishWork { fenced: false })
             }
             Event::BeginRenewal => {
                 let decision = self.state.step(CoordinationInput::BeginRenewal {
@@ -259,7 +260,9 @@ impl Simulation {
             Event::BeginDrain => self.state.step(CoordinationInput::BeginDrain),
             Event::BeginShutdown => self.state.step(CoordinationInput::BeginShutdown),
             Event::BeginMigration => self.state.step(CoordinationInput::BeginMigration),
-            Event::FinishMigration => self.state.step(CoordinationInput::FinishMigration),
+            Event::FinishMigration => self
+                .state
+                .step(CoordinationInput::FinishMigration { fenced: false }),
             Event::BeginHydration => {
                 let decision = self.state.step(CoordinationInput::BeginHydration {
                     queue_empty: true,

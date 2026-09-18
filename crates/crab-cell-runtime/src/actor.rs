@@ -3065,14 +3065,15 @@ fn handle_task(
                         });
                 }
                 Err(_) => {
-                    active
+                    let decision = active
                         .coordination
                         .step(CoordinationInput::FinishHydration {
                             complete: false,
                             stale: true,
                         });
-                    active.coordination.step(CoordinationInput::Fence);
-                    fence_active(active);
+                    if matches!(decision, CoordinationDecision::Fence) {
+                        fence_active(active);
+                    }
                 }
             }
             continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
@@ -3127,19 +3128,15 @@ fn handle_task(
                 result = Err(command.operation.unknown(Error::Fenced));
                 fenced = true;
             }
-            if fenced {
-                active.coordination.step(CoordinationInput::Fence);
-            }
-            if active.fenced() {
-                active.coordination.step(CoordinationInput::FinishWork);
-                fence_active(active);
+            if fenced || active.fenced() {
+                finish_work(active, true);
                 send_command_task_reply(&mut command, result);
                 continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
                 return;
             }
             match result {
                 Ok(CommandTaskResult::Recorded(outcome)) => {
-                    active.coordination.step(CoordinationInput::FinishWork);
+                    finish_work(active, false);
                     send_command_reply(&mut command, Ok(outcome));
                 }
                 Ok(CommandTaskResult::Pending {
@@ -3155,9 +3152,7 @@ fn handle_task(
                         match active.publication_bytes.checked_add(retained_bytes) {
                             Some(bytes) => bytes,
                             None => {
-                                active.coordination.step(CoordinationInput::Fence);
-                                active.coordination.step(CoordinationInput::FinishWork);
-                                fence_active(active);
+                                finish_work(active, true);
                                 let error = command
                                     .operation
                                     .unknown(Error::Capacity("pending publication bytes"));
@@ -3199,7 +3194,7 @@ fn handle_task(
                     });
                 }
                 Err(error) => {
-                    active.coordination.step(CoordinationInput::FinishWork);
+                    finish_work(active, false);
                     send_command_reply(&mut command, Err(error));
                 }
             }
@@ -3232,13 +3227,7 @@ fn handle_task(
                 result = Err(command.operation.unknown(Error::Fenced));
                 fenced = true;
             }
-            active.coordination.step(CoordinationInput::FinishWork);
-            if fenced {
-                active.coordination.step(CoordinationInput::Fence);
-            }
-            if active.fenced() {
-                fence_active(active);
-            }
+            finish_work(active, fenced);
             send_command_reply(&mut command, result);
             continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
         }
@@ -3274,13 +3263,13 @@ fn handle_task(
                 active.unpublished_node_logs = active.unpublished_node_logs.saturating_sub(1);
                 subtract_unpublished_bytes(unpublished_node_log_bytes, retained_bytes);
             }
-            active
+            let decision = active
                 .coordination
                 .step(CoordinationInput::FinishPublication {
                     fenced,
                     succeeded: result.is_ok(),
                 });
-            if active.fenced() {
+            if matches!(decision, CoordinationDecision::Fence) {
                 fence_active(active);
             } else {
                 start_publication(cell, active, pool, tasks);
@@ -3314,13 +3303,7 @@ fn handle_task(
                 result = Err(Error::Fenced);
                 fenced = true;
             }
-            active.coordination.step(CoordinationInput::FinishWork);
-            if fenced {
-                active.coordination.step(CoordinationInput::Fence);
-            }
-            if active.fenced() {
-                fence_active(active);
-            }
+            finish_work(active, fenced);
             send_query_reply(&mut query, result);
             continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
         }
@@ -3351,13 +3334,7 @@ fn handle_task(
                 result = Ok(Resolution::Unknown);
                 fenced = true;
             }
-            active.coordination.step(CoordinationInput::FinishWork);
-            if fenced {
-                active.coordination.step(CoordinationInput::Fence);
-            }
-            if active.fenced() {
-                fence_active(active);
-            }
+            finish_work(active, fenced);
             send_resolve_reply(&mut resolve, result);
             continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
         }
@@ -3401,18 +3378,14 @@ fn handle_task(
                 result = Err(Error::Fenced);
                 fenced = true;
             }
-            active.coordination.step(CoordinationInput::FinishWork);
-            active.coordination.step(CoordinationInput::FinishMigration);
             active.publisher = Some(*publisher);
             if preserve_owner {
                 active.unpublished_node_logs = active.unpublished_node_logs.saturating_add(1);
                 unpublished_node_log_bytes.fetch_add(unpublished_bytes, Ordering::AcqRel);
             }
-            if fenced {
-                active.coordination.step(CoordinationInput::Fence);
-            }
+            let completion = finish_migration(active, fenced);
             match result {
-                Ok(outcome) if !active.fenced() => {
+                Ok(outcome) if !matches!(completion, CoordinationDecision::Fence) => {
                     active.code = outcome.code;
                     active.schema = outcome.schema;
                     let admission = Arc::clone(&migration.successor_admission);
@@ -3423,9 +3396,6 @@ fn handle_task(
                 }
                 Ok(_) => send_migration_reply(&mut migration, Err(Error::Fenced)),
                 Err(error) => send_migration_reply(&mut migration, Err(error)),
-            }
-            if active.fenced() {
-                fence_active(active);
             }
             continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
         }
@@ -3451,10 +3421,10 @@ fn handle_task(
                 result = Err(Error::Fenced);
             }
             active.publisher = Some(*publisher);
-            active.coordination.step(CoordinationInput::FinishRenewal {
+            let decision = active.coordination.step(CoordinationInput::FinishRenewal {
                 fenced: result.is_err(),
             });
-            if active.fenced() {
+            if matches!(decision, CoordinationDecision::Fence) {
                 fence_active(active);
             }
             continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
@@ -3516,6 +3486,26 @@ fn rejection_error(reason: RejectReason) -> Error {
         RejectReason::Busy => Error::CellDraining,
         RejectReason::PublicationPending => Error::PendingPublication,
     }
+}
+
+fn finish_work(active: &mut ActiveCell, fenced: bool) -> CoordinationDecision {
+    let decision = active
+        .coordination
+        .step(CoordinationInput::FinishWork { fenced });
+    if matches!(decision, CoordinationDecision::Fence) {
+        fence_active(active);
+    }
+    decision
+}
+
+fn finish_migration(active: &mut ActiveCell, fenced: bool) -> CoordinationDecision {
+    let decision = active
+        .coordination
+        .step(CoordinationInput::FinishMigration { fenced });
+    if matches!(decision, CoordinationDecision::Fence) {
+        fence_active(active);
+    }
+    decision
 }
 
 fn fence_active(active: &mut ActiveCell) {

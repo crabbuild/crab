@@ -64,11 +64,15 @@ pub(crate) enum CoordinationInput {
         effect_id: u64,
         effect: CoordinationEffect,
     },
-    FinishWork,
+    FinishWork {
+        fenced: bool,
+    },
     BeginDrain,
     BeginShutdown,
     BeginMigration,
-    FinishMigration,
+    FinishMigration {
+        fenced: bool,
+    },
     BeginRenewal {
         queue_empty: bool,
         publication_idle: bool,
@@ -356,8 +360,12 @@ impl CoordinationState {
                     CoordinationDecision::StaleEffect
                 }
             }
-            CoordinationInput::FinishWork => {
+            CoordinationInput::FinishWork { fenced } => {
                 self.busy = false;
+                if fenced || self.is_fenced() {
+                    self.lifecycle = Lifecycle::Fenced;
+                    return CoordinationDecision::Fence;
+                }
                 if self.can_deactivate() && self.is_draining() {
                     CoordinationDecision::ReadyToDeactivate
                 } else {
@@ -411,7 +419,12 @@ impl CoordinationState {
                     CoordinationDecision::Started
                 }
             }
-            CoordinationInput::FinishMigration => {
+            CoordinationInput::FinishMigration { fenced } => {
+                self.busy = false;
+                if fenced || self.is_fenced() {
+                    self.lifecycle = Lifecycle::Fenced;
+                    return CoordinationDecision::Fence;
+                }
                 if matches!(self.lifecycle, Lifecycle::Migrating) {
                     self.lifecycle = if self.shutdown_requested {
                         Lifecycle::Shutdown
@@ -449,10 +462,12 @@ impl CoordinationState {
             }
             CoordinationInput::FinishRenewal { fenced } => {
                 self.renewing = false;
-                if fenced {
+                if fenced || self.is_fenced() {
                     self.lifecycle = Lifecycle::Fenced;
+                    CoordinationDecision::Fence
+                } else {
+                    CoordinationDecision::Ignored
                 }
-                CoordinationDecision::Ignored
             }
             CoordinationInput::BeginPublication => {
                 if self.is_fenced() {
@@ -478,6 +493,7 @@ impl CoordinationState {
                 self.follower_proof = false;
                 if fenced || !succeeded {
                     self.lifecycle = Lifecycle::Fenced;
+                    return CoordinationDecision::Fence;
                 }
                 if self.can_deactivate() && self.is_draining() {
                     CoordinationDecision::ReadyToDeactivate
@@ -542,6 +558,7 @@ impl CoordinationState {
                     };
                 } else {
                     self.residency = Residency::Sparse;
+                    return CoordinationDecision::Fence;
                 }
                 CoordinationDecision::Ignored
             }
@@ -657,9 +674,27 @@ mod tests {
             CoordinationDecision::Reject(RejectReason::Draining)
         );
         assert_eq!(
-            state.step(CoordinationInput::FinishWork),
+            state.step(CoordinationInput::FinishWork { fenced: false }),
             CoordinationDecision::ReadyToDeactivate
         );
+    }
+
+    #[test]
+    fn fenced_work_completion_returns_fence_without_actor_redeciding() {
+        let mut state = CoordinationState::serving(true);
+        assert_eq!(
+            state.step(CoordinationInput::BeginWork {
+                kind: AdmissionKind::Query,
+                publisher_ready: true,
+            }),
+            CoordinationDecision::Started
+        );
+        assert_eq!(
+            state.step(CoordinationInput::FinishWork { fenced: true }),
+            CoordinationDecision::Fence
+        );
+        assert!(state.is_fenced());
+        assert!(!state.is_busy());
     }
 
     #[test]
@@ -854,10 +889,13 @@ mod tests {
         let mut state = CoordinationState::serving(true);
         state.step(CoordinationInput::BeginPublication);
         assert_eq!(state.publication_count(), 1);
-        state.step(CoordinationInput::FinishPublication {
-            fenced: false,
-            succeeded: false,
-        });
+        assert_eq!(
+            state.step(CoordinationInput::FinishPublication {
+                fenced: false,
+                succeeded: false,
+            }),
+            CoordinationDecision::Fence
+        );
         assert!(state.is_fenced());
         assert_eq!(state.publication_count(), 0);
     }
@@ -866,10 +904,13 @@ mod tests {
     fn lost_cas_fences_the_owner_and_releases_the_publication_obligation() {
         let mut state = CoordinationState::serving(true);
         state.step(CoordinationInput::BeginPublication);
-        state.step(CoordinationInput::FinishPublication {
-            fenced: true,
-            succeeded: false,
-        });
+        assert_eq!(
+            state.step(CoordinationInput::FinishPublication {
+                fenced: true,
+                succeeded: false,
+            }),
+            CoordinationDecision::Fence
+        );
         assert!(state.is_fenced());
         assert_eq!(state.publication_count(), 0);
         assert!(state.can_deactivate());
@@ -918,7 +959,10 @@ mod tests {
             CoordinationDecision::Started
         );
         state.step(CoordinationInput::Fence);
-        state.step(CoordinationInput::FinishRenewal { fenced: false });
+        assert_eq!(
+            state.step(CoordinationInput::FinishRenewal { fenced: false }),
+            CoordinationDecision::Fence
+        );
         assert!(state.is_fenced());
         assert!(!state.is_renewing());
     }
@@ -947,10 +991,13 @@ mod tests {
             publication_idle: true,
             lease_live: true,
         });
-        failed.step(CoordinationInput::FinishHydration {
-            complete: false,
-            stale: true,
-        });
+        assert_eq!(
+            failed.step(CoordinationInput::FinishHydration {
+                complete: false,
+                stale: true,
+            }),
+            CoordinationDecision::Fence
+        );
         failed.step(CoordinationInput::Fence);
         assert!(failed.is_fenced());
         assert_eq!(failed.residency(), Residency::Sparse);
@@ -1008,7 +1055,7 @@ mod tests {
             state.step(CoordinationInput::BeginPublication),
             CoordinationDecision::Started
         );
-        state.step(CoordinationInput::FinishWork);
+        state.step(CoordinationInput::FinishWork { fenced: false });
         assert_eq!(state.publication_count(), 1);
         state.step(CoordinationInput::FinishPublication {
             fenced: false,
@@ -1036,7 +1083,7 @@ mod tests {
             CoordinationDecision::Reject(RejectReason::Draining)
         );
         assert_eq!(
-            state.step(CoordinationInput::FinishWork),
+            state.step(CoordinationInput::FinishWork { fenced: false }),
             CoordinationDecision::ReadyToDeactivate
         );
     }
@@ -1058,10 +1105,32 @@ mod tests {
             CoordinationDecision::Reject(RejectReason::Draining)
         ));
         assert_eq!(
-            state.step(CoordinationInput::FinishMigration),
+            state.step(CoordinationInput::FinishMigration { fenced: false }),
             CoordinationDecision::ReadyToDeactivate
         );
         assert!(state.is_shutdown());
+    }
+
+    #[test]
+    fn fenced_migration_completion_does_not_reopen_serving_state() {
+        let mut state = CoordinationState::serving(true);
+        assert_eq!(
+            state.step(CoordinationInput::BeginMigration),
+            CoordinationDecision::Started
+        );
+        assert_eq!(
+            state.step(CoordinationInput::BeginWork {
+                kind: AdmissionKind::Migration,
+                publisher_ready: true,
+            }),
+            CoordinationDecision::Started
+        );
+        assert_eq!(
+            state.step(CoordinationInput::FinishMigration { fenced: true }),
+            CoordinationDecision::Fence
+        );
+        assert!(state.is_fenced());
+        assert!(!state.is_busy());
     }
 
     #[test]
