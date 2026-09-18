@@ -5,14 +5,139 @@ use crab_ltx::{
     bundle::{Bundle, BundleEntry},
 };
 use crab_storage::{Store, StoreLayout};
+use futures_util::stream::BoxStream;
 use object_store::{
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult,
     memory::InMemory,
+    path::Path,
     throttle::{ThrottleConfig, ThrottledStore},
 };
 use std::{
+    fmt,
     sync::Arc,
+    sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
+
+#[derive(Debug)]
+struct FailFirstPutStore {
+    inner: Arc<InMemory>,
+    failures: AtomicUsize,
+}
+
+impl FailFirstPutStore {
+    fn new(inner: Arc<InMemory>) -> Self {
+        Self {
+            inner,
+            failures: AtomicUsize::new(0),
+        }
+    }
+
+    fn fail_next_put(&self) {
+        self.failures.fetch_add(1, Ordering::Release);
+    }
+}
+
+impl fmt::Display for FailFirstPutStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("fail-first-put-store")
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for FailFirstPutStore {
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        options: PutOptions,
+    ) -> object_store::Result<PutResult> {
+        if self
+            .failures
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(object_store::Error::PermissionDenied {
+                path: location.to_string(),
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected immutable PUT failure",
+                )),
+            });
+        }
+        self.inner.put_opts(location, payload, options).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        options: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(location, options).await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &Path,
+        options: GetOptions,
+    ) -> object_store::Result<GetResult> {
+        self.inner.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn immutable_provider_failure_preserves_head_and_retries_exact_source() {
+    let (directory, batches) = captures();
+    let backend = Arc::new(FailFirstPutStore::new(Arc::new(InMemory::new())));
+    let replica = Replica::new(
+        StoreLayout::new(Store::new(backend.clone()), "provider-failure".into()),
+        "epoch",
+        Limits::default(),
+    )
+    .unwrap();
+
+    backend.fail_next_put();
+    assert!(replica.replicate(&batches[0], None).await.is_err());
+    assert!(replica.head().await.unwrap().is_none());
+
+    let head = replica.replicate(&batches[0], None).await.unwrap();
+    let restored = directory.path().join("provider-failure-restored.sqlite");
+    replica.restore(&head, &restored).await.unwrap();
+    let database = crab_ltx::rusqlite::Connection::open(&restored).unwrap();
+    assert_eq!(
+        database
+            .query_row("SELECT count(*) FROM t", [], |row| row.get::<_, u32>(0))
+            .unwrap(),
+        1
+    );
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sparse_page_materialization_obeys_shared_local_disk_admission() {

@@ -1,6 +1,6 @@
 # Bounded-memory Cell LTX publication and bundle ingestion
 
-Status: IN PROGRESS — native/bundle bounded sources and shared authenticated inspection pass local and RustFS suites; measured multi-GiB RSS and injected provider-failure qualification remain
+Status: IN PROGRESS — native/bundle bounded sources and shared authenticated inspection pass local and RustFS suites; an injected immutable-provider PUT failure now proves the head stays absent and the verified source can be retried exactly; measured multi-GiB RSS, cancellation cleanup, and broader provider-failure qualification remain
 Priority: P0
 Effort: XL
 Risk: High
@@ -115,6 +115,12 @@ git diff --check
 The final search must have no whole-segment hit in Cell publication. Any
 remaining `read_to_end` must be small, statically bounded, and justified next
 to the code and in the PR evidence.
+
+The local provider-failure qualification uses a fail-first `ObjectStore` wrapper
+in `crates/crab-ltx/tests/capabilities.rs`. It rejects one immutable PUT,
+verifies that no head was published, retries the same captured source, and
+restores the resulting head. This is a deterministic failure seam, not a
+substitute for the provider matrix or multi-GiB/RSS receipt.
 
 ## Acceptance criteria
 

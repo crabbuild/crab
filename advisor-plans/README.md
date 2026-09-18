@@ -181,7 +181,8 @@ admission. Persisted Queue/Workflow rows are
 re-inspected after durable work and an unknown result remains ineligible for
 eviction. Remaining release gates are recorded in plans 009–017:
 post-promotion zero-origin measurement, multi-GiB/RSS and provider-failure
-evidence, complete process-wide resource accounting, multi-process
+matrix evidence (with one local fail-first immutable PUT proof now covered),
+complete process-wide resource accounting, multi-process
 movement/fault proof, protected Kubernetes receipts, and the named plan-016
 retain/deprecate/hard-remove decision. Plan 017 remains correctly blocked; no
 standalone export or stored prefix was removed.
