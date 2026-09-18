@@ -483,9 +483,13 @@ fn constrain_capacity_to_runtime(
     let ledger_memory = resources.memory_bytes.saturating_sub(reserved_memory);
     capacity.free_memory_bytes = capacity.free_memory_bytes.min(ledger_memory);
 
-    let ledger_disk = resources
+    // The runtime's DiskBudget is the admission owner.  A filesystem probe
+    // can be larger than that budget, but advertising the probe alone would
+    // let placement promise bytes the runtime cannot admit.
+    let disk_capacity = resources
         .disk_capacity_bytes
-        .saturating_sub(runtime.local_disk_reserved_bytes());
+        .min(runtime.local_disk_capacity_bytes());
+    let ledger_disk = disk_capacity.saturating_sub(runtime.local_disk_reserved_bytes());
     capacity.free_disk_bytes = capacity.free_disk_bytes.min(ledger_disk);
     capacity.follower_free_bytes = capacity.follower_free_bytes.min(capacity.free_disk_bytes);
 
@@ -1770,7 +1774,7 @@ mod tests {
             LocalResources {
                 memory_bytes: 1_024,
                 disk_limit_bytes: 1_000,
-                disk_capacity_bytes: 1_000,
+                disk_capacity_bytes: 2_000,
                 free_disk_bytes: 900,
                 available_file_descriptors: 100,
                 job_credits: 10,

@@ -217,7 +217,10 @@ The signed placement snapshot now has an end-to-end local provenance check:
 `NodePublisher` publishes while holding one runtime ledger byte/job reservation,
 and the peer test verifies that the signed memory/disk totals and Cell/job
 counts come from that coherent runtime sample while free headroom remains
-clamped. Nested cgroup fixture parsing and process file-capacity checks cover
+clamped. Disk headroom is additionally bounded by the runtime-owned
+`DiskBudget`, so a larger filesystem probe cannot advertise bytes the actor
+cannot admit; the deliberately mismatched-capacity peer regression covers this
+case. Nested cgroup fixture parsing and process file-capacity checks cover
 the fail-closed host probe; advertised/metric parity and multi-process convergence
 remain qualification work.
 

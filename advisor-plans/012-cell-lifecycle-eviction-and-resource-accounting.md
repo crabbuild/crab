@@ -218,6 +218,14 @@ inside their already-admitted worker jobs. Admission refusal fails closed with
 path, so this closes the process-wide transport-codec gap without adding a
 second semaphore, capacity setting, or accounting surface.
 
+Placement disk headroom now takes the minimum of the measured filesystem
+capacity and the runtime-owned `DiskBudget` capacity before subtracting ledger
+reservations. A host filesystem can be larger than the runtime admission
+budget; publishing the larger value would let a planner promise work that the
+destination must reject. `peer::tests::placement_capacity_respects_runtime_reservations`
+covers this projection with a deliberately larger filesystem probe, while the
+provider-scale disk-tolerance receipt remains a plan-015 qualification gate.
+
 On server restart, `LocalStaging::new_with_restart_inventory` walks the
 dedicated `cells/sessions` namespace before runtime startup. The newly created
 session is excluded because its active database, WAL, cache, and transfer
