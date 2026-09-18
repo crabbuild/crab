@@ -129,6 +129,7 @@ struct AdmissionMetrics {
     capacity: Gauge,
 }
 
+#[derive(Default)]
 pub(crate) struct RuntimeSnapshot {
     pub(crate) repositories: usize,
     pub(crate) catalog_healthy: bool,
@@ -167,6 +168,42 @@ pub(crate) struct RuntimeSnapshot {
     pub(crate) cell_follower_retained_bytes: u64,
     pub(crate) admission_available: [usize; ADMISSION_COUNT],
     pub(crate) admission_capacity: [usize; ADMISSION_COUNT],
+}
+
+impl RuntimeSnapshot {
+    pub(crate) fn with_cell_runtime(
+        mut self,
+        runtime: crab_cell_runtime::CellRuntimeStats,
+    ) -> Self {
+        self.cell_active = runtime.active_cells();
+        self.cell_active_capacity = runtime.active_cell_capacity();
+        self.cell_resident_bytes = runtime.resident_bytes();
+        self.cell_resident_capacity_bytes = runtime.resident_capacity_bytes();
+        self.cell_file_descriptors = runtime.file_descriptors();
+        self.cell_file_descriptor_capacity = runtime.file_descriptor_capacity();
+        self.cell_retained_bytes = runtime.retained_bytes();
+        self.cell_retained_capacity_bytes = runtime.retained_capacity_bytes();
+        self.cell_worker_jobs = runtime.worker_jobs();
+        self.cell_worker_job_capacity = runtime.worker_job_capacity();
+        self.cell_primitive_jobs = runtime.primitive_jobs();
+        self.cell_primitive_job_capacity = runtime.primitive_job_capacity();
+        self.cell_hydration_jobs = runtime.hydration_jobs();
+        self.cell_hydration_job_capacity = runtime.hydration_job_capacity();
+        self.cell_io_slots = runtime.io_slots();
+        self.cell_io_slot_capacity = runtime.io_slot_capacity();
+        self.cell_blocking_jobs = runtime.blocking_jobs();
+        self.cell_blocking_job_capacity = runtime.blocking_job_capacity();
+        self.cell_recovery_jobs = runtime.recovery_jobs();
+        self.cell_recovery_job_capacity = runtime.recovery_job_capacity();
+        self.cell_dirty_jobs = runtime.dirty_jobs();
+        self.cell_dirty_job_capacity = runtime.dirty_job_capacity();
+        self.cell_scratch_units = runtime.scratch_units();
+        self.cell_scratch_unit_capacity = runtime.scratch_unit_capacity();
+        self.cell_local_disk_reserved_bytes = runtime.local_disk_reserved_bytes();
+        self.cell_local_disk_capacity_bytes = runtime.local_disk_capacity_bytes();
+        self.cell_node_log_uncovered_bytes = runtime.unpublished_node_log_bytes();
+        self
+    }
 }
 
 impl Metrics {
@@ -1229,6 +1266,40 @@ mod tests {
             admission_available: [16, 3, 8, 1],
             admission_capacity: [16, 4, 8, 2],
         }
+    }
+
+    #[tokio::test]
+    async fn runtime_snapshot_projects_live_cell_ledger() {
+        let runtime = crab_cell_runtime::CellRuntime::new(
+            crab_cell_runtime::SqlWorkerPool::new(1, 2).unwrap(),
+            1_024,
+            crab_cell_runtime::SessionId::from_bytes([3; 16]),
+        )
+        .unwrap();
+        let reservation = runtime.try_reserve_worker_job().unwrap().unwrap();
+        let stats = runtime.stats();
+        let metrics = Metrics::new().unwrap();
+        let rendered = metrics.render(RuntimeSnapshot::default().with_cell_runtime(stats));
+
+        assert!(rendered.contains(&format!(
+            "crab_http_server_cell_runtime_active_cell_capacity {}",
+            stats.active_cell_capacity()
+        )));
+        assert!(rendered.contains(&format!(
+            "crab_http_server_cell_runtime_primitive_jobs {}",
+            stats.primitive_jobs()
+        )));
+        assert!(rendered.contains(&format!(
+            "crab_http_server_cell_runtime_primitive_job_capacity {}",
+            stats.primitive_job_capacity()
+        )));
+        assert!(rendered.contains(&format!(
+            "crab_http_server_cell_runtime_local_disk_capacity_bytes {}",
+            stats.local_disk_capacity_bytes()
+        )));
+
+        drop(reservation);
+        runtime.shutdown().await.unwrap();
     }
 
     #[tokio::test]

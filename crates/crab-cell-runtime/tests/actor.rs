@@ -15,7 +15,7 @@ use crab_cell_runtime::{
     NodeDurability, NodeId, NodeLeaseGuard, NodeLogAuthority, NodeLogRotationBarrier,
     NodeLogShipper, NodeLogTransport, Owner, PressureSample, PressureState, ReplicaHost, RequestId,
     Resolution, RetireRequest, SealRequest, SessionId, SqlWorkerPool, StoredOutcome, TailRequest,
-    TenantId, Transition,
+    TenantId, Transition, install_queue_schema, install_workflow_schema,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{
@@ -1534,7 +1534,6 @@ async fn persisted_work_blocks_idle_eviction_until_explicit_release() {
         }
     ));
 
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     assert_eq!(runtime.evict_idle(1).await.unwrap(), 0);
     assert_eq!(runtime.stats().active_cells(), 1);
 
@@ -1543,22 +1542,193 @@ async fn persisted_work_blocks_idle_eviction_until_explicit_release() {
     runtime.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn mixed_primitive_inventory_blocks_churn_until_drain_and_restores_root() {
+    let queue = fixture_for(b"mixed-queue");
+    let workflow = fixture_for(b"mixed-workflow");
+    let third = fixture_for(b"mixed-third");
+    let session = SessionId::from_bytes([80; 16]);
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 2).unwrap(), 16 * 1024 * 1024, session).unwrap();
+
+    let queue_handle = bootstrap_role_on(
+        &runtime,
+        &queue,
+        session,
+        CatalogRole::Queue,
+        |transaction| {
+            install_queue_schema(transaction)?;
+            transaction.execute(
+                "INSERT INTO queue_messages VALUES (zeroblob(16), X'01', 0, 0, 1, 1000, NULL, NULL, NULL, NULL)",
+                [],
+            )?;
+            Ok(())
+        },
+    )
+    .await;
+    let workflow_handle = bootstrap_role_on(
+        &runtime,
+        &workflow,
+        session,
+        CatalogRole::Workflow,
+        |transaction| {
+            install_workflow_schema(transaction)?;
+            transaction.execute(
+                "INSERT INTO workflow_runs VALUES (X'02', zeroblob(16), zeroblob(32), 0, X'', 0, NULL, NULL)",
+                [],
+            )?;
+            Ok(())
+        },
+    )
+    .await;
+
+    wait_for_persisted_work(
+        &queue_handle,
+        CatalogRole::Queue,
+        "maintenance release is blocked by retained Queue messages",
+    )
+    .await;
+    wait_for_persisted_work(
+        &workflow_handle,
+        CatalogRole::Workflow,
+        "maintenance release is blocked by retained Workflow runs",
+    )
+    .await;
+
+    assert_eq!(runtime.evict_idle(2).await.unwrap(), 0);
+    assert_eq!(runtime.stats().active_cells(), 2);
+
+    let queue_authority = CellAuthority::new(queue.layout.clone());
+    let queue_root = queue_authority
+        .load(queue.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let queue_root = queue_root.value().ltx_root().unwrap();
+
+    queue_handle.drain().await.unwrap();
+    workflow_handle.drain().await.unwrap();
+    assert_eq!(runtime.stats().active_cells(), 0);
+    let queue_idle = queue_authority
+        .load(queue.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let queue_proof =
+        crab_cell_runtime::CellCatalog::new(queue.layout.clone(), queue.target.tenant())
+            .lookup(queue.target.cell_id())
+            .await
+            .unwrap()
+            .unwrap();
+    let restored = runtime
+        .acquire_idle_restored(
+            queue_proof,
+            queue.replica.clone(),
+            queue_authority,
+            queue_idle,
+            queue._directory.path().join("mixed-queue-restored.sqlite"),
+            Owner {
+                session,
+                endpoint: "https://mixed-successor.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        restored
+            .query(64, 64, |connection| {
+                let count =
+                    connection.query_row("SELECT count(*) FROM queue_messages", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?;
+                Ok(count.to_be_bytes().to_vec())
+            })
+            .await
+            .unwrap(),
+        1_i64.to_be_bytes()
+    );
+    assert_eq!(
+        crab_cell_runtime::CellAuthority::new(queue.layout.clone())
+            .load(queue.target.cell_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .value()
+            .ltx_root(),
+        Some(queue_root)
+    );
+    restored.drain().await.unwrap();
+
+    let third_handle = bootstrap_on(&runtime, &third, session).await;
+    assert_eq!(runtime.stats().active_cells(), 1);
+    third_handle.drain().await.unwrap();
+    assert_eq!(runtime.stats().active_cells(), 0);
+    runtime.shutdown().await.unwrap();
+}
+
+async fn wait_for_persisted_work(
+    handle: &crab_cell_runtime::CellHandle,
+    role: CatalogRole,
+    blocker: &'static str,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if handle
+                .persisted_work_inventory(role)
+                .await
+                .unwrap()
+                .first_blocker()
+                == Some(blocker)
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
 async fn bootstrap_on(
     runtime: &CellRuntime,
     fixture: &Fixture,
     session: SessionId,
 ) -> crab_cell_runtime::CellHandle {
+    bootstrap_role_on(
+        runtime,
+        fixture,
+        session,
+        CatalogRole::Repository,
+        |transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE counter(value INTEGER NOT NULL); INSERT INTO counter VALUES (0)",
+            )?;
+            Ok(())
+        },
+    )
+    .await
+}
+
+async fn bootstrap_role_on<F>(
+    runtime: &CellRuntime,
+    fixture: &Fixture,
+    session: SessionId,
+    role: CatalogRole,
+    initialize: F,
+) -> crab_cell_runtime::CellHandle
+where
+    F: for<'connection> FnOnce(
+            &crab_ltx::rusqlite::Transaction<'connection>,
+        ) -> crab_cell_runtime::Result<()>
+        + Send
+        + 'static,
+{
     let catalog =
         crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
     let proof = catalog
         .provision(
-            CatalogEntry::new(
-                &fixture.target,
-                CatalogRole::Repository,
-                Digest::from_bytes([5; 32]),
-                1,
-            )
-            .unwrap(),
+            CatalogEntry::new(&fixture.target, role, Digest::from_bytes([5; 32]), 1).unwrap(),
         )
         .await
         .unwrap();
@@ -1581,12 +1751,7 @@ async fn bootstrap_on(
             authority,
             observed,
             fixture.database.clone(),
-            |transaction| {
-                transaction.execute_batch(
-                    "CREATE TABLE counter(value INTEGER NOT NULL); INSERT INTO counter VALUES (0)",
-                )?;
-                Ok(())
-            },
+            initialize,
         )
         .await
         .unwrap()

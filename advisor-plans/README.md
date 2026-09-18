@@ -205,6 +205,12 @@ node-log append/tail codecs to that same primitive-job ledger; SQL codecs stay
 inside their worker-job reservation. Advertised-placement parity and measured
 mixed-workload proof are still explicit Plan 012 qualification gates. Runtime
 Prometheus metrics now expose usage and capacity for every host-ledger class.
+The HTTP server builds those gauges through one
+`RuntimeSnapshot::with_cell_runtime` projection;
+`runtime_snapshot_projects_live_cell_ledger` proves live runtime reservations
+and capacities reach the rendered exposition without a second field mapping.
+Measured local-disk tolerance and provider-scale mixed-workload proof remain
+qualification gates rather than being inferred from this unit proof.
 
 Restart inventory is now fail-closed at the HTTP composition boundary. Each
 process gets a fresh `cells/sessions/<session-id>` directory; before the
@@ -235,8 +241,12 @@ through the canonical idle-restore path, bootstraps the third Cell after the
 reservation is released, and asserts a zero active-Cell baseline before
 shutdown. It deliberately uses bootstrap roots because durable command
 outcomes are release obligations; mutation-root restoration remains covered by
-the command/publication/cancellation tests, and mixed primitive/source-loss/
-restart qualification is still open under Plan 012.
+the command/publication/cancellation tests. The companion
+`mixed_primitive_inventory_blocks_churn_until_drain_and_restores_root` test
+installs durable Queue and Workflow rows in two Cells, proves both are
+ineligible for eviction until the actor drain path runs, restores the exact
+Queue root and row, then admits a third Cell and returns the ledger to zero;
+the source-loss takeover suite covers the separate owner-loss path.
 
 The companion `persisted_work_blocks_idle_eviction_until_explicit_release`
 regression executes a durable SQL mutation, waits for inventory refresh, and

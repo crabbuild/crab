@@ -1,6 +1,6 @@
 # Cell quiescing, idle eviction, and unified resource accounting
 
-Status: IN PROGRESS — RAII ledger shared by active Cells, resident native bytes, active-Cell file descriptors, SQL work, hydration jobs, retained publication bytes, primitive activity/effect/migration/recovery jobs, canonical LTX `DiskBudget`, and embedded-host I/O/blocking/recovery/dirty/scratch admissions; deterministic victim selection, actor eviction, pressure pacing, retained-byte accounting, and fail-closed persisted-work refresh are wired; unknown persisted-work inventory is explicitly ineligible for eviction; descriptor admission/metrics and shared local-disk consumer wiring are now explicit; bounded two-slot/three-Cell churn and retained-work eviction guard tests prove canonical capacity reuse and fail-closed obligation handling; runtime Prometheus gauges now expose every ledger class; stale session restart inventory now reserves every regular file outside the fresh process session and rejects ambiguous layouts before serving; outer peer and node-log codec work now shares the primitive-job ledger; advertised-placement parity and measured mixed-workload inventory proof remain
+Status: IN PROGRESS — RAII ledger shared by active Cells, resident native bytes, active-Cell file descriptors, SQL work, hydration jobs, retained publication bytes, primitive activity/effect/migration/recovery jobs, canonical LTX `DiskBudget`, and embedded-host I/O/blocking/recovery/dirty/scratch admissions; deterministic victim selection, actor eviction, pressure pacing, retained-byte accounting, and fail-closed persisted-work refresh are wired; unknown persisted-work inventory is explicitly ineligible for eviction; descriptor admission/metrics and shared local-disk consumer wiring are now explicit; bounded two-slot/three-Cell churn, mixed Queue/Workflow inventory churn, and retained-work eviction guard tests prove canonical capacity reuse and fail-closed obligation handling; runtime Prometheus gauges now expose every ledger class and the HTTP projection consumes one canonical `CellRuntimeStats` mapping; stale session restart inventory now reserves every regular file outside the fresh process session and rejects ambiguous layouts before serving; outer peer and node-log codec work now shares the primitive-job ledger; measured local-disk tolerance and provider-scale mixed-workload proof remain
 Priority: P0
 Effort: XL
 Risk: High
@@ -167,13 +167,20 @@ mutating the database behind the actor.
 - [x] Canonical LTX local-disk reservations reconcile with the runtime ledger
       without allowing a failed admission to leak bytes.
 - [ ] Advertised/metric totals reconcile with actor state and measured local
-      disk within a documented tolerance.
+      disk within a documented tolerance; the local actor-to-metric projection
+      is covered by `runtime_snapshot_projects_live_cell_ledger`, while disk
+      tolerance still requires provider-scale measurement.
 - [x] Restart inventory does not undercount existing owned files.
 - [x] Primitive jobs participate in the same limits; activity/effect scheduler
       work, release migrations, node-log recovery, and user SQL commands use
       bounded RAII reservations, while Queue and Workflow durable rows are
       re-inspected after work before an idle victim can be selected.
-- [ ] Mixed churn/source-loss test passes and final resources return to baseline.
+- [x] Mixed Queue/Workflow churn proves persisted primitive rows block unsafe
+      eviction, canonical drain releases both Cells, exact idle-root restore
+      preserves the Queue row, and a third Cell reuses the released capacity;
+      the companion source-loss takeover test preserves the same exact-root
+      and publication contract, with final active reservations returning to
+      baseline.
 - [x] No new user configuration or second eviction path is added.
 
 ## Stop conditions
