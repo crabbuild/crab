@@ -1,6 +1,6 @@
 # Bounded-memory Cell LTX publication and bundle ingestion
 
-Status: IN PROGRESS — native/bundle bounded sources and shared authenticated inspection pass local and RustFS suites; an injected immutable-provider PUT failure now proves the head stays absent and the verified source can be retried exactly; measured multi-GiB RSS, cancellation cleanup, and broader provider-failure qualification remain
+Status: IN PROGRESS — native/bundle bounded sources and shared authenticated inspection pass local and RustFS suites; injected immutable-provider failure and throttled-upload cancellation now prove exact retry and scratch cleanup; measured multi-GiB RSS, peak-memory, and broader provider-failure qualification remain
 Priority: P0
 Effort: XL
 Risk: High
@@ -130,8 +130,12 @@ substitute for the provider matrix or multi-GiB/RSS receipt.
 - [x] No full segment body is retained in `AppendInput`-like collections or
       copied from a bundle range.
 - [x] Retry uses replayable verified sources and preserves exact bytes.
-- [ ] Every injected failure/cancellation cleans owned scratch state and never
-      publishes an incomplete root.
+- [x] Every locally injected failure/cancellation cleans owned scratch state
+      and never publishes an incomplete root. Filesystem-fault coverage remains
+      in `host_hooks.rs`; the
+      `cancelled_cell_prepare_releases_scratch_without_publishing_a_root` test
+      cancels a throttled immutable upload and verifies scratch permits/files
+      are released. Provider-wide fault matrices remain Plan 015 evidence.
 - [ ] Multi-GiB publish, source deletion, restore, and checksum comparison pass
       in dedicated qualification.
 - [x] Existing native/bundle recovery and lost-CAS tests pass.

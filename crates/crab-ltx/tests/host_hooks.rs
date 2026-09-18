@@ -7,6 +7,8 @@ use crab_ltx::{
 #[cfg(feature = "replica")]
 use crab_storage::{CellStorageLayout, Store};
 #[cfg(feature = "replica")]
+use object_store::throttle::{ThrottleConfig, ThrottledStore};
+#[cfg(feature = "replica")]
 use object_store::{memory::InMemory, path::Path as ObjectPath};
 use std::{
     collections::BTreeSet,
@@ -16,6 +18,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 #[derive(Clone, Default)]
@@ -277,6 +280,63 @@ async fn cell_compaction_uses_injected_filesystem_and_cleans_failed_scratch() {
         .unwrap();
     assert_eq!(compacted.root().position, root.position);
     assert!(faults.calls.lock().unwrap().contains("open_rw"));
+}
+
+#[cfg(feature = "replica")]
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelled_cell_prepare_releases_scratch_without_publishing_a_root() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let mut writer =
+        ManagedDb::open(&directory.path().join("source.sqlite"), Limits::default()).unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction
+                .execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES(randomblob(2000000))")
+        })
+        .unwrap();
+    let captures = writer.capture().unwrap();
+    let backend = Arc::new(ThrottledStore::new(
+        InMemory::new(),
+        ThrottleConfig {
+            wait_put_per_call: Duration::from_secs(5),
+            ..ThrottleConfig::default()
+        },
+    ));
+    let scratch_slots = Arc::new(tokio::sync::Semaphore::new(64));
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(backend),
+            ObjectPath::from("cell-cancelled-prepare"),
+            [21; 16],
+        ),
+        [22; 32],
+        [23; 16],
+        Limits::default(),
+    )
+    .unwrap()
+    .with_host(
+        Host::default()
+            .with_scratch_slots(Arc::clone(&scratch_slots))
+            .with_local_disk_budget(crab_ltx::DiskBudget::new(64 * 1024 * 1024)),
+    );
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(250),
+        replica.prepare(None, &captures, 1, 1),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "the throttled immutable upload must be cancelled"
+    );
+    assert_eq!(scratch_slots.available_permits(), 64);
+    assert!(!std::fs::read_dir(directory.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".crab-cell-segment-")
+    }));
 }
 
 #[cfg(feature = "replica")]

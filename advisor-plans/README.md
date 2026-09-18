@@ -238,6 +238,15 @@ miss before the handle/resource release completes. This keeps the local route
 owned by the actor and prevents a cleanup race from exposing a stale serving
 handle.
 
+Plan 010 now has a cancellation regression in
+`crates/crab-ltx/tests/host_hooks.rs`:
+`cancelled_cell_prepare_releases_scratch_without_publishing_a_root` throttles
+the first immutable upload, cancels native preparation, and verifies the
+replayable scratch namespace and scratch semaphore return to baseline. Together
+with the existing injected filesystem-failure tests and fail-first immutable
+PUT test, this closes the local failure/cancellation cleanup gate; measured
+multi-GiB RSS and provider-matrix receipts remain intentionally external.
+
 The coordination kernel now records a typed intent beside every local effect
 identity. A completion must match both the activation generation and its
 effect family (work, hydration, inventory, publication, proof, or renewal),
