@@ -160,7 +160,11 @@ Local proof completed:
   `resident_route_reports_zero_origin_reads_and_latency_percentiles` then runs
   64 resident-handle plus SQL reads through the instrumented store; the latest
   local run recorded p50 67us, p95 90us, p99 364us, and zero origin reads.
-  This is a repeatable local warm-path proof, not a provider or release receipt.
+  `restored_sparse_route_promotes_before_zero_origin_reads` also publishes and
+  drains a Cell, reacquires its exact root through a new runtime, waits for
+  verified sparse hydration to promote the resident route, and observes zero
+  origin calls on the subsequent SQL read. These are repeatable local warm-path
+  proofs, not provider or release receipts.
 - `crab-ltx --features replica`: 45 unit tests, 79 integration test cases
   (one provider case ignored), and 5 doctests, plus the new streaming, cache
   restart, concurrent-fill, and fault-injection coverage pass; the ignored

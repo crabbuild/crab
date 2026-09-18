@@ -65,13 +65,17 @@ bucket-call counts, ownership epochs/roots/sequences, pass/fail, and signer/
 attestation identity. Secrets and endpoints with embedded credentials are
 forbidden.
 
-Local warm-path evidence: `resident_route_reports_zero_origin_reads_and_latency_percentiles`
-in `crates/crab-cell-runtime/tests/actor.rs` performs 64 resident-handle plus SQL
-reads after activation through a `Store::with_read_request_observer` seam. The
-latest local run reported p50 67us, p95 90us, p99 364us, max 364us, and zero
-object-store read attempts. These values are a local regression signal only;
-they do not satisfy the matched-hardware, restart, provider, or signed release
-receipt criteria below.
+Local warm-path evidence includes
+`resident_route_reports_zero_origin_reads_and_latency_percentiles`, which
+performs 64 resident-handle plus SQL reads after activation through a
+`Store::with_read_request_observer` seam. The latest local run reported p50
+67us, p95 90us, p99 364us, max 364us, and zero object-store read attempts.
+`restored_sparse_route_promotes_before_zero_origin_reads` separately publishes
+and drains a Cell, reacquires its exact root through a new runtime, waits for
+verified sparse hydration promotion, and observes zero origin calls on the
+subsequent SQL read. These values are local regression signals only; they do
+not satisfy the matched-hardware, provider, or signed release receipt criteria
+below.
 
 ## Implementation steps
 

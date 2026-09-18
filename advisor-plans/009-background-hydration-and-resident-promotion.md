@@ -1,6 +1,6 @@
 # Bounded background hydration and resident promotion
 
-Status: IN PROGRESS — bounded worker hydration, sparse/resident state, worker-job ledger admission, and counted-store zero-I/O proof are wired; cancellation/restart, warm-restart, and provider-scale qualification remain
+Status: IN PROGRESS — bounded worker hydration, sparse/resident state, worker-job ledger admission, counted-store zero-I/O proof, and a restored sparse warm-restart promotion probe are wired; cancellation and provider-scale qualification remain
 Priority: P0
 Effort: L
 Risk: High
@@ -121,6 +121,14 @@ git diff --check
       operations in the counted-store test.
 - [x] Existing sparse read, truncate/regrow, checksum, and source-loss tests
       pass unchanged.
+
+The restored sparse warm-restart probe is
+`restored_sparse_route_promotes_before_zero_origin_reads` in
+`crates/crab-cell-runtime/tests/actor.rs`. It publishes and drains a Cell,
+acquires the exact idle root through a new runtime, waits for verified
+hydration to promote the local route, then performs a SQL read after resetting
+the counted-store observer. The read performs zero origin calls. This is local
+restart evidence; provider-scale and protected release receipts remain open.
 
 ## Stop conditions
 

@@ -1444,6 +1444,98 @@ async fn resident_route_reports_zero_origin_reads_and_latency_percentiles() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn restored_sparse_route_promotes_before_zero_origin_reads() {
+    let origin_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_reads = Arc::clone(&origin_reads);
+    let store =
+        Store::new(Arc::new(InMemory::new())).with_read_request_observer(Arc::new(move |_kind| {
+            observed_reads.fetch_add(1, Ordering::AcqRel);
+        }));
+    let fixture = fixture_with_limits_and_store(
+        b"resident-warm-restart-qualification",
+        Limits::default(),
+        store,
+    );
+    let session = SessionId::from_bytes([110; 16]);
+    let first_runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024, session).unwrap();
+    let handle = bootstrap_on(&first_runtime, &fixture, session).await;
+    handle.drain().await.unwrap();
+    first_runtime.shutdown().await.unwrap();
+
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let idle = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let successor = SessionId::from_bytes([111; 16]);
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        16 * 1024 * 1024,
+        successor,
+    )
+    .unwrap();
+    let restored = runtime
+        .acquire_idle_restored(
+            proof,
+            fixture.replica.clone(),
+            authority,
+            idle,
+            fixture._directory.path().join("warm-restart.sqlite"),
+            Owner {
+                session: successor,
+                endpoint: "https://warm-restart.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if runtime
+                .resident_handle(&fixture.target, CatalogRole::Repository)
+                .await
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    origin_reads.store(0, Ordering::Release);
+
+    let resident = runtime
+        .resident_handle(&fixture.target, CatalogRole::Repository)
+        .await
+        .unwrap()
+        .expect("verified sparse restore must promote to resident");
+    let value = resident
+        .query(64, 64, |connection| {
+            let value = connection
+                .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+            Ok(value.to_be_bytes().to_vec())
+        })
+        .await
+        .unwrap();
+    assert_eq!(i64::from_be_bytes(value.try_into().unwrap()), 0);
+    assert_eq!(origin_reads.load(Ordering::Acquire), 0);
+
+    restored.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn churn_evicts_idle_cells_and_restores_exact_roots() {
     let first = fixture_for(b"churn-first");
     let second = fixture_for(b"churn-second");

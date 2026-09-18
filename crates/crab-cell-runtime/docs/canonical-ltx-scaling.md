@@ -211,6 +211,13 @@ resident-handle plus SQL reads after activation through an instrumented
 and zero origin reads. It is intentionally labeled local evidence rather than
 a matched-hardware or signed release receipt.
 
+The companion
+`restored_sparse_route_promotes_before_zero_origin_reads` publishes and drains
+a Cell, reacquires its exact root through a new runtime, waits for verified
+sparse hydration to promote the resident route, and observes zero origin calls
+on the subsequent SQL read. This closes the local warm-restart regression seam;
+provider-scale and signed release receipts remain separate gates.
+
 The upstream comparison is supported by Celld's pinned
 [`docs/testing.md`](https://github.com/denoland/celld/blob/10cb1303dac710dcb3b557e318e08c855261f68b/docs/testing.md),
 [`crates/logic/rebalance.rs`](https://github.com/denoland/celld/blob/10cb1303dac710dcb3b557e318e08c855261f68b/crates/logic/rebalance.rs),
