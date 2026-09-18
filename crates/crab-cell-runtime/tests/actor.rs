@@ -8,6 +8,10 @@ use std::{
 };
 
 use bytes::Bytes;
+#[cfg(feature = "process-test-support")]
+#[path = "../src/process_store.rs"]
+mod process_store;
+
 use crab_cell_runtime::{
     ACTIVE_CELL_FILE_DESCRIPTORS, AppendRequest, ApplicationId, CatalogEntry, CatalogRole,
     CellAuthority, CellRuntime, CellTarget, ControlState, Digest, DiskBudget, DurabilityGate,
@@ -545,6 +549,12 @@ fn fixture_with_limits_and_store(partition: &[u8], limits: Limits, store: Store)
         layout,
         replica,
     }
+}
+
+#[cfg(feature = "process-test-support")]
+fn filesystem_fixture(partition: &[u8], root: &std::path::Path) -> Fixture {
+    let store = process_store::FilesystemCasStore::new(root).unwrap();
+    fixture_with_limits_and_store(partition, Limits::default(), Store::new(Arc::new(store)))
 }
 
 async fn activate(fixture: &Fixture, node_bytes: usize) -> crab_cell_runtime::CellHandle {
@@ -1736,6 +1746,77 @@ async fn released_cell_is_acquired_by_one_successor_runtime() {
     assert_eq!(second_runtime.stats().active_cells(), 0);
     second_runtime.shutdown().await.unwrap();
     first_runtime.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "process-test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn independent_processes_allow_one_idle_cell_winner() {
+    let object_root = tempfile::TempDir::new().unwrap();
+    let fixture = filesystem_fixture(b"process-movement-race", object_root.path());
+    let session = SessionId::from_bytes([83; 16]);
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 * 1024 * 1024, session).unwrap();
+    let handle = bootstrap_on(&runtime, &fixture, session).await;
+    handle.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let idle = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(idle.value().state, ControlState::Idle);
+    let root = idle.value().ltx_root().unwrap();
+    let binary = std::env::var("CARGO_BIN_EXE_cell_movement_probe")
+        .expect("Cargo must provide the movement probe binary to integration tests");
+    let store_root = object_root.path().to_owned();
+    let partition = "process-movement-race";
+    let first_destination = fixture._directory.path().join("process-first.sqlite");
+    let second_destination = fixture._directory.path().join("process-second.sqlite");
+    let first_store_root = store_root.clone();
+    let first_binary = binary.clone();
+    let first = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(first_binary)
+            .stderr(std::process::Stdio::null())
+            .args([
+                first_store_root.as_os_str().to_string_lossy().as_ref(),
+                partition,
+                "53535353535353535353535353535353",
+                first_destination.to_string_lossy().as_ref(),
+                "750",
+            ])
+            .status()
+            .unwrap()
+    });
+    let second_store_root = store_root;
+    let second_binary = binary;
+    let second = tokio::task::spawn_blocking(move || {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        std::process::Command::new(second_binary)
+            .stderr(std::process::Stdio::null())
+            .args([
+                second_store_root.as_os_str().to_string_lossy().as_ref(),
+                partition,
+                "54545454545454545454545454545454",
+                second_destination.to_string_lossy().as_ref(),
+                "100",
+            ])
+            .status()
+            .unwrap()
+    });
+    let (first, second) = tokio::join!(first, second);
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert_ne!(first.success(), second.success());
+
+    let final_control = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(final_control.value().state, ControlState::Idle);
+    assert_eq!(final_control.value().ltx_root(), Some(root));
 }
 
 async fn wait_for_persisted_work(

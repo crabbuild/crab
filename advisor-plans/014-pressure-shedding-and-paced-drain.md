@@ -127,6 +127,21 @@ git diff --check
       by the shared job reservation and coordination pending-effect set.
 - [ ] Simulator and multi-process movement tests pass without retry masking.
 
+The process-level race probe is available behind the test-only
+`process-test-support` feature. It uses two OS processes and a shared local
+filesystem CAS adapter, so the command verifies an actual cross-process
+authority race rather than two runtimes in one address space:
+
+```bash
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-014-process-movement \
+  cargo test -p crab-cell-runtime --features process-test-support --test actor \
+  independent_processes_allow_one_idle_cell_winner --locked -- --exact --nocapture
+```
+
+This proves one idle-control winner and exact-root preservation after the
+winner drains. It does not replace the protected three-Pod owner-crash,
+membership-loss, or directional-partition receipt required for release.
+
 ## Stop conditions
 
 - Any victim can be selected while its resource/obligation state is unknown.
