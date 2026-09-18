@@ -1242,7 +1242,6 @@ fn parse_cgroup_limit(value: &str) -> Option<u64> {
     (!value.is_empty() && value != "max")
         .then(|| value.parse::<u64>().ok())
         .flatten()
-        .filter(|limit| *limit != 0)
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -1494,7 +1493,7 @@ mod tests {
         assert_eq!(parse_cgroup_limit("max"), None);
         assert_eq!(parse_cgroup_limit(""), None);
         assert_eq!(parse_cgroup_limit("not-a-number"), None);
-        assert_eq!(parse_cgroup_limit("0"), None);
+        assert_eq!(parse_cgroup_limit("0"), Some(0));
         assert_eq!(parse_cgroup_available("4096", "1024"), Some(3072));
         assert_eq!(parse_cgroup_available("4096", "4097"), None);
         assert_eq!(parse_cgroup_available("max", "1024"), None);
