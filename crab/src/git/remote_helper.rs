@@ -5208,6 +5208,17 @@ mod tests {
         )
         .await
         .expect("repack pointer repository");
+        crate::cmd::repack::run_repack(
+            &store,
+            "remote-helper-dispatch",
+            &crate::cmd::repack::RepackConfig {
+                workspace_root: repack_workspace.path().to_owned(),
+                ..crate::cmd::repack::RepackConfig::default()
+            },
+            &cancel,
+        )
+        .await
+        .expect("repeat repack must preserve compacted capsule history");
         let compacted_catalog = crab_metadata::capsule_protocol::load_pointer_catalog(&layout)
             .await
             .expect("load checkpointed pointer catalog");
