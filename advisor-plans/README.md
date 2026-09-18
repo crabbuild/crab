@@ -394,6 +394,8 @@ takeover path: `typed_blob_and_cron_recover_after_owner_loss`,
 `typed_queue_namespace_recovers_after_owner_loss` drop the first runtime,
 fence its exact node session, restore the published root, and verify a typed
 read/ack/tick after takeover. Workflow/activity owner loss remains covered by
-the native activity failover test, and SQL publication/source loss remains
-covered by the actor takeover suite. These are local in-memory ownership
-receipts; protected three-Pod primitive-fault evidence remains open.
+the native activity failover test, SQL publication/source loss remains covered
+by the actor takeover suite, and
+`typed_effect_source_publishes_claim_validation_ack_and_lost_lease` recovers
+the durable effect ledger before claim/ack. These are local in-memory
+ownership receipts; protected three-Pod primitive-fault evidence remains open.

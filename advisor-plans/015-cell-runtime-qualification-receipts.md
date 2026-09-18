@@ -92,9 +92,11 @@ boundary as the repository Cell path. `typed_blob_and_cron_recover_after_owner_l
 without releasing authority, fence its exact session through `NodeDirectory`,
 take over the published root, and verify the typed read/ack/tick result after
 recovery. Workflow/activity owner loss remains covered by the native activity
-failover test, and SQL publication/source-loss is covered by the actor
-takeover suite. This is local in-memory ownership evidence; it does not close
-the protected three-Pod primitive-fault receipt.
+failover test, SQL publication/source-loss is covered by the actor takeover
+suite, and `typed_effect_source_publishes_claim_validation_ack_and_lost_lease`
+now recovers the durable effect ledger before claiming and acknowledging it.
+This is local in-memory ownership evidence; it does not close the protected
+three-Pod primitive-fault receipt.
 
 ## Implementation steps
 
@@ -161,7 +163,9 @@ must fail when handed a receipt from a different SHA or image digest.
       show hysteresis and movement never exceeds the paced limit.
 - [ ] Advertised resource totals reconcile with measured cgroup/disk/job usage
       within a declared tolerance.
-- [ ] SQL, Blob, KV, Queue, Workflow, Cron/activity/effect survive owner loss.
+- [x] SQL, Blob, KV, Queue, Workflow, Cron/activity/effect survive owner loss
+      through the canonical local fencing/takeover tests; protected three-Pod
+      fault evidence remains a separate matrix gate.
 - [x] Receipt validator rejects dirty/mismatched/forged/incomplete evidence.
 - [x] Release workflow cannot consume evidence for another source/image: it
       checks the exact source revision and artifact digest, then validates the

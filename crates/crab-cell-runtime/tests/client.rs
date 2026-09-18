@@ -1,17 +1,19 @@
 use std::{future::Future, pin::Pin, sync::Arc, time::UNIX_EPOCH};
 
+mod support;
+
 use crab_cell_runtime::{
-    ApplicationId, BoundedDecoder, BoundedEncoder, BuildDescriptor, CatalogEntry, CatalogRole,
-    CellAuthority, CellClient, CellDescription, CellModule, CellTarget, CodecError, Command,
-    CommandContext, CommandResult, Digest, EffectBatch, EffectClaim, EffectClaimRequest,
-    EffectCommandIntent, EffectLeaseOutcome, EffectModule, EffectPeerClient, EffectRunOutcome,
-    EffectSource, IncarnationId, InvocationError, MigrationDescriptor, ModuleDescriptor,
-    MutationIdentity, NamespaceDescriptor, NamespaceId, OperationDescriptor, Owner, PeerAuthorizer,
-    PeerCellResolver, PeerDispatcher, PeerPrincipal, PeerRoundTrip, PeerSigner, PeerVerifier,
-    Query, QueryContext, Receipt, Registry, RegistryBuilder, RequestId, Resolution, SessionId,
-    SqlBatch, SqlStatement, SqlValue, SqlWorkerPool, TenantId, VerifiedPeerRequest, WireValue,
-    command_operation_digest, effect_id, effect_operation_digest, peer_wire as wire,
-    register_effect_delivery,
+    ApplicationId, BoundedDecoder, BoundedEncoder, BuildDescriptor, CatalogEntry, CatalogProof,
+    CatalogRole, CellAuthority, CellClient, CellDescription, CellModule, CellRuntime, CellTarget,
+    CodecError, Command, CommandContext, CommandResult, Digest, EffectBatch, EffectClaim,
+    EffectClaimRequest, EffectCommandIntent, EffectLeaseOutcome, EffectModule, EffectPeerClient,
+    EffectRunOutcome, EffectSource, IncarnationId, InvocationError, MigrationDescriptor,
+    ModuleDescriptor, MutationIdentity, NamespaceDescriptor, NamespaceId, OperationDescriptor,
+    Owner, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerPrincipal, PeerRoundTrip,
+    PeerSigner, PeerVerifier, Query, QueryContext, Receipt, Registry, RegistryBuilder, RequestId,
+    Resolution, SessionId, SqlBatch, SqlStatement, SqlValue, SqlWorkerPool, TenantId,
+    VerifiedPeerRequest, WireValue, command_operation_digest, effect_id, effect_operation_digest,
+    peer_wire as wire, register_effect_delivery,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{CellStorageLayout, Store};
@@ -275,9 +277,26 @@ fn registry() -> Arc<Registry> {
 
 struct Fixture {
     _directory: tempfile::TempDir,
+    layout: CellStorageLayout,
+    replica: CellReplica,
+    authority: CellAuthority,
+    proof: CatalogProof,
+    runtime: Option<CellRuntime>,
+    session: SessionId,
+    incarnation: IncarnationId,
     target: CellTarget,
-    handle: crab_cell_runtime::CellHandle,
+    handle: Option<crab_cell_runtime::CellHandle>,
     registry: Arc<Registry>,
+}
+
+impl Fixture {
+    fn handle(&self) -> &crab_cell_runtime::CellHandle {
+        self.handle.as_ref().expect("fixture handle is present")
+    }
+
+    fn take_handle(&mut self) -> crab_cell_runtime::CellHandle {
+        self.handle.take().expect("fixture handle is present")
+    }
 }
 
 async fn fixture() -> Fixture {
@@ -314,7 +333,7 @@ async fn fixture() -> Fixture {
         .await
         .unwrap();
     let session = SessionId::from_bytes([5; 16]);
-    let authority = CellAuthority::new(layout);
+    let authority = CellAuthority::new(layout.clone());
     let observed = authority
         .create_initial(
             &proof,
@@ -327,29 +346,33 @@ async fn fixture() -> Fixture {
         .await
         .unwrap();
     let directory = tempfile::TempDir::new().unwrap();
-    let handle = crab_cell_runtime::CellRuntime::new(
-        SqlWorkerPool::new(1, 4).unwrap(),
-        4 * 1024 * 1024,
-        session,
-    )
-    .unwrap()
-    .bootstrap(
-        proof,
-        replica,
-        authority,
-        observed,
-        directory.path().join("repository.sqlite"),
-        |transaction| {
-            transaction.execute_batch(MIGRATION)?;
-            Ok(())
-        },
-    )
-    .await
-    .unwrap();
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 4).unwrap(), 4 * 1024 * 1024, session).unwrap();
+    let handle = runtime
+        .bootstrap(
+            proof.clone(),
+            replica.clone(),
+            authority.clone(),
+            observed,
+            directory.path().join("repository.sqlite"),
+            |transaction| {
+                transaction.execute_batch(MIGRATION)?;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
     Fixture {
         _directory: directory,
+        layout,
+        replica,
+        authority,
+        proof,
+        runtime: Some(runtime),
+        session,
+        incarnation,
         target,
-        handle,
+        handle: Some(handle),
         registry,
     }
 }
@@ -445,7 +468,7 @@ impl PeerRoundTrip for LoopbackRoundTrip {
 #[tokio::test]
 async fn typed_client_publishes_replays_rejections_and_receipted_reads() {
     let fixture = fixture().await;
-    let client = CellClient::local(fixture.registry, fixture.handle.clone());
+    let client = CellClient::local(Arc::clone(&fixture.registry), fixture.handle().clone());
     let identity = mutation(7);
 
     let committed = client
@@ -478,13 +501,13 @@ async fn typed_client_publishes_replays_rejections_and_receipted_reads() {
     assert_eq!(observed.output, 1);
     assert_eq!(observed.receipt.commit_sequence, 2);
 
-    fixture.handle.drain().await.unwrap();
+    fixture.handle().drain().await.unwrap();
 }
 
 #[tokio::test]
 async fn state_stream_serializes_local_queries_across_a_new_commit() {
     let fixture = fixture().await;
-    let client = CellClient::local(Arc::clone(&fixture.registry), fixture.handle.clone());
+    let client = CellClient::local(Arc::clone(&fixture.registry), fixture.handle().clone());
     let mut stream = client
         .open_state_stream::<CountComments>(
             &fixture.target,
@@ -505,13 +528,13 @@ async fn state_stream_serializes_local_queries_across_a_new_commit() {
     assert_eq!(stream.last_receipt(), Some(second.receipt));
 
     stream.finish();
-    fixture.handle.drain().await.unwrap();
+    fixture.handle().drain().await.unwrap();
 }
 
 #[tokio::test]
 async fn local_and_peer_command_share_digest_dedup_and_query_state() {
     let fixture = fixture().await;
-    let client = CellClient::local(Arc::clone(&fixture.registry), fixture.handle.clone());
+    let client = CellClient::local(Arc::clone(&fixture.registry), fixture.handle().clone());
     let identity = mutation(14);
     let committed = client
         .command::<CreateComment>(&fixture.target, identity, b"same".to_vec())
@@ -532,7 +555,7 @@ async fn local_and_peer_command_share_digest_dedup_and_query_state() {
         Arc::clone(&fixture.registry),
         Arc::new(LocalResolver {
             target: fixture.target.clone(),
-            handle: fixture.handle.clone(),
+            handle: fixture.handle().clone(),
         }),
         Arc::new(RepositoryAuthorizer),
     ));
@@ -562,7 +585,7 @@ async fn local_and_peer_command_share_digest_dedup_and_query_state() {
     assert_eq!(observed.output, 1);
     assert_eq!(observed.receipt.commit_sequence, 1);
 
-    fixture.handle.drain().await.unwrap();
+    fixture.handle().drain().await.unwrap();
 }
 
 #[tokio::test]
@@ -582,7 +605,7 @@ async fn authenticated_effect_delivery_publishes_once_and_resolves_from_inbox() 
         Arc::clone(&fixture.registry),
         Arc::new(LocalResolver {
             target: fixture.target.clone(),
-            handle: fixture.handle.clone(),
+            handle: fixture.handle().clone(),
         }),
         Arc::new(RepositoryAuthorizer),
     ));
@@ -660,21 +683,21 @@ async fn authenticated_effect_delivery_publishes_once_and_resolves_from_inbox() 
     );
 
     assert_eq!(
-        CellClient::local(Arc::clone(&fixture.registry), fixture.handle.clone())
+        CellClient::local(Arc::clone(&fixture.registry), fixture.handle().clone())
             .query::<CountComments>(&fixture.target, None, ())
             .await
             .unwrap()
             .output,
         1
     );
-    fixture.handle.drain().await.unwrap();
+    fixture.handle().drain().await.unwrap();
 }
 
 #[tokio::test]
 async fn typed_effect_source_publishes_claim_validation_ack_and_lost_lease() {
-    let fixture = fixture().await;
+    let mut fixture = fixture().await;
     let source_cell = fixture.target.cell_id();
-    let source_incarnation = fixture.handle.incarnation();
+    let source_incarnation = fixture.incarnation;
     let source_sequence = 1;
     let ordinal = 0;
     let identity = mutation(30);
@@ -686,7 +709,7 @@ async fn typed_effect_source_publishes_claim_validation_ack_and_lost_lease() {
     let source_target = fixture.target.clone();
     let effect_target = fixture.target.clone();
     fixture
-        .handle
+        .handle()
         .execute(
             identity,
             Digest::from_bytes([31; 32]),
@@ -716,8 +739,40 @@ async fn typed_effect_source_publishes_claim_validation_ack_and_lost_lease() {
         .await
         .unwrap();
 
+    let first_handle = fixture.take_handle();
+    drop(first_handle);
+    drop(fixture.runtime.take().expect("fixture runtime is present"));
+    let stale = fixture.authority.load(source_cell).await.unwrap().unwrap();
+    let successor = SessionId::from_bytes([15; 16]);
+    let fenced = support::fence_session(&fixture.layout, fixture.session, successor).await;
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 4).unwrap(),
+        4 * 1024 * 1024,
+        successor,
+    )
+    .unwrap();
+    let restored = runtime
+        .takeover_restored(
+            fixture.proof.clone(),
+            fixture.replica.clone(),
+            fixture.authority.clone(),
+            stale,
+            fenced.direct_takeover().unwrap(),
+            crab_cell_runtime::RecoveryManifestStore::new(
+                fixture.layout.clone(),
+                Limits::default(),
+            ),
+            fixture._directory.path().join("effect-successor.sqlite"),
+            Owner {
+                session: successor,
+                endpoint: "https://effect-successor.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+
     let source = EffectSource::<RepositoryModule>::new(
-        CellClient::local(Arc::clone(&fixture.registry), fixture.handle.clone()),
+        CellClient::local(Arc::clone(&fixture.registry), restored.clone()),
         fixture.target.clone(),
     );
     let claimed = source
@@ -757,7 +812,8 @@ async fn typed_effect_source_publishes_claim_validation_ack_and_lost_lease() {
                 && outcome.receipt.commit_sequence == 4
     ));
 
-    fixture.handle.drain().await.unwrap();
+    restored.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -772,7 +828,7 @@ async fn effect_supervisor_delivers_to_inbox_and_acknowledges_source() {
     let source_target = fixture.target.clone();
     let effect_target = fixture.target.clone();
     fixture
-        .handle
+        .handle()
         .execute(
             identity,
             Digest::from_bytes([41; 32]),
@@ -816,7 +872,7 @@ async fn effect_supervisor_delivers_to_inbox_and_acknowledges_source() {
         Arc::clone(&fixture.registry),
         Arc::new(LocalResolver {
             target: fixture.target.clone(),
-            handle: fixture.handle.clone(),
+            handle: fixture.handle().clone(),
         }),
         Arc::new(RepositoryAuthorizer),
     ));
@@ -840,7 +896,7 @@ async fn effect_supervisor_delivers_to_inbox_and_acknowledges_source() {
     let outcome = fixture
         .registry
         .run_effect_once(
-            CellClient::local(Arc::clone(&fixture.registry), fixture.handle.clone()),
+            CellClient::local(Arc::clone(&fixture.registry), fixture.handle().clone()),
             fixture.target.clone(),
             peer,
             5_000,
@@ -869,7 +925,7 @@ async fn effect_supervisor_delivers_to_inbox_and_acknowledges_source() {
         "{outcome:?}"
     );
     assert_eq!(
-        CellClient::local(Arc::clone(&fixture.registry), fixture.handle.clone())
+        CellClient::local(Arc::clone(&fixture.registry), fixture.handle().clone())
             .query::<CountComments>(&fixture.target, None, ())
             .await
             .unwrap()
@@ -877,13 +933,13 @@ async fn effect_supervisor_delivers_to_inbox_and_acknowledges_source() {
         1
     );
 
-    fixture.handle.drain().await.unwrap();
+    fixture.handle().drain().await.unwrap();
 }
 
 #[tokio::test]
 async fn typed_client_rejects_conflicting_identity_receipt_and_module_before_execution() {
     let fixture = fixture().await;
-    let client = CellClient::local(fixture.registry, fixture.handle.clone());
+    let client = CellClient::local(Arc::clone(&fixture.registry), fixture.handle().clone());
     let identity = mutation(9);
     let committed = client
         .command::<CreateComment>(&fixture.target, identity, b"first".to_vec())
@@ -945,13 +1001,13 @@ async fn typed_client_rejects_conflicting_identity_receipt_and_module_before_exe
         ))
     ));
 
-    fixture.handle.drain().await.unwrap();
+    fixture.handle().drain().await.unwrap();
 }
 
 #[tokio::test]
 async fn invalid_typed_result_preserves_the_published_receipt() {
     let fixture = fixture().await;
-    let client = CellClient::local(fixture.registry, fixture.handle.clone());
+    let client = CellClient::local(Arc::clone(&fixture.registry), fixture.handle().clone());
 
     let result = client
         .command::<InvalidResultComment>(&fixture.target, mutation(12), b"stored".to_vec())
@@ -975,7 +1031,7 @@ async fn invalid_typed_result_preserves_the_published_receipt() {
         1
     );
 
-    fixture.handle.drain().await.unwrap();
+    fixture.handle().drain().await.unwrap();
 }
 
 #[test]
