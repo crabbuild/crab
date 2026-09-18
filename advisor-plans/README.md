@@ -195,6 +195,13 @@ clamped. Nested cgroup fixture parsing and process file-capacity checks cover
 the fail-closed host probe; process-wide parity and multi-process convergence
 remain qualification work.
 
+Scheduler maintenance is also ledger-visible: migration and node-log recovery
+tasks now retain a `NodeJobReservation` until their spawned futures finish,
+alongside the existing per-cell/session guards. This closes the untracked
+background-job path without adding a second capacity owner; process-wide
+codec/dirty/scratch reconciliation and restart inventory are still explicit
+Plan 012 qualification gates.
+
 The coordination kernel now records a typed intent beside every local effect
 identity. A completion must match both the activation generation and its
 effect family (work, hydration, inventory, publication, proof, or renewal),

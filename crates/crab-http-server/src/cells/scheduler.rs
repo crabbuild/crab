@@ -343,7 +343,7 @@ impl RepositoryCellScheduler {
                 {
                     continue;
                 }
-                let Some(reservation) = self.reserve_migration(cell) else {
+                let Some(reservation) = self.reserve_migration(cell)? else {
                     continue;
                 };
                 let target = CellTarget::new(
@@ -651,7 +651,7 @@ impl RepositoryCellScheduler {
             .recovery_candidates(self.session, now_ms, available)
             .await?;
         for session in candidates {
-            let Some(reservation) = self.reserve_recovery(session) else {
+            let Some(reservation) = self.reserve_recovery(session)? else {
                 continue;
             };
             let directory = self.directory.clone();
@@ -703,15 +703,23 @@ impl RepositoryCellScheduler {
         Ok(())
     }
 
-    fn reserve_migration(&self, cell: CellId) -> Option<MigrationCellReservation> {
+    fn reserve_migration(&self, cell: CellId) -> crate::Result<Option<MigrationCellReservation>> {
+        let Some(job) = self.router.reserve_primitive_job()? else {
+            return Ok(None);
+        };
         let mut cells = self
             .migration_cells
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        cells.insert(cell).then(|| MigrationCellReservation {
+        if !cells.insert(cell) {
+            drop(job);
+            return Ok(None);
+        }
+        Ok(Some(MigrationCellReservation {
             cell,
             cells: Arc::clone(&self.migration_cells),
-        })
+            _job: job,
+        }))
     }
 
     fn reserve_activity(&self, cell: CellId) -> Option<ActivityCellReservation> {
@@ -725,17 +733,26 @@ impl RepositoryCellScheduler {
         })
     }
 
-    fn reserve_recovery(&self, session: SessionId) -> Option<RecoverySessionReservation> {
+    fn reserve_recovery(
+        &self,
+        session: SessionId,
+    ) -> crate::Result<Option<RecoverySessionReservation>> {
+        let Some(job) = self.router.reserve_primitive_job()? else {
+            return Ok(None);
+        };
         let mut sessions = self
             .recovery_sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        sessions
-            .insert(session)
-            .then(|| RecoverySessionReservation {
-                session,
-                sessions: Arc::clone(&self.recovery_sessions),
-            })
+        if !sessions.insert(session) {
+            drop(job);
+            return Ok(None);
+        }
+        Ok(Some(RecoverySessionReservation {
+            session,
+            sessions: Arc::clone(&self.recovery_sessions),
+            _job: job,
+        }))
     }
 
     fn reserve_blocking_activity(
@@ -789,11 +806,13 @@ struct ActivityCellReservation {
 struct MigrationCellReservation {
     cell: CellId,
     cells: Arc<Mutex<HashSet<CellId>>>,
+    _job: crab_cell_runtime::NodeJobReservation,
 }
 
 struct RecoverySessionReservation {
     session: SessionId,
     sessions: Arc<Mutex<HashSet<SessionId>>>,
+    _job: crab_cell_runtime::NodeJobReservation,
 }
 
 impl Drop for MigrationCellReservation {

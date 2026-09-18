@@ -1,6 +1,6 @@
 # Cell quiescing, idle eviction, and unified resource accounting
 
-Status: IN PROGRESS — RAII ledger shared by active Cells, resident native bytes, active-Cell file descriptors, SQL work, hydration jobs, retained publication bytes, primitive activity/effect jobs, and the canonical LTX `DiskBudget`; deterministic victim selection, actor eviction, pressure pacing, retained-byte accounting, and fail-closed persisted-work refresh are wired; unknown persisted-work inventory is explicitly ineligible for eviction; descriptor admission/metrics and shared local-disk consumer wiring are now explicit; restart-churn and measured reconciliation proof remains
+Status: IN PROGRESS — RAII ledger shared by active Cells, resident native bytes, active-Cell file descriptors, SQL work, hydration jobs, retained publication bytes, primitive activity/effect/migration/recovery jobs, and the canonical LTX `DiskBudget`; deterministic victim selection, actor eviction, pressure pacing, retained-byte accounting, and fail-closed persisted-work refresh are wired; unknown persisted-work inventory is explicitly ineligible for eviction; descriptor admission/metrics and shared local-disk consumer wiring are now explicit; restart-churn, process-wide codec/scratch reconciliation, and measured inventory proof remain
 Priority: P0
 Effort: XL
 Risk: High
@@ -137,9 +137,9 @@ a timeout or process exit is not proof of cleanup.
       disk within a documented tolerance.
 - [ ] Restart inventory does not undercount existing owned files.
 - [x] Primitive jobs participate in the same limits; activity/effect scheduler
-      work and user SQL commands use bounded RAII reservations, while Queue and
-      Workflow durable rows are re-inspected after work before an idle victim
-      can be selected.
+      work, release migrations, node-log recovery, and user SQL commands use
+      bounded RAII reservations, while Queue and Workflow durable rows are
+      re-inspected after work before an idle victim can be selected.
 - [ ] Mixed churn/source-loss test passes and final resources return to baseline.
 - [x] No new user configuration or second eviction path is added.
 
@@ -154,3 +154,11 @@ a timeout or process exit is not proof of cleanup.
 
 Any new background job or local artifact must declare its cost and lifecycle in
 the unified ledger before it can be scheduled or advertised.
+
+Scheduler migration and node-log recovery now hold a `NodeJobReservation` for
+the complete spawned task, in addition to their per-cell/session duplicate
+guards. This prevents maintenance work from consuming unadvertised primitive
+capacity while the actor and effect paths are under load. The remaining ledger
+gate is process-wide codec/dirty/scratch accounting plus restart inventory
+reconciliation, which requires measured qualification rather than another
+local counter.
