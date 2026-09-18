@@ -101,6 +101,76 @@ async fn native_http_push_publishes_exact_objects_and_rejects_rewrites_atomicall
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn native_receive_exceeds_the_default_repository_budget() {
+    let server = maintenance_tests::fixture().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let stop = CancellationToken::new();
+    let stopped = stop.clone();
+    let app = router(Arc::clone(&server));
+    let http = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(stopped.cancelled_owned())
+            .await
+            .unwrap();
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let url = format!("http://127.0.0.1:{port}/git/team/repo.git");
+    success(
+        path,
+        &["init", "--initial-branch=main", "--object-format=sha1", "."],
+    )
+    .await;
+    let import_path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("git")
+            .current_dir(import_path)
+            .args(["fast-import", "--quiet"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        for index in 0..10_050 {
+            let body = format!("blob-{index}");
+            writeln!(input, "blob\nmark :{}\ndata {}", index + 1, body.len()).unwrap();
+            writeln!(input, "{body}").unwrap();
+        }
+        writeln!(input, "commit refs/heads/main").unwrap();
+        writeln!(
+            input,
+            "committer Receive test <receive@example.invalid> 0 +0000"
+        )
+        .unwrap();
+        writeln!(input, "data 4\nbase").unwrap();
+        for index in 0..10_050 {
+            writeln!(input, "M 100644 :{} file-{index}", index + 1).unwrap();
+        }
+        writeln!(input).unwrap();
+        drop(input);
+        assert!(child.wait().unwrap().success());
+    })
+    .await
+    .unwrap();
+
+    success(path, &["push", &url, "main"]).await;
+    let tree = reqwest::get(format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/tree?rev=main&limit=1"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(tree.status(), reqwest::StatusCode::OK);
+
+    stop.cancel();
+    http.await.unwrap();
+    server.cancellation.cancel();
+    server.shutdown_runtimes().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn native_http_receive_rejects_locked_paths_even_when_the_tip_reverts() {
     let server = maintenance_tests::fixture().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

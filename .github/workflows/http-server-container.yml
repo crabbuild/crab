@@ -821,7 +821,7 @@ jobs:
             crates/crab-http-server/tests/qualify_compose_cluster.sh \
             > "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json"
           jq --exit-status \
-            '.version == 4 and
+            '.version == 5 and
              .owner_loss.session_before != .owner_loss.session_after and
              .owner_loss.epoch_after > .owner_loss.epoch_before and
              (.owner_loss.root_before | keys | sort) ==
@@ -850,5 +850,21 @@ jobs:
              .fleet_only_commit.follower_retained_bytes > 0 and
              .fleet_only_commit.control_before_owner_loss.owner_lease.state == "live" and
              .fleet_only_commit.control_before_owner_loss.owner_lease.expires_at_ms >
-               .fleet_only_commit.control_before_owner_loss.owner_lease.observed_at_ms' \
+               .fleet_only_commit.control_before_owner_loss.owner_lease.observed_at_ms and
+             .follower_replacement.node_log_after.epoch >
+               .follower_replacement.node_log_before.epoch and
+             (.follower_replacement.node_log_after.member_nodes | length) == 1 and
+             .follower_replacement.object_covered_response.number == 3 and
+             .follower_replacement.fleet_only_response.id == 2 and
+             .second_owner_loss.session_before != .second_owner_loss.session_after and
+             .second_owner_loss.epoch_after > .second_owner_loss.epoch_before and
+             (.second_owner_loss.root_before | keys | sort) ==
+               ["checksum", "commit_sequence", "digest", "txid"] and
+             (.second_owner_loss.root_after | keys | sort) ==
+               ["checksum", "commit_sequence", "digest", "txid"] and
+             .second_owner_loss.root_after.digest != .second_owner_loss.root_before.digest and
+             .second_owner_loss.root_after.txid > .second_owner_loss.root_before.txid and
+             .second_owner_loss.root_after.commit_sequence >
+               .second_owner_loss.root_before.commit_sequence and
+             (.second_owner_loss.restored_labels.items | length) == 2' \
             "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json"

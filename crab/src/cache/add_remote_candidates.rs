@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lru::LruCache;
 use rusqlite::{Connection, TransactionBehavior, params, params_from_iter};
@@ -24,6 +24,7 @@ const MAX_PERSISTENT_ENTRIES: i64 = if cfg!(test) { 1_024 } else { 2_000_000 };
 const LOOKUP_BATCH_SIZE: usize = 512;
 const PERSISTENT_UNION_LOOKUP_BATCH: usize = LOOKUP_BATCH_SIZE / 2;
 const PERSIST_DEDUP_BATCH_SIZE: usize = MEMORY_CAPACITY;
+const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const NEGATIVE_TABLE: &str = "remote_candidate_misses_v1";
 const NEGATIVE_TTL: Duration = Duration::from_secs(5 * 60);
 
@@ -62,22 +63,31 @@ impl AddRemoteCandidateCache {
         let mut connection =
             Connection::open(path).map_err(|error| database_error("open", error))?;
         connection
-            .busy_timeout(Duration::from_millis(250))
+            .busy_timeout(DATABASE_BUSY_TIMEOUT)
             .map_err(|error| database_error("configure timeout", error))?;
-        connection
-            .execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")
+        with_database_lock_retry(|| connection.execute_batch("PRAGMA journal_mode = WAL;"))
             .map_err(|error| database_error("configure", error))?;
-        // Serialize schema creation with other add processes.
-        let schema = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| database_error("begin schema", error))?;
-        let version = schema
+        connection
+            .execute_batch("PRAGMA synchronous = NORMAL;")
+            .map_err(|error| database_error("configure", error))?;
+        // A read-only version check avoids taking a writer lock on every
+        // process open. Only an uninitialized database enters the serialized
+        // schema transaction; a concurrent initializer is rechecked after it
+        // releases the lock.
+        let version = connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .map_err(|error| database_error("read schema version", error))?;
         if version == 0 {
-            schema
-                .execute_batch(
-                    "CREATE TABLE remote_candidates_v1 (
+            let schema = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| database_error("begin schema", error))?;
+            let version = schema
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .map_err(|error| database_error("read schema version", error))?;
+            if version == 0 {
+                schema
+                    .execute_batch(
+                        "CREATE TABLE remote_candidates_v1 (
                          chunk_hash BLOB PRIMARY KEY NOT NULL CHECK(length(chunk_hash) = 32),
                          xorb_hash BLOB NOT NULL CHECK(length(xorb_hash) = 32),
                          chunk_index INTEGER NOT NULL CHECK(chunk_index >= 0),
@@ -104,16 +114,21 @@ impl AddRemoteCandidateCache {
                      CREATE TRIGGER miss_delete AFTER DELETE ON remote_candidate_misses_v1
                      BEGIN UPDATE cache_counts SET negatives = negatives - 1; END;
                      PRAGMA user_version = 1;",
-                )
-                .map_err(|error| database_error("initialize", error))?;
+                    )
+                    .map_err(|error| database_error("initialize", error))?;
+            } else if version != SCHEMA_VERSION {
+                return Err(CrabError::Internal(format!(
+                    "unsupported add remote candidate cache schema {version}; expected v{SCHEMA_VERSION}"
+                )));
+            }
+            schema
+                .commit()
+                .map_err(|error| database_error("commit schema", error))?;
         } else if version != SCHEMA_VERSION {
             return Err(CrabError::Internal(format!(
                 "unsupported add remote candidate cache schema {version}; expected v{SCHEMA_VERSION}"
             )));
         }
-        schema
-            .commit()
-            .map_err(|error| database_error("commit schema", error))?;
         let capacity = NonZeroUsize::new(MEMORY_CAPACITY).unwrap_or(NonZeroUsize::MIN);
         Ok(Self {
             connection: Mutex::new(connection),
@@ -628,6 +643,30 @@ fn decode_hash(value: Vec<u8>) -> rusqlite::Result<[u8; 32]> {
 
 fn database_error(operation: &str, error: rusqlite::Error) -> CrabError {
     CrabError::Internal(format!("{operation} add remote candidate cache: {error}"))
+}
+
+fn with_database_lock_retry<T>(
+    mut operation: impl FnMut() -> rusqlite::Result<T>,
+) -> rusqlite::Result<T> {
+    let started = Instant::now();
+    loop {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if is_lock_contention(&error) && started.elapsed() < DATABASE_BUSY_TIMEOUT =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn is_lock_contention(error: &rusqlite::Error) -> bool {
+    matches!(
+        error.sqlite_error_code(),
+        Some(rusqlite::ffi::ErrorCode::DatabaseBusy | rusqlite::ffi::ErrorCode::DatabaseLocked)
+    )
 }
 
 fn current_unix_timestamp() -> Result<i64> {

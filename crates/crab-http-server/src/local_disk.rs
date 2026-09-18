@@ -96,6 +96,33 @@ impl LocalStaging {
         })
     }
 
+    pub(crate) fn resize(&self, directory: &StagingDirectory, bytes: u64) -> Result<(), Error> {
+        let previous = directory._reservation.bytes();
+        directory
+            ._reservation
+            .resize(bytes.max(1))
+            .map_err(|_| Error::Busy)?;
+        let required = match self.disk_reserve_bytes.checked_add(self.budget.used()) {
+            Some(required) => required,
+            None => {
+                let _ = directory._reservation.resize(previous);
+                return Err(Error::TooLarge);
+            }
+        };
+        let available = match fs4::available_space(self.root.as_path()) {
+            Ok(available) => available,
+            Err(error) => {
+                let _ = directory._reservation.resize(previous);
+                return Err(Error::Io(error));
+            }
+        };
+        if available < required {
+            let _ = directory._reservation.resize(previous);
+            return Err(Error::Busy);
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn available_bytes(&self) -> u64 {
         self.budget.available()
@@ -158,6 +185,30 @@ mod tests {
         ));
         drop(cell);
         assert!(staging.create(MIB, &CancellationToken::new()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn staging_reservation_grows_without_overcommitting_shared_capacity() {
+        let owner = tempfile::TempDir::new().unwrap();
+        let staging = LocalStaging::new(
+            owner.path().join("staging"),
+            crab_cell_runtime::DiskBudget::new(3 * MIB),
+            0,
+        )
+        .unwrap();
+        let directory = staging
+            .create(MIB, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        staging.resize(&directory, 3 * MIB).unwrap();
+        assert_eq!(staging.available_bytes(), 0);
+        assert!(matches!(
+            staging.create(1, &CancellationToken::new()).await,
+            Err(Error::Busy)
+        ));
+        drop(directory);
+        assert_eq!(staging.available_bytes(), 3 * MIB);
     }
 
     #[tokio::test]

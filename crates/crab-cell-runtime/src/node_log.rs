@@ -84,10 +84,26 @@ pub fn build_recovery_overlays(
     }
 
     let mut recovered = Vec::with_capacity(grouped.len());
-    for (key, cell_frames) in grouped {
+    for (key, mut cell_frames) in grouped {
         let base = base_by_key
             .get(&key)
             .ok_or(Error::Node("recovery frame base disappeared"))?;
+        // A different Cell can hold back the global coverage watermark even
+        // after this Cell's root CAS. Discard only this exact root's covered
+        // prefix; a commit/position mismatch must never hide an uncovered cut.
+        for frame in &cell_frames {
+            let covered = frame.scope().commit_sequence <= base.root.commit_sequence;
+            let position = frame.segment().position();
+            if covered != (position.txid <= base.root.position.txid)
+                || (position.txid == base.root.position.txid && position != base.root.position)
+            {
+                return Err(Error::Node("recovery frame disagrees with published base"));
+            }
+        }
+        cell_frames.retain(|frame| frame.scope().commit_sequence > base.root.commit_sequence);
+        if cell_frames.is_empty() {
+            continue;
+        }
         let first_frame = cell_frames
             .first()
             .ok_or(Error::Node("recovery Cell tail is empty"))?;
@@ -916,12 +932,24 @@ mod tests {
             },
         ];
 
-        let recovered = build_recovery_overlays(frames, &bases, limits).unwrap();
+        let recovered = build_recovery_overlays(frames.clone(), &bases, limits).unwrap();
         assert_eq!(recovered.len(), 2);
         assert_eq!(recovered[0].first_node_sequence, 1);
         assert_eq!(recovered[0].overlay.final_position(), left_tail.position);
         assert_eq!(recovered[1].last_node_sequence, 2);
         assert_eq!(recovered[1].overlay.final_position(), right_tail.position);
+        // The second Cell can reach object storage before the first, leaving
+        // its already-published commit above the shared node watermark.
+        let mut advanced_bases = bases;
+        advanced_bases[1].root.position = right_tail.position;
+        advanced_bases[1].root.commit_sequence = 2;
+        let recovered = build_recovery_overlays(frames.clone(), &advanced_bases, limits).unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].overlay.predecessor().cell, left_cell);
+        advanced_bases[1].root.position.checksum ^= 1;
+        assert!(build_recovery_overlays(frames.clone(), &advanced_bases, limits).is_err());
+        advanced_bases[1].root.position = right_base.position;
+        assert!(build_recovery_overlays(frames, &advanced_bases, limits).is_err());
         left.close().unwrap();
         right.close().unwrap();
     }
@@ -996,7 +1024,7 @@ mod tests {
             ));
         }
 
-        let recovered = build_recovery_overlays(frames, &bases, limits).unwrap();
+        let recovered = build_recovery_overlays(frames.clone(), &bases, limits).unwrap();
 
         assert_eq!(recovered.len(), CELLS);
         for (index, tail) in recovered.into_iter().enumerate() {
@@ -1005,6 +1033,17 @@ mod tests {
             assert_eq!(tail.last_node_sequence, CELLS as u64 + index as u64 + 1);
             assert_eq!(tail.overlay.final_position(), second.position);
             assert_eq!(tail.overlay.final_commit_sequence(), 3);
+        }
+        for base in &mut bases {
+            base.root.position = first.position;
+            base.root.commit_sequence = 2;
+        }
+        let recovered = build_recovery_overlays(frames, &bases, limits).unwrap();
+        assert_eq!(recovered.len(), CELLS);
+        for (index, tail) in recovered.iter().enumerate() {
+            assert_eq!(tail.first_node_sequence, CELLS as u64 + index as u64 + 1);
+            assert_eq!(tail.overlay.predecessor().position, first.position);
+            assert_eq!(tail.overlay.final_position(), second.position);
         }
         database.close().unwrap();
     }

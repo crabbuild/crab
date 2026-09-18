@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     future::Future,
     pin::Pin,
     sync::{
@@ -21,7 +22,11 @@ use crab_cell_runtime::{
 };
 use crab_storage::{CellStorageLayout, Store};
 use ed25519_dalek::SigningKey;
-use object_store::{memory::InMemory, path::Path};
+use futures_util::stream::BoxStream;
+use object_store::{
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult, memory::InMemory, path::Path,
+};
 
 use super::*;
 use crate::cells::{
@@ -59,6 +64,88 @@ static WORKFLOW_NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     dead_letter: None,
 }];
 
+#[derive(Debug)]
+struct HangingUpdateStore {
+    inner: Arc<InMemory>,
+    armed: AtomicBool,
+}
+
+impl HangingUpdateStore {
+    fn new(inner: Arc<InMemory>) -> Self {
+        Self {
+            inner,
+            armed: AtomicBool::new(false),
+        }
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, Ordering::Release);
+    }
+}
+
+impl fmt::Display for HangingUpdateStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("hanging-update-store")
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for HangingUpdateStore {
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        options: PutOptions,
+    ) -> object_store::Result<PutResult> {
+        let update = matches!(&options.mode, PutMode::Update(_));
+        let result = self.inner.put_opts(location, payload, options).await?;
+        if update && self.armed.swap(false, Ordering::AcqRel) {
+            std::future::pending::<()>().await;
+        }
+        Ok(result)
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        options: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(location, options).await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &Path,
+        options: GetOptions,
+    ) -> object_store::Result<GetResult> {
+        self.inner.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
+
 const fn operation(id: u32, input_limit: u32, output_limit: u32) -> OperationDescriptor {
     OperationDescriptor {
         id,
@@ -68,6 +155,88 @@ const fn operation(id: u32, input_limit: u32, output_limit: u32) -> OperationDes
         input_limit,
         output_limit,
     }
+}
+
+#[tokio::test]
+async fn committed_claim_with_a_lost_response_is_resumed_after_timeout() {
+    let inner = Arc::new(InMemory::new());
+    let hanging = Arc::new(HangingUpdateStore::new(inner));
+    let object_store: Arc<dyn ObjectStore> = hanging.clone();
+    let application = ApplicationId::from_bytes([51; 16]);
+    let layout = CellStorageLayout::new(
+        Store::new(object_store),
+        Path::from("scheduler-claim-timeout"),
+        *application.as_bytes(),
+    );
+    let fleet = Digest::from_bytes([52; 32]);
+    let image = Digest::from_bytes([53; 32]);
+    let release = Digest::from_bytes([54; 32]);
+    let certificate = Digest::from_bytes([55; 32]);
+    let key = SigningKey::from_bytes(&[56; 32]);
+    let expired = crab_cell_runtime::SessionId::from_bytes([57; 16]);
+    let claimant = crab_cell_runtime::SessionId::from_bytes([58; 16]);
+    let capacity = NodeCapacity {
+        free_memory_bytes: 1,
+        free_disk_bytes: 1,
+        job_credits: 1,
+        ..NodeCapacity::default()
+    };
+    let advertisement =
+        |session: crab_cell_runtime::SessionId, issued_at_ms: i64, expires_at_ms: i64| {
+            NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+                session,
+                "https://claim-timeout.internal:8081".into(),
+                fleet,
+                certificate,
+                image,
+                release,
+                &key,
+                1,
+                issued_at_ms,
+                expires_at_ms,
+                vec![Digest::from_bytes([59; 32])],
+                vec![1],
+                crab_cell_runtime::NodeFailureDomain::default(),
+                capacity,
+            )
+            .unwrap()
+        };
+    let directory = NodeDirectory::new(layout, fleet, image, release);
+    directory
+        .create(advertisement(expired, 1, 10_000), 1)
+        .await
+        .unwrap();
+    directory
+        .create(advertisement(claimant, 10_000, 25_000), 10_000)
+        .await
+        .unwrap();
+    hanging.arm();
+
+    let timed_out = claim_expired_with_timeout(
+        &directory,
+        expired,
+        claimant,
+        20_000,
+        Duration::from_millis(10),
+    )
+    .await;
+    assert!(matches!(
+        timed_out,
+        Err(crate::Error::Cell(crab_cell_runtime::Error::Deadline))
+    ));
+
+    let resumed = claim_expired_with_timeout(
+        &directory,
+        expired,
+        claimant,
+        20_001,
+        Duration::from_secs(1),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resumed.session(), expired);
+    assert_eq!(resumed.claimant(), claimant);
 }
 
 #[tokio::test]

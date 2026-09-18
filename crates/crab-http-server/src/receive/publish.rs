@@ -22,6 +22,19 @@ use crate::{
 
 const TTL: Duration = Duration::from_secs(300);
 const MAX_ACTIVE_LFS_LOCKS: usize = 10_000;
+const MAX_RECEIVE_LOGICAL_OBJECTS: u64 = 5_000_000;
+const MAX_RECEIVE_STORAGE_REQUESTS: u64 = 6_000_000;
+
+fn repository_options(server: &Server) -> crate::Result<RepositoryOptions> {
+    let mut operation = server.options.operation_limits();
+    operation.max_duration = super::REQUEST_BUDGET;
+    operation.max_logical_objects = MAX_RECEIVE_LOGICAL_OBJECTS;
+    operation.max_storage_requests = MAX_RECEIVE_STORAGE_REQUESTS;
+    Ok(RepositoryOptions::new(
+        server.options.object_limits(),
+        operation,
+    )?)
+}
 
 #[derive(Serialize)]
 struct NativePlanBinding<'a> {
@@ -160,7 +173,7 @@ pub(crate) async fn publish_default_branch(
         return Err(ReceiveError::Forbidden);
     }
     entry
-        .open_current(server, RepositoryOptions::default(), cancel)
+        .open_current(server, repository_options(server)?, cancel)
         .await?;
     let leased_entry = Arc::clone(&entry);
     crab_remote::publication::with_leases(
@@ -242,7 +255,7 @@ pub(crate) async fn publish_default_branch(
                 let _readiness = crab_remote::publication::finish_committed(async {
                     entry.invalidate().await;
                     let repository = entry
-                        .open_current(server, RepositoryOptions::default(), &cancel)
+                        .open_current(server, repository_options(server)?, &cancel)
                         .await?;
                     Ok::<_, crate::Error>(repository.generation())
                 })
@@ -409,7 +422,7 @@ async fn publish_attempt<'a>(
         return Err(ReceiveError::Forbidden);
     }
     let repository = entry
-        .open_current(server, RepositoryOptions::default(), cancel)
+        .open_current(server, repository_options(server)?, cancel)
         .await?;
     let snapshot = manifest_store::read_repository_snapshot(&entry.store, &entry.layout).await?;
     let refs: BTreeMap<_, _> = repository
@@ -574,7 +587,7 @@ async fn publish_attempt<'a>(
     let _readiness = crab_remote::publication::finish_committed(async {
         entry.invalidate().await;
         let repository = entry
-            .open_current(server, RepositoryOptions::default(), cancel)
+            .open_current(server, repository_options(server)?, cancel)
             .await?;
         Ok::<_, crate::Error>(repository.generation())
     })
@@ -622,7 +635,7 @@ async fn recover_native_plan(
     let _readiness = crab_remote::publication::finish_committed(async {
         entry.invalidate().await;
         let repository = entry
-            .open_current(server, RepositoryOptions::default(), cancel)
+            .open_current(server, repository_options(server)?, cancel)
             .await?;
         Ok::<_, crate::Error>(repository.generation())
     })

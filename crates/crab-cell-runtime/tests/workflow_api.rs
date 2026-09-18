@@ -959,9 +959,12 @@ async fn native_activity_heartbeats_and_recovers_after_node_loss() {
             )
             .await
     });
-    tokio::time::timeout(Duration::from_secs(2), async {
+    // The activity claim crosses the SQL worker and the node-owned callback
+    // boundary. Allow one lease interval for a busy multi-crate test runner;
+    // the short sleep keeps this readiness wait from monopolizing the runtime.
+    tokio::time::timeout(Duration::from_secs(5), async {
         while !FAILOVER_ACTIVITY_ENTERED.load(Ordering::Acquire) {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
     .await
