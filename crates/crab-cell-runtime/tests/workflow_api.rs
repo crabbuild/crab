@@ -18,10 +18,11 @@ use crab_cell_runtime::{
     RegistryBuilder, RequestId, SessionId, SqlWorkerPool, TenantId, WorkflowAction,
     WorkflowActivityClaimCommand, WorkflowActivityCompleteCommand, WorkflowActivityExtendCommand,
     WorkflowActivityModule, WorkflowActivityValidateQuery, WorkflowCancelCommand, WorkflowContext,
-    WorkflowDecision, WorkflowDefinition, WorkflowGetQuery, WorkflowModule, WorkflowNamespace,
-    WorkflowOutcome, WorkflowSignal, WorkflowSignalCommand, WorkflowStartCommand, WorkflowStatus,
-    install_workflow_schema, register_activity, register_blocking_activity, register_maintenance,
-    register_workflow, register_workflow_activities,
+    WorkflowControlCommand, WorkflowDecision, WorkflowDefinition, WorkflowGetQuery, WorkflowModule,
+    WorkflowNamespace, WorkflowOutcome, WorkflowSignal, WorkflowSignalCommand,
+    WorkflowStartCommand, WorkflowStatus, install_workflow_schema, register_activity,
+    register_blocking_activity, register_maintenance, register_workflow,
+    register_workflow_activities,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{CellStorageLayout, Store};
@@ -151,6 +152,7 @@ const COMMANDS: &[OperationDescriptor] = &[
     operation(5, 1024 * 1024, 1024 * 1024),
     operation(6, 1024 * 1024, 64),
     operation(7, 8, 5),
+    operation(8, 1024 * 1024, 64),
 ];
 const QUERIES: &[OperationDescriptor] = &[
     operation(1, 2048, 1024 * 1024),
@@ -283,6 +285,7 @@ impl WorkflowModule for TestWorkflow {
     const START_COMMAND_ID: u32 = 1;
     const SIGNAL_COMMAND_ID: u32 = 2;
     const CANCEL_COMMAND_ID: u32 = 3;
+    const CONTROL_COMMAND_ID: u32 = 8;
     const GET_QUERY_ID: u32 = 1;
 }
 
@@ -426,6 +429,7 @@ impl CellModule for MissingDefinitionBinding {
         registry.bind_command::<WorkflowStartCommand<TestWorkflow>>()?;
         registry.bind_command::<WorkflowSignalCommand<TestWorkflow>>()?;
         registry.bind_command::<WorkflowCancelCommand<TestWorkflow>>()?;
+        registry.bind_command::<WorkflowControlCommand<TestWorkflow>>()?;
         registry.bind_command::<WorkflowActivityClaimCommand<TestWorkflow>>()?;
         registry.bind_command::<WorkflowActivityCompleteCommand<TestWorkflow>>()?;
         registry.bind_command::<WorkflowActivityExtendCommand<TestWorkflow>>()?;

@@ -385,6 +385,8 @@ fn role_name(role: CatalogRole) -> &'static str {
         CatalogRole::Kv => "kv",
         CatalogRole::Queue => "queue",
         CatalogRole::Workflow => "workflow",
+        CatalogRole::Blob => "blob",
+        CatalogRole::Cron => "cron",
     }
 }
 

@@ -26,8 +26,9 @@ pub use activity_api::{
     register_blocking_activity, register_workflow_activities,
 };
 pub use api::{
-    WorkflowCancelCommand, WorkflowGetQuery, WorkflowGetRequest, WorkflowModule, WorkflowNamespace,
-    WorkflowSignalCommand, WorkflowStartCommand, register_workflow,
+    WorkflowCancelCommand, WorkflowControlCommand, WorkflowGetQuery, WorkflowGetRequest,
+    WorkflowModule, WorkflowNamespace, WorkflowSignalCommand, WorkflowStartCommand,
+    register_workflow,
 };
 
 const WORKFLOW_SCHEMA: &str = include_str!("migrations/workflow.sql");
@@ -43,6 +44,7 @@ pub enum WorkflowStatus {
     Completed,
     Failed,
     Cancelled,
+    Paused,
 }
 
 impl WorkflowStatus {
@@ -52,6 +54,7 @@ impl WorkflowStatus {
             Self::Completed => 1,
             Self::Failed => 2,
             Self::Cancelled => 3,
+            Self::Paused => 4,
         }
     }
 
@@ -61,6 +64,7 @@ impl WorkflowStatus {
             1 => Ok(Self::Completed),
             2 => Ok(Self::Failed),
             3 => Ok(Self::Cancelled),
+            4 => Ok(Self::Paused),
             _ => Err(Error::Command("invalid stored workflow status")),
         }
     }
@@ -182,6 +186,26 @@ pub enum WorkflowOutcome {
     RunMismatch,
     NotRunning,
     NotDue,
+    Busy,
+}
+
+/// Administrative transition for one exact workflow run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkflowControl {
+    pub workflow_id: Vec<u8>,
+    pub run_id: [u8; 16],
+    pub action: WorkflowControlAction,
+}
+
+/// Durable workflow operator action.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkflowControlAction {
+    Pause,
+    Resume,
+    Restart {
+        request_id: RequestId,
+        event: Vec<u8>,
+    },
 }
 
 /// Materialized current state of one workflow run.
@@ -342,7 +366,7 @@ fn workflow_signal_with_effects(
     )
 }
 
-/// Cancels a running workflow and all of its still-outstanding local work.
+/// Cancels a running or paused workflow and its outstanding local work.
 pub fn workflow_cancel(
     transaction: &Transaction<'_>,
     now_ms: i64,
@@ -369,13 +393,13 @@ pub fn workflow_cancel(
             Ok(WorkflowOutcome::IdentityConflict)
         };
     }
-    if run.status != WorkflowStatus::Running {
+    if !matches!(run.status, WorkflowStatus::Running | WorkflowStatus::Paused) {
         return Ok(WorkflowOutcome::NotRunning);
     }
     let sequence = next_sequence(transaction, run.event_sequence)?;
     insert_event(transaction, run.run_id, sequence, id, &signal.event)?;
     if transaction.execute(
-        "UPDATE workflow_runs SET status = 3, event_sequence = ?1, completed_at_ms = ?2 WHERE run_id = ?3 AND status = 0",
+        "UPDATE workflow_runs SET status = 3, event_sequence = ?1, completed_at_ms = ?2 WHERE run_id = ?3 AND status IN (0, 4)",
         (sequence as i64, now_ms, run.run_id.as_slice()),
     )? != 1
     {
@@ -387,6 +411,112 @@ pub fn workflow_cancel(
         status: WorkflowStatus::Cancelled,
         event_sequence: sequence,
     })
+}
+
+/// Pauses, resumes, or restarts one exact workflow run.
+pub fn workflow_control(
+    transaction: &Transaction<'_>,
+    source: &CellTarget,
+    now_ms: i64,
+    request: &WorkflowControl,
+    definition: &dyn WorkflowDefinition,
+) -> Result<WorkflowOutcome> {
+    validate_now(now_ms)?;
+    validate_identifier(&request.workflow_id)?;
+    let Some(run) = load_run(transaction, &request.workflow_id)? else {
+        return Ok(WorkflowOutcome::RunMismatch);
+    };
+    if run.run_id != request.run_id {
+        return Ok(WorkflowOutcome::RunMismatch);
+    }
+    match &request.action {
+        WorkflowControlAction::Pause => {
+            if run.status != WorkflowStatus::Running {
+                return Ok(WorkflowOutcome::NotRunning);
+            }
+            let leased = transaction.query_row(
+                "SELECT count(*) FROM workflow_activities WHERE run_id = ?1 AND state = 1",
+                [run.run_id.as_slice()],
+                |row| row.get::<_, i64>(0),
+            )?;
+            if leased != 0 {
+                return Ok(WorkflowOutcome::Busy);
+            }
+            if transaction.execute(
+                "UPDATE workflow_runs SET status = 4 WHERE run_id = ?1 AND status = 0",
+                [run.run_id.as_slice()],
+            )? != 1
+            {
+                return Err(Error::Command("workflow changed during pause"));
+            }
+            Ok(WorkflowOutcome::Applied {
+                run_id: run.run_id,
+                status: WorkflowStatus::Paused,
+                event_sequence: run.event_sequence,
+            })
+        }
+        WorkflowControlAction::Resume => {
+            if run.status != WorkflowStatus::Paused {
+                return Ok(WorkflowOutcome::NotRunning);
+            }
+            if transaction.execute(
+                "UPDATE workflow_runs SET status = 0 WHERE run_id = ?1 AND status = 4",
+                [run.run_id.as_slice()],
+            )? != 1
+            {
+                return Err(Error::Command("workflow changed during resume"));
+            }
+            Ok(WorkflowOutcome::Applied {
+                run_id: run.run_id,
+                status: WorkflowStatus::Running,
+                event_sequence: run.event_sequence,
+            })
+        }
+        WorkflowControlAction::Restart { request_id, event } => {
+            if matches!(run.status, WorkflowStatus::Running | WorkflowStatus::Paused) {
+                return Ok(WorkflowOutcome::Busy);
+            }
+            if run_id(source.namespace(), *request_id) == run.run_id {
+                return Ok(WorkflowOutcome::IdentityConflict);
+            }
+            validate_event(event)?;
+            delete_workflow_run(transaction, run.run_id)?;
+            workflow_start(
+                transaction,
+                source,
+                now_ms,
+                &WorkflowStart {
+                    workflow_id: request.workflow_id.clone(),
+                    request_id: *request_id,
+                    event: event.clone(),
+                },
+                definition,
+            )
+        }
+    }
+}
+
+fn delete_workflow_run(transaction: &Transaction<'_>, run_id: [u8; 16]) -> Result<()> {
+    transaction.execute(
+        "DELETE FROM workflow_activities WHERE run_id = ?1",
+        [run_id.as_slice()],
+    )?;
+    transaction.execute(
+        "DELETE FROM workflow_timers WHERE run_id = ?1",
+        [run_id.as_slice()],
+    )?;
+    transaction.execute(
+        "DELETE FROM workflow_events WHERE run_id = ?1",
+        [run_id.as_slice()],
+    )?;
+    if transaction.execute(
+        "DELETE FROM workflow_runs WHERE run_id = ?1 AND status BETWEEN 1 AND 3",
+        [run_id.as_slice()],
+    )? != 1
+    {
+        return Err(Error::Command("workflow changed during restart"));
+    }
+    Ok(())
 }
 
 /// Fires one due timer and applies its event in the same transaction.
@@ -817,6 +947,11 @@ pub(super) fn validate_decision(
     effect_targets: &[NamespaceId],
     now_ms: i64,
 ) -> Result<()> {
+    if decision.status == WorkflowStatus::Paused {
+        return Err(Error::Command(
+            "workflow definitions cannot return operator-only paused status",
+        ));
+    }
     if decision.state.len() > MAX_WORKFLOW_BYTES
         || decision
             .result
@@ -1115,6 +1250,30 @@ fn validate_now(now_ms: i64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ApplicationId, IncarnationId, TenantId};
+    use crab_ltx::rusqlite::Connection;
+
+    struct RunningDefinition;
+
+    impl WorkflowDefinition for RunningDefinition {
+        fn digest(&self) -> Digest {
+            Digest::from_bytes([8; 32])
+        }
+
+        fn transition(
+            &self,
+            _: &[u8],
+            event: &[u8],
+            _: WorkflowContext,
+        ) -> Result<WorkflowDecision> {
+            Ok(WorkflowDecision {
+                status: WorkflowStatus::Running,
+                state: event.to_vec(),
+                result: None,
+                actions: Vec::new(),
+            })
+        }
+    }
 
     #[test]
     fn embedded_workflow_migration_matches_normative_contract() {
@@ -1127,6 +1286,150 @@ mod tests {
     #[test]
     fn status_codec_rejects_unknown_values() {
         assert_eq!(WorkflowStatus::decode(0).unwrap(), WorkflowStatus::Running);
-        assert!(WorkflowStatus::decode(4).is_err());
+        assert_eq!(WorkflowStatus::decode(4).unwrap(), WorkflowStatus::Paused);
+        assert!(WorkflowStatus::decode(5).is_err());
+    }
+
+    #[test]
+    fn pause_resume_and_terminal_restart_preserve_run_identity_rules() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        let transaction = connection.transaction().unwrap();
+        let source = CellTarget::new(
+            TenantId::from_bytes([1; 16]),
+            ApplicationId::from_bytes([2; 16]),
+            NamespaceId::from_bytes([3; 16]),
+            b"workflow",
+        )
+        .unwrap();
+        crate::schema::install_runtime_schema_in(
+            &transaction,
+            source.cell_id(),
+            IncarnationId::from_bytes([4; 16]),
+            1,
+        )
+        .unwrap();
+        install_workflow_schema(&transaction).unwrap();
+        let start = WorkflowStart {
+            workflow_id: b"build-42".to_vec(),
+            request_id: RequestId::from_bytes([5; 16]),
+            event: b"start".to_vec(),
+        };
+        let WorkflowOutcome::Applied { run_id, .. } =
+            workflow_start(&transaction, &source, 10, &start, &RunningDefinition).unwrap()
+        else {
+            panic!("workflow did not start");
+        };
+        transaction
+            .execute(
+                "INSERT INTO workflow_activities(run_id, activity_id, activity_type, input, state, attempt, due_at_ms, expires_at_ms, token, lease_until_ms, completion_token, completion_digest, result) VALUES (?1, ?2, 'test', X'', 1, 1, 10, 100, ?3, 50, NULL, NULL, NULL)",
+                (
+                    run_id.as_slice(),
+                    [10_u8; 16].as_slice(),
+                    [11_u8; 16].as_slice(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            workflow_control(
+                &transaction,
+                &source,
+                11,
+                &WorkflowControl {
+                    workflow_id: start.workflow_id.clone(),
+                    run_id,
+                    action: WorkflowControlAction::Pause,
+                },
+                &RunningDefinition,
+            )
+            .unwrap(),
+            WorkflowOutcome::Busy
+        );
+        transaction
+            .execute(
+                "DELETE FROM workflow_activities WHERE run_id = ?1",
+                [run_id.as_slice()],
+            )
+            .unwrap();
+        let paused = workflow_control(
+            &transaction,
+            &source,
+            11,
+            &WorkflowControl {
+                workflow_id: start.workflow_id.clone(),
+                run_id,
+                action: WorkflowControlAction::Pause,
+            },
+            &RunningDefinition,
+        )
+        .unwrap();
+        assert!(matches!(
+            paused,
+            WorkflowOutcome::Applied {
+                status: WorkflowStatus::Paused,
+                ..
+            }
+        ));
+        assert_eq!(
+            workflow_signal(
+                &transaction,
+                &source,
+                12,
+                &WorkflowSignal {
+                    workflow_id: start.workflow_id.clone(),
+                    run_id,
+                    signal_id: [6; 16],
+                    event: b"blocked".to_vec(),
+                },
+                &RunningDefinition,
+            )
+            .unwrap(),
+            WorkflowOutcome::NotRunning
+        );
+        workflow_control(
+            &transaction,
+            &source,
+            13,
+            &WorkflowControl {
+                workflow_id: start.workflow_id.clone(),
+                run_id,
+                action: WorkflowControlAction::Resume,
+            },
+            &RunningDefinition,
+        )
+        .unwrap();
+        workflow_cancel(
+            &transaction,
+            14,
+            &WorkflowSignal {
+                workflow_id: start.workflow_id.clone(),
+                run_id,
+                signal_id: [7; 16],
+                event: b"cancel".to_vec(),
+            },
+        )
+        .unwrap();
+        let restarted = workflow_control(
+            &transaction,
+            &source,
+            15,
+            &WorkflowControl {
+                workflow_id: start.workflow_id,
+                run_id,
+                action: WorkflowControlAction::Restart {
+                    request_id: RequestId::from_bytes([9; 16]),
+                    event: b"restart".to_vec(),
+                },
+            },
+            &RunningDefinition,
+        )
+        .unwrap();
+        let WorkflowOutcome::Applied {
+            run_id: restarted_run,
+            ..
+        } = restarted
+        else {
+            panic!("workflow did not restart");
+        };
+        assert_ne!(run_id, restarted_run);
     }
 }

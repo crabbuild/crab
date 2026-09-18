@@ -254,6 +254,8 @@ Before final `Ready`, it checks persisted work that may reference removed behavi
 - `sys_effects`
 - Queue messages and producer dedup rows
 - Workflow runs
+- Blob objects
+- Cron schedules
 
 Any matching row keeps the release in maintenance. The runtime doesn't guess payload compatibility. Operators must drain retention or compile a purpose-built transform.
 

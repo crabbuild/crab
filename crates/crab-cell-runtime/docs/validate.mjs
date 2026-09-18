@@ -36,7 +36,9 @@ function rejects(schema, operation, reason) {
 const kv = readFileSync(path.join(contracts, 'kv.sql'), 'utf8');
 const queue = readFileSync(path.join(contracts, 'queue.sql'), 'utf8');
 const workflow = readFileSync(path.join(contracts, 'workflow.sql'), 'utf8');
-for (const schema of ['', kv, queue, workflow]) sqlite(schema, 'PRAGMA integrity_check;', 'ok');
+const blob = readFileSync(path.join(contracts, 'blob.sql'), 'utf8');
+const cron = readFileSync(path.join(contracts, 'cron.sql'), 'utf8');
+for (const schema of ['', kv, queue, workflow, blob, cron]) sqlite(schema, 'PRAGMA integrity_check;', 'ok');
 
 rejects('', `INSERT INTO sys_meta VALUES(1, zeroblob(31), zeroblob(16), 0, 0, 1);`, /CHECK constraint/);
 rejects(kv, `INSERT INTO kv_entries VALUES(X'', X'01', zeroblob(27), X'', NULL);`, /CHECK constraint/);
@@ -64,6 +66,12 @@ const activity = `INSERT INTO workflow_activities VALUES(zeroblob(16), zeroblob(
 rejects(workflow, run + activity + `UPDATE workflow_activities SET completion_token=zeroblob(16);`, /CHECK constraint/);
 rejects(workflow, run + activity + `UPDATE workflow_activities SET state=1, lease_until_ms=100;`, /CHECK constraint/);
 rejects('', `INSERT INTO sys_effects VALUES(zeroblob(32), zeroblob(32), X'', 1, 1, 0, 1000, NULL, 100, 1, NULL);`, /CHECK constraint/);
+sqlite(workflow, run + `UPDATE workflow_runs SET status=4; SELECT status FROM workflow_runs;`, '4');
+
+const upload = `INSERT INTO blob_uploads VALUES(zeroblob(16), X'01', zeroblob(32), 0, NULL, NULL, X'', 0, 60000, 0, NULL, 0, 0);`;
+rejects(blob, upload + `INSERT INTO blob_parts VALUES(zeroblob(16), 1, zeroblob(32), zeroblob(262145), NULL);`, /CHECK constraint/);
+rejects(blob, `INSERT INTO blob_parts VALUES(zeroblob(16), 1, zeroblob(32), X'', NULL);`, /FOREIGN KEY constraint/);
+rejects(cron, `INSERT INTO cron_schedules VALUES(zeroblob(16), 0, X'', X'', 999, 0, 0, 1, 1, 0);`, /CHECK constraint/);
 
 // Only message contracts are intended: product HTTP APIs remain in Crab.
 const peer = readFileSync(path.join(contracts, 'peer.proto'), 'utf8');

@@ -23,6 +23,8 @@ pub enum CatalogRole {
     Kv,
     Queue,
     Workflow,
+    Blob,
+    Cron,
 }
 
 /// Immutable identity and bootstrap contract for one cataloged Cell.

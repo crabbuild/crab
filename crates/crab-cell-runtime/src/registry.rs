@@ -365,6 +365,8 @@ pub struct RegistryBuilder {
     activity_claims: BTreeSet<ActivityKey>,
     activity_runners: HashMap<NamespaceId, ActivityRunner>,
     queue_bindings: Vec<QueueBinding>,
+    blob_bindings: Vec<PrimitiveBinding>,
+    cron_bindings: Vec<CronBinding>,
     maintenance_bindings: BTreeMap<&'static str, Option<crate::QueueDeadLetterTarget>>,
     maintenance_runners: BTreeMap<&'static str, MaintenanceRunner>,
     effect_runners: BTreeMap<&'static str, EffectRunner>,
@@ -386,6 +388,8 @@ impl RegistryBuilder {
             activity_claims: BTreeSet::new(),
             activity_runners: HashMap::new(),
             queue_bindings: Vec::new(),
+            blob_bindings: Vec::new(),
+            cron_bindings: Vec::new(),
             maintenance_bindings: BTreeMap::new(),
             maintenance_runners: BTreeMap::new(),
             effect_runners: BTreeMap::new(),
@@ -448,6 +452,44 @@ impl RegistryBuilder {
             codec_version,
             dead_letter,
         });
+        Ok(())
+    }
+
+    pub(crate) fn bind_cron_module(
+        &mut self,
+        module: &'static str,
+        namespace: NamespaceId,
+        targets: &'static [crate::CronTarget],
+    ) -> Result<()> {
+        if self
+            .cron_bindings
+            .iter()
+            .any(|binding| binding.namespace == namespace)
+        {
+            return Err(Error::Registry("duplicate Cron module binding"));
+        }
+        self.cron_bindings.push(CronBinding {
+            module,
+            namespace,
+            targets,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn bind_blob_module(
+        &mut self,
+        module: &'static str,
+        namespace: NamespaceId,
+    ) -> Result<()> {
+        if self
+            .blob_bindings
+            .iter()
+            .any(|binding| binding.namespace == namespace)
+        {
+            return Err(Error::Registry("duplicate Blob module binding"));
+        }
+        self.blob_bindings
+            .push(PrimitiveBinding { module, namespace });
         Ok(())
     }
 
@@ -673,6 +715,13 @@ impl RegistryBuilder {
             &self.modules,
         )?;
         validate_queue_bindings(&self.queue_bindings, &namespace_owners, &self.modules)?;
+        validate_primitive_bindings(
+            &self.blob_bindings,
+            CatalogRole::Blob,
+            "Blob descriptors and compiled bindings differ",
+            &namespace_owners,
+        )?;
+        validate_cron_bindings(&self.cron_bindings, &namespace_owners, &self.modules)?;
         validate_maintenance_bindings(&self.maintenance_bindings, &self.queue_bindings)?;
         if self
             .maintenance_bindings
@@ -802,6 +851,19 @@ struct QueueBinding {
     send_command_id: u32,
     codec_version: u32,
     dead_letter: Option<crate::QueueDeadLetterTarget>,
+}
+
+#[derive(Clone, Copy)]
+struct CronBinding {
+    module: &'static str,
+    namespace: NamespaceId,
+    targets: &'static [crate::CronTarget],
+}
+
+#[derive(Clone, Copy)]
+struct PrimitiveBinding {
+    module: &'static str,
+    namespace: NamespaceId,
 }
 
 /// Immutable compiled registry shared by runtime and release inspection.
@@ -1821,6 +1883,91 @@ fn validate_queue_bindings(
             return Err(Error::Registry(
                 "Queue dead-letter target and compiled binding differ",
             ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_cron_bindings(
+    bindings: &[CronBinding],
+    namespaces: &HashMap<NamespaceId, (&'static str, NamespaceDescriptor)>,
+    modules: &[&ModuleDescriptor],
+) -> Result<()> {
+    let cron_namespaces = namespaces
+        .values()
+        .filter(|(_, namespace)| namespace.role == CatalogRole::Cron)
+        .count();
+    if bindings.len() != cron_namespaces {
+        return Err(Error::Registry(
+            "Cron descriptors and compiled bindings differ",
+        ));
+    }
+    for binding in bindings {
+        let Some((owner, namespace)) = namespaces.get(&binding.namespace) else {
+            return Err(Error::Registry("Cron binding namespace is unavailable"));
+        };
+        if namespace.role != CatalogRole::Cron || *owner != binding.module {
+            return Err(Error::Registry("Cron binding does not own its namespace"));
+        }
+        let compiled_targets = binding
+            .targets
+            .iter()
+            .map(|target| target.namespace())
+            .collect::<HashSet<_>>();
+        let declared_targets = namespace
+            .effect_targets
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        if compiled_targets != declared_targets {
+            return Err(Error::Registry("Cron effect targets and descriptor differ"));
+        }
+        for target in binding.targets {
+            let Some((target_owner, _)) = namespaces.get(&target.namespace()) else {
+                return Err(Error::Registry("Cron target namespace is unavailable"));
+            };
+            if *target_owner != target.module() {
+                return Err(Error::Registry(
+                    "Cron target module differs from descriptor",
+                ));
+            }
+            let target_module = modules
+                .iter()
+                .find(|module| module.name == target.module())
+                .ok_or(Error::Registry("Cron target module is unavailable"))?;
+            if !target_module.commands.iter().any(|command| {
+                command.id == target.command_id()
+                    && command.codec_version == target.codec_version()
+                    && command.input_limit == target.input_limit()
+            }) {
+                return Err(Error::Registry(
+                    "Cron target command differs from descriptor",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_primitive_bindings(
+    bindings: &[PrimitiveBinding],
+    role: CatalogRole,
+    mismatch: &'static str,
+    namespaces: &HashMap<NamespaceId, (&'static str, NamespaceDescriptor)>,
+) -> Result<()> {
+    let expected = namespaces
+        .values()
+        .filter(|(_, namespace)| namespace.role == role)
+        .count();
+    if bindings.len() != expected {
+        return Err(Error::Registry(mismatch));
+    }
+    for binding in bindings {
+        let Some((owner, namespace)) = namespaces.get(&binding.namespace) else {
+            return Err(Error::Registry(mismatch));
+        };
+        if *owner != binding.module || namespace.role != role {
+            return Err(Error::Registry(mismatch));
         }
     }
     Ok(())

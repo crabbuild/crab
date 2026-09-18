@@ -4,8 +4,8 @@ use crab_ltx::rusqlite::Connection;
 
 use crate::{
     BoundedDecoder, BoundedEncoder, CatalogRole, CodecError, Command, CommandContext,
-    CommandResult, Error, QueueDeadLetterTarget, RegistryBuilder, SchedulerTickOutcome, WireValue,
-    WorkflowDefinition, scheduler::scheduler_tick_at,
+    CommandResult, CronTarget, Error, QueueDeadLetterTarget, RegistryBuilder, SchedulerTickOutcome,
+    WireValue, WorkflowDefinition, scheduler::scheduler_tick_at,
 };
 
 const REQUESTS: u8 = 1 << 0;
@@ -14,6 +14,8 @@ const EFFECTS: u8 = 1 << 2;
 const QUEUE_MESSAGES: u8 = 1 << 3;
 const QUEUE_DEDUP: u8 = 1 << 4;
 const WORKFLOWS: u8 = 1 << 5;
+const BLOBS: u8 = 1 << 6;
+const CRON_SCHEDULES: u8 = 1 << 7;
 
 /// Conservative inventory of rows that can retain executable release contracts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -41,6 +43,10 @@ impl PersistedWorkInventory {
             Some("maintenance release is blocked by retained Queue producer identities")
         } else if self.0 & WORKFLOWS != 0 {
             Some("maintenance release is blocked by retained Workflow runs")
+        } else if self.0 & BLOBS != 0 {
+            Some("maintenance release is blocked by retained Blob objects")
+        } else if self.0 & CRON_SCHEDULES != 0 {
+            Some("maintenance release is blocked by retained Cron schedules")
         } else {
             None
         }
@@ -52,13 +58,7 @@ impl PersistedWorkInventory {
 
     pub(crate) fn decode(bytes: &[u8]) -> crate::Result<Self> {
         match bytes {
-            [bits]
-                if bits
-                    & !(REQUESTS | INBOX | EFFECTS | QUEUE_MESSAGES | QUEUE_DEDUP | WORKFLOWS)
-                    == 0 =>
-            {
-                Ok(Self(*bits))
-            }
+            [bits] => Ok(Self(*bits)),
             _ => Err(Error::Command("invalid persisted-work inventory")),
         }
     }
@@ -79,6 +79,12 @@ pub(crate) fn inspect_persisted_work(
     if role == CatalogRole::Workflow {
         bits |= exists(connection, "SELECT EXISTS(SELECT 1 FROM workflow_runs)")? * WORKFLOWS;
     }
+    if role == CatalogRole::Blob {
+        bits |= exists(connection, "SELECT EXISTS(SELECT 1 FROM blob_objects)")? * BLOBS;
+    }
+    if role == CatalogRole::Cron {
+        bits |= exists(connection, "SELECT EXISTS(SELECT 1 FROM cron_schedules)")? * CRON_SCHEDULES;
+    }
     Ok(PersistedWorkInventory(bits))
 }
 
@@ -98,6 +104,7 @@ pub trait MaintenanceModule: Send + Sync + 'static {
     const TICK_COMMAND_ID: u32;
     const WORKFLOW_DEFINITIONS: &'static [&'static dyn WorkflowDefinition] = &[];
     const QUEUE_DEAD_LETTER: Option<QueueDeadLetterTarget> = None;
+    const CRON_TARGETS: &'static [CronTarget] = &[];
 }
 
 /// Registers one module's internal scheduler Tick command.
@@ -150,6 +157,7 @@ impl<M: MaintenanceModule> Command for MaintenanceTickCommand<M> {
             context.now_ms(),
             M::WORKFLOW_DEFINITIONS,
             M::QUEUE_DEAD_LETTER,
+            M::CRON_TARGETS,
         )?;
         Ok(CommandResult::Success(MaintenanceTickOutcome::Applied {
             processed,

@@ -22,8 +22,9 @@ const QUEUE_COMMANDS: &[OperationDescriptor] = &[
     operation(2, 8, 530 * 1024),
     operation(3, 64, 16),
     operation(4, 8, 5),
+    operation(5, 8, 16),
 ];
-const QUEUE_QUERIES: &[OperationDescriptor] = &[operation(1, 530 * 1024, 1)];
+const QUEUE_QUERIES: &[OperationDescriptor] = &[operation(1, 530 * 1024, 1), operation(2, 1, 64)];
 
 struct TestQueue;
 
@@ -33,6 +34,8 @@ impl QueueModule for TestQueue {
     const CLAIM_COMMAND_ID: u32 = 2;
     const LEASE_COMMAND_ID: u32 = 3;
     const VALIDATE_QUERY_ID: u32 = 1;
+    const CONTROL_COMMAND_ID: u32 = 5;
+    const INFO_QUERY_ID: u32 = 2;
 }
 
 impl MaintenanceModule for TestQueue {
@@ -89,6 +92,8 @@ impl QueueModule for DeadLetterQueue {
     const CLAIM_COMMAND_ID: u32 = 2;
     const LEASE_COMMAND_ID: u32 = 3;
     const VALIDATE_QUERY_ID: u32 = 1;
+    const CONTROL_COMMAND_ID: u32 = 5;
+    const INFO_QUERY_ID: u32 = 2;
 }
 
 impl MaintenanceModule for DeadLetterQueue {
@@ -116,6 +121,8 @@ impl QueueModule for SourceQueue {
     const CLAIM_COMMAND_ID: u32 = 2;
     const LEASE_COMMAND_ID: u32 = 3;
     const VALIDATE_QUERY_ID: u32 = 1;
+    const CONTROL_COMMAND_ID: u32 = 5;
+    const INFO_QUERY_ID: u32 = 2;
 }
 
 impl MaintenanceModule for SourceQueue {
@@ -157,6 +164,8 @@ impl QueueModule for BadSourceQueue {
     const CLAIM_COMMAND_ID: u32 = 2;
     const LEASE_COMMAND_ID: u32 = 3;
     const VALIDATE_QUERY_ID: u32 = 1;
+    const CONTROL_COMMAND_ID: u32 = 5;
+    const INFO_QUERY_ID: u32 = 2;
 }
 
 impl MaintenanceModule for BadSourceQueue {

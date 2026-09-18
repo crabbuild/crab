@@ -3,7 +3,7 @@ CREATE TABLE workflow_runs (
     workflow_id BLOB PRIMARY KEY CHECK (length(workflow_id) BETWEEN 1 AND 1024),
     run_id BLOB NOT NULL UNIQUE CHECK (length(run_id) = 16),
     definition_digest BLOB NOT NULL CHECK (length(definition_digest) = 32),
-    status INTEGER NOT NULL CHECK (status BETWEEN 0 AND 3),
+    status INTEGER NOT NULL CHECK (status BETWEEN 0 AND 4),
     state BLOB NOT NULL CHECK (length(state) <= 1048576),
     event_sequence INTEGER NOT NULL CHECK (event_sequence >= 0),
     result BLOB,
@@ -57,4 +57,4 @@ CREATE TABLE workflow_timers (
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX timers_due ON workflow_timers(state, due_at_ms, run_id, timer_id);
 CREATE INDEX workflow_retention ON workflow_runs(completed_at_ms)
-    WHERE status != 0;
+    WHERE status BETWEEN 1 AND 3;

@@ -25,3 +25,12 @@ CREATE TABLE queue_dedup (
     retain_until_ms INTEGER NOT NULL
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX queue_dedup_expiry ON queue_dedup(retain_until_ms);
+
+CREATE TABLE queue_control (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    paused INTEGER NOT NULL CHECK (paused IN (0, 1)),
+    generation INTEGER NOT NULL CHECK (generation >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+) STRICT;
+INSERT INTO queue_control(singleton, paused, generation, updated_at_ms)
+VALUES (1, 0, 0, 0);

@@ -24,7 +24,7 @@ Each layer has one owner and one primary evidence surface.
 | Catalog | `src/catalog.rs` | `tests/catalog.rs` |
 | Registry and codecs | `src/registry.rs`, `src/codec.rs` | `tests/registry.rs`, `tests/codec.rs` |
 | Typed client and peer dispatch | `src/client.rs`, `src/peer.rs` | `tests/client.rs`, peer unit tests |
-| SQL, KV, Queue, Workflow | `src/sql.rs`, `src/kv.rs`, `src/queue.rs`, `src/workflow.rs` | matching integration tests |
+| SQL, KV, Blob, Queue, Cron, Workflow | `src/sql.rs`, `src/kv.rs`, `src/blob.rs`, `src/queue.rs`, `src/cron.rs`, `src/workflow.rs` | matching integration tests |
 | Effects and activities | `src/effects.rs`, `src/activity_pool.rs` | `tests/effects.rs`, workflow tests |
 | Scheduler | `src/scheduler.rs`, `src/maintenance.rs` | `tests/scheduler.rs` |
 | Release control | `src/release.rs`, `src/release_progress.rs` | release unit tests and server command tests |
@@ -54,7 +54,7 @@ node crates/crab-cell-runtime/docs/validate.mjs
 
 The script checks:
 
-- Runtime, KV, Queue, and Workflow schemas load in SQLite
+- Runtime, KV, Blob, Queue, Cron, and Workflow schemas load in SQLite
 - Foreign keys, lease states, token lengths, and unique constraints reject invalid rows
 - The peer descriptor compiles and round-trips representative messages
 - The peer contract defines messages, not a public service
@@ -239,7 +239,9 @@ Primitive tests require more than procedure-level SQL assertions.
 | --- | --- |
 | SQL | Publish a batch, delete local DB, restore, query the same rows |
 | KV | Apply checks and writes, restore, preserve versions and TTL behavior |
+| Blob | Complete multipart publication, restore, preserve ETag and range bytes |
 | Queue | Publish claim, restore, validate lease, reclaim expiry, complete attempt |
+| Cron | Publish occurrence effect, restore, preserve next due time and generation |
 | Workflow | Pin definition, publish transition, restore, run retained definition |
 | Activity | Publish claim, lose owner, take over, reclaim lease, complete next attempt |
 | Effect | Publish source intent, deduplicate destination, resolve ambiguity, acknowledge source |

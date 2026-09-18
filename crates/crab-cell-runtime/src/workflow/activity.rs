@@ -419,7 +419,7 @@ pub(crate) fn workflow_cleanup_terminal_bounded(
     let cutoff = now_ms.saturating_sub(TERMINAL_RETENTION_MS);
     let run_ids = {
         let mut statement = transaction.prepare(
-            "SELECT run_id FROM workflow_runs WHERE status != 0 AND completed_at_ms <= ?1 ORDER BY completed_at_ms, run_id LIMIT ?2",
+            "SELECT run_id FROM workflow_runs WHERE status BETWEEN 1 AND 3 AND completed_at_ms <= ?1 ORDER BY completed_at_ms, run_id LIMIT ?2",
         )?;
         statement
             .query_map((cutoff, limit as i64), |row| row.get::<_, Vec<u8>>(0))?
@@ -440,7 +440,7 @@ pub(crate) fn workflow_cleanup_terminal_bounded(
             [run_id.as_slice()],
         )?;
         if transaction.execute(
-            "DELETE FROM workflow_runs WHERE run_id = ?1 AND status != 0 AND completed_at_ms <= ?2",
+            "DELETE FROM workflow_runs WHERE run_id = ?1 AND status BETWEEN 1 AND 3 AND completed_at_ms <= ?2",
             (run_id.as_slice(), cutoff),
         )? != 1
         {

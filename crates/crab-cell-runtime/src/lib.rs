@@ -10,10 +10,12 @@ mod actor;
 mod application;
 mod authority;
 mod backup;
+mod blob;
 mod catalog;
 mod client;
 mod codec;
 mod control;
+mod cron;
 mod effects;
 mod error;
 mod executor;
@@ -52,6 +54,11 @@ pub use actor::{
 pub use application::{ApplicationIdentity, ApplicationIdentityStore};
 pub use authority::{CellAuthority, VersionedControl};
 pub use backup::{BackupPin, BackupPinStore, BackupRestore, PinnedCatalogShard};
+pub use blob::{
+    BlobCommand, BlobCondition, BlobMetadata, BlobModule, BlobMutation, BlobMutationOutcome,
+    BlobNamespace, BlobPage, BlobQuery, BlobQueryCommand, BlobQueryResult, BlobRead,
+    blob_cleanup_expired, blob_mutate, blob_query, install_blob_schema, register_blob,
+};
 pub use catalog::{
     CatalogEntry, CatalogProof, CatalogRole, CatalogScanPage, CatalogShardScan, CellCatalog,
 };
@@ -64,6 +71,11 @@ pub use control::{Control, ControlState, Owner, RecoveryOverlayRef, RootRef, Tra
 pub use crab_ltx::{
     CellReplica, DiskBudget, DiskReservation, Host as ReplicaHost, Limits as ReplicaLimits,
     ScratchMonitor,
+};
+pub use cron::{
+    CronCommand, CronInvocation, CronModule, CronMutation, CronMutationOutcome, CronNamespace,
+    CronQuery, CronQueryCommand, CronQueryResult, CronSchedule, CronTarget, cron_mutate,
+    cron_query, install_cron_schema, register_cron,
 };
 pub use effects::{
     EffectAckRequest, EffectBatch, EffectClaim, EffectClaimCommand, EffectClaimRequest,
@@ -123,12 +135,13 @@ pub use peer::{
 };
 pub use publication::CellPublisher;
 pub use queue::{
-    QueueClaimCommand, QueueClaimRequest, QueueDeadLetterTarget, QueueLeaseAction,
-    QueueLeaseCommand, QueueLeaseOutcome, QueueLeaseRequest, QueueMessage, QueueModule,
-    QueueNamespace, QueueSendCommand, QueueSendOutcome, QueueSendRequest, QueueState,
+    QueueClaimCommand, QueueClaimRequest, QueueControlAction, QueueControlCommand,
+    QueueControlOutcome, QueueDeadLetterTarget, QueueInfo, QueueInfoQuery, QueueInfoRequest,
+    QueueLeaseAction, QueueLeaseCommand, QueueLeaseOutcome, QueueLeaseRequest, QueueMessage,
+    QueueModule, QueueNamespace, QueueSendCommand, QueueSendOutcome, QueueSendRequest, QueueState,
     QueueTokenSource, QueueValidateClaimQuery, QueueValidateRequest, SystemQueueTokens,
-    install_queue_schema, queue_apply_lease, queue_claim, queue_cleanup_expired, queue_send,
-    queue_validate_claim, register_queue,
+    install_queue_schema, queue_apply_lease, queue_claim, queue_cleanup_expired, queue_control,
+    queue_info, queue_send, queue_validate_claim, register_queue,
 };
 pub use recovery_manifest::{PinnedRecoveryCell, RecoveryManifestStore};
 pub use registry::{
@@ -164,12 +177,13 @@ pub use workflow::{
     WorkflowActivities, WorkflowActivityClaimCommand, WorkflowActivityClaimRequest,
     WorkflowActivityCompleteCommand, WorkflowActivityExtendCommand, WorkflowActivityExtendRequest,
     WorkflowActivityModule, WorkflowActivityValidateQuery, WorkflowActivityValidateRequest,
-    WorkflowCancelCommand, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowGetQuery,
+    WorkflowCancelCommand, WorkflowContext, WorkflowControl, WorkflowControlAction,
+    WorkflowControlCommand, WorkflowDecision, WorkflowDefinition, WorkflowGetQuery,
     WorkflowGetRequest, WorkflowModule, WorkflowNamespace, WorkflowOutcome, WorkflowRun,
     WorkflowSignal, WorkflowSignalCommand, WorkflowStart, WorkflowStartCommand, WorkflowStatus,
     install_workflow_schema, register_activity, register_blocking_activity, register_workflow,
     register_workflow_activities, workflow_cancel, workflow_claim_activities,
-    workflow_cleanup_terminal, workflow_complete_activity, workflow_extend_activity,
-    workflow_fire_timer, workflow_signal, workflow_start, workflow_state,
+    workflow_cleanup_terminal, workflow_complete_activity, workflow_control,
+    workflow_extend_activity, workflow_fire_timer, workflow_signal, workflow_start, workflow_state,
     workflow_validate_activity_claim,
 };
