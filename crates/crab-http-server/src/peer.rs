@@ -1721,10 +1721,13 @@ mod tests {
 
     #[tokio::test]
     async fn placement_capacity_respects_runtime_reservations() {
-        let runtime = crab_cell_runtime::CellRuntime::new(
+        // Host::default shares one process-wide disk budget; this fixture must
+        // not cross-charge unrelated tests that run in parallel.
+        let runtime = crab_cell_runtime::CellRuntime::new_with_replica_host(
             crab_cell_runtime::SqlWorkerPool::new(2, 4).unwrap(),
             2_048,
             SessionId::from_bytes([21; 16]),
+            crab_ltx::Host::default().with_local_disk_budget(crab_ltx::DiskBudget::new(1_000)),
         )
         .unwrap();
         let retained = runtime.try_reserve_node_bytes(512).unwrap();
@@ -2091,10 +2094,11 @@ mod tests {
             crab_ltx::DiskBudget::new(1 << 20),
         )
         .unwrap();
-        let runtime = crab_cell_runtime::CellRuntime::new(
+        let runtime = crab_cell_runtime::CellRuntime::new_with_replica_host(
             crab_cell_runtime::SqlWorkerPool::new(2, 4).unwrap(),
             2_048,
             session,
+            crab_ltx::Host::default().with_local_disk_budget(crab_ltx::DiskBudget::new(1 << 20)),
         )
         .unwrap();
         let retained = runtime.try_reserve_node_bytes(512).unwrap();
