@@ -48,6 +48,14 @@ const SQL_WALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5)
 const HYDRATION_TICK: std::time::Duration = std::time::Duration::from_millis(100);
 const HYDRATION_PAGES_PER_STEP: u32 = 64;
 
+const fn bounded_u32(value: usize) -> u32 {
+    if value > u32::MAX as usize {
+        u32::MAX
+    } else {
+        value as u32
+    }
+}
+
 fn unix_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -194,6 +202,38 @@ impl CellRuntimeStats {
     #[must_use]
     pub const fn hydration_job_capacity(self) -> usize {
         self.hydration_job_capacity
+    }
+
+    /// Returns the active-Cell count in the bounded placement wire shape.
+    #[must_use]
+    pub const fn placement_active_cells(self) -> u32 {
+        bounded_u32(self.active_cells)
+    }
+
+    /// Returns the active-Cell ceiling in the bounded placement wire shape.
+    #[must_use]
+    pub const fn placement_active_cell_capacity(self) -> u32 {
+        bounded_u32(self.active_cell_capacity)
+    }
+
+    /// Returns aggregate admitted worker, primitive, and hydration jobs.
+    #[must_use]
+    pub const fn placement_running_jobs(self) -> u32 {
+        bounded_u32(
+            self.worker_jobs
+                .saturating_add(self.primitive_jobs)
+                .saturating_add(self.hydration_jobs),
+        )
+    }
+
+    /// Returns aggregate worker, primitive, and hydration job capacity.
+    #[must_use]
+    pub const fn placement_job_capacity(self) -> u32 {
+        bounded_u32(
+            self.worker_job_capacity
+                .saturating_add(self.primitive_job_capacity)
+                .saturating_add(self.hydration_job_capacity),
+        )
     }
 
     /// Returns bounded object-store I/O operations currently admitted.

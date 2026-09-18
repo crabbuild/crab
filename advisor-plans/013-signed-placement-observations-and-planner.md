@@ -125,7 +125,11 @@ Local provenance proof: `peer::tests::node_publisher_creates_one_local_session_a
 holds a runtime ledger byte and primitive-job reservation while publishing one
 advertisement, then checks the signed memory/disk totals, active-Cell/job
 snapshot, and clamped free headroom against that same runtime and measured
-`LocalResources` sample. `local_resources_include_process_file_capacity` plus
+`LocalResources` sample. The placement projection uses the canonical
+`CellRuntimeStats::placement_*` methods, so publisher admission clamping and
+signed job/cell totals cannot drift into separate aggregation formulas;
+`placement_capacity_respects_runtime_reservations` locks that contract down.
+`local_resources_include_process_file_capacity` plus
 the nested cgroup fixture tests cover the host/cgroup probe boundary and its
 fail-closed parsing rules. The remaining process-wide probe parity and
 multi-process convergence evidence belongs to plan 015.

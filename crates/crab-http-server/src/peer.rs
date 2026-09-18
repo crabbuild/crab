@@ -457,28 +457,15 @@ impl NodePublisher {
         let placement = NodePlacementCapacity::new(
             resources.memory_bytes,
             resources.disk_capacity_bytes,
-            runtime_stats.map_or(0, |stats| {
-                stats.active_cells().min(u32::MAX as usize) as u32
-            }),
-            runtime_stats.map_or(1, |stats| {
-                stats.active_cell_capacity().min(u32::MAX as usize) as u32
-            }),
-            runtime_stats.map_or(0, |stats| {
-                stats
-                    .worker_jobs()
-                    .saturating_add(stats.primitive_jobs())
-                    .saturating_add(stats.hydration_jobs())
-                    .min(u32::MAX as usize) as u32
-            }),
+            runtime_stats.map_or(
+                0,
+                crab_cell_runtime::CellRuntimeStats::placement_active_cells,
+            ),
+            runtime_stats.map_or(1, |stats| stats.placement_active_cell_capacity()),
+            runtime_stats.map_or(0, |stats| stats.placement_running_jobs()),
             runtime_stats.map_or_else(
                 || resources.job_credits.min(u32::MAX as usize) as u32,
-                |stats| {
-                    stats
-                        .worker_job_capacity()
-                        .saturating_add(stats.primitive_job_capacity())
-                        .saturating_add(stats.hydration_job_capacity())
-                        .min(u32::MAX as usize) as u32
-                },
+                |stats| stats.placement_job_capacity(),
             ),
         )?;
         Ok(advertisement.with_placement_capacity(placement, &self.signing_key)?)
@@ -504,18 +491,10 @@ fn constrain_capacity_to_runtime(
 
     // Keep the signed placement scalar on its existing worker/primitive contract;
     // host-ledger classes have separate metrics until the observation shape grows.
-    let running_jobs = runtime
-        .worker_jobs()
-        .saturating_add(runtime.primitive_jobs())
-        .saturating_add(runtime.hydration_jobs());
-    let job_capacity = runtime
-        .worker_job_capacity()
-        .saturating_add(runtime.primitive_job_capacity())
-        .saturating_add(runtime.hydration_job_capacity());
+    let running_jobs = runtime.placement_running_jobs();
+    let job_capacity = runtime.placement_job_capacity();
     let free_jobs = job_capacity.saturating_sub(running_jobs);
-    capacity.job_credits = capacity
-        .job_credits
-        .min(u32::try_from(free_jobs).unwrap_or(u32::MAX));
+    capacity.job_credits = capacity.job_credits.min(free_jobs);
 }
 
 impl NodeLogAuthority for NodePublisher {
@@ -1774,6 +1753,11 @@ mod tests {
         .unwrap();
         let retained = runtime.try_reserve_node_bytes(512).unwrap();
         let job = runtime.try_reserve_worker_job().unwrap().unwrap();
+        let stats = runtime.stats();
+        assert_eq!(stats.placement_active_cells(), 0);
+        assert_eq!(stats.placement_active_cell_capacity(), 4);
+        assert_eq!(stats.placement_running_jobs(), 1);
+        assert_eq!(stats.placement_job_capacity(), 6);
         let mut capacity = NodeCapacity {
             free_memory_bytes: 4_096,
             free_disk_bytes: 900,
@@ -1791,7 +1775,7 @@ mod tests {
                 available_file_descriptors: 100,
                 job_credits: 10,
             },
-            runtime.stats(),
+            stats,
         );
         assert_eq!(capacity.free_memory_bytes, 512);
         assert_eq!(capacity.free_disk_bytes, 900);
