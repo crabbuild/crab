@@ -339,6 +339,10 @@ impl CoordinationState {
                 } else if self.is_fenced()
                     || self.busy
                     || self.renewing
+                    || self
+                        .pending_effects
+                        .values()
+                        .any(|effect| matches!(effect, CoordinationEffect::Inventory))
                     || !queue_nonempty
                     || publication_blocked
                 {
@@ -780,6 +784,16 @@ mod tests {
                 lease_live: true,
             }),
             CoordinationDecision::Started
+        );
+        state.begin_effect(CoordinationEffect::Inventory);
+        assert_eq!(
+            state.step(CoordinationInput::Schedule {
+                queue_nonempty: true,
+                can_deactivate: false,
+                publication_blocked: false,
+                lease_live: true,
+            }),
+            CoordinationDecision::Ignored
         );
 
         let mut fenced = CoordinationState::serving(true);
