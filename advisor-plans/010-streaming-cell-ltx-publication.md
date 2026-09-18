@@ -1,6 +1,6 @@
 # Bounded-memory Cell LTX publication and bundle ingestion
 
-Status: IN PROGRESS — native/bundle bounded sources and shared authenticated inspection pass local and RustFS suites; injected immutable-provider failure and throttled-upload cancellation now prove exact retry and scratch cleanup; measured multi-GiB RSS, peak-memory, and broader provider-failure qualification remain
+Status: IN PROGRESS — native/bundle bounded sources and shared authenticated inspection pass local and RustFS suites; decoder trailer/index reads are now capped at the 64 KiB inspection chunk and the CellReplica source/scratch/upload path has a measured 8 MiB multipart/1 MiB scratch-transfer test; injected immutable-provider failure and throttled-upload cancellation prove exact retry and scratch cleanup; measured multi-GiB RSS, peak-memory, and broader provider-failure qualification remain
 Priority: P0
 Effort: XL
 Risk: High
@@ -112,9 +112,11 @@ rg -n "bundle\.segment\(.*\)\?\.to_vec|read_to_end" crates/crab-ltx/src
 git diff --check
 ```
 
-The final search must have no whole-segment hit in Cell publication. Any
-remaining `read_to_end` must be small, statically bounded, and justified next
-to the code and in the PR evidence.
+The final search must have no whole-segment hit in the canonical CellReplica
+publication call graph. Any remaining `read_to_end` must be small, statically
+bounded, and justified next to the code and in the PR evidence. The standalone
+`crab-ltx::Replica` bundle path is inventoried separately by Plan 016 until an
+authorized compatibility decision permits changing that public surface.
 
 The local provider-failure qualification uses a fail-first `ObjectStore` wrapper
 in `crates/crab-ltx/tests/capabilities.rs`. It rejects one immutable PUT,
@@ -128,7 +130,9 @@ substitute for the provider matrix or multi-GiB/RSS receipt.
 - [ ] Peak working memory is bounded by configured/static chunk concurrency,
       not total transaction or bundle size, with measured evidence.
 - [x] No full segment body is retained in `AppendInput`-like collections or
-      copied from a bundle range.
+      copied from a bundle range on the canonical `CellReplica` path. The
+      legacy standalone `Replica` bundle copy remains an explicit Plan 016
+      audit surface and is not used by the cell runtime.
 - [x] Retry uses replayable verified sources and preserves exact bytes.
 - [x] Every locally injected failure/cancellation cleans owned scratch state
       and never publishes an incomplete root. Filesystem-fault coverage remains

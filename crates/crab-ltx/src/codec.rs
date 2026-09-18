@@ -168,7 +168,14 @@ impl<R: Read> Decoder<R> {
         }
 
         let mut remaining = Vec::new();
-        self.reader.read_to_end(&mut remaining)?;
+        let mut chunk = [0; INDEX_COPY_BYTES];
+        loop {
+            let read = self.reader.read(&mut chunk)?;
+            if read == 0 {
+                break;
+            }
+            remaining.extend_from_slice(&chunk[..read]);
+        }
         if remaining.len() < 8 + TRAILER_SIZE {
             return Err(CrabError::LTXCorrupted);
         }

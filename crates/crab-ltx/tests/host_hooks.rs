@@ -16,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -27,6 +27,7 @@ struct Faults {
     calls: Arc<Mutex<BTreeSet<&'static str>>>,
     largest_read: Arc<AtomicUsize>,
     largest_write: Arc<AtomicUsize>,
+    track_all: Arc<AtomicBool>,
 }
 
 impl Faults {
@@ -45,12 +46,12 @@ impl Faults {
 struct File {
     inner: Box<dyn FileIo>,
     faults: Faults,
-    ltx: bool,
+    track: bool,
 }
 
 impl FileIo for File {
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
-        if self.ltx {
+        if self.track {
             self.faults
                 .largest_write
                 .fetch_max(bytes.len(), Ordering::Relaxed);
@@ -62,7 +63,7 @@ impl FileIo for File {
         self.inner.write_all(bytes)
     }
     fn write_all_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()> {
-        if self.ltx {
+        if self.track {
             self.faults
                 .largest_write
                 .fetch_max(bytes.len(), Ordering::Relaxed);
@@ -74,7 +75,7 @@ impl FileIo for File {
         self.inner.write_all_at(offset, bytes)
     }
     fn read_exact_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
-        if self.ltx {
+        if self.track {
             self.faults.largest_read.fetch_max(len, Ordering::Relaxed);
         }
         self.faults.check("read_exact_at")?;
@@ -108,7 +109,8 @@ impl FileSystem for Faults {
         Ok(Box::new(File {
             inner: DirectFileSystem.open(path)?,
             faults: self.clone(),
-            ltx: path.to_string_lossy().contains(".ltx"),
+            track: self.track_all.load(Ordering::Relaxed)
+                || path.to_string_lossy().contains(".ltx"),
         }))
     }
     fn open_rw(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
@@ -116,7 +118,8 @@ impl FileSystem for Faults {
         Ok(Box::new(File {
             inner: DirectFileSystem.open_rw(path)?,
             faults: self.clone(),
-            ltx: path.to_string_lossy().contains(".ltx"),
+            track: self.track_all.load(Ordering::Relaxed)
+                || path.to_string_lossy().contains(".ltx"),
         }))
     }
     fn create(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
@@ -124,7 +127,8 @@ impl FileSystem for Faults {
         Ok(Box::new(File {
             inner: DirectFileSystem.create(path)?,
             faults: self.clone(),
-            ltx: path.to_string_lossy().contains(".ltx"),
+            track: self.track_all.load(Ordering::Relaxed)
+                || path.to_string_lossy().contains(".ltx"),
         }))
     }
     filesystem_operation!(file_len(path: &Path) -> u64);
@@ -194,6 +198,49 @@ fn capture_and_inspection_bound_each_filesystem_transfer() {
     assert!(snapshot.info().size_bytes > 1_000_000);
     assert!(faults.largest_write.load(Ordering::Relaxed) < 128 * 1024);
     assert!(faults.largest_read.load(Ordering::Relaxed) < 128 * 1024);
+}
+
+#[cfg(feature = "replica")]
+#[tokio::test(flavor = "multi_thread")]
+async fn cell_prepare_bounds_source_and_scratch_transfers() {
+    let (directory, faults, host, mut writer) = fixture();
+    writer
+        .transaction(|tx| {
+            tx.execute("INSERT INTO t VALUES(randomblob(10000000))", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let captured = writer.capture().unwrap();
+    faults.track_all.store(true, Ordering::Relaxed);
+    faults.largest_read.store(0, Ordering::Relaxed);
+    faults.largest_write.store(0, Ordering::Relaxed);
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("cell-streaming-bound"),
+            [31; 16],
+        ),
+        [32; 32],
+        [33; 16],
+        Limits::default(),
+    )
+    .unwrap()
+    .with_host(host);
+
+    replica.prepare(None, &captured, 1, 1).await.unwrap();
+
+    assert!(
+        faults.largest_read.load(Ordering::Relaxed) <= 8 * 1024 * 1024,
+        "largest source read was {} bytes",
+        faults.largest_read.load(Ordering::Relaxed)
+    );
+    assert!(
+        faults.largest_write.load(Ordering::Relaxed) <= 1 << 20,
+        "largest scratch write was {} bytes",
+        faults.largest_write.load(Ordering::Relaxed)
+    );
+    writer.close().unwrap();
+    drop(directory);
 }
 
 #[cfg(feature = "replica")]

@@ -146,7 +146,7 @@ authorized standalone-contract decision.
 Local proof completed:
 
 - `crab-cell-runtime`: 207 library tests passed (one provider test ignored),
-  41 actor tests passed (one provider test ignored), and all primitive,
+  42 actor tests passed (one provider test ignored), and all primitive,
   migration, publication, simulator, and workflow suites pass. The ignored
   source-loss and retention tests also pass against an isolated local RustFS
   bucket when their provider variables are supplied. The shared
@@ -211,6 +211,14 @@ The HTTP server builds those gauges through one
 and capacities reach the rendered exposition without a second field mapping.
 Measured local-disk tolerance and provider-scale mixed-workload proof remain
 qualification gates rather than being inferred from this unit proof.
+
+Plan 010's canonical decoder no longer calls unbounded `read_to_end` for the
+trailer/index: it drains the remaining authenticated metadata through a fixed
+64 KiB buffer. `cell_prepare_bounds_source_and_scratch_transfers` measures the
+CellReplica source/scratch/upload path at no more than the 8 MiB multipart and
+1 MiB scratch-transfer bounds. A multi-GiB RSS receipt is still required before
+the peak-memory acceptance item can be checked; the legacy standalone Replica
+bundle-copy surface remains part of the pending Plan 016 decision.
 
 The movement simulator now includes an explicit lost-release-response event:
 after the authoritative release, the reply can disappear without restoring the
