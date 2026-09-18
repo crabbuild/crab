@@ -49,6 +49,14 @@ pub(crate) enum CoordinationInput {
     BeginWork {
         kind: AdmissionKind,
     },
+    /// Schedules the next adapter action from actor-owned queue observations.
+    ///
+    /// The actor supplies queue/deactivation facts; lifecycle, busy, renewal,
+    /// and fencing policy remains owned by this pure state machine.
+    Schedule {
+        queue_nonempty: bool,
+        can_deactivate: bool,
+    },
     CompleteEffect {
         effect_id: u64,
         effect: CoordinationEffect,
@@ -104,6 +112,7 @@ pub(crate) enum CoordinationDecision {
     StaleEffect,
     Ignored,
     ReadyToDeactivate,
+    StartQueuedWork,
 }
 
 impl CoordinationDecision {
@@ -291,6 +300,18 @@ impl CoordinationState {
                 } else {
                     self.busy = true;
                     CoordinationDecision::Started
+                }
+            }
+            CoordinationInput::Schedule {
+                queue_nonempty,
+                can_deactivate,
+            } => {
+                if can_deactivate && (self.is_fenced() || self.is_draining()) && !queue_nonempty {
+                    CoordinationDecision::ReadyToDeactivate
+                } else if self.is_fenced() || self.busy || self.renewing || !queue_nonempty {
+                    CoordinationDecision::Ignored
+                } else {
+                    CoordinationDecision::StartQueuedWork
                 }
             }
             CoordinationInput::CompleteEffect { effect_id, effect } => {
@@ -559,6 +580,40 @@ mod tests {
         );
         assert_eq!(
             state.step(CoordinationInput::FinishWork),
+            CoordinationDecision::ReadyToDeactivate
+        );
+    }
+
+    #[test]
+    fn scheduler_decision_stays_pure_and_respects_lifecycle_obligations() {
+        let mut serving = CoordinationState::serving(true);
+        assert_eq!(
+            serving.step(CoordinationInput::Schedule {
+                queue_nonempty: true,
+                can_deactivate: false,
+            }),
+            CoordinationDecision::StartQueuedWork
+        );
+
+        let mut busy = CoordinationState::serving(true);
+        busy.step(CoordinationInput::BeginWork {
+            kind: AdmissionKind::Query,
+        });
+        assert_eq!(
+            busy.step(CoordinationInput::Schedule {
+                queue_nonempty: true,
+                can_deactivate: false,
+            }),
+            CoordinationDecision::Ignored
+        );
+
+        let mut draining = CoordinationState::serving(true);
+        draining.step(CoordinationInput::BeginDrain);
+        assert_eq!(
+            draining.step(CoordinationInput::Schedule {
+                queue_nonempty: false,
+                can_deactivate: true,
+            }),
             CoordinationDecision::ReadyToDeactivate
         );
     }

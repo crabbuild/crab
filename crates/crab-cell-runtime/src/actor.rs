@@ -3503,20 +3503,30 @@ fn continue_cell(
     let Some(active) = cells.get_mut(&cell) else {
         return;
     };
-    if active.busy() || active.renewing() {
-        return;
-    }
-    if active.fenced() {
-        if active.can_deactivate() {
+    let fenced = active.fenced();
+    let decision = active.coordination.step(CoordinationInput::Schedule {
+        queue_nonempty: !active.queue.is_empty(),
+        can_deactivate: active.can_deactivate(),
+    });
+    match decision {
+        CoordinationDecision::ReadyToDeactivate if fenced => {
             let preserve_owner = active.unpublished_node_logs != 0;
             start_fenced_deactivate(cell, pool, cells, transitioning, tasks, preserve_owner);
         }
-    } else if active.draining() && active.queue.is_empty() {
-        if active.can_deactivate() {
+        CoordinationDecision::ReadyToDeactivate => {
             start_deactivate(cell, pool, cells, transitioning, tasks);
         }
-    } else {
-        start_next(active, pool, tasks, node_lease);
+        CoordinationDecision::StartQueuedWork => {
+            start_next(active, pool, tasks, node_lease);
+        }
+        CoordinationDecision::Ignored
+        | CoordinationDecision::Admit
+        | CoordinationDecision::ResolveUnknown
+        | CoordinationDecision::LocalHandle
+        | CoordinationDecision::Reject(_)
+        | CoordinationDecision::Started
+        | CoordinationDecision::EffectCompleted
+        | CoordinationDecision::StaleEffect => {}
     }
 }
 

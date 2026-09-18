@@ -163,8 +163,8 @@ decision is pending; no standalone surface is removed by this design.
 
 The first implementation slices now have one code path each: the architecture
 guard rejects production `crab-ltx` imports from `crab-http-server`; the actor
-uses a private coordination state machine for admission, fencing, publication,
-renewal, migration, and drain, while the kernel allocates and retires typed
+uses a private coordination state machine for admission, scheduling, fencing,
+publication, renewal, migration, and drain, while the kernel allocates and retires typed
 effect intents/IDs and the actor fences completions by activation generation
 and effect family before fenced
 deactivation; the deterministic simulator and bounded TLA+ model exercise the same lifecycle
