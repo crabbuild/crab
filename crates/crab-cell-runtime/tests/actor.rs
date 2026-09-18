@@ -1667,6 +1667,77 @@ async fn mixed_primitive_inventory_blocks_churn_until_drain_and_restores_root() 
     runtime.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn released_cell_is_acquired_by_one_successor_runtime() {
+    let fixture = fixture_for(b"successor-runtime-movement");
+    let first_session = SessionId::from_bytes([81; 16]);
+    let second_session = SessionId::from_bytes([82; 16]);
+    let first_runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        8 * 1024 * 1024,
+        first_session,
+    )
+    .unwrap();
+    let handle = bootstrap_on(&first_runtime, &fixture, first_session).await;
+    handle.drain().await.unwrap();
+    assert_eq!(first_runtime.stats().active_cells(), 0);
+
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let idle = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(idle.value().state, ControlState::Idle);
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let second_runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        8 * 1024 * 1024,
+        second_session,
+    )
+    .unwrap();
+    let successor = second_runtime
+        .acquire_idle_restored(
+            proof,
+            fixture.replica.clone(),
+            authority.clone(),
+            idle,
+            fixture._directory.path().join("successor.sqlite"),
+            Owner {
+                session: second_session,
+                endpoint: "https://successor.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(first_runtime.stats().active_cells(), 0);
+    assert_eq!(second_runtime.stats().active_cells(), 1);
+    assert_eq!(
+        authority
+            .load(fixture.target.cell_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .value()
+            .owner
+            .as_ref()
+            .map(|owner| owner.session),
+        Some(second_session)
+    );
+
+    successor.drain().await.unwrap();
+    assert_eq!(second_runtime.stats().active_cells(), 0);
+    second_runtime.shutdown().await.unwrap();
+    first_runtime.shutdown().await.unwrap();
+}
+
 async fn wait_for_persisted_work(
     handle: &crab_cell_runtime::CellHandle,
     role: CatalogRole,

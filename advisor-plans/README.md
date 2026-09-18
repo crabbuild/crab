@@ -224,7 +224,10 @@ The movement simulator now includes an explicit lost-release-response event:
 after the authoritative release, the reply can disappear without restoring the
 old owner, and a live receiver must still acquire through the normal authority
 path. Its existing receiver-crash and membership-loss guards remain model-only;
-the multi-process movement receipt is still open under Plan 014.
+the multi-process movement receipt is still open under Plan 014. The actor
+integration `released_cell_is_acquired_by_one_successor_runtime` additionally
+transfers one idle control between two independent runtimes and verifies the
+authority owner and active-cell reservations never overlap.
 
 Restart inventory is now fail-closed at the HTTP composition boundary. Each
 process gets a fresh `cells/sessions/<session-id>` directory; before the

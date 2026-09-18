@@ -112,8 +112,11 @@ git diff --check
 - [x] Victim selection is pure/deterministic and excludes every unsafe state.
 - [x] Concurrent drains, releases, receiver activations, and movement rate are
       measurably bounded.
-- [ ] Movement uses quiesce -> durability -> release -> normal acquire; no
-      planner-owned or dual-writer authority exists.
+- [x] The local handoff path uses quiesce -> durability -> release -> normal
+      acquire with no planner-owned or dual-writer authority; the
+      `released_cell_is_acquired_by_one_successor_runtime` test transfers an
+      idle control between two independent runtimes and checks the successor
+      owner/active-cell ledger.
 - [ ] Receiver failure, owner crash, lost release reply, and membership loss
       preserve single ownership and acknowledged state; the pure simulator now
       covers the lost-release-reply and receiver-crash ordering, while a
