@@ -439,30 +439,26 @@ impl NodePublisher {
             return Ok(advertisement);
         }
         let resources = self.local_resources()?;
+        let runtime_stats = self.runtime.as_ref().map(CellRuntime::stats);
         let placement = NodePlacementCapacity::new(
             resources.memory_bytes,
             resources.disk_capacity_bytes,
-            self.runtime
-                .as_ref()
-                .map_or(0, |runtime| runtime.stats().active_cells() as u32),
-            self.runtime.as_ref().map_or(1, |runtime| {
-                runtime
-                    .stats()
-                    .active_cell_capacity()
-                    .min(u32::MAX as usize) as u32
+            runtime_stats.map_or(0, |stats| {
+                stats.active_cells().min(u32::MAX as usize) as u32
             }),
-            self.runtime.as_ref().map_or(0, |runtime| {
-                let stats = runtime.stats();
+            runtime_stats.map_or(1, |stats| {
+                stats.active_cell_capacity().min(u32::MAX as usize) as u32
+            }),
+            runtime_stats.map_or(0, |stats| {
                 stats
                     .worker_jobs()
                     .saturating_add(stats.primitive_jobs())
                     .saturating_add(stats.hydration_jobs())
                     .min(u32::MAX as usize) as u32
             }),
-            self.runtime.as_ref().map_or_else(
+            runtime_stats.map_or_else(
                 || resources.job_credits.min(u32::MAX as usize) as u32,
-                |runtime| {
-                    let stats = runtime.stats();
+                |stats| {
                     stats
                         .worker_job_capacity()
                         .saturating_add(stats.primitive_job_capacity())

@@ -1,6 +1,6 @@
 # Signed live placement observations and pure weighted planner
 
-Status: IN PROGRESS — versioned signed placement observations now carry measured memory/disk totals and runtime Cell/job counts; cold activation now uses a bounded authenticated activation hint; process-wide probe parity and multi-process convergence remain
+Status: IN PROGRESS — versioned signed placement observations now carry measured memory/disk totals and one coherent runtime Cell/job snapshot; cold activation now uses a bounded authenticated activation hint; process-wide probe parity and multi-process convergence remain
 Priority: P0
 Effort: XL
 Risk: High
