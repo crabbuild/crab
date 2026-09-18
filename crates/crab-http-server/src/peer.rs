@@ -19,7 +19,7 @@ use crab_cell_runtime::{
     Error as CellError, NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain, NodeId,
     NodeLogAuthority, NodePlacementCapacity, PeerAuthorizer, PeerCellResolver, PeerDispatcher,
     PeerRoundTrip, Registry, ReleaseState, ReleaseStore, SessionId, VerifiedPeerRequest,
-    VersionedNodeAdvertisement, peer_wire,
+    VersionedNodeAdvertisement, encode_peer_reply, peer_wire,
 };
 use crab_storage::CellStorageLayout;
 use ed25519_dalek::SigningKey;
@@ -42,6 +42,10 @@ const ADVERTISEMENT_LIFETIME_MS: i64 = 10_000;
 const ADVERTISEMENT_EXPIRY_MARGIN_MS: i64 = 1_000;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
 const HEARTBEAT_RETRY: Duration = Duration::from_millis(500);
+
+fn reserve_peer_codec(runtime: &CellRuntime) -> Option<crab_cell_runtime::NodeJobReservation> {
+    runtime.try_reserve_worker_job().ok().flatten()
+}
 
 #[derive(Clone)]
 pub(crate) struct PeerReceiver {
@@ -767,13 +771,18 @@ pub(crate) async fn forward(
         Ok(now_ms) => now_ms,
         Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
     };
-    let request = match receiver
-        .directory
-        .verify_peer_request(&body, identity.certificate(), identity.public_key(), now_ms)
-        .await
-    {
-        Ok(request) => request,
-        Err(_) => return peer_http_error(StatusCode::UNAUTHORIZED),
+    let request = {
+        let Some(_codec) = reserve_peer_codec(&server.cell_runtime) else {
+            return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+        };
+        match receiver
+            .directory
+            .verify_peer_request(&body, identity.certificate(), identity.public_key(), now_ms)
+            .await
+        {
+            Ok(request) => request,
+            Err(_) => return peer_http_error(StatusCode::UNAUTHORIZED),
+        }
     };
     if server.authorize(&request).is_err() {
         return peer_http_error(StatusCode::UNAUTHORIZED);
@@ -836,7 +845,11 @@ pub(crate) async fn forward(
         Arc::new(receiver.resolver.clone()),
         Arc::clone(&server) as Arc<dyn PeerAuthorizer>,
     );
-    match dispatcher.dispatch_bytes(&request, now_ms).await {
+    let reply = dispatcher.dispatch(&request, now_ms).await;
+    let Some(_codec) = reserve_peer_codec(&server.cell_runtime) else {
+        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    match encode_peer_reply(&reply) {
         Ok(body) => peer_http_reply(body),
         Err(_) => peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
     }
@@ -877,9 +890,14 @@ pub(crate) async fn append_node_log(
     if !authenticated_session(receiver, leader, &identity, now_ms).await {
         return peer_http_error(StatusCode::UNAUTHORIZED);
     }
-    let (covered_through, frames) = match decode_append_batch(body) {
-        Ok(batch) => batch,
-        Err(()) => return peer_http_error(StatusCode::BAD_REQUEST),
+    let (covered_through, frames) = {
+        let Some(_codec) = reserve_peer_codec(&server.cell_runtime) else {
+            return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+        };
+        match decode_append_batch(body) {
+            Ok(batch) => batch,
+            Err(()) => return peer_http_error(StatusCode::BAD_REQUEST),
+        }
     };
     if receiver
         .directory
@@ -1010,18 +1028,23 @@ pub(crate) async fn tail_node_log(
         return peer_http_error(StatusCode::FORBIDDEN);
     }
     match store.read_tail_page(leader, epoch, first).await {
-        Ok(page) => match encode_tail_page(page) {
-            Ok(body) => (
-                StatusCode::OK,
-                [
-                    (header::CONTENT_TYPE, NODE_LOG_MEDIA_TYPE),
-                    (header::CACHE_CONTROL, "no-store"),
-                ],
-                body,
-            )
-                .into_response(),
-            Err(()) => peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
-        },
+        Ok(page) => {
+            let Some(_codec) = reserve_peer_codec(&server.cell_runtime) else {
+                return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+            };
+            match encode_tail_page(page) {
+                Ok(body) => (
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, NODE_LOG_MEDIA_TYPE),
+                        (header::CACHE_CONTROL, "no-store"),
+                    ],
+                    body,
+                )
+                    .into_response(),
+                Err(()) => peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
+            }
+        }
         Err(CellError::Node(_)) | Err(CellError::Ltx(_)) => peer_http_error(StatusCode::CONFLICT),
         Err(_) => peer_http_error(StatusCode::SERVICE_UNAVAILABLE),
     }
@@ -1656,6 +1679,23 @@ mod tests {
             SessionId::from_bytes([1; 16])
         );
         assert!(decode_session("0101010101010101010101010101010G").is_err());
+    }
+
+    #[tokio::test]
+    async fn peer_codec_reservation_uses_primitive_job_budget() {
+        let runtime = crab_cell_runtime::CellRuntime::new(
+            crab_cell_runtime::SqlWorkerPool::new(1, 1).unwrap(),
+            1_024,
+            SessionId::from_bytes([2; 16]),
+        )
+        .unwrap();
+
+        let first = reserve_peer_codec(&runtime).expect("one primitive job is available");
+        assert!(reserve_peer_codec(&runtime).is_none());
+        drop(first);
+        assert!(reserve_peer_codec(&runtime).is_some());
+
+        runtime.shutdown().await.unwrap();
     }
 
     #[test]

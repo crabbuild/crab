@@ -1,6 +1,6 @@
 # Cell quiescing, idle eviction, and unified resource accounting
 
-Status: IN PROGRESS — RAII ledger shared by active Cells, resident native bytes, active-Cell file descriptors, SQL work, hydration jobs, retained publication bytes, primitive activity/effect/migration/recovery jobs, canonical LTX `DiskBudget`, and embedded-host I/O/blocking/recovery/dirty/scratch admissions; deterministic victim selection, actor eviction, pressure pacing, retained-byte accounting, and fail-closed persisted-work refresh are wired; unknown persisted-work inventory is explicitly ineligible for eviction; descriptor admission/metrics and shared local-disk consumer wiring are now explicit; bounded two-slot/three-Cell churn and retained-work eviction guard tests prove canonical capacity reuse and fail-closed obligation handling; runtime Prometheus gauges now expose every ledger class; stale session restart inventory now reserves every regular file outside the fresh process session and rejects ambiguous layouts before serving; process-wide codec accounting, advertised-placement parity, and measured mixed-workload inventory proof remain
+Status: IN PROGRESS — RAII ledger shared by active Cells, resident native bytes, active-Cell file descriptors, SQL work, hydration jobs, retained publication bytes, primitive activity/effect/migration/recovery jobs, canonical LTX `DiskBudget`, and embedded-host I/O/blocking/recovery/dirty/scratch admissions; deterministic victim selection, actor eviction, pressure pacing, retained-byte accounting, and fail-closed persisted-work refresh are wired; unknown persisted-work inventory is explicitly ineligible for eviction; descriptor admission/metrics and shared local-disk consumer wiring are now explicit; bounded two-slot/three-Cell churn and retained-work eviction guard tests prove canonical capacity reuse and fail-closed obligation handling; runtime Prometheus gauges now expose every ledger class; stale session restart inventory now reserves every regular file outside the fresh process session and rejects ambiguous layouts before serving; outer peer and node-log codec work now shares the primitive-job ledger; advertised-placement parity and measured mixed-workload inventory proof remain
 Priority: P0
 Effort: XL
 Risk: High
@@ -163,7 +163,7 @@ mutating the database behind the actor.
 - [x] Activation pressure can reclaim eligible idle Cells without losing any
       acknowledged exact root.
 - [x] Busy, unpublished, migrating, pinned, or leased work is never selected.
-- [ ] Every listed resource consumer reserves and releases through one ledger.
+- [x] Every listed resource consumer reserves and releases through one ledger.
 - [x] Canonical LTX local-disk reservations reconcile with the runtime ledger
       without allowing a failed admission to leak bytes.
 - [ ] Advertised/metric totals reconcile with actor state and measured local
@@ -196,12 +196,20 @@ LTX host now obtains one runtime admission token for each bounded object-store
 I/O operation, blocking host job, recovery cohort, dirty-memory cohort, and
 scratch MiB. Tokens follow cancellation-safe work until completion, while the
 existing LTX semaphores remain the local waiters. The remaining ledger gates are
-process-wide codec accounting, complete advertised-metric parity,
-advertised-placement parity, and measured mixed-workload proof; those require
+complete advertised-metric parity, advertised-placement parity, and measured
+mixed-workload proof; those require
 qualification rather than another local counter. HTTP Prometheus
 metrics now export usage and capacity for every host-ledger class, but the
 placement advertisement still publishes its narrower job-credit contract until
 qualification proves a compatible expanded observation shape.
+
+The HTTP peer boundary now reserves one primitive-job token for the bounded
+authenticated request verification and reply protobuf encoding sections. The
+node-log append and tail codecs use the same helper; SQL wire codecs remain
+inside their already-admitted worker jobs. Admission refusal fails closed with
+`503` before the codec executes, and the RAII token is dropped on every return
+path, so this closes the process-wide transport-codec gap without adding a
+second semaphore, capacity setting, or accounting surface.
 
 On server restart, `LocalStaging::new_with_restart_inventory` walks the
 dedicated `cells/sessions` namespace before runtime startup. The newly created

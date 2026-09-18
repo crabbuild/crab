@@ -182,7 +182,8 @@ re-inspected after durable work and an unknown result remains ineligible for
 eviction. Remaining release gates are recorded in plans 009–017:
 post-promotion zero-origin measurement, multi-GiB/RSS and provider-failure
 matrix evidence (with one local fail-first immutable PUT proof now covered),
-complete process-wide resource accounting, multi-process
+complete advertised/metric parity and mixed-workload resource accounting,
+multi-process
 movement/fault proof, protected Kubernetes receipts, and the named plan-016
 retain/deprecate/hard-remove decision. Plan 017 remains correctly blocked; no
 standalone export or stored prefix was removed.
@@ -192,14 +193,16 @@ The signed placement snapshot now has an end-to-end local provenance check:
 and the peer test verifies that the signed memory/disk totals and Cell/job
 counts come from that coherent runtime sample while free headroom remains
 clamped. Nested cgroup fixture parsing and process file-capacity checks cover
-the fail-closed host probe; process-wide parity and multi-process convergence
+the fail-closed host probe; advertised/metric parity and multi-process convergence
 remain qualification work.
 
 Scheduler maintenance is also ledger-visible: migration and node-log recovery
 tasks now retain a `NodeJobReservation` until their spawned futures finish,
 alongside the existing per-cell/session guards. This closes the untracked
-background-job path without adding a second capacity owner; process-wide
-codec accounting, advertised-placement parity, and measured
+background-job path without adding a second capacity owner. The HTTP peer
+boundary charges authenticated protobuf verification/reply encoding and
+node-log append/tail codecs to that same primitive-job ledger; SQL codecs stay
+inside their worker-job reservation. Advertised-placement parity and measured
 mixed-workload proof are still explicit Plan 012 qualification gates. Runtime
 Prometheus metrics now expose usage and capacity for every host-ledger class.
 
