@@ -2044,8 +2044,9 @@ fn begin_idle_evictions(
             migrating: active.publisher.is_none(),
             backup_pinned: active.unpublished_node_logs != 0,
             leased_work: !active.queue.is_empty(),
-            primitive_obligation: !active.persisted_work.is_empty(),
-            accounting_known: true,
+            primitive_obligation: !active.persisted_work.is_unknown()
+                && !active.persisted_work.is_empty(),
+            accounting_known: !active.persisted_work.is_unknown(),
         })
         .collect::<Vec<_>>();
     let victims = select_victims(&observations, limit);
