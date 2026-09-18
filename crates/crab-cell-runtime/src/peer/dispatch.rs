@@ -653,6 +653,7 @@ fn error_reply(error: Error) -> wire::PeerReply {
         | Error::CellNotActive
         | Error::CellDraining
         | Error::RuntimeClosed
+        | Error::StreamCancelled
         | Error::PendingPublication => (
             wire::error::Code::Unavailable,
             wire::error::Outcome::NotStarted,
@@ -697,6 +698,8 @@ fn error_reply(error: Error) -> wire::PeerReply {
         | Error::Retention(_)
         | Error::RetentionIo(_)
         | Error::RetentionWorkerJoin(_)
+        | Error::FollowerIo(_)
+        | Error::FollowerWorkerJoin(_)
         | Error::PeerTransport { .. }
         | Error::PeerTransportUnknown { .. }
         | Error::CatalogCollision

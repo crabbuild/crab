@@ -30,12 +30,17 @@ Each layer has one owner and one primary evidence surface.
 | Release control | `src/release.rs`, `src/release_progress.rs` | release unit tests and server command tests |
 | Backup pins | `src/backup.rs`, `crab-ltx::CellReplica::reachable_objects` | runtime pin tests and server create/verify command tests |
 | Immutable retention | `src/retention.rs`, `crab-storage::Store::list_stream` | mark/sweep tests and server maintenance-fence tests |
+| Follower mechanics | `src/follower.rs`, `src/node_log.rs`, `src/node_log_recovery.rs` | verified-frame, object-covered queued-prefix, lost-ACK suffix, torn-tail, dual-proof, and seal/gather tests |
+| State-observing streams | `src/client.rs`; `crab-http-server/src/state_stream.rs` | `tests/client.rs`; `CellStateStream` enforces per-output receipts, cancellation, deadlines, and fencing; `state_observing_body` adapts it to one-at-a-time HTTP chunks without a second queue |
 | Product composition | `crab-http-server/src/cells/` | server route, restore, and lifecycle tests |
 
-Celld-style follower durability is a target extension, not part of this
-implemented evidence map. Its phase gates and failure matrix live in
-[Follower durability and warm failover](failover-and-followers.md). Until those
-gates pass, only an exact object-store root publication can release a response.
+Celld-style follower durability is connected to product command and schema-
+migration response release. A response may be released by either an exact
+object-store root or a write-all follower proof. The actor retains the Cell
+until the exact root is published, and takeover consumes any fleet-only tail
+before serving. The remaining release gate is live multi-node fault and
+capacity qualification in
+[Follower durability and warm failover](failover-and-followers.md).
 
 Use the map during review. A change to one boundary needs caller, callee, sibling, and source-loss evidence where applicable.
 
@@ -302,15 +307,20 @@ The target workload is 1,000 to 10,000 active databases per node, 100 MB to 5,00
 
 Qualify each node profile separately:
 
-| Profile | Required matrix |
-| --- | --- |
-| Small | Minimum supported workload, admission behavior, drain under pressure |
-| Medium | Mixed repository sizes, sustained command target, sparse takeover |
-| Large | Maximum active-Cell target, 5,000 MB restore, compaction and renewal load |
+| Profile | Process-visible resources | Required matrix |
+| --- | --- | --- |
+| Small | 1–2 CPU credits, 2–4 GiB memory, 50–100 GiB SSD | Minimum supported workload, admission behavior, drain under pressure |
+| Medium | 4–8 CPU credits, 8–16 GiB memory, 100–200 GiB SSD | Mixed repository sizes, sustained command target, sparse takeover |
+| Large | 16 CPU credits, 32–64 GiB memory, 500–1,000 GiB SSD | Maximum active-Cell target, 5,000 MB restore, compaction and renewal load |
 
 Before starting traffic, capture the exact resource-derived envelope from every
 node. A profile label or Kubernetes request is not evidence of the resources
-visible to the process.
+visible to the process. The live Kubernetes qualifier rejects a Pod whose
+cgroup-aware CPU credits, effective memory limit, or configured and enforced
+local-disk capacity falls outside the selected profile. Effective capacity is
+the smaller of the backing filesystem and the configured limit. The report
+also binds that limit to the Pod's `emptyDir.sizeLimit`; current filesystem
+free space remains a separate admission input.
 
 ```bash
 kubectl --namespace crab exec POD -- \
@@ -332,6 +342,17 @@ request creates durable state. The JSON template must contain the exact
 top-level marker `"request_id":"{{request_id}}"`; the harness replaces it with
 a new UUIDv7 for every request.
 
+The release Kubernetes qualifier builds this harness from the exact tagged
+source and drives 1,000 aggregate mutation requests/s through each ready Pod
+for 60 seconds. The checked-in profile uses 64 distinct commit-status targets
+distributed across eight repository Cells (24 commits per Cell); this is the
+node-wide aggregate capacity proof while retaining the same per-commit
+submission history. Each Pod receives eight targets per Cell, and the receipt
+records a configured 125 target requests/s per Cell. Retain a one-Cell run as a
+separately labelled hot-Cell limit test. Every attested receipt retains each Pod
+UID, p50/p95/p99 latency, success and admission counts, plus capacity envelopes
+before and after load.
+
 ```json
 {"request_id":"{{request_id}}","title":"load qualification","body":"durable command"}
 ```
@@ -344,6 +365,7 @@ CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-load-generator \
   --target 'commits=8@/api/repos/team/project/commits?rev=main&limit=20' \
   --target 'readme=4@/api/repos/team/project/file?rev=main&path_hex=524541444d452e6d64' \
   --mutation 'issues=16@/api/repos/team/disposable-load/issues|/secure/new-issue.json' \
+  --aggregate-requests-per-second 1000 \
   --duration-seconds 300 \
   --warmup-seconds 15 \
   --header-file /secure/load-headers \
@@ -355,7 +377,10 @@ rejections, unexpected responses, transport/body-limit failures, bytes,
 throughput, and all-response plus successful-response latency percentiles. It
 checks `/livez` before and after traffic. HTTP 429 is an expected overload
 signal; any other non-2xx response, transport failure, oversized body, or
-unhealthy liveness check makes the command fail after writing the receipt.
+unhealthy liveness check makes the command fail after writing the receipt. A
+fixed aggregate-rate run also fails when successful responses fall below 95%
+of its configured request count, so 429 responses cannot satisfy the 1,000 TPS
+capacity target.
 
 The report separates CPU-bounded blocking jobs, dirty-memory-bounded jobs, and
 the two-slot full-recovery ceiling. Store the report with the immutable image

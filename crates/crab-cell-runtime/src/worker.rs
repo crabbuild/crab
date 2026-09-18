@@ -458,6 +458,20 @@ impl SqlWorkerPool {
         receive(response).await
     }
 
+    pub(crate) async fn confirm_durable(&self, cell: CellId, commit_sequence: u64) -> Result<()> {
+        let (reply, response) = oneshot::channel();
+        self.send(
+            cell,
+            WorkerCommand::ConfirmDurable {
+                cell,
+                commit_sequence,
+                reply,
+            },
+        )
+        .await?;
+        receive(response).await
+    }
+
     pub(crate) async fn confirm_migration_published(
         &self,
         cell: CellId,
@@ -712,6 +726,11 @@ enum WorkerCommand {
         root: crab_ltx::RootRef,
         reply: oneshot::Sender<Result<StoredOutcome>>,
     },
+    ConfirmDurable {
+        cell: CellId,
+        commit_sequence: u64,
+        reply: oneshot::Sender<Result<()>>,
+    },
     ConfirmBootstrapPublished {
         cell: CellId,
         cuts: Box<crab_ltx::CaptureBatch>,
@@ -874,7 +893,7 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                         }
                         CommandExecution::Pending => active
                             .executor
-                            .pending()
+                            .latest_pending()
                             .cloned()
                             .map(Box::new)
                             .map(WorkerExecution::Pending)
@@ -921,7 +940,7 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                         }
                         CommandExecution::Pending => active
                             .executor
-                            .pending()
+                            .latest_pending()
                             .cloned()
                             .map(Box::new)
                             .map(WorkerExecution::Pending)
@@ -1019,6 +1038,17 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                     .get_mut(&cell)
                     .ok_or(Error::CellNotActive)
                     .and_then(|cell| cell.executor.confirm_published(&root));
+                let _ = reply.send(result);
+            }
+            WorkerCommand::ConfirmDurable {
+                cell,
+                commit_sequence,
+                reply,
+            } => {
+                let result = cells
+                    .get_mut(&cell)
+                    .ok_or(Error::CellNotActive)
+                    .and_then(|cell| cell.executor.confirm_durable(commit_sequence));
                 let _ = reply.send(result);
             }
             WorkerCommand::ConfirmBootstrapPublished { cell, cuts, reply } => {

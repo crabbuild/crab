@@ -233,9 +233,19 @@ drain state.
 Before a capacity qualification run, save `cells capacity --json --live` and
 `cells metrics` from every pod. They record the running server's startup memory, disk, descriptor and CPU inputs and
 the resulting active-Cell, retained-byte, blocking-job, dirty-job, recovery-job
-and scratch budgets. Treat it as admission evidence only: latency, throughput,
-RSS, descriptors, local bytes and object-store cost still require a measured
-workload receipt.
+and scratch budgets. The reported disk limit must equal the Pod's
+`emptyDir.sizeLimit`; otherwise the application and kubelet enforce different
+ceilings. Treat it as admission evidence only: latency, throughput, RSS,
+descriptors, local bytes and object-store cost still require a measured workload
+receipt.
+
+The Kubernetes release qualifier runs the tagged-source load generator against
+each Pod through a direct port-forward while preserving the public HTTP
+authority. Each node must sustain 1,000 aggregate authenticated mutations/s for
+60 seconds with at least 95% success across eight repository Cells (64 total
+commit-status targets). Treat the three bound Pod reports as the per-node
+throughput evidence; a separate one-Cell run measures the hot-Cell admission
+limit, and neither run replaces the provider latency envelope.
 
 ## Roll back a failed release
 
@@ -347,11 +357,15 @@ qualification repository and issue a short-lived write token through **Git
 access**. Run the same provider-neutral test on EKS, GKE, and AKS:
 
 ```sh
+CARGO_TARGET_DIR=/secure/crab-http-load-target \
+  cargo build -p crab-http-server --release --example qualify_http_load --locked
+export CRAB_HTTP_SERVER_LOAD_GENERATOR=/secure/crab-http-load-target/release/examples/qualify_http_load
 export CRAB_HTTP_SERVER_GIT_TOKEN=secret_from_git_access
 export CRAB_HTTP_SERVER_EXPECTED_IMAGE="$(jq --raw-output .image.reference crab-http-server-release.json)"
 export CRAB_HTTP_SERVER_EXPECTED_CHART="$(jq --raw-output .chart.reference crab-http-server-release.json)"
 export CRAB_HTTP_SERVER_RELEASE_TAG="$(jq --raw-output .tag crab-http-server-release.json)"
 export CRAB_HTTP_SERVER_SOURCE_SHA="$(jq --raw-output .source_commit crab-http-server-release.json)"
+export CRAB_HTTP_SERVER_NODE_PROFILE=medium
 export CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true
 export CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true
 
@@ -373,6 +387,8 @@ higher epoch and publish a new status visible through another replica. It leaves
 durable evidence and writes a secret-free JSON receipt bound to the supplied
 release tag, source commit, image, and chart. Review and retain that receipt
 with the release record; revoke the qualification token afterward.
+The load phase retains roughly 180,000 status submissions and 192 synthetic
+commits, so the qualification repository must be disposable.
 
 For repeatable retained evidence, dispatch
 `.github/workflows/http-server-kubernetes-live.yml` from the release tag. Its

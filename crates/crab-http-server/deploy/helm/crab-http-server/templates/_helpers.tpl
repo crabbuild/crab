@@ -68,6 +68,7 @@ url = {{ required "config.storageUrl is required when config.existingConfigMap i
 
 [cells]
 data_dir = "/var/lib/crab/cells"
+local_disk_limit_bytes = {{ .Values.scratch.sizeBytes }}
 peer_advertise = "https://127.0.0.1:8789"
 peer_tls_server_name = {{ required "cells.tlsServerName is required" .Values.cells.tlsServerName | toJson }}
 peer_certificate = "/run/secrets/crab/peer/tls.crt"

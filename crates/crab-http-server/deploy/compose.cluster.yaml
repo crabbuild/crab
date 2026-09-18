@@ -42,6 +42,13 @@ services:
     volumes:
       - ./compose.node-b.toml:/etc/crab/server.toml:ro
       - peer-identity:/run/secrets/crab-peer:ro
+    depends_on:
+      repository-init:
+        condition: service_completed_successfully
+      peer-pki-init:
+        condition: service_completed_successfully
+      server-c:
+        condition: service_healthy
 
   server-c:
     <<: *cluster-server

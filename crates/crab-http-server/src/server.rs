@@ -59,6 +59,13 @@ const MAX_BLOCKING_JOBS: usize = 16;
 const MAX_RECOVERY_JOBS: usize = 2;
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(110);
 const RELEASE_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const NODE_LOG_RECRUIT_INTERVAL: Duration = Duration::from_secs(3);
+const NODE_LOG_LIVE_NODE_LIMIT: usize = 1_024;
+const NODE_LOG_ROTATION_INTERVAL: Duration = Duration::from_secs(5);
+const NODE_LOG_ROTATION_FRAMES: u64 = 1_000_000;
+const RETIRED_FOLLOWER_COLLECTION_INTERVAL: Duration = Duration::from_secs(60);
+const RETIRED_FOLLOWER_GRACE_MS: i64 = 10 * 60 * 1_000;
+const RETIRED_FOLLOWER_BATCH: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CellRuntimeBudget {
@@ -83,6 +90,8 @@ pub(crate) struct CellCapacityReport {
 #[derive(Clone, Serialize)]
 struct CellCapacityResources {
     memory_bytes: u64,
+    disk_limit_bytes: u64,
+    disk_capacity_bytes: u64,
     free_disk_bytes: u64,
     available_file_descriptors: usize,
     job_credits: usize,
@@ -224,6 +233,8 @@ impl CellCapacityReport {
             version: 1,
             resources: CellCapacityResources {
                 memory_bytes: resources.memory_bytes,
+                disk_limit_bytes: resources.disk_limit_bytes,
+                disk_capacity_bytes: resources.disk_capacity_bytes,
                 free_disk_bytes: resources.free_disk_bytes,
                 available_file_descriptors: resources.available_file_descriptors,
                 job_credits: resources.job_credits,
@@ -249,8 +260,14 @@ impl CellCapacityReport {
     }
 }
 
-pub(crate) fn cell_capacity_report(data_dir: &std::path::Path) -> Result<Vec<u8>> {
-    encode_cell_capacity_report(crate::peer::local_resources(data_dir)?)
+pub(crate) fn cell_capacity_report(
+    data_dir: &std::path::Path,
+    local_disk_limit_bytes: u64,
+) -> Result<Vec<u8>> {
+    encode_cell_capacity_report(crate::peer::local_resources(
+        data_dir,
+        local_disk_limit_bytes,
+    )?)
 }
 
 fn encode_cell_capacity_report(resources: crate::peer::LocalResources) -> Result<Vec<u8>> {
@@ -264,6 +281,8 @@ fn encode_cell_capacity_report(resources: crate::peer::LocalResources) -> Result
 pub(crate) fn test_cell_capacity_report() -> CellCapacityReport {
     let resources = crate::peer::LocalResources {
         memory_bytes: 2 * GIB,
+        disk_limit_bytes: 30 * GIB,
+        disk_capacity_bytes: 30 * GIB,
         free_disk_bytes: 30 * GIB,
         available_file_descriptors: 10_000,
         job_credits: 2,
@@ -310,7 +329,7 @@ fn start_cell_runtime(
     scratch_root: PathBuf,
 ) -> Result<CellRuntime> {
     crate::cells::compiled_registry()?;
-    Ok(CellRuntime::new_with_replica_host(
+    Ok(CellRuntime::new_with_replica_host_requiring_node_lease(
         SqlWorkerPool::for_system(budget.max_active_cells)?,
         budget.node_retained_bytes,
         session,
@@ -638,6 +657,8 @@ pub(crate) struct Server {
     pub cell_runtime: CellRuntime,
     pub(crate) repository_cells: Option<crate::cells::RepositoryCellRouter>,
     pub(crate) peer_receiver: Option<crate::peer::PeerReceiver>,
+    pub(crate) follower_store: Option<crab_cell_runtime::FollowerStore>,
+    pub(crate) node_log_transport: Option<Arc<dyn crab_cell_runtime::NodeLogTransport>>,
     pub options: RepositoryOptions,
     pub cursor_key: [u8; 32],
     pub admission: Semaphore,
@@ -657,6 +678,10 @@ pub(crate) struct Server {
 }
 
 impl Server {
+    pub(crate) fn accepts_application_peers(&self) -> bool {
+        self.node_healthy.load(Ordering::Acquire) && !self.cancellation.is_cancelled()
+    }
+
     pub(crate) async fn acquire_transfer(
         &self,
         cancellation: &CancellationToken,
@@ -739,7 +764,6 @@ pub async fn serve(config: Config) -> Result<()> {
         },
     )?;
     let transfer_admission = transfer_admission(&catalog);
-    probe_storage_contract(&catalog, &transfer_admission).await?;
     let startup = crate::cells::verify_startup_release(&config).await?;
     crate::cells::verify_repository_cells(&startup.layout, startup.identity, repository_cells)
         .await?;
@@ -758,14 +782,20 @@ pub async fn serve(config: Config) -> Result<()> {
         peer_tls.signing_key().clone(),
         session,
         config.cells.peer_advertise.to_string(),
+        crab_cell_runtime::NodeFailureDomain::new(
+            config.cells.failure_zone.clone(),
+            config.cells.failure_host.clone(),
+        )?,
         peer_tls.fleet(),
         peer_tls.certificate(),
         startup.image,
         registry.release_digest(),
         registry.module_digests(),
         config.cells.data_dir.clone(),
+        config.cells.local_disk_limit_bytes,
         scheduler_status.clone(),
     )?;
+    let node = node_publisher.node();
     let session_dir = node_publisher.session_dir();
     let local_resources = node_publisher.local_resources()?;
     let cell_budget = CellRuntimeBudget::from_resources(local_resources)?;
@@ -779,12 +809,33 @@ pub async fn serve(config: Config) -> Result<()> {
     .map_err(|source| crate::Error::LocalStaging {
         source: Box::new(source),
     })?;
-    // A pod must prove the complete storage contract before it owns any socket;
-    // otherwise incomplete cloud permissions can look partially started.
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
     let metrics = crate::metrics::Metrics::new()?;
-    let cell_runtime = start_cell_runtime(session, cell_budget, local_disk, session_dir.clone())?;
+    let cell_runtime = start_cell_runtime(
+        session,
+        cell_budget,
+        local_disk.clone(),
+        session_dir.clone(),
+    )?;
+    cell_runtime.install_telemetry(Arc::new(metrics.clone()))?;
+    let follower_store = crab_cell_runtime::FollowerStore::open(
+        config.cells.data_dir.clone(),
+        crate::cells::repository_replica_limits(),
+        local_disk.clone(),
+    )?;
+    if follower_store.quarantined_entries() != 0 {
+        tracing::warn!(
+            entries = follower_store.quarantined_entries(),
+            "corrupt follower storage remains quarantined"
+        );
+    }
+    let node_publisher = Arc::new(
+        node_publisher
+            .with_follower_store(follower_store.clone())
+            .with_telemetry(cell_runtime.telemetry_handle())
+            .with_metrics(metrics.clone()),
+    );
     let cell_resolver = crate::peer::LocalCellResolver::new(
         startup.layout.clone(),
         startup.identity,
@@ -797,8 +848,16 @@ pub async fn serve(config: Config) -> Result<()> {
         peer_tls.client_identity(),
         session,
     ));
+    let node_log_transport: Arc<dyn crab_cell_runtime::NodeLogTransport> =
+        Arc::new(crate::peer::NodeLogHttpTransport::new(
+            directory.clone(),
+            peer_tls.client_identity(),
+            session,
+        ));
     let release_store = ReleaseStore::new(startup.layout.clone(), startup.identity)?;
     let peer_receiver = crate::peer::PeerReceiver::new(
+        node,
+        session,
         directory.clone(),
         Arc::clone(&registry),
         release_store.clone(),
@@ -832,22 +891,19 @@ pub async fn serve(config: Config) -> Result<()> {
         repository_cells.clone(),
         session,
         scheduler_status.clone(),
-    )?;
-    let advertised = match node_publisher.publish_initial().await {
-        Ok(advertised) => advertised,
-        Err(error) => {
-            if let Err(shutdown_error) = cell_runtime.shutdown().await {
-                tracing::warn!(error = %shutdown_error, "Cell runtime startup cleanup failed");
-            }
-            return Err(error);
-        }
-    };
+    )?
+    .with_node_recovery(Arc::clone(&node_log_transport))
+    .with_node_recovery_disk(local_disk.clone())
+    .with_metrics(metrics.clone());
+    let durability_application = startup.identity.application();
     let server = Arc::new(Server {
         repositories: repositories.into(),
         runtime: Arc::clone(&runtime),
         cell_runtime,
         repository_cells: Some(repository_cells),
         peer_receiver: Some(peer_receiver),
+        follower_store: Some(follower_store.clone()),
+        node_log_transport: Some(node_log_transport),
         cancellation: cancellation.clone(),
         receives: tokio_util::task::TaskTracker::new(),
         options,
@@ -861,17 +917,69 @@ pub async fn serve(config: Config) -> Result<()> {
         app_admission: Semaphore::new(APP_ADMISSION_CAPACITY),
         maintenance_admission: Arc::new(Semaphore::new(MAINTENANCE_ADMISSION_CAPACITY)),
         auth,
-        catalog: Some(catalog),
+        catalog: Some(catalog.clone()),
         catalog_healthy: AtomicBool::new(true),
-        node_healthy: AtomicBool::new(true),
+        node_healthy: AtomicBool::new(false),
         scheduler_status,
         cell_capacity,
         metrics,
     });
-    let app = router(Arc::clone(&server));
     let management = management_router(Arc::clone(&server));
-    tracing::info!(address = %listener.local_addr()?, "public listener started");
     tracing::info!(address = %management_listener.local_addr()?, "management listener started");
+    let recovery_shutdown = CancellationToken::new();
+    let management_shutdown = recovery_shutdown.clone();
+    let mut management_listener = tokio::spawn(async move {
+        axum::serve(
+            peer_tls.listener(management_listener),
+            management.into_make_service_with_connect_info::<crate::peer_tls::PeerTlsIdentity>(),
+        )
+        .with_graceful_shutdown(management_shutdown.cancelled_owned())
+        .await
+    });
+    let startup_result = {
+        let startup = async {
+            // Recovery is reachable before the comprehensive object-store probe.
+            // Application peer routes remain gated until all startup tasks exist.
+            probe_storage_contract(&catalog, &server.transfer_admission).await?;
+            node_publisher.publish_initial().await?;
+            let node_lease = node_publisher.lease_guard()?;
+            server.cell_runtime.install_node_lease(node_lease.clone())?;
+            Ok::<_, crate::Error>(node_lease)
+        };
+        tokio::pin!(startup);
+        tokio::select! {
+            result = &mut startup => result,
+            result = &mut management_listener => {
+                cancellation.cancel();
+                let listener_error = match listener_task_result(result) {
+                    Ok(()) => crate::Error::Config("management listener stopped during startup"),
+                    Err(error) => error,
+                };
+                if let Err(shutdown_error) = server.shutdown_runtimes().await {
+                    tracing::warn!(error = %shutdown_error, "runtime startup cleanup failed");
+                }
+                return Err(listener_error);
+            }
+        }
+    };
+    let node_lease = match startup_result {
+        Ok(node_lease) => node_lease,
+        Err(error) => {
+            cancellation.cancel();
+            recovery_shutdown.cancel();
+            if tokio::time::timeout(Duration::from_secs(5), &mut management_listener)
+                .await
+                .is_err()
+            {
+                management_listener.abort();
+                let _ = management_listener.await;
+            }
+            if let Err(shutdown_error) = server.shutdown_runtimes().await {
+                tracing::warn!(error = %shutdown_error, "runtime startup cleanup failed");
+            }
+            return Err(error);
+        }
+    };
     let signal_cancellation = cancellation.clone();
     let signal = tokio::spawn(async move {
         shutdown_signal().await;
@@ -880,13 +988,81 @@ pub async fn serve(config: Config) -> Result<()> {
     let refresh_server = Arc::clone(&server);
     let refresh =
         tokio::spawn(async move { refresh_catalog(refresh_server, catalog_version).await });
+    let durability_publisher = Arc::clone(&node_publisher);
+    let durability_runtime = server.cell_runtime.clone();
+    let durability_transport = Arc::clone(
+        server
+            .node_log_transport
+            .as_ref()
+            .ok_or(crate::Error::Config("node-log transport is unavailable"))?,
+    );
+    let durability_cancellation = cancellation.clone();
+    let durability_recruiter = tokio::spawn(async move {
+        recruit_node_durability(
+            durability_publisher,
+            durability_runtime,
+            durability_application,
+            durability_transport,
+            durability_cancellation,
+        )
+        .await
+    });
+    let rotation_publisher = Arc::clone(&node_publisher);
+    let rotation_runtime = server.cell_runtime.clone();
+    let rotation_transport = Arc::clone(
+        server
+            .node_log_transport
+            .as_ref()
+            .ok_or(crate::Error::Config("node-log transport is unavailable"))?,
+    );
+    let rotation_cancellation = cancellation.clone();
+    let rotation_metrics = server.metrics.clone();
+    let durability_rotator = tokio::spawn(async move {
+        rotate_node_durability(
+            rotation_publisher,
+            rotation_runtime,
+            durability_application,
+            rotation_transport,
+            rotation_cancellation,
+            rotation_metrics,
+        )
+        .await
+    });
+    let follower_collection_store = follower_store;
+    let follower_collection_directory = directory.clone();
+    let follower_collection_cancellation = cancellation.clone();
+    let follower_collection = tokio::spawn(async move {
+        collect_retired_follower_lanes(
+            follower_collection_store,
+            follower_collection_directory,
+            follower_collection_cancellation,
+        )
+        .await
+    });
     let node_shutdown = CancellationToken::new();
     let node_server = Arc::clone(&server);
     let heartbeat_shutdown = node_shutdown.clone();
+    let heartbeat_publisher = Arc::clone(&node_publisher);
     let heartbeat = tokio::spawn(async move {
-        node_publisher
-            .run(node_server, advertised, heartbeat_shutdown)
+        heartbeat_publisher
+            .run_shared(node_server, heartbeat_shutdown)
             .await
+    });
+    let lease_server = Arc::clone(&server);
+    let lease_cancellation = cancellation.clone();
+    let lease_watch = tokio::spawn(async move {
+        node_lease.wait_fenced().await;
+        if lease_server.node_healthy.load(Ordering::Acquire) {
+            lease_server
+                .metrics
+                .record_self_fence(crate::metrics::SelfFenceReason::Expiry);
+        } else if lease_cancellation.is_cancelled() {
+            lease_server
+                .metrics
+                .record_self_fence(crate::metrics::SelfFenceReason::Shutdown);
+        }
+        lease_server.node_healthy.store(false, Ordering::Release);
+        lease_cancellation.cancel();
     });
     let release_cancellation = cancellation.clone();
     let compiled_release = registry.release_digest();
@@ -895,38 +1071,59 @@ pub async fn serve(config: Config) -> Result<()> {
     });
     let scheduler_cancellation = cancellation.clone();
     let scheduler = tokio::spawn(async move { cell_scheduler.run(scheduler_cancellation).await });
+    server.node_healthy.store(true, Ordering::Release);
+    let app = router(Arc::clone(&server));
+    tracing::info!(address = %listener.local_addr()?, "public listener started");
     let public_shutdown = cancellation.clone();
-    let management_shutdown = cancellation.clone();
-    let listeners = async {
-        tokio::try_join!(
-            axum::serve(listener, app).with_graceful_shutdown(public_shutdown.cancelled_owned()),
-            axum::serve(
-                peer_tls.listener(management_listener),
-                management
-                    .into_make_service_with_connect_info::<crate::peer_tls::PeerTlsIdentity>(),
-            )
-            .with_graceful_shutdown(management_shutdown.cancelled_owned()),
-        )
+    let public = async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(public_shutdown.cancelled_owned())
+            .await
     };
-    tokio::pin!(listeners);
-    let (listener_result, shutdown_deadline) = tokio::select! {
-        result = &mut listeners => {
+    tokio::pin!(public);
+    let mut management_result = None;
+    let (public_result, shutdown_deadline) = tokio::select! {
+        result = &mut public => {
+            server.node_healthy.store(false, Ordering::Release);
             cancellation.cancel();
             (Ok(result), Instant::now() + SHUTDOWN_DEADLINE)
         }
+        result = &mut management_listener => {
+            server.node_healthy.store(false, Ordering::Release);
+            cancellation.cancel();
+            management_result = Some(match listener_task_result(result) {
+                Ok(()) => Err(crate::Error::Config("management listener stopped unexpectedly")),
+                Err(error) => Err(error),
+            });
+            let deadline = Instant::now() + SHUTDOWN_DEADLINE;
+            (before_shutdown_deadline(deadline, &mut public).await, deadline)
+        }
         () = cancellation.cancelled() => {
+            server.node_healthy.store(false, Ordering::Release);
             signal.abort();
             let deadline = Instant::now() + SHUTDOWN_DEADLINE;
-            (before_shutdown_deadline(deadline, &mut listeners).await, deadline)
+            (before_shutdown_deadline(deadline, &mut public).await, deadline)
         }
     };
     signal.abort();
-    let result = listener_result?;
+    let result = public_result?;
     before_shutdown_deadline(shutdown_deadline, async move {
         let _cancel_heartbeat_on_drop = node_shutdown.clone().drop_guard();
         if let Err(error) = refresh.await {
             tracing::warn!(error = %error, "repository catalog refresh task failed");
         }
+        let durability_recruiter = match durability_recruiter.await {
+            Ok(result) => result,
+            Err(error) => Err(error.into()),
+        };
+        let durability_rotator = match durability_rotator.await {
+            Ok(result) => result,
+            Err(error) => Err(error.into()),
+        };
+        let follower_collection = match follower_collection.await {
+            Ok(result) => result,
+            Err(error) => Err(error.into()),
+        };
         let scheduler = match scheduler.await {
             Ok(result) => result,
             Err(error) => Err(error.into()),
@@ -949,16 +1146,191 @@ pub async fn serve(config: Config) -> Result<()> {
             Ok(result) => result,
             Err(error) => Err(error.into()),
         };
+        let lease_watch = match lease_watch.await {
+            Ok(()) => Ok(()),
+            Err(error) => Err(error.into()),
+        };
+        recovery_shutdown.cancel();
+        let management = match management_result {
+            Some(result) => result,
+            None => listener_task_result(management_listener.await),
+        };
         result
             .map(|_| ())
             .map_err(crate::Error::from)
+            .and(management)
             .and(heartbeat)
+            .and(lease_watch)
             .and(scheduler)
             .and(release_watch)
+            .and(durability_recruiter)
+            .and(durability_rotator)
+            .and(follower_collection)
             .and(maintenance)
             .and(runtimes)
     })
     .await?
+}
+
+fn listener_task_result(
+    result: std::result::Result<std::io::Result<()>, tokio::task::JoinError>,
+) -> Result<()> {
+    result.map_err(crate::Error::from)?.map_err(Into::into)
+}
+
+async fn collect_retired_follower_lanes(
+    store: crab_cell_runtime::FollowerStore,
+    directory: NodeDirectory,
+    cancellation: CancellationToken,
+) -> Result<()> {
+    loop {
+        tokio::select! {
+            () = cancellation.cancelled() => return Ok(()),
+            () = tokio::time::sleep(RETIRED_FOLLOWER_COLLECTION_INTERVAL) => {}
+        }
+        let now_ms = crate::cells::unix_now_ms()?;
+        let cutoff_ms = now_ms.saturating_sub(RETIRED_FOLLOWER_GRACE_MS);
+        let candidates = match store.retired_lanes(cutoff_ms, RETIRED_FOLLOWER_BATCH).await {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                tracing::warn!(error = %error, "retired follower scan failed");
+                continue;
+            }
+        };
+        for candidate in candidates {
+            match directory
+                .log_epoch_referenced(candidate.leader(), candidate.epoch())
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    if let Err(error) = store.remove_retired(candidate, cutoff_ms).await {
+                        tracing::warn!(error = %error, "retired follower collection failed");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "retired follower authority check failed");
+                }
+            }
+        }
+    }
+}
+
+async fn recruit_node_durability(
+    publisher: Arc<crate::peer::NodePublisher>,
+    runtime: CellRuntime,
+    application: crab_cell_runtime::ApplicationId,
+    transport: Arc<dyn crab_cell_runtime::NodeLogTransport>,
+    cancellation: CancellationToken,
+) -> Result<()> {
+    let limits = crate::cells::repository_replica_limits();
+    loop {
+        let recruited = publisher
+            .recruit_node_durability(
+                Arc::clone(&transport),
+                limits,
+                limits.max_capture_bytes,
+                NODE_LOG_LIVE_NODE_LIMIT,
+            )
+            .await;
+        match recruited {
+            Ok(Some(durability)) => {
+                runtime.install_node_durability(application, durability)?;
+                tracing::info!("node-log follower durability recruited");
+                return Ok(());
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "node-log follower recruitment failed");
+            }
+        }
+        tokio::select! {
+            () = cancellation.cancelled() => return Ok(()),
+            () = tokio::time::sleep(NODE_LOG_RECRUIT_INTERVAL) => {}
+        }
+    }
+}
+
+async fn rotate_node_durability(
+    publisher: Arc<crate::peer::NodePublisher>,
+    runtime: CellRuntime,
+    application: crab_cell_runtime::ApplicationId,
+    transport: Arc<dyn crab_cell_runtime::NodeLogTransport>,
+    cancellation: CancellationToken,
+    metrics: crate::metrics::Metrics,
+) -> Result<()> {
+    let limits = crate::cells::repository_replica_limits();
+    loop {
+        tokio::select! {
+            () = cancellation.cancelled() => return Ok(()),
+            () = tokio::time::sleep(NODE_LOG_ROTATION_INTERVAL) => {}
+        }
+        let Some((installed_application, durability)) = runtime.node_durability() else {
+            continue;
+        };
+        if installed_application != application {
+            return Err(crate::Error::Config(
+                "node-log durability application changed during rotation",
+            ));
+        }
+        if !durability.needs_rotation(NODE_LOG_ROTATION_FRAMES) {
+            continue;
+        }
+        metrics.record_node_log_rotation(crate::metrics::NodeLogRotationResult::Started);
+        loop {
+            match durability.shutdown().await {
+                Ok(()) => break,
+                Err(crab_cell_runtime::Error::PendingPublication) => {
+                    metrics
+                        .record_node_log_rotation(crate::metrics::NodeLogRotationResult::Pending);
+                    tokio::select! {
+                        () = cancellation.cancelled() => return Ok(()),
+                        () = tokio::time::sleep(NODE_LOG_RECRUIT_INTERVAL) => {}
+                    }
+                }
+                Err(error) => {
+                    metrics.record_node_log_rotation(crate::metrics::NodeLogRotationResult::Failed);
+                    return Err(crate::Error::Cell(error));
+                }
+            }
+        }
+        if cancellation.is_cancelled() {
+            return Ok(());
+        }
+        let replacement = loop {
+            match publisher
+                .recruit_node_durability(
+                    Arc::clone(&transport),
+                    limits,
+                    limits.max_capture_bytes,
+                    NODE_LOG_LIVE_NODE_LIMIT,
+                )
+                .await
+            {
+                Ok(Some(durability)) => break durability,
+                Ok(None) => {}
+                Err(error) => {
+                    metrics.record_node_log_rotation(crate::metrics::NodeLogRotationResult::Failed);
+                    tracing::warn!(error = %error, "node-log epoch rotation recruitment failed");
+                }
+            }
+            tokio::select! {
+                () = cancellation.cancelled() => return Ok(()),
+                () = tokio::time::sleep(NODE_LOG_RECRUIT_INTERVAL) => {}
+            }
+        };
+        if cancellation.is_cancelled() {
+            replacement.shutdown().await?;
+            return Ok(());
+        }
+        if let Err(error) = runtime.replace_node_durability(application, Arc::clone(&replacement)) {
+            metrics.record_node_log_rotation(crate::metrics::NodeLogRotationResult::Failed);
+            replacement.shutdown().await?;
+            return Err(crate::Error::Cell(error));
+        }
+        metrics.record_node_log_rotation(crate::metrics::NodeLogRotationResult::Completed);
+        tracing::info!("node-log epoch rotated after object coverage");
+    }
 }
 
 /// Validate the durable catalog and the storage coordination write path.
@@ -1177,18 +1549,55 @@ pub(crate) fn router(server: Arc<Server>) -> Router {
 }
 
 fn management_router(server: Arc<Server>) -> Router {
-    Router::new()
-        .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
-        .route("/readyz", get(readiness))
-        .route("/capacity", get(render_capacity))
-        .route("/metrics", get(render_metrics))
+    let application = Router::new()
         .route(
             "/internal/cells/v1/forward",
             post(crate::peer::forward).layer(axum::extract::DefaultBodyLimit::max(
                 crab_cell_runtime::MAX_PEER_REQUEST_BYTES,
             )),
         )
+        .route(
+            "/internal/cells/v1/node-log/{leader}/{epoch}/append",
+            post(crate::peer::append_node_log).layer(axum::extract::DefaultBodyLimit::max(
+                (65 * 1024 * 1024) + (64 * 8) + 8,
+            )),
+        )
+        .route(
+            "/internal/cells/v1/node-log/{leader}/{epoch}/retire/{covered_through}",
+            post(crate::peer::retire_node_log).layer(axum::extract::DefaultBodyLimit::max(0)),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            Arc::clone(&server),
+            application_peer_admission,
+        ));
+    let recovery = Router::new()
+        .route(
+            "/internal/cells/v1/node-log/{leader}/{epoch}/recovery/{claimant}/seal",
+            post(crate::peer::seal_node_log).layer(axum::extract::DefaultBodyLimit::max(0)),
+        )
+        .route(
+            "/internal/cells/v1/node-log/{leader}/{epoch}/recovery/{claimant}/tail/{first}",
+            post(crate::peer::tail_node_log).layer(axum::extract::DefaultBodyLimit::max(0)),
+        );
+    Router::new()
+        .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
+        .route("/readyz", get(readiness))
+        .route("/capacity", get(render_capacity))
+        .route("/metrics", get(render_metrics))
+        .merge(application)
+        .merge(recovery)
         .with_state(server)
+}
+
+async fn application_peer_admission(
+    State(server): State<Arc<Server>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !server.accepts_application_peers() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    next.run(request).await
 }
 
 async fn render_capacity(State(server): State<Arc<Server>>) -> Response {
@@ -1216,6 +1625,11 @@ async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
         cell_retained_capacity_bytes: cell_runtime.retained_capacity_bytes(),
         cell_local_disk_reserved_bytes: cell_runtime.local_disk_reserved_bytes(),
         cell_local_disk_capacity_bytes: cell_runtime.local_disk_capacity_bytes(),
+        cell_node_log_uncovered_bytes: cell_runtime.unpublished_node_log_bytes(),
+        cell_follower_retained_bytes: server
+            .follower_store
+            .as_ref()
+            .map_or(0, crab_cell_runtime::FollowerStore::retained_bytes),
         admission_available: [
             server.admission.available_permits(),
             server.transfer_admission.available_permits(),
@@ -1266,7 +1680,7 @@ async fn check_readiness(server: &Server) -> Result<()> {
     if server.catalog.is_some() && server.peer_receiver.is_none() {
         return Err(crate::Error::Config("Cell peer receiver is unavailable"));
     }
-    if !server.node_healthy.load(Ordering::Acquire) {
+    if !server.accepts_application_peers() {
         return Err(crate::Error::Config("Cell node advertisement is unhealthy"));
     }
     if !server
@@ -1545,6 +1959,8 @@ mod tests {
     ) -> crate::peer::LocalResources {
         crate::peer::LocalResources {
             memory_bytes,
+            disk_limit_bytes: free_disk_bytes,
+            disk_capacity_bytes: free_disk_bytes,
             free_disk_bytes,
             available_file_descriptors,
             job_credits: 16,
@@ -1578,6 +1994,8 @@ mod tests {
 
         assert_eq!(report["version"], 1);
         assert_eq!(report["resources"]["memory_bytes"], 2 * GIB);
+        assert_eq!(report["resources"]["disk_limit_bytes"], 30 * GIB);
+        assert_eq!(report["resources"]["disk_capacity_bytes"], 30 * GIB);
         assert_eq!(report["resources"]["free_disk_bytes"], 30 * GIB);
         assert_eq!(report["admission"]["active_cells"], 1_125);
         assert_eq!(report["admission"]["blocking_jobs"], 16);
@@ -1705,6 +2123,8 @@ mod tests {
         assert!(
             CellRuntimeBudget::from_resources(crate::peer::LocalResources {
                 memory_bytes: 2 * GIB,
+                disk_limit_bytes: 30 * GIB,
+                disk_capacity_bytes: 30 * GIB,
                 free_disk_bytes: 30 * GIB,
                 available_file_descriptors: FILE_DESCRIPTOR_RESERVE_MINIMUM,
                 job_credits: 16,
@@ -1785,6 +2205,8 @@ mod tests {
             cell_runtime: start_test_cell_runtime(),
             repository_cells: None,
             peer_receiver: None,
+            follower_store: None,
+            node_log_transport: None,
             options: RepositoryOptions::default(),
             cursor_key: [0; 32],
             admission: Semaphore::new(1),
@@ -1907,6 +2329,49 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), expected, "{path}");
         }
+        for path in [
+            "/internal/cells/v1/forward",
+            "/internal/cells/v1/node-log/leader/1/append",
+            "/internal/cells/v1/node-log/leader/1/retire/0",
+        ] {
+            let response = management
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+        }
+        let recovery = management
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/internal/cells/v1/node-log/leader/1/recovery/claimant/seal")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(recovery.status(), StatusCode::SERVICE_UNAVAILABLE);
+        server.node_healthy.store(true, Ordering::Release);
+        let admitted = management
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/internal/cells/v1/forward")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(admitted.status(), StatusCode::SERVICE_UNAVAILABLE);
         let response = management
             .clone()
             .oneshot(

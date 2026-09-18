@@ -107,6 +107,8 @@ spec:
             - /etc/crab/http-server/server.toml
             - --peer-advertise-host
             - $(CRAB_POD_IP)
+            - --cell-failure-host
+            - $(CRAB_NODE_NAME)
           terminationMessagePolicy: FallbackToLogsOnError
           securityContext:
             allowPrivilegeEscalation: false
@@ -153,6 +155,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            - name: CRAB_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
           {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
           {{- end }}
@@ -221,4 +227,4 @@ spec:
                       path: peer/ca.crt
         - name: scratch
           emptyDir:
-            sizeLimit: {{ .Values.scratch.sizeLimit }}
+            sizeLimit: {{ .Values.scratch.sizeBytes | quote }}

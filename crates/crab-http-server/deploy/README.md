@@ -136,8 +136,12 @@ docker compose --file crates/crab-http-server/deploy/compose.yaml down
 ```
 
 The capacity report is the server's resource-derived admission envelope, not a
-benchmark result. Record it beside live RSS, file-descriptor, latency, local
-disk and RustFS measurements when qualifying a node profile.
+benchmark result. It reports the configured local-disk limit and current
+filesystem free space separately, plus effective capacity as the smaller of
+that limit and the backing filesystem total. The configured limit is the
+admission ceiling even when the host filesystem is larger. Record it beside
+live RSS, file-descriptor, latency and RustFS measurements when qualifying a
+node profile.
 
 The backup commands operate on object-store state, not the disposable Cell
 tmpfs. Reusing the same nonzero lowercase pin ID is idempotent and re-verifies

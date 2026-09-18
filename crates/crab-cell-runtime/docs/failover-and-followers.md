@@ -10,7 +10,7 @@ before a successor opens SQLite.
 | Content type | Low-level target design |
 | Audience | `crab-ltx`, `crab-cell-runtime`, and `crab-http-server` implementers |
 | Goal | Define the persistence, wire, gating, recovery, lifecycle, and proof contracts needed for Celld-style follower durability |
-| Status | Designed, not implemented; the current runtime uses object-store root publication only |
+| Status | Non-streaming failover, bounded hot-Cell pipelining, state-observing stream gating, and online epoch rotation implemented; target-load and extended fault qualification remain |
 | Reference | Celld commit `10cb1303dac710dcb3b557e318e08c855261f68b` |
 
 [Back to the Cell runtime index](README.md)
@@ -66,7 +66,8 @@ true:
    when the exact root reached object storage.
 3. A response cannot reveal a SQLite state newer than the durability proof that
    released it. This includes successful mutations, durable business errors,
-   reads, and streamed response chunks.
+   reads performed after a mutation in the same serialized actor, and every
+   chunk emitted by `CellStateStream`.
 4. A successor cannot open SQLite until the predecessor node-log session is
    absent-with-proof or sealed and every recovered tail is pinned by Cell
    control.
@@ -147,6 +148,93 @@ crab-http-server
 HTTP response is safe. `crab-http-server` must not parse LTX or create a second
 recovery path.
 
+### Implementation checkpoint
+
+| Working now | Remaining target gaps |
+| --- | --- |
+| Strict frame codec plus capacity- and failure-domain-aware deterministic selection, retrying automatic enrollment, activation, coverage, recovery claims, object-covered epoch rotation, and clean log close | Signed small/medium/large live runs and the extended fault/telemetry matrix |
+| Crash-safe, node-budgeted follower store under a persisted physical `NodeId`, authenticated remote append/seal/tail/retire transport, a bounded node-wide batched shipper, a recovery-first management-listener lifecycle, and startup lane scrub/quarantine | None for this slice |
+| Authoritative create and refresh drive a terminal monotonic node-lease guard; admission, actor dispatch, Cell-control CAS, durability proof, and output acceptance all check it | None for the current non-streaming Cell API |
+| Write-all durability gate, first-fsynced-batch activation, bounded dual-watermark command continuation, ordered object publication, object fallback, schema-migration barriers, and contiguous authoritative object watermark | None for this slice |
+| Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | None for this slice |
+| Cell control attachment and takeover consumption of overlays; server drain closes a fully object-covered epoch before session withdrawal; grace-aged retired follower lanes are deleted only after authority stops naming their epoch; the Compose qualifier proves a follower-only result survives owner `SIGKILL`, owner-disk deletion, RustFS restoration, takeover, and owner rejoin; the Kubernetes harness exercises each selected node profile and the 1,000 aggregate mutation schedule against every Pod across eight load Cells | Signed live runs across small/medium/large profiles plus the extended fault/telemetry matrix |
+| Bounded command/query responses and the typed `CellStateStream` bind every emitted chunk to the actor's proven logical head | Extended live fault and profile qualification only |
+
+The session record now owns one CAS-protected log epoch, its exact sorted member
+set, activation bit, contiguous object watermark, and renewable recovery claim.
+The private mTLS transport implements enrolled append plus claimant-authorized,
+page-bounded seal and tail operations. The follower store admits every append
+and seal against the same node-level disk budget used by Cell work, reserves
+existing bytes on restart, and NACKs before writing when capacity is exhausted.
+Each data directory strict-creates one durable `node-id`; boot sessions remain
+ephemeral. Log membership records stable physical node IDs, and each request
+resolves that ID to exactly one current live session. Two overlapping live
+sessions for one physical node fail closed.
+`NodeLogShipper` reserves encoded bytes before assigning a sequence, multiplexes
+accepted cuts in submission order, batches for at most one millisecond or 64
+frames, sends each batch to every member concurrently, and advances the gate
+only after all receipts cover the batch. Encoding, transport, or receipt
+failure stops fleet issuance for that epoch while its tickets remain eligible
+for object proof and covered rotation.
+The directory now filters live peers by protocol, pressure, and the exact
+shared-disk capacity advertised by their follower stores. It greedily maximizes
+proven zone separation, then proven host separation, then applies the owner-
+session/physical-node rendezvous rank for the full one- or two-member ensemble
+before its CAS enrollment. Unknown topology labels receive no separation credit
+instead of being assumed independent. Rotation closes
+the old gate only after every issued sequence is object-covered, best-effort
+retires old lanes behind durable append fences, and CASes a fresh inactive
+epoch. Recruitment retries while the node remains healthy and leaves a
+one-node fleet on the object path.
+The preferred
+shard-zero scanner now inventories expired active node
+logs, claims at most two concurrently, scans at most 10,000 affected Cells,
+renews each recovery claim while gathering and pinning, seals the session, and
+leaves a takeover proof that another request can reload. For commands, the
+actor submits captured cuts before immutable-root preparation. Every selected
+follower must fsync the ticket before the shared node-session authority performs
+the exact `active=false -> active=true` CAS. Only then can fleet proof release
+the command response. The actor advances a logical head after that proof and
+may execute the next command while one separate publisher advances the exact
+object-backed root in order. A 64-entry queue and a 64 MiB retained-byte high
+water apply backpressure; the existing local-disk budget remains the hard byte
+admission boundary. Failure of the fleet path falls back to object proof, while
+a terminal publication failure fences the Cell and leaves any already released
+outcomes recoverable from the node log.
+Schema-migration cuts use the same follower/object race and recovery
+coverage. A successful fleet proof may release the successor handle before
+object publication; its admission is already installed, so requests queue
+behind the publication barrier. Migrations, drain, and shutdown do not cross a
+command backlog; object-only migrations continue to wait for exact root
+publication.
+An active predecessor log cannot be converted directly from a session fence
+into Cell takeover authority: only the coordinator's successful post-seal
+result carries `NodeTakeoverProof`.
+
+The HTTP node publisher now arms a process-wide monotonic lease guard only
+after its session create succeeds and advances it only after an authoritative
+refresh. Expiry and refresh failure are terminal: both mark the node unhealthy
+and cancel the server, and a late refresh cannot revive the process. The
+production Cell runtime stays fenced until that guard is installed. It checks
+the same guard before admission, immediately before actor dispatch, around
+Cell-control mutation, and before returning any state-observing result.
+Heartbeat refresh, log activation, object coverage, and clean close share one
+mutex-protected authoritative observation, so their ETag CAS operations cannot
+race through stale local state.
+
+Retired follower lanes keep their durable append-fence marker for ten minutes.
+The server then scans at most 64 lanes per minute, requires the exact
+node-session record to exist and no longer name that log epoch, rechecks the
+unchanged marker and its filesystem timestamp under the lane lock, and only
+then deletes it and releases disk admission. Missing authority fails closed.
+
+Deterministic fault coverage includes the two ambiguous recovery boundaries: a
+follower may fsync a frame and lose its ACK without authorizing a fleet proof,
+and an expired recovery claim may move to a new live claimant while permanently
+fencing the old claimant's renewal. It also closes and reopens every follower
+in an ensemble before gathering the witness, and discards a recovery
+coordinator after overlay attachment before a new coordinator resumes sealing.
+
 ## Use one multiplexed log per owner session
 
 A node can own 1,000 to 10,000 active databases. Full per-repository standbys
@@ -192,11 +280,16 @@ discarded and recreated when that format changes. There is no dual write,
 fallback reader, compatibility branch, or data migration until Crab ships a
 persistent Cell format that explicitly requires those guarantees.
 
+This applies to both the `cells/v1` path and the `version: 1` fields inside its
+documents. During development those values remain stable while the only reader,
+writer, validation rules, fixtures, and diagrams change together. They are
+format identity guards, not counters to increment for each structural edit.
+
 ```text
 <root>/cells/v1/
   identity.json
   sessions/<session-id>.json
-  node-logs/<leader-session>/
+  node-logs/<leader-session>/<log-epoch>/
     recovery/<manifest-digest>.json
     bundles/<bundle-digest>.bundle
   apps/<application-id>/
@@ -227,12 +320,17 @@ CAS-protected mutable authority:
   "version": 1,
   "identity": {
     "fleet": "32-byte-hex",
+    "node": "16-byte-hex",
     "session": "16-byte-hex",
     "endpoint": "https://node-a.internal:8081",
     "certificate": "32-byte-hex",
     "public_key": "32-byte-hex",
     "image": "32-byte-hex",
     "release": "32-byte-hex",
+    "failure_domain": {
+      "zone": "us-west-2a",
+      "host": "worker-17"
+    },
     "peer_versions": [1],
     "signature": "64-byte-hex"
   },
@@ -244,7 +342,7 @@ CAS-protected mutable authority:
   "log": {
     "state": "open",
     "epoch": 3,
-    "members": ["follower-session-a", "follower-session-b"],
+    "members": ["physical-node-a", "physical-node-b"],
     "active": true,
     "tiered_through": 9001,
     "recovery": null
@@ -258,7 +356,9 @@ CAS-protected mutable authority:
 }
 ```
 
-The identity signature covers only the canonical `identity` fields. The whole
+`node` identifies the durable local data directory; `session` identifies only
+one boot generation. The identity signature covers only the canonical
+`identity` fields. The whole
 object is still protected by its object-store ETag. The owner may renew only a
 `live` record with the exact session and generation. A recoverer may change
 only recovery-owned fields after expiry. Every transition validates all
@@ -329,7 +429,7 @@ struct RecoveryOverlayRef {
     manifest_digest: Digest,
     first_node_sequence: u64,
     last_node_sequence: u64,
-    base_txid: u64,
+    predecessor: RootRef,
     final_txid: u64,
     final_checksum: u64,
     final_commit_sequence: u64,
@@ -424,16 +524,19 @@ Follower storage is local SSD cache with a durability obligation. It is not an
 evictable read cache until the session record proves the bytes are covered.
 
 ```text
+<cell-data>/node-id
 <cell-data>/followers/<leader-session>/<log-epoch>/
-  meta.json
+  retired
   chunks/
-    0000000000000001-0000000000004096.log
-    0000000000004097-open.log
+    00000000000000000001-00000000000000004096.log
+    open.log
+<cell-data>/followers-quarantine/<monotonic-id>.bad
 ```
 
-Each record in a chunk contains magic, version, sequence, encoded-frame length,
-frame bytes, and a CRC for torn-write detection. Startup scans the active chunk
-and truncates only an invalid suffix after the last completely verified record.
+Each record in a chunk contains magic, sequence, encoded-frame length, the
+canonical frame digest, and frame bytes. Startup scans the active chunk,
+re-verifies the frame digest and LTX body, and truncates only an invalid suffix
+after the last completely verified record.
 
 Append handling is ordered per leader/log epoch:
 
@@ -456,28 +559,43 @@ also required when creating, rotating, renaming, or removing a chunk. A disk
 error, short write, checksum mismatch, gap, or sync error returns a typed NACK
 and never advances `durable_through`.
 
+`FollowerStore::open` walks every retained lane before the management listener
+starts. It verifies directory shape, closed-chunk names and records, frame
+scope and digest, sequence continuity, and seal/retire watermarks. A torn or
+invalid suffix in `open.log` is truncated to its last fully verified record and
+synced. Any other invalid lane is atomically renamed into
+`followers-quarantine`; the server reports the persisted quarantine count and
+keeps those bytes charged to the same disk budget. Quarantine is diagnostic
+and has no automatic deletion path. Because the corrupt lane is no longer a
+recovery witness, an active leader log with no other complete member remains
+unavailable rather than treating the damage as an empty tail.
+
 Exact duplicates return the existing durable end after comparing the stored
 digest. A duplicate sequence with different bytes is corruption and
 quarantines that leader lane. A future sequence returns `expected_sequence`
 without filling the gap.
 
-Followers delete only chunks at or below `covered_through`, and only after the
-new base metadata is atomically installed. `covered_through` comes from an
-object-store root or bundle proof, never from leader memory.
+Followers delete only chunks at or below `covered_through`. Whole-epoch
+retirement first fsyncs the eight-byte `retired` watermark and its directory,
+then removes the chunks. The marker permanently rejects old-epoch appends and
+lets recovery prove that the now-empty lane was fully object-covered even if
+the leader crashes before its rotation CAS. `covered_through` comes from the
+authoritative session record, never from leader memory.
 
 ## Use bounded ordered peer streams
 
-The existing private mTLS listener gains three node-log operations:
+The existing private mTLS listener gains four node-log operations:
 
 | Operation | Direction | Purpose |
 | --- | --- | --- |
 | `OpenAppendStream` | Leader to selected follower | Long-lived ordered batches and ordered acknowledgements |
 | `SealFragment` | Recoverer to follower | Stop appends for one leader/log epoch and return retained range |
 | `ReadTail` | Recoverer from follower | Stream the sealed retained range with checksums |
+| `RetireFragment` | Live leader to follower | Persist an append fence and delete one fully object-covered epoch |
 
 The peer descriptor remains message-only; no public service is generated. The
 HTTP server maps messages onto private routes such as
-`/internal/cells/v1/node-log/stream`, `/seal`, and `/tail`.
+`/internal/cells/v1/node-log/.../append`, `/seal`, `/tail`, and `/retire`.
 
 Initial protocol bounds are compile-time contracts:
 
@@ -486,7 +604,7 @@ Initial protocol bounds are compile-time contracts:
 | One LTX frame body | 64 MiB |
 | One append batch | 64 frames or 64 MiB, whichever comes first |
 | Outstanding batches per follower lane | 8 |
-| Tail chunk | 1 MiB |
+| Tail page | 1 MiB or 4,096 frames; one individually bounded frame may exceed 1 MiB |
 | Append/follower request deadline | Remaining caller deadline, at most 30s |
 | Recovery claim heartbeat | 10s |
 | Recovery claim expiry | 30s |
@@ -495,35 +613,68 @@ The leader applies backpressure before the window fills. It does not spawn one
 task or connection per Cell. One lane per selected follower carries all Cells
 for that owner session.
 
+`tail_page` is the recovery path used by the current implementation. Its
+default transport adapter can page a legacy `tail` result in memory, while the
+HTTP transport and `LocalFollowerTransport` provide native paging. A page with
+one frame may be larger than the 1 MiB network target, but that frame is still
+bounded by the configured capture limit; a multi-frame page may not exceed the
+target. Recovery rejects oversized, non-contiguous, or unverifiable pages
+before attaching any overlay. The large-single-frame regression is covered by
+`node_log_recovery::tests::active_lane_requires_and_returns_a_complete_follower_tail`.
+
 ## Select and change the follower ensemble
 
-The owner chooses followers from live, release-compatible node sessions that
-advertise the node-log protocol and available follower bytes.
+The owner chooses followers from live, release-compatible physical nodes whose
+current boot sessions advertise the node-log protocol and available follower
+bytes.
 
 Selection rules, in order:
 
-1. Exclude the owner session
-2. Exclude draining, pressured, stale, or protocol-incompatible sessions
+1. Exclude the owner's physical node
+2. Exclude draining, pressured, stale, protocol-incompatible, or ambiguously
+   advertised nodes
 3. Prefer a different zone, host, and local-disk failure domain
-4. Rank by rendezvous hash of owner session and candidate session
+4. Rank by rendezvous hash of owner session and candidate physical node ID
 5. Select one follower in a two-node fleet and two in a fleet of three or more
 
 Every selected member must fsync a batch for a fleet proof. This is write-all,
 ack-all. Quorum acknowledgement is not safe because recovery is designed to use
 one complete surviving witness, not merge partially acknowledged quorums.
 
+Zone and host are optional signed boot-identity labels. A missing label cannot
+prove separation and therefore receives no preference over a known unequal
+label. The persisted physical `NodeId` identifies the local-disk domain; live
+inventory rejects duplicate physical IDs, and the selector never chooses the
+owner or the same physical node twice.
+
 Changing members uses a barrier:
 
 1. Stop assigning new fleet tickets to the old shipper
 2. Wait until every submitted sequence is covered by an exact object-store
    proof
-3. CAS the session record to the next log epoch and new member set
-4. Open new follower lanes with sequence one
-5. Allow old followers to truncate the covered epoch
+3. While the old authority is still verifiable, ask reachable old followers to
+   persist the exact covered watermark and remove that lane
+4. CAS the session record to the next log epoch and new member set
+5. Open new follower lanes with sequence one
 
 If a member fails, in-flight writes can still complete through object-store
 publication. The owner must not silently shrink the current write-all set while
-uncovered entries exist.
+uncovered entries exist. An unreachable old follower does not block rotation:
+it retains inert data, rejects future appends after the authority CAS, and is
+collected later. A successful retirement response with any other watermark is
+a protocol error and blocks the CAS.
+
+The long-lived HTTP runtime applies the same barrier when the current epoch
+reaches `1_000_000` issued node-log frames. A five-second controller observes
+the active binding, closes it through the idempotent
+`NodeDurability::shutdown`, and retries `PendingPublication` until object
+coverage is contiguous. It then recruits the next epoch and atomically
+replaces the runtime binding. New Cell submissions read the current binding at
+the start of each durability attempt; a replacement therefore cannot create a
+second SQLite writer or a second Cell-control CAS owner. If recruitment is
+temporarily unavailable, the server keeps serving through the object proof
+path and retries while the node lease remains healthy. A shutdown or lease
+fence cancels the controller and closes whichever binding is current.
 
 ## Release responses through one gate
 
@@ -541,7 +692,7 @@ enum DurabilityProof {
         leader_session: SessionId,
         log_epoch: u64,
         durable_through: u64,
-        members: Vec<SessionId>,
+        members: Vec<NodeId>,
     },
 }
 
@@ -588,24 +739,270 @@ lease guard before entering an actor, and the output gate checks it before
 crediting a newly completed proof. A process pause cannot use an expired cached
 deadline to admit more work.
 
-The actor tracks two heads:
+The actor keeps one SQLite writer and one object publisher. Fleet proof may
+release a command and advance the local logical head before object upload
+finishes, but the actor retains exclusive ownership and the publisher performs
+every root CAS in commit-sequence order. Reaching a backlog high water pauses
+new commands until publication catches up; it never creates another writer or
+weakens durability.
 
-- `logical_head`: latest locally committed and durably proven position
-- `published_head`: exact root currently named by Cell control
+### Use a bounded dual-watermark pipeline for hot Cells
 
-Subsequent local commands continue from `logical_head`. The object publisher
-may combine several queued cuts into one exact successor of `published_head`.
-It advances control only through the canonical CAS path and then prunes locally
-retained and follower-covered data.
+Fleet durability removes the object-store round trip from response latency, but
+the baseline still leaves that round trip between two commands on the same
+Cell. That is acceptable for a fleet whose traffic is spread across many
+repositories, but it imposes an unnecessary per-repository throughput ceiling.
+The target therefore separates two positions without creating a second owner.
+The shorter name **dual-head** refers only to these publication watermarks; it
+does not mean dual primary, two SQLite writers, or two control authorities.
 
-Every actor output records the highest commit sequence it observed. The output
-gate waits until either proof covers at least that sequence. Therefore:
+| Position | Meaning | May accept a new command? |
+| --- | --- | --- |
+| `logical_head` | Latest local SQLite commit covered by fleet or object proof | Yes |
+| `published_head` | Exact immutable root named by Cell control | Yes, while backlog admission remains available |
+
+```mermaid
+flowchart LR
+    C1[Commit N] --> P1[Fleet or object proof N]
+    P1 --> R1[Release response N]
+    P1 --> C2[Commit N+1]
+    C1 --> Q[Bounded publication queue]
+    C2 --> Q
+    Q --> U[One ordered object publisher]
+    U --> CAS[Exact-root control CAS]
+    CAS --> Q
+```
+
+The implementation is a bounded queue behind one actor and one object
+publisher, not two SQLite writers and not parallel control CAS operations:
+
+1. Execute and capture one command on the existing SQL worker.
+2. Submit its cuts to the node log and object path.
+3. Release its result only after its own durability ticket is proven.
+4. After proof, advance `logical_head` and allow the actor to execute the next
+   queued command.
+5. Append the captured cut to an ordered publication queue. One publisher
+   advances one contiguous queued cut at a time onto `published_head`, performs
+   the canonical control CAS, advances that ticket's object coverage, and then
+   removes the cut.
+
+Queue admission is bounded by both entry count and retained LTX bytes and is
+also charged to the existing local-disk budget. A Cell stops starting commands
+at 64 pending cuts or once already-retained cuts reach the 64 MiB high water.
+Because capture size is known only after SQLite commits, the one command that
+crosses the byte high water is retained and published rather than discarded;
+the configured capture limit plus the node local-disk budget form the hard
+ceiling. Reaching either high water lets the publisher catch up; it does not
+drop cuts, shrink the follower ensemble, or acknowledge through a weaker
+proof. Schema migrations, graceful handoff, and shutdown remain publication
+barriers and must drain the queue completely.
+
+The queue preserves these ordering rules:
+
+- Command `N+1` never executes until command `N` has a durability proof.
+- Results are released in actor order; a later proof cannot pass an unresolved
+  earlier ticket.
+- Root preparation consumes only a contiguous queue prefix whose predecessor
+  is the current `published_head`.
+- Only the single publisher mutates Cell control. A lost CAS response reloads
+  and accepts only the exact proposed successor.
+- A terminal lease or publication failure fences new execution. Already
+  released fleet-proven outcomes remain recoverable from the node log.
+- A fenced executor may release Cell ownership only when every submitted
+  node-log cut is covered by the published root. Otherwise it discards local
+  SQLite but preserves the owner record, so session-expiry takeover seals and
+  replays the log instead of misclassifying the Cell as cleanly `Idle`.
+
+Object coverage may advance while an older frame is still waiting in the
+node-wide shipper. Followers therefore verify every received frame and reject
+conflicting local duplicates, but treat a locally absent prefix at or below
+the authoritative `covered_through` watermark as a no-op. They must fsync every
+later frame in the same batch. Without this rule, an object-first proof for
+sequence `N` could make a queued `[N, N+1]` append look like a sequence gap and
+silently disable fleet durability for the valid `N+1` suffix.
+
+This model is narrower than a general asynchronous publication graph. It adds
+one ordered queue and two monotonic positions because they directly remove the
+hot-Cell object-store stall. It does not add configurable queue policies,
+parallel root writers, speculative branch heads, or compatibility paths.
+
+This is an intentional throughput-versus-complexity decision:
+
+| Design | Benefit | Cost or risk | Decision |
+| --- | --- | --- | --- |
+| One head; wait for every object CAS before the next command | Smallest lifecycle | One slow object round trip caps each hot Cell even after fleet durability succeeds | Keep only as the natural behavior when no fleet proof wins |
+| Bounded `logical_head` plus `published_head` | Removes object latency between consecutive commands while preserving one writer and one ordered CAS owner | Retains proven cuts until publication and needs explicit drain/backpressure rules | Chosen and implemented |
+| Multiple publishers, branch heads, or an unbounded publication queue | More speculative concurrency | Reordering, unbounded recovery state, and ambiguous CAS ownership | Rejected |
+| Let a stream follow the moving logical head without per-chunk gates | Low-latency live output | Bytes could escape after lease loss or observe state newer than the stream's proof | Rejected |
+
+#### Revisit result: keep the bounded pipeline
+
+The dual-watermark pipeline remains the best Crab trade-off and is implemented,
+so it is not a remaining delivery item. It pays for one extra monotonic
+watermark and one bounded queue to remove object-store latency from consecutive
+commands. It deliberately stops before a general publication graph: one actor,
+one SQLite writer, one ordered publisher, and one Cell-control CAS owner remain.
+
+The shorter name **dual-head** refers only to these two publication watermarks;
+it does not imply two independent root writers. A true dual-head publication
+graph is deliberately deferred: it would add another CAS owner, reordering
+state, and recovery surface without improving the one-writer contract. The next
+durability work is qualification across signed node profiles and the extended
+fault matrix, not a second publication head.
+
+State-observing streaming is delivered separately from publication. The first
+Rust API reads mutable Cell state through `CellStateStream`; it adds no stream
+scheduler, second writer, or publication head. Any future body adapter must
+delegate to this gate rather than bypassing its receipt and lease checks.
+
+The dual-watermark model earns its extra state only because it changes current
+command throughput. It is the narrowest design that gives Crab all three of
+these properties:
+
+1. The next command does not wait for object-store latency after fleet fsync.
+2. SQLite and Cell-control mutation still have one serial owner.
+3. Recovery has one ordered interval, `(published_head, logical_head]`, rather
+   than speculative branches to reconcile.
+
+It is safe for failover because `logical_head` advances only after a
+non-forgeable fleet or object proof, every unpublished cut remains in the
+predecessor node log, and takeover seals and replays that log before opening
+the successor SQLite database. `published_head` remains the compact,
+long-term object-store authority; it is not weakened or replaced.
+
+```text
+normal:    published_head == logical_head
+fleet win: published_head <  logical_head  # bounded recoverable interval
+drained:   published_head == logical_head
+fenced:    stop output; preserve the interval for takeover
+```
+
+This choice fits Crab because object stores have materially higher and more
+variable latency than an in-fleet fsync, while the exact-root CAS must remain
+serial. A general multi-publisher graph would add conflict resolution without
+improving the one-writer SQLite execution path.
+
+The same owner-retention rule covers migration cuts. If fleet proof releases a
+successor handle and object publication then fails, the actor fences both
+admissions and leaves the old owner record for recovery. It never writes
+`Idle` while the acknowledged migration exists only in the node log.
+
+The actor serializes bounded outputs against the logical-head proof. A command
+waits for its own ticket, and a query or resolution starts only after the
+preceding command has advanced the logical head. Therefore:
 
 - A mutation result cannot escape before its ledger row is durable
 - A durable business rejection follows the same rule
 - A query that observes a just-committed row waits for that row's proof
 - An error generated after reading Cell state is gated
-- Each streaming chunk carries and waits for its observation watermark
+
+The current Cell command and query APIs return bounded replies rather than
+state-observing streams. Actor ordering proves that a query can observe only a
+`logical_head` covered by an earlier durability ticket.
+
+### Deliver state-observing streaming as a separate output gate
+
+Streaming is an output gate, not another publication head and not an extension
+of the object-publication queue. The important distinction is what
+the producer can observe:
+
+| Stream kind | Required gate |
+| --- | --- |
+| Immutable blob or object already authorized by digest/root | Pin that immutable identity before the response head; later byte reads cannot reveal newer Cell state |
+| Materialized result fixed at stream open | Prove the captured logical watermark before the response head and retain the materialization until close |
+| Producer that can read Cell state between chunks | Take a fresh output ticket for the response head and every chunk |
+
+Celld uses the third rule: one response release is insufficient because the
+producer continues after the head and a later chunk can reveal a later commit.
+`CellStateStream` applies that same rule to Crab's Rust state-observing API.
+
+```mermaid
+sequenceDiagram
+    participant P as Rust stream producer
+    participant G as Cell output gate
+    participant D as Durability proof
+    participant H as HTTP body
+
+    P->>G: emit(stream, observed_sequence, chunk)
+    G->>G: verify owner epoch and node lease
+    alt observed_sequence is already proven
+        G-->>H: release chunk
+    else proof is pending
+        G->>D: await fleet or object proof
+        D-->>G: proven through observed_sequence
+        G-->>H: release chunk
+    else fenced, expired, or unprovable
+        G-->>H: terminate body without releasing chunk
+    end
+```
+
+The first implementation must satisfy this contract:
+
+1. `open_state_stream` allocates a stream ID and binds it to the current Cell,
+   incarnation, expected owner description, deadline, and latest observed
+   commit sequence. The owner lease/session is rechecked by the local actor or
+   authenticated peer on every query.
+2. `EmitChunk` carries the highest commit sequence the chunk may reveal. The
+   gate releases it only when the same epoch has a fleet or object proof
+   covering that sequence.
+3. The response head and each chunk use the same gate. Exactly one chunk per
+   stream may wait or flush, so held data cannot be overtaken.
+4. The terminal node-session lease is checked immediately before every flush.
+   Lease loss, ownership change, cancellation, deadline, or an unprovable
+   watermark closes the stream and releases all admission permits.
+5. Buffered chunk bytes, stream count, and any pinned materialization are
+   bounded by runtime admission. The producer cannot build an unbounded queue
+   behind a slow client or slow proof.
+6. A stream never reads a moving logical head implicitly. A producer that
+   performs another state observation must obtain a new observed sequence and
+   a new chunk ticket.
+
+```rust,ignore
+let mut stream = client.open_state_stream::<LiveQuery>(&target, deadline).await?;
+let first = stream.emit(first_input).await?;
+send_chunk(first.output).await?;
+let next = stream.emit(next_input).await?; // waits for the next proof
+send_chunk(next.output).await?;
+stream.finish();
+```
+
+The stream-gate proof matrix is small and specific:
+
+- A response head and first chunk wait for the commit they reveal.
+- A mutation between two chunks makes only the later chunk wait for the newer
+  watermark.
+- Lease expiry or takeover between chunks releases no further bytes.
+- A later proven chunk cannot overtake an earlier held chunk.
+- Client cancellation, deadline, proof failure, and producer failure return
+  every buffer, snapshot, and admission permit.
+
+The streaming gate is now the first Rust state-observing stream API. `CellClient`
+opens a typed `CellStateStream`; its mutable `emit` operation serializes chunks,
+passes the previous `Receipt` as the next minimum watermark, and closes on
+deadline, cancellation, fencing, or a non-monotonic receipt. The existing actor
+query path performs the final node-lease check immediately before returning the
+observed value. The stream uses the query's declared output limit as its one-
+chunk byte bound and never creates a second publication queue or writer.
+
+The current server stream audit explains that boundary:
+
+| Current or future output | State source after response head | Decision |
+| --- | --- | --- |
+| Release asset and LFS download | Immutable object selected by digest and size | Pin identity before the head; no per-chunk Cell gate |
+| Repository archive and Git pack | One fixed repository snapshot or fetch plan | Keep snapshot/operation lifetime through the body |
+| SQL, KV, Queue, and Workflow response | None; runtime returns one bounded value | Existing actor proof gates the complete value |
+| Future SSE, live query, or incremental Cell renderer | May read a newer Cell head for each chunk | Use `CellStateStream`; a custom body must preserve the same per-output gate |
+
+This narrow API avoids a second speculative queue or stream scheduler. It does
+not weaken the contract: introducing a state-observing body without the phase 8
+gate is a correctness regression, not an optional optimization.
+
+The server now exposes `crab_http_server::state_observing_body` as the narrow
+HTTP adapter. It consumes one input only after the previous body chunk has
+completed, invokes `CellStateStream::emit` before encoding each chunk, maps
+stream errors to body I/O errors, cancels on body drop, and owns no queue or
+scheduler of its own. Product routes still choose their media type (SSE or a
+custom chunk format) and must set the corresponding response headers.
 
 Authentication, routing, and malformed-request errors produced before Cell
 execution do not need a Cell durability proof.
@@ -670,7 +1067,9 @@ sequenceDiagram
 The recoverer rereads the session record and current time immediately before
 claiming. It refuses a live lease. `Open -> Recovering` records claimant
 session, claim generation, and claim expiry. The claimant refreshes that field
-every ten seconds.
+every ten seconds. Each refresh has a five-second deadline; a stalled object
+store therefore fails recovery closed instead of allowing a claimant to keep
+gathering after its 30-second claim expires.
 
 A second node waits behind a live claim. After the 30-second claim expiry, it
 may CAS takeover of recovery. All later operations are content-addressed,
@@ -760,17 +1159,26 @@ acknowledged tail is neither rooted nor attached.
 
 ### Consume the overlay
 
-After acquiring the Cell, the new owner calls one `crab-ltx` operation:
+After acquiring the Cell, the new owner loads the pinned overlay, prepares its
+exact successor, and publishes that successor through the control CAS:
 
 ```rust,ignore
-let prepared = replica
-    .prepare_recovered_overlay(
-        control.ltx_root(),
-        control.recovery(),
-        &scratch_directory,
-    )
+let observed = /* latest VersionedControl loaded from authority */;
+let control = observed.value();
+let recovery_ref = control
+    .recovery
+    .as_ref()
+    .ok_or(Error::Control("recovery overlay is not pinned"))?;
+let overlay = manifests
+    .load_overlay(control.cell, control.incarnation, recovery_ref)
     .await?;
-authority.publish_recovery(&control, &prepared).await?;
+let prepared = replica
+    .prepare_recovered_overlay(&overlay, control.schema)
+    .await?;
+let successor = control.publish_recovery(&prepared, control.next_due_ms)?;
+authority
+    .transition(&observed, successor, Transition::PublishRecovery)
+    .await?;
 ```
 
 `prepare_recovered_overlay` performs no ownership decision. It verifies the
@@ -829,7 +1237,7 @@ A clean per-Cell handoff does not seal the whole owner node log.
 1. Stop new commands for the Cell
 2. Wait for accepted commands to reach either proof
 3. Force all Cell cuts through exact object publication
-4. Verify `published_head == logical_head`
+4. Verify the exact published root covers the final local commit
 5. Close SQLite and CAS Cell control to `Idle`
 6. Let the successor acquire a new Cell epoch and sparse-open that root
 
@@ -850,11 +1258,18 @@ Clean node shutdown is broader:
 A crash at any step leaves `open` or `recovering` state and returns to the same
 dead-session recovery path.
 
+The runtime's shutdown path calls `close_node_log` for steps 3 through 5. It
+stops ticket issuance only after every issued sequence is object-covered,
+best-effort writes exact retire fences to reachable followers, and CAS-clears
+the session log. That clear makes later appends unauthorized and allows exact
+session withdrawal.
+
 ## Start and stop in recovery-safe order
 
 Startup order is:
 
-1. Validate local follower directories and quarantine corrupt lanes
+1. Load or strict-create the durable physical node ID, then validate local
+   follower directories and quarantine corrupt lanes
 2. Start the private mTLS listener in **recovery-only** mode
 3. Serve `SealFragment` and `ReadTail` for surviving peer fragments
 4. Probe object-store conditional writes and range reads
@@ -867,9 +1282,19 @@ Serving follower recovery before application readiness allows a fleet-wide
 restart to recover from surviving disks without circularly waiting for every
 node to become fully ready.
 
-Shutdown closes application admission first and follower recovery last. A
-follower must not discard the only surviving fragment merely because its own
-application runtime is draining.
+The server now starts the mTLS management listener before the object-store
+probe and session publication. Middleware returns `503` from append, retire,
+and ordinary peer-forward routes until the session lease, watchdog, recovery
+sweep, shipper, actors, and schedulers are installed. Seal and tail remain
+available to an authenticated live claimant: the dead leader's recovery claim
+authorizes that claimant against this node's persisted physical `NodeId`, so a
+fresh local boot-session advertisement is not a recovery prerequisite.
+
+Shutdown closes public and application-peer admission first. It then drains
+accepted work, closes the Cell runtime and node-log epoch, withdraws the node
+heartbeat, and only then cancels the recovery listener. A follower must not
+discard the only surviving fragment merely because its own application runtime
+is draining.
 
 ## Bound resources and backpressure
 
@@ -931,8 +1356,8 @@ proofs. It never evicts uncovered fragments.
 
 ## Expose narrow Rust APIs
 
-The names below define ownership and data flow. Final signatures may change to
-fit existing types, but they must not collapse the layer boundaries.
+The names below mirror the current public ownership and data-flow boundaries;
+private fields and imports are omitted. Changes must not collapse these layers.
 
 ### `crab-ltx`
 
@@ -945,47 +1370,61 @@ pub fn inspect_node_frame(bytes: Bytes, limits: Limits)
 impl CellReplica {
     pub async fn prepare_recovered_overlay(
         &self,
-        predecessor: RootRef,
         overlay: &RecoveryOverlay,
-        scratch: &Path,
+        schema: u32,
     ) -> Result<PreparedRoot>;
 }
 ```
 
-The verified frame exposes immutable metadata and a bounded body stream. It
-does not expose unchecked constructors for server code.
+The verified frame exposes immutable metadata and bounded, already-verified body
+bytes. It does not expose unchecked constructors for server code.
 
 ### `crab-cell-runtime`
 
 ```rust,ignore
 pub trait NodeLogTransport: Send + Sync {
-    async fn open_append(&self, member: SessionId) -> Result<AppendLane>;
-    async fn seal(&self, member: SessionId, request: SealRequest)
-        -> Result<SealReceipt>;
-    async fn tail(&self, member: SessionId, request: TailRequest)
-        -> Result<TailStream>;
+    fn append(&self, member: NodeId, request: AppendRequest)
+        -> BoxFuture<'_, Result<FollowerReceipt>>;
+    fn seal(&self, member: NodeId, request: SealRequest)
+        -> BoxFuture<'_, Result<FollowerReceipt>>;
+    fn retire(&self, member: NodeId, request: RetireRequest)
+        -> BoxFuture<'_, Result<FollowerReceipt>>;
+    fn tail(&self, member: NodeId, request: TailRequest)
+        -> BoxFuture<'_, Result<Vec<Bytes>>>;
+    fn tail_page(&self, member: NodeId, request: TailRequest)
+        -> BoxFuture<'_, Result<FollowerTailPage>>;
 }
 
 pub struct DurabilityGate;
+pub struct NodeLogShipper;
+pub struct NodeLogSubmission;
 
 impl DurabilityGate {
     pub async fn prove(&self, ticket: CommitTicket)
         -> Result<DurabilityProof>;
-    pub async fn wait_until(&self, sequence: u64)
-        -> Result<DurabilityProof>;
+}
+
+impl NodeLogShipper {
+    pub async fn submit(&self, submission: NodeLogSubmission)
+        -> Result<CommitTicket>;
+    pub async fn shutdown(&self) -> Result<()>;
 }
 
 pub struct NodeLogRecovery;
 
 impl NodeLogRecovery {
-    pub async fn ensure_sealed(&self, predecessor: SessionId)
-        -> Result<SealedSession>;
+    pub async fn ensure_sealed(&self) -> Result<SealedSession>;
 }
+
+pub struct NodeTakeoverProof { /* private validated fields */ }
 ```
 
 `CommitTicket` is created only by the actor after capture. `DurabilityProof`
 has private fields or validated constructors so application handlers cannot
-forge a release token.
+forge a release token. `FencedNodeSession` converts directly to
+`NodeTakeoverProof` only when fleet durability was never active. Otherwise the
+proof is emitted only after every recovered overlay is pinned and the session
+log is CASed to `sealed`.
 
 ### `crab-http-server`
 
@@ -1006,6 +1445,7 @@ crab_cell_node_log_lanes{state="open|degraded|sealed"}
 crab_cell_node_log_recoveries{state="running|waiting"}
 crab_cell_node_log_recovery_seconds
 crab_cell_node_log_recovery_failures_total{reason}
+crab_cell_node_log_rotations_total{result="started|pending|failed|completed"}
 crab_cell_follower_retained_bytes
 crab_cell_session_lease_seconds
 crab_cell_self_fences_total{reason}
@@ -1014,17 +1454,30 @@ crab_cell_self_fences_total{reason}
 Cell ID, repository name, request ID, session ID, and object digest belong in
 structured logs or bounded administrative queries, never metric labels.
 
-`cells status --owner OWNER --name REPOSITORY --json` adds:
+The current server wiring emits durability-proof and follower-append events
+through `CellTelemetry`; it samples the signed node-log phase and session-lease
+remaining time, and records recovery duration and bounded failure class from the
+scheduler. Recovery `waiting` is intentionally reported as zero until admission
+owns a durable queued-candidate count; it must not be inferred from a saturated
+worker count.
+
+`cells status --owner OWNER --name REPOSITORY --json` reports from persistent
+control and signed node-session state:
 
 - Current owner session and Cell epoch
 - Owner-session lease state and expiry
-- Published and logical commit sequences when queried on the owner
 - Pending recovery overlay, if any
-- Last durability source
 
-`cells node --session SESSION --json` adds log state, epoch, member sessions,
-tiered sequence, retained byte estimates, and recovery claimant. It does not
-return frame bodies or credentials.
+The published commit sequence is the control root. Logical commit sequence and
+last durability source are live actor state; they require a future
+owner-introspection channel and must not be guessed by an out-of-process CLI or
+derived from the node-log sequence.
+
+`cells node --session SESSION --json` reports the signed advertisement's log
+state, epoch, stable member node IDs, activation bit, tiered sequence, follower
+free/retained byte estimates, recovery claimant, and recovery-manifest digest.
+It does not return frame bodies or credentials. Expired sessions return
+`live=false` without treating stale advertisement contents as current state.
 
 ## Qualify the complete contract
 
@@ -1056,6 +1509,8 @@ below.
 - Return a fleet proof while blocking every object upload, kill the owner, delete
   its disk, take over, and resolve the exact request outcome
 - Race object proof and fleet proof in both orders
+- Advance object coverage while its frame remains queued, then retain and
+  recover the uncovered suffix
 - Gate reads and business-error outputs behind an earlier unproven commit
 - Kill recovery after each overlay attachment and resume from another node
 - Recover a multi-cut transaction and interleaved cuts from 1,000 Cells
@@ -1085,6 +1540,36 @@ The 1,000 TPS target is aggregate per node, not per repository. A result must
 state transaction size, changed pages, follower count, database distribution,
 object-store latency, and failure injection.
 
+The qualification profile is an envelope, not a required machine shape. The
+same binary and protocol run on every profile; only admission limits and the
+load schedule change:
+
+| Profile | CPU | Memory | Local SSD | Active Cells | Throughput target |
+| --- | --- | --- | --- | ---: | ---: |
+| Small | 1–2 vCPU | 2–4 GiB | 50–100 GiB | 1,000–10,000 | 1,000 mutations/s per node |
+| Medium | 4–8 vCPU | 8–16 GiB | 100–200 GiB | 1,000–10,000 | 1,000 mutations/s per node |
+| Large | 16 vCPU | 32–64 GiB | 500–1,000 GiB | 1,000–10,000 | 1,000 mutations/s per node |
+
+The active-Cell range is the node admission envelope, not a promise that every
+workload reaches the upper bound. A report must include the actual count,
+retained follower bytes, queue depth, and p50/p95/p99 latency. The 1,000
+mutations/s figure is always node-aggregate; a hot repository is qualified
+separately with the one-Cell schedule described below.
+
+Use `qualify_http_load --aggregate-requests-per-second 1000` for the bounded
+request schedule. Its schema-v2 receipt rejects a run whose successful response
+count is below 95% of the configured aggregate rate; 429 responses remain
+visible admission evidence but do not count toward the target throughput.
+The Kubernetes qualifier runs the schedule separately through each Pod, using
+64 bounded status-mutation targets backed by distinct commits per run and
+distributed across eight repository Cells (24 commits per Cell). Each Pod gets
+eight targets per Cell, so every report exercises the complete Cell set. It
+binds the three reports to Pod UIDs, captures capacity again after load, and
+rejects server, transport, body-limit, latency-over-60-second, or target-rate
+failures. The eight-Cell schedule is the node-level aggregate profile (the
+receipt records a configured 125 target requests/s per Cell); retain a separate
+one-Cell run when measuring the hot-Cell admission limit.
+
 ## Deliver in dependency order
 
 Each phase has a usable exit criterion. Do not enable the fleet response path
@@ -1096,9 +1581,11 @@ until the recovery gate is complete.
 | 2 | `crab-ltx` verified frame and recovered-overlay API | Golden, corruption, cross-epoch, and exact-root tests |
 | 3 | Follower disk format and private append/seal/tail protocol | Crash matrix proves fsync and torn-tail behavior |
 | 4 | Node-log recovery claim, bundles, Cell overlay attachment, retention roots | Kill recovery at every boundary and converge |
-| 5 | Dual object/fleet durability gate and logical/published heads | Fleet-first response survives owner and disk loss |
+| 5 | Dual object/fleet durability gate with one in-flight publication per Cell | Fleet-first response survives owner and disk loss |
 | 6 | Ensemble rotation, graceful drain, startup recovery-only listener, GC | Member loss and rolling restart matrix |
-| 7 | Real RustFS and Kubernetes qualification at target load | Signed receipts with zero lost acknowledged outcomes |
+| 7 | Bounded logical/published-head pipeline for hot Cells | Consecutive commands no longer wait for object publication; queue bounds and crash recovery hold |
+| 8 | `CellClient::open_state_stream` and `CellStateStream` per-output watermark gate | Typed stream tests prove monotonic receipts, serial emission, deadline, cancellation, and fencing behavior |
+| 9 | Real RustFS and Kubernetes qualification at target load | Signed receipts with zero lost acknowledged outcomes |
 
 Phases 1 through 4 may ship with object-only responses. Phase 5 is the first
 point at which follower fsync may release a public result.
@@ -1115,6 +1602,8 @@ The pinned Celld design establishes the pattern used here:
   recovery claims.
 - [Celld LTX replication](https://github.com/denoland/celld/blob/10cb1303dac710dcb3b557e318e08c855261f68b/crates/celld/ltx_repl.rs)
   races bucket and fleet proofs and multiplexes Cell cuts.
+- [Celld output gate](https://github.com/denoland/celld/blob/10cb1303dac710dcb3b557e318e08c855261f68b/crates/logic/output_gate.rs)
+  gates the response head and each later state-observing stream chunk.
 
 Crab must prove its own version because its control model differs. Celld can
 restore discoverable epoch prefixes. Crab restores one authenticated root, so

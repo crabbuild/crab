@@ -334,16 +334,19 @@ fn exhausted_scanner_is_removed_until_its_capacity_recovers() {
             free_memory_bytes: 0,
             free_disk_bytes: 1,
             job_credits: 1,
+            ..NodeCapacity::default()
         },
         NodeCapacity {
             free_memory_bytes: 1,
             free_disk_bytes: 0,
             job_credits: 1,
+            ..NodeCapacity::default()
         },
         NodeCapacity {
             free_memory_bytes: 1,
             free_disk_bytes: 1,
             job_credits: 0,
+            ..NodeCapacity::default()
         },
     ];
     let available = advertisement(2, 1, 0, &key);
@@ -390,6 +393,7 @@ fn advertisement(
             free_memory_bytes: 1,
             free_disk_bytes: 1,
             job_credits: 1,
+            ..NodeCapacity::default()
         },
     )
 }
@@ -402,6 +406,7 @@ fn advertisement_with_capacity(
     capacity: NodeCapacity,
 ) -> NodeAdvertisement {
     NodeAdvertisement::sign(
+        crab_cell_runtime::NodeId::from_bytes([session; 16]),
         SessionId::from_bytes([session; 16]),
         format!("https://node-{session}.internal:8789"),
         Digest::from_bytes([1; 32]),
@@ -414,6 +419,7 @@ fn advertisement_with_capacity(
         issued_at_ms + 10_000,
         vec![Digest::from_bytes([5; 32])],
         vec![1],
+        crab_cell_runtime::NodeFailureDomain::default(),
         capacity,
     )
     .unwrap()

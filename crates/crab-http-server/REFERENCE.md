@@ -128,7 +128,10 @@ management_listen = "127.0.0.1:8789"
 
 [cells]
 data_dir = "/var/lib/crab/cells"
+local_disk_limit_bytes = 34359738368
 peer_advertise = "https://localhost:8789"
+failure_zone = "local"
+failure_host = "development-node"
 peer_certificate = "/run/secrets/crab-peer/tls.crt"
 peer_private_key = "/run/secrets/crab-peer/tls.key"
 peer_ca = "/run/secrets/crab-peer/ca.crt"
@@ -236,12 +239,13 @@ open SQLite, acquire ownership, or extend a lease.
 
 `cells capacity --json --live` is a read-only mTLS request to the running
 process. It reports that process's retained startup memory limit, free Cell
-volume bytes, available file descriptors, CPU-derived job credits, and the
-resulting active-Cell, retained-byte, local-disk, scratch, blocking-job,
-dirty-job and full-recovery admission limits. The full-recovery limit stays at
-two even when the node can run more blocking or capture jobs. Omitting `--live`
-calculates a preflight envelope for the command process. Both are qualification
-inputs, not measured performance evidence.
+volume bytes, configured Cell-volume limit, available file descriptors,
+CPU-derived job credits, and the resulting active-Cell, retained-byte,
+local-disk, scratch, blocking-job, dirty-job and full-recovery admission
+limits. The full-recovery limit stays at two even when the node can run more
+blocking or capture jobs. Omitting `--live` calculates a preflight envelope for
+the command process. Both are qualification inputs, not measured performance
+evidence.
 
 `cells backup create` observes all 256 catalog heads before traversing their
 immutable pages. It binds the selected release record and descriptors, the
@@ -694,7 +698,10 @@ management_listen = "0.0.0.0:8789"
 
 [cells]
 data_dir = "/var/lib/crab/cells"
+local_disk_limit_bytes = 34359738368
 peer_advertise = "https://node-1.internal.example:8789"
+failure_zone = "us-west-2a"
+failure_host = "worker-17"
 peer_tls_server_name = "node-1.internal.example"
 peer_certificate = "/run/secrets/crab-peer/tls.crt"
 peer_private_key = "/run/secrets/crab-peer/tls.key"
@@ -1349,19 +1356,27 @@ CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-load-generator" \
   --target 'refs=4@/api/repos/team/project/refs' \
   --target 'commits=8@/api/repos/team/project/commits?rev=main&limit=20' \
   --mutation 'issues=8@/api/repos/team/disposable-load/issues|/secure/new-issue.json' \
+  --aggregate-requests-per-second 1000 \
   --duration-seconds 60 \
   --warmup-seconds 5 \
   > http-load.json
 ```
 
 Each read or mutation target declares its own concurrency and all targets run together. The
-versioned JSON receipt includes successful responses, HTTP 429 admission
+versioned JSON receipt includes the configured aggregate rate, its minimum
+successful-response count, successful responses, HTTP 429 admission
 rejections, unexpected responses, response bytes, throughput, and p50/p95/p99
-latency. The generator fully consumes every body, bounds response bytes, checks
+latency. A fixed-rate run fails qualification when it delivers less than 95%
+of the configured successful request count; admission rejections therefore do
+not masquerade as sustained target throughput. The generator fully consumes every body, bounds response bytes, checks
 `/livez` before and after traffic, and exits unsuccessfully on 5xx, unexpected
 non-429 status, transport/body-limit failure, or unhealthy liveness. Use
 `--header-file /secure/load-headers` for one private HTTP header per line; the
 tool neither prints nor stores those values.
+For direct-node qualification through a loopback port-forward, pass
+`--authority git.example.com`. The option accepts only one DNS name or IP
+address without a port and changes the HTTP Host header without changing the
+connection destination.
 
 ### Read the executable evidence map
 

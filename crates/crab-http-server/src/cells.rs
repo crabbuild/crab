@@ -11,8 +11,8 @@ use crab_cell_runtime::{
     CellId, CellModule, CellRuntime, CellTarget, Control, ControlState, Digest, EffectModule,
     GarbageCollectionPolicy, MaintenanceModule, MigrationDescriptor, MigrationFailure,
     MigrationProgressState, MigrationProgressStore, ModuleDescriptor, NamespaceDescriptor,
-    NamespaceId, NodeAdvertisement, NodeCapacity, NodeDirectory, OperationDescriptor, Owner,
-    PeerRoundTrip, PeerSigner, PinnedCatalogShard, Registry, RegistryBuilder, ReleaseRecord,
+    NamespaceId, NodeAdvertisement, NodeCapacity, NodeDirectory, NodeLogPhase, OperationDescriptor,
+    Owner, PeerRoundTrip, PeerSigner, PinnedCatalogShard, Registry, RegistryBuilder, ReleaseRecord,
     ReleaseState, ReleaseStore, ReplicaHost, ReplicaLimits, RequestId, SessionId, SqlWorkerPool,
     TenantId, VersionedNodeAdvertisement, register_effect_delivery, register_maintenance,
 };
@@ -358,7 +358,9 @@ struct RepositoryControlStatus {
     progress: u64,
     state: ControlState,
     owner: Option<RepositoryControlOwner>,
+    owner_lease: Option<RepositoryOwnerLeaseStatus>,
     root: Option<RepositoryControlRoot>,
+    recovery: Option<RepositoryRecoveryStatus>,
     code: String,
     schema: u32,
     next_due_ms: Option<i64>,
@@ -371,11 +373,28 @@ struct RepositoryControlOwner {
 }
 
 #[derive(Serialize)]
+struct RepositoryOwnerLeaseStatus {
+    state: &'static str,
+    observed_at_ms: i64,
+    expires_at_ms: Option<i64>,
+}
+
+#[derive(Serialize)]
 struct RepositoryControlRoot {
     digest: String,
     txid: u64,
     checksum: u64,
     commit_sequence: u64,
+}
+
+#[derive(Serialize)]
+struct RepositoryRecoveryStatus {
+    leader_session: String,
+    log_epoch: u64,
+    manifest_digest: String,
+    first_node_sequence: u64,
+    last_node_sequence: u64,
+    final_commit_sequence: u64,
 }
 
 pub(crate) async fn repository_status(config: &Config, owner: &str, name: &str) -> Result<Vec<u8>> {
@@ -393,11 +412,39 @@ pub(crate) async fn repository_status(config: &Config, owner: &str, name: &str) 
         REPOSITORY_NAMESPACE,
         repository.id.as_bytes(),
     )?;
-    let control = CellAuthority::new(startup.layout)
+    let control = CellAuthority::new(startup.layout.clone())
         .load(target.cell_id())
         .await?
         .ok_or(Error::Config("cataloged repository Cell has no control"))?;
     let control = control.value();
+    let observed_at_ms = unix_now_ms()?;
+    let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
+    let directory = NodeDirectory::new(
+        startup.layout,
+        peer_tls.fleet(),
+        startup.image,
+        startup.registry.release_digest(),
+    );
+    let owner_lease = match control.owner.as_ref() {
+        Some(owner) => {
+            let advertisement = directory
+                .inspect_advertisement(owner.session, observed_at_ms)
+                .await?;
+            let (state, expires_at_ms) = match advertisement {
+                Some(advertisement) if advertisement.expires_at_ms() > observed_at_ms => {
+                    ("live", Some(advertisement.expires_at_ms()))
+                }
+                Some(advertisement) => ("expired", Some(advertisement.expires_at_ms())),
+                None => ("missing", None),
+            };
+            Some(RepositoryOwnerLeaseStatus {
+                state,
+                observed_at_ms,
+                expires_at_ms,
+            })
+        }
+        None => None,
+    };
     let status = RepositoryControlStatus {
         version: 1,
         repository: repository.id,
@@ -411,12 +458,24 @@ pub(crate) async fn repository_status(config: &Config, owner: &str, name: &str) 
             session: status_hex(owner.session.as_bytes()),
             endpoint: owner.endpoint.clone(),
         }),
+        owner_lease,
         root: control.root.as_ref().map(|root| RepositoryControlRoot {
             digest: status_hex(root.digest.as_bytes()),
             txid: root.txid,
             checksum: root.checksum,
             commit_sequence: root.commit_sequence,
         }),
+        recovery: control
+            .recovery
+            .as_ref()
+            .map(|recovery| RepositoryRecoveryStatus {
+                leader_session: status_hex(recovery.leader_session.as_bytes()),
+                log_epoch: recovery.log_epoch,
+                manifest_digest: status_hex(recovery.manifest_digest.as_bytes()),
+                first_node_sequence: recovery.first_node_sequence,
+                last_node_sequence: recovery.last_node_sequence,
+                final_commit_sequence: recovery.final_commit_sequence,
+            }),
         code: status_hex(control.code.as_bytes()),
         schema: control.schema,
         next_due_ms: control.next_due_ms,
@@ -430,6 +489,37 @@ struct NodeStatus {
     session: String,
     live: bool,
     observed_at_ms: i64,
+    advertisement: Option<NodeAdvertisementStatus>,
+}
+
+#[derive(Serialize)]
+struct NodeAdvertisementStatus {
+    node: String,
+    endpoint: String,
+    generation: u64,
+    progress: u64,
+    expires_at_ms: i64,
+    follower_free_bytes: u64,
+    follower_retained_bytes: u64,
+    log: Option<NodeLogStatus>,
+}
+
+#[derive(Serialize)]
+struct NodeLogStatus {
+    state: &'static str,
+    epoch: u64,
+    member_nodes: Vec<String>,
+    active: bool,
+    tiered_through: u64,
+    recovery: Option<NodeRecoveryStatus>,
+    recovery_manifest: Option<String>,
+}
+
+#[derive(Serialize)]
+struct NodeRecoveryStatus {
+    claimant: String,
+    generation: u64,
+    expires_at_ms: i64,
 }
 
 pub(crate) async fn node_status(config: &Config, session: &str) -> Result<Vec<u8>> {
@@ -444,13 +534,59 @@ pub(crate) async fn node_status(config: &Config, session: &str) -> Result<Vec<u8
     );
     let observed_at_ms = unix_now_ms()?;
     let live = directory.is_live(session, observed_at_ms).await?;
+    let advertisement = if live {
+        directory
+            .load(session, observed_at_ms)
+            .await?
+            .map(|versioned| node_advertisement_status(versioned.advertisement()))
+    } else {
+        None
+    };
     serde_json::to_vec_pretty(&NodeStatus {
         version: 1,
         session: status_hex(session.as_bytes()),
         live,
         observed_at_ms,
+        advertisement,
     })
     .map_err(Error::from)
+}
+
+fn node_advertisement_status(advertisement: &NodeAdvertisement) -> NodeAdvertisementStatus {
+    let capacity = advertisement.capacity();
+    NodeAdvertisementStatus {
+        node: status_hex(advertisement.node().as_bytes()),
+        endpoint: advertisement.endpoint().to_owned(),
+        generation: advertisement.generation(),
+        progress: advertisement.progress(),
+        expires_at_ms: advertisement.expires_at_ms(),
+        follower_free_bytes: capacity.follower_free_bytes,
+        follower_retained_bytes: capacity.follower_retained_bytes,
+        log: advertisement.log().map(|log| NodeLogStatus {
+            state: match log.phase() {
+                NodeLogPhase::Open => "open",
+                NodeLogPhase::Recovering => "recovering",
+                NodeLogPhase::Sealed => "sealed",
+                NodeLogPhase::Retired => "retired",
+            },
+            epoch: log.epoch(),
+            member_nodes: log
+                .members()
+                .iter()
+                .map(|member| status_hex(member.as_bytes()))
+                .collect(),
+            active: log.active(),
+            tiered_through: log.tiered_through(),
+            recovery: log.recovery().map(|recovery| NodeRecoveryStatus {
+                claimant: status_hex(recovery.claimant().as_bytes()),
+                generation: recovery.generation(),
+                expires_at_ms: recovery.expires_at_ms(),
+            }),
+            recovery_manifest: log
+                .recovery_manifest()
+                .map(|manifest| status_hex(manifest.as_bytes())),
+        }),
+    }
 }
 
 #[derive(Serialize)]
@@ -661,6 +797,7 @@ fn backup_store(
         .tempdir_in(&config.cells.data_dir)?;
     let budget = crate::server::CellRuntimeBudget::from_resources(crate::peer::local_resources(
         &config.cells.data_dir,
+        config.cells.local_disk_limit_bytes,
     )?)?;
     let local_disk = budget.local_disk();
     let host = budget.replica_host(local_disk, scratch.path().to_owned());
@@ -1153,6 +1290,7 @@ pub(crate) async fn enter_maintenance(
     let session = SessionId::from_bytes(Uuid::now_v7().into_bytes());
     let budget = crate::server::CellRuntimeBudget::from_resources(crate::peer::local_resources(
         &config.cells.data_dir,
+        config.cells.local_disk_limit_bytes,
     )?)?;
     let local_disk = budget.local_disk();
     let retention_host = budget.replica_host(local_disk.clone(), session_dir.path().to_owned());
@@ -1531,6 +1669,7 @@ impl OfflineAdvertisement {
 
     fn advertisement(&self, now_ms: i64) -> Result<NodeAdvertisement> {
         NodeAdvertisement::sign(
+            crab_cell_runtime::NodeId::from_bytes(*self.session.as_bytes()),
             self.session,
             self.endpoint.clone(),
             self.fleet,
@@ -1543,10 +1682,12 @@ impl OfflineAdvertisement {
             now_ms.saturating_add(OFFLINE_ADVERTISEMENT_LIFETIME_MS),
             self.module_digests.clone(),
             vec![1],
+            crab_cell_runtime::NodeFailureDomain::default(),
             NodeCapacity {
                 free_memory_bytes: 0,
                 free_disk_bytes: 0,
                 job_credits: 0,
+                ..NodeCapacity::default()
             },
         )
         .map_err(Into::into)
@@ -2009,6 +2150,7 @@ mod tests {
         directory
             .create(
                 NodeAdvertisement::sign(
+                    crab_cell_runtime::NodeId::from_bytes([13; 16]),
                     SessionId::from_bytes([13; 16]),
                     "https://node-1.internal:8081".into(),
                     fleet,
@@ -2021,10 +2163,12 @@ mod tests {
                     now_ms + 10_000,
                     registry.module_digests(),
                     vec![1],
+                    crab_cell_runtime::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,
                         job_credits: 1,
+                        ..NodeCapacity::default()
                     },
                 )
                 .unwrap(),
@@ -2041,6 +2185,7 @@ mod tests {
         directory
             .create(
                 NodeAdvertisement::sign(
+                    crab_cell_runtime::NodeId::from_bytes([15; 16]),
                     SessionId::from_bytes([15; 16]),
                     "https://node-2.internal:8081".into(),
                     fleet,
@@ -2053,10 +2198,12 @@ mod tests {
                     now_ms + 10_000,
                     registry.module_digests(),
                     vec![1],
+                    crab_cell_runtime::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,
                         job_credits: 1,
+                        ..NodeCapacity::default()
                     },
                 )
                 .unwrap(),
@@ -2099,6 +2246,7 @@ mod tests {
         foreign_directory
             .create(
                 NodeAdvertisement::sign(
+                    crab_cell_runtime::NodeId::from_bytes([17; 16]),
                     SessionId::from_bytes([17; 16]),
                     "https://foreign-node.internal:8081".into(),
                     fleet,
@@ -2111,10 +2259,12 @@ mod tests {
                     now_ms + 10_000,
                     vec![Digest::from_bytes([19; 32])],
                     vec![1],
+                    crab_cell_runtime::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,
                         job_credits: 1,
+                        ..NodeCapacity::default()
                     },
                 )
                 .unwrap(),
@@ -2161,6 +2311,7 @@ mod tests {
         let session = directory
             .create(
                 NodeAdvertisement::sign(
+                    crab_cell_runtime::NodeId::from_bytes([55; 16]),
                     SessionId::from_bytes([55; 16]),
                     "https://node.internal:8789".into(),
                     fleet,
@@ -2173,10 +2324,12 @@ mod tests {
                     now_ms - 10_000,
                     registry.module_digests(),
                     vec![1],
+                    crab_cell_runtime::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,
                         job_credits: 1,
+                        ..NodeCapacity::default()
                     },
                 )
                 .unwrap(),

@@ -3,7 +3,10 @@ management_listen = "127.0.0.1:8789"
 
 [cells]
 data_dir = "/var/lib/crab/cells"
+local_disk_limit_bytes = 34359738368
 peer_advertise = "https://localhost:8789"
+failure_zone = "compose-local"
+failure_host = "node-a"
 peer_certificate = "/run/secrets/crab-peer/peer.crt"
 peer_private_key = "/run/secrets/crab-peer/peer.key"
 peer_ca = "/run/secrets/crab-peer/ca.crt"

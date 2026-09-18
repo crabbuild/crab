@@ -17,13 +17,22 @@ mod control;
 mod effects;
 mod error;
 mod executor;
+mod follower;
 mod identity;
 mod kv;
 mod maintenance;
 mod node;
+mod node_durability;
+mod node_lease;
+mod node_log;
+mod node_log_recovery;
+mod node_log_shipper;
+mod node_log_state;
+mod node_log_transport;
 mod peer;
 mod publication;
 mod queue;
+mod recovery_manifest;
 mod registry;
 mod release;
 mod release_progress;
@@ -31,6 +40,7 @@ mod retention;
 mod scheduler;
 mod schema;
 mod sql;
+mod telemetry;
 mod worker;
 mod workflow;
 
@@ -46,11 +56,11 @@ pub use catalog::{
     CatalogEntry, CatalogProof, CatalogRole, CatalogScanPage, CatalogShardScan, CellCatalog,
 };
 pub use client::{
-    CellClient, CellDescription, Committed, InvocationError, Observed, PendingMutation, Receipt,
-    command_operation_digest,
+    CellClient, CellDescription, CellStateStream, Committed, InvocationError, Observed,
+    PendingMutation, Receipt, StateStreamCancellation, command_operation_digest,
 };
 pub use codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
-pub use control::{Control, ControlState, Owner, RootRef, Transition};
+pub use control::{Control, ControlState, Owner, RecoveryOverlayRef, RootRef, Transition};
 pub use crab_ltx::{
     CellReplica, DiskBudget, DiskReservation, Host as ReplicaHost, Limits as ReplicaLimits,
     ScratchMonitor,
@@ -70,9 +80,10 @@ pub use executor::{
     CellExecutor, CommandExecution, HandlerOutcome, MigrationOutcome, MutationIdentity,
     PendingCommit, PendingMigration, Resolution, StoredOutcome,
 };
+pub use follower::{FollowerReceipt, FollowerStore, FollowerTailPage, RetiredFollowerLane};
 pub use identity::{
-    ApplicationId, CellId, CellTarget, Digest, IncarnationId, NamespaceId, RequestId, SessionId,
-    TenantId, partition_for_shard, shard_for_scope,
+    ApplicationId, CellId, CellTarget, Digest, IncarnationId, NamespaceId, NodeId, RequestId,
+    SessionId, TenantId, partition_for_shard, shard_for_scope,
 };
 pub use kv::{
     KvAtomicCommand, KvAtomicOutcome, KvAtomicRequest, KvCheck, KvCondition, KvEntry, KvGetQuery,
@@ -83,7 +94,27 @@ pub use maintenance::{
     MaintenanceModule, MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest,
     PersistedWorkInventory, register_maintenance,
 };
-pub use node::{NodeAdvertisement, NodeCapacity, NodeDirectory, VersionedNodeAdvertisement};
+pub use node::{
+    FencedNodeSession, NODE_LOG_PROTOCOL_VERSION, NodeAdvertisement, NodeCapacity, NodeDirectory,
+    NodeFailureDomain, NodeTakeoverProof, SealedNodeLog, VersionedNodeAdvertisement,
+};
+pub use node_durability::{NodeDurability, NodeLogAuthority};
+pub use node_lease::NodeLeaseGuard;
+pub use node_log::{
+    CommitTicket, DurabilityGate, DurabilityProof, DurabilitySource, NodeLogRotationBarrier,
+    RecoveredCellTail, RecoveryBase, RotatedNodeLog, build_recovery_overlays, close_node_log,
+    rotate_node_log,
+};
+pub use node_log_recovery::{
+    CompletedNodeRecovery, NodeLogRecovery, RecoveryCell, RecoveryCoordinator, SealedSession,
+    recoverable_cells,
+};
+pub use node_log_shipper::{NodeLogShipper, NodeLogSubmission};
+pub use node_log_state::{NodeLogPhase, NodeLogStatus, NodeRecoveryClaim};
+pub use node_log_transport::{
+    AppendRequest, LocalFollowerTransport, NodeLogTransport, RetireRequest, SealRequest,
+    TailRequest,
+};
 pub use peer::{
     EffectPeerClient, MAX_PEER_REQUEST_BYTES, MigrationPeerClient, PeerAuthorizer,
     PeerCellResolver, PeerDispatcher, PeerOperation, PeerPrincipal, PeerRoundTrip, PeerSigner,
@@ -99,6 +130,7 @@ pub use queue::{
     install_queue_schema, queue_apply_lease, queue_claim, queue_cleanup_expired, queue_send,
     queue_validate_claim, register_queue,
 };
+pub use recovery_manifest::{PinnedRecoveryCell, RecoveryManifestStore};
 pub use registry::{
     BuildDescriptor, CellModule, Command, CommandContext, CommandInvocation, CommandResult,
     MigrationDescriptor, MigrationPlan, ModuleDescriptor, NamespaceDescriptor, OperationDescriptor,
@@ -120,6 +152,7 @@ pub use sql::{
     SqlBatch, SqlBatchCommand, SqlBatchQuery, SqlCell, SqlModule, SqlResultSet, SqlStatement,
     SqlValue, register_sql, sql_batch, sql_query_batch,
 };
+pub use telemetry::{CellTelemetry, CellTelemetryHandle};
 pub use worker::{
     ACTIVE_CELL_FILE_DESCRIPTORS, ACTIVE_CELL_PAGE_CACHE_BYTES, SqlWorkerPool, WorkerExecution,
 };

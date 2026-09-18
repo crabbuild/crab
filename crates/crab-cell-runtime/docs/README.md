@@ -27,7 +27,10 @@ Lower crates never import HTTP, Git, repository authorization, or provider confi
 
 ## Follow one mutation
 
-A successful response means the command outcome and its exact SQLite root are durable in object storage.
+A successful mutation response means its SQLite outcome is covered either by
+the exact object-store root or by every selected follower's fsynced node-log
+tail. Fleet-only outcomes are recovered before a successor serves the Cell;
+object publication continues while later work stays queued on that Cell.
 
 ```mermaid
 sequenceDiagram

@@ -207,6 +207,11 @@ impl CellCatalog {
         }
     }
 
+    #[must_use]
+    pub const fn application(&self) -> ApplicationId {
+        self.application
+    }
+
     pub(crate) fn matches_identity(&self, identity: crate::ApplicationIdentity) -> bool {
         self.tenant == identity.tenant() && self.application == identity.application()
     }

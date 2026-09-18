@@ -94,7 +94,7 @@ resources:
     ephemeral-storage: 50Gi
 
 scratch:
-  sizeLimit: 32Gi
+  sizeBytes: 34359738368
 
 startupProbe:
   periodSeconds: 5

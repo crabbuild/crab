@@ -11,9 +11,16 @@ Cell storage separates one mutable authority record from immutable SQLite histor
 [Back to the Cell runtime index](README.md)
 
 This page describes the implemented `cells/v1` object-store contract. The
-in-place session-record evolution and control-pinned recovery overlay needed
-before follower fsync may release a response are specified in
+in-place session record and control-pinned recovery overlay that make follower
+fsync a valid response-release proof are specified in
 [Follower durability and warm failover](failover-and-followers.md).
+
+`v1` names the one current development format; it is not a release counter.
+Until Crab ships a persistent Cell format, storage changes update this layout,
+its document schemas, all readers and writers, tests, and documentation in one
+change. Development data may be recreated. Do not introduce a new `cells/vN`
+prefix, dual readers, compatibility branches, or migration code merely because
+the structure changes.
 
 ## Derive stable identities
 

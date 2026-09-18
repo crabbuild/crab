@@ -7,7 +7,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, oneshot};
 
 use super::{
     Message, QueuedCommand, QueuedMigration, QueuedOperation, QueuedQuery, QueuedResolve,
-    ResolveOperation, RuntimeInner,
+    ResolveOperation, RuntimeInner, new_cell_admission,
 };
 use crate::{
     CatalogProof, CatalogRole, CellId, Digest, Error, InboxDelivery, IncarnationId, MigratedCell,
@@ -174,7 +174,9 @@ impl CellHandle {
             })))
             .await
             .map_err(|_| Error::RuntimeClosed)?;
-        response.await.map_err(|_| Error::RuntimeClosed)?
+        let result = response.await.map_err(|_| Error::RuntimeClosed)?;
+        self.inner.node_lease.check()?;
+        result
     }
 
     /// Reads durable work that can retain a removed release contract.
@@ -271,7 +273,7 @@ impl CellHandle {
         }
     }
 
-    /// Drains the old capability and publishes one registry-verified schema step.
+    /// Drains the old capability and durably proves one registry-verified schema step.
     pub async fn migrate(&self, plan: MigrationPlan, now_ms: i64) -> crate::Result<MigratedCell> {
         if plan.from_code() != self.code
             || plan.from_schema() != self.schema
@@ -290,6 +292,7 @@ impl CellHandle {
         }
         self.admission.requests.close();
         self.admission.bytes.close();
+        let successor_admission = new_cell_admission();
         let (reply, response) = oneshot::channel();
         self.inner
             .sender
@@ -299,6 +302,7 @@ impl CellHandle {
                 plan,
                 now_ms,
                 reply: Some(reply),
+                successor_admission,
                 _work: work,
             })))
             .await
@@ -351,6 +355,7 @@ impl CellHandle {
         if self.inner.shutting_down.load(Ordering::Acquire) {
             return Err(Error::RuntimeClosed);
         }
+        self.inner.node_lease.check()?;
         if operation_bytes > MAX_OPERATION_BYTES || max_result_bytes > MAX_RESULT_BYTES {
             return Err(Error::Capacity("operation or result bytes"));
         }
@@ -383,6 +388,7 @@ impl CellHandle {
         if self.admission.draining.load(Ordering::Acquire) {
             return Err(Error::CellDraining);
         }
+        self.inner.node_lease.check()?;
         Ok(admission)
     }
 }

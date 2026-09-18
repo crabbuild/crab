@@ -31,7 +31,12 @@ pub struct StorageConfig {
 #[serde(deny_unknown_fields)]
 pub struct CellsConfig {
     pub data_dir: PathBuf,
+    pub local_disk_limit_bytes: u64,
     pub peer_advertise: Url,
+    #[serde(default)]
+    pub failure_zone: Option<String>,
+    #[serde(default)]
+    pub failure_host: Option<String>,
     #[serde(default)]
     pub peer_tls_server_name: Option<String>,
     pub peer_certificate: PathBuf,
@@ -107,6 +112,21 @@ impl Config {
         self.validate()
     }
 
+    /// Overrides the node topology labels used for follower placement.
+    pub fn set_cell_failure_domain(
+        &mut self,
+        zone: Option<&str>,
+        host: Option<&str>,
+    ) -> Result<()> {
+        if let Some(zone) = zone {
+            self.cells.failure_zone = Some(zone.into());
+        }
+        if let Some(host) = host {
+            self.cells.failure_host = Some(host.into());
+        }
+        self.validate()
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
         if self.listen == self.management_listen {
             return Err(Error::Config(
@@ -165,6 +185,11 @@ fn validate_cells(cells: &CellsConfig, management_listen: SocketAddr) -> Result<
             "Cell data and peer identity paths must be absolute",
         ));
     }
+    if cells.local_disk_limit_bytes == 0 {
+        return Err(Error::Config(
+            "cells.local_disk_limit_bytes must be greater than zero",
+        ));
+    }
     let endpoint = &cells.peer_advertise;
     if endpoint.scheme() != "https"
         || endpoint.host().is_none()
@@ -190,6 +215,10 @@ fn validate_cells(cells: &CellsConfig, management_listen: SocketAddr) -> Result<
             "cells.peer_tls_server_name must be a DNS name without a port",
         ));
     }
+    crab_cell_runtime::NodeFailureDomain::new(
+        cells.failure_zone.clone(),
+        cells.failure_host.clone(),
+    )?;
     Ok(())
 }
 
@@ -313,7 +342,7 @@ pub(crate) fn validate_identity_url(url: &Url, allow_loopback_http: bool) -> Res
 mod tests {
     use super::*;
 
-    const CELLS: &str = "\n[cells]\ndata_dir='/var/lib/crab/cells'\npeer_advertise='https://127.0.0.1:8789'\npeer_certificate='/run/secrets/crab/peer.crt'\npeer_private_key='/run/secrets/crab/peer.key'\npeer_ca='/run/secrets/crab/peer-ca.crt'\n";
+    const CELLS: &str = "\n[cells]\ndata_dir='/var/lib/crab/cells'\nlocal_disk_limit_bytes=34359738368\npeer_advertise='https://127.0.0.1:8789'\npeer_certificate='/run/secrets/crab/peer.crt'\npeer_private_key='/run/secrets/crab/peer.key'\npeer_ca='/run/secrets/crab/peer-ca.crt'\n";
 
     fn local_config(storage_url: &str) -> Config {
         toml::from_str(&format!(
@@ -407,6 +436,10 @@ mod tests {
         assert!(config.validate().is_err());
 
         let mut config = local_config("s3://bucket/repositories");
+        config.cells.local_disk_limit_bytes = 0;
+        assert!(config.validate().is_err());
+
+        let mut config = local_config("s3://bucket/repositories");
         config.cells.peer_tls_server_name = Some("crab-http-server-peer".into());
         config.set_peer_advertise_host("10.42.3.17").unwrap();
         assert_eq!(
@@ -419,6 +452,19 @@ mod tests {
             "https://[2001:db8::17]:8789/"
         );
         config.cells.peer_tls_server_name = Some("https://peer.invalid".into());
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn cell_failure_domains_are_optional_bounded_topology_labels() {
+        let mut config = local_config("s3://bucket/repositories");
+        config
+            .set_cell_failure_domain(Some("us-west-2a"), Some("worker-17"))
+            .unwrap();
+        assert_eq!(config.cells.failure_zone.as_deref(), Some("us-west-2a"));
+        assert_eq!(config.cells.failure_host.as_deref(), Some("worker-17"));
+
+        config.cells.failure_host = Some("worker 17".into());
         assert!(config.validate().is_err());
     }
 

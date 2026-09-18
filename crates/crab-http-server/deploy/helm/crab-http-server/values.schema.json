@@ -202,8 +202,10 @@
     "scratch": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sizeLimit"],
-      "properties": { "sizeLimit": { "type": "string", "minLength": 1 } }
+      "required": ["sizeBytes"],
+      "properties": {
+        "sizeBytes": { "type": "integer", "minimum": 32212254720 }
+      }
     },
     "startupProbe": { "$ref": "#/definitions/probe" },
     "readinessProbe": { "$ref": "#/definitions/probe" },

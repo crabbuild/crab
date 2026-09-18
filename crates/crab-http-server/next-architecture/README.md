@@ -106,7 +106,7 @@ and deployment boundaries.
 | [Git and application workflows](git-workflows.md) | Durable outbox, merge/tag publication, uncertain outcomes, and release assets. |
 | [Recovery, compaction, and backups](recovery-and-retention.md) | Exact restore, failure matrix, takeover races, retention, and backup roots. |
 | [Deployment, lifecycle, and operations](deployment-and-operations.md) | Kubernetes topology, drain, resource budgets, capacity, metrics, and runbooks. |
-| [Hard cutover and future upgrades](hard-cutover.md) | Offline application-data reset, empty Cell initialization, verification, fleet transition, failure recovery, and format upgrades. |
+| [Hard cutover and format evolution](hard-cutover.md) | Offline application-data reset, empty Cell initialization, verification, fleet transition, in-place development evolution, and post-release upgrades. |
 | [Validation, delivery, and worked examples](validation-and-delivery.md) | Protocol tests, real repositories/API acceptance, delivery gates, examples, and sources. |
 
 Start with [architecture and data ownership](overview.md#architecture-and-data-ownership).

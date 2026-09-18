@@ -118,6 +118,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         identity,
         &registry,
         initialize_dir.path(),
+        32 * 1024 * 1024 * 1024,
         "https://localhost:1".into(),
         repository_id,
     )
@@ -145,36 +146,45 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     let owner_session = SessionId::from_bytes([8; 16]);
     let ingress_dir = tempfile::TempDir::new().unwrap();
     let owner_dir = tempfile::TempDir::new().unwrap();
-    let ingress_publisher = NodePublisher::new(
-        directory.clone(),
-        peer_tls.signing_key().clone(),
-        ingress_session,
-        "https://localhost:2".into(),
-        peer_tls.fleet(),
-        peer_tls.certificate(),
-        image,
-        registry.release_digest(),
-        registry.module_digests(),
-        ingress_dir.path().to_path_buf(),
-        crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap()).unwrap(),
-    )
-    .unwrap();
-    let owner_publisher = NodePublisher::new(
-        directory.clone(),
-        peer_tls.signing_key().clone(),
-        owner_session,
-        management_endpoint.clone(),
-        peer_tls.fleet(),
-        peer_tls.certificate(),
-        image,
-        registry.release_digest(),
-        registry.module_digests(),
-        owner_dir.path().to_path_buf(),
-        crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap()).unwrap(),
-    )
-    .unwrap();
-    let ingress_advertisement = ingress_publisher.publish_initial().await.unwrap();
-    let owner_advertisement = owner_publisher.publish_initial().await.unwrap();
+    let ingress_publisher = Arc::new(
+        NodePublisher::new(
+            directory.clone(),
+            peer_tls.signing_key().clone(),
+            ingress_session,
+            "https://localhost:2".into(),
+            crab_cell_runtime::NodeFailureDomain::default(),
+            peer_tls.fleet(),
+            peer_tls.certificate(),
+            image,
+            registry.release_digest(),
+            registry.module_digests(),
+            ingress_dir.path().to_path_buf(),
+            32 * 1024 * 1024 * 1024,
+            crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap()).unwrap(),
+        )
+        .unwrap(),
+    );
+    let owner_publisher = Arc::new(
+        NodePublisher::new(
+            directory.clone(),
+            peer_tls.signing_key().clone(),
+            owner_session,
+            management_endpoint.clone(),
+            crab_cell_runtime::NodeFailureDomain::default(),
+            peer_tls.fleet(),
+            peer_tls.certificate(),
+            image,
+            registry.release_digest(),
+            registry.module_digests(),
+            owner_dir.path().to_path_buf(),
+            32 * 1024 * 1024 * 1024,
+            crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap()).unwrap(),
+        )
+        .unwrap(),
+    );
+    let owner_node = owner_publisher.node();
+    ingress_publisher.publish_initial().await.unwrap();
+    owner_publisher.publish_initial().await.unwrap();
     let ingress_session_dir = ingress_publisher.session_dir();
     let owner_session_dir = owner_publisher.session_dir();
 
@@ -233,6 +243,8 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         owner_runtime.clone(),
         None,
         Some(PeerReceiver::new(
+            owner_node,
+            owner_session,
             directory.clone(),
             Arc::clone(&registry),
             crab_cell_runtime::ReleaseStore::new(cell_layout.clone(), identity).unwrap(),
@@ -241,11 +253,10 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         )),
     );
     let owner_heartbeat_stop = CancellationToken::new();
-    let owner_heartbeat_task = tokio::spawn(owner_publisher.run(
-        Arc::clone(&owner_server),
-        owner_advertisement,
-        owner_heartbeat_stop.clone(),
-    ));
+    let owner_heartbeat_task = tokio::spawn(
+        Arc::clone(&owner_publisher)
+            .run_shared(Arc::clone(&owner_server), owner_heartbeat_stop.clone()),
+    );
     let management = management_router(Arc::clone(&owner_server));
     let (management_stop, management_done) = tokio::sync::oneshot::channel();
     let management_tls = Arc::clone(&peer_tls);
@@ -298,11 +309,10 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         None,
     );
     let ingress_heartbeat_stop = CancellationToken::new();
-    let ingress_heartbeat_task = tokio::spawn(ingress_publisher.run(
-        Arc::clone(&ingress_server),
-        ingress_advertisement,
-        ingress_heartbeat_stop.clone(),
-    ));
+    let ingress_heartbeat_task = tokio::spawn(
+        Arc::clone(&ingress_publisher)
+            .run_shared(Arc::clone(&ingress_server), ingress_heartbeat_stop.clone()),
+    );
     let public_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let public_origin = format!("http://{}", public_listener.local_addr().unwrap());
     let public_app = router(Arc::clone(&ingress_server));
@@ -752,6 +762,8 @@ fn server(
         cell_runtime,
         repository_cells,
         peer_receiver,
+        follower_store: None,
+        node_log_transport: None,
         options: RepositoryOptions::default(),
         cursor_key: [0; 32],
         admission: Semaphore::new(16),
@@ -768,7 +780,7 @@ fn server(
         auth: None,
         catalog: None,
         catalog_healthy: AtomicBool::new(false),
-        node_healthy: AtomicBool::new(false),
+        node_healthy: AtomicBool::new(true),
         scheduler_status: crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap())
             .unwrap(),
         cell_capacity: super::test_cell_capacity_report(),

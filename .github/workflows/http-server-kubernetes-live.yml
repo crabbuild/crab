@@ -51,6 +51,14 @@ on:
         description: Dedicated qualification repository name
         required: true
         type: string
+      node_profile:
+        description: Resource profile every qualified Pod must match
+        required: true
+        type: choice
+        options:
+          - small
+          - medium
+          - large
       approve_rollout:
         description: I approve a write and rolling restart of this deployment
         required: true
@@ -214,6 +222,21 @@ jobs:
             echo "expected_chart=$(jq --raw-output .chart.reference "$manifest")"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Set up Rust for the load generator
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the release-source load generator
+        shell: bash
+        run: |
+          set -euo pipefail
+          load_target="${RUNNER_TEMP}/crab-http-load-target"
+          CARGO_TARGET_DIR="$load_target" \
+            cargo build -p crab-http-server --release \
+              --example qualify_http_load --locked
+          load_generator="${load_target}/release/examples/qualify_http_load"
+          test -x "$load_generator"
+          echo "CRAB_HTTP_SERVER_LOAD_GENERATOR=${load_generator}" >> "$GITHUB_ENV"
+
       - name: Validate selected provider inputs
         shell: bash
         env:
@@ -354,6 +377,7 @@ jobs:
           CRAB_HTTP_SERVER_EXPECTED_IMAGE: ${{ steps.release-record.outputs.expected_image }}
           CRAB_HTTP_SERVER_RELEASE_TAG: ${{ steps.release.outputs.tag }}
           CRAB_HTTP_SERVER_SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+          CRAB_HTTP_SERVER_NODE_PROFILE: ${{ inputs.node_profile }}
           CRAB_HTTP_SERVER_APPROVE_ROLLOUT: "true"
           CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS: "true"
         run: |
@@ -373,6 +397,7 @@ jobs:
           ORIGIN: ${{ inputs.origin }}
           OWNER: ${{ inputs.owner }}
           REPOSITORY: ${{ inputs.repository }}
+          NODE_PROFILE: ${{ inputs.node_profile }}
           EXPECTED_CHART: ${{ steps.release-record.outputs.expected_chart }}
           EXPECTED_IMAGE: ${{ steps.release-record.outputs.expected_image }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
@@ -390,9 +415,13 @@ jobs:
             --arg image "$EXPECTED_IMAGE" \
             --arg release_tag "$RELEASE_TAG" \
             --arg source_sha "$SOURCE_SHA" \
-            '.schema == 9 and .provider == $provider and
+            --arg node_profile "$NODE_PROFILE" \
+            '.schema == 11 and .provider == $provider and
              .namespace == $namespace and .deployment == $deployment and
              .origin == $origin and .repository == $repository and
+             .node_profile == $node_profile and
+             (.scratch_limit_bytes | type) == "number" and
+             .scratch_limit_bytes > 0 and
              .image == $image and .chart == $chart and
              .qualification_source.release_tag == $release_tag and
              .qualification_source.commit == $source_sha and
@@ -410,6 +439,17 @@ jobs:
              .checks.workload_identity_only == true and
              .checks.management_network_isolation == true and
              .checks.capacity_envelopes == true and
+             .checks.node_profile_resources == true and
+             .checks.aggregate_node_load == true and
+             .load_workload == {
+               aggregate_requests_per_second_per_node: 1000,
+               duration_seconds: 60,
+               database_count: 8,
+               commit_targets_per_node: 64,
+               commit_targets_per_cell: 24,
+               configured_requests_per_cell_per_node: 125,
+               transaction: "repository commit status insert"
+             } and
              .checks.cross_replica_git == true and
              .checks.cross_replica_lfs == true and
              .checks.durable_lfs_lock == true and
@@ -446,15 +486,27 @@ jobs:
              (.commit | test("^[0-9a-f]{40}$")) and
              (.status_context | length) > 0 and
              (.check_run_id | type) == "number" and .check_run_id > 0 and
+             ([.load[].pod_uid] | sort) ==
+               ([.capacity.before_traffic[].pod_uid] | sort) and
              (.payload_sha256 | test("^[0-9a-f]{64}$"))' \
             "$receipt" >/dev/null
           capacity_validator=crates/crab-http-server/deploy/helm/crab-http-server/qualification/validate-capacity-envelope.jq
-          for phase in before_traffic after_rollout after_owner_loss; do
+          profile_validator=crates/crab-http-server/deploy/helm/crab-http-server/qualification/validate-node-profile.jq
+          for phase in before_traffic after_load after_rollout after_owner_loss; do
             phase_label="${phase//_/-}"
             jq --arg phase "$phase" '.capacity[$phase]' "$receipt" \
               | jq --exit-status --arg phase "$phase_label" \
                   --from-file "$capacity_validator" >/dev/null
+            jq --arg phase "$phase" '.capacity[$phase]' "$receipt" \
+              | jq --exit-status --arg profile "$NODE_PROFILE" \
+                  --argjson disk_limit_bytes "$(jq '.scratch_limit_bytes' "$receipt")" \
+                  --from-file "$profile_validator" >/dev/null
           done
+          authority="${ORIGIN#https://}"
+          jq '.load' "$receipt" \
+            | jq --exit-status --arg authority "$authority" \
+                --from-file crates/crab-http-server/deploy/helm/crab-http-server/qualification/validate-load-report.jq \
+                >/dev/null
 
       - name: Attest the qualification receipt
         id: receipt-attestation

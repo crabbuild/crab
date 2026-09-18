@@ -3,7 +3,10 @@ management_listen = "0.0.0.0:8789"
 
 [cells]
 data_dir = "/var/lib/crab/cells"
+local_disk_limit_bytes = 34359738368
 peer_advertise = "https://node-1.internal.example:8789"
+failure_zone = "us-west-2a"
+failure_host = "node-1.internal.example"
 peer_tls_server_name = "node-1.internal.example"
 peer_certificate = "/run/secrets/crab-peer/tls.crt"
 peer_private_key = "/run/secrets/crab-peer/tls.key"

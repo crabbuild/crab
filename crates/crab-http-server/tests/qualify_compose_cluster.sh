@@ -64,12 +64,31 @@ cleanup() {
 }
 trap cleanup EXIT
 
+wait_for_healthy() {
+  local service="$1"
+  local container
+  for _ in $(seq 1 90); do
+    container="$("${compose[@]}" ps --quiet "$service")"
+    if [ -n "$container" ] &&
+      [ "$(docker inspect --format '{{.State.Health.Status}}' "$container")" = healthy ]; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "${service} did not become healthy." >&2
+  return 1
+}
+
 up_mode=(--no-build)
 if [ "${CRAB_HTTP_CLUSTER_BUILD:-true}" = true ]; then
   up_mode=(--build)
 fi
 "${compose[@]}" config --quiet
 "${compose[@]}" up --detach "${up_mode[@]}" --wait --wait-timeout 180
+
+# The cluster overlay starts B only after C is healthy. Together with B's
+# implicit network-namespace dependency on A, its first immutable epoch can
+# recruit both followers without replacing its boot session.
 
 capacity_a="$("${compose[@]}" exec -T server crab-http-server \
   --config /etc/crab/server.toml cells capacity --json --live)"
@@ -84,14 +103,25 @@ for capacity in "$capacity_a" "$capacity_b" "$capacity_c"; do
     <<<"$capacity" >/dev/null
 done
 
-create_response="$(curl --fail-with-body --silent --show-error \
-  --request POST \
-  --header 'content-type: application/json' \
-  --data '{"request_id":"00000000-0000-4000-8000-000000000101","title":"Owner loss qualification","body":"Created through node B"}' \
-  "${node_b_origin}/${repository_path}/issues")"
-jq --exit-status \
-  '.number == 1 and .title == "Owner loss qualification"' \
-  <<<"$create_response" >/dev/null
+create_response=""
+for _ in $(seq 1 45); do
+  candidate="$(curl --fail-with-body --silent --show-error --max-time 10 \
+    --request POST \
+    --header 'content-type: application/json' \
+    --data '{"request_id":"00000000-0000-4000-8000-000000000101","title":"Owner loss qualification","body":"Created through node B"}' \
+    "${node_b_origin}/${repository_path}/issues" 2>/dev/null || true)"
+  if jq --exit-status \
+    '.number == 1 and .title == "Owner loss qualification"' \
+    <<<"$candidate" >/dev/null 2>&1; then
+    create_response="$candidate"
+    break
+  fi
+  sleep 1
+done
+if [ -z "$create_response" ]; then
+  echo "Node B did not activate and accept the initial idempotent write." >&2
+  exit 1
+fi
 
 control_before="$("${compose[@]}" exec -T server-b crab-http-server \
   --config /etc/crab/server.toml cells status --owner demo --name hello)"
@@ -101,7 +131,29 @@ sequence_before="$(jq --raw-output '.root.commit_sequence' <<<"$control_before")
 root_before_state="$(jq --compact-output '.root' <<<"$control_before")"
 jq --exit-status \
   '.state == "serving" and .owner.endpoint == "https://localhost:8889/" and
+   .owner_lease.state == "live" and
+   .owner_lease.expires_at_ms > .owner_lease.observed_at_ms and
+   .recovery == null and
    .root.commit_sequence >= 1' <<<"$control_before" >/dev/null
+
+log_ready=false
+for _ in $(seq 1 45); do
+  node_before="$("${compose[@]}" exec -T server-c crab-http-server \
+    --config /etc/crab/server.toml cells node \
+    --session "$session_before" --json)"
+  if jq --exit-status \
+    '.live == true and .advertisement.log.state == "open" and
+     (.advertisement.log.member_nodes | length) == 2' \
+    <<<"$node_before" >/dev/null; then
+    log_ready=true
+    break
+  fi
+  sleep 1
+done
+if ! $log_ready; then
+  echo "Node B did not activate a two-follower durability log." >&2
+  exit 1
+fi
 
 for origin in "$node_a_origin" "$node_c_origin" "$cluster_origin"; do
   curl --fail --silent --show-error \
@@ -111,7 +163,51 @@ for origin in "$node_a_origin" "$node_c_origin" "$cluster_origin"; do
       >/dev/null
 done
 
+deny_cell_objects='{"Version":"2012-10-17","Statement":[{"Sid":"DenyCellImmutableObjectWrites","Effect":"Deny","Principal":"*","Action":"s3:PutObject","Resource":"arn:aws:s3:::crab-http-server/repositories/cells/v1/apps/*/cells/*/inc/*/objects/*"}]}'
+"${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
+  --endpoint-url http://rustfs:9000 s3api put-bucket-policy \
+  --bucket crab-http-server --policy "$deny_cell_objects" >/dev/null
+fleet_only_response="$(curl --fail-with-body --silent --show-error \
+  --max-time 15 \
+  --request POST \
+  --header 'content-type: application/json' \
+  --data '{"request_id":"00000000-0000-4000-8000-000000000102","name":"follower-only","color":"c2410c","description":"Acknowledged by follower fsync"}' \
+  "${node_b_origin}/${repository_path}/labels")"
+jq --exit-status \
+  '.id == 1 and .name == "follower-only"' \
+  <<<"$fleet_only_response" >/dev/null
+control_fleet_only="$("${compose[@]}" exec -T server-b crab-http-server \
+  --config /etc/crab/server.toml cells status --owner demo --name hello)"
+jq --exit-status --argjson sequence_before "$sequence_before" \
+  '.root.commit_sequence == $sequence_before' <<<"$control_fleet_only" >/dev/null
+node_fleet_only="$("${compose[@]}" exec -T server-c crab-http-server \
+  --config /etc/crab/server.toml cells node \
+  --session "$session_before" --json)"
+jq --exit-status \
+  '.live == true and .advertisement.log.state == "open" and
+   .advertisement.log.active == true and
+   (.advertisement.log.member_nodes | length) == 2' \
+  <<<"$node_fleet_only" >/dev/null
+metrics_owner_fleet_only="$("${compose[@]}" exec -T server-b crab-http-server \
+  --config /etc/crab/server.toml cells metrics)"
+metrics_follower_fleet_only="$("${compose[@]}" exec -T server-c crab-http-server \
+  --config /etc/crab/server.toml cells metrics)"
+owner_uncovered_bytes="$(awk \
+  '$1 == "crab_cell_node_log_uncovered_bytes" { print $2 }' \
+  <<<"$metrics_owner_fleet_only")"
+follower_retained_bytes="$(awk \
+  '$1 == "crab_cell_follower_retained_bytes" { print $2 }' \
+  <<<"$metrics_follower_fleet_only")"
+awk '$1 == "crab_cell_node_log_uncovered_bytes" && $2 + 0 > 0 { found = 1 }
+     END { exit !found }' <<<"$metrics_owner_fleet_only"
+awk '$1 == "crab_cell_follower_retained_bytes" && $2 + 0 > 0 { found = 1 }
+     END { exit !found }' <<<"$metrics_follower_fleet_only"
+
 "${compose[@]}" kill --signal KILL server-b >/dev/null
+"${compose[@]}" rm --force --stop server-b >/dev/null
+"${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
+  --endpoint-url http://rustfs:9000 s3api delete-bucket-policy \
+  --bucket crab-http-server >/dev/null
 advertisement_expired=false
 for _ in $(seq 1 45); do
   node_status="$("${compose[@]}" exec -T server-c crab-http-server \
@@ -128,11 +224,29 @@ if ! $advertisement_expired; then
   exit 1
 fi
 
-restored="$(curl --fail-with-body --silent --show-error \
-  --max-time 90 "${node_c_origin}/${repository_path}/issues?state=all")"
-jq --exit-status \
-  '.items | length == 1 and .[0].title == "Owner loss qualification"' \
-  <<<"$restored" >/dev/null
+restored=""
+restored_labels=""
+for _ in $(seq 1 45); do
+  candidate="$(curl --fail-with-body --silent --show-error --max-time 10 \
+    "${node_c_origin}/${repository_path}/issues?state=all" || true)"
+  label_candidate="$(curl --fail-with-body --silent --show-error --max-time 10 \
+    "${node_c_origin}/${repository_path}/labels" || true)"
+  if jq --exit-status \
+    '.items | length == 1 and .[0].title == "Owner loss qualification"' \
+    <<<"$candidate" >/dev/null 2>&1 \
+    && jq --exit-status \
+      '.items | length == 1 and .[0].name == "follower-only"' \
+      <<<"$label_candidate" >/dev/null 2>&1; then
+    restored="$candidate"
+    restored_labels="$label_candidate"
+    break
+  fi
+  sleep 1
+done
+if [ -z "$restored" ]; then
+  echo "Node C did not recover the follower-proven commit." >&2
+  exit 1
+fi
 
 control_after="$("${compose[@]}" exec -T server-c crab-http-server \
   --config /etc/crab/server.toml cells status --owner demo --name hello)"
@@ -142,10 +256,13 @@ root_after_state="$(jq --compact-output '.root' <<<"$control_after")"
 jq --exit-status \
   --arg session_before "$session_before" \
   --argjson epoch_before "$epoch_before" \
-  --argjson root_before "$root_before_state" \
+  --argjson sequence_before "$sequence_before" \
   '.state == "serving" and .owner.endpoint == "https://localhost:8989/" and
    .owner.session != $session_before and .epoch > $epoch_before and
-   .root == $root_before' <<<"$control_after" >/dev/null
+   .owner_lease.state == "live" and
+   .owner_lease.expires_at_ms > .owner_lease.observed_at_ms and
+   .recovery == null and
+   .root.commit_sequence > $sequence_before' <<<"$control_after" >/dev/null
 
 for _ in $(seq 1 6); do
   curl --fail --silent --show-error \
@@ -153,12 +270,17 @@ for _ in $(seq 1 6); do
     | jq --exit-status \
       '.items | length == 1 and .[0].title == "Owner loss qualification"' \
       >/dev/null
+  curl --fail --silent --show-error \
+    "${cluster_origin}/${repository_path}/labels" \
+    | jq --exit-status \
+      '.items | length == 1 and .[0].name == "follower-only"' \
+      >/dev/null
 done
 
 continued="$(curl --fail-with-body --silent --show-error \
   --request POST \
   --header 'content-type: application/json' \
-  --data '{"request_id":"00000000-0000-4000-8000-000000000102","title":"Recovered owner","body":"Published by node C"}' \
+  --data '{"request_id":"00000000-0000-4000-8000-000000000103","title":"Recovered owner","body":"Published by node C"}' \
   "${node_c_origin}/${repository_path}/issues")"
 jq --exit-status '.number == 2 and .title == "Recovered owner"' \
   <<<"$continued" >/dev/null
@@ -171,29 +293,23 @@ jq --exit-status \
   --arg session_after "$session_after" \
   --argjson sequence_before "$sequence_before" \
   '.owner.session == $session_after and
+   .owner_lease.state == "live" and
+   .owner_lease.expires_at_ms > .owner_lease.observed_at_ms and
+   .recovery == null and
    .root.commit_sequence > $sequence_before' \
   <<<"$control_continued" >/dev/null
 
-"${compose[@]}" start server-b >/dev/null
-server_b_healthy=false
-for _ in $(seq 1 90); do
-  server_b_container="$("${compose[@]}" ps --quiet server-b)"
-  if [ -n "$server_b_container" ] &&
-    [ "$(docker inspect --format '{{.State.Health.Status}}' "$server_b_container")" = healthy ]; then
-    server_b_healthy=true
-    break
-  fi
-  sleep 1
-done
-if ! $server_b_healthy; then
-  echo "Node B did not become healthy after restart." >&2
-  exit 1
-fi
+"${compose[@]}" up --detach --no-build server server-b >/dev/null
+wait_for_healthy server-b
 curl --fail --silent --show-error \
   "${node_b_origin}/${repository_path}/issues?state=all" \
   | jq --exit-status \
     '.items | length == 2 and .[0].title == "Recovered owner" and
      .[1].title == "Owner loss qualification"' >/dev/null
+curl --fail --silent --show-error \
+  "${node_b_origin}/${repository_path}/labels" \
+  | jq --exit-status \
+    '.items | length == 1 and .[0].name == "follower-only"' >/dev/null
 control_after_rejoin="$("${compose[@]}" exec -T server-b crab-http-server \
   --config /etc/crab/server.toml cells status --owner demo --name hello)"
 jq --exit-status \
@@ -202,6 +318,9 @@ jq --exit-status \
   --argjson sequence_continued "$sequence_continued" \
   '.state == "serving" and .owner.session == $session_after and
    .owner.endpoint == "https://localhost:8989/" and .epoch == $epoch_after and
+   .owner_lease.state == "live" and
+   .owner_lease.expires_at_ms > .owner_lease.observed_at_ms and
+   .recovery == null and
    .root.commit_sequence == $sequence_continued' \
   <<<"$control_after_rejoin" >/dev/null
 
@@ -217,8 +336,15 @@ jq --null-input \
   --argjson capacity_a "$capacity_a" \
   --argjson capacity_b "$capacity_b" \
   --argjson capacity_c "$capacity_c" \
+  --argjson node_before "$node_before" \
+  --argjson node_fleet_only "$node_fleet_only" \
+  --argjson fleet_only_response "$fleet_only_response" \
+  --argjson restored_labels "$restored_labels" \
+  --argjson control_fleet_only "$control_fleet_only" \
+  --argjson owner_uncovered_bytes "$owner_uncovered_bytes" \
+  --argjson follower_retained_bytes "$follower_retained_bytes" \
   '{
-    version: 2,
+    version: 4,
     project: $project,
     owner_loss: {
       session_before: $session_before,
@@ -228,6 +354,17 @@ jq --null-input \
       root_before: $root_before,
       root_after_restore: $root_after_restore,
       root_continued: $root_continued
+    },
+    fleet_only_commit: {
+      node_log_before: $node_before.advertisement.log,
+      node_log_after: $node_fleet_only.advertisement.log,
+      response: $fleet_only_response,
+      restored_labels: $restored_labels,
+      control_before_owner_loss: $control_fleet_only,
+      owner_uncovered_bytes: $owner_uncovered_bytes,
+      follower_retained_bytes: $follower_retained_bytes,
+      immutable_object_put_rejected: true,
+      owner_disk_removed_before_policy_restore: true
     },
     capacity: {node_a: $capacity_a, node_b: $capacity_b, node_c: $capacity_c}
   }'

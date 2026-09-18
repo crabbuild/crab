@@ -8,7 +8,9 @@ unset GIT_CURL_VERBOSE GIT_TRACE GIT_TRACE_CURL GIT_TRACE_CURL_NO_DATA \
 usage() {
   echo "usage: qualify-kubernetes.sh PROVIDER NAMESPACE DEPLOYMENT HTTPS_ORIGIN OWNER REPOSITORY EVIDENCE_FILE" >&2
   echo "Set CRAB_HTTP_SERVER_GIT_TOKEN, CRAB_HTTP_SERVER_EXPECTED_IMAGE, CRAB_HTTP_SERVER_EXPECTED_CHART," >&2
-  echo "CRAB_HTTP_SERVER_RELEASE_TAG, CRAB_HTTP_SERVER_SOURCE_SHA, CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true," >&2
+  echo "CRAB_HTTP_SERVER_RELEASE_TAG, CRAB_HTTP_SERVER_SOURCE_SHA, CRAB_HTTP_SERVER_NODE_PROFILE," >&2
+  echo "CRAB_HTTP_SERVER_LOAD_GENERATOR pointing to the tagged-source load executable," >&2
+  echo "CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true," >&2
   echo "and CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true." >&2
   exit 2
 }
@@ -50,6 +52,19 @@ if [[ ! "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
   echo "CRAB_HTTP_SERVER_SOURCE_SHA must be a lowercase 40-character Git commit." >&2
   exit 2
 fi
+node_profile="${CRAB_HTTP_SERVER_NODE_PROFILE:?set CRAB_HTTP_SERVER_NODE_PROFILE to small, medium, or large}"
+case "$node_profile" in
+  small | medium | large) ;;
+  *)
+    echo "CRAB_HTTP_SERVER_NODE_PROFILE must be small, medium, or large." >&2
+    exit 2
+    ;;
+esac
+load_generator="${CRAB_HTTP_SERVER_LOAD_GENERATOR:?set CRAB_HTTP_SERVER_LOAD_GENERATOR to the tagged-source load executable}"
+test -x "$load_generator" || {
+  echo "CRAB_HTTP_SERVER_LOAD_GENERATOR must be executable." >&2
+  exit 2
+}
 
 case "$provider" in
   eks | gke | aks) ;;
@@ -277,7 +292,8 @@ jq --exit-status '
   (.spec.template.spec.containers[] | select(.name == "crab-http-server") |
     (.image | test("@sha256:[0-9a-f]{64}$")) and
     (.args == ["--config", "/etc/crab/http-server/server.toml",
-      "--peer-advertise-host", "$(CRAB_POD_IP)"]) and
+      "--peer-advertise-host", "$(CRAB_POD_IP)",
+      "--cell-failure-host", "$(CRAB_NODE_NAME)"]) and
     (.securityContext.allowPrivilegeEscalation == false) and
     (.securityContext.readOnlyRootFilesystem == true) and
     (.securityContext.capabilities.drop == ["ALL"]) and
@@ -287,6 +303,7 @@ jq --exit-status '
       "/etc/crab/http-server/server.toml", "healthcheck"]) and
     (.livenessProbe.tcpSocket.port == "management") and
     any(.env[]?; .name == "CRAB_POD_IP" and .valueFrom.fieldRef.fieldPath == "status.podIP") and
+    any(.env[]?; .name == "CRAB_NODE_NAME" and .valueFrom.fieldRef.fieldPath == "spec.nodeName") and
     any(.volumeMounts[]?; .name == "scratch" and .mountPath == "/var/lib/crab") and
     all(.env[]?; (.name | forbidden_cloud_env | not)) and
     (.lifecycle.preStop.exec.command == ["/usr/bin/sleep", "15"])) and
@@ -298,6 +315,12 @@ jq --exit-status '
     any(.projected.sources[]?.secret.items[]?; .path == "peer/tls.key") and
     any(.projected.sources[]?.secret.items[]?; .path == "peer/ca.crt"))
 ' "$deployment_json" >/dev/null
+scratch_limit_bytes="$(jq --exit-status --raw-output '
+  .spec.template.spec.volumes[] |
+  select(.name == "scratch") |
+  .emptyDir.sizeLimit | tonumber
+' "$deployment_json")"
+test "$scratch_limit_bytes" -gt 0
 release_version="${release_tag#crab-http-server-v}"
 expected_chart_label="crab-http-server-${release_version}"
 jq --exit-status \
@@ -482,6 +505,9 @@ capture_capacity_envelopes() {
   jq --slurp . "$entries" > "$output"
   jq --exit-status --arg phase "$phase" --from-file \
     "$(dirname -- "$0")/validate-capacity-envelope.jq" "$output" >/dev/null
+  jq --exit-status --arg profile "$node_profile" \
+    --argjson disk_limit_bytes "$scratch_limit_bytes" --from-file \
+    "$(dirname -- "$0")/validate-node-profile.jq" "$output" >/dev/null
 }
 
 check_workload_identity() {
@@ -579,6 +605,7 @@ check_workload_identity
 check_management_isolation
 check_pod_health
 capacity_before_traffic="${work_dir}/capacity-before-traffic.json"
+capacity_after_load="${work_dir}/capacity-after-load.json"
 capacity_after_rollout="${work_dir}/capacity-after-rollout.json"
 capacity_after_owner_loss="${work_dir}/capacity-after-owner-loss.json"
 capture_capacity_envelopes before-traffic "$capacity_before_traffic"
@@ -697,10 +724,49 @@ git -C "$client" config "lfs.${remote_public}/info/lfs.locksverify" true
 printf 'second revision %s\n' "$qualification_id" >> "${client}/${payload}"
 git -C "$client" add "$payload"
 git -C "$client" commit --message "Qualify durable LFS lock owner write"
-final_oid="$(git -C "$client" rev-parse HEAD)"
+load_oids="${work_dir}/load-oids"
+: > "$load_oids"
+for commit_index in $(seq 1 192); do
+  git -C "$client" commit --allow-empty \
+    --message "Prepare load target ${commit_index}" >/dev/null
+  git -C "$client" rev-parse HEAD >> "$load_oids"
+done
+test "$(wc -l < "$load_oids" | tr -d '[:space:]')" = 192
+final_oid="$(tail -1 "$load_oids")"
 git_public -C "$client" push "$remote_public" "HEAD:refs/heads/${branch}"
 git_public -C "$client" lfs unlock "$payload"
 lock_held=false
+
+load_cell_count=8
+load_targets_per_cell=24
+load_targets="${work_dir}/load-targets"
+: > "$load_targets"
+for load_cell_index in $(seq 1 "$load_cell_count"); do
+  load_repository="${repository}-load-${qualification_id}-${load_cell_index}"
+  load_client="${work_dir}/load-${load_cell_index}"
+  mkdir -p "$load_client"
+  git -C "$load_client" init --quiet
+  git -C "$load_client" config user.name "Crab load qualification"
+  git -C "$load_client" config user.email "qualification@example.invalid"
+  printf 'load Cell %s\n' "$load_cell_index" > "${load_client}/README.md"
+  git -C "$load_client" add README.md
+  git -C "$load_client" commit --quiet --message "Create load Cell ${load_cell_index}"
+  load_cell_oids="${work_dir}/load-${load_cell_index}-oids"
+  : > "$load_cell_oids"
+  git -C "$load_client" rev-parse HEAD >> "$load_cell_oids"
+  for load_commit_index in $(seq 2 "$load_targets_per_cell"); do
+    git -C "$load_client" commit --quiet --allow-empty \
+      --message "Prepare load target ${load_commit_index}"
+    git -C "$load_client" rev-parse HEAD >> "$load_cell_oids"
+  done
+  load_remote="http://127.0.0.1:${port_a}/git/${owner}/${load_repository}.git"
+  git_pod -C "$load_client" push --quiet "$load_remote" HEAD:refs/heads/main
+  while IFS= read -r load_oid; do
+    printf '%s\t%s\n' "$load_repository" "$load_oid" >> "$load_targets"
+  done < "$load_cell_oids"
+done
+test "$(wc -l < "$load_targets" | tr -d '[:space:]')" = \
+  "$((load_cell_count * load_targets_per_cell))"
 
 uuid_from_text() {
   local digest
@@ -767,6 +833,50 @@ jq --exit-status \
   '.id == $id and .status == "completed" and .conclusion == "success" and
    .output.title == "Three-node Cell qualification passed"' \
   "${work_dir}/check-replica.json" >/dev/null
+
+load_headers="${work_dir}/load-headers"
+printf 'Authorization: Basic %s\n' "$basic_token" > "$load_headers"
+load_template="${work_dir}/load-status.json"
+jq --null-input \
+  '{request_id: "{{request_id}}", context: "crab/load-qualification",
+    state: "success", description: null, target_url: null}' \
+  > "$load_template"
+load_reports_jsonl="${work_dir}/load-reports.jsonl"
+load_reports="${work_dir}/load-reports.json"
+: > "$load_reports_jsonl"
+load_ports=("$port_a" "$port_b" "$port_c")
+for pod_index in 0 1 2; do
+  load_arguments=(
+    --base-url "http://127.0.0.1:${load_ports[$pod_index]}/"
+    --authority "$public_host"
+    --header-file "$load_headers"
+    --aggregate-requests-per-second 1000
+    --duration-seconds 60
+    --warmup-seconds 5
+  )
+  target_index=0
+  while IFS=$'\t' read -r load_repository load_oid; do
+    load_arguments+=(
+      --mutation "status-${target_index}=2@/api/repos/${owner}/${load_repository}/statuses/${load_oid}|${load_template}"
+    )
+    target_index=$((target_index + 1))
+  done < <(awk -F '\t' -v pod_index="$pod_index" \
+    '((NR - 1) % 3) == pod_index { print $0 }' "$load_targets")
+  test "$target_index" = 64
+  node_report="${work_dir}/load-${pod_index}.json"
+  "$load_generator" "${load_arguments[@]}" > "$node_report"
+  pod_uid="$(jq --raw-output --arg pod "${pods[$pod_index]}" '
+    .items[] | select(.metadata.name == $pod) | .metadata.uid
+  ' "$pods_json")"
+  jq --compact-output \
+    --arg pod "${pods[$pod_index]}" --arg pod_uid "$pod_uid" \
+    '{pod: $pod, pod_uid: $pod_uid, report: .}' "$node_report" \
+    >> "$load_reports_jsonl"
+done
+jq --slurp . "$load_reports_jsonl" > "$load_reports"
+jq --exit-status --arg authority "$public_host" --from-file \
+  "$(dirname -- "$0")/validate-load-report.jq" "$load_reports" >/dev/null
+capture_capacity_envelopes after-load "$capacity_after_load"
 
 stop_forwards
 kubectl --namespace "$namespace" rollout restart "deployment/${deployment}"
@@ -995,6 +1105,7 @@ jq --null-input \
   --arg chart "$expected_chart" \
   --arg release_tag "$release_tag" \
   --arg source_sha "$source_sha" \
+  --arg node_profile "$node_profile" \
   --arg service_account "$service_account" \
   --arg workload_identity_mechanism "$workload_identity_mechanism" \
   --arg repository "${owner}/${repository}" \
@@ -1003,6 +1114,8 @@ jq --null-input \
   --arg payload_sha256 "$payload_sha256" \
   --arg status_context "$status_context" \
   --arg continuation_context "$continuation_context" \
+  --argjson load_cell_count "$load_cell_count" \
+  --argjson load_targets_per_node "$((load_cell_count * load_targets_per_cell / 3))" \
   --arg owner_pod_uid "$owner_pod_uid" \
   --arg owner_session_before "$owner_session_before" \
   --arg owner_session_after "$(jq --raw-output '.owner.session' "$control_after")" \
@@ -1019,14 +1132,18 @@ jq --null-input \
   --argjson rollout_probe_failures "$probe_failures" \
   --argjson replica_count "$replica_count" \
   --argjson zone_count "$zone_count" \
+  --argjson scratch_limit_bytes "$scratch_limit_bytes" \
   --argjson old_pod_uids "$old_uids" \
   --argjson new_pod_uids "$new_uids" \
   --slurpfile capacity_before_traffic "$capacity_before_traffic" \
+  --slurpfile capacity_after_load "$capacity_after_load" \
   --slurpfile capacity_after_rollout "$capacity_after_rollout" \
   --slurpfile capacity_after_owner_loss "$capacity_after_owner_loss" \
-  '{schema: 9, provider: $provider, namespace: $namespace, deployment: $deployment,
+  --slurpfile load_reports "$load_reports" \
+  '{schema: 11, provider: $provider, namespace: $namespace, deployment: $deployment,
     origin: $origin, image: $image, chart: $chart,
     qualification_source: {release_tag: $release_tag, commit: $source_sha},
+    node_profile: $node_profile, scratch_limit_bytes: $scratch_limit_bytes,
     workload_identity: {
       service_account: $service_account,
       mechanism: $workload_identity_mechanism
@@ -1051,9 +1168,20 @@ jq --null-input \
     old_pod_uids: $old_pod_uids, new_pod_uids: $new_pod_uids,
     capacity: {
       before_traffic: $capacity_before_traffic[0],
+      after_load: $capacity_after_load[0],
       after_rollout: $capacity_after_rollout[0],
       after_owner_loss: $capacity_after_owner_loss[0]
     },
+    load_workload: {
+      aggregate_requests_per_second_per_node: 1000,
+      duration_seconds: 60,
+      database_count: $load_cell_count,
+      commit_targets_per_node: $load_targets_per_node,
+      commit_targets_per_cell: $load_targets_per_cell,
+      configured_requests_per_cell_per_node: (1000 / $load_cell_count),
+      transaction: "repository commit status insert"
+    },
+    load: $load_reports[0],
     rollout_probes: $rollout_probes,
     rollout_probe_failures: $rollout_probe_failures,
     checks: {
@@ -1064,6 +1192,8 @@ jq --null-input \
       workload_identity_only: true,
       management_network_isolation: true,
       capacity_envelopes: true,
+      node_profile_resources: true,
+      aggregate_node_load: true,
       cross_replica_git: true,
       cross_replica_lfs: true,
       durable_lfs_lock: true,

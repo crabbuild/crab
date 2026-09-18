@@ -105,7 +105,10 @@ management_listen = "0.0.0.0:8789"
 
 [cells]
 data_dir = "/var/lib/crab/cells"
+local_disk_limit_bytes = 34359738368
 peer_advertise = "https://10.42.3.17:8789"
+failure_zone = "us-west-2a"
+failure_host = "worker-17"
 peer_tls_server_name = "crab-http-server-peer"
 peer_certificate = "/run/secrets/crab-peer/tls.crt"
 peer_private_key = "/run/secrets/crab-peer/tls.key"
@@ -116,6 +119,12 @@ peer_ca = "/run/secrets/crab-peer/ca.crt"
 node-specific Pod IP. The peer client still verifies the CA chain, the server
 authentication EKU, and that DNS name; it then pins the exact enrolled leaf and
 Ed25519 key before sending the request. It does not disable TLS verification.
+
+`failure_zone` and `failure_host` are optional signed placement labels. Missing
+labels never claim independence; known unequal labels are preferred before the
+rendezvous tie-break. Kubernetes supplies `spec.nodeName` as the host label.
+Pass `--cell-failure-zone` only from trusted platform topology metadata; the
+standard Downward API does not expose a node's zone label.
 
 The target may split peer traffic onto 8790 after the Helm, probe and certificate
 contracts are changed together. That is an operational isolation change, not a
@@ -242,6 +251,13 @@ executor or all restore slots.
 Use weighted admission based on estimated disk requirement for restores and
 snapshots. `emptyDir.sizeLimit` alone does not reserve node disk. Account for
 Kubernetes ephemeral-storage requests/limits and eviction pressure.
+
+The Helm chart renders one integer `scratch.sizeBytes` into both
+`cells.local_disk_limit_bytes` and `emptyDir.sizeLimit`. Crab clamps reported
+filesystem capacity and availability to that limit and uses the result for
+runtime admission and follower-capacity advertisements; kubelet independently
+enforces the same ceiling. Node ephemeral-storage capacity still has to cover
+that Pod limit.
 
 The implemented node split assigns one third of usable startup disk to
 one-MiB full-job scratch permits and two thirds to a byte-precise shared budget.

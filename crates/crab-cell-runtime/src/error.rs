@@ -52,6 +52,10 @@ pub enum Error {
     PeerAuthorization(&'static str),
     #[error("invalid Cell node advertisement: {0}")]
     Node(&'static str),
+    #[error("Cell follower storage failed")]
+    FollowerIo(#[from] std::io::Error),
+    #[error("failed to join Cell follower storage worker")]
+    FollowerWorkerJoin(#[source] tokio::task::JoinError),
     #[error("Cell runtime SQLite schema failed")]
     Sqlite(#[from] rusqlite::Error),
     #[error("Cell SQL returned invalid UTF-8 text")]
@@ -70,6 +74,8 @@ pub enum Error {
     Fenced,
     #[error("Cell runtime worker pool is closed")]
     RuntimeClosed,
+    #[error("Cell state stream was cancelled")]
+    StreamCancelled,
     #[error("Cell is not active on its assigned worker")]
     CellNotActive,
     #[error("Cell is already active on its assigned worker")]

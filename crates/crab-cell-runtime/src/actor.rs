@@ -2,8 +2,8 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        Arc, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -17,10 +17,13 @@ mod handle;
 pub use handle::CellHandle;
 use handle::{CellAdmission, WorkAdmission};
 
+use crate::executor::{MAX_PENDING_PUBLICATIONS, PENDING_PUBLICATION_HIGH_WATER_BYTES};
+use crate::publication::{CellDurabilitySubmitter, NodeDurabilitySlot, PendingDurability};
 use crate::{
-    CatalogProof, CellAuthority, CellId, CellPublisher, Digest, Error, InboxDelivery,
-    MigrationOutcome, MigrationPlan, MutationIdentity, Owner, Resolution, SessionId, SqlWorkerPool,
-    StoredOutcome, Transition, VersionedControl, WorkerExecution,
+    ApplicationId, CatalogProof, CellAuthority, CellId, CellPublisher, Digest, Error,
+    InboxDelivery, MigrationOutcome, MigrationPlan, MutationIdentity, NodeDurability,
+    NodeLeaseGuard, Owner, PendingCommit, Resolution, SessionId, SqlWorkerPool, StoredOutcome,
+    Transition, VersionedControl, WorkerExecution,
     worker::{CellReservation, Handler, Initializer, QueryHandler, WorkerState},
 };
 
@@ -29,7 +32,6 @@ const CELL_REQUESTS: usize = 64;
 const CELL_BYTES: usize = 8 * 1024 * 1024;
 const RENEWAL_SCAN: std::time::Duration = std::time::Duration::from_millis(100);
 const MAX_RENEWALS_IN_FLIGHT: usize = 32;
-const TAKEOVER_OBSERVATION: std::time::Duration = std::time::Duration::from_secs(15);
 const SQL_WALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Conservative per-active-Cell reservation for actor state and native tasks.
@@ -59,6 +61,7 @@ pub struct CellRuntimeStats {
     retained_capacity_bytes: usize,
     local_disk_reserved_bytes: u64,
     local_disk_capacity_bytes: u64,
+    unpublished_node_log_bytes: u64,
 }
 
 impl CellRuntimeStats {
@@ -97,6 +100,12 @@ impl CellRuntimeStats {
     pub const fn local_disk_capacity_bytes(self) -> u64 {
         self.local_disk_capacity_bytes
     }
+
+    /// Returns owner bytes submitted to node logs but not covered by object roots.
+    #[must_use]
+    pub const fn unpublished_node_log_bytes(self) -> u64 {
+        self.unpublished_node_log_bytes
+    }
 }
 
 /// New capability and publication receipt returned by one schema migration.
@@ -113,6 +122,42 @@ pub(super) struct RuntimeInner {
     session: SessionId,
     pool: SqlWorkerPool,
     replica_host: crab_ltx::Host,
+    node_lease: Arc<RuntimeNodeLease>,
+    node_durability: NodeDurabilitySlot,
+    telemetry: crate::CellTelemetryHandle,
+    unpublished_node_log_bytes: Arc<AtomicU64>,
+}
+
+enum RuntimeNodeLease {
+    ObjectOnly,
+    Required(OnceLock<NodeLeaseGuard>),
+}
+
+impl RuntimeNodeLease {
+    fn check(&self) -> crate::Result<()> {
+        match self {
+            Self::ObjectOnly => Ok(()),
+            Self::Required(guard) => guard.get().ok_or(Error::Fenced)?.check(),
+        }
+    }
+
+    fn guard(&self) -> crate::Result<Option<NodeLeaseGuard>> {
+        match self {
+            Self::ObjectOnly => Ok(None),
+            Self::Required(guard) => guard.get().cloned().map(Some).ok_or(Error::Fenced),
+        }
+    }
+
+    fn install(&self, guard: NodeLeaseGuard) -> crate::Result<()> {
+        match self {
+            Self::ObjectOnly => Err(Error::Control(
+                "object-only Cell runtime does not accept a node lease",
+            )),
+            Self::Required(slot) => slot
+                .set(guard)
+                .map_err(|_| Error::Control("Cell runtime node lease was initialized twice")),
+        }
+    }
 }
 
 impl CellRuntime {
@@ -137,12 +182,51 @@ impl CellRuntime {
         session: SessionId,
         replica_host: crab_ltx::Host,
     ) -> crate::Result<Self> {
+        Self::new_inner(
+            pool,
+            node_retained_bytes,
+            session,
+            replica_host,
+            RuntimeNodeLease::ObjectOnly,
+        )
+    }
+
+    /// Starts one dispatcher that remains fenced until its node lease is installed.
+    pub fn new_with_replica_host_requiring_node_lease(
+        pool: SqlWorkerPool,
+        node_retained_bytes: usize,
+        session: SessionId,
+        replica_host: crab_ltx::Host,
+    ) -> crate::Result<Self> {
+        Self::new_inner(
+            pool,
+            node_retained_bytes,
+            session,
+            replica_host,
+            RuntimeNodeLease::Required(OnceLock::new()),
+        )
+    }
+
+    fn new_inner(
+        pool: SqlWorkerPool,
+        node_retained_bytes: usize,
+        session: SessionId,
+        replica_host: crab_ltx::Host,
+        node_lease: RuntimeNodeLease,
+    ) -> crate::Result<Self> {
         if node_retained_bytes == 0 || node_retained_bytes > Semaphore::MAX_PERMITS {
             return Err(Error::Capacity("node retained bytes"));
         }
         let runtime = tokio::runtime::Handle::try_current().map_err(Error::RuntimeStart)?;
         let (sender, receiver) = mpsc::channel(INGRESS_REQUESTS);
-        runtime.spawn(run(receiver, pool.clone()));
+        let node_lease = Arc::new(node_lease);
+        let unpublished_node_log_bytes = Arc::new(AtomicU64::new(0));
+        runtime.spawn(run(
+            receiver,
+            pool.clone(),
+            Arc::clone(&node_lease),
+            Arc::clone(&unpublished_node_log_bytes),
+        ));
         Ok(Self {
             inner: Arc::new(RuntimeInner {
                 sender,
@@ -152,8 +236,90 @@ impl CellRuntime {
                 session,
                 pool,
                 replica_host,
+                node_lease,
+                node_durability: Arc::new(std::sync::RwLock::new(None)),
+                telemetry: crate::CellTelemetryHandle::default(),
+                unpublished_node_log_bytes,
             }),
         })
+    }
+
+    /// Installs the process telemetry sink before Cell work begins.
+    pub fn install_telemetry(&self, telemetry: Arc<dyn crate::CellTelemetry>) -> crate::Result<()> {
+        self.inner.telemetry.install(telemetry)
+    }
+
+    /// Returns the shared sink used by node-log components for this runtime.
+    #[must_use]
+    pub fn telemetry_handle(&self) -> crate::CellTelemetryHandle {
+        self.inner.telemetry.clone()
+    }
+
+    /// Installs the successfully published process lease before Cell admission opens.
+    pub fn install_node_lease(&self, guard: NodeLeaseGuard) -> crate::Result<()> {
+        if self.inner.shutting_down.load(Ordering::Acquire) {
+            return Err(Error::RuntimeClosed);
+        }
+        self.inner.node_lease.install(guard)
+    }
+
+    /// Installs the one recruited node-log epoch used by newly activated Cells.
+    pub fn install_node_durability(
+        &self,
+        application: ApplicationId,
+        durability: Arc<NodeDurability>,
+    ) -> crate::Result<()> {
+        self.ensure_running()?;
+        let mut slot = self
+            .inner
+            .node_durability
+            .write()
+            .map_err(|_| Error::Control("Cell runtime node durability lock poisoned"))?;
+        if slot.is_some() {
+            return Err(Error::Control(
+                "Cell runtime node durability was initialized twice",
+            ));
+        }
+        *slot = Some((application, durability));
+        Ok(())
+    }
+
+    /// Returns the currently installed node-log durability binding.
+    #[must_use]
+    pub fn node_durability(&self) -> Option<(ApplicationId, Arc<NodeDurability>)> {
+        self.inner
+            .node_durability
+            .read()
+            .ok()
+            .and_then(|slot| slot.clone())
+    }
+
+    /// Replaces the active node-log durability binding after an epoch close.
+    pub fn replace_node_durability(
+        &self,
+        application: ApplicationId,
+        durability: Arc<NodeDurability>,
+    ) -> crate::Result<Arc<NodeDurability>> {
+        self.ensure_running()?;
+        let mut slot = self
+            .inner
+            .node_durability
+            .write()
+            .map_err(|_| Error::Control("Cell runtime node durability lock poisoned"))?;
+        let Some((installed_application, _)) = slot.as_ref() else {
+            return Err(Error::Control(
+                "Cell runtime node durability is not installed",
+            ));
+        };
+        if *installed_application != application {
+            return Err(Error::Control(
+                "Cell runtime node durability application changed",
+            ));
+        }
+        let (_, previous) = slot
+            .replace((application, durability))
+            .ok_or(Error::Control("Cell runtime node durability disappeared"))?;
+        Ok(previous)
     }
 
     /// Stops admission, drains accepted work, closes every Cell, and releases ownership.
@@ -175,10 +341,11 @@ impl CellRuntime {
             .map_err(|_| Error::RuntimeClosed)?;
         let drain = response.await.map_err(|_| Error::RuntimeClosed)?;
         let workers = self.inner.pool.shutdown().await;
-        match drain {
-            Err(error) => Err(error),
-            Ok(()) => workers,
-        }
+        let durability = match self.node_durability() {
+            Some((_, durability)) => durability.shutdown().await,
+            None => Ok(()),
+        };
+        drain.and(workers).and(durability)
     }
 
     /// Reports whether node-wide admission has entered its terminal drain.
@@ -201,6 +368,10 @@ impl CellRuntime {
             retained_capacity_bytes: self.inner.node_retained_bytes,
             local_disk_reserved_bytes: self.inner.replica_host.local_disk_used(),
             local_disk_capacity_bytes: self.inner.replica_host.local_disk_capacity(),
+            unpublished_node_log_bytes: self
+                .inner
+                .unpublished_node_log_bytes
+                .load(Ordering::Acquire),
         }
     }
 
@@ -316,12 +487,17 @@ impl CellRuntime {
     }
 
     /// Takes over an unchanged unpublished owner, initializes and publishes the Cell.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the takeover boundary keeps every authority and activation input explicit"
+    )]
     pub async fn takeover_unpublished<F>(
         &self,
         catalog: CatalogProof,
         replica: crab_ltx::CellReplica,
         authority: CellAuthority,
         mut observed: VersionedControl,
+        takeover: crate::NodeTakeoverProof,
         destination: PathBuf,
         owner: Owner,
         initialize: F,
@@ -335,6 +511,9 @@ impl CellRuntime {
     {
         self.ensure_running()?;
         let cell = self.claiming_cell(&catalog, &observed, &owner)?;
+        if owner.session != takeover.claimant() {
+            return Err(Error::Fenced);
+        }
         loop {
             if observed.value().state != crate::ControlState::Recovering
                 || observed.value().owner.is_none()
@@ -344,7 +523,11 @@ impl CellRuntime {
                     "unpublished takeover requires an active rootless control",
                 ));
             }
-            tokio::time::sleep(TAKEOVER_OBSERVATION).await;
+            if observed.value().owner.as_ref().map(|owner| owner.session)
+                != Some(takeover.session())
+            {
+                return Err(Error::Fenced);
+            }
             self.ensure_running()?;
             let current = authority.load(cell).await?.ok_or(Error::Fenced)?;
             if current.value() != observed.value() {
@@ -402,9 +585,14 @@ impl CellRuntime {
         replica: crab_ltx::CellReplica,
         authority: CellAuthority,
         observed: VersionedControl,
+        recovery_store: crate::RecoveryManifestStore,
         destination: PathBuf,
     ) -> crate::Result<CellHandle> {
         self.ensure_running()?;
+        self.activation_cell(&catalog, &observed)?;
+        let observed = self
+            .publish_attached_recovery(&replica, &authority, observed, &recovery_store)
+            .await?;
         let reservation = self.inner.pool.reserve_activation()?;
         self.activate_restored_reserved(
             catalog,
@@ -466,18 +654,27 @@ impl CellRuntime {
         .await
     }
 
-    /// Takes over an unchanged owner after the fixed observation interval.
+    /// Takes over an unchanged owner after its exact node session is fenced.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the takeover boundary keeps every authority, recovery and activation input explicit"
+    )]
     pub async fn takeover_restored(
         &self,
         catalog: CatalogProof,
         replica: crab_ltx::CellReplica,
         authority: CellAuthority,
         mut observed: VersionedControl,
+        takeover: crate::NodeTakeoverProof,
+        recovery_store: crate::RecoveryManifestStore,
         destination: PathBuf,
         owner: Owner,
     ) -> crate::Result<CellHandle> {
         self.ensure_running()?;
         let cell = self.claiming_cell(&catalog, &observed, &owner)?;
+        if owner.session != takeover.claimant() {
+            return Err(Error::Fenced);
+        }
         loop {
             if !matches!(
                 observed.value().state,
@@ -489,7 +686,11 @@ impl CellRuntime {
                     "takeover requires a published control with an active owner",
                 ));
             }
-            tokio::time::sleep(TAKEOVER_OBSERVATION).await;
+            if observed.value().owner.as_ref().map(|owner| owner.session)
+                != Some(takeover.session())
+            {
+                return Err(Error::Fenced);
+            }
             self.ensure_running()?;
             let current = authority.load(cell).await?.ok_or(Error::Fenced)?;
             if current.value() != observed.value() {
@@ -519,6 +720,9 @@ impl CellRuntime {
                     }
                 }
             };
+            let claimed = self
+                .publish_attached_recovery(&replica, &authority, claimed, &recovery_store)
+                .await?;
             return self
                 .activate_restored_reserved(
                     catalog,
@@ -529,6 +733,49 @@ impl CellRuntime {
                     reservation,
                 )
                 .await;
+        }
+    }
+
+    async fn publish_attached_recovery(
+        &self,
+        replica: &crab_ltx::CellReplica,
+        authority: &CellAuthority,
+        observed: VersionedControl,
+        recovery_store: &crate::RecoveryManifestStore,
+    ) -> crate::Result<VersionedControl> {
+        let Some(recovery) = observed.value().recovery.as_ref() else {
+            return Ok(observed);
+        };
+        let overlay = recovery_store
+            .load_overlay(
+                observed.value().cell,
+                observed.value().incarnation,
+                recovery,
+            )
+            .await?;
+        let prepared = replica
+            .prepare_recovered_overlay(&overlay, observed.value().schema)
+            .await?;
+        self.ensure_running()?;
+        let successor = observed
+            .value()
+            .publish_recovery(&prepared, observed.value().next_due_ms)?;
+        match authority
+            .transition(&observed, successor.clone(), Transition::PublishRecovery)
+            .await
+        {
+            Ok(published) => Ok(published),
+            Err(error) => {
+                let current = authority
+                    .load(observed.value().cell)
+                    .await?
+                    .ok_or(Error::Fenced)?;
+                if current.value() == &successor {
+                    Ok(current)
+                } else {
+                    Err(error)
+                }
+            }
         }
     }
 
@@ -625,7 +872,7 @@ impl CellRuntime {
         if self.inner.shutting_down.load(Ordering::Acquire) {
             return Err(Error::RuntimeClosed);
         }
-        Ok(())
+        self.inner.node_lease.check()
     }
 
     async fn activate_inner(
@@ -648,17 +895,18 @@ impl CellRuntime {
         .ok_or(Error::Control("Cell activation destination has no parent"))?
         .to_owned();
         let (reply, response) = oneshot::channel();
+        let mut publisher = CellPublisher::new(replica, authority, observed, scratch_directory);
+        if let Some(node_lease) = self.inner.node_lease.guard()? {
+            publisher = publisher.with_node_lease(node_lease);
+        }
+        publisher = publisher.with_node_durability_slot(Arc::clone(&self.inner.node_durability));
+        publisher = publisher.with_telemetry(self.inner.telemetry.clone());
         self.inner
             .sender
             .send(Message::Activate {
                 cell,
                 activation,
-                publisher: Box::new(CellPublisher::new(
-                    replica,
-                    authority,
-                    observed,
-                    scratch_directory,
-                )),
+                publisher: Box::new(publisher),
                 reply,
             })
             .await
@@ -788,6 +1036,7 @@ struct QueuedResolve {
 struct QueuedMigration {
     cell: CellId,
     admission: Arc<CellAdmission>,
+    successor_admission: Arc<CellAdmission>,
     plan: MigrationPlan,
     now_ms: i64,
     reply: Option<oneshot::Sender<crate::Result<MigratedAdmission>>>,
@@ -824,6 +1073,11 @@ struct ActiveCell {
     schema: u32,
     interrupt: Arc<crab_ltx::rusqlite::InterruptHandle>,
     publisher: Option<CellPublisher>,
+    durability_submitter: CellDurabilitySubmitter,
+    publications: VecDeque<QueuedPublication>,
+    publication_count: usize,
+    publication_bytes: u64,
+    unpublished_node_logs: usize,
     queue: VecDeque<QueuedWork>,
     busy: bool,
     renewing: bool,
@@ -831,6 +1085,13 @@ struct ActiveCell {
     drain: Option<oneshot::Sender<crate::Result<()>>>,
     migrating: bool,
     shutdown_drain: bool,
+}
+
+struct QueuedPublication {
+    pending: PendingCommit,
+    durability: Option<PendingDurability>,
+    submitted_at: std::time::Instant,
+    proof: oneshot::Sender<crate::Result<()>>,
 }
 
 impl ActiveCell {
@@ -862,9 +1123,22 @@ enum TaskResult {
     },
     Executed {
         cell: CellId,
-        publisher: Box<CellPublisher>,
+        command: Box<QueuedCommand>,
+        result: crate::Result<CommandTaskResult>,
+        fenced: bool,
+    },
+    Proven {
+        cell: CellId,
         command: Box<QueuedCommand>,
         result: crate::Result<StoredOutcome>,
+        fenced: bool,
+    },
+    Published {
+        cell: CellId,
+        publisher: Box<CellPublisher>,
+        retained_bytes: u64,
+        node_logged: bool,
+        result: crate::Result<()>,
         fenced: bool,
     },
     Queried {
@@ -885,6 +1159,8 @@ enum TaskResult {
         migration: Box<QueuedMigration>,
         result: crate::Result<MigrationOutcome>,
         fenced: bool,
+        preserve_owner: bool,
+        unpublished_bytes: u64,
     },
     Renewed {
         cell: CellId,
@@ -899,7 +1175,20 @@ enum TaskResult {
     },
 }
 
-async fn run(mut receiver: mpsc::Receiver<Message>, pool: SqlWorkerPool) {
+enum CommandTaskResult {
+    Recorded(StoredOutcome),
+    Pending {
+        pending: Box<PendingCommit>,
+        durability: Option<PendingDurability>,
+    },
+}
+
+async fn run(
+    mut receiver: mpsc::Receiver<Message>,
+    pool: SqlWorkerPool,
+    node_lease: Arc<RuntimeNodeLease>,
+    unpublished_node_log_bytes: Arc<AtomicU64>,
+) {
     let mut cells = HashMap::<CellId, ActiveCell>::new();
     let mut transitioning = HashSet::<CellId>::new();
     let mut tasks = JoinSet::<TaskResult>::new();
@@ -931,6 +1220,8 @@ async fn run(mut receiver: mpsc::Receiver<Message>, pool: SqlWorkerPool) {
                 &mut transitioning,
                 &mut tasks,
                 &mut shutdown,
+                &node_lease,
+                &unpublished_node_log_bytes,
             );
             continue;
         }
@@ -944,7 +1235,7 @@ async fn run(mut receiver: mpsc::Receiver<Message>, pool: SqlWorkerPool) {
                         }
                         break;
                     };
-                    handle_message(message, &mut receiver, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown);
+                    handle_message(message, &mut receiver, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown, &node_lease);
                 }
                 _ = renewal_tick.tick() => {
                     start_due_renewals(&pool, &mut cells, &mut tasks);
@@ -961,17 +1252,17 @@ async fn run(mut receiver: mpsc::Receiver<Message>, pool: SqlWorkerPool) {
                     }
                     while let Some(result) = tasks.join_next().await {
                         let Ok(result) = result else { return; };
-                        handle_task(result, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown);
+                        handle_task(result, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown, &node_lease, &unpublished_node_log_bytes);
                     }
                     break;
                 };
-                handle_message(message, &mut receiver, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown);
+                handle_message(message, &mut receiver, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown, &node_lease);
             }
             result = tasks.join_next() => {
                 let Some(Ok(result)) = result else {
                     return;
                 };
-                handle_task(result, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown);
+                handle_task(result, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown, &node_lease, &unpublished_node_log_bytes);
             }
             _ = renewal_tick.tick() => {
                 start_due_renewals(&pool, &mut cells, &mut tasks);
@@ -1000,13 +1291,18 @@ fn start_shutdown_drain(
         active.admission.draining.store(true, Ordering::Release);
         active.admission.requests.close();
         active.admission.bytes.close();
-        if !active.busy && !active.renewing && active.queue.is_empty() {
-            ready.push((*cell, active.fenced));
+        if !active.busy
+            && !active.renewing
+            && active.queue.is_empty()
+            && active.publication_count == 0
+            && active.publisher.is_some()
+        {
+            ready.push((*cell, active.fenced, active.unpublished_node_logs != 0));
         }
     }
-    for (cell, fenced) in ready {
+    for (cell, fenced, preserve_owner) in ready {
         if fenced {
-            start_fenced_deactivate(cell, pool, cells, transitioning, tasks);
+            start_fenced_deactivate(cell, pool, cells, transitioning, tasks, preserve_owner);
         } else {
             start_deactivate(cell, pool, cells, transitioning, tasks);
         }
@@ -1037,7 +1333,16 @@ fn handle_message(
     transitioning: &mut HashSet<CellId>,
     tasks: &mut JoinSet<TaskResult>,
     shutdown: &mut Option<ShutdownState>,
+    node_lease: &RuntimeNodeLease,
 ) {
+    if !matches!(message, Message::Shutdown { .. }) && node_lease.check().is_err() {
+        for active in cells.values_mut() {
+            active.fenced = true;
+            fence_active(active);
+        }
+        reject_fenced_message(message);
+        return;
+    }
     match message {
         Message::Activate {
             cell,
@@ -1084,7 +1389,7 @@ fn handle_message(
                 send_command_reply(&mut command, Err(Error::CellNotActive));
                 return;
             }
-            if active.fenced || active.draining() {
+            if active.fenced || active.drain.is_some() || active.shutdown_drain {
                 let error = if active.fenced {
                     Error::Fenced
                 } else {
@@ -1094,7 +1399,7 @@ fn handle_message(
                 return;
             }
             active.queue.push_back(QueuedWork::Command(command));
-            start_next(active, pool, tasks);
+            start_next(active, pool, tasks, node_lease);
         }
         Message::Query(mut query) => {
             let Some(active) = cells.get_mut(&query.cell) else {
@@ -1105,7 +1410,7 @@ fn handle_message(
                 send_query_reply(&mut query, Err(Error::CellNotActive));
                 return;
             }
-            if active.fenced || active.draining() {
+            if active.fenced || active.drain.is_some() || active.shutdown_drain {
                 let error = if active.fenced {
                     Error::Fenced
                 } else {
@@ -1115,7 +1420,7 @@ fn handle_message(
                 return;
             }
             active.queue.push_back(QueuedWork::Query(query));
-            start_next(active, pool, tasks);
+            start_next(active, pool, tasks, node_lease);
         }
         Message::Resolve(mut resolve) => {
             let Some(active) = cells.get_mut(&resolve.cell) else {
@@ -1130,12 +1435,12 @@ fn handle_message(
                 send_resolve_reply(&mut resolve, Ok(Resolution::Unknown));
                 return;
             }
-            if active.draining() {
+            if active.drain.is_some() || active.shutdown_drain {
                 send_resolve_reply(&mut resolve, Err(Error::CellDraining));
                 return;
             }
             active.queue.push_back(QueuedWork::Resolve(resolve));
-            start_next(active, pool, tasks);
+            start_next(active, pool, tasks, node_lease);
         }
         Message::Migrate(mut migration) => {
             let Some(active) = cells.get_mut(&migration.cell) else {
@@ -1165,8 +1470,9 @@ fn handle_message(
                 return;
             }
             active.migrating = true;
+            active.admission = Arc::clone(&migration.successor_admission);
             active.queue.push_back(QueuedWork::Migration(migration));
-            start_next(active, pool, tasks);
+            start_next(active, pool, tasks, node_lease);
         }
         Message::Lookup { cell, reply } => {
             let local = cells.get(&cell).and_then(|active| {
@@ -1197,7 +1503,12 @@ fn handle_message(
                 return;
             }
             active.drain = Some(reply);
-            if !active.busy && !active.renewing && active.queue.is_empty() {
+            if !active.busy
+                && !active.renewing
+                && active.queue.is_empty()
+                && active.publication_count == 0
+                && active.publisher.is_some()
+            {
                 start_deactivate(cell, pool, cells, transitioning, tasks);
             }
         }
@@ -1212,6 +1523,35 @@ fn handle_message(
                 draining: false,
                 error: None,
             });
+        }
+    }
+}
+
+fn reject_fenced_message(message: Message) {
+    match message {
+        Message::Activate { reply, .. } => {
+            let _ = reply.send(Err(Error::Fenced));
+        }
+        Message::Execute(mut command) => {
+            send_command_reply(&mut command, Err(Error::Fenced));
+        }
+        Message::Query(mut query) => {
+            send_query_reply(&mut query, Err(Error::Fenced));
+        }
+        Message::Resolve(mut resolve) => {
+            send_resolve_reply(&mut resolve, Ok(Resolution::Unknown));
+        }
+        Message::Migrate(mut migration) => {
+            send_migration_reply(&mut migration, Err(Error::Fenced));
+        }
+        Message::Lookup { reply, .. } => {
+            let _ = reply.send(None);
+        }
+        Message::Drain { reply, .. } => {
+            let _ = reply.send(Err(Error::Fenced));
+        }
+        Message::Shutdown { reply } => {
+            let _ = reply.send(Err(Error::RuntimeClosed));
         }
     }
 }
@@ -1314,9 +1654,36 @@ async fn bootstrap_and_publish(
     Ok(())
 }
 
-fn start_next(active: &mut ActiveCell, pool: &SqlWorkerPool, tasks: &mut JoinSet<TaskResult>) {
+fn start_next(
+    active: &mut ActiveCell,
+    pool: &SqlWorkerPool,
+    tasks: &mut JoinSet<TaskResult>,
+    node_lease: &RuntimeNodeLease,
+) {
     if active.busy || active.renewing || active.fenced {
         return;
+    }
+    if node_lease.check().is_err() {
+        active.fenced = true;
+        fence_active(active);
+        return;
+    }
+    let Some(work) = active.queue.front() else {
+        return;
+    };
+    match work {
+        QueuedWork::Command(_)
+            if active.publication_count >= MAX_PENDING_PUBLICATIONS
+                || active.publication_bytes >= PENDING_PUBLICATION_HIGH_WATER_BYTES =>
+        {
+            return;
+        }
+        // Migrations change the schema used to prepare roots, so they cannot
+        // cross an older command cut that still targets the current schema.
+        QueuedWork::Migration(_) if active.publication_count != 0 || active.publisher.is_none() => {
+            return;
+        }
+        _ => {}
     }
     let Some(work) = active.queue.pop_front() else {
         return;
@@ -1325,16 +1692,9 @@ fn start_next(active: &mut ActiveCell, pool: &SqlWorkerPool, tasks: &mut JoinSet
     let pool = pool.clone();
     let interrupt = active.interrupt.clone();
     match work {
-        QueuedWork::Command(mut command) => {
-            let Some(publisher) = active.publisher.take() else {
-                send_command_reply(&mut command, Err(Error::Fenced));
-                active.fenced = true;
-                active.busy = false;
-                return;
-            };
-            tasks.spawn(async move {
-                execute_and_publish(pool, Box::new(publisher), command, interrupt).await
-            });
+        QueuedWork::Command(command) => {
+            let durability = active.durability_submitter.clone();
+            tasks.spawn(async move { execute_command(pool, durability, command, interrupt).await });
         }
         QueuedWork::Query(query) => {
             tasks.spawn(async move { execute_query(pool, query, interrupt).await });
@@ -1363,6 +1723,8 @@ async fn execute_migration(
     mut migration: Box<QueuedMigration>,
     interrupt: Arc<crab_ltx::rusqlite::InterruptHandle>,
 ) -> TaskResult {
+    let mut preserve_owner = false;
+    let mut unpublished_bytes = 0;
     let deadline = std::time::Instant::now() + SQL_WALL_DEADLINE;
     let operation = pool.migrate(migration.cell, migration.plan, migration.now_ms, deadline);
     tokio::pin!(operation);
@@ -1380,26 +1742,75 @@ async fn execute_migration(
                 migration,
                 result: Err(Error::Deadline),
                 fenced: true,
+                preserve_owner: false,
+                unpublished_bytes: 0,
             };
         }
     };
     let result = match pending {
         Ok(pending) => {
-            async {
-                let prepared = publisher.prepare_migration(&pending).await?;
-                pool.bind_migration_prepared(migration.cell, prepared.clone())
-                    .await?;
-                let root = publisher
-                    .publish_migration(
-                        &prepared,
-                        pending.next_due_ms(),
-                        pending.code(),
-                        pending.to_schema(),
-                    )
-                    .await?;
-                pool.confirm_migration_published(migration.cell, root).await
+            let durability_started = std::time::Instant::now();
+            let durability = publisher.submit_migration_durability(&pending).await;
+            match durability {
+                Err(error) => Err(error),
+                Ok(durability) => {
+                    let node_logged = durability.is_some();
+                    let retained_bytes = pending.retained_bytes();
+                    let cell = migration.cell;
+                    let early_outcome = MigrationOutcome {
+                        code: pending.code(),
+                        schema: pending.to_schema(),
+                        commit_sequence: pending.commit_sequence(),
+                    };
+                    let object = async {
+                        let prepared = publisher.prepare_migration(&pending).await?;
+                        pool.bind_migration_prepared(cell, prepared.clone()).await?;
+                        let root = publisher
+                            .publish_migration(
+                                &prepared,
+                                pending.next_due_ms(),
+                                pending.code(),
+                                pending.to_schema(),
+                            )
+                            .await?;
+                        if let Some(durability) = durability.as_ref() {
+                            durability.prove_object().await?;
+                        } else {
+                            publisher.record_object_proof(durability_started.elapsed());
+                        }
+                        pool.confirm_migration_published(cell, root).await
+                    };
+                    tokio::pin!(object);
+                    let result = match durability.as_ref() {
+                        Some(durability) => {
+                            let fleet = durability.prove_fleet();
+                            tokio::pin!(fleet);
+                            tokio::select! {
+                                result = &mut object => result,
+                                fleet = &mut fleet => {
+                                    if fleet.is_ok() {
+                                        let admission = Arc::clone(&migration.successor_admission);
+                                        send_migration_reply(
+                                            &mut migration,
+                                            Ok(MigratedAdmission {
+                                                admission,
+                                                outcome: early_outcome,
+                                            }),
+                                        );
+                                    }
+                                    object.await
+                                }
+                            }
+                        }
+                        None => object.await,
+                    };
+                    preserve_owner = node_logged && result.is_err();
+                    if preserve_owner {
+                        unpublished_bytes = retained_bytes;
+                    }
+                    result
+                }
             }
-            .await
         }
         Err(error) => Err(error),
     };
@@ -1413,12 +1824,14 @@ async fn execute_migration(
         migration,
         result,
         fenced,
+        preserve_owner,
+        unpublished_bytes,
     }
 }
 
-async fn execute_and_publish(
+async fn execute_command(
     pool: SqlWorkerPool,
-    mut publisher: Box<CellPublisher>,
+    durability: CellDurabilitySubmitter,
     mut command: Box<QueuedCommand>,
     interrupt: Arc<crab_ltx::rusqlite::InterruptHandle>,
 ) -> TaskResult {
@@ -1474,7 +1887,6 @@ async fn execute_and_publish(
                     let _ = pool.fence(command.cell).await;
                     return TaskResult::Executed {
                         cell: command.cell,
-                        publisher,
                         command,
                         result: Err(Error::Deadline),
                         fenced: true,
@@ -1485,17 +1897,15 @@ async fn execute_and_publish(
         None => Err(Error::Fenced),
     };
     let (result, must_fence) = match execution {
-        Ok(WorkerExecution::Recorded(outcome)) => (Ok(outcome), false),
+        Ok(WorkerExecution::Recorded(outcome)) => (Ok(CommandTaskResult::Recorded(outcome)), false),
         Ok(WorkerExecution::Pending(pending)) => {
-            let result = async {
-                let prepared = publisher.prepare(&pending).await?;
-                pool.bind_prepared(command.cell, prepared.clone()).await?;
-                let root = publisher
-                    .publish_prepared(&prepared, pending.next_due_ms())
-                    .await?;
-                pool.confirm_published(command.cell, root).await
-            }
-            .await;
+            let result = durability
+                .submit(pending.outcome().commit_sequence(), pending.cuts())
+                .await
+                .map(|durability| CommandTaskResult::Pending {
+                    pending,
+                    durability,
+                });
             (result, true)
         }
         Err(error) => (
@@ -1514,11 +1924,129 @@ async fn execute_and_publish(
     };
     TaskResult::Executed {
         cell: command.cell,
-        publisher,
         command,
         result,
         fenced,
     }
+}
+
+async fn prove_command(
+    pool: SqlWorkerPool,
+    command: Box<QueuedCommand>,
+    outcome: StoredOutcome,
+    commit_sequence: u64,
+    durability: Option<PendingDurability>,
+    mut object: oneshot::Receiver<crate::Result<()>>,
+) -> TaskResult {
+    let proof = match durability {
+        Some(durability) => {
+            let fleet_or_object = durability.prove();
+            tokio::pin!(fleet_or_object);
+            tokio::select! {
+                object = &mut object => match receive_publication_proof(object) {
+                    Ok(()) => Ok(()),
+                    // Object publication failure does not invalidate an
+                    // independently fsynced follower proof for this cut.
+                    Err(_) => fleet_or_object.await.map(|_| ()),
+                },
+                result = &mut fleet_or_object => match result {
+                    Ok(()) => Ok(()),
+                    // Losing the follower path does not invalidate the same
+                    // cut's object publication, which remains the fallback.
+                    Err(_) => receive_publication_proof(object.await),
+                }
+            }
+        }
+        None => receive_publication_proof(object.await),
+    };
+    let result = match proof {
+        Ok(()) => pool
+            .confirm_durable(command.cell, commit_sequence)
+            .await
+            .map(|()| outcome),
+        Err(error) => Err(error),
+    };
+    let fenced = result.is_err();
+    if fenced {
+        let _ = pool.fence(command.cell).await;
+    }
+    let result = if fenced {
+        result.map_err(|source| command.operation.unknown(source))
+    } else {
+        result
+    };
+    TaskResult::Proven {
+        cell: command.cell,
+        command,
+        result,
+        fenced,
+    }
+}
+
+fn receive_publication_proof(
+    result: std::result::Result<crate::Result<()>, oneshot::error::RecvError>,
+) -> crate::Result<()> {
+    result.map_err(|_| Error::RuntimeClosed)?
+}
+
+fn start_publication(
+    cell: CellId,
+    active: &mut ActiveCell,
+    pool: &SqlWorkerPool,
+    tasks: &mut JoinSet<TaskResult>,
+) {
+    if active.fenced {
+        return;
+    }
+    let Some(mut publisher) = active.publisher.take() else {
+        return;
+    };
+    let Some(publication) = active.publications.pop_front() else {
+        active.publisher = Some(publisher);
+        return;
+    };
+    let node_logged = publication.durability.is_some();
+    // Moving the publisher out of ActiveCell is the serialization token for
+    // root preparation and CAS; no second object publisher can overtake it.
+    let pool = pool.clone();
+    tasks.spawn(async move {
+        let retained_bytes = publication.pending.retained_bytes();
+        let result = async {
+            let expected = publication.pending.outcome().clone();
+            let prepared = publisher.prepare(&publication.pending).await?;
+            pool.bind_prepared(cell, prepared.clone()).await?;
+            let root = publisher
+                .publish_prepared(&prepared, publication.pending.next_due_ms())
+                .await?;
+            if let Some(durability) = publication.durability.as_ref() {
+                durability.prove_object().await?;
+            } else {
+                publisher.record_object_proof(publication.submitted_at.elapsed());
+            }
+            let published = pool.confirm_published(cell, root).await?;
+            if published != expected {
+                return Err(Error::Control(
+                    "published result does not match queued commit",
+                ));
+            }
+            Ok(())
+        }
+        .await;
+        let fenced = result.is_err();
+        let proof = if fenced { Err(Error::Fenced) } else { Ok(()) };
+        let _ = publication.proof.send(proof);
+        if fenced {
+            let _ = pool.fence(cell).await;
+        }
+        TaskResult::Published {
+            cell,
+            publisher: Box::new(publisher),
+            retained_bytes,
+            node_logged,
+            result,
+            fenced,
+        }
+    });
 }
 
 async fn execute_query(
@@ -1640,6 +2168,8 @@ fn handle_task(
     transitioning: &mut HashSet<CellId>,
     tasks: &mut JoinSet<TaskResult>,
     shutdown: &mut Option<ShutdownState>,
+    node_lease: &RuntimeNodeLease,
+    unpublished_node_log_bytes: &AtomicU64,
 ) {
     match result {
         TaskResult::Activated {
@@ -1650,6 +2180,12 @@ fn handle_task(
             result,
         } => match result {
             Ok(interrupt) => {
+                if node_lease.check().is_err() {
+                    fence_admission(&admission);
+                    let _ = reply.send(Err(Error::Fenced));
+                    start_orphan_deactivate(cell, pool, *publisher, transitioning, tasks, false);
+                    return;
+                }
                 if shutdown.as_ref().is_some_and(|state| state.draining) {
                     admission.draining.store(true, Ordering::Release);
                     admission.requests.close();
@@ -1667,6 +2203,7 @@ fn handle_task(
                 let incarnation = control.incarnation;
                 let code = control.code;
                 let schema = control.schema;
+                let durability_submitter = publisher.durability_submitter();
                 cells.insert(
                     cell,
                     ActiveCell {
@@ -1676,6 +2213,11 @@ fn handle_task(
                         schema,
                         interrupt,
                         publisher: Some(*publisher),
+                        durability_submitter,
+                        publications: VecDeque::new(),
+                        publication_count: 0,
+                        publication_bytes: 0,
+                        unpublished_node_logs: 0,
                         queue: VecDeque::new(),
                         busy: false,
                         renewing: false,
@@ -1688,86 +2230,216 @@ fn handle_task(
             }
             Err(error) => {
                 transitioning.remove(&cell);
+                let error = if node_lease.check().is_err() {
+                    Error::Fenced
+                } else {
+                    error
+                };
                 let _ = reply.send(Err(error));
             }
         },
         TaskResult::Executed {
             cell,
-            publisher,
             mut command,
-            result,
-            fenced,
+            mut result,
+            mut fenced,
         } => {
             let Some(active) = cells.get_mut(&cell) else {
                 send_command_reply(&mut command, Err(Error::CellNotActive));
                 return;
             };
+            if node_lease.check().is_err() {
+                result = Err(command.operation.unknown(Error::Fenced));
+                fenced = true;
+            }
+            active.fenced |= fenced;
+            if active.fenced {
+                active.busy = false;
+                fence_active(active);
+                send_command_task_reply(&mut command, result);
+                continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
+                return;
+            }
+            match result {
+                Ok(CommandTaskResult::Recorded(outcome)) => {
+                    active.busy = false;
+                    send_command_reply(&mut command, Ok(outcome));
+                }
+                Ok(CommandTaskResult::Pending {
+                    pending,
+                    durability,
+                }) => {
+                    let retained_bytes = pending.retained_bytes();
+                    active.publication_count += 1;
+                    active.publication_bytes =
+                        match active.publication_bytes.checked_add(retained_bytes) {
+                            Some(bytes) => bytes,
+                            None => {
+                                active.busy = false;
+                                active.fenced = true;
+                                fence_active(active);
+                                let error = command
+                                    .operation
+                                    .unknown(Error::Capacity("pending publication bytes"));
+                                send_command_reply(&mut command, Err(error));
+                                continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
+                                return;
+                            }
+                        };
+                    let outcome = pending.outcome().clone();
+                    let commit_sequence = outcome.commit_sequence();
+                    let (proof, object) = oneshot::channel();
+                    active.publications.push_back(QueuedPublication {
+                        pending: *pending,
+                        durability: durability.clone(),
+                        submitted_at: std::time::Instant::now(),
+                        proof,
+                    });
+                    if durability.is_some() {
+                        active.unpublished_node_logs += 1;
+                        unpublished_node_log_bytes.fetch_add(retained_bytes, Ordering::AcqRel);
+                    }
+                    start_publication(cell, active, pool, tasks);
+                    let pool = pool.clone();
+                    tasks.spawn(async move {
+                        prove_command(pool, command, outcome, commit_sequence, durability, object)
+                            .await
+                    });
+                }
+                Err(error) => {
+                    active.busy = false;
+                    send_command_reply(&mut command, Err(error));
+                }
+            }
+            continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
+        }
+        TaskResult::Proven {
+            cell,
+            mut command,
+            mut result,
+            mut fenced,
+        } => {
+            let Some(active) = cells.get_mut(&cell) else {
+                send_command_reply(&mut command, Err(Error::CellNotActive));
+                return;
+            };
+            if node_lease.check().is_err() {
+                result = Err(command.operation.unknown(Error::Fenced));
+                fenced = true;
+            }
             active.busy = false;
-            active.publisher = Some(*publisher);
             active.fenced |= fenced;
             if active.fenced {
                 fence_active(active);
             }
             send_command_reply(&mut command, result);
-            continue_cell(cell, pool, cells, transitioning, tasks);
+            continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
+        }
+        TaskResult::Published {
+            cell,
+            publisher,
+            retained_bytes,
+            node_logged,
+            mut result,
+            mut fenced,
+        } => {
+            let Some(active) = cells.get_mut(&cell) else {
+                return;
+            };
+            let object_published = result.is_ok();
+            if node_lease.check().is_err() {
+                result = Err(Error::Fenced);
+                fenced = true;
+            }
+            active.publisher = Some(*publisher);
+            active.publication_count = active.publication_count.saturating_sub(1);
+            active.publication_bytes = active.publication_bytes.saturating_sub(retained_bytes);
+            if node_logged && object_published {
+                active.unpublished_node_logs = active.unpublished_node_logs.saturating_sub(1);
+                subtract_unpublished_bytes(unpublished_node_log_bytes, retained_bytes);
+            }
+            active.fenced |= fenced || result.is_err();
+            if active.fenced {
+                fence_active(active);
+            } else {
+                start_publication(cell, active, pool, tasks);
+            }
+            continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
         }
         TaskResult::Queried {
             cell,
             mut query,
-            result,
-            fenced,
+            mut result,
+            mut fenced,
         } => {
             let Some(active) = cells.get_mut(&cell) else {
                 send_query_reply(&mut query, Err(Error::CellNotActive));
                 return;
             };
+            if node_lease.check().is_err() {
+                result = Err(Error::Fenced);
+                fenced = true;
+            }
             active.busy = false;
             active.fenced |= fenced;
             if active.fenced {
                 fence_active(active);
             }
             send_query_reply(&mut query, result);
-            continue_cell(cell, pool, cells, transitioning, tasks);
+            continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
         }
         TaskResult::Resolved {
             cell,
             mut resolve,
-            result,
-            fenced,
+            mut result,
+            mut fenced,
         } => {
             let Some(active) = cells.get_mut(&cell) else {
                 send_resolve_reply(&mut resolve, Err(Error::CellNotActive));
                 return;
             };
+            if node_lease.check().is_err() {
+                result = Ok(Resolution::Unknown);
+                fenced = true;
+            }
             active.busy = false;
             active.fenced |= fenced;
             if active.fenced {
                 fence_active(active);
             }
             send_resolve_reply(&mut resolve, result);
-            continue_cell(cell, pool, cells, transitioning, tasks);
+            continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
         }
         TaskResult::Migrated {
             cell,
             publisher,
             mut migration,
-            result,
-            fenced,
+            mut result,
+            mut fenced,
+            preserve_owner,
+            unpublished_bytes,
         } => {
             let Some(active) = cells.get_mut(&cell) else {
                 send_migration_reply(&mut migration, Err(Error::CellNotActive));
                 return;
             };
+            if node_lease.check().is_err() {
+                result = Err(Error::Fenced);
+                fenced = true;
+            }
             active.busy = false;
             active.migrating = false;
             active.publisher = Some(*publisher);
+            if preserve_owner {
+                active.unpublished_node_logs = active.unpublished_node_logs.saturating_add(1);
+                unpublished_node_log_bytes.fetch_add(unpublished_bytes, Ordering::AcqRel);
+            }
             active.fenced |= fenced;
             match result {
                 Ok(outcome) if !active.fenced => {
                     active.code = outcome.code;
                     active.schema = outcome.schema;
-                    let admission = new_cell_admission();
-                    active.admission = admission.clone();
+                    let admission = Arc::clone(&migration.successor_admission);
                     send_migration_reply(
                         &mut migration,
                         Ok(MigratedAdmission { admission, outcome }),
@@ -1779,23 +2451,26 @@ fn handle_task(
             if active.fenced {
                 fence_active(active);
             }
-            continue_cell(cell, pool, cells, transitioning, tasks);
+            continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
         }
         TaskResult::Renewed {
             cell,
             publisher,
-            result,
+            mut result,
         } => {
             let Some(active) = cells.get_mut(&cell) else {
                 return;
             };
+            if node_lease.check().is_err() {
+                result = Err(Error::Fenced);
+            }
             active.renewing = false;
             active.publisher = Some(*publisher);
             if result.is_err() {
                 active.fenced = true;
                 fence_active(active);
             }
-            continue_cell(cell, pool, cells, transitioning, tasks);
+            continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
         }
         TaskResult::Deactivated {
             cell,
@@ -1830,8 +2505,21 @@ fn handle_task(
     }
 }
 
+fn subtract_unpublished_bytes(total: &AtomicU64, bytes: u64) {
+    let _ = total.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        Some(current.saturating_sub(bytes))
+    });
+}
+
 fn fence_active(active: &mut ActiveCell) {
     fence_admission(&active.admission);
+    while let Some(publication) = active.publications.pop_front() {
+        active.publication_count = active.publication_count.saturating_sub(1);
+        active.publication_bytes = active
+            .publication_bytes
+            .saturating_sub(publication.pending.retained_bytes());
+        let _ = publication.proof.send(Err(Error::Fenced));
+    }
     while let Some(queued) = active.queue.pop_front() {
         match queued {
             QueuedWork::Command(mut command) => {
@@ -1856,6 +2544,7 @@ fn continue_cell(
     cells: &mut HashMap<CellId, ActiveCell>,
     transitioning: &mut HashSet<CellId>,
     tasks: &mut JoinSet<TaskResult>,
+    node_lease: &RuntimeNodeLease,
 ) {
     let Some(active) = cells.get_mut(&cell) else {
         return;
@@ -1864,11 +2553,16 @@ fn continue_cell(
         return;
     }
     if active.fenced {
-        start_fenced_deactivate(cell, pool, cells, transitioning, tasks);
+        if active.publication_count == 0 && active.publisher.is_some() {
+            let preserve_owner = active.unpublished_node_logs != 0;
+            start_fenced_deactivate(cell, pool, cells, transitioning, tasks, preserve_owner);
+        }
     } else if active.draining() && active.queue.is_empty() {
-        start_deactivate(cell, pool, cells, transitioning, tasks);
+        if active.publication_count == 0 && active.publisher.is_some() {
+            start_deactivate(cell, pool, cells, transitioning, tasks);
+        }
     } else {
-        start_next(active, pool, tasks);
+        start_next(active, pool, tasks, node_lease);
     }
 }
 
@@ -1892,6 +2586,15 @@ fn send_command_reply(command: &mut QueuedCommand, result: crate::Result<StoredO
     if let Some(reply) = command.reply.take() {
         let _ = reply.send(result);
     }
+}
+
+fn send_command_task_reply(command: &mut QueuedCommand, result: crate::Result<CommandTaskResult>) {
+    let result = match result {
+        Ok(CommandTaskResult::Recorded(outcome)) => Ok(outcome),
+        Ok(CommandTaskResult::Pending { .. }) => Err(command.operation.unknown(Error::Fenced)),
+        Err(error) => Err(error),
+    };
+    send_command_reply(command, result);
 }
 
 fn send_query_reply(query: &mut QueuedQuery, result: crate::Result<Vec<u8>>) {
@@ -1931,6 +2634,7 @@ fn start_due_renewals(
             || active.renewing
             || active.fenced
             || active.draining()
+            || active.publication_count != 0
             || !active.queue.is_empty()
             || active
                 .publisher
@@ -1994,6 +2698,7 @@ fn start_fenced_deactivate(
     cells: &mut HashMap<CellId, ActiveCell>,
     transitioning: &mut HashSet<CellId>,
     tasks: &mut JoinSet<TaskResult>,
+    preserve_owner: bool,
 ) {
     let Some(active) = cells.remove(&cell) else {
         return;
@@ -2003,6 +2708,11 @@ fn start_fenced_deactivate(
     tasks.spawn(async move {
         let result = async {
             pool.discard(cell).await?;
+            // An unpublished node-log cut must keep its owner record so
+            // takeover seals and replays it instead of treating the Cell as idle.
+            if preserve_owner {
+                return Ok(());
+            }
             let mut publisher = active.publisher.ok_or(Error::Fenced)?;
             publisher.release_after_fence().await
         }

@@ -9,7 +9,7 @@ use std::{
 use reqwest::header::{
     CONTENT_LENGTH, HOST, HeaderMap, HeaderName, HeaderValue, TRANSFER_ENCODING,
 };
-use url::Url;
+use url::{Host, Url};
 
 use super::Error;
 
@@ -166,6 +166,20 @@ pub(super) fn load_headers(path: Option<&Path>) -> Result<HeaderMap, Error> {
         headers.append(name, value);
     }
     Ok(headers)
+}
+
+pub(super) fn load_authority(value: Option<&str>) -> Result<Option<HeaderValue>, Error> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_empty() || value.len() > 253 || Host::parse(value).is_err() {
+        return Err(Error::Configuration(
+            "authority must be one DNS name or IP address without a port",
+        ));
+    }
+    HeaderValue::from_str(value)
+        .map(Some)
+        .map_err(|_| Error::Configuration("authority is not a valid HTTP Host value"))
 }
 
 pub(super) fn load_mutation_template(path: &Path) -> Result<Arc<str>, Error> {

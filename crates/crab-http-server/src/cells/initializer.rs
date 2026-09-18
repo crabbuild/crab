@@ -39,6 +39,7 @@ pub(crate) async fn initialize_repository(config: &Config, repository: Uuid) -> 
         startup.identity,
         &startup.registry,
         &config.cells.data_dir,
+        config.cells.local_disk_limit_bytes,
         config.cells.peer_advertise.to_string(),
         repository,
     )
@@ -52,6 +53,7 @@ pub(crate) async fn initialize_repository_at(
     identity: ApplicationIdentity,
     registry: &Registry,
     data_dir: &Path,
+    local_disk_limit_bytes: u64,
     endpoint: String,
     repository: Uuid,
 ) -> Result<()> {
@@ -80,8 +82,10 @@ pub(crate) async fn initialize_repository_at(
     let directory = tempfile::Builder::new()
         .prefix("crab-cell-repository-init-")
         .tempdir_in(data_dir)?;
-    let budget =
-        crate::server::CellRuntimeBudget::from_resources(crate::peer::local_resources(data_dir)?)?;
+    let budget = crate::server::CellRuntimeBudget::from_resources(crate::peer::local_resources(
+        data_dir,
+        local_disk_limit_bytes,
+    )?)?;
     let local_disk = budget.local_disk();
     let runtime = CellRuntime::new_with_replica_host(
         SqlWorkerPool::new(1, 1)?,
@@ -121,17 +125,9 @@ pub(crate) async fn initialize_repository_at(
                         )
                         .await?
                 } else {
-                    runtime
-                        .takeover_unpublished(
-                            proof,
-                            replica,
-                            authority.clone(),
-                            observed,
-                            destination,
-                            owner.clone(),
-                            initialize,
-                        )
-                        .await?
+                    return Err(Error::Config(
+                        "offline repository initialization cannot fence an existing Cell owner",
+                    ));
                 }
             }
             (ControlState::Idle, true) => {
@@ -147,16 +143,9 @@ pub(crate) async fn initialize_repository_at(
                     .await?
             }
             (ControlState::Recovering | ControlState::Serving, true) => {
-                runtime
-                    .takeover_restored(
-                        proof,
-                        replica,
-                        authority.clone(),
-                        observed,
-                        destination,
-                        owner.clone(),
-                    )
-                    .await?
+                return Err(Error::Config(
+                    "offline repository initialization cannot take over an owned Cell",
+                ));
             }
             (ControlState::Tombstoned, _) => {
                 return Err(Error::Config("repository Cell is tombstoned"));
@@ -328,6 +317,7 @@ mod tests {
                 identity,
                 &registry,
                 local.path(),
+                32 * 1024 * 1024 * 1024,
                 "https://initializer.internal:8081".into(),
                 repository,
             )

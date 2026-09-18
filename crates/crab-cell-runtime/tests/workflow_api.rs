@@ -27,6 +27,79 @@ use crab_ltx::{CellReplica, Limits};
 use crab_storage::{CellStorageLayout, Store};
 use object_store::{memory::InMemory, path::Path};
 
+async fn fence_session(
+    layout: &CellStorageLayout,
+    session: SessionId,
+    claimant: SessionId,
+) -> crab_cell_runtime::FencedNodeSession {
+    let fleet = Digest::from_bytes([90; 32]);
+    let image = Digest::from_bytes([91; 32]);
+    let release = Digest::from_bytes([92; 32]);
+    let directory = crab_cell_runtime::NodeDirectory::new(layout.clone(), fleet, image, release);
+    directory
+        .create(
+            crab_cell_runtime::NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+                session,
+                "https://expired.internal:8081".into(),
+                fleet,
+                Digest::from_bytes([93; 32]),
+                image,
+                release,
+                &ed25519_dalek::SigningKey::from_bytes(&[94; 32]),
+                1,
+                1,
+                10_001,
+                vec![Digest::from_bytes([95; 32])],
+                vec![1],
+                crab_cell_runtime::NodeFailureDomain::default(),
+                crab_cell_runtime::NodeCapacity {
+                    free_memory_bytes: 1,
+                    free_disk_bytes: 1,
+                    job_credits: 1,
+                    ..crab_cell_runtime::NodeCapacity::default()
+                },
+            )
+            .unwrap(),
+            1,
+        )
+        .await
+        .unwrap();
+    directory
+        .create(
+            crab_cell_runtime::NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*claimant.as_bytes()),
+                claimant,
+                "https://claimant.internal:8081".into(),
+                fleet,
+                Digest::from_bytes([93; 32]),
+                image,
+                release,
+                &ed25519_dalek::SigningKey::from_bytes(&[94; 32]),
+                1,
+                10_000,
+                20_000,
+                vec![Digest::from_bytes([95; 32])],
+                vec![1],
+                crab_cell_runtime::NodeFailureDomain::default(),
+                crab_cell_runtime::NodeCapacity {
+                    free_memory_bytes: 1,
+                    free_disk_bytes: 1,
+                    job_credits: 1,
+                    ..crab_cell_runtime::NodeCapacity::default()
+                },
+            )
+            .unwrap(),
+            10_000,
+        )
+        .await
+        .unwrap();
+    directory
+        .claim_expired(session, claimant, 10_001)
+        .await
+        .unwrap()
+}
+
 const WORKFLOW_MODULE: &str = "workflow-api-test";
 const WORKFLOW_NAMESPACE: NamespaceId = NamespaceId::from_bytes([8; 16]);
 const EFFECT_NAMESPACE: NamespaceId = NamespaceId::from_bytes([9; 16]);
@@ -460,7 +533,7 @@ async fn typed_workflow_namespace_publishes_rejects_reads_and_survives_restore()
         )
         .await
         .unwrap();
-    let authority = CellAuthority::new(layout);
+    let authority = CellAuthority::new(layout.clone());
     let first_session = SessionId::from_bytes([4; 16]);
     let control = authority
         .create_initial(
@@ -727,7 +800,7 @@ async fn native_activity_heartbeats_and_recovers_after_node_loss() {
         )
         .await
         .unwrap();
-    let authority = CellAuthority::new(layout);
+    let authority = CellAuthority::new(layout.clone());
     let first_session = SessionId::from_bytes([25; 16]);
     let control = authority
         .create_initial(
@@ -914,6 +987,8 @@ async fn native_activity_heartbeats_and_recovers_after_node_loss() {
         first_session
     );
     assert!(stale_owner.value().root.is_some());
+    let fenced = fence_session(&layout, first_session, SessionId::from_bytes([27; 16])).await;
+    let takeover = fenced.direct_takeover().unwrap();
     let second_session = SessionId::from_bytes([27; 16]);
     let runtime = CellRuntime::new(
         SqlWorkerPool::new(1, 10).unwrap(),
@@ -927,6 +1002,8 @@ async fn native_activity_heartbeats_and_recovers_after_node_loss() {
             replica,
             authority.clone(),
             stale_owner,
+            takeover,
+            crab_cell_runtime::RecoveryManifestStore::new(layout.clone(), Limits::default()),
             directory.path().join("activity-second.sqlite"),
             Owner {
                 session: second_session,
@@ -951,6 +1028,9 @@ async fn native_activity_heartbeats_and_recovers_after_node_loss() {
             .state,
         b"activity-complete"
     );
+    // Node-session fencing makes Cell takeover immediate, but activity leases
+    // remain valid until their published deadline.
+    tokio::time::sleep(Duration::from_millis(5_100)).await;
     let current = authority.load(cell).await.unwrap().unwrap();
     let current_sequence = current.value().root.as_ref().unwrap().commit_sequence;
     let restored_client = CellClient::local(registry.clone(), restored.clone());

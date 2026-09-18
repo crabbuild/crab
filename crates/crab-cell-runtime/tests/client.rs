@@ -482,6 +482,33 @@ async fn typed_client_publishes_replays_rejections_and_receipted_reads() {
 }
 
 #[tokio::test]
+async fn state_stream_serializes_local_queries_across_a_new_commit() {
+    let fixture = fixture().await;
+    let client = CellClient::local(Arc::clone(&fixture.registry), fixture.handle.clone());
+    let mut stream = client
+        .open_state_stream::<CountComments>(
+            &fixture.target,
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+
+    let first = stream.emit(()).await.unwrap();
+    assert_eq!(first.output, 0);
+    let committed = client
+        .command::<CreateComment>(&fixture.target, mutation(18), b"streamed".to_vec())
+        .await
+        .unwrap();
+    let second = stream.emit(()).await.unwrap();
+    assert_eq!(second.output, 1);
+    assert!(second.receipt.commit_sequence >= committed.receipt.commit_sequence);
+    assert_eq!(stream.last_receipt(), Some(second.receipt));
+
+    stream.finish();
+    fixture.handle.drain().await.unwrap();
+}
+
+#[tokio::test]
 async fn local_and_peer_command_share_digest_dedup_and_query_state() {
     let fixture = fixture().await;
     let client = CellClient::local(Arc::clone(&fixture.registry), fixture.handle.clone());

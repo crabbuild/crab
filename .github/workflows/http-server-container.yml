@@ -131,10 +131,12 @@ jobs:
           bash -n \
             crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
             crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-capacity-envelope.sh \
+            crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-load-report.sh \
             crates/crab-http-server/deploy/helm/crab-http-server/qualification/verify-workload-identity.sh \
             crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-workload-identity.sh \
             crates/crab-http-server/tests/qualify_compose_cluster.sh
           crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-capacity-envelope.sh
+          crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-load-report.sh
           crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-workload-identity.sh
           immutable_chart=oci://registry.example.com/charts/crab-http-server@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
           if CRAB_HTTP_SERVER_GIT_TOKEN=test-only \
@@ -205,6 +207,7 @@ jobs:
             /src/crates/crab-http-server/deploy/generate-release-manifest.sh \
             /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
             /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-capacity-envelope.sh \
+            /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-load-report.sh \
             /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/verify-workload-identity.sh \
             /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-workload-identity.sh \
             /src/crates/crab-http-server/tests/qualify_lfs_locking.sh \
@@ -292,9 +295,12 @@ jobs:
             grep -F 'name: cell-release-bootstrap' "${rendered}"
             grep -F -- '- bootstrap' "${rendered}"
             grep -F -- '- --peer-advertise-host' "${rendered}"
+            grep -F -- '- --cell-failure-host' "${rendered}"
             # This is the literal Kubernetes env expansion, not a shell substitution.
             # shellcheck disable=SC2016
             grep -F -- '- $(CRAB_POD_IP)' "${rendered}"
+            # shellcheck disable=SC2016
+            grep -F -- '- $(CRAB_NODE_NAME)' "${rendered}"
             grep -F -- 'mountPath: /var/lib/crab' "${rendered}"
             grep -F -- 'path: peer/tls.crt' "${rendered}"
             grep -F -- 'path: peer/tls.key' "${rendered}"
@@ -358,7 +364,13 @@ jobs:
           tar -tzf "$chart_archive" \
             | grep -F 'crab-http-server/qualification/test-capacity-envelope.sh'
           tar -tzf "$chart_archive" \
+            | grep -F 'crab-http-server/qualification/test-load-report.sh'
+          tar -tzf "$chart_archive" \
             | grep -F 'crab-http-server/qualification/validate-capacity-envelope.jq'
+          tar -tzf "$chart_archive" \
+            | grep -F 'crab-http-server/qualification/validate-load-report.jq'
+          tar -tzf "$chart_archive" \
+            | grep -F 'crab-http-server/qualification/validate-node-profile.jq'
           tar -tzf "$chart_archive" \
             | grep -F 'crab-http-server/qualification/rbac.example.yaml'
 
@@ -387,6 +399,7 @@ jobs:
           assert config["storage"]["url"] == "s3://team-crab-repositories/repositories"
           assert config["cells"] == {
               "data_dir": "/var/lib/crab/cells",
+              "local_disk_limit_bytes": 34359738368,
               "peer_advertise": "https://127.0.0.1:8789",
               "peer_tls_server_name": "crab-http-server-peer",
               "peer_certificate": "/run/secrets/crab/peer/tls.crt",
@@ -808,7 +821,7 @@ jobs:
             crates/crab-http-server/tests/qualify_compose_cluster.sh \
             > "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json"
           jq --exit-status \
-            '.version == 2 and
+            '.version == 4 and
              .owner_loss.session_before != .owner_loss.session_after and
              .owner_loss.epoch_after > .owner_loss.epoch_before and
              (.owner_loss.root_before | keys | sort) ==
@@ -817,13 +830,25 @@ jobs:
              .owner_loss.root_before.txid > 0 and
              (.owner_loss.root_before.checksum | type) == "number" and
              .owner_loss.root_before.commit_sequence > 0 and
-             .owner_loss.root_after_restore == .owner_loss.root_before and
+             (.owner_loss.root_after_restore | keys | sort) ==
+               ["checksum", "commit_sequence", "digest", "txid"] and
+             (.owner_loss.root_after_restore.digest | test("^[0-9a-f]{64}$")) and
+             (.owner_loss.root_after_restore.checksum | type) == "number" and
+             .owner_loss.root_after_restore.digest != .owner_loss.root_before.digest and
+             .owner_loss.root_after_restore.txid > .owner_loss.root_before.txid and
+             .owner_loss.root_after_restore.commit_sequence >
+               .owner_loss.root_before.commit_sequence and
              (.owner_loss.root_continued | keys | sort) ==
                ["checksum", "commit_sequence", "digest", "txid"] and
              (.owner_loss.root_continued.digest | test("^[0-9a-f]{64}$")) and
              (.owner_loss.root_continued.checksum | type) == "number" and
-             .owner_loss.root_continued.digest != .owner_loss.root_before.digest and
-             .owner_loss.root_continued.txid > .owner_loss.root_before.txid and
+             .owner_loss.root_continued.digest != .owner_loss.root_after_restore.digest and
+             .owner_loss.root_continued.txid > .owner_loss.root_after_restore.txid and
              .owner_loss.root_continued.commit_sequence >
-               .owner_loss.root_before.commit_sequence' \
+               .owner_loss.root_after_restore.commit_sequence and
+             .fleet_only_commit.owner_uncovered_bytes > 0 and
+             .fleet_only_commit.follower_retained_bytes > 0 and
+             .fleet_only_commit.control_before_owner_loss.owner_lease.state == "live" and
+             .fleet_only_commit.control_before_owner_loss.owner_lease.expires_at_ms >
+               .fleet_only_commit.control_before_owner_loss.owner_lease.observed_at_ms' \
             "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json"

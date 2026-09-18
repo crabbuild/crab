@@ -1,8 +1,11 @@
 use std::{
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -18,6 +21,13 @@ const METHOD_COUNT: usize = 6;
 const OUTCOME_COUNT: usize = 7;
 const ADMISSION_COUNT: usize = 4;
 const TRANSFER_REJECTION_COUNT: usize = 2;
+const DURABILITY_SOURCE_COUNT: usize = 2;
+const APPEND_RESULT_COUNT: usize = 2;
+const NODE_LOG_LANE_STATE_COUNT: usize = 3;
+const SELF_FENCE_REASON_COUNT: usize = 4;
+const RECOVERY_STATE_COUNT: usize = 2;
+const RECOVERY_FAILURE_REASON_COUNT: usize = 4;
+const NODE_LOG_ROTATION_RESULT_COUNT: usize = 4;
 const DURATION_BUCKETS_SECONDS: [f64; 16] = [
     0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
     600.0,
@@ -28,6 +38,17 @@ const OUTCOME_LABELS: [&str; OUTCOME_COUNT] =
 pub(crate) const ADMISSION_LABELS: [&str; ADMISSION_COUNT] =
     ["read", "git_transfer", "application", "maintenance"];
 const TRANSFER_REJECTION_LABELS: [&str; TRANSFER_REJECTION_COUNT] = ["capacity", "coordination"];
+const DURABILITY_SOURCE_LABELS: [&str; DURABILITY_SOURCE_COUNT] = ["fleet", "object"];
+const APPEND_RESULT_LABELS: [&str; APPEND_RESULT_COUNT] = ["acked", "nacked"];
+const NODE_LOG_LANE_STATE_LABELS: [&str; NODE_LOG_LANE_STATE_COUNT] =
+    ["open", "degraded", "sealed"];
+const SELF_FENCE_REASON_LABELS: [&str; SELF_FENCE_REASON_COUNT] =
+    ["expiry", "refresh", "shutdown", "other"];
+const RECOVERY_STATE_LABELS: [&str; RECOVERY_STATE_COUNT] = ["running", "waiting"];
+const RECOVERY_FAILURE_REASON_LABELS: [&str; RECOVERY_FAILURE_REASON_COUNT] =
+    ["storage", "capacity", "fenced", "other"];
+const NODE_LOG_ROTATION_RESULT_LABELS: [&str; NODE_LOG_ROTATION_RESULT_COUNT] =
+    ["started", "pending", "failed", "completed"];
 const METADATA: Metadata<'static> = Metadata::new(
     "crab_http_server",
     Level::INFO,
@@ -56,6 +77,19 @@ struct MetricsInner {
     cell_retained_capacity_bytes: Gauge,
     cell_local_disk_reserved_bytes: Gauge,
     cell_local_disk_capacity_bytes: Gauge,
+    cell_node_log_uncovered_bytes: Gauge,
+    cell_follower_retained_bytes: Gauge,
+    durability_proofs: [Counter; DURABILITY_SOURCE_COUNT],
+    durability_wait: [Histogram; DURABILITY_SOURCE_COUNT],
+    node_log_append_bytes: [Counter; APPEND_RESULT_COUNT],
+    node_log_lanes: [Gauge; NODE_LOG_LANE_STATE_COUNT],
+    session_lease_seconds: Gauge,
+    self_fenced: AtomicBool,
+    self_fences: [Counter; SELF_FENCE_REASON_COUNT],
+    node_log_recoveries: [Gauge; RECOVERY_STATE_COUNT],
+    node_log_recovery_seconds: Histogram,
+    node_log_recovery_failures: [Counter; RECOVERY_FAILURE_REASON_COUNT],
+    node_log_rotations: [Counter; NODE_LOG_ROTATION_RESULT_COUNT],
     catalog_refresh_failures: Counter,
     transfer_admission_rejections: [Counter; TRANSFER_REJECTION_COUNT],
 }
@@ -87,6 +121,8 @@ pub(crate) struct RuntimeSnapshot {
     pub(crate) cell_retained_capacity_bytes: usize,
     pub(crate) cell_local_disk_reserved_bytes: u64,
     pub(crate) cell_local_disk_capacity_bytes: u64,
+    pub(crate) cell_node_log_uncovered_bytes: u64,
+    pub(crate) cell_follower_retained_bytes: u64,
     pub(crate) admission_available: [usize; ADMISSION_COUNT],
     pub(crate) admission_capacity: [usize; ADMISSION_COUNT],
 }
@@ -160,6 +196,77 @@ impl Metrics {
                     ),
                     &METADATA,
                 ),
+                cell_node_log_uncovered_bytes: recorder.register_gauge(
+                    &Key::from_static_name("crab_cell_node_log_uncovered_bytes"),
+                    &METADATA,
+                ),
+                cell_follower_retained_bytes: recorder.register_gauge(
+                    &Key::from_static_name("crab_cell_follower_retained_bytes"),
+                    &METADATA,
+                ),
+                durability_proofs: DURABILITY_SOURCE_LABELS.map(|source| {
+                    recorder.register_counter(
+                        &key("crab_cell_durability_proofs_total", &[("source", source)]),
+                        &METADATA,
+                    )
+                }),
+                durability_wait: DURABILITY_SOURCE_LABELS.map(|source| {
+                    recorder.register_histogram(
+                        &key("crab_cell_durability_wait_seconds", &[("source", source)]),
+                        &METADATA,
+                    )
+                }),
+                node_log_append_bytes: APPEND_RESULT_LABELS.map(|result| {
+                    recorder.register_counter(
+                        &key(
+                            "crab_cell_node_log_append_bytes_total",
+                            &[("result", result)],
+                        ),
+                        &METADATA,
+                    )
+                }),
+                node_log_lanes: NODE_LOG_LANE_STATE_LABELS.map(|state| {
+                    recorder.register_gauge(
+                        &key("crab_cell_node_log_lanes", &[("state", state)]),
+                        &METADATA,
+                    )
+                }),
+                session_lease_seconds: recorder.register_gauge(
+                    &Key::from_static_name("crab_cell_session_lease_seconds"),
+                    &METADATA,
+                ),
+                self_fenced: AtomicBool::new(false),
+                self_fences: SELF_FENCE_REASON_LABELS.map(|reason| {
+                    recorder.register_counter(
+                        &key("crab_cell_self_fences_total", &[("reason", reason)]),
+                        &METADATA,
+                    )
+                }),
+                node_log_recoveries: RECOVERY_STATE_LABELS.map(|state| {
+                    recorder.register_gauge(
+                        &key("crab_cell_node_log_recoveries", &[("state", state)]),
+                        &METADATA,
+                    )
+                }),
+                node_log_recovery_seconds: recorder.register_histogram(
+                    &Key::from_static_name("crab_cell_node_log_recovery_seconds"),
+                    &METADATA,
+                ),
+                node_log_recovery_failures: RECOVERY_FAILURE_REASON_LABELS.map(|reason| {
+                    recorder.register_counter(
+                        &key(
+                            "crab_cell_node_log_recovery_failures_total",
+                            &[("reason", reason)],
+                        ),
+                        &METADATA,
+                    )
+                }),
+                node_log_rotations: NODE_LOG_ROTATION_RESULT_LABELS.map(|result| {
+                    recorder.register_counter(
+                        &key("crab_cell_node_log_rotations_total", &[("result", result)]),
+                        &METADATA,
+                    )
+                }),
                 catalog_refresh_failures: recorder.register_counter(
                     &Key::from_static_name("crab_http_server_catalog_refresh_failures_total"),
                     &METADATA,
@@ -231,6 +338,12 @@ impl Metrics {
         self.inner
             .cell_local_disk_capacity_bytes
             .set(snapshot.cell_local_disk_capacity_bytes as f64);
+        self.inner
+            .cell_node_log_uncovered_bytes
+            .set(snapshot.cell_node_log_uncovered_bytes as f64);
+        self.inner
+            .cell_follower_retained_bytes
+            .set(snapshot.cell_follower_retained_bytes as f64);
         for (index, admission) in self.inner.admission.iter().enumerate() {
             admission
                 .available
@@ -252,6 +365,127 @@ impl Metrics {
             .duration
             .record(started.elapsed().as_secs_f64());
     }
+}
+
+impl crab_cell_runtime::CellTelemetry for Metrics {
+    fn durability_proof(&self, source: crab_cell_runtime::DurabilitySource, waited: Duration) {
+        let index = match source {
+            crab_cell_runtime::DurabilitySource::Fleet => 0,
+            crab_cell_runtime::DurabilitySource::Object => 1,
+        };
+        self.inner.durability_proofs[index].increment(1);
+        self.inner.durability_wait[index].record(waited.as_secs_f64());
+    }
+
+    fn node_log_append(&self, acknowledged: bool, bytes: u64) {
+        self.inner.node_log_append_bytes[usize::from(!acknowledged)].increment(bytes);
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum SelfFenceReason {
+    Expiry,
+    Refresh,
+    Shutdown,
+    Other,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum RecoveryFailureReason {
+    Storage,
+    Capacity,
+    Fenced,
+    Other,
+}
+
+impl Metrics {
+    pub(crate) fn update_node_log(
+        &self,
+        log: Option<&crab_cell_runtime::NodeLogStatus>,
+        lease_remaining: Duration,
+    ) {
+        let Some(log) = log else {
+            for lane in &self.inner.node_log_lanes {
+                lane.set(0.0);
+            }
+            self.inner
+                .session_lease_seconds
+                .set(lease_remaining.as_secs_f64());
+            return;
+        };
+        let state = match log.phase() {
+            crab_cell_runtime::NodeLogPhase::Open if log.active() => 0,
+            crab_cell_runtime::NodeLogPhase::Open | crab_cell_runtime::NodeLogPhase::Recovering => {
+                1
+            }
+            crab_cell_runtime::NodeLogPhase::Sealed | crab_cell_runtime::NodeLogPhase::Retired => 2,
+        };
+        for (index, lane) in self.inner.node_log_lanes.iter().enumerate() {
+            lane.set(f64::from(index == state));
+        }
+        self.inner
+            .session_lease_seconds
+            .set(lease_remaining.as_secs_f64());
+    }
+
+    pub(crate) fn record_self_fence(&self, reason: SelfFenceReason) {
+        if self.inner.self_fenced.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let index = match reason {
+            SelfFenceReason::Expiry => 0,
+            SelfFenceReason::Refresh => 1,
+            SelfFenceReason::Shutdown => 2,
+            SelfFenceReason::Other => 3,
+        };
+        self.inner.self_fences[index].increment(1);
+        for lane in &self.inner.node_log_lanes {
+            lane.set(0.0);
+        }
+        self.inner.session_lease_seconds.set(0.0);
+    }
+
+    pub(crate) fn update_recovery_states(&self, running: usize, waiting: usize) {
+        self.inner.node_log_recoveries[0].set(running as f64);
+        self.inner.node_log_recoveries[1].set(waiting as f64);
+    }
+
+    pub(crate) fn record_recovery_finished(
+        &self,
+        elapsed: Duration,
+        failure: Option<RecoveryFailureReason>,
+    ) {
+        self.inner
+            .node_log_recovery_seconds
+            .record(elapsed.as_secs_f64());
+        if let Some(reason) = failure {
+            let index = match reason {
+                RecoveryFailureReason::Storage => 0,
+                RecoveryFailureReason::Capacity => 1,
+                RecoveryFailureReason::Fenced => 2,
+                RecoveryFailureReason::Other => 3,
+            };
+            self.inner.node_log_recovery_failures[index].increment(1);
+        }
+    }
+
+    pub(crate) fn record_node_log_rotation(&self, result: NodeLogRotationResult) {
+        let index = match result {
+            NodeLogRotationResult::Started => 0,
+            NodeLogRotationResult::Pending => 1,
+            NodeLogRotationResult::Failed => 2,
+            NodeLogRotationResult::Completed => 3,
+        };
+        self.inner.node_log_rotations[index].increment(1);
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum NodeLogRotationResult {
+    Started,
+    Pending,
+    Failed,
+    Completed,
 }
 
 impl MethodMetrics {
@@ -536,6 +770,66 @@ fn describe_metrics(recorder: &impl Recorder) {
         "crab_http_server_cell_runtime_local_disk_capacity_bytes",
         "Startup admission ceiling for local Cell working bytes.",
     );
+    describe_gauge(
+        recorder,
+        "crab_cell_node_log_uncovered_bytes",
+        "Owner LTX bytes retained in node logs but not yet covered by object roots.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_cell_follower_retained_bytes",
+        "Verified follower node-log bytes retained on this node.",
+    );
+    describe_counter(
+        recorder,
+        "crab_cell_durability_proofs_total",
+        "Completed Cell durability proofs by bounded source.",
+    );
+    recorder.describe_histogram(
+        KeyName::from_const_str("crab_cell_durability_wait_seconds"),
+        Some(Unit::Seconds),
+        "Time from captured commit submission to the selected durability proof.".into(),
+    );
+    describe_counter(
+        recorder,
+        "crab_cell_node_log_append_bytes_total",
+        "Bytes attempted across bounded follower append lanes by result.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_cell_node_log_lanes",
+        "Current bounded node-log lane state; exactly one state is active for this node session.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_cell_session_lease_seconds",
+        "Seconds remaining on the authoritative node-session lease.",
+    );
+    describe_counter(
+        recorder,
+        "crab_cell_self_fences_total",
+        "Terminal node self-fences by bounded reason.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_cell_node_log_recoveries",
+        "Node-log recovery sessions currently running or waiting.",
+    );
+    recorder.describe_histogram(
+        KeyName::from_const_str("crab_cell_node_log_recovery_seconds"),
+        Some(Unit::Seconds),
+        "Node-log recovery duration from claim to sealed witness.".into(),
+    );
+    describe_counter(
+        recorder,
+        "crab_cell_node_log_recovery_failures_total",
+        "Node-log recovery failures by bounded reason.",
+    );
+    describe_counter(
+        recorder,
+        "crab_cell_node_log_rotations_total",
+        "Node-log epoch rotation attempts by bounded result.",
+    );
     describe_counter(
         recorder,
         "crab_http_server_catalog_refresh_failures_total",
@@ -608,6 +902,8 @@ mod tests {
             cell_retained_capacity_bytes: 4_096,
             cell_local_disk_reserved_bytes: 0,
             cell_local_disk_capacity_bytes: 8_192,
+            cell_node_log_uncovered_bytes: 128,
+            cell_follower_retained_bytes: 256,
             admission_available: [16, 3, 8, 1],
             admission_capacity: [16, 4, 8, 2],
         }
@@ -618,6 +914,29 @@ mod tests {
         let metrics = Metrics::new().unwrap();
         metrics.record_transfer_admission_rejection(false);
         metrics.record_transfer_admission_rejection(true);
+        <Metrics as crab_cell_runtime::CellTelemetry>::durability_proof(
+            &metrics,
+            crab_cell_runtime::DurabilitySource::Fleet,
+            Duration::from_millis(25),
+        );
+        <Metrics as crab_cell_runtime::CellTelemetry>::durability_proof(
+            &metrics,
+            crab_cell_runtime::DurabilitySource::Object,
+            Duration::from_millis(50),
+        );
+        <Metrics as crab_cell_runtime::CellTelemetry>::node_log_append(&metrics, true, 512);
+        <Metrics as crab_cell_runtime::CellTelemetry>::node_log_append(&metrics, false, 128);
+        metrics.record_self_fence(SelfFenceReason::Refresh);
+        metrics.record_self_fence(SelfFenceReason::Shutdown);
+        metrics.update_recovery_states(1, 0);
+        metrics.record_recovery_finished(
+            Duration::from_millis(75),
+            Some(RecoveryFailureReason::Storage),
+        );
+        metrics.record_node_log_rotation(NodeLogRotationResult::Started);
+        metrics.record_node_log_rotation(NodeLogRotationResult::Pending);
+        metrics.record_node_log_rotation(NodeLogRotationResult::Failed);
+        metrics.record_node_log_rotation(NodeLogRotationResult::Completed);
         let observation = metrics.start_request(&Method::GET).response(StatusCode::OK);
         let body = Body::new(ObservedBody::new(Body::from("response"), observation));
         assert_eq!(
@@ -644,6 +963,23 @@ mod tests {
         assert!(rendered.contains("crab_http_server_cell_runtime_retained_capacity_bytes 4096"));
         assert!(rendered.contains("crab_http_server_cell_runtime_local_disk_reserved_bytes 0"));
         assert!(rendered.contains("crab_http_server_cell_runtime_local_disk_capacity_bytes 8192"));
+        assert!(rendered.contains("crab_cell_node_log_uncovered_bytes 128"));
+        assert!(rendered.contains("crab_cell_follower_retained_bytes 256"));
+        assert!(rendered.contains("crab_cell_durability_proofs_total{source=\"fleet\"} 1"));
+        assert!(rendered.contains("crab_cell_durability_proofs_total{source=\"object\"} 1"));
+        assert!(rendered.contains("crab_cell_node_log_append_bytes_total{result=\"acked\"} 512"));
+        assert!(rendered.contains("crab_cell_node_log_append_bytes_total{result=\"nacked\"} 128"));
+        assert!(rendered.contains("crab_cell_self_fences_total{reason=\"refresh\"} 1"));
+        assert!(rendered.contains("crab_cell_session_lease_seconds 0"));
+        assert!(rendered.contains("crab_cell_node_log_recoveries{state=\"running\"} 1"));
+        assert!(rendered.contains("crab_cell_node_log_recovery_seconds_count 1"));
+        assert!(
+            rendered.contains("crab_cell_node_log_recovery_failures_total{reason=\"storage\"} 1")
+        );
+        assert!(rendered.contains("crab_cell_node_log_rotations_total{result=\"started\"} 1"));
+        assert!(rendered.contains("crab_cell_node_log_rotations_total{result=\"pending\"} 1"));
+        assert!(rendered.contains("crab_cell_node_log_rotations_total{result=\"failed\"} 1"));
+        assert!(rendered.contains("crab_cell_node_log_rotations_total{result=\"completed\"} 1"));
         assert!(
             rendered
                 .contains("crab_http_server_admission_available_permits{class=\"git_transfer\"} 3")

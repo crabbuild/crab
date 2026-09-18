@@ -263,6 +263,7 @@ impl Harness {
             cell_identity,
             &registry,
             cell_dir.path(),
+            32 * 1024 * 1024 * 1024,
             "https://initializer.test:8081".into(),
             repository.id,
         )
@@ -307,6 +308,8 @@ impl Harness {
             cell_runtime,
             repository_cells: Some(repository_cells),
             peer_receiver: None,
+            follower_store: None,
+            node_log_transport: None,
             options: RepositoryOptions::default(),
             cursor_key: [7; 32],
             admission: Semaphore::new(16),

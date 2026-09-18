@@ -1,22 +1,25 @@
 use std::{
     future::Future,
+    io::Write,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, atomic::Ordering},
+    sync::{Arc, OnceLock, atomic::Ordering},
     time::{Duration, Instant, SystemTime},
 };
 
 use axum::{
-    extract::{ConnectInfo, State},
+    Json,
+    extract::{ConnectInfo, Path as AxumPath, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
 use crab_cell_runtime::{
     ApplicationIdentity, CellAuthority, CellCatalog, CellHandle, CellRuntime, CellTarget, Digest,
-    Error as CellError, NodeAdvertisement, NodeCapacity, NodeDirectory, PeerAuthorizer,
-    PeerCellResolver, PeerDispatcher, PeerRoundTrip, Registry, ReleaseState, ReleaseStore,
-    SessionId, VerifiedPeerRequest, VersionedNodeAdvertisement, peer_wire,
+    Error as CellError, NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain, NodeId,
+    NodeLogAuthority, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerRoundTrip, Registry,
+    ReleaseState, ReleaseStore, SessionId, VerifiedPeerRequest, VersionedNodeAdvertisement,
+    peer_wire,
 };
 use crab_storage::CellStorageLayout;
 use ed25519_dalek::SigningKey;
@@ -26,16 +29,24 @@ use uuid::Uuid;
 use crate::{RepositoryAccess, RepositoryConfig, peer_tls::PeerTlsIdentity, server::Server};
 
 mod client;
+mod node_log_client;
 pub(crate) use client::PeerHttpRoundTrip;
+pub(crate) use node_log_client::NodeLogHttpTransport;
 
 const PROTOBUF_MEDIA_TYPE: &str = "application/x-protobuf";
-const ADVERTISEMENT_LIFETIME_MS: i64 = 15_000;
+const NODE_LOG_MEDIA_TYPE: &str = "application/x-crab-node-log";
+const NODE_LOG_TAIL_PAGE_FRAMES: usize = 4_096;
+const NODE_LOG_TAIL_PAGE_BODY_BYTES: usize =
+    (65 * 1024 * 1024) + (NODE_LOG_TAIL_PAGE_FRAMES * 8) + 12;
+const ADVERTISEMENT_LIFETIME_MS: i64 = 10_000;
 const ADVERTISEMENT_EXPIRY_MARGIN_MS: i64 = 1_000;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
 const HEARTBEAT_RETRY: Duration = Duration::from_millis(500);
 
 #[derive(Clone)]
 pub(crate) struct PeerReceiver {
+    node: NodeId,
+    session: SessionId,
     directory: NodeDirectory,
     registry: Arc<Registry>,
     releases: ReleaseStore,
@@ -45,6 +56,8 @@ pub(crate) struct PeerReceiver {
 
 impl PeerReceiver {
     pub(crate) fn new(
+        node: NodeId,
+        session: SessionId,
         directory: NodeDirectory,
         registry: Arc<Registry>,
         releases: ReleaseStore,
@@ -52,6 +65,8 @@ impl PeerReceiver {
         round_trip: Arc<dyn PeerRoundTrip>,
     ) -> Self {
         Self {
+            node,
+            session,
             directory,
             registry,
             releases,
@@ -64,20 +79,30 @@ impl PeerReceiver {
 pub(crate) struct NodePublisher {
     directory: NodeDirectory,
     signing_key: SigningKey,
+    node: NodeId,
     session: SessionId,
     endpoint: String,
+    failure_domain: NodeFailureDomain,
     fleet: Digest,
     certificate: Digest,
     image: Digest,
     release: Digest,
     module_digests: Vec<Digest>,
     data_dir: PathBuf,
+    local_disk_limit_bytes: u64,
     scheduler: crate::cells::SchedulerStatus,
+    follower_store: Option<crab_cell_runtime::FollowerStore>,
+    telemetry: crab_cell_runtime::CellTelemetryHandle,
+    metrics: Option<crate::metrics::Metrics>,
+    lease: OnceLock<crab_cell_runtime::NodeLeaseGuard>,
+    observed: OnceLock<tokio::sync::Mutex<VersionedNodeAdvertisement>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LocalResources {
     pub(crate) memory_bytes: u64,
+    pub(crate) disk_limit_bytes: u64,
+    pub(crate) disk_capacity_bytes: u64,
     pub(crate) free_disk_bytes: u64,
     pub(crate) available_file_descriptors: usize,
     pub(crate) job_credits: usize,
@@ -93,45 +118,103 @@ impl NodePublisher {
         signing_key: SigningKey,
         session: SessionId,
         endpoint: String,
+        failure_domain: NodeFailureDomain,
         fleet: Digest,
         certificate: Digest,
         image: Digest,
         release: Digest,
         module_digests: Vec<Digest>,
         data_dir: PathBuf,
+        local_disk_limit_bytes: u64,
         scheduler: crate::cells::SchedulerStatus,
     ) -> crate::Result<Self> {
         std::fs::create_dir_all(&data_dir)?;
         if !std::fs::metadata(&data_dir)?.is_dir() {
             return Err(crate::Error::Config("cells.data_dir is not a directory"));
         }
+        let node = load_or_create_node_id(&data_dir)?;
         let sessions = data_dir.join("sessions");
         std::fs::create_dir_all(&sessions)?;
         std::fs::create_dir(sessions.join(encode_session(session)))?;
         Ok(Self {
             directory,
             signing_key,
+            node,
             session,
             endpoint,
+            failure_domain,
             fleet,
             certificate,
             image,
             release,
             module_digests,
             data_dir,
+            local_disk_limit_bytes,
             scheduler,
+            follower_store: None,
+            telemetry: crab_cell_runtime::CellTelemetryHandle::default(),
+            metrics: None,
+            lease: OnceLock::new(),
+            observed: OnceLock::new(),
         })
     }
 
+    pub(crate) fn with_follower_store(
+        mut self,
+        follower_store: crab_cell_runtime::FollowerStore,
+    ) -> Self {
+        self.follower_store = Some(follower_store);
+        self
+    }
+
+    pub(crate) fn with_telemetry(
+        mut self,
+        telemetry: crab_cell_runtime::CellTelemetryHandle,
+    ) -> Self {
+        self.telemetry = telemetry;
+        self
+    }
+
+    pub(crate) fn with_metrics(mut self, metrics: crate::metrics::Metrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
     pub(crate) async fn publish_initial(&self) -> crate::Result<VersionedNodeAdvertisement> {
+        if self.lease.get().is_some() || self.observed.get().is_some() {
+            return Err(crate::Error::Config(
+                "node advertisement was initialized twice",
+            ));
+        }
         let now_ms = now_ms()?;
-        Ok(self
+        let published = self
             .directory
             .create(
                 self.advertisement(self.scheduler.progress(), now_ms, false)?,
                 now_ms,
             )
-            .await?)
+            .await?;
+        let lease = crab_cell_runtime::NodeLeaseGuard::new(
+            now_ms,
+            published.advertisement().expires_at_ms(),
+        )?;
+        self.lease
+            .set(lease.clone())
+            .map_err(|_| crate::Error::Config("node lease was initialized twice"))?;
+        self.observed
+            .set(tokio::sync::Mutex::new(published.clone()))
+            .map_err(|_| crate::Error::Config("node advertisement was initialized twice"))?;
+        if let Some(metrics) = &self.metrics {
+            metrics.update_node_log(published.advertisement().log(), lease.remaining());
+        }
+        Ok(published)
+    }
+
+    pub(crate) fn lease_guard(&self) -> crate::Result<crab_cell_runtime::NodeLeaseGuard> {
+        self.lease
+            .get()
+            .cloned()
+            .ok_or(crate::Error::Config("node lease is not initialized"))
     }
 
     pub(crate) fn session_dir(&self) -> PathBuf {
@@ -140,16 +223,75 @@ impl NodePublisher {
             .join(encode_session(self.session))
     }
 
-    pub(crate) fn local_resources(&self) -> crate::Result<LocalResources> {
-        local_resources(&self.data_dir)
+    pub(crate) const fn node(&self) -> NodeId {
+        self.node
     }
 
-    pub(crate) async fn run(
-        self,
+    pub(crate) fn local_resources(&self) -> crate::Result<LocalResources> {
+        local_resources(&self.data_dir, self.local_disk_limit_bytes)
+    }
+
+    pub(crate) async fn recruit_node_durability(
+        self: &Arc<Self>,
+        transport: Arc<dyn crab_cell_runtime::NodeLogTransport>,
+        limits: crab_cell_runtime::ReplicaLimits,
+        required_follower_bytes: u64,
+        live_node_limit: usize,
+    ) -> crate::Result<Option<Arc<crab_cell_runtime::NodeDurability>>> {
+        let now_ms = now_ms()?;
+        let mut observed = self.observed().map_err(crate::Error::from)?.lock().await;
+        if observed.advertisement().log().is_none() {
+            let Some(enrolled) = self
+                .directory
+                .try_recruit_log(
+                    &observed,
+                    1,
+                    required_follower_bytes,
+                    live_node_limit,
+                    now_ms,
+                )
+                .await?
+            else {
+                return Ok(None);
+            };
+            *observed = enrolled;
+        }
+        let log = observed
+            .advertisement()
+            .log()
+            .ok_or(CellError::Node("enrolled node session lost its log"))?;
+        let gate = crab_cell_runtime::DurabilityGate::new(
+            self.session,
+            self.node,
+            log.epoch(),
+            log.members().iter().copied(),
+        )?;
+        let shipper = crab_cell_runtime::NodeLogShipper::new_with_telemetry(
+            gate.clone(),
+            Arc::clone(&transport),
+            limits,
+            self.telemetry.clone(),
+        )?;
+        let authority: Arc<dyn NodeLogAuthority> = self.clone();
+        let durability = crab_cell_runtime::NodeDurability::new(
+            gate,
+            shipper,
+            authority,
+            transport,
+            self.lease_guard()?,
+        );
+        Ok(Some(Arc::new(durability)))
+    }
+
+    pub(crate) async fn run_shared(
+        self: Arc<Self>,
         server: Arc<Server>,
-        mut observed: VersionedNodeAdvertisement,
         shutdown: CancellationToken,
     ) -> crate::Result<()> {
+        let lease = self.lease_guard()?;
+        let observed = self.observed.get().ok_or(crate::Error::Config(
+            "node advertisement is not initialized",
+        ))?;
         let mut draining = false;
         let heartbeat = 'heartbeat: loop {
             tokio::select! {
@@ -160,17 +302,36 @@ impl NodePublisher {
             loop {
                 let now_ms = now_ms()?;
                 let next = self.advertisement(self.scheduler.progress(), now_ms, draining)?;
-                match self.directory.refresh(&observed, next, now_ms).await {
+                let mut current = observed.lock().await;
+                match self.directory.refresh(&current, next, now_ms).await {
                     Ok(next) => {
-                        observed = next;
+                        if let Err(error) =
+                            lease.renew(now_ms, next.advertisement().expires_at_ms())
+                        {
+                            if let Some(metrics) = &self.metrics {
+                                metrics.record_self_fence(crate::metrics::SelfFenceReason::Other);
+                            }
+                            lease.fence();
+                            server.node_healthy.store(false, Ordering::Release);
+                            server.cancellation.cancel();
+                            break 'heartbeat Err(error.into());
+                        }
+                        if let Some(metrics) = &self.metrics {
+                            metrics.update_node_log(next.advertisement().log(), lease.remaining());
+                        }
+                        *current = next;
                         break;
                     }
                     Err(error) => {
-                        let retry_deadline = observed
+                        let retry_deadline = current
                             .advertisement()
                             .expires_at_ms()
                             .saturating_sub(ADVERTISEMENT_EXPIRY_MARGIN_MS);
                         if now_ms >= retry_deadline {
+                            if let Some(metrics) = &self.metrics {
+                                metrics.record_self_fence(crate::metrics::SelfFenceReason::Refresh);
+                            }
+                            lease.fence();
                             server.node_healthy.store(false, Ordering::Release);
                             server.cancellation.cancel();
                             break 'heartbeat Err(error.into());
@@ -186,15 +347,18 @@ impl NodePublisher {
                 }
             }
         };
+        lease.fence();
         if heartbeat.is_err() && !shutdown.is_cancelled() {
             shutdown.cancelled().await;
         }
         let withdrawal = match now_ms() {
-            Ok(now_ms) => self
-                .directory
-                .withdraw(&observed, now_ms)
-                .await
-                .map_err(crate::Error::from),
+            Ok(now_ms) => {
+                let current = observed.lock().await;
+                self.directory
+                    .withdraw(&current, now_ms)
+                    .await
+                    .map_err(crate::Error::from)
+            }
             Err(error) => Err(error),
         };
         match (heartbeat, withdrawal) {
@@ -207,6 +371,14 @@ impl NodePublisher {
         }
     }
 
+    fn observed(
+        &self,
+    ) -> crab_cell_runtime::Result<&tokio::sync::Mutex<VersionedNodeAdvertisement>> {
+        self.observed
+            .get()
+            .ok_or(CellError::Node("node advertisement is not initialized"))
+    }
+
     fn advertisement(
         &self,
         progress: u64,
@@ -217,12 +389,26 @@ impl NodePublisher {
             NodeCapacity {
                 free_memory_bytes: 0,
                 free_disk_bytes: 0,
+                follower_free_bytes: 0,
+                follower_retained_bytes: self
+                    .follower_store
+                    .as_ref()
+                    .map_or(0, |store| store.retained_bytes()),
                 job_credits: 0,
+                log_protocol: self
+                    .follower_store
+                    .as_ref()
+                    .map_or(0, |_| crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION),
             }
         } else {
-            node_capacity(&self.data_dir)?
+            node_capacity(
+                &self.data_dir,
+                self.local_disk_limit_bytes,
+                self.follower_store.as_ref(),
+            )?
         };
         Ok(NodeAdvertisement::sign(
+            self.node,
             self.session,
             self.endpoint.clone(),
             self.fleet,
@@ -235,8 +421,78 @@ impl NodePublisher {
             now_ms.saturating_add(ADVERTISEMENT_LIFETIME_MS),
             self.module_digests.clone(),
             vec![1],
+            self.failure_domain.clone(),
             capacity,
         )?)
+    }
+}
+
+impl NodeLogAuthority for NodePublisher {
+    fn activate<'a>(
+        &'a self,
+        log_epoch: u64,
+    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<()>> {
+        Box::pin(async move {
+            let now_ms = now_ms().map_err(|_| CellError::Node("node-log time is unavailable"))?;
+            let mut observed = self.observed()?.lock().await;
+            let log = observed
+                .advertisement()
+                .log()
+                .ok_or(CellError::Node("node session has no enrolled log"))?;
+            if log.epoch() != log_epoch {
+                return Err(CellError::Fenced);
+            }
+            if log.active() {
+                return Ok(());
+            }
+            *observed = self.directory.activate_log(&observed, now_ms).await?;
+            Ok(())
+        })
+    }
+
+    fn advance_coverage<'a>(
+        &'a self,
+        log_epoch: u64,
+        tiered_through: u64,
+    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<()>> {
+        Box::pin(async move {
+            let now_ms = now_ms().map_err(|_| CellError::Node("node-log time is unavailable"))?;
+            let mut observed = self.observed()?.lock().await;
+            let log = observed
+                .advertisement()
+                .log()
+                .ok_or(CellError::Node("node session has no enrolled log"))?;
+            if log.epoch() != log_epoch {
+                return Err(CellError::Fenced);
+            }
+            if log.tiered_through() >= tiered_through {
+                return Ok(());
+            }
+            *observed = self
+                .directory
+                .advance_log_coverage(&observed, tiered_through, now_ms)
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn close<'a>(
+        &'a self,
+        barrier: &'a crab_cell_runtime::NodeLogRotationBarrier,
+    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<()>> {
+        Box::pin(async move {
+            let now_ms = now_ms().map_err(|_| CellError::Node("node-log time is unavailable"))?;
+            let mut observed = self.observed()?.lock().await;
+            let log = observed
+                .advertisement()
+                .log()
+                .ok_or(CellError::Node("node session has no enrolled log"))?;
+            if log.epoch() != barrier.log_epoch() {
+                return Err(CellError::Fenced);
+            }
+            *observed = self.directory.close_log(&observed, barrier, now_ms).await?;
+            Ok(())
+        })
     }
 }
 
@@ -487,6 +743,306 @@ pub(crate) async fn forward(
     }
 }
 
+pub(crate) async fn append_node_log(
+    State(server): State<Arc<Server>>,
+    ConnectInfo(identity): ConnectInfo<PeerTlsIdentity>,
+    AxumPath((leader, epoch)): AxumPath<(String, u64)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        != Some(NODE_LOG_MEDIA_TYPE)
+    {
+        return peer_http_error(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+    let (Some(receiver), Some(store), Some(_transport)) = (
+        server.peer_receiver.as_ref(),
+        server.follower_store.as_ref(),
+        server.node_log_transport.as_ref(),
+    ) else {
+        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let leader = match decode_session(&leader) {
+        Ok(leader) => leader,
+        Err(()) => return peer_http_error(StatusCode::BAD_REQUEST),
+    };
+    let now_ms = match now_ms() {
+        Ok(now_ms) => now_ms,
+        Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    if !receiver_is_current(receiver, now_ms).await {
+        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    if !authenticated_session(receiver, leader, &identity, now_ms).await {
+        return peer_http_error(StatusCode::UNAUTHORIZED);
+    }
+    if receiver
+        .directory
+        .authorize_log_append(leader, receiver.node, epoch, now_ms)
+        .await
+        .is_err()
+    {
+        return peer_http_error(StatusCode::FORBIDDEN);
+    }
+    let (covered_through, frames) = match decode_append_batch(body) {
+        Ok(batch) => batch,
+        Err(()) => return peer_http_error(StatusCode::BAD_REQUEST),
+    };
+    match store.append(leader, epoch, frames, covered_through).await {
+        Ok(receipt) => follower_receipt_response(receipt),
+        Err(CellError::PeerAuthorization(_)) => peer_http_error(StatusCode::UNAUTHORIZED),
+        Err(CellError::Node(_)) | Err(CellError::Ltx(_)) => peer_http_error(StatusCode::CONFLICT),
+        Err(_) => peer_http_error(StatusCode::SERVICE_UNAVAILABLE),
+    }
+}
+
+pub(crate) async fn seal_node_log(
+    State(server): State<Arc<Server>>,
+    ConnectInfo(identity): ConnectInfo<PeerTlsIdentity>,
+    AxumPath((leader, epoch, claimant)): AxumPath<(String, u64, String)>,
+) -> Response {
+    let (Some(receiver), Some(store), Some(_transport)) = (
+        server.peer_receiver.as_ref(),
+        server.follower_store.as_ref(),
+        server.node_log_transport.as_ref(),
+    ) else {
+        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let (Ok(leader), Ok(claimant)) = (decode_session(&leader), decode_session(&claimant)) else {
+        return peer_http_error(StatusCode::BAD_REQUEST);
+    };
+    let now_ms = match now_ms() {
+        Ok(now_ms) => now_ms,
+        Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    // Recovery must work before this follower publishes a new boot session.
+    // The recovery claim below binds the request to its persisted physical node.
+    if !authenticated_session(receiver, claimant, &identity, now_ms).await {
+        return peer_http_error(StatusCode::UNAUTHORIZED);
+    }
+    if receiver
+        .directory
+        .authorize_log_recovery(leader, claimant, receiver.node, epoch, now_ms)
+        .await
+        .is_err()
+    {
+        return peer_http_error(StatusCode::FORBIDDEN);
+    }
+    match store.seal(leader, epoch).await {
+        Ok(receipt) => follower_receipt_response(receipt),
+        Err(CellError::Node(_)) | Err(CellError::Ltx(_)) => peer_http_error(StatusCode::CONFLICT),
+        Err(_) => peer_http_error(StatusCode::SERVICE_UNAVAILABLE),
+    }
+}
+
+pub(crate) async fn retire_node_log(
+    State(server): State<Arc<Server>>,
+    ConnectInfo(identity): ConnectInfo<PeerTlsIdentity>,
+    AxumPath((leader, epoch, covered_through)): AxumPath<(String, u64, u64)>,
+) -> Response {
+    let (Some(receiver), Some(store), Some(_transport)) = (
+        server.peer_receiver.as_ref(),
+        server.follower_store.as_ref(),
+        server.node_log_transport.as_ref(),
+    ) else {
+        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let leader = match decode_session(&leader) {
+        Ok(leader) => leader,
+        Err(()) => return peer_http_error(StatusCode::BAD_REQUEST),
+    };
+    let now_ms = match now_ms() {
+        Ok(now_ms) => now_ms,
+        Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    if !receiver_is_current(receiver, now_ms).await {
+        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    if !authenticated_session(receiver, leader, &identity, now_ms).await {
+        return peer_http_error(StatusCode::UNAUTHORIZED);
+    }
+    if receiver
+        .directory
+        .authorize_log_retire(leader, receiver.node, epoch, covered_through, now_ms)
+        .await
+        .is_err()
+    {
+        return peer_http_error(StatusCode::FORBIDDEN);
+    }
+    match store.retire(leader, epoch, covered_through).await {
+        Ok(receipt) => follower_receipt_response(receipt),
+        Err(CellError::Node(_)) | Err(CellError::Ltx(_)) => peer_http_error(StatusCode::CONFLICT),
+        Err(_) => peer_http_error(StatusCode::SERVICE_UNAVAILABLE),
+    }
+}
+
+pub(crate) async fn tail_node_log(
+    State(server): State<Arc<Server>>,
+    ConnectInfo(identity): ConnectInfo<PeerTlsIdentity>,
+    AxumPath((leader, epoch, claimant, first)): AxumPath<(String, u64, String, u64)>,
+) -> Response {
+    let (Some(receiver), Some(store), Some(_transport)) = (
+        server.peer_receiver.as_ref(),
+        server.follower_store.as_ref(),
+        server.node_log_transport.as_ref(),
+    ) else {
+        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let (Ok(leader), Ok(claimant)) = (decode_session(&leader), decode_session(&claimant)) else {
+        return peer_http_error(StatusCode::BAD_REQUEST);
+    };
+    let now_ms = match now_ms() {
+        Ok(now_ms) => now_ms,
+        Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    // Recovery must work before this follower publishes a new boot session.
+    // The recovery claim below binds the request to its persisted physical node.
+    if !authenticated_session(receiver, claimant, &identity, now_ms).await {
+        return peer_http_error(StatusCode::UNAUTHORIZED);
+    }
+    if receiver
+        .directory
+        .authorize_log_recovery(leader, claimant, receiver.node, epoch, now_ms)
+        .await
+        .is_err()
+    {
+        return peer_http_error(StatusCode::FORBIDDEN);
+    }
+    match store.read_tail_page(leader, epoch, first).await {
+        Ok(page) => match encode_tail_page(page) {
+            Ok(body) => (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, NODE_LOG_MEDIA_TYPE),
+                    (header::CACHE_CONTROL, "no-store"),
+                ],
+                body,
+            )
+                .into_response(),
+            Err(()) => peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
+        },
+        Err(CellError::Node(_)) | Err(CellError::Ltx(_)) => peer_http_error(StatusCode::CONFLICT),
+        Err(_) => peer_http_error(StatusCode::SERVICE_UNAVAILABLE),
+    }
+}
+
+async fn authenticated_session(
+    receiver: &PeerReceiver,
+    claimed: SessionId,
+    identity: &PeerTlsIdentity,
+    now_ms: i64,
+) -> bool {
+    let Ok(Some(enrolled)) = receiver.directory.load(claimed, now_ms).await else {
+        return false;
+    };
+    let advertisement = enrolled.advertisement();
+    advertisement.certificate() == identity.certificate()
+        && advertisement
+            .verifying_key()
+            .is_ok_and(|key| key.to_bytes() == identity.public_key())
+}
+
+async fn receiver_is_current(receiver: &PeerReceiver, now_ms: i64) -> bool {
+    let Ok(Some(current)) = receiver.directory.load(receiver.session, now_ms).await else {
+        return false;
+    };
+    current.advertisement().node() == receiver.node
+}
+
+fn follower_receipt_response(receipt: crab_cell_runtime::FollowerReceipt) -> Response {
+    (
+        StatusCode::OK,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({
+            "base_sequence": receipt.base_sequence.to_string(),
+            "durable_through": receipt.durable_through.to_string(),
+        })),
+    )
+        .into_response()
+}
+
+fn encode_tail_page(page: crab_cell_runtime::FollowerTailPage) -> std::result::Result<Vec<u8>, ()> {
+    if page.frames.len() > NODE_LOG_TAIL_PAGE_FRAMES {
+        return Err(());
+    }
+    let count = u32::try_from(page.frames.len()).map_err(|_| ())?;
+    let body_len = page.frames.iter().try_fold(12_usize, |length, frame| {
+        length.checked_add(8)?.checked_add(frame.len())
+    });
+    let body_len = body_len
+        .filter(|length| *length <= NODE_LOG_TAIL_PAGE_BODY_BYTES)
+        .ok_or(())?;
+    let mut body = Vec::with_capacity(body_len);
+    body.extend_from_slice(&page.next_sequence.unwrap_or(0).to_le_bytes());
+    body.extend_from_slice(&count.to_le_bytes());
+    for frame in page.frames {
+        body.extend_from_slice(&(frame.len() as u64).to_le_bytes());
+        body.extend_from_slice(&frame);
+    }
+    Ok(body)
+}
+
+fn decode_append_batch(body: Bytes) -> std::result::Result<(u64, Vec<Bytes>), ()> {
+    let covered = body.get(..8).ok_or(())?;
+    let covered_through = u64::from_le_bytes(covered.try_into().map_err(|_| ())?);
+    let mut cursor = 8_usize;
+    let mut frames = Vec::new();
+    while cursor < body.len() {
+        if frames.len() == 64 {
+            return Err(());
+        }
+        let length_end = cursor.checked_add(8).ok_or(())?;
+        let length = u64::from_le_bytes(
+            body.get(cursor..length_end)
+                .ok_or(())?
+                .try_into()
+                .map_err(|_| ())?,
+        );
+        if length == 0 || length > usize::MAX as u64 {
+            return Err(());
+        }
+        let frame_end = length_end.checked_add(length as usize).ok_or(())?;
+        if frame_end > body.len() {
+            return Err(());
+        }
+        frames.push(body.slice(length_end..frame_end));
+        cursor = frame_end;
+    }
+    if frames.is_empty() {
+        return Err(());
+    }
+    Ok((covered_through, frames))
+}
+
+fn decode_session(value: &str) -> std::result::Result<SessionId, ()> {
+    if value.len() != 32 {
+        return Err(());
+    }
+    let mut bytes = [0_u8; 16];
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return Err(());
+    }
+    for (index, pair) in pairs.iter().enumerate() {
+        bytes[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
+    }
+    Ok(SessionId::from_bytes(bytes))
+}
+
+fn decode_node(value: &str) -> std::result::Result<NodeId, ()> {
+    decode_session(value).map(|session| NodeId::from_bytes(*session.as_bytes()))
+}
+
+fn hex_nibble(value: u8) -> std::result::Result<u8, ()> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        _ => Err(()),
+    }
+}
+
 fn peer_http_reply(body: Vec<u8>) -> Response {
     (
         StatusCode::OK,
@@ -519,11 +1075,15 @@ fn remaining_timeout(started: Instant, original_ms: u32) -> crab_cell_runtime::R
         .ok_or(CellError::Deadline)
 }
 
-fn node_capacity(data_dir: &Path) -> crate::Result<NodeCapacity> {
+fn node_capacity(
+    data_dir: &Path,
+    local_disk_limit_bytes: u64,
+    follower_store: Option<&crab_cell_runtime::FollowerStore>,
+) -> crate::Result<NodeCapacity> {
     let mut system = sysinfo::System::new();
     system.refresh_memory();
     let free_memory_bytes = effective_memory_available(system.available_memory());
-    let free_disk_bytes = fs4::available_space(data_dir)?;
+    let free_disk_bytes = fs4::available_space(data_dir)?.min(local_disk_limit_bytes);
     let job_credits = std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1)
@@ -531,11 +1091,22 @@ fn node_capacity(data_dir: &Path) -> crate::Result<NodeCapacity> {
     Ok(NodeCapacity {
         free_memory_bytes,
         free_disk_bytes,
+        follower_free_bytes: follower_store
+            .map(crab_cell_runtime::FollowerStore::available_bytes)
+            .unwrap_or(0)
+            .min(free_disk_bytes),
+        follower_retained_bytes: follower_store
+            .map(crab_cell_runtime::FollowerStore::retained_bytes)
+            .unwrap_or(0),
         job_credits,
+        log_protocol: follower_store.map_or(0, |_| crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION),
     })
 }
 
-pub(crate) fn local_resources(data_dir: &Path) -> crate::Result<LocalResources> {
+pub(crate) fn local_resources(
+    data_dir: &Path,
+    local_disk_limit_bytes: u64,
+) -> crate::Result<LocalResources> {
     let mut system = sysinfo::System::new();
     system.refresh_memory();
     let pid = sysinfo::get_current_pid()
@@ -552,9 +1123,13 @@ pub(crate) fn local_resources(data_dir: &Path) -> crate::Result<LocalResources> 
     ))?;
     // Startup budgets use the stable process limit. Reusing advertised free
     // memory would make transient boot load permanently shrink Cell admission.
+    let disk = fs4::statvfs(data_dir)?;
+    let disk_capacity_bytes = disk.total_space().min(local_disk_limit_bytes);
     Ok(LocalResources {
         memory_bytes: effective_memory_limit(system.total_memory()),
-        free_disk_bytes: fs4::available_space(data_dir)?,
+        disk_limit_bytes: local_disk_limit_bytes,
+        disk_capacity_bytes,
+        free_disk_bytes: disk.available_space().min(disk_capacity_bytes),
         available_file_descriptors: file_limit.saturating_sub(open_files),
         job_credits: std::thread::available_parallelism()
             .map(usize::from)
@@ -615,6 +1190,45 @@ fn cgroup_memory_limit(path: &str) -> Option<u64> {
 
 fn encode_session(session: SessionId) -> String {
     encode_hex(session.as_bytes())
+}
+
+fn load_or_create_node_id(data_dir: &Path) -> crate::Result<NodeId> {
+    let path = data_dir.join("node-id");
+    match std::fs::read_to_string(&path) {
+        Ok(encoded) => {
+            return decode_node(&encoded)
+                .map_err(|()| crate::Error::Config("cells.data_dir node-id is invalid"));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let generated = NodeId::from_bytes(Uuid::now_v7().into_bytes());
+    let temporary = data_dir.join(format!(".node-id-{}.tmp", Uuid::now_v7()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    file.write_all(encode_hex(generated.as_bytes()).as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    let installed = match std::fs::hard_link(&temporary, &path) {
+        Ok(()) => {
+            std::fs::File::open(data_dir)?.sync_all()?;
+            generated
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let encoded = std::fs::read_to_string(&path)?;
+            decode_node(&encoded)
+                .map_err(|()| crate::Error::Config("cells.data_dir node-id is invalid"))?
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error.into());
+        }
+    };
+    std::fs::remove_file(temporary)?;
+    std::fs::File::open(data_dir)?.sync_all()?;
+    Ok(installed)
 }
 
 fn encode_digest(digest: Digest) -> String {
@@ -765,14 +1379,51 @@ mod tests {
     const NOW_MS: i64 = 1_000_000;
 
     #[test]
+    fn node_log_append_codec_is_bounded_and_exact() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&9_u64.to_le_bytes());
+        body.extend_from_slice(&3_u64.to_le_bytes());
+        body.extend_from_slice(b"one");
+        body.extend_from_slice(&3_u64.to_le_bytes());
+        body.extend_from_slice(b"two");
+        let (covered, frames) = decode_append_batch(Bytes::from(body)).unwrap();
+        assert_eq!(covered, 9);
+        assert_eq!(
+            frames,
+            [Bytes::from_static(b"one"), Bytes::from_static(b"two")]
+        );
+
+        let mut trailing = Vec::new();
+        trailing.extend_from_slice(&0_u64.to_le_bytes());
+        trailing.extend_from_slice(&4_u64.to_le_bytes());
+        trailing.extend_from_slice(b"bad");
+        assert!(decode_append_batch(Bytes::from(trailing)).is_err());
+        assert!(
+            encode_tail_page(crab_cell_runtime::FollowerTailPage {
+                frames: vec![Bytes::from_static(b"frame"); NODE_LOG_TAIL_PAGE_FRAMES + 1],
+                next_sequence: None,
+            })
+            .is_err()
+        );
+        assert_eq!(
+            decode_session("01010101010101010101010101010101").unwrap(),
+            SessionId::from_bytes([1; 16])
+        );
+        assert!(decode_session("0101010101010101010101010101010G").is_err());
+    }
+
+    #[test]
     fn local_resources_include_process_file_capacity() {
         let directory = TempDir::new().unwrap();
-        let resources = local_resources(directory.path()).unwrap();
+        let resources = local_resources(directory.path(), 32 * 1024 * 1024 * 1024).unwrap();
         assert!(
             resources.memory_bytes > 0
                 && resources.free_disk_bytes > 0
                 && resources.available_file_descriptors > 0
         );
+        assert_eq!(resources.disk_limit_bytes, 32 * 1024 * 1024 * 1024);
+        assert!(resources.disk_capacity_bytes <= resources.disk_limit_bytes);
+        assert!(resources.free_disk_bytes <= resources.disk_capacity_bytes);
     }
 
     fn repository() -> RepositoryConfig {
@@ -1092,17 +1743,32 @@ mod tests {
             signing_key.clone(),
             session,
             "https://node-1.internal:8789".into(),
+            NodeFailureDomain::default(),
             fleet,
             Digest::from_bytes([15; 32]),
             image,
             release,
             vec![Digest::from_bytes([16; 32])],
             data_dir.path().into(),
+            32 * 1024 * 1024 * 1024,
             crate::cells::SchedulerStatus::new(now_ms().unwrap()).unwrap(),
         )
         .unwrap();
+        let follower_store = crab_cell_runtime::FollowerStore::open(
+            data_dir.path().to_owned(),
+            crab_ltx::Limits::default(),
+            crab_ltx::DiskBudget::new(1 << 20),
+        )
+        .unwrap();
+        let publisher = publisher.with_follower_store(follower_store);
 
         let published = publisher.publish_initial().await.unwrap();
+        publisher.lease_guard().unwrap().check().unwrap();
+        assert_eq!(
+            published.advertisement().capacity().log_protocol,
+            crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION
+        );
+        assert!(published.advertisement().capacity().follower_free_bytes > 0);
         assert_eq!(
             publisher
                 .advertisement(2, now_ms().unwrap(), true)
@@ -1111,7 +1777,10 @@ mod tests {
             NodeCapacity {
                 free_memory_bytes: 0,
                 free_disk_bytes: 0,
+                follower_free_bytes: 0,
+                follower_retained_bytes: 0,
                 job_credits: 0,
+                log_protocol: crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION,
             }
         );
         let loaded = directory
@@ -1121,18 +1790,38 @@ mod tests {
             .unwrap();
 
         assert_eq!(loaded.advertisement(), published.advertisement());
+        assert_eq!(loaded.advertisement().node(), publisher.node());
+        let restarted = NodePublisher::new(
+            directory.clone(),
+            signing_key.clone(),
+            SessionId::from_bytes([17; 16]),
+            "https://node-1.internal:8789".into(),
+            NodeFailureDomain::default(),
+            fleet,
+            Digest::from_bytes([15; 32]),
+            image,
+            release,
+            vec![Digest::from_bytes([16; 32])],
+            data_dir.path().into(),
+            32 * 1024 * 1024 * 1024,
+            crate::cells::SchedulerStatus::new(now_ms().unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restarted.node(), publisher.node());
         assert!(
             NodePublisher::new(
                 directory,
                 signing_key,
                 session,
                 "https://node-1.internal:8789".into(),
+                NodeFailureDomain::default(),
                 fleet,
                 Digest::from_bytes([15; 32]),
                 image,
                 release,
                 vec![Digest::from_bytes([16; 32])],
                 data_dir.path().into(),
+                32 * 1024 * 1024 * 1024,
                 crate::cells::SchedulerStatus::new(now_ms().unwrap()).unwrap(),
             )
             .is_err()

@@ -78,10 +78,10 @@ These hooks do not implement SQL admission, resident-database eviction, owner
 timers, distributed fencing or a deterministic cluster simulator.
 
 The requested capacity is 1K–10K active databases per node, 100–5,000 MB each,
-with 1,000 TPS (aggregate per node assumed pending confirmation). This is a target,
-not current qualification. The [scalability assessment](../../crab-ltx/SCALABILITY.md)
-records measured regressions, current resource bounds and the required metadata,
-streaming and node-level qualification work. Raising `Limits` alone is insufficient.
+with 1,000 TPS aggregate per node. This is a target, not current qualification.
+The [scalability assessment](../../crab-ltx/SCALABILITY.md) records measured
+regressions, current resource bounds and the required metadata, HTTP streaming,
+and node-level qualification work. Raising `Limits` alone is insufficient.
 
 The [Celld comparison](celld-and-rust.md) explains the system-level differences.
 This document owns the reusable crate boundary and the changes needed to meet

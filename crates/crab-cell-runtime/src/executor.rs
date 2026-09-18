@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crab_ltx::{CaptureBatch, ManagedDb, TransactionError, rusqlite::OptionalExtension};
 
 use crate::{CellId, Digest, Error, IncarnationId, RequestId, Result};
@@ -6,6 +8,8 @@ const MAX_RESULT_BYTES: usize = 1 << 20;
 const MAX_REQUEST_LIFETIME_MS: i64 = 24 * 60 * 60 * 1000;
 const MAX_ISSUED_FUTURE_MS: i64 = 5 * 60 * 1000;
 const REQUEST_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
+pub(crate) const MAX_PENDING_PUBLICATIONS: usize = 64;
+pub(crate) const PENDING_PUBLICATION_HIGH_WATER_BYTES: u64 = 64 << 20;
 
 /// Stable caller identity retained across retries and outcome resolution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,6 +103,7 @@ pub struct PendingCommit {
     next_due_ms: Option<i64>,
     cuts: CaptureBatch,
     prepared: Option<crab_ltx::RootRef>,
+    durable: bool,
 }
 
 /// Locally committed schema step retained until its root and control pair publish.
@@ -149,9 +154,18 @@ impl PendingMigration {
     pub const fn cuts(&self) -> &CaptureBatch {
         &self.cuts
     }
+
+    #[must_use]
+    pub(crate) fn retained_bytes(&self) -> u64 {
+        self.cuts
+            .segments
+            .iter()
+            .map(|segment| segment.info().size_bytes)
+            .sum()
+    }
 }
 
-/// Published identity of one completed schema migration.
+/// Durably proven identity of one completed schema migration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MigrationOutcome {
     pub code: Digest,
@@ -184,6 +198,15 @@ impl PendingCommit {
     pub fn prepared(&self) -> Option<crab_ltx::RootRef> {
         self.prepared
     }
+
+    #[must_use]
+    pub(crate) fn retained_bytes(&self) -> u64 {
+        self.cuts
+            .segments
+            .iter()
+            .map(|segment| segment.info().size_bytes)
+            .sum()
+    }
 }
 
 /// Immediate executor result; pending output cannot be observed before publication.
@@ -195,15 +218,18 @@ pub enum CommandExecution {
 
 /// Single-threaded SQL owner for one active Cell.
 ///
-/// The actor must not call `execute` while `pending` is present. Dropping a
-/// caller does not remove pending cuts or their result. Only `confirm_published`
-/// releases that result after an authoritative root matches the local commit.
+/// The actor may continue after the preceding commit has a durability proof.
+/// Dropping a caller does not remove queued cuts or their result. Only
+/// `confirm_published` releases retained files after an authoritative root
+/// matches the oldest local commit.
 pub struct CellExecutor {
     db: ManagedDb,
     cell: CellId,
     incarnation: IncarnationId,
     schema: u32,
-    pending: Option<PendingCommit>,
+    pending: VecDeque<PendingCommit>,
+    pending_bytes: u64,
+    published_sequence: u64,
     pending_migration: Option<PendingMigration>,
     fenced: bool,
 }
@@ -220,7 +246,9 @@ impl CellExecutor {
             cell,
             incarnation,
             schema,
-            pending: None,
+            pending: VecDeque::new(),
+            pending_bytes: 0,
+            published_sequence: 0,
             pending_migration: None,
             fenced: false,
         }
@@ -327,7 +355,9 @@ impl CellExecutor {
             let _ = db.close();
             return Err(error);
         }
-        Ok(Self::new(db, cell, incarnation, schema))
+        let mut executor = Self::new(db, cell, incarnation, schema);
+        executor.published_sequence = root.commit_sequence;
+        Ok(executor)
     }
 
     /// Executes one accepted command or returns its already published result.
@@ -342,7 +372,7 @@ impl CellExecutor {
         if self.fenced {
             return Err(Error::Fenced);
         }
-        if self.has_pending() {
+        if !self.accepts_publication() {
             return Err(Error::PendingPublication);
         }
         if max_result_bytes > MAX_RESULT_BYTES {
@@ -448,7 +478,7 @@ impl CellExecutor {
         if self.fenced {
             return Err(Error::Fenced);
         }
-        if self.has_pending() {
+        if !self.accepts_publication() {
             return Err(Error::PendingPublication);
         }
         if max_result_bytes > MAX_RESULT_BYTES {
@@ -523,7 +553,7 @@ impl CellExecutor {
         self.finish_transaction(transaction)
     }
 
-    /// Runs one bounded read only when no unpublished local commit exists.
+    /// Runs one bounded read from the actor-serialized logical head.
     pub fn query(
         &mut self,
         max_result_bytes: usize,
@@ -532,7 +562,7 @@ impl CellExecutor {
         if self.fenced {
             return Err(Error::Fenced);
         }
-        if self.has_pending() {
+        if !self.logical_head_is_durable() {
             return Err(Error::PendingPublication);
         }
         if max_result_bytes > MAX_RESULT_BYTES {
@@ -558,7 +588,7 @@ impl CellExecutor {
         }
     }
 
-    /// Resolves one identity against the current published SQLite state.
+    /// Resolves one identity against the actor-serialized logical SQLite state.
     pub fn resolve(
         &mut self,
         identity: MutationIdentity,
@@ -569,7 +599,7 @@ impl CellExecutor {
         if self.fenced {
             return Ok(Resolution::Unknown);
         }
-        if self.has_pending() {
+        if !self.logical_head_is_durable() {
             return Ok(Resolution::Unknown);
         }
         if identity.expired(now_ms)? {
@@ -623,14 +653,14 @@ impl CellExecutor {
         Ok(Resolution::Committed(outcome))
     }
 
-    /// Resolves one destination inbox identity from published SQLite state.
+    /// Resolves one destination inbox identity from the logical SQLite state.
     pub fn resolve_effect(
         &mut self,
         delivery: crate::InboxDelivery,
         now_ms: i64,
         max_result_bytes: usize,
     ) -> Result<Resolution> {
-        if self.fenced || self.has_pending() {
+        if self.fenced || !self.logical_head_is_durable() {
             return Ok(Resolution::Unknown);
         }
         let result = self.db.query_with(|connection| {
@@ -656,7 +686,38 @@ impl CellExecutor {
 
     #[must_use]
     pub fn pending(&self) -> Option<&PendingCommit> {
-        self.pending.as_ref()
+        self.pending.front()
+    }
+
+    #[must_use]
+    pub(crate) fn latest_pending(&self) -> Option<&PendingCommit> {
+        self.pending.back()
+    }
+
+    /// Marks one actor-ordered logical commit safe to observe before object publication.
+    pub(crate) fn confirm_durable(&mut self, commit_sequence: u64) -> Result<()> {
+        if commit_sequence <= self.published_sequence {
+            return Ok(());
+        }
+        let index = self
+            .pending
+            .iter()
+            .position(|pending| pending.outcome.commit_sequence() == commit_sequence)
+            .ok_or(Error::PendingPublication)?;
+        if self
+            .pending
+            .iter()
+            .take(index)
+            .any(|pending| !pending.durable)
+        {
+            return Err(Error::Control("durability proof skipped an earlier commit"));
+        }
+        let pending = self
+            .pending
+            .get_mut(index)
+            .ok_or(Error::PendingPublication)?;
+        pending.durable = true;
+        Ok(())
     }
 
     #[must_use]
@@ -773,7 +834,7 @@ impl CellExecutor {
 
     /// Pins the one immutable proposal that may satisfy the pending commit.
     pub fn bind_prepared(&mut self, prepared: &crab_ltx::PreparedRoot) -> Result<()> {
-        let pending = self.pending.as_mut().ok_or(Error::PendingPublication)?;
+        let pending = self.pending.front_mut().ok_or(Error::PendingPublication)?;
         let root = prepared.root();
         if root.cell != *self.cell.as_bytes()
             || root.incarnation != *self.incarnation.as_bytes()
@@ -814,20 +875,23 @@ impl CellExecutor {
 
     /// Releases the stored result only after the published root proves inclusion.
     pub fn confirm_published(&mut self, root: &crab_ltx::RootRef) -> Result<StoredOutcome> {
-        let pending = self.pending.as_ref().ok_or(Error::PendingPublication)?;
+        let pending = self.pending.front().ok_or(Error::PendingPublication)?;
         if pending.prepared.as_ref() != Some(root) {
             return Err(Error::Command(
                 "published root does not match prepared commit",
             ));
         }
         self.db.prune_captured(&pending.cuts)?;
-        self.pending
-            .take()
-            .map(|pending| pending.outcome)
-            .ok_or(Error::PendingPublication)
+        let pending = self.pending.pop_front().ok_or(Error::PendingPublication)?;
+        self.pending_bytes = self
+            .pending_bytes
+            .checked_sub(pending.retained_bytes())
+            .ok_or(Error::Control("pending publication accounting underflow"))?;
+        self.published_sequence = root.commit_sequence;
+        Ok(pending.outcome)
     }
 
-    /// Releases one migration only after its exact schema-bearing root publishes.
+    /// Finalizes local migration state after its exact schema-bearing root publishes.
     pub fn confirm_migration_published(
         &mut self,
         root: &crab_ltx::RootRef,
@@ -900,7 +964,18 @@ impl CellExecutor {
     }
 
     fn has_pending(&self) -> bool {
-        self.pending.is_some() || self.pending_migration.is_some()
+        !self.pending.is_empty() || self.pending_migration.is_some()
+    }
+
+    fn accepts_publication(&self) -> bool {
+        self.pending_migration.is_none()
+            && self.logical_head_is_durable()
+            && self.pending.len() < MAX_PENDING_PUBLICATIONS
+            && self.pending_bytes < PENDING_PUBLICATION_HIGH_WATER_BYTES
+    }
+
+    fn logical_head_is_durable(&self) -> bool {
+        self.pending.back().is_none_or(|pending| pending.durable)
     }
 
     fn finish_transaction(
@@ -934,13 +1009,19 @@ impl CellExecutor {
                         return Err(error.into());
                     }
                 };
-                self.pending = Some(PendingCommit {
+                let pending = PendingCommit {
                     outcome,
                     logical_time_ms,
                     next_due_ms,
                     cuts,
                     prepared: None,
-                });
+                    durable: false,
+                };
+                self.pending_bytes = self
+                    .pending_bytes
+                    .checked_add(pending.retained_bytes())
+                    .ok_or(Error::Capacity("pending publication bytes"))?;
+                self.pending.push_back(pending);
                 Ok(CommandExecution::Pending)
             }
         }

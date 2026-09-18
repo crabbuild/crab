@@ -7,17 +7,19 @@ use std::{
     },
 };
 
+use bytes::Bytes;
 use crab_cell_runtime::{
     ActivityContext, ActivityExecution, ApplicationId, BlockingActivityHandler, BuildDescriptor,
-    CellModule, CellReplica, CellRuntime, CellTarget, Digest, IncarnationId, MaintenanceModule,
-    MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor, NamespaceId, NodeAdvertisement,
-    NodeCapacity, OperationDescriptor, Owner, PeerRoundTrip, PeerSigner, RegistryBuilder,
-    ReplicaLimits, RetainedCodeDescriptor, SqlWorkerPool, TenantId, WorkflowAction,
-    WorkflowActivityModule, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowModule,
-    WorkflowNamespace, WorkflowStatus, install_workflow_schema, register_blocking_activity,
-    register_maintenance, register_workflow, register_workflow_activities,
+    CellAuthority, CellCatalog, CellModule, CellReplica, CellRuntime, CellTarget, Digest,
+    IncarnationId, MaintenanceModule, MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor,
+    NamespaceId, NodeAdvertisement, NodeCapacity, OperationDescriptor, Owner, PeerRoundTrip,
+    PeerSigner, RecoveryManifestStore, RegistryBuilder, ReplicaLimits, RetainedCodeDescriptor,
+    SqlWorkerPool, TenantId, WorkflowAction, WorkflowActivityModule, WorkflowContext,
+    WorkflowDecision, WorkflowDefinition, WorkflowModule, WorkflowNamespace, WorkflowStatus,
+    install_workflow_schema, register_blocking_activity, register_maintenance, register_workflow,
+    register_workflow_activities,
 };
-use crab_storage::{CellStorageLayout, StorageError, Store};
+use crab_storage::{CellStorageLayout, Store};
 use ed25519_dalek::SigningKey;
 use object_store::{memory::InMemory, path::Path};
 
@@ -65,6 +67,196 @@ const fn operation(id: u32, input_limit: u32, output_limit: u32) -> OperationDes
         input_limit,
         output_limit,
     }
+}
+
+#[tokio::test]
+async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
+    let application = ApplicationId::from_bytes([61; 16]);
+    let tenant = TenantId::from_bytes([62; 16]);
+    let layout = CellStorageLayout::new(
+        Store::new(Arc::new(InMemory::new())),
+        Path::from("scheduler-recovery"),
+        *application.as_bytes(),
+    );
+    let fleet = Digest::from_bytes([63; 32]);
+    let image = Digest::from_bytes([64; 32]);
+    let release = Digest::from_bytes([65; 32]);
+    let certificate = Digest::from_bytes([66; 32]);
+    let key = SigningKey::from_bytes(&[67; 32]);
+    let leader = crab_cell_runtime::SessionId::from_bytes([68; 16]);
+    let member = crab_cell_runtime::SessionId::from_bytes([69; 16]);
+    let claimant = crab_cell_runtime::SessionId::from_bytes([70; 16]);
+    let now_ms = super::super::unix_now_ms().unwrap();
+    let initial_ms = now_ms - 20_000;
+    let capacity = NodeCapacity {
+        free_memory_bytes: 1 << 30,
+        free_disk_bytes: 1 << 30,
+        follower_free_bytes: 1 << 30,
+        follower_retained_bytes: 0,
+        job_credits: 1,
+        log_protocol: crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION,
+    };
+    let advertisement = |session: crab_cell_runtime::SessionId,
+                         endpoint: &str,
+                         progress,
+                         issued_at_ms,
+                         expires_at_ms| {
+        NodeAdvertisement::sign(
+            crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+            session,
+            endpoint.into(),
+            fleet,
+            certificate,
+            image,
+            release,
+            &key,
+            progress,
+            issued_at_ms,
+            expires_at_ms,
+            vec![Digest::from_bytes([71; 32])],
+            vec![1],
+            crab_cell_runtime::NodeFailureDomain::default(),
+            capacity,
+        )
+        .unwrap()
+    };
+    let directory = NodeDirectory::new(layout.clone(), fleet, image, release);
+    let leader_record = directory
+        .create(
+            advertisement(
+                leader,
+                "https://expired.internal:8081",
+                1,
+                initial_ms,
+                initial_ms + 15_000,
+            ),
+            initial_ms,
+        )
+        .await
+        .unwrap();
+    let member_record = directory
+        .create(
+            advertisement(
+                member,
+                "https://follower.internal:8081",
+                1,
+                initial_ms,
+                initial_ms + 15_000,
+            ),
+            initial_ms,
+        )
+        .await
+        .unwrap();
+    let enrolled = directory
+        .recruit_log(&leader_record, 1, 1, 2, initial_ms + 1)
+        .await
+        .unwrap();
+    let active = directory
+        .activate_log(&enrolled, initial_ms + 2)
+        .await
+        .unwrap();
+    directory
+        .advance_log_coverage(&active, 1, initial_ms + 3)
+        .await
+        .unwrap();
+    directory
+        .refresh(
+            &member_record,
+            advertisement(
+                member,
+                "https://follower.internal:8081",
+                2,
+                now_ms,
+                now_ms + 15_000,
+            ),
+            now_ms,
+        )
+        .await
+        .unwrap();
+    directory
+        .create(
+            advertisement(
+                claimant,
+                "https://claimant.internal:8081",
+                1,
+                now_ms,
+                now_ms + 15_000,
+            ),
+            now_ms,
+        )
+        .await
+        .unwrap();
+
+    let follower_directory = tempfile::TempDir::new().unwrap();
+    let follower = crab_cell_runtime::FollowerStore::open(
+        follower_directory.path().to_owned(),
+        super::super::repository_replica_limits(),
+        crab_cell_runtime::DiskBudget::new(1 << 30),
+    )
+    .unwrap();
+    let source = tempfile::TempDir::new().unwrap();
+    let mut database = crab_ltx::ManagedDb::open(
+        &source.path().join("follower.sqlite"),
+        super::super::repository_replica_limits(),
+    )
+    .unwrap();
+    database
+        .transaction(|transaction| transaction.execute_batch("CREATE TABLE values_(v)"))
+        .unwrap();
+    let capture = database.capture().unwrap();
+    let segment = capture.segments.first().unwrap();
+    let frame = crab_ltx::encode_node_frame(
+        crab_ltx::NodeFrameScope {
+            leader_session: *leader.as_bytes(),
+            log_epoch: 1,
+            node_sequence: 1,
+            application: *application.as_bytes(),
+            cell: [72; 32],
+            incarnation: [73; 16],
+            cell_epoch: 1,
+            commit_sequence: 1,
+        },
+        segment.info().clone(),
+        Bytes::from(std::fs::read(segment.path()).unwrap()),
+        super::super::repository_replica_limits(),
+    )
+    .unwrap()
+    .encoded()
+    .clone();
+    follower.append(leader, 1, vec![frame], 0).await.unwrap();
+    database.close().unwrap();
+    let transport: Arc<dyn crab_cell_runtime::NodeLogTransport> =
+        Arc::new(crab_cell_runtime::LocalFollowerTransport::new(
+            crab_cell_runtime::NodeId::from_bytes(*member.as_bytes()),
+            follower,
+        ));
+    recover_node_session(
+        directory.clone(),
+        CellCatalog::new(layout.clone(), tenant),
+        CellAuthority::new(layout.clone()),
+        RecoveryManifestStore::new(layout, super::super::repository_replica_limits()),
+        transport,
+        crab_ltx::DiskBudget::new(512 << 20),
+        leader,
+        claimant,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        directory
+            .recovery_candidates(claimant, super::super::unix_now_ms().unwrap(), 2)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        directory
+            .takeover_proof(leader, claimant, super::super::unix_now_ms().unwrap())
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 struct SchedulerWorkflowDefinition;
@@ -379,6 +571,7 @@ async fn scan_executes_registered_workflow_activity_without_blocking_the_scanner
     node_directory
         .create(
             NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 endpoint,
                 fleet,
@@ -391,10 +584,12 @@ async fn scan_executes_registered_workflow_activity_without_blocking_the_scanner
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
+                crab_cell_runtime::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
                     job_credits: 1,
+                    ..NodeCapacity::default()
                 },
             )
             .unwrap(),
@@ -549,6 +744,7 @@ async fn scan_cursor_advances_when_the_cycle_budget_is_exhausted() {
     node_directory
         .create(
             NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 endpoint,
                 fleet,
@@ -561,10 +757,12 @@ async fn scan_cursor_advances_when_the_cycle_budget_is_exhausted() {
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
+                crab_cell_runtime::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
                     job_credits: 1,
+                    ..NodeCapacity::default()
                 },
             )
             .unwrap(),
@@ -720,6 +918,7 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
     node_directory
         .create(
             NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*remote_session.as_bytes()),
                 remote_session,
                 remote_endpoint,
                 fleet,
@@ -732,10 +931,12 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
+                crab_cell_runtime::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 0,
                     free_disk_bytes: 0,
                     job_credits: 0,
+                    ..NodeCapacity::default()
                 },
             )
             .unwrap(),
@@ -747,6 +948,7 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
     node_directory
         .create(
             NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*local_session.as_bytes()),
                 local_session,
                 local_endpoint.clone(),
                 fleet,
@@ -759,10 +961,12 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
+                crab_cell_runtime::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
                     job_credits: 1,
+                    ..NodeCapacity::default()
                 },
             )
             .unwrap(),
@@ -880,6 +1084,7 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
     node_directory
         .create(
             NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*stale_session.as_bytes()),
                 stale_session,
                 "https://stale.internal:8789".into(),
                 fleet,
@@ -892,10 +1097,12 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
                 stale_issued_at_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
+                crab_cell_runtime::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1,
                     free_disk_bytes: 1,
                     job_credits: 1,
+                    ..NodeCapacity::default()
                 },
             )
             .unwrap(),
@@ -906,6 +1113,7 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
     node_directory
         .create(
             NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 endpoint,
                 fleet,
@@ -918,10 +1126,12 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
+                crab_cell_runtime::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
                     job_credits: 1,
+                    ..NodeCapacity::default()
                 },
             )
             .unwrap(),
@@ -947,7 +1157,7 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
     let mut scheduler = RepositoryCellScheduler::new(
         identity,
         layout.clone(),
-        node_directory,
+        node_directory.clone(),
         router,
         session,
         status.clone(),
@@ -962,13 +1172,26 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
     assert_eq!(after.value().state, crab_cell_runtime::ControlState::Idle);
     assert_eq!(status.progress(), 2);
     assert!(status.is_healthy(super::super::unix_now_ms().unwrap()));
-    assert!(matches!(
+    assert!(
+        !node_directory
+            .is_live(stale_session, super::super::unix_now_ms().unwrap())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !node_directory
+            .advertised_sessions(super::super::unix_now_ms().unwrap(), 8)
+            .await
+            .unwrap()
+            .contains(&stale_session)
+    );
+    assert!(
         layout
             .store()
-            .get_with_etag_bounded(&layout.node_path(stale_session.as_bytes()), 1)
-            .await,
-        Err(StorageError::NotFound { .. })
-    ));
+            .get_with_etag_bounded(&layout.node_path(stale_session.as_bytes()), 1_024)
+            .await
+            .is_ok()
+    );
     runtime.shutdown().await.unwrap();
 }
 
@@ -1078,6 +1301,7 @@ async fn activating_release_migrates_idle_cell_before_ready_gate() {
     node_directory
         .create(
             NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 endpoint,
                 fleet,
@@ -1090,10 +1314,12 @@ async fn activating_release_migrates_idle_cell_before_ready_gate() {
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
+                crab_cell_runtime::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
                     job_credits: 1,
+                    ..NodeCapacity::default()
                 },
             )
             .unwrap(),
