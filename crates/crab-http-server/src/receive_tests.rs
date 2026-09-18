@@ -232,7 +232,7 @@ async fn native_http_receive_rejects_locked_paths_even_when_the_tip_reverts() {
 async fn native_http_push_rustfs() {
     let bucket = std::env::var("QUALIFICATION_BUCKET").unwrap();
     let prefix = std::env::var("QUALIFICATION_PREFIX").unwrap();
-    assert!(prefix.starts_with("qualification/http-receive-"));
+    assert!(prefix.starts_with("qualification/http-push-"));
     let store =
         crab_storage::build_static_env_store(&bucket, crab_storage::StorageProviderKind::S3)
             .unwrap();
