@@ -16,60 +16,72 @@ const QUEUE_DEDUP: u8 = 1 << 4;
 const WORKFLOWS: u8 = 1 << 5;
 const BLOBS: u8 = 1 << 6;
 const CRON_SCHEDULES: u8 = 1 << 7;
-const UNKNOWN: u8 = 1 << 8;
 
 /// Conservative inventory of rows that can retain executable release contracts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PersistedWorkInventory(u8);
+pub struct PersistedWorkInventory {
+    bits: u8,
+    unknown: bool,
+}
 
 impl PersistedWorkInventory {
     pub(crate) const fn unknown() -> Self {
-        Self(UNKNOWN)
+        Self {
+            bits: 0,
+            unknown: true,
+        }
     }
 
     /// Reports whether contract removal can proceed without transforming durable work.
     #[must_use]
     pub const fn is_empty(self) -> bool {
-        self.0 == 0
+        !self.unknown && self.bits == 0
     }
 
     pub(crate) const fn is_unknown(self) -> bool {
-        self.0 & UNKNOWN != 0
+        self.unknown
     }
 
     /// Names the first durable work class blocking contract removal.
     #[must_use]
     pub const fn first_blocker(self) -> Option<&'static str> {
-        if self.0 & REQUESTS != 0 {
-            Some("maintenance release is blocked by retained request outcomes")
-        } else if self.0 & INBOX != 0 {
-            Some("maintenance release is blocked by retained effect inbox outcomes")
-        } else if self.0 & EFFECTS != 0 {
-            Some("maintenance release is blocked by retained source effects")
-        } else if self.0 & QUEUE_MESSAGES != 0 {
-            Some("maintenance release is blocked by retained Queue messages")
-        } else if self.0 & QUEUE_DEDUP != 0 {
-            Some("maintenance release is blocked by retained Queue producer identities")
-        } else if self.0 & WORKFLOWS != 0 {
-            Some("maintenance release is blocked by retained Workflow runs")
-        } else if self.0 & BLOBS != 0 {
-            Some("maintenance release is blocked by retained Blob objects")
-        } else if self.0 & CRON_SCHEDULES != 0 {
-            Some("maintenance release is blocked by retained Cron schedules")
-        } else if self.0 & UNKNOWN != 0 {
+        if self.unknown {
             Some("maintenance release is blocked by unknown persisted work")
+        } else if self.bits & REQUESTS != 0 {
+            Some("maintenance release is blocked by retained request outcomes")
+        } else if self.bits & INBOX != 0 {
+            Some("maintenance release is blocked by retained effect inbox outcomes")
+        } else if self.bits & EFFECTS != 0 {
+            Some("maintenance release is blocked by retained source effects")
+        } else if self.bits & QUEUE_MESSAGES != 0 {
+            Some("maintenance release is blocked by retained Queue messages")
+        } else if self.bits & QUEUE_DEDUP != 0 {
+            Some("maintenance release is blocked by retained Queue producer identities")
+        } else if self.bits & WORKFLOWS != 0 {
+            Some("maintenance release is blocked by retained Workflow runs")
+        } else if self.bits & BLOBS != 0 {
+            Some("maintenance release is blocked by retained Blob objects")
+        } else if self.bits & CRON_SCHEDULES != 0 {
+            Some("maintenance release is blocked by retained Cron schedules")
         } else {
             None
         }
     }
 
     pub(crate) fn encode(self) -> Vec<u8> {
-        vec![self.0]
+        if self.unknown {
+            Vec::new()
+        } else {
+            vec![self.bits]
+        }
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> crate::Result<Self> {
         match bytes {
-            [bits] => Ok(Self(*bits)),
+            [bits] => Ok(Self {
+                bits: *bits,
+                unknown: false,
+            }),
             _ => Err(Error::Command("invalid persisted-work inventory")),
         }
     }
@@ -96,7 +108,10 @@ pub(crate) fn inspect_persisted_work(
     if role == CatalogRole::Cron {
         bits |= exists(connection, "SELECT EXISTS(SELECT 1 FROM cron_schedules)")? * CRON_SCHEDULES;
     }
-    Ok(PersistedWorkInventory(bits))
+    Ok(PersistedWorkInventory {
+        bits,
+        unknown: false,
+    })
 }
 
 fn exists(connection: &Connection, sql: &str) -> crate::Result<u8> {
@@ -265,6 +280,22 @@ mod tests {
                 .first_blocker(),
             Some("maintenance release is blocked by retained request outcomes")
         );
+    }
+
+    #[test]
+    fn unknown_inventory_stays_fail_closed_without_changing_wire_width() {
+        let unknown = PersistedWorkInventory::unknown();
+        assert!(unknown.is_unknown());
+        assert!(!unknown.is_empty());
+        assert_eq!(
+            unknown.first_blocker(),
+            Some("maintenance release is blocked by unknown persisted work")
+        );
+        assert!(PersistedWorkInventory::decode(&unknown.encode()).is_err());
+
+        let empty = PersistedWorkInventory::decode(&[0]).unwrap();
+        assert!(empty.is_empty());
+        assert!(!empty.is_unknown());
     }
 
     #[test]

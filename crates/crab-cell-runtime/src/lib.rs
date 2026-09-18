@@ -15,10 +15,10 @@ mod catalog;
 mod client;
 mod codec;
 mod control;
-mod cron;
 mod coordination;
 #[cfg(test)]
 mod coordination_sim;
+mod cron;
 mod effects;
 mod error;
 mod eviction;
