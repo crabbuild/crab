@@ -77,6 +77,27 @@ fn duplicate_targets_and_unsafe_origins_fail_validation() {
     assert!(validate_origin(&Url::parse("https://example.com/").unwrap()).is_ok());
 }
 
+#[test]
+fn target_validation_supports_a_hundred_repository_fleet() {
+    let targets = (0..100)
+        .map(|index| {
+            format!("repo-{index}=1@/api/repos/github/repo-{index}/refs")
+                .parse::<TargetSpec>()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(validate_targets(&targets).is_ok());
+
+    let oversized = (0..257)
+        .map(|index| {
+            format!("repo-{index}=1@/api/repos/github/repo-{index}/refs")
+                .parse::<TargetSpec>()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(validate_targets(&oversized).is_err());
+}
+
 #[tokio::test]
 async fn load_runner_counts_success_and_admission_without_false_failure() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

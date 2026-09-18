@@ -3,6 +3,12 @@ use crab_git::{
     receive_plan::{GraphLimits, RefPolicy},
 };
 
+const MAX_GRAPH_STEPS: usize = 100_000_000;
+const MAX_GRAPH_READ_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const MAX_INCOMING_OBJECTS: u32 = 5_000_000;
+const MAX_OBJECT_BYTES: usize = 128 * 1024 * 1024;
+const MAX_INFLATED_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+
 pub(super) use crab_remote::prepare::Prepared;
 
 pub(super) async fn prepare(
@@ -30,15 +36,17 @@ pub(super) async fn prepare(
             layout,
             graph: GraphLimits {
                 max_ref_updates: 1024,
-                max_graph_steps: 1_000_000,
-                max_object_bytes: 64 * 1024 * 1024,
-                max_read_bytes: 512 * 1024 * 1024,
+                max_graph_steps: MAX_GRAPH_STEPS,
+                max_object_bytes: MAX_OBJECT_BYTES,
+                // A full-history create visits each unique object. This is a
+                // streaming work budget; object data is not retained together.
+                max_read_bytes: MAX_GRAPH_READ_BYTES,
             },
             pack: ReceiveLimits {
                 max_pack_bytes: super::MAX_BODY,
-                max_objects: 1_000_000,
-                max_object_bytes: 64 * 1024 * 1024,
-                max_inflated_bytes: 8 * 1024 * 1024 * 1024,
+                max_objects: MAX_INCOMING_OBJECTS,
+                max_object_bytes: MAX_OBJECT_BYTES,
+                max_inflated_bytes: MAX_INFLATED_BYTES,
                 max_delta_depth: 128,
             },
             policy: move |name: &str| RefPolicy {

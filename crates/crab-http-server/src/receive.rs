@@ -17,8 +17,10 @@ use crate::{auth::Principal, server::Server};
 mod publish;
 mod validate;
 
-const MAX_BODY: u64 = 2 * 1024 * 1024 * 1024;
-const REQUEST_BUDGET: Duration = Duration::from_secs(5 * 60);
+const MAX_BODY: u64 = 8 * 1024 * 1024 * 1024;
+const INITIAL_RECEIVE_RESERVATION: u64 = 2 * 1024 * 1024 * 1024;
+const RECEIVE_RESERVATION_GROWTH: u64 = 256 * 1024 * 1024;
+const REQUEST_BUDGET: Duration = Duration::from_secs(30 * 60);
 const REF_UPDATE_BUDGET: Duration = Duration::from_secs(30);
 const CONTENT_TYPE: &str = "application/x-git-receive-pack-result";
 
@@ -42,7 +44,7 @@ pub(crate) enum ReceiveError {
     Busy,
     #[error("receive cancelled or deadline exceeded")]
     Cancelled,
-    #[error("receive body exceeds 2 GiB")]
+    #[error("receive body exceeds 8 GiB")]
     TooLarge,
     #[error("receive body failed")]
     Body(#[from] axum::Error),
@@ -262,7 +264,7 @@ impl IntoResponse for ReceiveError {
                 StatusCode::REQUEST_TIMEOUT,
                 "Receive cancelled or timed out",
             ),
-            Self::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "Receive body exceeds 2 GiB"),
+            Self::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "Receive body exceeds 8 GiB"),
             Self::Cancelled => (
                 StatusCode::REQUEST_TIMEOUT,
                 "Receive cancelled or timed out",
@@ -370,13 +372,14 @@ pub(crate) async fn receive(
         let work = async {
             let directory = worker_server
                 .local_staging
-                .create(MAX_BODY, &worker_cancel)
+                .create(INITIAL_RECEIVE_RESERVATION, &worker_cancel)
                 .await?;
             let path = directory.path().join("receive");
             let mut file = tokio::fs::File::create(&path).await?;
             let mut stream = request.into_body().into_data_stream();
             let mut body_hasher = blake3::Hasher::new_derive_key("crab http receive body v1");
             let mut size = 0_u64;
+            let mut reserved = INITIAL_RECEIVE_RESERVATION;
             loop {
                 let chunk = tokio::select! {
                     () = worker_cancel.cancelled() => return Err(ReceiveError::Cancelled),
@@ -390,11 +393,18 @@ pub(crate) async fn receive(
                     .checked_add(chunk.len() as u64)
                     .filter(|size| *size <= MAX_BODY)
                     .ok_or(ReceiveError::TooLarge)?;
+                if size > reserved {
+                    reserved = size
+                        .saturating_add(RECEIVE_RESERVATION_GROWTH)
+                        .min(MAX_BODY);
+                    worker_server.local_staging.resize(&directory, reserved)?;
+                }
                 body_hasher.update(&chunk);
                 file.write_all(&chunk).await?;
             }
             file.flush().await?;
             drop(file);
+            worker_server.local_staging.resize(&directory, MAX_BODY)?;
             publish::run(
                 &worker_server,
                 &principal,

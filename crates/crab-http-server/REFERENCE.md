@@ -1066,14 +1066,17 @@ The server acquires sorted ref leases, the shared namespace lease for creates or
 
 | Resource | Limit |
 | --- | ---: |
-| Request body and prepared pack | 2 GiB |
-| Cooperative receive budget | 5 minutes |
-| Incoming objects | 1,000,000 |
-| One Git object | 64 MiB |
-| Total inflation | 8 GiB |
+| Request body and prepared pack | 8 GiB |
+| Cooperative receive budget | 30 minutes |
+| Incoming objects | 5,000,000 |
+| One Git object | 128 MiB |
+| Total inflation | 64 GiB |
 | Delta depth | 128 |
 | Ref commands | 1,024 |
-| Graph traversal steps | 1,000,000 |
+| Graph traversal steps | 100,000,000 |
+| Graph object bytes read | 64 GiB |
+| Existing logical objects inspected while validating receive | 5,000,000 |
+| Existing object-store requests while validating receive | 6,000,000 |
 | Dependency pointers | 1,024 |
 | One dependency file | 512 MiB |
 | Aggregate dependency content | 2 GiB |
@@ -1294,13 +1297,13 @@ This table collects process and transport limits that otherwise span several rou
 
 | Boundary | Limit | Ownership |
 | --- | ---: | --- |
-| Interactive repository reads | 16 concurrent, 2 minutes, 8 MiB response | `server.rs` and `crab-remote-git` |
+| Interactive repository reads | 16 concurrent, 5 minutes, 4 GiB fetched/inflated, 8 MiB response | `server.rs` and `crab-remote-git` |
 | Collaboration handlers | 8 concurrent, 30s | `app.rs` and route middleware |
 | Git fetch, push, LFS, archives, and release assets | 4 concurrent across the deployment | Process-local fast-path semaphore plus renewable object-store CAS slots under `.crab/http-server/v1/admission` |
 | Read-readiness publication | 2 repositories concurrently, 3-minute cooperative budget | `maintenance.rs` |
 | OIDC callbacks | 8 concurrent, 10s per provider request | `auth.rs` |
 | Archive transfer | 10 minutes, 3 GiB encoded response | `archive.rs` |
-| Git receive | 5-minute cooperative budget, 2 GiB body | `receive.rs` |
+| Git receive | 30-minute cooperative budget, 8 GiB body | `receive.rs` |
 | Browser existing-object ref update | 30s | `receive.rs` |
 | LFS transfer | 5 minutes, 512 MiB object | `lfs.rs` and `crab-lfs` |
 

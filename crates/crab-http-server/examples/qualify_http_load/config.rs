@@ -16,7 +16,7 @@ use super::Error;
 const MAX_HEADERS: usize = 64;
 const MAX_HEADER_FILE_BYTES: u64 = 64 * 1024;
 const MAX_MUTATION_TEMPLATE_BYTES: u64 = 1024 * 1024;
-const MAX_TARGETS: usize = 64;
+const MAX_TARGETS: usize = 256;
 const MAX_TOTAL_CONCURRENCY: usize = 4_096;
 
 #[derive(Clone, Debug)]

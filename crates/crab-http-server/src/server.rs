@@ -753,9 +753,11 @@ pub async fn serve(config: Config) -> Result<()> {
         OperationLimits {
             // Graph-backed batches keep deep blame bounded while covering
             // first-parent histories of Kubernetes-scale repositories.
-            max_duration: Duration::from_secs(2 * 60),
-            max_logical_objects: 175_000,
-            max_storage_requests: 200_000,
+            max_duration: Duration::from_secs(5 * 60),
+            max_logical_objects: 5_000_000,
+            max_storage_requests: 6_000_000,
+            max_fetched_bytes: 4 * 1024 * 1024 * 1024,
+            max_inflated_bytes: 4 * 1024 * 1024 * 1024,
             max_entries: 2_000_000,
             max_history_commits: 75_000,
             max_blame_comparison_cells: 64_000_000,
