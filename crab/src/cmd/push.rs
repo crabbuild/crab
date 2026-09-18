@@ -375,6 +375,19 @@ fn push_failure_source(specs: &[PushSpec], result: &PushResult) -> CrabError {
                     source: None,
                 };
             }
+            RefPushOutcome::Rejected(PushRejectReason::LockContention {
+                holder,
+                ttl_remaining_secs,
+            }) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |duration| duration.as_secs());
+                return CrabError::PushLockHeld {
+                    ref_name: spec.dst.clone(),
+                    holder: holder.clone(),
+                    expires_at_unix: Some(now.saturating_add(*ttl_remaining_secs)),
+                };
+            }
             RefPushOutcome::Rejected(reason) => {
                 return CrabError::Internal(reason.to_string());
             }
@@ -898,11 +911,15 @@ fn push_result_from_retryable_error(
     error: &CrabError,
     stage: PushFailureStage,
 ) -> Option<PushResult> {
-    // Legacy protected-push prepare is not idempotent and maps failures to
-    // AuthFailed, so only transport types with an explicit retry contract enter this loop.
+    // Publication admission failures do not move a ref, so lock contention is
+    // safe to report as a per-ref retryable outcome just like transport
+    // failures. Protected-push preparation remains deliberately narrower
+    // because its legacy session allocation is not idempotent.
     matches!(
         error,
-        CrabError::NetworkTransient(_) | CrabError::Throttled { .. }
+        CrabError::NetworkTransient(_)
+            | CrabError::Throttled { .. }
+            | CrabError::PushLockHeld { .. }
     )
     .then(|| push_result_from_error(specs, error).with_failure_stage(stage))
 }
@@ -2208,6 +2225,22 @@ mod tests {
             CrabError::NetworkTransient(_)
         ));
 
+        let lock_result = PushResult::new(HashMap::from([(
+            spec.dst.clone(),
+            RefPushOutcome::Rejected(PushRejectReason::LockContention {
+                holder: "push-owner".to_owned(),
+                ttl_remaining_secs: 5,
+            }),
+        )]));
+        assert!(matches!(
+            push_failure_source(std::slice::from_ref(&spec), &lock_result),
+            CrabError::PushLockHeld {
+                ref_name,
+                holder,
+                expires_at_unix: Some(_),
+            } if ref_name == "refs/heads/main" && holder == "push-owner"
+        ));
+
         let setup_error = CrabError::Throttled {
             retry_after: Some(std::time::Duration::from_secs(3)),
             source: None,
@@ -2222,6 +2255,30 @@ mod tests {
             setup_result.failure_stage,
             Some(PushFailureStage::StoreResolve)
         );
+        let lock_result = push_result_from_retryable_error(
+            std::slice::from_ref(&spec),
+            &CrabError::PushLockHeld {
+                ref_name: spec.dst.clone(),
+                holder: "crashed-push".to_owned(),
+                expires_at_unix: Some(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("test clock after epoch")
+                        .as_secs()
+                        + 7,
+                ),
+            },
+            PushFailureStage::Discovery,
+        )
+        .expect("lock contention is a retryable setup failure");
+        assert!(matches!(
+            lock_result.outcomes.get(&spec.dst),
+            Some(RefPushOutcome::Rejected(PushRejectReason::LockContention {
+                holder,
+                ttl_remaining_secs,
+            })) if holder == "crashed-push" && *ttl_remaining_secs <= 7
+        ));
+        assert_eq!(lock_result.failure_stage, Some(PushFailureStage::Discovery));
         assert!(
             push_result_from_retryable_error(
                 std::slice::from_ref(&spec),

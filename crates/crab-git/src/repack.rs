@@ -1656,7 +1656,12 @@ fn pin_refs_and_fsck(
     operation: &'static str,
 ) -> Result<(), RepackError> {
     for (index, oid) in refs.iter().enumerate() {
-        let name = format!("refs/heads/crab-repack-{index}");
+        // A visible ref may legally target a tag, tree, or blob (for
+        // example an annotated tag or a Git-generated namespace). Pinning
+        // every object under `refs/heads` makes Git reject valid inventories
+        // before fsck can verify them. Temporary tags accept every Git object
+        // type while keeping the complete reachable closure visible.
+        let name = format!("refs/tags/crab-repack-{index}");
         run_git(
             Command::new("git")
                 .arg(format!("--git-dir={}", repository.display()))
@@ -1665,16 +1670,6 @@ fn pin_refs_and_fsck(
                 .arg(oid),
             operation,
         )?;
-        if index == 0 {
-            run_git(
-                Command::new("git")
-                    .arg(format!("--git-dir={}", repository.display()))
-                    .arg("symbolic-ref")
-                    .arg("HEAD")
-                    .arg(&name),
-                operation,
-            )?;
-        }
     }
     run_git(
         Command::new("git")
@@ -2083,7 +2078,14 @@ mod tests {
                 .args(["rev-parse", "HEAD"]),
             "resolve test tip",
         )?;
-        let refs = BTreeSet::from([tip]);
+        let blob = git_output(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["rev-parse", "HEAD:first.txt"]),
+            "resolve visible blob ref",
+        )?;
+        let refs = BTreeSet::from([tip, blob]);
         let sources = [source_descriptor(first)?, source_descriptor(second)?];
 
         let geometric = repack_repository_geometric(&sources, &refs)?;
