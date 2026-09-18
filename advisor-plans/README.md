@@ -182,6 +182,13 @@ Local proof completed:
   and TLC fast/negative/broad safety plus fair stable-provider liveness checks
   pass.
 
+The latest isolated local RustFS run (RustFS 1.0.0-rc.1, 2026-09-18) also
+passed the LTX round-trip/parity/CAS-race, Cell source-loss takeover, retention
+graph, HTTP receive-fault, native HTTP push, and public collaboration/takeover
+cases. These are provider/fault iteration receipts, not signed release
+evidence; protected three-Pod, multi-GiB RSS, matched-latency, and fleet gates
+remain open.
+
 The in-repo placement path now consumes the signed observation block for cold
 activation: the planner selects a live eligible session, sends one authenticated
 activation hint, and the destination enters through the existing router,

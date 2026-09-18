@@ -77,6 +77,14 @@ subsequent SQL read. These values are local regression signals only; they do
 not satisfy the matched-hardware, provider, or signed release receipt criteria
 below.
 
+The isolated local RustFS run on 2026-09-18 used RustFS 1.0.0-rc.1, a fresh
+bucket, and separate `qualification/*-20260918-local` prefixes. The LTX
+round-trip/parity/CAS-race case, Cell source-loss takeover, retention graph,
+HTTP receive-fault, native HTTP push, and public collaboration/takeover cases
+all passed. These results close the local provider/fault iteration seam; they
+remain unsigned local evidence and do not satisfy the protected three-Pod,
+multi-GiB RSS, matched-latency, or release-receipt criteria.
+
 ## Implementation steps
 
 1. Inventory and map every existing test/script to the matrix. Delete no useful
