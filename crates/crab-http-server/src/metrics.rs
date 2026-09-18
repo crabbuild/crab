@@ -82,6 +82,8 @@ struct MetricsInner {
     cell_worker_job_capacity: Gauge,
     cell_primitive_jobs: Gauge,
     cell_primitive_job_capacity: Gauge,
+    cell_hydration_jobs: Gauge,
+    cell_hydration_job_capacity: Gauge,
     cell_local_disk_reserved_bytes: Gauge,
     cell_local_disk_capacity_bytes: Gauge,
     cell_node_log_uncovered_bytes: Gauge,
@@ -133,6 +135,8 @@ pub(crate) struct RuntimeSnapshot {
     pub(crate) cell_worker_job_capacity: usize,
     pub(crate) cell_primitive_jobs: usize,
     pub(crate) cell_primitive_job_capacity: usize,
+    pub(crate) cell_hydration_jobs: usize,
+    pub(crate) cell_hydration_job_capacity: usize,
     pub(crate) cell_local_disk_reserved_bytes: u64,
     pub(crate) cell_local_disk_capacity_bytes: u64,
     pub(crate) cell_node_log_uncovered_bytes: u64,
@@ -220,6 +224,14 @@ impl Metrics {
                 ),
                 cell_primitive_job_capacity: recorder.register_gauge(
                     &Key::from_static_name("crab_http_server_cell_runtime_primitive_job_capacity"),
+                    &METADATA,
+                ),
+                cell_hydration_jobs: recorder.register_gauge(
+                    &Key::from_static_name("crab_http_server_cell_runtime_hydration_jobs"),
+                    &METADATA,
+                ),
+                cell_hydration_job_capacity: recorder.register_gauge(
+                    &Key::from_static_name("crab_http_server_cell_runtime_hydration_job_capacity"),
                     &METADATA,
                 ),
                 cell_local_disk_reserved_bytes: recorder.register_gauge(
@@ -394,6 +406,12 @@ impl Metrics {
         self.inner
             .cell_primitive_job_capacity
             .set(snapshot.cell_primitive_job_capacity as f64);
+        self.inner
+            .cell_hydration_jobs
+            .set(snapshot.cell_hydration_jobs as f64);
+        self.inner
+            .cell_hydration_job_capacity
+            .set(snapshot.cell_hydration_job_capacity as f64);
         self.inner
             .cell_local_disk_reserved_bytes
             .set(snapshot.cell_local_disk_reserved_bytes as f64);
@@ -863,6 +881,16 @@ fn describe_metrics(recorder: &impl Recorder) {
     );
     describe_gauge(
         recorder,
+        "crab_http_server_cell_runtime_hydration_jobs",
+        "Background hydration jobs currently admitted by the shared Cell ledger.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_http_server_cell_runtime_hydration_job_capacity",
+        "Background hydration-job ceiling in the shared Cell ledger.",
+    );
+    describe_gauge(
+        recorder,
         "crab_http_server_cell_runtime_local_disk_reserved_bytes",
         "Local database, WAL, LTX, sparse-page, and staging bytes currently reserved.",
     );
@@ -1012,6 +1040,8 @@ mod tests {
             cell_worker_job_capacity: 4,
             cell_primitive_jobs: 0,
             cell_primitive_job_capacity: 4,
+            cell_hydration_jobs: 0,
+            cell_hydration_job_capacity: 2,
             cell_local_disk_reserved_bytes: 0,
             cell_local_disk_capacity_bytes: 8_192,
             cell_node_log_uncovered_bytes: 128,

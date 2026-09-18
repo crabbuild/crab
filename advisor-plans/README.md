@@ -150,8 +150,9 @@ Local proof completed:
   migration, publication, simulator, and workflow suites pass. The ignored
   source-loss and retention tests also pass against an isolated local RustFS
   bucket when their provider variables are supplied. The shared
-  runtime/SQL/hydration/primitive-job ledger and schema-v3 receipt evidence
-  path are covered by focused tests; user SQL commands now hold bounded worker
+  runtime/SQL/hydration/primitive-job ledger (including exported hydration-job
+  usage/capacity metrics) and schema-v3 receipt evidence path are covered by
+  focused tests; user SQL commands now hold bounded worker
   reservations for their full queued/executing lifetime, and pending
   publication bytes remain ledger-reserved until publication completes.
 - `crab-ltx --features replica`: 45 unit tests, 74 integration tests, and 5

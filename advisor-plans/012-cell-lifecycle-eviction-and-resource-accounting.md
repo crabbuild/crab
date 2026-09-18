@@ -1,6 +1,6 @@
 # Cell quiescing, idle eviction, and unified resource accounting
 
-Status: IN PROGRESS — RAII ledger shared by active Cells, resident native bytes, SQL work, hydration, retained publication bytes, and primitive activity/effect jobs; deterministic victim selection, actor eviction, pressure pacing, retained-byte accounting, and fail-closed persisted-work refresh are wired; cross-crate consumer registration/restart-churn proof remains
+Status: IN PROGRESS — RAII ledger shared by active Cells, resident native bytes, SQL work, hydration jobs, retained publication bytes, and primitive activity/effect jobs; deterministic victim selection, actor eviction, pressure pacing, retained-byte accounting, and fail-closed persisted-work refresh are wired; cross-crate consumer registration/restart-churn proof remains
 Priority: P0
 Effort: XL
 Risk: High

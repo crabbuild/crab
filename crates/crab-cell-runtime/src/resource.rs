@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use crate::{Error, Result};
 
 pub(crate) const ACTIVE_CELL_NATIVE_BYTES: usize = 64 * 1024;
+pub(crate) const HYDRATION_JOB_CAPACITY: usize = 2;
 
 /// Bounded resources owned by one runtime admission token.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -13,6 +14,7 @@ pub struct ResourceCost {
     disk_bytes: u64,
     worker_jobs: usize,
     primitive_jobs: usize,
+    hydration_jobs: usize,
 }
 
 impl ResourceCost {
@@ -34,6 +36,7 @@ impl ResourceCost {
             disk_bytes: 0,
             worker_jobs: 0,
             primitive_jobs: 0,
+            hydration_jobs: 0,
         }
     }
 
@@ -65,6 +68,11 @@ impl ResourceCost {
     #[must_use]
     pub const fn primitive_jobs(self) -> usize {
         self.primitive_jobs
+    }
+
+    #[must_use]
+    pub const fn hydration_jobs(self) -> usize {
+        self.hydration_jobs
     }
 
     #[must_use]
@@ -103,6 +111,12 @@ impl ResourceCost {
         self
     }
 
+    #[must_use]
+    pub const fn with_hydration_jobs(mut self, jobs: usize) -> Self {
+        self.hydration_jobs = jobs;
+        self
+    }
+
     fn checked_add(self, other: Self) -> Option<Self> {
         Some(Self {
             active_cells: self.active_cells.checked_add(other.active_cells)?,
@@ -111,6 +125,7 @@ impl ResourceCost {
             disk_bytes: self.disk_bytes.checked_add(other.disk_bytes)?,
             worker_jobs: self.worker_jobs.checked_add(other.worker_jobs)?,
             primitive_jobs: self.primitive_jobs.checked_add(other.primitive_jobs)?,
+            hydration_jobs: self.hydration_jobs.checked_add(other.hydration_jobs)?,
         })
     }
 
@@ -122,6 +137,7 @@ impl ResourceCost {
             disk_bytes: self.disk_bytes.checked_sub(other.disk_bytes)?,
             worker_jobs: self.worker_jobs.checked_sub(other.worker_jobs)?,
             primitive_jobs: self.primitive_jobs.checked_sub(other.primitive_jobs)?,
+            hydration_jobs: self.hydration_jobs.checked_sub(other.hydration_jobs)?,
         })
     }
 
@@ -132,6 +148,7 @@ impl ResourceCost {
             && self.disk_bytes <= limit.disk_bytes
             && self.worker_jobs <= limit.worker_jobs
             && self.primitive_jobs <= limit.primitive_jobs
+            && self.hydration_jobs <= limit.hydration_jobs
     }
 }
 
@@ -229,7 +246,8 @@ mod tests {
             ResourceCost::active_cell()
                 .with_resident_bytes(ACTIVE_CELL_NATIVE_BYTES)
                 .with_retained_bytes(64)
-                .with_worker_jobs(1),
+                .with_worker_jobs(1)
+                .with_hydration_jobs(1),
         );
         let reservation = ledger
             .try_reserve(ResourceCost::active_cell().with_retained_bytes(32))
@@ -244,6 +262,15 @@ mod tests {
                 .try_reserve(ResourceCost::zero().with_worker_jobs(1))
                 .is_err()
         );
+        let hydration = ledger
+            .try_reserve(ResourceCost::zero().with_hydration_jobs(1))
+            .unwrap();
+        assert!(
+            ledger
+                .try_reserve(ResourceCost::zero().with_hydration_jobs(1))
+                .is_err()
+        );
+        drop(hydration);
         drop(job);
         drop(reservation);
         assert_eq!(ledger.snapshot().unwrap().used, ResourceCost::zero());

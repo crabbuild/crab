@@ -47,7 +47,6 @@ const MAX_RENEWALS_IN_FLIGHT: usize = 32;
 const SQL_WALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 const HYDRATION_TICK: std::time::Duration = std::time::Duration::from_millis(100);
 const HYDRATION_PAGES_PER_STEP: u32 = 64;
-const HYDRATION_SLOTS: usize = 2;
 
 fn unix_millis() -> i64 {
     std::time::SystemTime::now()
@@ -93,6 +92,8 @@ pub struct CellRuntimeStats {
     worker_job_capacity: usize,
     primitive_jobs: usize,
     primitive_job_capacity: usize,
+    hydration_jobs: usize,
+    hydration_job_capacity: usize,
     local_disk_reserved_bytes: u64,
     local_disk_capacity_bytes: u64,
     unpublished_node_log_bytes: u64,
@@ -157,6 +158,18 @@ impl CellRuntimeStats {
     #[must_use]
     pub const fn primitive_job_capacity(self) -> usize {
         self.primitive_job_capacity
+    }
+
+    /// Returns background hydration jobs currently admitted by the shared ledger.
+    #[must_use]
+    pub const fn hydration_jobs(self) -> usize {
+        self.hydration_jobs
+    }
+
+    /// Returns the background hydration-job ceiling in the shared ledger.
+    #[must_use]
+    pub const fn hydration_job_capacity(self) -> usize {
+        self.hydration_job_capacity
     }
 
     /// Returns the bytes currently reserved in the local replica cache.
@@ -292,13 +305,11 @@ impl CellRuntime {
         let (sender, receiver) = mpsc::channel(INGRESS_REQUESTS);
         let node_lease = Arc::new(node_lease);
         let unpublished_node_log_bytes = Arc::new(AtomicU64::new(0));
-        let hydration_slots = Arc::new(Semaphore::new(HYDRATION_SLOTS));
         runtime.spawn(run(
             receiver,
             pool.clone(),
             Arc::clone(&node_lease),
             Arc::clone(&unpublished_node_log_bytes),
-            Arc::clone(&hydration_slots),
         ));
         Ok(Self {
             inner: Arc::new(RuntimeInner {
@@ -470,6 +481,8 @@ impl CellRuntime {
             worker_job_capacity,
             primitive_jobs,
             primitive_job_capacity,
+            hydration_jobs,
+            hydration_job_capacity,
         ) = self
             .inner
             .resources
@@ -484,9 +497,11 @@ impl CellRuntime {
                     snapshot.limit.worker_jobs(),
                     snapshot.used.primitive_jobs(),
                     snapshot.limit.primitive_jobs(),
+                    snapshot.used.hydration_jobs(),
+                    snapshot.limit.hydration_jobs(),
                 )
             })
-            .unwrap_or((0, 0, 0, 0, 0, 0, 0, 0));
+            .unwrap_or((0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
         CellRuntimeStats {
             active_cells: self.inner.pool.active_cells(),
             active_cell_capacity: self.inner.pool.active_cell_capacity(),
@@ -498,6 +513,8 @@ impl CellRuntime {
             worker_job_capacity,
             primitive_jobs,
             primitive_job_capacity,
+            hydration_jobs,
+            hydration_job_capacity,
             local_disk_reserved_bytes: self.inner.replica_host.local_disk_used(),
             local_disk_capacity_bytes: self.inner.replica_host.local_disk_capacity(),
             unpublished_node_log_bytes: self
@@ -1490,7 +1507,6 @@ async fn run(
     pool: SqlWorkerPool,
     node_lease: Arc<RuntimeNodeLease>,
     unpublished_node_log_bytes: Arc<AtomicU64>,
-    hydration_slots: Arc<Semaphore>,
 ) {
     let mut cells = HashMap::<CellId, ActiveCell>::new();
     let mut transitioning = HashSet::<CellId>::new();
@@ -1570,7 +1586,6 @@ async fn run(
                         &pool,
                         &mut cells,
                         &mut tasks,
-                        &hydration_slots,
                         &node_lease,
                     );
                     start_background_inventory(&pool, &mut cells, &mut tasks, &node_lease);
@@ -1614,7 +1629,6 @@ async fn run(
                     &pool,
                     &mut cells,
                     &mut tasks,
-                    &hydration_slots,
                     &node_lease,
                 );
                 start_background_inventory(&pool, &mut cells, &mut tasks, &node_lease);
@@ -2149,7 +2163,6 @@ fn start_background_hydration(
     pool: &SqlWorkerPool,
     cells: &mut HashMap<CellId, ActiveCell>,
     tasks: &mut JoinSet<TaskResult>,
-    hydration_slots: &Arc<Semaphore>,
     node_lease: &RuntimeNodeLease,
 ) {
     if node_lease.check().is_err() {
@@ -2159,6 +2172,7 @@ fn start_background_hydration(
         }
         return;
     }
+    let resources = pool.resource_ledger();
     let candidates = cells
         .iter_mut()
         .filter_map(|(cell, active)| {
@@ -2172,23 +2186,25 @@ fn start_background_hydration(
             {
                 return None;
             }
-            let permit = Arc::clone(hydration_slots).try_acquire_owned().ok()?;
+            let reservation = resources
+                .try_reserve(ResourceCost::zero().with_hydration_jobs(1))
+                .ok()?;
             if !matches!(
                 active.coordination.step(CoordinationInput::BeginHydration),
                 CoordinationDecision::Started
             ) {
-                drop(permit);
+                drop(reservation);
                 return None;
             }
             let effect_id = active.begin_task(CoordinationEffect::Hydration);
-            Some((*cell, active.generation, effect_id, permit))
+            Some((*cell, active.generation, effect_id, reservation))
         })
         .collect::<Vec<_>>();
 
-    for (cell, generation, effect_id, permit) in candidates {
+    for (cell, generation, effect_id, reservation) in candidates {
         let pool = pool.clone();
         tasks.spawn(async move {
-            let _permit = permit;
+            let _reservation = reservation;
             let deadline = std::time::Instant::now() + SQL_WALL_DEADLINE;
             let result = tokio::time::timeout_at(
                 deadline.into(),

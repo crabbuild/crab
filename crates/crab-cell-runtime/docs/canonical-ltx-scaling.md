@@ -172,7 +172,8 @@ predicates; resident-only lookup is actor-owned and attempted before
 catalog/control I/O; sparse restored Cells receive bounded
 `ManagedDb::hydrate_step` work on the existing SQL worker; active-cell admission
 uses an exact RAII resource ledger (including resident native bytes, bounded
-SQL-worker, hydration, and primitive activity/effect reservations); persisted
+SQL-worker, hydration-job, and primitive activity/effect reservations, with
+runtime metrics for hydration usage/capacity); persisted
 Queue/Workflow rows are re-inspected after durable work before eviction; the
 eviction seam now has a pure
 deterministic selector that

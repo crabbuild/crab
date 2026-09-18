@@ -9,7 +9,9 @@ use std::{
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::resource::{ACTIVE_CELL_NATIVE_BYTES, ResourceLedger, ResourceReservation};
+use crate::resource::{
+    ACTIVE_CELL_NATIVE_BYTES, HYDRATION_JOB_CAPACITY, ResourceLedger, ResourceReservation,
+};
 use crate::{
     CatalogRole, CellExecutor, CellId, CommandExecution, Digest, Error, HandlerOutcome,
     InboxDelivery, MigrationOutcome, MigrationPlan, MutationIdentity, PendingCommit,
@@ -85,7 +87,8 @@ impl SqlWorkerPool {
                 .with_active_cells(max_active_cells)
                 .with_resident_bytes(max_active_cells.saturating_mul(ACTIVE_CELL_NATIVE_BYTES))
                 .with_worker_jobs(worker_count)
-                .with_primitive_jobs(worker_count),
+                .with_primitive_jobs(worker_count)
+                .with_hydration_jobs(HYDRATION_JOB_CAPACITY),
         );
         let mut workers = Vec::with_capacity(worker_count);
         let mut threads: Vec<JoinHandle<()>> = Vec::with_capacity(worker_count);

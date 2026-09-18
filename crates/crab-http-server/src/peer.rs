@@ -456,6 +456,7 @@ impl NodePublisher {
                 stats
                     .worker_jobs()
                     .saturating_add(stats.primitive_jobs())
+                    .saturating_add(stats.hydration_jobs())
                     .min(u32::MAX as usize) as u32
             }),
             self.runtime.as_ref().map_or_else(
@@ -465,6 +466,7 @@ impl NodePublisher {
                     stats
                         .worker_job_capacity()
                         .saturating_add(stats.primitive_job_capacity())
+                        .saturating_add(stats.hydration_job_capacity())
                         .min(u32::MAX as usize) as u32
                 },
             ),
