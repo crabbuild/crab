@@ -1,6 +1,6 @@
 # Cell quiescing, idle eviction, and unified resource accounting
 
-Status: IN PROGRESS — RAII ledger shared by active Cells, resident native bytes, SQL work, hydration jobs, retained publication bytes, primitive activity/effect jobs, and the canonical LTX `DiskBudget`; deterministic victim selection, actor eviction, pressure pacing, retained-byte accounting, and fail-closed persisted-work refresh are wired; unknown persisted-work inventory is explicitly ineligible for eviction; cross-crate consumer registration/restart-churn proof remains
+Status: IN PROGRESS — RAII ledger shared by active Cells, resident native bytes, active-Cell file descriptors, SQL work, hydration jobs, retained publication bytes, primitive activity/effect jobs, and the canonical LTX `DiskBudget`; deterministic victim selection, actor eviction, pressure pacing, retained-byte accounting, and fail-closed persisted-work refresh are wired; unknown persisted-work inventory is explicitly ineligible for eviction; descriptor admission/metrics and shared local-disk consumer wiring are now explicit; restart-churn and measured reconciliation proof remains
 Priority: P0
 Effort: XL
 Risk: High
@@ -57,7 +57,8 @@ released; authority release follows protocol ordering.
 
 Track and reconcile at least:
 
-- active/resident/sparse Cell count and estimated resident memory;
+- active/resident/sparse Cell count, estimated resident memory, and per-Cell
+  file descriptors;
 - SQL workers and queued commands;
 - hydration jobs and reservations;
 - publication scratch and retained cuts;

@@ -277,10 +277,6 @@ impl CoordinationState {
         self.pending_effects.get(&effect_id) == Some(&effect)
     }
 
-    pub(crate) fn pending_effects_empty(&self) -> bool {
-        self.pending_effects.is_empty()
-    }
-
     pub(crate) fn lookup(&self) -> CoordinationDecision {
         if self.is_fenced() {
             CoordinationDecision::Reject(RejectReason::Fenced)
@@ -297,6 +293,13 @@ impl CoordinationState {
             && self.publications == 0
             && self.pending_effects.is_empty()
             && self.publisher_ready
+    }
+
+    /// Combines kernel-owned quiescence with adapter observations needed to
+    /// close a Cell. The adapter may report queue and publisher state, but it
+    /// cannot reimplement the lifecycle predicates above.
+    pub(crate) fn ready_to_deactivate(&self, queue_empty: bool, publisher_ready: bool) -> bool {
+        queue_empty && publisher_ready && self.can_deactivate()
     }
 
     pub(crate) fn step(&mut self, input: CoordinationInput) -> CoordinationDecision {
@@ -1071,5 +1074,13 @@ mod tests {
             CoordinationDecision::EffectCompleted
         );
         assert!(state.can_deactivate());
+    }
+
+    #[test]
+    fn deactivation_requires_adapter_observations_without_repeating_policy() {
+        let state = CoordinationState::serving(true);
+        assert!(!state.ready_to_deactivate(false, true));
+        assert!(!state.ready_to_deactivate(true, false));
+        assert!(state.ready_to_deactivate(true, true));
     }
 }

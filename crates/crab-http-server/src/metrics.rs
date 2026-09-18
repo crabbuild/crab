@@ -76,6 +76,8 @@ struct MetricsInner {
     cell_active_capacity: Gauge,
     cell_resident_bytes: Gauge,
     cell_resident_capacity_bytes: Gauge,
+    cell_file_descriptors: Gauge,
+    cell_file_descriptor_capacity: Gauge,
     cell_retained_bytes: Gauge,
     cell_retained_capacity_bytes: Gauge,
     cell_worker_jobs: Gauge,
@@ -129,6 +131,8 @@ pub(crate) struct RuntimeSnapshot {
     pub(crate) cell_active_capacity: usize,
     pub(crate) cell_resident_bytes: usize,
     pub(crate) cell_resident_capacity_bytes: usize,
+    pub(crate) cell_file_descriptors: usize,
+    pub(crate) cell_file_descriptor_capacity: usize,
     pub(crate) cell_retained_bytes: usize,
     pub(crate) cell_retained_capacity_bytes: usize,
     pub(crate) cell_worker_jobs: usize,
@@ -200,6 +204,16 @@ impl Metrics {
                 ),
                 cell_resident_capacity_bytes: recorder.register_gauge(
                     &Key::from_static_name("crab_http_server_cell_runtime_resident_capacity_bytes"),
+                    &METADATA,
+                ),
+                cell_file_descriptors: recorder.register_gauge(
+                    &Key::from_static_name("crab_http_server_cell_runtime_file_descriptors"),
+                    &METADATA,
+                ),
+                cell_file_descriptor_capacity: recorder.register_gauge(
+                    &Key::from_static_name(
+                        "crab_http_server_cell_runtime_file_descriptor_capacity",
+                    ),
                     &METADATA,
                 ),
                 cell_retained_bytes: recorder.register_gauge(
@@ -388,6 +402,12 @@ impl Metrics {
         self.inner
             .cell_resident_capacity_bytes
             .set(snapshot.cell_resident_capacity_bytes as f64);
+        self.inner
+            .cell_file_descriptors
+            .set(snapshot.cell_file_descriptors as f64);
+        self.inner
+            .cell_file_descriptor_capacity
+            .set(snapshot.cell_file_descriptor_capacity as f64);
         self.inner
             .cell_retained_bytes
             .set(snapshot.cell_retained_bytes as f64);
@@ -851,6 +871,16 @@ fn describe_metrics(recorder: &impl Recorder) {
     );
     describe_gauge(
         recorder,
+        "crab_http_server_cell_runtime_file_descriptors",
+        "File descriptors reserved by active Cells in the shared runtime ledger.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_http_server_cell_runtime_file_descriptor_capacity",
+        "File-descriptor ceiling for active Cells in the shared runtime ledger.",
+    );
+    describe_gauge(
+        recorder,
         "crab_http_server_cell_runtime_retained_bytes",
         "Node-wide bytes currently reserved outside Cell mailboxes.",
     );
@@ -1034,6 +1064,8 @@ mod tests {
             cell_active_capacity: 7,
             cell_resident_bytes: 0,
             cell_resident_capacity_bytes: 458_752,
+            cell_file_descriptors: 0,
+            cell_file_descriptor_capacity: 56,
             cell_retained_bytes: 0,
             cell_retained_capacity_bytes: 4_096,
             cell_worker_jobs: 1,
@@ -1111,6 +1143,8 @@ mod tests {
         assert!(rendered.contains("crab_http_server_cell_runtime_active_cell_capacity 7"));
         assert!(rendered.contains("crab_http_server_cell_runtime_resident_bytes 0"));
         assert!(rendered.contains("crab_http_server_cell_runtime_resident_capacity_bytes 458752"));
+        assert!(rendered.contains("crab_http_server_cell_runtime_file_descriptors 0"));
+        assert!(rendered.contains("crab_http_server_cell_runtime_file_descriptor_capacity 56"));
         assert!(rendered.contains("crab_http_server_cell_runtime_retained_bytes 0"));
         assert!(rendered.contains("crab_http_server_cell_runtime_retained_capacity_bytes 4096"));
         assert!(rendered.contains("crab_http_server_cell_runtime_local_disk_reserved_bytes 0"));

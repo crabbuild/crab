@@ -86,6 +86,8 @@ pub struct CellRuntimeStats {
     active_cell_capacity: usize,
     resident_bytes: usize,
     resident_capacity_bytes: usize,
+    file_descriptors: usize,
+    file_descriptor_capacity: usize,
     retained_bytes: usize,
     retained_capacity_bytes: usize,
     worker_jobs: usize,
@@ -122,6 +124,18 @@ impl CellRuntimeStats {
     #[must_use]
     pub const fn resident_capacity_bytes(self) -> usize {
         self.resident_capacity_bytes
+    }
+
+    /// Returns file descriptors reserved by active Cells in the shared ledger.
+    #[must_use]
+    pub const fn file_descriptors(self) -> usize {
+        self.file_descriptors
+    }
+
+    /// Returns the active-Cell file-descriptor ceiling in the shared ledger.
+    #[must_use]
+    pub const fn file_descriptor_capacity(self) -> usize {
+        self.file_descriptor_capacity
     }
 
     /// Returns the bytes currently reserved by node-wide native work.
@@ -481,6 +495,8 @@ impl CellRuntime {
             retained_capacity,
             resident,
             resident_capacity,
+            file_descriptors,
+            file_descriptor_capacity,
             worker_jobs,
             worker_job_capacity,
             primitive_jobs,
@@ -499,6 +515,8 @@ impl CellRuntime {
                     snapshot.limit.retained_bytes(),
                     snapshot.used.resident_bytes(),
                     snapshot.limit.resident_bytes(),
+                    snapshot.used.file_descriptors(),
+                    snapshot.limit.file_descriptors(),
                     snapshot.used.worker_jobs(),
                     snapshot.limit.worker_jobs(),
                     snapshot.used.primitive_jobs(),
@@ -509,12 +527,14 @@ impl CellRuntime {
                     snapshot.limit.disk_bytes(),
                 )
             })
-            .unwrap_or((0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+            .unwrap_or((0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
         CellRuntimeStats {
             active_cells: self.inner.pool.active_cells(),
             active_cell_capacity: self.inner.pool.active_cell_capacity(),
             resident_bytes: resident,
             resident_capacity_bytes: resident_capacity,
+            file_descriptors,
+            file_descriptor_capacity,
             retained_bytes: retained,
             retained_capacity_bytes: retained_capacity,
             worker_jobs,
@@ -1371,15 +1391,6 @@ impl ActiveCell {
         self.coordination.is_renewing()
     }
 
-    fn can_deactivate(&self) -> bool {
-        !self.busy()
-            && !self.renewing()
-            && self.coordination.pending_effects_empty()
-            && self.queue.is_empty()
-            && self.coordination.publication_count() == 0
-            && self.publisher.is_some()
-    }
-
     fn begin_task(&mut self, effect: CoordinationEffect) -> u64 {
         self.coordination.begin_effect(effect)
     }
@@ -1669,7 +1680,10 @@ fn start_shutdown_drain(
         if !active.queue.is_empty() {
             start_next(active, pool, tasks, node_lease);
         }
-        if active.can_deactivate() {
+        if active
+            .coordination
+            .ready_to_deactivate(active.queue.is_empty(), active.publisher.is_some())
+        {
             ready.push((*cell, active.fenced(), active.unpublished_node_logs != 0));
         }
     }
@@ -1859,7 +1873,17 @@ fn handle_message(
                 );
                 return;
             }
-            active.coordination.step(CoordinationInput::BeginMigration);
+            match active.coordination.step(CoordinationInput::BeginMigration) {
+                CoordinationDecision::Started => {}
+                CoordinationDecision::Reject(reason) => {
+                    send_migration_reply(&mut migration, Err(rejection_error(reason)));
+                    return;
+                }
+                _ => {
+                    send_migration_reply(&mut migration, Err(Error::CellDraining));
+                    return;
+                }
+            }
             active.admission = Arc::clone(&migration.successor_admission);
             active.queue.push_back(QueuedWork::Migration(migration));
             start_next(active, pool, tasks, node_lease);
@@ -1906,7 +1930,11 @@ fn handle_message(
                 return;
             }
             active.drain = Some(reply);
-            if decision.is_ready_to_deactivate() || active.can_deactivate() {
+            if decision.is_ready_to_deactivate()
+                || active
+                    .coordination
+                    .ready_to_deactivate(active.queue.is_empty(), active.publisher.is_some())
+            {
                 start_deactivate(cell, pool, cells, transitioning, tasks);
             }
         }
@@ -2063,7 +2091,11 @@ fn begin_idle_evictions(
         active.admission.requests.close();
         active.admission.bytes.close();
         started.push(cell);
-        if decision.is_ready_to_deactivate() || active.can_deactivate() {
+        if decision.is_ready_to_deactivate()
+            || active
+                .coordination
+                .ready_to_deactivate(active.queue.is_empty(), active.publisher.is_some())
+        {
             start_deactivate(cell, pool, cells, transitioning, tasks);
         }
     }
@@ -2295,7 +2327,9 @@ fn start_next(
     });
     let decision = active.coordination.step(CoordinationInput::Schedule {
         queue_nonempty: !active.queue.is_empty(),
-        can_deactivate: active.can_deactivate(),
+        can_deactivate: active
+            .coordination
+            .ready_to_deactivate(active.queue.is_empty(), active.publisher.is_some()),
         publication_blocked,
         lease_live: node_lease.check().is_ok(),
     });
@@ -3528,7 +3562,9 @@ fn continue_cell(
     let fenced = active.fenced();
     let decision = active.coordination.step(CoordinationInput::Schedule {
         queue_nonempty: !active.queue.is_empty(),
-        can_deactivate: active.can_deactivate(),
+        can_deactivate: active
+            .coordination
+            .ready_to_deactivate(active.queue.is_empty(), active.publisher.is_some()),
         publication_blocked: active.queue.front().is_some_and(|work| {
             matches!(work, QueuedWork::Command(_))
                 && (active.coordination.publication_count() >= MAX_PENDING_PUBLICATIONS

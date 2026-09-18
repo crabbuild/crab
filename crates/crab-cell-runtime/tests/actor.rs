@@ -9,12 +9,13 @@ use std::{
 
 use bytes::Bytes;
 use crab_cell_runtime::{
-    AppendRequest, ApplicationId, CatalogEntry, CatalogRole, CellAuthority, CellRuntime,
-    CellTarget, ControlState, Digest, DiskBudget, DurabilityGate, FollowerReceipt, HandlerOutcome,
-    InboxDelivery, IncarnationId, MutationIdentity, NamespaceId, NodeDurability, NodeId,
-    NodeLeaseGuard, NodeLogAuthority, NodeLogRotationBarrier, NodeLogShipper, NodeLogTransport,
-    Owner, PressureSample, PressureState, ReplicaHost, RequestId, Resolution, RetireRequest,
-    SealRequest, SessionId, SqlWorkerPool, StoredOutcome, TailRequest, TenantId, Transition,
+    ACTIVE_CELL_FILE_DESCRIPTORS, AppendRequest, ApplicationId, CatalogEntry, CatalogRole,
+    CellAuthority, CellRuntime, CellTarget, ControlState, Digest, DiskBudget, DurabilityGate,
+    FollowerReceipt, HandlerOutcome, InboxDelivery, IncarnationId, MutationIdentity, NamespaceId,
+    NodeDurability, NodeId, NodeLeaseGuard, NodeLogAuthority, NodeLogRotationBarrier,
+    NodeLogShipper, NodeLogTransport, Owner, PressureSample, PressureState, ReplicaHost, RequestId,
+    Resolution, RetireRequest, SealRequest, SessionId, SqlWorkerPool, StoredOutcome, TailRequest,
+    TenantId, Transition,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{
@@ -578,6 +579,11 @@ async fn node_byte_reservation_rejects_overcommit_and_releases_capacity() {
     let full = runtime.stats();
     assert_eq!(full.active_cells(), 0);
     assert_eq!(full.active_cell_capacity(), 1);
+    assert_eq!(full.file_descriptors(), 0);
+    assert_eq!(
+        full.file_descriptor_capacity(),
+        ACTIVE_CELL_FILE_DESCRIPTORS
+    );
     assert_eq!(full.retained_bytes(), 1_024);
     assert_eq!(full.retained_capacity_bytes(), 1_024);
     assert_eq!(full.local_disk_reserved_bytes(), 512);
@@ -590,6 +596,11 @@ async fn node_byte_reservation_rejects_overcommit_and_releases_capacity() {
     drop(held);
     drop(disk);
     let empty = runtime.stats();
+    assert_eq!(empty.file_descriptors(), 0);
+    assert_eq!(
+        empty.file_descriptor_capacity(),
+        ACTIVE_CELL_FILE_DESCRIPTORS
+    );
     assert_eq!(empty.retained_bytes(), 0);
     assert_eq!(empty.local_disk_reserved_bytes(), 0);
     let released = runtime.try_reserve_node_bytes(1_024).unwrap();
@@ -1330,9 +1341,18 @@ async fn runtime_stats_follow_active_cell_lifecycle() {
         runtime.stats().resident_capacity_bytes(),
         10 * crab_cell_runtime::ACTIVE_CELL_NATIVE_BYTES as usize
     );
+    assert_eq!(
+        runtime.stats().file_descriptors(),
+        ACTIVE_CELL_FILE_DESCRIPTORS
+    );
+    assert_eq!(
+        runtime.stats().file_descriptor_capacity(),
+        10 * ACTIVE_CELL_FILE_DESCRIPTORS
+    );
     handle.drain().await.unwrap();
     assert_eq!(runtime.stats().active_cells(), 0);
     assert_eq!(runtime.stats().resident_bytes(), 0);
+    assert_eq!(runtime.stats().file_descriptors(), 0);
     runtime.shutdown().await.unwrap();
 }
 

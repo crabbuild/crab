@@ -27,8 +27,7 @@ const DEFAULT_PAGE_IO_DEADLINE: Duration = Duration::from_secs(30);
 pub const ACTIVE_CELL_PAGE_CACHE_BYTES: u64 =
     crab_ltx::MANAGED_SQLITE_CONNECTIONS * crab_ltx::MANAGED_CONNECTION_PAGE_CACHE_BYTES;
 
-/// Persistent database, WAL, SHM and capture descriptors reserved per active Cell.
-pub const ACTIVE_CELL_FILE_DESCRIPTORS: usize = 8;
+pub use crate::resource::ACTIVE_CELL_FILE_DESCRIPTORS;
 
 pub(crate) type Handler = Box<
     dyn for<'connection> FnOnce(
@@ -86,6 +85,9 @@ impl SqlWorkerPool {
             ResourceCost::zero()
                 .with_active_cells(max_active_cells)
                 .with_resident_bytes(max_active_cells.saturating_mul(ACTIVE_CELL_NATIVE_BYTES))
+                .with_file_descriptors(
+                    max_active_cells.saturating_mul(ACTIVE_CELL_FILE_DESCRIPTORS),
+                )
                 .with_worker_jobs(worker_count)
                 .with_primitive_jobs(worker_count)
                 .with_hydration_jobs(HYDRATION_JOB_CAPACITY),

@@ -3,6 +3,8 @@ use std::sync::{Arc, Mutex, Weak};
 use crate::{Error, Result};
 
 pub(crate) const ACTIVE_CELL_NATIVE_BYTES: usize = 64 * 1024;
+/// Persistent database, WAL, SHM and capture descriptors reserved per active Cell.
+pub const ACTIVE_CELL_FILE_DESCRIPTORS: usize = 8;
 pub(crate) const HYDRATION_JOB_CAPACITY: usize = 2;
 
 /// Bounded resources owned by one runtime admission token.
@@ -10,6 +12,7 @@ pub(crate) const HYDRATION_JOB_CAPACITY: usize = 2;
 pub struct ResourceCost {
     active_cells: usize,
     resident_bytes: usize,
+    file_descriptors: usize,
     retained_bytes: usize,
     disk_bytes: u64,
     worker_jobs: usize,
@@ -23,6 +26,7 @@ impl ResourceCost {
         Self {
             active_cells: 1,
             resident_bytes: ACTIVE_CELL_NATIVE_BYTES,
+            file_descriptors: ACTIVE_CELL_FILE_DESCRIPTORS,
             ..Self::zero()
         }
     }
@@ -32,6 +36,7 @@ impl ResourceCost {
         Self {
             active_cells: 0,
             resident_bytes: 0,
+            file_descriptors: 0,
             retained_bytes: 0,
             disk_bytes: 0,
             worker_jobs: 0,
@@ -48,6 +53,11 @@ impl ResourceCost {
     #[must_use]
     pub const fn resident_bytes(self) -> usize {
         self.resident_bytes
+    }
+
+    #[must_use]
+    pub const fn file_descriptors(self) -> usize {
+        self.file_descriptors
     }
 
     #[must_use]
@@ -88,6 +98,12 @@ impl ResourceCost {
     }
 
     #[must_use]
+    pub const fn with_file_descriptors(mut self, descriptors: usize) -> Self {
+        self.file_descriptors = descriptors;
+        self
+    }
+
+    #[must_use]
     pub const fn with_active_cells(mut self, cells: usize) -> Self {
         self.active_cells = cells;
         self
@@ -121,6 +137,7 @@ impl ResourceCost {
         Some(Self {
             active_cells: self.active_cells.checked_add(other.active_cells)?,
             resident_bytes: self.resident_bytes.checked_add(other.resident_bytes)?,
+            file_descriptors: self.file_descriptors.checked_add(other.file_descriptors)?,
             retained_bytes: self.retained_bytes.checked_add(other.retained_bytes)?,
             disk_bytes: self.disk_bytes.checked_add(other.disk_bytes)?,
             worker_jobs: self.worker_jobs.checked_add(other.worker_jobs)?,
@@ -133,6 +150,7 @@ impl ResourceCost {
         Some(Self {
             active_cells: self.active_cells.checked_sub(other.active_cells)?,
             resident_bytes: self.resident_bytes.checked_sub(other.resident_bytes)?,
+            file_descriptors: self.file_descriptors.checked_sub(other.file_descriptors)?,
             retained_bytes: self.retained_bytes.checked_sub(other.retained_bytes)?,
             disk_bytes: self.disk_bytes.checked_sub(other.disk_bytes)?,
             worker_jobs: self.worker_jobs.checked_sub(other.worker_jobs)?,
@@ -144,6 +162,7 @@ impl ResourceCost {
     fn fits_within(self, limit: Self) -> bool {
         self.active_cells <= limit.active_cells
             && self.resident_bytes <= limit.resident_bytes
+            && self.file_descriptors <= limit.file_descriptors
             && self.retained_bytes <= limit.retained_bytes
             && self.disk_bytes <= limit.disk_bytes
             && self.worker_jobs <= limit.worker_jobs
@@ -340,6 +359,13 @@ mod tests {
             .checked_add(ResourceCost::active_cell())
             .is_none()
         );
+    }
+
+    #[test]
+    fn active_cell_cost_tracks_file_descriptors() {
+        let cost = ResourceCost::active_cell();
+        assert_eq!(cost.file_descriptors(), ACTIVE_CELL_FILE_DESCRIPTORS);
+        assert_eq!(cost.with_file_descriptors(0).file_descriptors(), 0);
     }
 
     #[test]

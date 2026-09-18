@@ -171,9 +171,10 @@ deactivation; the deterministic simulator and bounded TLA+ model exercise the sa
 predicates; resident-only lookup is actor-owned and attempted before
 catalog/control I/O; sparse restored Cells receive bounded
 `ManagedDb::hydrate_step` work on the existing SQL worker; active-cell admission
-uses an exact RAII resource ledger (including resident native bytes, bounded
-SQL-worker, hydration-job, and primitive activity/effect reservations, with
-runtime metrics for hydration usage/capacity); the runtime installs a weak
+uses an exact RAII resource ledger (including resident native bytes, active-Cell
+file-descriptor reservations, bounded SQL-worker, hydration-job, and primitive
+activity/effect reservations, with runtime metrics for hydration and descriptor
+usage/capacity); the runtime installs a weak
 ledger admission on `crab_ltx::DiskBudget`, imports existing local bytes, and
 keeps LTX reserve/resize/release usage identical to the advertised disk total;
 persisted
@@ -882,7 +883,7 @@ counting.
 
 | Consumer | Required accounting |
 | --- | --- |
-| SQLite main, WAL, and SHM | Active Cell disk and descriptors |
+| SQLite main, WAL, and SHM | Active Cell disk and descriptors; the runtime ledger reserves eight descriptors per active Cell and exports used/capacity gauges |
 | Retained captured LTX and checksum sidecar | Managed session disk |
 | Sparse materialized pages | Incremental Cell disk |
 | Directory-node and immutable-page cache | Evictable cache disk |

@@ -1626,6 +1626,8 @@ async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
         cell_active_capacity: cell_runtime.active_cell_capacity(),
         cell_resident_bytes: cell_runtime.resident_bytes(),
         cell_resident_capacity_bytes: cell_runtime.resident_capacity_bytes(),
+        cell_file_descriptors: cell_runtime.file_descriptors(),
+        cell_file_descriptor_capacity: cell_runtime.file_descriptor_capacity(),
         cell_retained_bytes: cell_runtime.retained_bytes(),
         cell_retained_capacity_bytes: cell_runtime.retained_capacity_bytes(),
         cell_worker_jobs: cell_runtime.worker_jobs(),
