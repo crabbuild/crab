@@ -145,8 +145,8 @@ authorized standalone-contract decision.
 
 Local proof completed:
 
-- `crab-cell-runtime`: 180 library tests (179 passed, one provider test
-  ignored), 37 actor tests (36 passed, one provider test ignored), and all primitive,
+- `crab-cell-runtime`: 200 library tests passed (one provider test ignored),
+  38 actor tests passed (one provider test ignored), and all primitive,
   migration, publication, simulator, and workflow suites pass. The ignored
   source-loss and retention tests also pass against an isolated local RustFS
   bucket when their provider variables are supplied. The shared
@@ -162,7 +162,7 @@ Local proof completed:
 - `crab-ltx --no-default-features`: 12 unit tests, 21 integration/doc tests,
   and 5 doctests pass, so the standalone/minimal feature boundary remains
   buildable.
-- `crab-http-server --lib`: 184 tests pass (four provider/browser tests remain
+- `crab-http-server --lib`: 190 tests pass (four provider/browser tests remain
   explicitly ignored); the local RustFS collaboration/takeover, native-push,
   and receive-fault qualifications pass when run with an isolated prefix. The
   architecture target, architecture regression tests, Clippy, formatting,
@@ -200,3 +200,9 @@ inventory refresh now pass their queue/publication/unknown-work/lease
 observations through the kernel as well; the actor only owns resource
 reservation, effect execution, and generation-matched inventory application
 after a `Started` result.
+
+Blob upload lifetimes and Cron first-due windows are validated from the
+mutation-issued timestamp, while the serialized Cell still rejects an upload
+that has expired before acceptance. This keeps absolute caller deadlines stable
+under queue or transport delay without making an overdue-but-valid Cron schedule
+ineligible; the next Tick owns its durable catch-up.
