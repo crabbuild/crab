@@ -168,7 +168,9 @@ publication, renewal, migration, inventory refresh, and drain, while the kernel 
 effect intents/IDs and the actor fences completions by activation generation
 and effect family before fenced
 deactivation; the deterministic simulator and bounded TLA+ model exercise the same lifecycle
-predicates; resident-only lookup is actor-owned and attempted before
+predicates; the simulator's movement release also passes queue/publisher
+observations through the same deactivation gate; resident-only lookup is
+actor-owned and attempted before
 catalog/control I/O; sparse restored Cells receive bounded
 `ManagedDb::hydrate_step` work on the existing SQL worker; active-cell admission
 uses an exact RAII resource ledger (including resident native bytes, active-Cell

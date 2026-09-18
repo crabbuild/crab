@@ -382,7 +382,7 @@ impl Simulation {
                 }
             }
             Event::Release => {
-                if self.state.can_deactivate()
+                if self.state.ready_to_deactivate(true, true)
                     && self.retained == 0
                     && self.primitive_obligations == 0
                     && self
@@ -421,7 +421,7 @@ impl Simulation {
                 if self.movement == MovementPhase::Quiescing
                     && self.retained == 0
                     && self.primitive_obligations == 0
-                    && self.state.can_deactivate()
+                    && self.state.ready_to_deactivate(true, true)
                 {
                     self.movement = MovementPhase::Durability;
                 }
@@ -431,7 +431,7 @@ impl Simulation {
                 if self.movement == MovementPhase::Durability
                     && self.retained == 0
                     && self.primitive_obligations == 0
-                    && self.state.can_deactivate()
+                    && self.state.ready_to_deactivate(true, true)
                 {
                     self.owner = None;
                     self.owner_live = false;
@@ -550,7 +550,7 @@ impl Simulation {
         assert!(!self.owner_live || self.owner.is_some());
         assert!(!self.released || self.owner.is_none());
         assert!(!self.released || self.primitive_obligations == 0);
-        assert!(!self.released || self.state.can_deactivate());
+        assert!(!self.released || self.state.ready_to_deactivate(true, true));
         assert!(
             !self.released
                 || self
