@@ -550,12 +550,12 @@ async fn node_log_enrollment_activation_and_coverage_are_authoritative() {
     assert!(!log.active());
     assert_eq!(log.members(), [node(first), node(second)]);
     directory
-        .authorize_log_append(leader, node(first), 4, NOW_MS + 2)
+        .authorize_log_append(leader, node(first), 4, 0, NOW_MS + 2)
         .await
         .unwrap();
     assert!(
         directory
-            .authorize_log_append(leader, NodeId::from_bytes([8; 16]), 4, NOW_MS + 2)
+            .authorize_log_append(leader, NodeId::from_bytes([8; 16]), 4, 0, NOW_MS + 2)
             .await
             .is_err()
     );
@@ -581,6 +581,20 @@ async fn node_log_enrollment_activation_and_coverage_are_authoritative() {
         .unwrap();
     assert!(directory.log_epoch_referenced(leader, 4).await.unwrap());
     assert_eq!(covered.advertisement().log().unwrap().tiered_through(), 27);
+    // An append may have been queued before coverage advanced, but its wire
+    // watermark must never authorize deletion beyond the persisted prefix.
+    for watermark in [0, 26, 27] {
+        directory
+            .authorize_log_append(leader, node(first), 4, watermark, NOW_MS + 1_003)
+            .await
+            .unwrap();
+    }
+    assert!(matches!(
+        directory
+            .authorize_log_append(leader, node(first), 4, 28, NOW_MS + 1_003)
+            .await,
+        Err(Error::PeerAuthorization(_))
+    ));
     directory
         .authorize_log_retire(leader, node(first), 4, 27, NOW_MS + 1_003)
         .await
@@ -661,7 +675,7 @@ async fn clean_node_log_close_clears_authority_before_session_withdrawal() {
     assert!(!directory.log_epoch_referenced(leader, 4).await.unwrap());
     assert!(
         directory
-            .authorize_log_append(leader, node(member), 4, NOW_MS + 5)
+            .authorize_log_append(leader, node(member), 4, 0, NOW_MS + 5)
             .await
             .is_err()
     );
@@ -735,7 +749,7 @@ async fn expired_enrolled_log_becomes_a_renewable_recovery_claim() {
         .unwrap();
     assert!(
         directory
-            .authorize_log_append(leader, node(member), 7, NOW_MS + 10_001)
+            .authorize_log_append(leader, node(member), 7, 0, NOW_MS + 10_001)
             .await
             .is_err()
     );

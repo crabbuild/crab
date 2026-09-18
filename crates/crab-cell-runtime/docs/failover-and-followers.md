@@ -153,7 +153,7 @@ recovery path.
 | Working now | Remaining target gaps |
 | --- | --- |
 | Strict frame codec plus capacity- and failure-domain-aware deterministic selection, retrying automatic enrollment, activation, coverage, recovery claims, object-covered epoch rotation, and clean log close | Signed small/medium/large live runs and the extended fault/telemetry matrix |
-| Crash-safe, node-budgeted follower store under a persisted physical `NodeId`, authenticated remote append/seal/tail/retire transport, a bounded node-wide batched shipper, a recovery-first management-listener lifecycle, and startup lane scrub/quarantine | None for this slice |
+| Crash-safe, node-budgeted follower store under a persisted physical `NodeId`, authenticated remote append/seal/tail/retire transport, a bounded node-wide batched shipper, a recovery-first management-listener lifecycle, and startup lane scrub/quarantine | Disk scans retain verified locations rather than all payloads, but each page still scans the lane; indexed seek-only reads remain a large-tail I/O performance gap |
 | Authoritative create and refresh drive a terminal monotonic node-lease guard; admission, actor dispatch, Cell-control CAS, durability proof, and output acceptance all check it | None for the current non-streaming Cell API |
 | Write-all durability gate, first-fsynced-batch activation, bounded dual-watermark command continuation, ordered object publication, object fallback, schema-migration barriers, and contiguous authoritative object watermark | None for this slice |
 | Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | None for this slice |
@@ -234,6 +234,23 @@ and an expired recovery claim may move to a new live claimant while permanently
 fencing the old claimant's renewal. It also closes and reopens every follower
 in an ensemble before gathering the witness, and discards a recovery
 coordinator after overlay attachment before a new coordinator resumes sealing.
+
+Correctness boundaries exercised by regression tests:
+
+| Race or fault | Required behavior |
+| --- | --- |
+| Two Cells finish object publication concurrently | Serialize coverage preview, authority CAS, and local confirmation; persisted coverage cannot trail an acknowledged local truncation watermark |
+| A queued batch contains an object-covered prefix | Accept an ACK retaining every uncovered suffix frame; reject an empty retained range for an uncovered ticket |
+| An append requests truncation ahead of authority | Reject before follower storage changes; stale, lower watermarks remain safe |
+| Shipping stops before the frame-count threshold | Trigger the same object-coverage barrier and follower re-enrollment used by normal rotation |
+| Close clears the old log before re-enrollment | Allocate the new epoch from the monotonically increasing authoritative node generation; never reset it to one within the same session |
+| Another Cell holds back global object coverage | Remove each Cell's already-rooted prefix using its exact commit sequence and LTX position; reject contradictory positions/checksums |
+| All retained frames are already rooted | Seal without creating an empty recovery manifest; accept a sealed empty lane when every skipped frame is object-covered |
+| Two witnesses return different valid bytes for one sequence | Fail closed, including overlapping evidence from shorter or partially readable witnesses |
+| A valid frame names another session or epoch | Reject it before building a recovery overlay |
+| A recovered suffix is awaiting immutable pinning | Retain its recovery admission until the result is pinned or discarded |
+| Recovery must inspect 256 catalog shard heads | Read heads with a fixed concurrency bound while still verifying every populated shard, page, and Cell control |
+| The claim CAS commits but its response never returns | Bound the storage wait, then resume the same persisted claim idempotently on the next scheduler scan |
 
 ## Use one multiplexed log per owner session
 
@@ -614,8 +631,13 @@ task or connection per Cell. One lane per selected follower carries all Cells
 for that owner session.
 
 `tail_page` is the recovery path used by the current implementation. Its
-default transport adapter can page a legacy `tail` result in memory, while the
-HTTP transport and `LocalFollowerTransport` provide native paging. A page with
+default transport adapter can page a legacy `tail` result in memory. The HTTP
+transport and `LocalFollowerTransport` expose bounded pages. The follower disk
+reader scans one frame at a time, retaining verified file locations and digests,
+then materializes only the requested page. It rechecks the digest after seeking.
+Metadata remains proportional to retained frame count, and each page still
+performs a full validation scan: payload memory is bounded, not total scan I/O.
+A page with
 one frame may be larger than the 1 MiB network target, but that frame is still
 bounded by the configured capture limit; a multi-frame page may not exceed the
 target. Recovery rejects oversized, non-contiguous, or unverifiable pages
@@ -664,8 +686,8 @@ it retains inert data, rejects future appends after the authority CAS, and is
 collected later. A successful retirement response with any other watermark is
 a protocol error and blocks the CAS.
 
-The long-lived HTTP runtime applies the same barrier when the current epoch
-reaches `1_000_000` issued node-log frames. A five-second controller observes
+The long-lived HTTP runtime applies the same barrier when shipping stops or the
+current epoch reaches `1_000_000` issued node-log frames. A five-second controller observes
 the active binding, closes it through the idempotent
 `NodeDurability::shutdown`, and retries `PendingPublication` until object
 coverage is contiguous. It then recruits the next epoch and atomically
@@ -1105,7 +1127,13 @@ loss record; it is not an automatic runtime branch.
 
 The recoverer filters entries at or below the session's object-covered
 watermark, then groups the remaining verified frames by application, Cell,
-incarnation, and Cell epoch. It writes shared immutable bundles and one small
+incarnation, and Cell epoch. Because different Cells publish independently,
+the shared watermark may lag a Cell's exact root. Within each group, recovery
+also removes frames already covered by that root's commit sequence and LTX
+position, checks the checksum at an equal TXID, and requires the uncovered
+suffix to begin at the next commit. Fully rooted groups need no overlay.
+The recovery reservation stays owned through immutable pinning.
+It writes shared immutable bundles and one small
 manifest per affected Cell.
 
 ```json

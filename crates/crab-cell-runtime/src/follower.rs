@@ -254,7 +254,8 @@ impl FollowerStore {
             let _guard = lock
                 .lock()
                 .map_err(|_| Error::Node("follower lane lock poisoned"))?;
-            read_tail_sync(&root, lane, first_sequence, limits)
+            read_tail_sync(&root, lane, first_sequence, limits, usize::MAX, usize::MAX)
+                .map(|page| page.frames)
         })
         .await
         .map_err(Error::FollowerWorkerJoin)?
@@ -278,24 +279,14 @@ impl FollowerStore {
             let _guard = lock
                 .lock()
                 .map_err(|_| Error::Node("follower lane lock poisoned"))?;
-            let frames = read_tail_sync(&root, lane, first_sequence, limits)?;
-            let mut bytes = 0_usize;
-            let mut count = 0_usize;
-            for frame in &frames {
-                if count == MAX_TAIL_PAGE_FRAMES
-                    || (count != 0 && bytes.saturating_add(frame.len()) > MAX_TAIL_PAGE_BYTES)
-                {
-                    break;
-                }
-                bytes = bytes.saturating_add(frame.len());
-                count += 1;
-            }
-            let has_more = count < frames.len();
-            let frames = frames.into_iter().take(count).collect();
-            Ok(FollowerTailPage {
-                frames,
-                next_sequence: has_more.then(|| first_sequence.saturating_add(count as u64)),
-            })
+            read_tail_sync(
+                &root,
+                lane,
+                first_sequence,
+                limits,
+                MAX_TAIL_PAGE_BYTES,
+                MAX_TAIL_PAGE_FRAMES,
+            )
         })
         .await
         .map_err(Error::FollowerWorkerJoin)?
@@ -875,7 +866,9 @@ fn read_tail_sync(
     lane: Lane,
     first_sequence: u64,
     limits: crab_ltx::Limits,
-) -> Result<Vec<Bytes>> {
+    max_bytes: usize,
+    max_frames: usize,
+) -> Result<FollowerTailPage> {
     validate_lane(lane)?;
     let directory = lane_directory(root, lane);
     let marker = directory.join("sealed");
@@ -895,17 +888,41 @@ fn read_tail_sync(
             "requested follower tail is beyond durable data",
         ));
     }
-    Ok(retained
-        .range(first_sequence..)
-        .map(|(_, record)| record.encoded.clone())
-        .collect())
+    let mut frames = Vec::new();
+    let mut bytes = 0_usize;
+    let mut next_sequence = None;
+    for (sequence, record) in retained.range(first_sequence..) {
+        if frames.len() == max_frames
+            || (!frames.is_empty() && bytes.saturating_add(record.length) > max_bytes)
+        {
+            next_sequence = Some(*sequence);
+            break;
+        }
+        let mut file = std::fs::File::open(&record.path)?;
+        file.seek(SeekFrom::Start(record.offset))?;
+        let mut encoded = vec![0; record.length];
+        file.read_exact(&mut encoded)?;
+        // The scan verified framing and LTX; recheck bytes after seeking so
+        // disk changes between validation and page materialization fail closed.
+        if *blake3::hash(&encoded).as_bytes() != record.digest {
+            return Err(Error::Node("stored follower record changed after scan"));
+        }
+        bytes = bytes.saturating_add(record.length);
+        frames.push(Bytes::from(encoded));
+    }
+    Ok(FollowerTailPage {
+        frames,
+        next_sequence,
+    })
 }
 
 #[derive(Clone)]
 struct StoredRecord {
     sequence: u64,
     digest: [u8; 32],
-    encoded: Bytes,
+    path: Arc<Path>,
+    offset: u64,
+    length: usize,
 }
 
 struct LaneMemory {
@@ -996,6 +1013,7 @@ fn scan_chunk(
     };
     let mut records = Vec::new();
     let mut valid_bytes = 0_u64;
+    let path: Arc<Path> = Arc::from(path);
     loop {
         let mut header = [0_u8; RECORD_HEADER_BYTES];
         match file.read_exact(&mut header) {
@@ -1055,14 +1073,18 @@ fn scan_chunk(
             }
             return Err(Error::Node("stored follower record scope differs"));
         }
-        valid_bytes = valid_bytes
-            .checked_add(RECORD_HEADER_BYTES as u64 + length)
-            .ok_or(Error::Node("follower chunk length overflow"))?;
+        // Keep only verified locations, not every body in the lane. Restart,
+        // seal and paged reads must not allocate the entire retained log.
         records.push(StoredRecord {
             sequence,
             digest,
-            encoded,
+            path: Arc::clone(&path),
+            offset: valid_bytes + RECORD_HEADER_BYTES as u64,
+            length: encoded.len(),
         });
+        valid_bytes = valid_bytes
+            .checked_add(RECORD_HEADER_BYTES as u64 + length)
+            .ok_or(Error::Node("follower chunk length overflow"))?;
     }
 }
 

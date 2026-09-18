@@ -241,11 +241,15 @@ impl NodePublisher {
         let now_ms = now_ms()?;
         let mut observed = self.observed().map_err(crate::Error::from)?.lock().await;
         if observed.advertisement().log().is_none() {
+            // Closing clears the log, but its follower append fences persist.
+            // The authoritative generation advances across close/enrollment,
+            // so using it prevents reuse of an old lane without another counter.
+            let epoch = observed.advertisement().generation();
             let Some(enrolled) = self
                 .directory
                 .try_recruit_log(
                     &observed,
-                    1,
+                    epoch,
                     required_follower_bytes,
                     live_node_limit,
                     now_ms,
@@ -778,18 +782,18 @@ pub(crate) async fn append_node_log(
     if !authenticated_session(receiver, leader, &identity, now_ms).await {
         return peer_http_error(StatusCode::UNAUTHORIZED);
     }
+    let (covered_through, frames) = match decode_append_batch(body) {
+        Ok(batch) => batch,
+        Err(()) => return peer_http_error(StatusCode::BAD_REQUEST),
+    };
     if receiver
         .directory
-        .authorize_log_append(leader, receiver.node, epoch, now_ms)
+        .authorize_log_append(leader, receiver.node, epoch, covered_through, now_ms)
         .await
         .is_err()
     {
         return peer_http_error(StatusCode::FORBIDDEN);
     }
-    let (covered_through, frames) = match decode_append_batch(body) {
-        Ok(batch) => batch,
-        Err(()) => return peer_http_error(StatusCode::BAD_REQUEST),
-    };
     match store.append(leader, epoch, frames, covered_through).await {
         Ok(receipt) => follower_receipt_response(receipt),
         Err(CellError::PeerAuthorization(_)) => peer_http_error(StatusCode::UNAUTHORIZED),
@@ -1760,7 +1764,7 @@ mod tests {
             crab_ltx::DiskBudget::new(1 << 20),
         )
         .unwrap();
-        let publisher = publisher.with_follower_store(follower_store);
+        let publisher = Arc::new(publisher.with_follower_store(follower_store));
 
         let published = publisher.publish_initial().await.unwrap();
         publisher.lease_guard().unwrap().check().unwrap();
@@ -1791,6 +1795,67 @@ mod tests {
 
         assert_eq!(loaded.advertisement(), published.advertisement());
         assert_eq!(loaded.advertisement().node(), publisher.node());
+        let follower_dir = TempDir::new().unwrap();
+        let follower_store = crab_cell_runtime::FollowerStore::open(
+            follower_dir.path().to_owned(),
+            crab_ltx::Limits::default(),
+            crab_ltx::DiskBudget::new(1 << 20),
+        )
+        .unwrap();
+        let follower = NodePublisher::new(
+            directory.clone(),
+            signing_key.clone(),
+            SessionId::from_bytes([18; 16]),
+            "https://node-2.internal:8789".into(),
+            NodeFailureDomain::default(),
+            fleet,
+            Digest::from_bytes([15; 32]),
+            image,
+            release,
+            vec![Digest::from_bytes([16; 32])],
+            follower_dir.path().into(),
+            32 * 1024 * 1024 * 1024,
+            crate::cells::SchedulerStatus::new(now_ms().unwrap()).unwrap(),
+        )
+        .unwrap()
+        .with_follower_store(follower_store.clone());
+        follower.publish_initial().await.unwrap();
+        let transport: Arc<dyn crab_cell_runtime::NodeLogTransport> = Arc::new(
+            crab_cell_runtime::LocalFollowerTransport::new(follower.node(), follower_store),
+        );
+        let first = publisher
+            .recruit_node_durability(Arc::clone(&transport), crab_ltx::Limits::default(), 1, 10)
+            .await
+            .unwrap()
+            .unwrap();
+        let first_epoch = directory
+            .load(session, now_ms().unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .advertisement()
+            .log()
+            .unwrap()
+            .epoch();
+        first.shutdown().await.unwrap();
+        let second = publisher
+            .recruit_node_durability(transport, crab_ltx::Limits::default(), 1, 10)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            directory
+                .load(session, now_ms().unwrap())
+                .await
+                .unwrap()
+                .unwrap()
+                .advertisement()
+                .log()
+                .unwrap()
+                .epoch()
+                > first_epoch
+        );
+        second.shutdown().await.unwrap();
         let restarted = NodePublisher::new(
             directory.clone(),
             signing_key.clone(),

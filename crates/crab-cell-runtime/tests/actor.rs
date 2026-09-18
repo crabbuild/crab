@@ -37,6 +37,8 @@ struct PausingStore {
     released: AtomicBool,
     entered: Notify,
     release: Notify,
+    parallel_catalog_heads: AtomicBool,
+    catalog_head_barrier: tokio::sync::Barrier,
 }
 
 impl PausingStore {
@@ -50,7 +52,13 @@ impl PausingStore {
             released: AtomicBool::new(false),
             entered: Notify::new(),
             release: Notify::new(),
+            parallel_catalog_heads: AtomicBool::new(false),
+            catalog_head_barrier: tokio::sync::Barrier::new(2),
         }
+    }
+
+    fn require_parallel_catalog_heads(&self) {
+        self.parallel_catalog_heads.store(true, Ordering::Release);
     }
 
     fn arm(&self) {
@@ -130,6 +138,11 @@ impl ObjectStore for PausingStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
+        if self.parallel_catalog_heads.load(Ordering::Acquire)
+            && location.as_ref().ends_with("/head.json")
+        {
+            self.catalog_head_barrier.wait().await;
+        }
         self.inner.get_opts(location, options).await
     }
 
@@ -452,6 +465,36 @@ async fn fence_log_session(
         .claim_expired(session, claimant, 10_001)
         .await
         .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_inventory_reads_catalog_heads_concurrently() {
+    let pausing = Arc::new(PausingStore::new(Arc::new(InMemory::new())));
+    let object_store: Arc<dyn ObjectStore> = pausing.clone();
+    let fixture = fixture_with_limits_and_store(
+        b"parallel-recovery-inventory",
+        Limits::default(),
+        Store::new(object_store),
+    );
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let authority = CellAuthority::new(fixture.layout.clone());
+    pausing.require_parallel_catalog_heads();
+
+    let inventory = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        crab_cell_runtime::recoverable_cells(
+            &catalog,
+            &authority,
+            SessionId::from_bytes([99; 16]),
+            10,
+        ),
+    )
+    .await
+    .expect("catalog head reads remained serial")
+    .unwrap();
+
+    assert!(inventory.is_empty());
 }
 
 struct Fixture {
@@ -1933,6 +1976,15 @@ async fn unchanged_dead_owner_is_taken_over_then_restored() {
 
 #[tokio::test]
 async fn takeover_resumes_pinned_recovery_before_serving() {
+    recover_retained_tail(false).await;
+}
+
+#[tokio::test]
+async fn recovery_seals_already_rooted_tail_without_an_empty_manifest() {
+    recover_retained_tail(true).await;
+}
+
+async fn recover_retained_tail(rooted: bool) {
     let fixture = fixture_for(b"recovered-takeover");
     let handle = activate(&fixture, 16 * 1024 * 1024).await;
     drop(handle);
@@ -1999,6 +2051,27 @@ async fn takeover_resumes_pinned_recovery_before_serving() {
             .clone(),
         );
     }
+    if rooted {
+        // Crash after the exact Cell root CAS but before shared node coverage.
+        let prepared = fixture
+            .replica
+            .prepare(
+                Some(&predecessor),
+                &capture,
+                predecessor.commit_sequence + 1,
+                stale.value().schema,
+            )
+            .await
+            .unwrap();
+        authority
+            .transition(
+                &stale,
+                stale.value().publish_prepared(&prepared, None).unwrap(),
+                Transition::Publish,
+            )
+            .await
+            .unwrap();
+    }
     writer.close().unwrap();
     let follower = SessionId::from_bytes([43; 16]);
     let follower_directory = tempfile::TempDir::new().unwrap();
@@ -2044,6 +2117,24 @@ async fn takeover_resumes_pinned_recovery_before_serving() {
         .await
         .unwrap();
     assert_eq!(inventory.len(), 1);
+    if rooted {
+        let directory = crab_cell_runtime::NodeDirectory::new(
+            fixture.layout.clone(),
+            Digest::from_bytes([90; 32]),
+            Digest::from_bytes([91; 32]),
+            Digest::from_bytes([92; 32]),
+        );
+        let completed = coordinator
+            .recover_and_seal(&directory, fenced, inventory, 10_002)
+            .await
+            .unwrap();
+        assert!(completed.controls.is_empty());
+        assert_eq!(
+            completed.sealed.log().phase(),
+            crab_cell_runtime::NodeLogPhase::Sealed
+        );
+        return;
+    }
     let attached = coordinator
         .recover(fenced.clone(), inventory)
         .await

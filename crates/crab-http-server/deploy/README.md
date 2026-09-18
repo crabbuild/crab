@@ -188,8 +188,11 @@ flowchart LR
     LB --> B[Node B\n127.0.0.1:8888]
     LB --> C[Node C\n127.0.0.1:8988]
     A & B & C --> Origin[(RustFS)]
-    B -. SIGKILL .-> Lost[Local SQLite removed]
-    Origin -->|exact LTX root| C
+    B -. first SIGKILL .-> LostB[Owner B local SQLite removed]
+    A -. pause past lease .-> Reenroll[C replaces follower A with B]
+    C -. second SIGKILL .-> LostC[Owner C local SQLite removed]
+    B -->|verified follower tail| C
+    C -->|verified replacement tail| B
 ```
 
 Run the repeatable owner-loss qualification from the repository root:
@@ -204,25 +207,33 @@ Compose project, and then:
 1. Records the live admission envelope from all three processes.
 2. Sends a durable issue mutation directly to node B and proves A, C, and the
    round-robin endpoint route to B over the private mTLS peer protocol.
-3. Sends `SIGKILL` to B, destroying its local SQLite files.
-4. Waits until B's exact signed boot-session advertisement is expired.
+3. Blocks immutable Cell-object writes, commits through follower fsync, sends
+   `SIGKILL` to B, and destroys its local SQLite files.
+4. Waits until B's exact signed boot-session advertisement expires.
 5. Reads through C and requires a higher epoch, a different session, and the
    same complete LTX root: digest, transaction ID, checksum, and commit sequence.
 6. Writes a second issue through C and requires a different digest plus higher
    transaction ID and commit sequence.
 7. Restarts B with empty local Cell storage and proves it routes to C.
+8. Pauses follower A past its signed lease, writes through object coverage,
+   and requires C to recruit B into a higher node-log epoch.
+9. Blocks immutable objects again and commits through the replacement follower.
+10. Sends `SIGKILL` to C, destroys its local SQLite files, and requires B to
+    recover both follower-only commits before serving further reads.
 
-Success prints a JSON receipt containing the before/after sessions, epochs,
-complete roots before takeover, after restore, and after continuation, plus
-each process's admission envelope. The trap removes only the uniquely named
-qualification project and its volumes. Set
+Success prints a JSON receipt containing both failovers' sessions, epochs and
+complete roots, follower replacement evidence, both follower-only responses,
+and each process's admission envelope. The trap clears an injected bucket
+policy and removes only the uniquely named qualification project and its
+volumes. Set
 `CRAB_HTTP_CLUSTER_BUILD=false` to reuse an already-built
 `CRAB_HTTP_SERVER_IMAGE`.
 
-This is real process-loss, source-loss, peer-routing, and recovery evidence. It
-is not the production three-Pod gate because the processes share one network
-namespace and it does not inject a network partition, delayed immutable upload,
-or lost control-CAS response.
+This is real process-loss, source-loss, peer-routing, follower replacement, and
+repeated recovery evidence. Node A is paused rather than removed because the
+Compose fixture shares its network namespace; B and C are independently killed
+and lose their tmpfs. The gate is not a production three-Pod partition test.
+Lost control-CAS responses are covered by a deterministic scheduler regression.
 
 ## Deploy for a team
 

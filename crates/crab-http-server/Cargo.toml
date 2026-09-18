@@ -45,7 +45,7 @@ url = { version = "2", features = ["serde"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
-sysinfo = "0.35.2"
+sysinfo = "0.38.4"
 thiserror = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }

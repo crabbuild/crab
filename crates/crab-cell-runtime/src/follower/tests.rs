@@ -143,22 +143,91 @@ async fn append_skips_an_object_covered_queued_prefix() {
     let first_frame = frame(1, first.segments.first().unwrap(), limits);
     let second_frame = frame(2, second.segments.first().unwrap(), limits);
 
+    for covered in [1, 2] {
+        let root = tempfile::TempDir::new().unwrap();
+        let store = FollowerStore::open(
+            root.path().to_owned(),
+            limits,
+            crab_ltx::DiskBudget::new(1 << 30),
+        )
+        .unwrap();
+        let leader = SessionId::from_bytes([1; 16]);
+        let receipt = store
+            .append(
+                leader,
+                2,
+                vec![first_frame.clone(), second_frame.clone()],
+                covered,
+            )
+            .await
+            .unwrap();
+        assert_eq!(receipt.base_sequence, covered + 1);
+        assert_eq!(receipt.durable_through, 2);
+        let member = crate::NodeId::from_bytes([2; 16]);
+        let recovery = crate::NodeLogRecovery::new(
+            Arc::new(crate::LocalFollowerTransport::new(member, store)),
+            crate::NodeId::from_bytes([1; 16]),
+            leader,
+            2,
+            vec![member],
+            covered,
+            true,
+            limits,
+        )
+        .unwrap();
+        let sealed = recovery.ensure_sealed().await.unwrap();
+        assert_eq!(sealed.frames.len(), (2 - covered) as usize);
+    }
+    database.close().unwrap();
+}
+
+#[tokio::test]
+async fn restarted_lane_returns_only_the_requested_large_frame_page() {
+    let limits = crab_ltx::Limits::default();
+    let source = tempfile::TempDir::new().unwrap();
+    let mut database = ManagedDb::open(&source.path().join("source.sqlite"), limits).unwrap();
+    database
+        .transaction(|transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE values_(v); INSERT INTO values_ VALUES(randomblob(2097152))",
+            )
+        })
+        .unwrap();
+    let capture = database.capture().unwrap();
     let root = tempfile::TempDir::new().unwrap();
+    let leader = SessionId::from_bytes([1; 16]);
     let store = FollowerStore::open(
         root.path().to_owned(),
         limits,
         crab_ltx::DiskBudget::new(1 << 30),
     )
     .unwrap();
-    let leader = SessionId::from_bytes([1; 16]);
-    let receipt = store
-        .append(leader, 2, vec![first_frame, second_frame], 1)
-        .await
-        .unwrap();
-    assert_eq!(receipt.base_sequence, 2);
-    assert_eq!(receipt.durable_through, 2);
-    assert_eq!(store.seal(leader, 2).await.unwrap(), receipt);
-    assert_eq!(store.read_tail(leader, 2, 2).await.unwrap().len(), 1);
+    for sequence in 1..=16 {
+        store
+            .append(
+                leader,
+                2,
+                vec![frame(sequence, &capture.segments[0], limits)],
+                0,
+            )
+            .await
+            .unwrap();
+    }
+    store.seal(leader, 2).await.unwrap();
+    drop(store);
+    let store = FollowerStore::open(
+        root.path().to_owned(),
+        limits,
+        crab_ltx::DiskBudget::new(1 << 30),
+    )
+    .unwrap();
+    for sequence in [1, 16] {
+        let page = store.read_tail_page(leader, 2, sequence).await.unwrap();
+        assert_eq!(page.frames.len(), 1);
+        assert_eq!(page.next_sequence, (sequence < 16).then_some(sequence + 1));
+        let frame = crab_ltx::inspect_node_frame(page.frames[0].clone(), limits).unwrap();
+        assert_eq!(frame.scope().node_sequence, sequence);
+    }
     database.close().unwrap();
 }
 

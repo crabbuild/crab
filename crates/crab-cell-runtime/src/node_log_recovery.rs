@@ -1,6 +1,7 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use futures_util::future::join_all;
+use futures_util::{StreamExt, future::join_all, stream};
 
 use crate::{
     ApplicationId, CellAuthority, CellCatalog, Digest, Error, FencedNodeSession, NodeDirectory,
@@ -8,6 +9,8 @@ use crate::{
     Result, SealRequest, SealedNodeLog, SessionId, TailRequest, Transition, VersionedControl,
     build_recovery_overlays,
 };
+
+const MAX_RECOVERY_CATALOG_HEAD_READS: usize = 32;
 
 const MAX_RECOVERY_PAGE_BYTES: u64 = 1 << 20;
 const MAX_RECOVERY_PAGE_FRAMES: usize = 4_096;
@@ -19,6 +22,9 @@ pub struct SealedSession {
     pub tiered_through: u64,
     pub durable_through: u64,
     pub frames: Vec<crab_ltx::VerifiedNodeFrame>,
+    // Keep admission until the caller has pinned or discarded the recovered
+    // bytes, not merely until their last network page arrives.
+    _reservation: Option<crab_ltx::DiskReservation>,
 }
 
 /// Mechanical seal-and-gather coordinator for one already claimed dead session.
@@ -68,8 +74,11 @@ pub async fn recoverable_cells(
         return Err(Error::Node("node recovery inventory bound is invalid"));
     }
     let mut cells = Vec::new();
-    for shard in 0_u16..=u8::MAX.into() {
-        let mut scan = catalog.scan_shard(shard as u8).await?;
+    let mut scans = stream::iter(0_u16..=u8::MAX.into())
+        .map(|shard| catalog.scan_shard(shard as u8))
+        .buffer_unordered(MAX_RECOVERY_CATALOG_HEAD_READS);
+    while let Some(scan) = scans.next().await {
+        let mut scan = scan?;
         while let Some(page) = scan.next_page().await? {
             for proof in page.entries() {
                 let Some(observed) = authority.load(proof.entry().cell()).await? else {
@@ -142,6 +151,9 @@ impl RecoveryCoordinator {
             return Ok(Vec::new());
         }
         let tails = build_recovery_overlays(sealed.frames, &bases, self.recovery.limits)?;
+        if tails.is_empty() {
+            return Ok(Vec::new());
+        }
         let pinned = self
             .manifests
             .pin(sealed.leader_session, sealed.log_epoch, tails)
@@ -359,7 +371,7 @@ impl NodeLogRecovery {
         Ok(())
     }
 
-    /// Seals all reachable members and returns one complete verified witness.
+    /// Seals all reachable members, rejects conflicts, and returns a complete witness.
     pub async fn ensure_sealed(&self) -> Result<SealedSession> {
         let receipts = join_all(self.members.iter().map(|member| {
             let transport = Arc::clone(&self.transport);
@@ -380,6 +392,16 @@ impl NodeLogRecovery {
             }
         }))
         .await;
+        if receipts
+            .iter()
+            .filter_map(|(_, receipt)| receipt.as_ref().ok())
+            .any(|receipt| {
+                (receipt.base_sequence == 0 && receipt.durable_through != 0)
+                    || receipt.base_sequence > receipt.durable_through.saturating_add(1)
+            })
+        {
+            return Err(Error::Node("follower seal receipt is invalid"));
+        }
         let successful_seals = receipts
             .iter()
             .filter(|(_, receipt)| receipt.is_ok())
@@ -402,6 +424,7 @@ impl NodeLogRecovery {
                 tiered_through: self.tiered_through,
                 durable_through: self.tiered_through,
                 frames: Vec::new(),
+                _reservation: None,
             });
         }
 
@@ -409,23 +432,29 @@ impl NodeLogRecovery {
             .tiered_through
             .checked_add(1)
             .ok_or(Error::Node("node-log recovery sequence overflow"))?;
+        let reservation = self
+            .recovery_disk
+            .try_reserve(recovery_tail_reservation_bytes(self.limits))?;
+        let mut observed = BTreeMap::new();
+        let mut selected = None;
         for (member, receipt) in receipts {
             let Ok(receipt) = receipt else {
                 continue;
             };
-            if receipt.base_sequence > required_first || receipt.durable_through < durable_through {
+            if receipt.durable_through < required_first {
                 continue;
             }
-            let Ok(reservation) = self
-                .recovery_disk
-                .try_reserve(recovery_tail_reservation_bytes(self.limits))
-            else {
+            let first = required_first.max(receipt.base_sequence);
+            if first > receipt.durable_through {
                 continue;
-            };
-            let mut first_sequence = required_first;
+            }
+            let retain = selected.is_none()
+                && first == required_first
+                && receipt.durable_through == durable_through;
+            let mut first_sequence = first;
             let mut frames = Vec::new();
             let mut tail_bytes = 0_u64;
-            let mut complete = true;
+            let complete;
             loop {
                 let Ok(page) = self
                     .transport
@@ -460,6 +489,19 @@ impl NodeLogRecovery {
                     complete = false;
                     break;
                 };
+                // A valid frame digest proves its bytes, not that it belongs to
+                // the claimed failed session. Bind every page to that lane and
+                // the sealed range before retaining it as recovery evidence.
+                if verified.iter().enumerate().any(|(offset, frame)| {
+                    let scope = frame.scope();
+                    scope.leader_session != *self.leader_session.as_bytes()
+                        || scope.log_epoch != self.log_epoch
+                        || first_sequence.checked_add(offset as u64) != Some(scope.node_sequence)
+                        || scope.node_sequence > receipt.durable_through
+                }) {
+                    complete = false;
+                    break;
+                }
                 let page_bytes = verified.iter().try_fold(0_u64, |bytes, frame| {
                     bytes.checked_add(frame.encoded().len() as u64)
                 });
@@ -485,8 +527,24 @@ impl NodeLogRecovery {
                         break;
                     }
                 };
-                frames.extend(verified);
+                // A shorter or partially readable follower may still expose
+                // a conflicting valid frame. Never choose a witness by order
+                // while silently ignoring that evidence from another member.
+                for frame in &verified {
+                    let digest = frame.digest();
+                    if observed
+                        .insert(frame.scope().node_sequence, digest)
+                        .is_some_and(|previous| previous != digest)
+                    {
+                        return Err(Error::Node("follower witnesses disagree"));
+                    }
+                }
+                let last_sequence = verified.last().map(|frame| frame.scope().node_sequence);
+                if retain {
+                    frames.extend(verified);
+                }
                 let Some(next_sequence) = page.next_sequence else {
+                    complete = last_sequence == Some(receipt.durable_through);
                     break;
                 };
                 let Ok(page_count) = u64::try_from(page_count) else {
@@ -497,14 +555,13 @@ impl NodeLogRecovery {
                     complete = false;
                     break;
                 };
-                if next_sequence != expected_next {
+                if next_sequence != expected_next || next_sequence > receipt.durable_through {
                     complete = false;
                     break;
                 }
                 first_sequence = next_sequence;
             }
-            drop(reservation);
-            if !complete {
+            if !complete || !retain {
                 continue;
             }
             if frames.first().map(|frame| frame.scope().node_sequence) != Some(required_first)
@@ -516,12 +573,16 @@ impl NodeLogRecovery {
             {
                 continue;
             }
+            selected = Some(frames);
+        }
+        if let Some(frames) = selected {
             return Ok(SealedSession {
                 leader_session: self.leader_session,
                 log_epoch: self.log_epoch,
                 tiered_through: self.tiered_through,
                 durable_through,
                 frames,
+                _reservation: Some(reservation),
             });
         }
         Err(Error::Node(
@@ -553,6 +614,7 @@ mod tests {
         good: LocalFollowerTransport,
         gap: bool,
         oversized: bool,
+        replacement: Option<Bytes>,
     }
 
     struct FleetTransport {
@@ -686,8 +748,12 @@ mod tests {
             let good = self.good.clone();
             let gap = self.gap;
             let oversized = self.oversized;
+            let replacement = self.replacement.clone();
             Box::pin(async move {
                 let mut page = good.tail_page(member, request).await?;
+                if let Some(replacement) = replacement {
+                    page.frames = vec![replacement];
+                }
                 if oversized {
                     let first = page
                         .frames
@@ -787,6 +853,7 @@ mod tests {
         .unwrap()
         .with_recovery_disk(crab_ltx::DiskBudget::new(0));
         assert!(rejected.ensure_sealed().await.is_err());
+        let budget = crab_ltx::DiskBudget::new(1 << 30);
         let recovery = NodeLogRecovery::new(
             transport,
             NodeId::from_bytes([1; 16]),
@@ -797,10 +864,14 @@ mod tests {
             true,
             limits,
         )
-        .unwrap();
+        .unwrap()
+        .with_recovery_disk(budget.clone());
         let sealed = recovery.ensure_sealed().await.unwrap();
         assert_eq!(sealed.durable_through, 1);
         assert_eq!(sealed.frames.len(), 1);
+        assert!(budget.used() > 0);
+        drop(sealed);
+        assert_eq!(budget.used(), 0);
         database.close().unwrap();
     }
 
@@ -860,6 +931,7 @@ mod tests {
             good: local.clone(),
             gap: false,
             oversized: false,
+            replacement: None,
         });
         let recovery = NodeLogRecovery::new(
             transport,
@@ -879,6 +951,7 @@ mod tests {
             good: local.clone(),
             gap: true,
             oversized: false,
+            replacement: None,
         });
         let recovery = NodeLogRecovery::new(
             gapped,
@@ -895,9 +968,10 @@ mod tests {
 
         let oversized: Arc<dyn NodeLogTransport> = Arc::new(FailingFirstTransport {
             failed,
-            good: local,
+            good: local.clone(),
             gap: false,
             oversized: true,
+            replacement: None,
         });
         let recovery = NodeLogRecovery::new(
             oversized,
@@ -911,6 +985,40 @@ mod tests {
         )
         .unwrap();
         assert!(recovery.ensure_sealed().await.is_err());
+        for wrong_epoch in [false, true] {
+            let mut scope = frame.scope();
+            if wrong_epoch {
+                scope.log_epoch += 1;
+            } else {
+                scope.leader_session = [99; 16];
+            }
+            let replacement = crab_ltx::encode_node_frame(
+                scope,
+                frame.segment().clone(),
+                frame.body().clone(),
+                limits,
+            )
+            .unwrap();
+            let transport = Arc::new(FailingFirstTransport {
+                failed,
+                good: local.clone(),
+                gap: false,
+                oversized: false,
+                replacement: Some(replacement.encoded().clone()),
+            });
+            let recovery = NodeLogRecovery::new(
+                transport,
+                NodeId::from_bytes([1; 16]),
+                leader,
+                3,
+                vec![good],
+                0,
+                true,
+                limits,
+            )
+            .unwrap();
+            assert!(recovery.ensure_sealed().await.is_err());
+        }
         database.close().unwrap();
     }
 
@@ -943,58 +1051,79 @@ mod tests {
             limits,
         )
         .unwrap();
-        let roots = [
-            tempfile::TempDir::new().unwrap(),
-            tempfile::TempDir::new().unwrap(),
-        ];
-        for (member, root) in members.iter().zip(&roots) {
-            let store = FollowerStore::open(
-                root.path().to_owned(),
+        for conflict in [false, true] {
+            let roots = [
+                tempfile::TempDir::new().unwrap(),
+                tempfile::TempDir::new().unwrap(),
+            ];
+            for (index, (member, root)) in members.iter().zip(&roots).enumerate() {
+                let store = FollowerStore::open(
+                    root.path().to_owned(),
+                    limits,
+                    crab_ltx::DiskBudget::new(1 << 30),
+                )
+                .unwrap();
+                let mut scope = frame.scope();
+                if conflict && index == 1 {
+                    scope.cell = [99; 32];
+                }
+                let frame = crab_ltx::encode_node_frame(
+                    scope,
+                    frame.segment().clone(),
+                    frame.body().clone(),
+                    limits,
+                )
+                .unwrap();
+                store
+                    .append(leader, 3, vec![frame.encoded().clone()], 0)
+                    .await
+                    .unwrap();
+                drop(store);
+                assert!(root.path().join("followers").exists(), "{member:?}");
+            }
+
+            let transport: Arc<dyn NodeLogTransport> = Arc::new(FleetTransport {
+                stores: members
+                    .iter()
+                    .zip(&roots)
+                    .map(|(member, root)| {
+                        (
+                            *member,
+                            FollowerStore::open(
+                                root.path().to_owned(),
+                                limits,
+                                crab_ltx::DiskBudget::new(1 << 30),
+                            )
+                            .unwrap(),
+                        )
+                    })
+                    .collect(),
+            });
+            let recovery = NodeLogRecovery::new(
+                transport,
+                leader_node,
+                leader,
+                3,
+                members.to_vec(),
+                0,
+                true,
                 limits,
-                crab_ltx::DiskBudget::new(1 << 30),
             )
             .unwrap();
-            store
-                .append(leader, 3, vec![frame.encoded().clone()], 0)
-                .await
-                .unwrap();
-            drop(store);
-            assert!(root.path().join("followers").exists(), "{member:?}");
+
+            let result = recovery.ensure_sealed().await;
+            if conflict {
+                assert!(matches!(
+                    result,
+                    Err(Error::Node("follower witnesses disagree"))
+                ));
+                continue;
+            }
+            let sealed = result.unwrap();
+            assert_eq!(sealed.durable_through, 1);
+            assert_eq!(sealed.frames.len(), 1);
+            assert_eq!(sealed.frames[0].scope().node_sequence, 1);
         }
-
-        let transport: Arc<dyn NodeLogTransport> = Arc::new(FleetTransport {
-            stores: members
-                .iter()
-                .zip(&roots)
-                .map(|(member, root)| {
-                    (
-                        *member,
-                        FollowerStore::open(
-                            root.path().to_owned(),
-                            limits,
-                            crab_ltx::DiskBudget::new(1 << 30),
-                        )
-                        .unwrap(),
-                    )
-                })
-                .collect(),
-        });
-        let recovery = NodeLogRecovery::new(
-            transport,
-            leader_node,
-            leader,
-            3,
-            members.to_vec(),
-            0,
-            true,
-            limits,
-        )
-        .unwrap();
-
-        let sealed = recovery.ensure_sealed().await.unwrap();
-        assert_eq!(sealed.durable_through, 1);
-        assert_eq!(sealed.frames.len(), 1);
-        assert_eq!(sealed.frames[0].scope().node_sequence, 1);
         database.close().unwrap();
     }
 }

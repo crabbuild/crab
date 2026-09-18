@@ -38,6 +38,7 @@ const MAX_NODE_RECOVERY_JOBS: usize = 2;
 const MAX_NODE_RECOVERY_CELLS: usize = 10_000;
 const RECOVERY_CLAIM_HEARTBEAT: Duration = Duration::from_secs(10);
 const RECOVERY_CLAIM_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
+const RECOVERY_CLAIM_STORAGE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Shared scanner progress used by enrollment, readiness and metrics.
 #[derive(Clone)]
@@ -832,15 +833,27 @@ async fn recover_node_session(
     session: SessionId,
     claimant: SessionId,
 ) -> crate::Result<()> {
-    let mut fenced = directory
-        .claim_expired(session, claimant, super::unix_now_ms()?)
-        .await?;
+    let mut fenced = claim_expired_with_timeout(
+        &directory,
+        session,
+        claimant,
+        super::unix_now_ms()?,
+        RECOVERY_CLAIM_STORAGE_TIMEOUT,
+    )
+    .await?;
+    tracing::debug!(?session, ?claimant, "claimed expired Cell node log");
     let cells = await_with_claim_heartbeat(
         &directory,
         &mut fenced,
         recoverable_cells(&catalog, &authority, session, MAX_NODE_RECOVERY_CELLS),
     )
     .await?;
+    tracing::debug!(
+        ?session,
+        ?claimant,
+        cells = cells.len(),
+        "inventoried Cells for node-log recovery"
+    );
     let recovery = NodeLogRecovery::from_fenced_with_disk(
         transport,
         &fenced,
@@ -855,10 +868,30 @@ async fn recover_node_session(
         coordinator.recover(recovery_fence, cells),
     )
     .await?;
+    tracing::debug!(
+        ?session,
+        ?claimant,
+        controls = controls.len(),
+        "pinned recovered Cell overlays"
+    );
     coordinator
         .finish(&directory, fenced, controls, super::unix_now_ms()?)
         .await?;
+    tracing::debug!(?session, ?claimant, "sealed recovered Cell node log");
     Ok(())
+}
+
+async fn claim_expired_with_timeout(
+    directory: &NodeDirectory,
+    session: SessionId,
+    claimant: SessionId,
+    now_ms: i64,
+    timeout: Duration,
+) -> crate::Result<crab_cell_runtime::FencedNodeSession> {
+    tokio::time::timeout(timeout, directory.claim_expired(session, claimant, now_ms))
+        .await
+        .map_err(|_| crab_cell_runtime::Error::Deadline)?
+        .map_err(Into::into)
 }
 
 async fn await_with_claim_heartbeat<T, F>(

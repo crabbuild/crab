@@ -36,6 +36,7 @@ pub struct NodeDurability {
     transport: Arc<dyn NodeLogTransport>,
     node_lease: NodeLeaseGuard,
     activated: OnceCell<()>,
+    object_coverage: Mutex<()>,
     shutdown: Mutex<()>,
     closed: std::sync::atomic::AtomicBool,
 }
@@ -56,15 +57,16 @@ impl NodeDurability {
             transport,
             node_lease,
             activated: OnceCell::new(),
+            object_coverage: Mutex::new(()),
             shutdown: Mutex::new(()),
             closed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
-    /// Returns whether this epoch has reached the caller's rotation threshold.
+    /// Returns whether shipping stopped or the epoch reached its rotation threshold.
     #[must_use]
     pub fn needs_rotation(&self, max_issued_frames: u64) -> bool {
-        self.gate.issued_through() >= max_issued_frames
+        self.gate.shipping_scope().is_err() || self.gate.issued_through() >= max_issued_frames
     }
 
     /// Assigns and asynchronously ships one captured commit to every member.
@@ -137,6 +139,10 @@ impl NodeDurability {
     ///
     /// Callers must complete the exact Cell root CAS before invoking this method.
     pub async fn prove_object(&self, ticket: CommitTicket) -> Result<DurabilityProof> {
+        // Publishers from different Cells share this watermark. Serialize the
+        // preview, authority CAS and local confirmation so concurrent completions
+        // cannot leave the persisted prefix behind the local truncation proof.
+        let _coverage = self.object_coverage.lock().await;
         self.node_lease.check()?;
         let tiered_through = self.gate.preview_object(ticket)?;
         self.authority
@@ -184,6 +190,7 @@ mod tests {
         activations: Vec<u64>,
         coverage: Vec<(u64, u64)>,
         reject_coverage: bool,
+        yield_coverage: bool,
     }
 
     #[derive(Default)]
@@ -203,6 +210,10 @@ mod tests {
             tiered_through: u64,
         ) -> BoxFuture<'a, Result<()>> {
             Box::pin(async move {
+                let yield_coverage = self.0.lock().unwrap().yield_coverage;
+                if yield_coverage {
+                    tokio::task::yield_now().await;
+                }
                 let mut state = self.0.lock().unwrap();
                 if state.reject_coverage {
                     return Err(Error::Node("coverage rejected"));
@@ -346,6 +357,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_object_proofs_persist_the_complete_contiguous_prefix() {
+        for reverse in [false, true] {
+            let gate = DurabilityGate::new(session(1), node(1), 2, [node(2)]).unwrap();
+            let transport: Arc<dyn NodeLogTransport> = Arc::new(ImmediateTransport);
+            let shipper = NodeLogShipper::new(
+                gate.clone(),
+                Arc::clone(&transport),
+                crab_ltx::Limits::default(),
+            )
+            .unwrap();
+            let authority = Arc::new(RecordingAuthority(Mutex::new(AuthorityState {
+                yield_coverage: true,
+                ..AuthorityState::default()
+            })));
+            let durability =
+                NodeDurability::new(gate.clone(), shipper, authority.clone(), transport, lease());
+            let first = gate.issue(1).unwrap();
+            let second = gate.issue(1).unwrap();
+            let (left, right) = if reverse {
+                (second, first)
+            } else {
+                (first, second)
+            };
+
+            let (left, right) = tokio::join!(
+                durability.prove_object(left),
+                durability.prove_object(right),
+            );
+            left.unwrap();
+            right.unwrap();
+
+            assert_eq!(gate.tiered_through(), 2);
+            assert_eq!(authority.0.lock().unwrap().coverage.last(), Some(&(2, 2)));
+        }
+    }
+
+    #[tokio::test]
     async fn rejected_object_coverage_does_not_release_a_local_proof() {
         let gate = DurabilityGate::new(session(1), node(1), 2, [node(2)]).unwrap();
         let transport: Arc<dyn NodeLogTransport> = Arc::new(ImmediateTransport);
@@ -389,6 +437,8 @@ mod tests {
         gate.issue(1).unwrap();
         assert!(durability.needs_rotation(1));
         assert!(!durability.needs_rotation(2));
+        gate.stop_shipping();
+        assert!(durability.needs_rotation(1_000_000));
     }
 
     #[tokio::test]

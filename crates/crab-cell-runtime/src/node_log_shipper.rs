@@ -481,9 +481,13 @@ async fn append_batch(
     let mut acknowledgements = Vec::with_capacity(replies.len());
     for (member, reply) in replies {
         let receipt = reply?;
+        // A queued batch can include an already object-covered prefix. Only
+        // its uncovered suffix must remain on the follower for a fleet proof.
+        let required_first = first.max(covered_through.saturating_add(1));
         if receipt.durable_through < last
+            || receipt.base_sequence == 0
             || receipt.base_sequence > receipt.durable_through.saturating_add(1)
-            || receipt.base_sequence > first && receipt.base_sequence <= last
+            || (last > covered_through && receipt.base_sequence > required_first)
         {
             return Err(Error::Node("node-log append receipt differs"));
         }
@@ -512,6 +516,7 @@ mod tests {
         batches: Mutex<Vec<(NodeId, Vec<u64>)>>,
         fail: Option<NodeId>,
         delay: Option<Duration>,
+        receipt: Option<FollowerReceipt>,
     }
 
     #[derive(Default)]
@@ -572,6 +577,7 @@ mod tests {
                 batches: Mutex::new(Vec::new()),
                 fail: Some(member),
                 delay: None,
+                receipt: None,
             }
         }
 
@@ -580,6 +586,7 @@ mod tests {
                 batches: Mutex::new(Vec::new()),
                 fail: None,
                 delay: Some(delay),
+                receipt: None,
             }
         }
 
@@ -619,10 +626,10 @@ mod tests {
                 let first = *sequences.first().ok_or(Error::Node("empty test append"))?;
                 let last = *sequences.last().ok_or(Error::Node("empty test append"))?;
                 self.batches.lock().unwrap().push((member, sequences));
-                Ok(FollowerReceipt {
+                Ok(self.receipt.unwrap_or(FollowerReceipt {
                     base_sequence: first,
                     durable_through: last,
-                })
+                }))
             })
         }
 
@@ -774,6 +781,93 @@ mod tests {
         assert_eq!(ticket.last_sequence(), 65);
         assert_eq!(transport.batch_sizes(node(2)), [64, 1]);
         assert!(gate.issue(1).is_err());
+    }
+
+    #[tokio::test]
+    async fn covered_queued_prefix_keeps_the_uncovered_suffix_fleet_durable() {
+        let (_directory, cuts) = capture();
+        let limits = crab_ltx::Limits::default();
+        let leader = session(1);
+        let member = node(2);
+        let gate = DurabilityGate::new(leader, node(1), 2, [member]).unwrap();
+        gate.activate_fleet().unwrap();
+        let first = gate.issue(1).unwrap();
+        let second = gate.issue(1).unwrap();
+        gate.prove_object(first).unwrap();
+        let follower_directory = tempfile::TempDir::new().unwrap();
+        let store = FollowerStore::open(
+            follower_directory.path().to_owned(),
+            limits,
+            crab_ltx::DiskBudget::new(1 << 30),
+        )
+        .unwrap();
+        let transport = Arc::new(LocalFollowerTransport::new(member, store.clone()));
+        let reservation = Arc::new(OutstandingBytes {
+            _permit: Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap(),
+        });
+        let batch = [first, second]
+            .into_iter()
+            .flat_map(|ticket| {
+                submission(&cuts)
+                    .load(limits)
+                    .unwrap()
+                    .encode(ticket, limits)
+                    .unwrap()
+            })
+            .enumerate()
+            .map(|(offset, encoded)| QueuedFrame {
+                sequence: offset as u64 + 1,
+                encoded,
+                _reservation: Arc::clone(&reservation),
+            })
+            .collect();
+
+        append_batch(&gate, transport, leader, 2, &[member], batch)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            gate.prove(second).await.unwrap().source(),
+            crate::DurabilitySource::Fleet
+        );
+        assert_eq!(store.seal(leader, 2).await.unwrap().base_sequence, 2);
+        assert_eq!(store.read_tail(leader, 2, 2).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn receipts_without_the_uncovered_frame_never_authorize_fleet_proof() {
+        let (_directory, cuts) = capture();
+        for (base_sequence, durable_through) in [(2, 1), (0, 1), (3, 1), (1, 0)] {
+            let gate = DurabilityGate::new(session(1), node(1), 2, [node(2)]).unwrap();
+            gate.activate_fleet().unwrap();
+            let transport = Arc::new(RecordingTransport {
+                receipt: Some(FollowerReceipt {
+                    base_sequence,
+                    durable_through,
+                }),
+                ..RecordingTransport::default()
+            });
+            let shipper =
+                NodeLogShipper::new(gate.clone(), transport, crab_ltx::Limits::default()).unwrap();
+            let ticket = shipper.submit(submission(&cuts)).await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), gate.wait_followers(ticket))
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+            shipper.shutdown().await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), gate.prove(ticket))
+                    .await
+                    .is_err()
+            );
+            gate.prove_object(ticket).unwrap();
+            assert_eq!(
+                gate.prove(ticket).await.unwrap().source(),
+                crate::DurabilitySource::Object
+            );
+        }
     }
 
     #[tokio::test]

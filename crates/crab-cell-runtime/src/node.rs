@@ -820,12 +820,13 @@ impl NodeDirectory {
         }
     }
 
-    /// Verifies that this exact follower belongs to a live leader log epoch.
+    /// Verifies live enrollment and that requested truncation is object-covered.
     pub async fn authorize_log_append(
         &self,
         leader: SessionId,
         member: NodeId,
         log_epoch: u64,
+        covered_through: u64,
         now_ms: i64,
     ) -> Result<NodeLogStatus> {
         let current = self
@@ -840,6 +841,11 @@ impl NodeDirectory {
                 "node-log leader has no enrolled log",
             ))?;
         log.permits_append(current.advertisement.node, member, log_epoch)?;
+        if covered_through > log.tiered_through() {
+            return Err(Error::PeerAuthorization(
+                "node-log append watermark exceeds authority",
+            ));
+        }
         Ok(log.clone())
     }
 
@@ -853,7 +859,7 @@ impl NodeDirectory {
         now_ms: i64,
     ) -> Result<NodeLogStatus> {
         let log = self
-            .authorize_log_append(leader, member, log_epoch, now_ms)
+            .authorize_log_append(leader, member, log_epoch, covered_through, now_ms)
             .await?;
         if log.tiered_through() != covered_through {
             return Err(Error::PeerAuthorization(

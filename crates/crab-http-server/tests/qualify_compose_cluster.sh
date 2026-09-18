@@ -51,6 +51,10 @@ failed=false
 
 cleanup() {
   result=$?
+  "${compose[@]}" unpause server >/dev/null 2>&1 || true
+  "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
+    --endpoint-url http://rustfs:9000 s3api delete-bucket-policy \
+    --bucket crab-http-server >/dev/null 2>&1 || true
   if [ "$result" -ne 0 ]; then
     failed=true
     "${compose[@]}" ps --all || true
@@ -324,6 +328,109 @@ jq --exit-status \
    .root.commit_sequence == $sequence_continued' \
   <<<"$control_after_rejoin" >/dev/null
 
+node_before_follower_loss="$("${compose[@]}" exec -T server-c crab-http-server \
+  --config /etc/crab/server.toml cells node \
+  --session "$session_after" --json)"
+node_b_id="$(jq --raw-output '.advertisement.node' <<<"$node_before")"
+log_epoch_before_follower_loss="$(jq --raw-output \
+  '.advertisement.log.epoch' <<<"$node_before_follower_loss")"
+jq --exit-status \
+  --arg node_b "$node_b_id" \
+  '.live == true and .advertisement.log.state == "open" and
+   any(.advertisement.log.member_nodes[]; . != $node_b)' \
+  <<<"$node_before_follower_loss" >/dev/null
+
+# Pausing node A keeps the shared Compose network namespace alive while its
+# process, heartbeats, and follower endpoint are unavailable.
+"${compose[@]}" pause server >/dev/null
+sleep 12
+after_follower_loss="$(curl --fail-with-body --silent --show-error \
+  --request POST \
+  --header 'content-type: application/json' \
+  --data '{"request_id":"00000000-0000-4000-8000-000000000104","title":"Follower lost","body":"Published through object coverage before re-enrollment"}' \
+  "${node_c_origin}/${repository_path}/issues")"
+jq --exit-status '.number == 3 and .title == "Follower lost"' \
+  <<<"$after_follower_loss" >/dev/null
+
+reenrolled=false
+for _ in $(seq 1 75); do
+  node_after_follower_loss="$("${compose[@]}" exec -T server-c crab-http-server \
+    --config /etc/crab/server.toml cells node \
+    --session "$session_after" --json)"
+  if jq --exit-status \
+    --argjson epoch "$log_epoch_before_follower_loss" \
+    --arg node_b "$node_b_id" \
+    '.live == true and .advertisement.log.state == "open" and
+     .advertisement.log.epoch > $epoch and
+     .advertisement.log.member_nodes == [$node_b]' \
+    <<<"$node_after_follower_loss" >/dev/null; then
+    reenrolled=true
+    break
+  fi
+  sleep 1
+done
+if ! $reenrolled; then
+  echo "Node C did not replace the expired follower." >&2
+  exit 1
+fi
+
+"${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
+  --endpoint-url http://rustfs:9000 s3api put-bucket-policy \
+  --bucket crab-http-server --policy "$deny_cell_objects" >/dev/null
+replacement_fleet_response="$(curl --fail-with-body --silent --show-error \
+  --max-time 15 \
+  --request POST \
+  --header 'content-type: application/json' \
+  --data '{"request_id":"00000000-0000-4000-8000-000000000105","name":"replacement-follower-only","color":"0369a1","description":"Acknowledged by the replacement follower"}' \
+  "${node_c_origin}/${repository_path}/labels")"
+jq --exit-status \
+  '.id == 2 and .name == "replacement-follower-only"' \
+  <<<"$replacement_fleet_response" >/dev/null
+control_before_second_loss="$("${compose[@]}" exec -T server-c crab-http-server \
+  --config /etc/crab/server.toml cells status --owner demo --name hello)"
+root_before_second_loss="$(jq --compact-output '.root' <<<"$control_before_second_loss")"
+
+"${compose[@]}" kill --signal KILL server-c >/dev/null
+"${compose[@]}" rm --force --stop server-c >/dev/null
+"${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
+  --endpoint-url http://rustfs:9000 s3api delete-bucket-policy \
+  --bucket crab-http-server >/dev/null
+
+second_restored_labels=""
+for _ in $(seq 1 60); do
+  candidate="$(curl --fail-with-body --silent --show-error --max-time 10 \
+    "${node_b_origin}/${repository_path}/labels" || true)"
+  if jq --exit-status \
+    '.items | (length == 2 and
+     (map(.name) | sort == ["follower-only", "replacement-follower-only"]))' \
+    <<<"$candidate" >/dev/null 2>&1; then
+    second_restored_labels="$candidate"
+    break
+  fi
+  sleep 1
+done
+if [ -z "$second_restored_labels" ]; then
+  echo "Node B did not recover the replacement-follower commit." >&2
+  exit 1
+fi
+curl --fail --silent --show-error \
+  "${node_b_origin}/${repository_path}/issues?state=all" \
+  | jq --exit-status '.items | length == 3' >/dev/null
+control_after_second_loss="$("${compose[@]}" exec -T server-b crab-http-server \
+  --config /etc/crab/server.toml cells status --owner demo --name hello)"
+session_after_second_loss="$(jq --raw-output '.owner.session' \
+  <<<"$control_after_second_loss")"
+epoch_after_second_loss="$(jq --raw-output '.epoch' \
+  <<<"$control_after_second_loss")"
+root_after_second_loss="$(jq --compact-output '.root' \
+  <<<"$control_after_second_loss")"
+jq --exit-status \
+  --arg session_after "$session_after" \
+  --argjson epoch_after "$epoch_after" \
+  '.state == "serving" and .owner.session != $session_after and
+   .epoch > $epoch_after and .owner_lease.state == "live" and
+   .recovery == null' <<<"$control_after_second_loss" >/dev/null
+
 jq --null-input \
   --arg project "$project" \
   --arg session_before "$session_before" \
@@ -343,8 +450,17 @@ jq --null-input \
   --argjson control_fleet_only "$control_fleet_only" \
   --argjson owner_uncovered_bytes "$owner_uncovered_bytes" \
   --argjson follower_retained_bytes "$follower_retained_bytes" \
+  --argjson node_before_follower_loss "$node_before_follower_loss" \
+  --argjson node_after_follower_loss "$node_after_follower_loss" \
+  --argjson after_follower_loss "$after_follower_loss" \
+  --argjson replacement_fleet_response "$replacement_fleet_response" \
+  --argjson second_restored_labels "$second_restored_labels" \
+  --arg session_after_second_loss "$session_after_second_loss" \
+  --argjson epoch_after_second_loss "$epoch_after_second_loss" \
+  --argjson root_before_second_loss "$root_before_second_loss" \
+  --argjson root_after_second_loss "$root_after_second_loss" \
   '{
-    version: 4,
+    version: 5,
     project: $project,
     owner_loss: {
       session_before: $session_before,
@@ -365,6 +481,21 @@ jq --null-input \
       follower_retained_bytes: $follower_retained_bytes,
       immutable_object_put_rejected: true,
       owner_disk_removed_before_policy_restore: true
+    },
+    follower_replacement: {
+      node_log_before: $node_before_follower_loss.advertisement.log,
+      node_log_after: $node_after_follower_loss.advertisement.log,
+      object_covered_response: $after_follower_loss,
+      fleet_only_response: $replacement_fleet_response
+    },
+    second_owner_loss: {
+      session_before: $session_after,
+      session_after: $session_after_second_loss,
+      epoch_before: $epoch_after,
+      epoch_after: $epoch_after_second_loss,
+      root_before: $root_before_second_loss,
+      root_after: $root_after_second_loss,
+      restored_labels: $second_restored_labels
     },
     capacity: {node_a: $capacity_a, node_b: $capacity_b, node_c: $capacity_c}
   }'
