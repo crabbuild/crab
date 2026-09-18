@@ -9,6 +9,7 @@ use super::{
     Message, QueuedCommand, QueuedMigration, QueuedOperation, QueuedQuery, QueuedResolve,
     ResolveOperation, RuntimeInner, new_cell_admission,
 };
+use crate::resource::{ResourceCost, ResourceReservation};
 use crate::{
     CatalogProof, CatalogRole, CellId, Digest, Error, InboxDelivery, IncarnationId, MigratedCell,
     MigrationPlan, MutationIdentity, PersistedWorkInventory, Resolution, StoredOutcome,
@@ -39,7 +40,7 @@ pub(super) struct CellAdmission {
 pub(super) struct WorkAdmission {
     _request: OwnedSemaphorePermit,
     _cell_bytes: OwnedSemaphorePermit,
-    _node_bytes: OwnedSemaphorePermit,
+    _node_bytes: ResourceReservation,
 }
 
 impl CellHandle {
@@ -376,11 +377,14 @@ impl CellHandle {
                 reservation_bytes,
                 "Cell mailbox bytes",
             )?,
-            _node_bytes: try_many(
-                self.inner.node_bytes.clone(),
-                reservation_bytes,
-                "node retained bytes",
-            )?,
+            _node_bytes: self
+                .inner
+                .resources
+                .try_reserve(ResourceCost::zero().with_retained_bytes(reservation_bytes))
+                .map_err(|error| match error {
+                    Error::Capacity(_) => Error::Capacity("node retained bytes"),
+                    error => error,
+                })?,
         };
         if self.admission.fenced.load(Ordering::Acquire) {
             return Err(Error::Fenced);

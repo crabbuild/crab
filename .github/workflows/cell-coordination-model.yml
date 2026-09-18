@@ -1,0 +1,93 @@
+name: Cell coordination model
+
+on:
+  pull_request:
+    paths:
+      - "crates/crab-cell-runtime/model/**"
+      - "crates/crab-cell-runtime/src/coordination.rs"
+      - "crates/crab-cell-runtime/src/coordination_sim.rs"
+      - ".github/workflows/cell-coordination-model.yml"
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fast:
+    name: TLC fast and negative matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Run TLC fast and negative checks
+        run: |
+          chmod +x crates/crab-cell-runtime/model/check.sh
+          crates/crab-cell-runtime/model/check.sh fast
+          crates/crab-cell-runtime/model/check.sh negative
+
+  broad:
+    if: github.event_name != 'pull_request'
+    name: TLC broad bounded exploration
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Run TLC broad check
+        run: |
+          chmod +x crates/crab-cell-runtime/model/check.sh
+          mkdir -p "$RUNNER_TEMP/cell-coordination-broad"
+          {
+            printf 'source_revision=%s\n' "$(git rev-parse HEAD)"
+            printf 'config=CellCoordination.cfg\nmode=broad\n'
+            cat crates/crab-cell-runtime/model/toolchain.env
+            crates/crab-cell-runtime/model/check.sh broad
+          } 2>&1 | tee "$RUNNER_TEMP/cell-coordination-broad/tlc-broad.log"
+      - name: Upload broad model evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cell-coordination-tlc-broad-${{ github.run_id }}
+          path: ${{ runner.temp }}/cell-coordination-broad
+          if-no-files-found: error
+
+  simulation:
+    if: github.event_name != 'pull_request'
+    name: Deterministic simulator seed corpus
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-coordination-simulation-target
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+      - name: Run the fixed simulator corpus
+        run: |
+          mkdir -p "$RUNNER_TEMP/cell-coordination-simulation"
+          {
+            printf 'source_revision=%s\n' "$(git rev-parse HEAD)"
+            printf 'seed_range=0..511\nsteps_per_seed=256\n'
+            cargo test -p crab-cell-runtime coordination_sim::broad_seed_corpus_is_replayable --locked -- --exact --nocapture
+          } 2>&1 | tee "$RUNNER_TEMP/cell-coordination-simulation/simulator.log"
+      - name: Upload simulator evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cell-coordination-simulator-${{ github.run_id }}
+          path: ${{ runner.temp }}/cell-coordination-simulation
+          if-no-files-found: error

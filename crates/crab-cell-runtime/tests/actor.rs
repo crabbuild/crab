@@ -13,8 +13,8 @@ use crab_cell_runtime::{
     CellTarget, ControlState, Digest, DiskBudget, DurabilityGate, FollowerReceipt, HandlerOutcome,
     InboxDelivery, IncarnationId, MutationIdentity, NamespaceId, NodeDurability, NodeId,
     NodeLeaseGuard, NodeLogAuthority, NodeLogRotationBarrier, NodeLogShipper, NodeLogTransport,
-    Owner, ReplicaHost, RequestId, Resolution, RetireRequest, SealRequest, SessionId,
-    SqlWorkerPool, StoredOutcome, TailRequest, TenantId, Transition,
+    Owner, PressureSample, PressureState, ReplicaHost, RequestId, Resolution, RetireRequest,
+    SealRequest, SessionId, SqlWorkerPool, StoredOutcome, TailRequest, TenantId, Transition,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{
@@ -595,6 +595,35 @@ async fn node_byte_reservation_rejects_overcommit_and_releases_capacity() {
     let released = runtime.try_reserve_node_bytes(1_024).unwrap();
     drop(released);
 
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn actor_pressure_observation_uses_hysteresis_and_shared_eviction_path() {
+    let session = SessionId::from_bytes([41; 16]);
+    let runtime = CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 1_024, session).unwrap();
+    let high = PressureSample {
+        at_ms: 0,
+        memory_used_permille: 900,
+        disk_used_permille: 100,
+        jobs_used_permille: 100,
+        stale: false,
+    };
+    assert_eq!(
+        runtime.observe_pressure(high).await.unwrap(),
+        PressureState::Normal
+    );
+    assert_eq!(
+        runtime
+            .observe_pressure(PressureSample {
+                at_ms: 1_000,
+                ..high
+            })
+            .await
+            .unwrap(),
+        PressureState::Shedding
+    );
+    assert_eq!(runtime.evict_idle(1).await.unwrap(), 0);
     runtime.shutdown().await.unwrap();
 }
 
@@ -1293,8 +1322,17 @@ async fn runtime_stats_follow_active_cell_lifecycle() {
     let (runtime, handle, _pool) = activate_runtime(&fixture, 2 * 1024 * 1024).await;
 
     assert_eq!(runtime.stats().active_cells(), 1);
+    assert_eq!(
+        runtime.stats().resident_bytes(),
+        crab_cell_runtime::ACTIVE_CELL_NATIVE_BYTES as usize
+    );
+    assert_eq!(
+        runtime.stats().resident_capacity_bytes(),
+        10 * crab_cell_runtime::ACTIVE_CELL_NATIVE_BYTES as usize
+    );
     handle.drain().await.unwrap();
     assert_eq!(runtime.stats().active_cells(), 0);
+    assert_eq!(runtime.stats().resident_bytes(), 0);
     runtime.shutdown().await.unwrap();
 }
 

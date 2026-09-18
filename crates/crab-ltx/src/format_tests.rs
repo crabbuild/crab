@@ -3,6 +3,7 @@
 
 use crate::{
     CHECKSUM_FLAG, CrabError, Limits, LocalSegment, Position, SegmentInfo, VerifiedLocalPlan, ltx,
+    paged,
 };
 
 fn crc(bytes: &[u8]) -> u64 {
@@ -98,6 +99,19 @@ fn independent_crc_and_both_ltx_page_encodings_match() {
         assert_eq!(decoded, vec![(1, data.clone())]);
         assert_eq!(file.trailer.post_apply_checksum, page_sum(1, &data));
     }
+}
+
+#[test]
+fn streaming_inspection_emits_the_same_authenticated_index() {
+    let data = vec![0x39; 512];
+    let bytes = fixture(&[(1, data.clone())], 1, page_sum(1, &data), 0, false);
+    let (_, size, digest, pages) = ltx::inspect_bytes_with_index(&bytes).unwrap();
+    assert_eq!(size, bytes.len() as u64);
+    assert_eq!(digest, *blake3::hash(&bytes).as_bytes());
+    assert_eq!(
+        paged::encode_index_from_pages(&pages).unwrap(),
+        paged::encode_index(&bytes).unwrap()
+    );
 }
 
 #[test]

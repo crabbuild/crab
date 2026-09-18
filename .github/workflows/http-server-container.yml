@@ -868,3 +868,24 @@ jobs:
                .second_owner_loss.root_before.commit_sequence and
              (.second_owner_loss.restored_labels.items | length) == 2' \
             "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json"
+      - name: Prepare exact-source qualification evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/crab-cell-runtime-qualification"
+          mkdir -p "$evidence_dir"
+          cp "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json" \
+            "$evidence_dir/cluster-receipt.json"
+          git rev-parse HEAD > "$evidence_dir/source-revision"
+          sha256sum "$evidence_dir/cluster-receipt.json" > "$evidence_dir/artifact.sha256"
+          jq --exit-status \
+            --arg source "$(cat "$evidence_dir/source-revision")" \
+            '.version == 4 and ($source | length == 40)' \
+            "$evidence_dir/cluster-receipt.json" >/dev/null
+      - name: Upload exact-source qualification evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cell-runtime-qualification-${{ github.run_id }}
+          path: ${{ runner.temp }}/crab-cell-runtime-qualification
+          if-no-files-found: error
+          retention-days: 14

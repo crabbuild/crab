@@ -87,6 +87,103 @@ CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-b347-clippy \
 
 Use the checkout's actual stable target suffix when it differs from `b347`.
 
+Release jobs bind a schema-v3 qualification receipt to the exact tagged source,
+published image manifest, and raw cluster evidence. The receipt is emitted and
+verified by the crate-owned validator; the release job fails before publishing
+if the downloaded evidence belongs to another source or if the image digest is
+changed. The short-lived Ed25519 key in this step authenticates the canonical
+receipt bytes; GitHub's workflow attestation remains the trust anchor for the
+release job and source identity.
+
+```bash
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
+  cargo run -p crab-cell-runtime --bin qualification_receipt --locked -- \
+  verify receipt.json "$SOURCE_SHA" "$IMAGE_DIGEST" cluster-receipt.json
+```
+
+This command verifies the receipt signature, canonical encoding, passed status,
+source/image identity, and BLAKE3 digest of the exact raw artifact. It does not
+turn local or in-memory evidence into provider qualification; the release
+matrix still needs the real RustFS/Kubernetes and multi-GiB runs below.
+
+The local RustFS qualification pass on 2026-09-18 used one isolated bucket and
+unique prefixes with explicit credentials (the credentials were not written to
+artifacts). It passed the LTX round trip, Cell source-loss takeover and
+retention sweep, HTTP collaboration/takeover, native HTTP push, and receive
+fault matrix. These commands are provider evidence for iteration, not release
+receipts; protected release jobs must emit the schema-v3 receipt bound to the
+tagged source and immutable image.
+
+```bash
+AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+CRAB_LTX_TEST_BUCKET="$BUCKET" \
+CRAB_LTX_TEST_ENDPOINT="$ENDPOINT" \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
+  cargo test -p crab-ltx --features replica --test remote rustfs_roundtrip \
+  --locked -- --ignored --exact
+
+AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+CRAB_CELL_TEST_BUCKET="$BUCKET" \
+CRAB_CELL_TEST_ENDPOINT="$ENDPOINT" \
+CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX" \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
+  cargo test -p crab-cell-runtime --test actor \
+  rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
+  --locked -- --ignored --exact
+
+AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+CRAB_CELL_TEST_BUCKET="$BUCKET" \
+CRAB_CELL_TEST_ENDPOINT="$ENDPOINT" \
+CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX-retention" \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
+  cargo test -p crab-cell-runtime --lib \
+  retention::tests::rustfs_maintenance_collection_preserves_live_and_pinned_graphs \
+  --locked -- --ignored --exact
+
+AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+AWS_ENDPOINT_URL_S3="$ENDPOINT" AWS_ALLOW_HTTP=true \
+AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false \
+QUALIFICATION_BUCKET="$BUCKET" QUALIFICATION_PREFIX="qualification/http-receive-$UNIQUE_PREFIX" \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
+  cargo test -p crab-http-server --lib \
+  server::receive_fault_tests::receive_faults_rustfs \
+  --locked -- --ignored --exact
+
+AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+CRAB_HTTP_CELL_TEST_BUCKET="$BUCKET" \
+CRAB_HTTP_CELL_TEST_ENDPOINT="$ENDPOINT" \
+CRAB_HTTP_CELL_TEST_PREFIX="http-$UNIQUE_PREFIX" \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
+  cargo test -p crab-http-server --lib \
+  server::peer_e2e_tests::rustfs_public_collaboration_reaches_remote_owner_and_publishes_ltx \
+  --locked -- --ignored --exact
+
+AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+AWS_ENDPOINT_URL_S3="$ENDPOINT" AWS_ALLOW_HTTP=true \
+AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false \
+QUALIFICATION_BUCKET="$BUCKET" QUALIFICATION_PREFIX="qualification/http-push-$UNIQUE_PREFIX" \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
+  cargo test -p crab-http-server --lib \
+  server::receive_tests::native_http_push_rustfs \
+  --locked -- --ignored --exact
+```
+
+The coordination simulator has a deterministic seed replay entry point in the
+normal runtime test binary. It never starts I/O or Tokio work:
+
+```bash
+CRAB_COORDINATION_SEED=41 CRAB_COORDINATION_STEPS=256 \
+  CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
+  cargo test -p crab-cell-runtime coordination_sim::replay_requested_seed_from_environment \
+  --locked -- --exact --nocapture
+```
+
 ## Prove the mutation contract
 
 Mutation tests must cover the complete durability boundary.
@@ -230,6 +327,38 @@ advertisement is no longer live; Pod deletion alone is not expiry evidence.
 That case is not evidence until its
 signed provider receipt exists, and it does not replace the remaining partition
 and commit-window faults. Browser E2E is intentionally outside this gate.
+
+## Emit and verify qualification receipts
+
+Release evidence uses the signed, version-3 `QualificationReceipt` contract in
+`src/qualification.rs`. A receipt is bound to the source revision, artifact
+digest, execution profile, topology, workload seed, bucket-call count, peak
+resident set, bounded named measurements, start/finish timestamps, a digest of
+the exact fault schedule, every retained raw-artifact digest, and sampled
+epoch/published-root ownership watermarks (latency/duration measurements are
+recorded by the harness as metrics). The schema is versioned and rejects
+unknown fields, dirty worktrees, oversized labels, embedded credentials, and
+forged signatures. The runner signs the canonical JSON after recording the
+artifact digest; verification recomputes that digest and requires it to appear
+in the raw-artifact set before accepting the receipt.
+
+Consumers call `receipt.verify_for(expected_source, expected_image, artifact)`
+after decoding. This rejects a validly signed receipt issued for another
+source revision, image, or raw artifact; signature validity alone is not release
+eligibility.
+
+The contract test surface is:
+
+```bash
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-qualification-receipts \
+  cargo test -p crab-cell-runtime qualification --lib --locked
+```
+
+This proves receipt encoding, signature verification, artifact binding, dirty
+source rejection, and forged-field rejection. It does not claim that a local
+receipt proves RustFS, Kubernetes, partition, or capacity behavior. Protected
+qualification jobs must attach the emitted receipt to the exact source and
+image digest and feed it through a fresh verifier before release consumes it.
 
 ## Prove each primitive through recovery
 
@@ -387,7 +516,7 @@ capacity target.
 The report separates CPU-bounded blocking jobs, dirty-memory-bounded jobs, and
 the two-slot full-recovery ceiling. Store the report with the immutable image
 digest, profile, workload parameters, and live measurements. Reject a receipt
-when its observed active-Cell, retained-byte, or local-disk capacity differs
+when its observed active-Cell, resident-byte, retained-byte, or local-disk capacity differs
 from the corresponding private metrics sample taken before traffic, or when a
 live usage gauge exceeds its advertised capacity.
 

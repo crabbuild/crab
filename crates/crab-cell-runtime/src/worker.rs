@@ -2,20 +2,18 @@ use std::{
     collections::HashMap,
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Mutex},
     thread::JoinHandle,
     time::{Duration, Instant},
 };
 
 use tokio::sync::{mpsc, oneshot};
 
+use crate::resource::{ACTIVE_CELL_NATIVE_BYTES, ResourceLedger, ResourceReservation};
 use crate::{
-    CellExecutor, CellId, CommandExecution, Digest, Error, HandlerOutcome, InboxDelivery,
-    MigrationOutcome, MigrationPlan, MutationIdentity, PendingCommit, PendingMigration, Resolution,
-    Result, StoredOutcome,
+    CatalogRole, CellExecutor, CellId, CommandExecution, Digest, Error, HandlerOutcome,
+    InboxDelivery, MigrationOutcome, MigrationPlan, MutationIdentity, PendingCommit,
+    PendingMigration, PersistedWorkInventory, Resolution, ResourceCost, Result, StoredOutcome,
 };
 
 const MAX_WORKERS: usize = 16;
@@ -82,7 +80,13 @@ impl SqlWorkerPool {
         {
             return Err(Error::Capacity("invalid SQL worker configuration"));
         }
-        let active = Arc::new(AtomicUsize::new(0));
+        let resources = ResourceLedger::new(
+            ResourceCost::zero()
+                .with_active_cells(max_active_cells)
+                .with_resident_bytes(max_active_cells.saturating_mul(ACTIVE_CELL_NATIVE_BYTES))
+                .with_worker_jobs(worker_count)
+                .with_primitive_jobs(worker_count),
+        );
         let mut workers = Vec::with_capacity(worker_count);
         let mut threads: Vec<JoinHandle<()>> = Vec::with_capacity(worker_count);
         for index in 0..worker_count {
@@ -110,7 +114,7 @@ impl SqlWorkerPool {
                     threads,
                     closing: false,
                 }),
-                active,
+                resources,
                 max_active_cells,
                 worker_count,
             }),
@@ -259,7 +263,7 @@ impl SqlWorkerPool {
         handler: Handler,
     ) -> Result<WorkerExecution> {
         let (reply, response) = oneshot::channel();
-        self.send(
+        self.send_worker_job(
             cell,
             WorkerCommand::Execute {
                 cell,
@@ -285,7 +289,7 @@ impl SqlWorkerPool {
         deadline: Instant,
     ) -> Result<PendingMigration> {
         let (reply, response) = oneshot::channel();
-        self.send(
+        self.send_worker_job(
             cell,
             WorkerCommand::Migrate {
                 cell,
@@ -310,7 +314,7 @@ impl SqlWorkerPool {
         handler: Handler,
     ) -> Result<WorkerExecution> {
         let (reply, response) = oneshot::channel();
-        self.send(
+        self.send_worker_job(
             cell,
             WorkerCommand::DeliverEffect {
                 cell,
@@ -335,7 +339,7 @@ impl SqlWorkerPool {
         handler: QueryHandler,
     ) -> Result<Vec<u8>> {
         let (reply, response) = oneshot::channel();
-        self.send(
+        self.send_worker_job(
             cell,
             WorkerCommand::Query {
                 cell,
@@ -346,6 +350,45 @@ impl SqlWorkerPool {
             },
         )
         .await?;
+        receive(response).await
+    }
+
+    /// Resolves a bounded sparse-page batch on the Cell's assigned worker.
+    pub(crate) async fn hydrate(
+        &self,
+        cell: CellId,
+        pages: u32,
+        deadline: Instant,
+    ) -> Result<Option<crab_ltx::Hydration>> {
+        let (reply, response) = oneshot::channel();
+        self.send_worker_job(
+            cell,
+            WorkerCommand::Hydrate {
+                cell,
+                pages,
+                deadline,
+                reply,
+            },
+        )
+        .await?;
+        receive(response).await
+    }
+
+    pub(crate) async fn hydration(&self, cell: CellId) -> Result<Option<crab_ltx::Hydration>> {
+        let (reply, response) = oneshot::channel();
+        self.send(cell, WorkerCommand::Hydration { cell, reply })
+            .await?;
+        receive(response).await
+    }
+
+    pub(crate) async fn persisted_work_inventory(
+        &self,
+        cell: CellId,
+        role: CatalogRole,
+    ) -> Result<PersistedWorkInventory> {
+        let (reply, response) = oneshot::channel();
+        self.send_worker_job(cell, WorkerCommand::PersistedWork { cell, role, reply })
+            .await?;
         receive(response).await
     }
 
@@ -360,7 +403,7 @@ impl SqlWorkerPool {
         deadline: Instant,
     ) -> Result<Resolution> {
         let (reply, response) = oneshot::channel();
-        self.send(
+        self.send_worker_job(
             cell,
             WorkerCommand::Resolve {
                 cell,
@@ -386,7 +429,7 @@ impl SqlWorkerPool {
         deadline: Instant,
     ) -> Result<Resolution> {
         let (reply, response) = oneshot::channel();
-        self.send(
+        self.send_worker_job(
             cell,
             WorkerCommand::ResolveEffect {
                 cell,
@@ -542,7 +585,13 @@ impl SqlWorkerPool {
             if lifecycle.closing {
                 return Err(Error::RuntimeClosed);
             }
-            if self.inner.active.load(Ordering::Acquire) != 0 {
+            if self
+                .inner
+                .resources
+                .snapshot()
+                .map(|snapshot| snapshot.used.active_cells() != 0)
+                .unwrap_or(true)
+            {
                 return Err(Error::Control(
                     "SQL worker shutdown requires every Cell to be deactivated",
                 ));
@@ -583,6 +632,21 @@ impl SqlWorkerPool {
         sender.send(command).await.map_err(|_| Error::RuntimeClosed)
     }
 
+    async fn send_worker_job(&self, cell: CellId, command: WorkerCommand) -> Result<()> {
+        let reservation = self
+            .inner
+            .resources
+            .try_reserve(ResourceCost::zero().with_worker_jobs(1))?;
+        self.send(
+            cell,
+            WorkerCommand::Reserved {
+                command: Box::new(command),
+                reservation,
+            },
+        )
+        .await
+    }
+
     pub(crate) fn reserve_activation(&self) -> Result<CellReservation> {
         let lifecycle = self
             .inner
@@ -592,19 +656,33 @@ impl SqlWorkerPool {
         if lifecycle.closing {
             return Err(Error::RuntimeClosed);
         }
-        self.inner
-            .active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                (active < self.inner.max_active_cells).then_some(active + 1)
-            })
-            .map_err(|_| Error::Capacity("active Cells per node"))?;
+        let reservation = self
+            .inner
+            .resources
+            .try_reserve(ResourceCost::active_cell())
+            .map_err(|error| match error {
+                Error::Capacity(_) => Error::Capacity("active Cells per node"),
+                error => error,
+            })?;
         Ok(CellReservation {
-            active: self.inner.active.clone(),
+            _reservation: reservation,
         })
     }
 
+    pub(crate) fn configure_retained_capacity(&self, bytes: usize) -> Result<()> {
+        self.inner.resources.set_retained_limit(bytes)
+    }
+
+    pub(crate) fn resource_ledger(&self) -> ResourceLedger {
+        self.inner.resources.clone()
+    }
+
     pub(crate) fn active_cells(&self) -> usize {
-        self.inner.active.load(Ordering::Acquire)
+        self.inner
+            .resources
+            .snapshot()
+            .map(|snapshot| snapshot.used.active_cells())
+            .unwrap_or(self.inner.max_active_cells)
     }
 
     pub(crate) fn active_cell_capacity(&self) -> usize {
@@ -614,7 +692,7 @@ impl SqlWorkerPool {
 
 struct PoolInner {
     lifecycle: Mutex<WorkerLifecycle>,
-    active: Arc<AtomicUsize>,
+    resources: ResourceLedger,
     max_active_cells: usize,
     worker_count: usize,
 }
@@ -640,6 +718,10 @@ impl Drop for PoolInner {
 }
 
 enum WorkerCommand {
+    Reserved {
+        command: Box<WorkerCommand>,
+        reservation: ResourceReservation,
+    },
     Activate {
         cell: CellId,
         executor: Box<CellExecutor>,
@@ -689,6 +771,21 @@ enum WorkerCommand {
         deadline: Instant,
         handler: QueryHandler,
         reply: oneshot::Sender<Result<Vec<u8>>>,
+    },
+    Hydrate {
+        cell: CellId,
+        pages: u32,
+        deadline: Instant,
+        reply: oneshot::Sender<Result<Option<crab_ltx::Hydration>>>,
+    },
+    Hydration {
+        cell: CellId,
+        reply: oneshot::Sender<Result<Option<crab_ltx::Hydration>>>,
+    },
+    PersistedWork {
+        cell: CellId,
+        role: CatalogRole,
+        reply: oneshot::Sender<Result<PersistedWorkInventory>>,
     },
     Resolve {
         cell: CellId,
@@ -780,330 +877,367 @@ struct ActiveCell {
 }
 
 pub(crate) struct CellReservation {
-    active: Arc<AtomicUsize>,
-}
-
-impl Drop for CellReservation {
-    fn drop(&mut self) {
-        self.active.fetch_sub(1, Ordering::AcqRel);
-    }
+    _reservation: ResourceReservation,
 }
 
 fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
     let mut cells = HashMap::new();
     while let Some(command) = receiver.blocking_recv() {
         match command {
-            WorkerCommand::Activate {
-                cell,
-                executor,
+            WorkerCommand::Reserved {
+                command,
                 reservation,
-                reply,
             } => {
-                let result = match cells.entry(cell) {
-                    std::collections::hash_map::Entry::Occupied(_) => Err(Error::CellAlreadyActive),
-                    std::collections::hash_map::Entry::Vacant(entry) => {
+                run_worker_command(*command, &mut cells, Some(reservation));
+            }
+            command => run_worker_command(command, &mut cells, None),
+        }
+    }
+}
+
+fn run_worker_command(
+    command: WorkerCommand,
+    cells: &mut HashMap<CellId, ActiveCell>,
+    mut reservation: Option<ResourceReservation>,
+) {
+    match command {
+        WorkerCommand::Reserved {
+            command,
+            reservation,
+        } => {
+            run_worker_command(*command, cells, Some(reservation));
+        }
+        WorkerCommand::Activate {
+            cell,
+            executor,
+            reservation,
+            reply,
+        } => {
+            let result = match cells.entry(cell) {
+                std::collections::hash_map::Entry::Occupied(_) => Err(Error::CellAlreadyActive),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(ActiveCell {
+                        executor: *executor,
+                        _reservation: reservation,
+                    });
+                    Ok(())
+                }
+            };
+            let _ = reply.send(result);
+        }
+        WorkerCommand::ActivateRestored {
+            cell,
+            database,
+            destination,
+            incarnation,
+            schema,
+            root,
+            reservation,
+            reply,
+        } => {
+            let result = match cells.entry(cell) {
+                std::collections::hash_map::Entry::Occupied(_) => Err(Error::CellAlreadyActive),
+                std::collections::hash_map::Entry::Vacant(entry) => (*database)
+                    .open_writable(&destination)
+                    .map_err(Error::from)
+                    .and_then(|db| CellExecutor::from_restored(db, cell, incarnation, schema, root))
+                    .map(|executor| {
                         entry.insert(ActiveCell {
-                            executor: *executor,
+                            executor,
                             _reservation: reservation,
                         });
-                        Ok(())
-                    }
-                };
-                let _ = reply.send(result);
-            }
-            WorkerCommand::ActivateRestored {
+                    }),
+            };
+            let _ = reply.send(result);
+        }
+        WorkerCommand::Bootstrap(bootstrap) => {
+            let WorkerBootstrap {
                 cell,
-                database,
+                replica,
                 destination,
                 incarnation,
                 schema,
-                root,
+                initialize,
                 reservation,
                 reply,
-            } => {
-                let result = match cells.entry(cell) {
-                    std::collections::hash_map::Entry::Occupied(_) => Err(Error::CellAlreadyActive),
-                    std::collections::hash_map::Entry::Vacant(entry) => (*database)
-                        .open_writable(&destination)
-                        .map_err(Error::from)
-                        .and_then(|db| {
-                            CellExecutor::from_restored(db, cell, incarnation, schema, root)
-                        })
-                        .map(|executor| {
-                            entry.insert(ActiveCell {
-                                executor,
-                                _reservation: reservation,
-                            });
-                        }),
-                };
-                let _ = reply.send(result);
-            }
-            WorkerCommand::Bootstrap(bootstrap) => {
-                let WorkerBootstrap {
-                    cell,
-                    replica,
-                    destination,
-                    incarnation,
-                    schema,
-                    initialize,
-                    reservation,
-                    reply,
-                } = *bootstrap;
-                let result = match catch_unwind(AssertUnwindSafe(|| match cells.entry(cell) {
-                    std::collections::hash_map::Entry::Occupied(_) => Err(Error::CellAlreadyActive),
-                    std::collections::hash_map::Entry::Vacant(entry) => replica
-                        .open_new(&destination)
-                        .map_err(Error::from)
-                        .and_then(|db| {
-                            CellExecutor::bootstrap(db, cell, incarnation, schema, initialize)
-                        })
-                        .map(|(executor, cuts, next_due_ms)| {
-                            entry.insert(ActiveCell {
-                                executor,
-                                _reservation: reservation,
-                            });
-                            BootstrapExecution { cuts, next_due_ms }
-                        }),
-                })) {
-                    Ok(result) => result,
-                    Err(_) => Err(Error::NativePanic),
-                };
-                let _ = reply.send(result);
-            }
-            WorkerCommand::Execute {
-                cell,
-                identity,
-                operation_digest,
-                now_ms,
-                max_result_bytes,
-                deadline,
-                handler,
-                reply,
-            } => {
-                let result = run_native_callback(&mut cells, cell, deadline, move |active| {
-                    match active.executor.execute(
-                        identity,
-                        operation_digest,
-                        now_ms,
-                        max_result_bytes,
-                        handler,
-                    )? {
-                        CommandExecution::Recorded(outcome) => {
-                            Ok(WorkerExecution::Recorded(outcome))
-                        }
-                        CommandExecution::Pending => active
-                            .executor
-                            .latest_pending()
-                            .cloned()
-                            .map(Box::new)
-                            .map(WorkerExecution::Pending)
-                            .ok_or(Error::Fenced),
-                    }
-                });
-                let _ = reply.send(result);
-            }
-            WorkerCommand::Migrate {
-                cell,
-                plan,
-                now_ms,
-                deadline,
-                reply,
-            } => {
-                let result = run_native_callback(&mut cells, cell, deadline, move |active| {
-                    active.executor.migrate(plan, now_ms)?;
-                    active
+            } = *bootstrap;
+            let result = match catch_unwind(AssertUnwindSafe(|| match cells.entry(cell) {
+                std::collections::hash_map::Entry::Occupied(_) => Err(Error::CellAlreadyActive),
+                std::collections::hash_map::Entry::Vacant(entry) => replica
+                    .open_new(&destination)
+                    .map_err(Error::from)
+                    .and_then(|db| {
+                        CellExecutor::bootstrap(db, cell, incarnation, schema, initialize)
+                    })
+                    .map(|(executor, cuts, next_due_ms)| {
+                        entry.insert(ActiveCell {
+                            executor,
+                            _reservation: reservation,
+                        });
+                        BootstrapExecution { cuts, next_due_ms }
+                    }),
+            })) {
+                Ok(result) => result,
+                Err(_) => Err(Error::NativePanic),
+            };
+            let _ = reply.send(result);
+        }
+        WorkerCommand::Execute {
+            cell,
+            identity,
+            operation_digest,
+            now_ms,
+            max_result_bytes,
+            deadline,
+            handler,
+            reply,
+        } => {
+            let result = run_native_callback(cells, cell, deadline, move |active| {
+                match active.executor.execute(
+                    identity,
+                    operation_digest,
+                    now_ms,
+                    max_result_bytes,
+                    handler,
+                )? {
+                    CommandExecution::Recorded(outcome) => Ok(WorkerExecution::Recorded(outcome)),
+                    CommandExecution::Pending => active
                         .executor
-                        .pending_migration()
+                        .latest_pending()
                         .cloned()
-                        .ok_or(Error::Fenced)
-                });
-                let _ = reply.send(result);
-            }
-            WorkerCommand::DeliverEffect {
-                cell,
-                delivery,
-                now_ms,
-                max_result_bytes,
-                deadline,
-                handler,
-                reply,
-            } => {
-                let result = run_native_callback(&mut cells, cell, deadline, move |active| {
-                    match active.executor.deliver_effect(
-                        delivery,
-                        now_ms,
-                        max_result_bytes,
-                        handler,
-                    )? {
-                        CommandExecution::Recorded(outcome) => {
-                            Ok(WorkerExecution::Recorded(outcome))
-                        }
-                        CommandExecution::Pending => active
-                            .executor
-                            .latest_pending()
-                            .cloned()
-                            .map(Box::new)
-                            .map(WorkerExecution::Pending)
-                            .ok_or(Error::Fenced),
-                    }
-                });
-                let _ = reply.send(result);
-            }
-            WorkerCommand::Query {
-                cell,
-                max_result_bytes,
-                deadline,
-                handler,
-                reply,
-            } => {
-                let result = run_native_callback(&mut cells, cell, deadline, move |active| {
-                    active.executor.query(max_result_bytes, handler)
-                });
-                let _ = reply.send(result);
-            }
-            WorkerCommand::Resolve {
-                cell,
-                identity,
-                operation_digest,
-                now_ms,
-                max_result_bytes,
-                deadline,
-                reply,
-            } => {
-                let result = crab_ltx::with_paged_io_deadline(deadline, || {
-                    cells
-                        .get_mut(&cell)
-                        .ok_or(Error::CellNotActive)
-                        .and_then(|cell| {
-                            cell.executor.resolve(
-                                identity,
-                                operation_digest,
-                                now_ms,
-                                max_result_bytes,
-                            )
-                        })
-                });
-                let _ = reply.send(result);
-            }
-            WorkerCommand::ResolveEffect {
-                cell,
-                delivery,
-                now_ms,
-                max_result_bytes,
-                deadline,
-                reply,
-            } => {
-                let result = crab_ltx::with_paged_io_deadline(deadline, || {
-                    cells
-                        .get_mut(&cell)
-                        .ok_or(Error::CellNotActive)
-                        .and_then(|cell| {
-                            cell.executor
-                                .resolve_effect(delivery, now_ms, max_result_bytes)
-                        })
-                });
-                let _ = reply.send(result);
-            }
-            WorkerCommand::BindPrepared {
-                cell,
-                prepared,
-                reply,
-            } => {
-                let result = cells
+                        .map(Box::new)
+                        .map(WorkerExecution::Pending)
+                        .ok_or(Error::Fenced),
+                }
+            });
+            drop(reservation.take());
+            let _ = reply.send(result);
+        }
+        WorkerCommand::Migrate {
+            cell,
+            plan,
+            now_ms,
+            deadline,
+            reply,
+        } => {
+            let result = run_native_callback(cells, cell, deadline, move |active| {
+                active.executor.migrate(plan, now_ms)?;
+                active
+                    .executor
+                    .pending_migration()
+                    .cloned()
+                    .ok_or(Error::Fenced)
+            });
+            drop(reservation.take());
+            let _ = reply.send(result);
+        }
+        WorkerCommand::DeliverEffect {
+            cell,
+            delivery,
+            now_ms,
+            max_result_bytes,
+            deadline,
+            handler,
+            reply,
+        } => {
+            let result = run_native_callback(cells, cell, deadline, move |active| {
+                match active
+                    .executor
+                    .deliver_effect(delivery, now_ms, max_result_bytes, handler)?
+                {
+                    CommandExecution::Recorded(outcome) => Ok(WorkerExecution::Recorded(outcome)),
+                    CommandExecution::Pending => active
+                        .executor
+                        .latest_pending()
+                        .cloned()
+                        .map(Box::new)
+                        .map(WorkerExecution::Pending)
+                        .ok_or(Error::Fenced),
+                }
+            });
+            drop(reservation.take());
+            let _ = reply.send(result);
+        }
+        WorkerCommand::Query {
+            cell,
+            max_result_bytes,
+            deadline,
+            handler,
+            reply,
+        } => {
+            let result = run_native_callback(cells, cell, deadline, move |active| {
+                active.executor.query(max_result_bytes, handler)
+            });
+            drop(reservation.take());
+            let _ = reply.send(result);
+        }
+        WorkerCommand::Hydrate {
+            cell,
+            pages,
+            deadline,
+            reply,
+        } => {
+            let result = run_native_callback(cells, cell, deadline, move |active| {
+                active.executor.hydrate_step(pages)
+            });
+            drop(reservation.take());
+            let _ = reply.send(result);
+        }
+        WorkerCommand::Hydration { cell, reply } => {
+            let result = cells
+                .get(&cell)
+                .ok_or(Error::CellNotActive)
+                .and_then(|active| active.executor.hydration());
+            let _ = reply.send(result);
+        }
+        WorkerCommand::PersistedWork { cell, role, reply } => {
+            let result = cells
+                .get_mut(&cell)
+                .ok_or(Error::CellNotActive)
+                .and_then(|active| active.executor.persisted_work_inventory(role));
+            drop(reservation.take());
+            let _ = reply.send(result);
+        }
+        WorkerCommand::Resolve {
+            cell,
+            identity,
+            operation_digest,
+            now_ms,
+            max_result_bytes,
+            deadline,
+            reply,
+        } => {
+            let result = crab_ltx::with_paged_io_deadline(deadline, || {
+                cells
                     .get_mut(&cell)
                     .ok_or(Error::CellNotActive)
-                    .and_then(|cell| cell.executor.bind_prepared(&prepared));
-                let _ = reply.send(result);
-            }
-            WorkerCommand::BindMigrationPrepared {
-                cell,
-                prepared,
-                reply,
-            } => {
-                let result = cells
+                    .and_then(|cell| {
+                        cell.executor
+                            .resolve(identity, operation_digest, now_ms, max_result_bytes)
+                    })
+            });
+            drop(reservation.take());
+            let _ = reply.send(result);
+        }
+        WorkerCommand::ResolveEffect {
+            cell,
+            delivery,
+            now_ms,
+            max_result_bytes,
+            deadline,
+            reply,
+        } => {
+            let result = crab_ltx::with_paged_io_deadline(deadline, || {
+                cells
                     .get_mut(&cell)
                     .ok_or(Error::CellNotActive)
-                    .and_then(|cell| cell.executor.bind_migration_prepared(&prepared));
-                let _ = reply.send(result);
-            }
-            WorkerCommand::Pending { cell, reply } => {
-                let result = cells
-                    .get(&cell)
-                    .ok_or(Error::CellNotActive)
-                    .map(|cell| cell.executor.pending().cloned());
-                let _ = reply.send(result);
-            }
-            WorkerCommand::ConfirmPublished { cell, root, reply } => {
-                let result = cells
-                    .get_mut(&cell)
-                    .ok_or(Error::CellNotActive)
-                    .and_then(|cell| cell.executor.confirm_published(&root));
-                let _ = reply.send(result);
-            }
-            WorkerCommand::ConfirmDurable {
-                cell,
-                commit_sequence,
-                reply,
-            } => {
-                let result = cells
-                    .get_mut(&cell)
-                    .ok_or(Error::CellNotActive)
-                    .and_then(|cell| cell.executor.confirm_durable(commit_sequence));
-                let _ = reply.send(result);
-            }
-            WorkerCommand::ConfirmBootstrapPublished { cell, cuts, reply } => {
-                let result = cells
-                    .get_mut(&cell)
-                    .ok_or(Error::CellNotActive)
-                    .and_then(|cell| cell.executor.confirm_bootstrap_published(&cuts));
-                let _ = reply.send(result);
-            }
-            WorkerCommand::ConfirmMigrationPublished { cell, root, reply } => {
-                let result = cells
-                    .get_mut(&cell)
-                    .ok_or(Error::CellNotActive)
-                    .and_then(|cell| cell.executor.confirm_migration_published(&root));
-                let _ = reply.send(result);
-            }
-            WorkerCommand::Fence { cell, reply } => {
-                let result = cells
-                    .get_mut(&cell)
-                    .ok_or(Error::CellNotActive)
-                    .map(|cell| cell.executor.fence());
-                let _ = reply.send(result);
-            }
-            WorkerCommand::State { cell, reply } => {
-                let result = cells
-                    .get(&cell)
-                    .ok_or(Error::CellNotActive)
-                    .map(|cell| cell.executor.worker_state());
-                let _ = reply.send(result);
-            }
-            WorkerCommand::InterruptHandle { cell, reply } => {
-                let result = cells
-                    .get(&cell)
-                    .ok_or(Error::CellNotActive)
-                    .map(|cell| cell.executor.interrupt_handle());
-                let _ = reply.send(result);
-            }
-            WorkerCommand::Deactivate { cell, reply } => {
-                let result = match cells.get(&cell) {
-                    None => Err(Error::CellNotActive),
-                    Some(cell) if !cell.executor.drained() => Err(Error::PendingPublication),
-                    Some(_) => cells
-                        .remove(&cell)
-                        .ok_or(Error::CellNotActive)
-                        .and_then(|cell| cell.executor.close()),
-                };
-                let _ = reply.send(result);
-            }
-            WorkerCommand::Discard { cell, reply } => {
-                let result = cells
+                    .and_then(|cell| {
+                        cell.executor
+                            .resolve_effect(delivery, now_ms, max_result_bytes)
+                    })
+            });
+            drop(reservation.take());
+            let _ = reply.send(result);
+        }
+        WorkerCommand::BindPrepared {
+            cell,
+            prepared,
+            reply,
+        } => {
+            let result = cells
+                .get_mut(&cell)
+                .ok_or(Error::CellNotActive)
+                .and_then(|cell| cell.executor.bind_prepared(&prepared));
+            let _ = reply.send(result);
+        }
+        WorkerCommand::BindMigrationPrepared {
+            cell,
+            prepared,
+            reply,
+        } => {
+            let result = cells
+                .get_mut(&cell)
+                .ok_or(Error::CellNotActive)
+                .and_then(|cell| cell.executor.bind_migration_prepared(&prepared));
+            let _ = reply.send(result);
+        }
+        WorkerCommand::Pending { cell, reply } => {
+            let result = cells
+                .get(&cell)
+                .ok_or(Error::CellNotActive)
+                .map(|cell| cell.executor.pending().cloned());
+            let _ = reply.send(result);
+        }
+        WorkerCommand::ConfirmPublished { cell, root, reply } => {
+            let result = cells
+                .get_mut(&cell)
+                .ok_or(Error::CellNotActive)
+                .and_then(|cell| cell.executor.confirm_published(&root));
+            let _ = reply.send(result);
+        }
+        WorkerCommand::ConfirmDurable {
+            cell,
+            commit_sequence,
+            reply,
+        } => {
+            let result = cells
+                .get_mut(&cell)
+                .ok_or(Error::CellNotActive)
+                .and_then(|cell| cell.executor.confirm_durable(commit_sequence));
+            let _ = reply.send(result);
+        }
+        WorkerCommand::ConfirmBootstrapPublished { cell, cuts, reply } => {
+            let result = cells
+                .get_mut(&cell)
+                .ok_or(Error::CellNotActive)
+                .and_then(|cell| cell.executor.confirm_bootstrap_published(&cuts));
+            let _ = reply.send(result);
+        }
+        WorkerCommand::ConfirmMigrationPublished { cell, root, reply } => {
+            let result = cells
+                .get_mut(&cell)
+                .ok_or(Error::CellNotActive)
+                .and_then(|cell| cell.executor.confirm_migration_published(&root));
+            let _ = reply.send(result);
+        }
+        WorkerCommand::Fence { cell, reply } => {
+            let result = cells
+                .get_mut(&cell)
+                .ok_or(Error::CellNotActive)
+                .map(|cell| cell.executor.fence());
+            let _ = reply.send(result);
+        }
+        WorkerCommand::State { cell, reply } => {
+            let result = cells
+                .get(&cell)
+                .ok_or(Error::CellNotActive)
+                .map(|cell| cell.executor.worker_state());
+            let _ = reply.send(result);
+        }
+        WorkerCommand::InterruptHandle { cell, reply } => {
+            let result = cells
+                .get(&cell)
+                .ok_or(Error::CellNotActive)
+                .map(|cell| cell.executor.interrupt_handle());
+            let _ = reply.send(result);
+        }
+        WorkerCommand::Deactivate { cell, reply } => {
+            let result = match cells.get(&cell) {
+                None => Err(Error::CellNotActive),
+                Some(cell) if !cell.executor.drained() => Err(Error::PendingPublication),
+                Some(_) => cells
                     .remove(&cell)
                     .ok_or(Error::CellNotActive)
-                    .and_then(|cell| cell.executor.discard());
-                let _ = reply.send(result);
-            }
+                    .and_then(|cell| cell.executor.close()),
+            };
+            let _ = reply.send(result);
+        }
+        WorkerCommand::Discard { cell, reply } => {
+            let result = cells
+                .remove(&cell)
+                .ok_or(Error::CellNotActive)
+                .and_then(|cell| cell.executor.discard());
+            let _ = reply.send(result);
         }
     }
 }

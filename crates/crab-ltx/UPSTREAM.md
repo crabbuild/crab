@@ -1,5 +1,8 @@
 # Source provenance and intentional changes
 
+Standalone export and shipped-contract evidence is tracked in
+[`crab-cell-runtime`'s compatibility audit](../crab-cell-runtime/docs/standalone-replication-audit.md).
+
 Source repository: [denoland/celld](https://github.com/denoland/celld).
 Pinned revision: `10cb1303dac710dcb3b557e318e08c855261f68b`.
 Original subtree: `crates/ltx`; package `celld-ltx`, version `0.0.0`, unpublished.

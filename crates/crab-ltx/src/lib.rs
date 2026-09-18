@@ -18,7 +18,7 @@ pub mod environment;
 mod error;
 mod host;
 #[cfg(feature = "replica")]
-pub use environment::ScratchMonitor;
+pub use environment::{DirectoryCacheStats, ScratchMonitor};
 pub use environment::{DiskBudget, DiskReservation, Host};
 mod ltx;
 mod lz4_block;
@@ -66,7 +66,7 @@ pub use replica::{Replica, ReplicaHead};
 #[cfg(feature = "replica")]
 pub use schedule::CompactionSchedule;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "replica"))]
 mod format_tests;
 
 pub use db::CheckpointMode;

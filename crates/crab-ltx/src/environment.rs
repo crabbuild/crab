@@ -10,6 +10,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(feature = "replica")]
+use std::collections::{BTreeMap, HashMap, VecDeque};
+
 /// Shared byte-precise admission for local files owned by active database work.
 #[derive(Clone, Debug)]
 pub struct DiskBudget {
@@ -172,6 +175,469 @@ pub trait FileSystem: Send + Sync {
     fn sync_parent(&self, path: &Path) -> io::Result<()>;
     fn persist_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
     fn persist_file_new(&self, source: &Path, destination: &Path) -> io::Result<()>;
+
+    /// Removes abandoned private cache temporaries below `root`.
+    ///
+    /// Host filesystems that cannot enumerate a private directory may leave
+    /// this as a no-op; the cache remains fail-closed because only indexed,
+    /// canonical entries are ever read.
+    fn cleanup_private_temporaries(&self, _root: &Path) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "replica")]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DirectoryCacheIndex {
+    version: u8,
+    entries: BTreeMap<String, u64>,
+}
+
+#[cfg(feature = "replica")]
+struct DirectoryCacheState {
+    entries: BTreeMap<String, u64>,
+    order: VecDeque<String>,
+    bytes: u64,
+    reservations: BTreeMap<String, DiskReservation>,
+}
+
+#[cfg(feature = "replica")]
+/// Point-in-time usage of the verified immutable directory-node cache.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DirectoryCacheStats {
+    entries: usize,
+    bytes: u64,
+    capacity_bytes: u64,
+}
+
+#[cfg(feature = "replica")]
+impl DirectoryCacheStats {
+    /// Returns the number of indexed cache entries.
+    #[must_use]
+    pub const fn entries(self) -> usize {
+        self.entries
+    }
+
+    /// Returns bytes occupied by verified cache entries.
+    #[must_use]
+    pub const fn bytes(self) -> u64 {
+        self.bytes
+    }
+
+    /// Returns the cache's byte ceiling.
+    #[must_use]
+    pub const fn capacity_bytes(self) -> u64 {
+        self.capacity_bytes
+    }
+}
+
+#[cfg(feature = "replica")]
+struct DirectoryCache {
+    filesystem: Arc<dyn FileSystem>,
+    budget: DiskBudget,
+    root: PathBuf,
+    index: PathBuf,
+    max_bytes: u64,
+    state: Mutex<DirectoryCacheState>,
+    fills: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+}
+
+#[cfg(feature = "replica")]
+const MAX_DIRECTORY_CACHE_ENTRIES: usize = 16_384;
+
+#[cfg(feature = "replica")]
+impl DirectoryCache {
+    #[cfg(test)]
+    fn new(filesystem: Arc<dyn FileSystem>, root: PathBuf, max_bytes: u64) -> Self {
+        Self::with_budget(filesystem, root, max_bytes, DiskBudget::new(max_bytes))
+    }
+
+    fn with_budget(
+        filesystem: Arc<dyn FileSystem>,
+        root: PathBuf,
+        max_bytes: u64,
+        budget: DiskBudget,
+    ) -> Self {
+        let _ = filesystem.cleanup_private_temporaries(&root);
+        let index = root.join("index-v1.json");
+        let entries = filesystem
+            .open(&index)
+            .and_then(|mut file| {
+                let length = file.file_len()?;
+                let length = usize::try_from(length).map_err(io::Error::other)?;
+                let bytes = file.read_exact_at(0, length)?;
+                let index: DirectoryCacheIndex =
+                    serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+                if index.version != 1 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "unsupported Cell directory cache index",
+                    ));
+                }
+                Ok(index.entries)
+            })
+            .unwrap_or_default();
+        let entries = entries
+            .into_iter()
+            .filter_map(|(key, length)| {
+                let path = root.join(hex_digest(blake3::hash(key.as_bytes()).as_bytes()));
+                let valid = length != 0
+                    && length <= max_bytes
+                    && filesystem.exists(&path).ok() == Some(true)
+                    && filesystem.file_len(&path).ok() == Some(length)
+                    && safe_cache_entry(&filesystem, &root, &path).ok() == Some(true);
+                if !valid {
+                    let _ = filesystem.remove_file(&path);
+                }
+                valid.then_some((key, length))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut retained = BTreeMap::new();
+        let mut reservations = BTreeMap::new();
+        for (key, length) in entries {
+            let within_limits = length <= max_bytes
+                && retained.len() < MAX_DIRECTORY_CACHE_ENTRIES
+                && retained.values().copied().fold(0_u64, u64::saturating_add)
+                    <= max_bytes.saturating_sub(length);
+            let reservation = within_limits
+                .then(|| budget.try_reserve(length).ok())
+                .flatten();
+            if let Some(reservation) = reservation {
+                retained.insert(key.clone(), length);
+                reservations.insert(key, reservation);
+            } else {
+                let path = root.join(hex_digest(blake3::hash(key.as_bytes()).as_bytes()));
+                let _ = filesystem.remove_file(&path);
+            }
+        }
+        let bytes = retained.values().copied().sum();
+        let order = retained.keys().cloned().collect();
+        Self {
+            filesystem,
+            budget,
+            root,
+            index,
+            max_bytes,
+            state: Mutex::new(DirectoryCacheState {
+                entries: retained,
+                order,
+                bytes,
+                reservations,
+            }),
+            fills: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn key_path(&self, key: &str) -> PathBuf {
+        let digest = blake3::hash(key.as_bytes());
+        self.root.join(hex_digest(digest.as_bytes()))
+    }
+
+    fn stats(&self) -> DirectoryCacheStats {
+        let state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        DirectoryCacheStats {
+            entries: state.entries.len(),
+            bytes: state.bytes,
+            capacity_bytes: self.max_bytes,
+        }
+    }
+
+    fn fill_lock(&self, key: &str) -> Arc<Mutex<()>> {
+        let mut fills = match self.fills.lock() {
+            Ok(fills) => fills,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(lock) = fills.get(key) {
+            return Arc::clone(lock);
+        }
+        let lock = Arc::new(Mutex::new(()));
+        if fills.len() < MAX_DIRECTORY_CACHE_ENTRIES {
+            fills.insert(key.to_owned(), Arc::clone(&lock));
+        }
+        lock
+    }
+
+    fn get(&self, key: &str, max_bytes: u64) -> io::Result<Option<Vec<u8>>> {
+        let lock = self.fill_lock(key);
+        let _guard = lock
+            .lock()
+            .map_err(|_| io::Error::other("cache fill lock poisoned"))?;
+        let path = self.key_path(key);
+        if !self.filesystem.exists(&path)? {
+            self.remove_entry(key);
+            self.persist_index();
+            return Ok(None);
+        }
+        if !safe_cache_entry(&self.filesystem, &self.root, &path)? {
+            let _ = self.filesystem.remove_file(&path);
+            self.remove_entry(key);
+            self.persist_index();
+            return Ok(None);
+        }
+        let length = self.filesystem.file_len(&path)?;
+        if length == 0 || length > max_bytes || length > self.max_bytes {
+            let _ = self.filesystem.remove_file(&path);
+            self.remove_entry(key);
+            self.persist_index();
+            return Ok(None);
+        }
+        let indexed_length = match self.state.lock() {
+            Ok(state) => state.entries.get(key).copied(),
+            Err(poisoned) => poisoned.into_inner().entries.get(key).copied(),
+        };
+        if indexed_length != Some(length) {
+            let _ = self.filesystem.remove_file(&path);
+            self.remove_entry(key);
+            self.persist_index();
+            return Ok(None);
+        }
+        let mut file = match self.filesystem.open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let bytes = match file.read_exact_at(0, usize::try_from(length).map_err(io::Error::other)?)
+        {
+            Ok(bytes) => bytes,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::UnexpectedEof
+                        | io::ErrorKind::InvalidData
+                        | io::ErrorKind::NotFound
+                ) =>
+            {
+                let _ = self.filesystem.remove_file(&path);
+                self.remove_entry(key);
+                self.persist_index();
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        if bytes.len() as u64 != length {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "directory cache entry was truncated",
+            ));
+        }
+        self.touch_entry(key, length);
+        self.persist_index();
+        Ok(Some(bytes))
+    }
+
+    fn put(&self, key: &str, bytes: &[u8], max_entry: u64) -> io::Result<()> {
+        if bytes.is_empty() || bytes.len() as u64 > max_entry || bytes.len() as u64 > self.max_bytes
+        {
+            return Ok(());
+        }
+        let lock = self.fill_lock(key);
+        let _guard = lock
+            .lock()
+            .map_err(|_| io::Error::other("cache fill lock poisoned"))?;
+        self.filesystem.create_dir_all(&self.root)?;
+        let path = self.key_path(key);
+        if self.filesystem.exists(&path)? {
+            let length = self.filesystem.file_len(&path)?;
+            if length == bytes.len() as u64 {
+                self.touch_entry(key, length);
+                self.persist_index();
+                return Ok(());
+            }
+            let _ = self.filesystem.remove_file(&path);
+            self.remove_entry(key);
+        }
+        self.make_room(bytes.len() as u64)?;
+        let reservation = self
+            .budget
+            .try_reserve(bytes.len() as u64)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        let temporary = self.root.join(format!(
+            ".tmp-{}-{}",
+            std::process::id(),
+            NEXT_CACHE_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut file = match self.filesystem.create(&temporary) {
+            Ok(file) => file,
+            Err(error) => {
+                drop(reservation);
+                return Err(error);
+            }
+        };
+        if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+            let _ = self.filesystem.remove_file(&temporary);
+            drop(reservation);
+            return Err(error);
+        }
+        drop(file);
+        if let Err(error) = self.filesystem.rename(&temporary, &path) {
+            let _ = self.filesystem.remove_file(&temporary);
+            drop(reservation);
+            return Err(error);
+        }
+        self.touch_entry_with_reservation(key, bytes.len() as u64, reservation);
+        self.evict()?;
+        self.persist_index();
+        Ok(())
+    }
+
+    fn invalidate(&self, key: &str) -> io::Result<()> {
+        let lock = self.fill_lock(key);
+        let _guard = lock
+            .lock()
+            .map_err(|_| io::Error::other("cache fill lock poisoned"))?;
+        let path = self.key_path(key);
+        match self.filesystem.remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        self.remove_entry(key);
+        self.persist_index();
+        Ok(())
+    }
+
+    fn touch_entry(&self, key: &str, length: u64) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(previous) = state.entries.insert(key.to_owned(), length) {
+            state.bytes = state.bytes.saturating_sub(previous);
+            state.order.retain(|entry| entry != key);
+        }
+        state.bytes = state.bytes.saturating_add(length);
+        state.order.push_back(key.to_owned());
+    }
+
+    fn touch_entry_with_reservation(&self, key: &str, length: u64, reservation: DiskReservation) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(previous) = state.entries.insert(key.to_owned(), length) {
+            state.bytes = state.bytes.saturating_sub(previous);
+            state.order.retain(|entry| entry != key);
+        }
+        state.bytes = state.bytes.saturating_add(length);
+        state.order.push_back(key.to_owned());
+        state.reservations.insert(key.to_owned(), reservation);
+    }
+
+    fn remove_entry(&self, key: &str) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(previous) = state.entries.remove(key) {
+            state.bytes = state.bytes.saturating_sub(previous);
+        }
+        state.reservations.remove(key);
+        state.order.retain(|entry| entry != key);
+    }
+
+    fn make_room(&self, required: u64) -> io::Result<()> {
+        loop {
+            let victim = {
+                let state = match self.state.lock() {
+                    Ok(state) => state,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                (state.bytes.saturating_add(required) > self.max_bytes
+                    || state.entries.len() >= MAX_DIRECTORY_CACHE_ENTRIES)
+                    .then(|| state.order.front().cloned())
+            };
+            let Some(Some(key)) = victim else {
+                return Ok(());
+            };
+            let path = self.key_path(&key);
+            match self.filesystem.remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            self.remove_entry(&key);
+        }
+    }
+
+    fn evict(&self) -> io::Result<()> {
+        loop {
+            let victim = {
+                let state = match self.state.lock() {
+                    Ok(state) => state,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                (state.bytes > self.max_bytes || state.entries.len() > MAX_DIRECTORY_CACHE_ENTRIES)
+                    .then(|| state.order.front().cloned())
+            };
+            let Some(Some(key)) = victim else {
+                return Ok(());
+            };
+            let path = self.key_path(&key);
+            match self.filesystem.remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            self.remove_entry(&key);
+        }
+    }
+
+    fn persist_index(&self) {
+        let entries = match self.state.lock() {
+            Ok(state) => state.entries.clone(),
+            Err(poisoned) => poisoned.into_inner().entries.clone(),
+        };
+        if self.filesystem.create_dir_all(&self.root).is_err() {
+            return;
+        }
+        let Ok(bytes) = serde_json::to_vec(&DirectoryCacheIndex {
+            version: 1,
+            entries,
+        }) else {
+            return;
+        };
+        let temporary = self.root.join(format!(
+            ".index-tmp-{}-{}",
+            std::process::id(),
+            NEXT_CACHE_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let Ok(mut file) = self.filesystem.create(&temporary) else {
+            return;
+        };
+        if file.write_all(&bytes).is_err() || file.sync_all().is_err() {
+            let _ = self.filesystem.remove_file(&temporary);
+            return;
+        }
+        drop(file);
+        let _ = self.filesystem.rename(&temporary, &self.index);
+    }
+}
+
+#[cfg(feature = "replica")]
+fn safe_cache_entry(
+    filesystem: &Arc<dyn FileSystem>,
+    root: &Path,
+    path: &Path,
+) -> io::Result<bool> {
+    let canonical_root = filesystem.canonicalize(root)?;
+    let canonical_path = filesystem.canonicalize(path)?;
+    Ok(canonical_path.parent() == Some(canonical_root.as_path())
+        && canonical_path.file_name() == path.file_name())
+}
+
+#[cfg(feature = "replica")]
+static NEXT_CACHE_TEMP: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(feature = "replica")]
+fn hex_digest(bytes: &[u8; 32]) -> String {
+    let mut output = String::with_capacity(64);
+    for byte in bytes {
+        output.push_str(&format!("{byte:02x}"));
+    }
+    output
 }
 
 /// Rechecks host disk pressure after full-job scratch admission.
@@ -249,6 +715,8 @@ pub struct Host {
     #[cfg(feature = "replica")]
     scratch_monitor: Arc<dyn ScratchMonitor>,
     #[cfg(feature = "replica")]
+    directory_cache: Option<Arc<DirectoryCache>>,
+    #[cfg(feature = "replica")]
     recovery: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     #[cfg(feature = "replica")]
     dirty: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
@@ -306,6 +774,24 @@ impl Host {
         self
     }
 
+    /// Enables the verified immutable directory-node cache below `root`.
+    ///
+    /// The cache is an acceleration layer only; directory reachability still
+    /// reads canonical objects when collecting retention roots. Its byte bound
+    /// is derived from one eighth of the shared local-disk envelope.
+    #[cfg(feature = "replica")]
+    #[must_use]
+    pub fn with_directory_cache(mut self, root: PathBuf) -> Self {
+        let capacity = (self.local_disk.capacity() / 8).clamp(1, 8 << 30);
+        self.directory_cache = Some(Arc::new(DirectoryCache::with_budget(
+            Arc::clone(&self.filesystem),
+            root,
+            capacity,
+            self.local_disk.clone(),
+        )));
+        self
+    }
+
     /// Returns the configured byte ceiling shared by local replica artifacts.
     #[must_use]
     pub fn local_disk_capacity(&self) -> u64 {
@@ -316,6 +802,13 @@ impl Host {
     #[must_use]
     pub fn local_disk_used(&self) -> u64 {
         self.local_disk.used()
+    }
+
+    /// Returns verified directory-cache usage when the cache is enabled.
+    #[cfg(feature = "replica")]
+    #[must_use]
+    pub fn directory_cache_stats(&self) -> Option<DirectoryCacheStats> {
+        self.directory_cache.as_ref().map(|cache| cache.stats())
     }
 
     pub(crate) fn reserve_local_disk(&self, bytes: u64) -> crate::Result<DiskReservation> {
@@ -509,6 +1002,48 @@ impl Host {
     }
 
     #[cfg(feature = "replica")]
+    pub(crate) async fn directory_cache_get(
+        &self,
+        key: String,
+        max_bytes: u64,
+    ) -> crate::Result<Option<Vec<u8>>> {
+        let Some(cache) = &self.directory_cache else {
+            return Ok(None);
+        };
+        let cache = Arc::clone(cache);
+        self.run(move || cache.get(&key, max_bytes))
+            .await?
+            .map_err(crate::CrabError::Io)
+    }
+
+    #[cfg(feature = "replica")]
+    pub(crate) async fn directory_cache_put(
+        &self,
+        key: String,
+        bytes: Vec<u8>,
+        max_bytes: u64,
+    ) -> crate::Result<()> {
+        let Some(cache) = &self.directory_cache else {
+            return Ok(());
+        };
+        let cache = Arc::clone(cache);
+        self.run(move || cache.put(&key, &bytes, max_bytes))
+            .await?
+            .map_err(crate::CrabError::Io)
+    }
+
+    #[cfg(feature = "replica")]
+    pub(crate) async fn directory_cache_invalidate(&self, key: String) -> crate::Result<()> {
+        let Some(cache) = &self.directory_cache else {
+            return Ok(());
+        };
+        let cache = Arc::clone(cache);
+        self.run(move || cache.invalidate(&key))
+            .await?
+            .map_err(crate::CrabError::Io)
+    }
+
+    #[cfg(feature = "replica")]
     pub(crate) async fn run<T: Send + 'static>(
         &self,
         operation: impl FnOnce() -> T + Send + 'static,
@@ -601,6 +1136,8 @@ impl Default for Host {
             scratch_capacity: 64 * 1024,
             #[cfg(feature = "replica")]
             scratch_monitor: Arc::new(UnlimitedScratch),
+            #[cfg(feature = "replica")]
+            directory_cache: None,
             #[cfg(feature = "replica")]
             recovery: None,
             #[cfg(feature = "replica")]
@@ -714,6 +1251,29 @@ impl FileSystem for DirectFileSystem {
         std::fs::remove_file(source)?;
         self.sync_parent(destination)
     }
+
+    fn cleanup_private_temporaries(&self, root: &Path) -> io::Result<()> {
+        let entries = match std::fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if file_type.is_file() && (name.starts_with(".tmp-") || name.starts_with(".index-tmp-"))
+            {
+                match std::fs::remove_file(entry.path()) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Operating-system wall clock; future mtimes have age zero.
@@ -786,6 +1346,89 @@ mod tests {
         assert_eq!(budget.available(), 8);
         drop(first);
         assert_eq!(budget.available(), 10);
+    }
+
+    #[cfg(feature = "replica")]
+    #[test]
+    fn directory_cache_survives_restart_and_evicts_by_bytes() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path().join("directory-cache");
+        let filesystem: Arc<dyn FileSystem> = Arc::new(DirectFileSystem);
+        let cache = DirectoryCache::new(Arc::clone(&filesystem), root.clone(), 5);
+        cache.put("first", b"1234", 64).unwrap();
+        assert_eq!(cache.budget.used(), 4);
+        drop(cache);
+
+        let cache = DirectoryCache::new(Arc::clone(&filesystem), root, 5);
+        assert_eq!(cache.get("first", 64).unwrap(), Some(b"1234".to_vec()));
+        assert_eq!(cache.stats().entries(), 1);
+        assert_eq!(cache.stats().bytes(), 4);
+        cache.put("second", b"abcde", 64).unwrap();
+        assert!(cache.get("first", 64).unwrap().is_none());
+        assert_eq!(cache.get("second", 64).unwrap(), Some(b"abcde".to_vec()));
+        assert_eq!(cache.stats().entries(), 1);
+        assert_eq!(cache.budget.used(), 5);
+    }
+
+    #[cfg(feature = "replica")]
+    #[test]
+    fn directory_cache_discards_truncated_and_symlink_entries() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path().join("directory-cache");
+        let filesystem: Arc<dyn FileSystem> = Arc::new(DirectFileSystem);
+        let cache = DirectoryCache::new(Arc::clone(&filesystem), root.clone(), 64);
+        cache.put("entry", b"verified", 64).unwrap();
+        let path = cache.key_path("entry");
+        std::fs::write(&path, b"short").unwrap();
+        assert!(cache.get("entry", 64).unwrap().is_none());
+
+        let target = directory.path().join("outside");
+        std::fs::write(&target, b"outside").unwrap();
+        let symlink = cache.key_path("symlink");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &symlink).unwrap();
+        #[cfg(unix)]
+        assert!(cache.get("symlink", 64).unwrap().is_none());
+    }
+
+    #[cfg(feature = "replica")]
+    #[test]
+    fn directory_cache_cleans_abandoned_private_temporaries_on_restart() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path().join("directory-cache");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(".tmp-old"), b"partial").unwrap();
+        std::fs::write(root.join(".index-tmp-old"), b"partial").unwrap();
+        std::fs::write(root.join("unrelated"), b"keep").unwrap();
+        let filesystem: Arc<dyn FileSystem> = Arc::new(DirectFileSystem);
+        let _cache = DirectoryCache::new(filesystem, root.clone(), 64);
+        assert!(!root.join(".tmp-old").exists());
+        assert!(!root.join(".index-tmp-old").exists());
+        assert!(root.join("unrelated").exists());
+    }
+
+    #[cfg(feature = "replica")]
+    #[test]
+    fn directory_cache_serializes_concurrent_fills_for_one_key() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path().join("directory-cache");
+        let filesystem: Arc<dyn FileSystem> = Arc::new(DirectFileSystem);
+        let cache = Arc::new(DirectoryCache::new(Arc::clone(&filesystem), root, 64));
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let cache = Arc::clone(&cache);
+                scope.spawn(move || {
+                    cache.put("same-key", b"verified", 64).unwrap();
+                    assert_eq!(
+                        cache.get("same-key", 64).unwrap(),
+                        Some(b"verified".to_vec())
+                    );
+                });
+            }
+        });
+        assert_eq!(cache.stats().entries(), 1);
+        assert_eq!(cache.stats().bytes(), 8);
+        assert_eq!(cache.budget.used(), 8);
     }
 
     struct TestClock;

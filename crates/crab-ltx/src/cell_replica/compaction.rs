@@ -14,8 +14,9 @@ use super::{
 };
 use crate::{CrabError, Result, SegmentInfo, Txid, environment::FileIo};
 
-mod scratch;
-use scratch::{ScratchFiles, upload};
+pub(super) mod scratch;
+use scratch::ScratchFiles;
+pub(super) use scratch::upload;
 
 const INDEX_READ_BYTES: u64 = 60 * 8_192;
 const FRAME_READ_BYTES: u64 = 1 << 20;

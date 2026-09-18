@@ -654,6 +654,31 @@ async fn read_node(verification: &Verification<'_>, digest: [u8; 32]) -> Result<
     {
         return Ok(bytes);
     }
+    let persistent_key = format!(
+        "v1:{}:{}",
+        path,
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    if let Some(bytes) = verification
+        .host
+        .directory_cache_get(persistent_key.clone(), MAX_NODE_BYTES)
+        .await?
+    {
+        if bytes.len() <= MAX_NODE_BYTES as usize && *blake3::hash(&bytes).as_bytes() == digest {
+            let bytes: Arc<[u8]> = bytes.into();
+            return Ok(node_cache()
+                .lock()
+                .map_err(|_| CrabError::InvalidState("Cell directory cache poisoned"))?
+                .insert(key, bytes));
+        }
+        let _ = verification
+            .host
+            .directory_cache_invalidate(persistent_key.clone())
+            .await;
+    }
     let _permit = verification.host.io_permit().await?;
     let (bytes, _) = verification
         .layout
@@ -663,6 +688,10 @@ async fn read_node(verification: &Verification<'_>, digest: [u8; 32]) -> Result<
     if *blake3::hash(&bytes).as_bytes() != digest {
         return Err(CrabError::ChecksumMismatch);
     }
+    let _ = verification
+        .host
+        .directory_cache_put(persistent_key, bytes.to_vec(), MAX_NODE_BYTES)
+        .await;
     let bytes: Arc<[u8]> = bytes.to_vec().into();
     Ok(node_cache()
         .lock()

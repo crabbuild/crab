@@ -28,7 +28,6 @@ const MAX_LIVE_NODES: usize = 10_000;
 const MAX_DUE_PER_CYCLE: usize = 128;
 const EFFECT_LEASE_MS: u32 = 30_000;
 const ACTIVITY_LEASE_MS: u32 = 30_000;
-const MAX_ACTIVITY_JOBS: usize = 16;
 const MAX_MIGRATION_JOBS: usize = 16;
 const MAX_MIGRATION_SCANS_PER_CYCLE: usize = 128;
 const SCHEDULER_STALE_AFTER_MS: i64 = 15_000;
@@ -113,7 +112,6 @@ pub(crate) struct RepositoryCellScheduler {
     recovery_disk: crab_cell_runtime::DiskBudget,
     next_migration_shard: u8,
     next_shard: u8,
-    activity_admission: Arc<tokio::sync::Semaphore>,
     blocking_activities: Option<BlockingActivityPool>,
     activity_cells: Arc<Mutex<HashSet<CellId>>>,
     activity_jobs: tokio::task::JoinSet<()>,
@@ -162,11 +160,6 @@ impl RepositoryCellScheduler {
             recovery_disk: crab_cell_runtime::DiskBudget::new(512 << 20),
             next_migration_shard: 0,
             next_shard: 0,
-            activity_admission: Arc::new(tokio::sync::Semaphore::new(
-                std::thread::available_parallelism()
-                    .map_or(1, |count| count.get())
-                    .min(MAX_ACTIVITY_JOBS),
-            )),
             blocking_activities,
             activity_cells: Arc::new(Mutex::new(HashSet::new())),
             activity_jobs: tokio::task::JoinSet::new(),
@@ -526,7 +519,7 @@ impl RepositoryCellScheduler {
             return self.release_after(&cell.target, release_after).await;
         }
         if self.registry.has_activity_runner(cell.target.namespace())
-            && let Ok(permit) = Arc::clone(&self.activity_admission).try_acquire_owned()
+            && let Some(job) = self.router.reserve_primitive_job()?
             && let Ok(activity_bytes) = self.router.reserve_activity_payloads()
             && let Some(activity_cell) = self.reserve_activity(cell.target.cell_id())
             && let Some(blocking) = self.reserve_blocking_activity(cell.target.namespace())?
@@ -549,15 +542,17 @@ impl RepositoryCellScheduler {
                         tracing::warn!(error = %error, "Workflow activity was not resolved");
                     }
                 }
-                if registry.has_effect_runner(target.namespace()) {
-                    run_effect(&registry, &router, cell).await;
+                drop(job);
+                if registry.has_effect_runner(target.namespace())
+                    && let Err(error) = run_effect(&registry, &router, cell).await
+                {
+                    tracing::warn!(error = %error, "Cell effect was not resolved");
                 }
                 if release_after && let Err(error) = router.drain_local_target(&target).await {
                     tracing::warn!(error = %error, "Workflow scheduler Cell release failed");
                 }
                 drop(activity_cell);
                 drop(activity_bytes);
-                drop(permit);
             });
             return Ok(());
         }
@@ -565,7 +560,10 @@ impl RepositoryCellScheduler {
             return self.release_after(&cell.target, release_after).await;
         }
         let target = cell.target.clone();
-        match self
+        let Some(job) = self.router.reserve_primitive_job()? else {
+            return self.release_after(&target, release_after).await;
+        };
+        let result = match self
             .registry
             .run_effect_once(
                 cell.client,
@@ -586,7 +584,9 @@ impl RepositoryCellScheduler {
                 tracing::warn!(error = %error, "Cell effect was not resolved");
                 self.release_after(&target, release_after).await
             }
-        }
+        };
+        drop(job);
+        result
     }
 
     async fn release_after(&self, target: &CellTarget, release_after: bool) -> crate::Result<()> {
@@ -923,7 +923,10 @@ async fn run_effect(
     registry: &Registry,
     router: &RepositoryCellRouter,
     cell: super::RepositoryCell,
-) {
+) -> crate::Result<()> {
+    let Some(_job) = router.reserve_primitive_job()? else {
+        return Ok(());
+    };
     match registry
         .run_effect_once(
             cell.client,
@@ -940,6 +943,7 @@ async fn run_effect(
         | Ok(EffectRunOutcome::LeaseLost { .. }) => {}
         Err(error) => tracing::warn!(error = %error, "Cell effect was not resolved"),
     }
+    Ok(())
 }
 
 fn mutation_identity() -> crate::Result<MutationIdentity> {

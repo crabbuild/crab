@@ -1,6 +1,14 @@
 //! Immutable Cell-scoped LTX roots prepared independently of ownership CAS.
 
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    io,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use bytes::Bytes;
 use crab_storage::{CellObjectKind, CellStorageLayout};
@@ -560,25 +568,54 @@ impl CellReplica {
         );
         self.validate_chain(&descriptors, cuts.position)?;
 
-        let local = cuts.segments.clone();
-        let host = self.host.clone();
-        let limits = self.limits;
-        let inputs = self
-            .host
-            .run(move || {
-                local
-                    .into_iter()
-                    .map(|segment| {
-                        let bytes = host.read(segment.path(), limits.max_capture_bytes)?;
-                        Ok(AppendInput {
-                            bytes,
-                            info: segment.info().clone(),
-                            location: BodyLocation::Native,
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()
-            })
-            .await??;
+        // Capture files are copied into owned, replayable scratch files. The
+        // copy is chunked so a large WAL cut never becomes an in-memory upload
+        // body and a retry can reopen the same verified source.
+        let _scratch = self.host.for_scratch(captured_bytes).await?;
+        let mut inputs = Vec::with_capacity(cuts.segments.len());
+        for segment in &cuts.segments {
+            let source = segment.path().to_owned();
+            let info = segment.info().clone();
+            let directory = source
+                .parent()
+                .ok_or(CrabError::InvalidState("capture path has no parent"))?;
+            let scratch = ScratchFile::new(&self.host, directory, "segment")?;
+            let scratch_path = scratch.path().to_owned();
+            let filesystem = Arc::clone(&self.host.filesystem);
+            let expected = info.size_bytes;
+            self.host
+                .run(move || {
+                    let mut source_file = filesystem.open(&source)?;
+                    let mut destination = filesystem.open_rw(&scratch_path)?;
+                    let mut offset = 0_u64;
+                    while offset < expected {
+                        let length =
+                            usize::try_from((expected - offset).min(STREAM_COPY_BYTES as u64))
+                                .map_err(io::Error::other)?;
+                        let bytes = source_file.read_exact_at(offset, length)?;
+                        destination.write_all(&bytes)?;
+                        offset = offset
+                            .checked_add(length as u64)
+                            .ok_or_else(|| io::Error::other("capture offset overflow"))?;
+                    }
+                    if source_file.file_len()? != expected {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "capture size changed while copying",
+                        ));
+                    }
+                    destination.sync_all()?;
+                    Ok::<_, io::Error>(())
+                })
+                .await??;
+            let index = inspect_segment_file(self, scratch.path(), &info).await?;
+            inputs.push(AppendInput {
+                info,
+                location: BodyLocation::Native,
+                index,
+                body: AppendBody::Native(scratch),
+            });
+        }
         self.prepare_append(
             base,
             base_graph,
@@ -693,13 +730,23 @@ impl CellReplica {
                 bundle_digest,
                 row.offset,
             ));
+            let bytes = bundle.segment(index)?;
+            let (file, size, digest, pages) = crate::ltx::inspect_bytes_with_index(bytes)?;
+            if size != row.info.size_bytes
+                || digest != row.info.blake3
+                || crate::SegmentInfo::from_inspected(&file, size, digest) != row.info
+            {
+                return Err(CrabError::ChecksumMismatch);
+            }
+            let index_bytes = crate::paged::encode_index_from_pages(&pages)?;
             inputs.push(AppendInput {
-                bytes: bundle.segment(index)?.to_vec(),
                 info: row.info.clone(),
                 location: BodyLocation::Bundle {
                     digest: bundle_digest,
                     offset: row.offset,
                 },
+                index: index_bytes,
+                body: AppendBody::Bundle,
             });
         }
         let target = inputs
@@ -714,7 +761,7 @@ impl CellReplica {
             target,
             commit_sequence,
             schema,
-            Some(bundle.bytes().to_vec()),
+            Some(bundle.shared_bytes()),
         )
         .await
     }
@@ -795,39 +842,31 @@ impl CellReplica {
         target: Position,
         commit_sequence: u64,
         schema: u32,
-        bundle: Option<Vec<u8>>,
+        bundle: Option<Bytes>,
     ) -> Result<PreparedRoot> {
-        let limits = self.limits;
-        let prepared = self
-            .host
-            .run(move || {
-                inputs
-                    .into_iter()
-                    .map(|input| {
-                        crate::recovery::verify_segment(&input.bytes, &input.info, limits)?;
-                        let index = crate::paged::encode_index(&input.bytes)?;
-                        let digest = *blake3::hash(&index).as_bytes();
-                        let descriptor = match input.location {
-                            BodyLocation::Native => {
-                                SegmentDescriptor::native(input.info, digest, index.len() as u64)
-                            }
-                            BodyLocation::Bundle { digest, offset } => SegmentDescriptor::bundled(
-                                input.info,
-                                *blake3::hash(&index).as_bytes(),
-                                index.len() as u64,
-                                digest,
-                                offset,
-                            ),
-                        };
-                        Ok(PreparedSegment {
-                            bytes: input.bytes,
-                            descriptor,
-                            index,
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()
+        let prepared = inputs
+            .into_iter()
+            .map(|input| {
+                let digest = *blake3::hash(&input.index).as_bytes();
+                let descriptor = match input.location {
+                    BodyLocation::Native => {
+                        SegmentDescriptor::native(input.info, digest, input.index.len() as u64)
+                    }
+                    BodyLocation::Bundle { digest, offset } => SegmentDescriptor::bundled(
+                        input.info,
+                        *blake3::hash(&input.index).as_bytes(),
+                        input.index.len() as u64,
+                        digest,
+                        offset,
+                    ),
+                };
+                Ok(PreparedSegment {
+                    descriptor,
+                    index: input.index,
+                    body: input.body,
+                })
             })
-            .await??;
+            .collect::<Result<Vec<_>>>()?;
 
         let mut descriptors = base_graph
             .as_ref()
@@ -837,16 +876,20 @@ impl CellReplica {
         self.validate_chain(&descriptors, target)?;
         if let Some(bytes) = bundle {
             let digest = *blake3::hash(&bytes).as_bytes();
-            self.put_object(&digest, CellObjectKind::Bundle, bytes)
+            self.put_object_bytes(&digest, CellObjectKind::Bundle, bytes)
                 .await?;
         }
         let mut directory_inputs = Vec::with_capacity(prepared.len());
         for segment in prepared {
             if segment.descriptor.object_kind() == CellObjectKind::Ltx {
-                self.put_object(
+                let AppendBody::Native(source) = segment.body else {
+                    return Err(CrabError::InvalidState("native Cell body source missing"));
+                };
+                compaction::upload(
+                    self,
+                    source.path(),
                     &segment.descriptor.info.blake3,
                     CellObjectKind::Ltx,
-                    segment.bytes,
                 )
                 .await?;
             }
@@ -1270,6 +1313,16 @@ impl CellReplica {
         kind: CellObjectKind,
         bytes: Vec<u8>,
     ) -> Result<()> {
+        self.put_object_bytes(digest, kind, Bytes::from(bytes))
+            .await
+    }
+
+    async fn put_object_bytes(
+        &self,
+        digest: &[u8; 32],
+        kind: CellObjectKind,
+        bytes: Bytes,
+    ) -> Result<()> {
         if *blake3::hash(&bytes).as_bytes() != *digest {
             return Err(CrabError::ChecksumMismatch);
         }
@@ -1277,7 +1330,7 @@ impl CellReplica {
         let path = self
             .layout
             .incarnation_object_path(&self.cell, &self.incarnation, digest, kind);
-        self.layout.store().put(&path, Bytes::from(bytes)).await?;
+        self.layout.store().put(&path, bytes).await?;
         Ok(())
     }
 
@@ -1354,9 +1407,15 @@ fn compaction_scratch_bytes(graph: &LoadedGraph) -> Result<u64> {
 }
 
 struct AppendInput {
-    bytes: Vec<u8>,
     info: crate::SegmentInfo,
     location: BodyLocation,
+    index: Vec<u8>,
+    body: AppendBody,
+}
+
+enum AppendBody {
+    Native(ScratchFile),
+    Bundle,
 }
 
 #[derive(Clone, Copy)]
@@ -1366,14 +1425,92 @@ enum BodyLocation {
 }
 
 struct PreparedSegment {
-    bytes: Vec<u8>,
     descriptor: SegmentDescriptor,
     index: Vec<u8>,
+    body: AppendBody,
 }
 
 struct DirectoryInput {
     descriptor: SegmentDescriptor,
     index: Vec<u8>,
+}
+
+const STREAM_COPY_BYTES: usize = 1 << 20;
+
+struct ScratchFile {
+    filesystem: Arc<dyn crate::environment::FileSystem>,
+    path: PathBuf,
+}
+
+impl ScratchFile {
+    fn new(host: &Host, directory: &Path, label: &str) -> Result<Self> {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        for _ in 0..16 {
+            let path = directory.join(format!(
+                ".crab-cell-{label}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match host.filesystem.create(&path) {
+                Ok(file) => {
+                    drop(file);
+                    return Ok(Self {
+                        filesystem: Arc::clone(&host.filesystem),
+                        path,
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "Cell publication scratch namespace exhausted",
+        )
+        .into())
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ScratchFile {
+    fn drop(&mut self) {
+        if self.filesystem.remove_file(&self.path).is_ok() {
+            let _ = self.filesystem.sync_parent(&self.path);
+        }
+    }
+}
+
+async fn inspect_segment_file(
+    replica: &CellReplica,
+    path: &Path,
+    expected: &crate::SegmentInfo,
+) -> Result<Vec<u8>> {
+    let host = replica.host.clone();
+    let limits = replica.limits;
+    let path = path.to_owned();
+    let expected = expected.clone();
+    replica
+        .host
+        .run(move || {
+            let reader = crate::host::LtxHost {
+                facilities: host.clone(),
+                max_database_bytes: limits.max_database_bytes,
+                max_file_bytes: expected.size_bytes,
+            }
+            .open(&path)?;
+            let (file, size, digest, pages) = crate::ltx::inspect_reader_with_index(reader)?;
+            if size != expected.size_bytes || digest != expected.blake3 {
+                return Err(CrabError::ChecksumMismatch);
+            }
+            if crate::SegmentInfo::from_inspected(&file, size, digest) != expected {
+                return Err(CrabError::ChecksumMismatch);
+            }
+            crate::paged::encode_index_from_pages(&pages)
+        })
+        .await?
 }
 
 impl VerifiedRoot {

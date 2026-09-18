@@ -1,5 +1,8 @@
 # Celld functional parity and Crab safety boundaries
 
+The standalone-versus-Cell contract decision is pending in
+[`standalone-replication-audit.md`](../crab-cell-runtime/docs/standalone-replication-audit.md).
+
 Reference: `denoland/celld`, `10cb1303dac710dcb3b557e318e08c855261f68b`,
 `crates/ltx`. This is a capability comparison, not an API-name, wire-envelope,
 performance or production-readiness equivalence claim. Source notices and hashes

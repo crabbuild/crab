@@ -2,6 +2,7 @@
 //! Apache-2.0; adapted from bundle.rs at the revision in UPSTREAM.md.
 
 use crate::{CrabError, Limits, Result, SegmentInfo};
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -46,7 +47,7 @@ pub struct BundleRow {
 /// The format is Crab's `CRB1`, not Celld's `CLB1`: rows retain string epochs,
 /// exact ranges and whole-file checksums. A manifest must pin its locations.
 pub struct Bundle {
-    bytes: Vec<u8>,
+    bytes: Bytes,
     rows: Vec<BundleRow>,
 }
 
@@ -137,7 +138,10 @@ impl Bundle {
         if end != start as u64 {
             return Err(CrabError::LTXCorrupted);
         }
-        Ok(Self { bytes, rows })
+        Ok(Self {
+            bytes: bytes.into(),
+            rows,
+        })
     }
 
     #[must_use]
@@ -148,6 +152,10 @@ impl Bundle {
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    pub(crate) fn shared_bytes(&self) -> Bytes {
+        self.bytes.clone()
     }
 
     /// Returns the verified bytes for a row index, never a caller-supplied extent.

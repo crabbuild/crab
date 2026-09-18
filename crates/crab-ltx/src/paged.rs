@@ -393,6 +393,32 @@ pub(crate) fn encode_index(bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(index)
 }
 
+/// Encodes the fixed-size authenticated index collected by the streaming LTX
+/// decoder. The decoder has already verified the embedded variable-length
+/// index and trailer; this pass only changes its representation for paged SQL.
+pub(crate) fn encode_index_from_pages(pages: &[crate::codec::EncodedPage]) -> Result<Vec<u8>> {
+    if pages.is_empty() {
+        return Err(CrabError::LTXCorrupted);
+    }
+    let mut index = Vec::with_capacity(
+        pages
+            .len()
+            .checked_mul(ENTRY_BYTES)
+            .ok_or(CrabError::Limit("LTX page index bytes"))?,
+    );
+    for page in pages {
+        if page.frame_hash == [0; 32] || page.size == 0 {
+            return Err(CrabError::LTXCorrupted);
+        }
+        index.extend_from_slice(&page.page.to_be_bytes());
+        index.extend_from_slice(&page.offset.to_be_bytes());
+        index.extend_from_slice(&page.size.to_be_bytes());
+        index.extend_from_slice(&page.frame_hash);
+        index.extend_from_slice(&page.checksum.to_be_bytes());
+    }
+    Ok(index)
+}
+
 fn array<const N: usize>(bytes: &[u8]) -> Result<[u8; N]> {
     bytes.try_into().map_err(|_| CrabError::LTXCorrupted)
 }

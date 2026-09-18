@@ -134,6 +134,18 @@ async fn cancelled_waiter_does_not_cancel_an_accepted_sql_command() {
     tokio::task::spawn_blocking(move || started_rx.recv().unwrap())
         .await
         .unwrap();
+    assert!(matches!(
+        pool.execute(
+            cell,
+            identity(9),
+            Digest::from_bytes([10; 32]),
+            20,
+            RESULT_LIMIT,
+            |_| Ok(HandlerOutcome::Success(Vec::new())),
+        )
+        .await,
+        Err(Error::Capacity(_))
+    ));
     waiting.abort();
     assert!(matches!(waiting.await, Err(error) if error.is_cancelled()));
     release_tx.send(()).unwrap();

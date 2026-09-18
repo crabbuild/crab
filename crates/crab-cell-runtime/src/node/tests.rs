@@ -9,7 +9,8 @@ use object_store::{memory::InMemory, path::Path};
 use super::*;
 use crate::{
     AppendRequest, ApplicationId, CellTarget, NamespaceId, NodeLogTransport, PeerOperation,
-    PeerPrincipal, PeerSigner, RetireRequest, SealRequest, TailRequest, TenantId, peer_wire,
+    PeerPrincipal, PeerSigner, PlacementPlanner, PlacementPressure, PlacementRuntimeSnapshot,
+    RetireRequest, SealRequest, TailRequest, TenantId, peer_wire,
 };
 
 const NOW_MS: i64 = 1_000_000;
@@ -144,6 +145,50 @@ fn advertisement_for_node_capacity_in_domain(
         capacity,
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn placement_uses_signed_capacity_and_requires_runtime_snapshot() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    let session = SessionId::from_bytes([1; 16]);
+    directory
+        .create(advertisement_for(session, &key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    let planner = PlacementPlanner::default();
+    let cell = crate::CellId::from_bytes([9; 32]);
+    let snapshot = PlacementRuntimeSnapshot {
+        node: node(session),
+        memory_capacity_bytes: 2_000,
+        disk_capacity_bytes: 4_000,
+        active_cells: 1,
+        max_active_cells: 8,
+        running_jobs: 0,
+        pressure: PlacementPressure::Normal,
+        draining: false,
+        locality_bonus: 10,
+        current_owner: false,
+    };
+    let chosen = directory
+        .choose_placement(&planner, cell, NOW_MS + 1, &[snapshot], 4)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(chosen.node, node(session));
+    let advertised = directory
+        .choose_advertised_placement(&planner, cell, NOW_MS + 1, session, 4)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(advertised.node, node(session));
+    assert!(
+        directory
+            .choose_placement(&planner, cell, NOW_MS + 1, &[], 4)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1116,6 +1161,12 @@ async fn invalid_signature_expiry_and_identity_change_fail_closed() {
         .is_err()
     );
     let original = advertisement(&key, 1, NOW_MS);
+    let mut tampered_capacity = original.clone();
+    tampered_capacity.capacity.free_memory_bytes = tampered_capacity
+        .capacity
+        .free_memory_bytes
+        .saturating_add(1);
+    assert!(tampered_capacity.verify_signature().is_err());
     let mut tampered = original.encode().unwrap();
     let endpoint_byte = tampered
         .windows(b"node-1".len())
@@ -1150,6 +1201,81 @@ async fn invalid_signature_expiry_and_identity_change_fail_closed() {
             .await
             .is_err()
     );
+}
+
+#[test]
+fn placement_schema_is_mixed_version_safe_and_fail_closed() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let current = advertisement(&key, 1, NOW_MS)
+        .with_placement_capacity(
+            NodePlacementCapacity::new(8_192, 16_384, 3, 16, 2, 8).unwrap(),
+            &key,
+        )
+        .unwrap();
+    assert!(current.has_signed_placement());
+    let decoded_current = NodeAdvertisement::decode_canonical(&current.encode().unwrap()).unwrap();
+    assert_eq!(decoded_current.placement_version, 1);
+    assert_eq!(
+        decoded_current.placement_capacity(),
+        Some(NodePlacementCapacity::new(8_192, 16_384, 3, 16, 2, 8).unwrap())
+    );
+    let observation =
+        PlacementObservation::from_signed_advertisement(&decoded_current, NOW_MS + 1, true)
+            .unwrap();
+    assert_eq!(observation.memory_capacity_bytes, 8_192);
+    assert_eq!(observation.active_cells, 3);
+    assert_eq!(observation.running_jobs, 2);
+
+    let mut legacy = current.clone();
+    legacy.placement_version = 0;
+    legacy.placement_signature = [0; 64];
+    let decoded_legacy = NodeAdvertisement::decode_canonical(&legacy.encode().unwrap()).unwrap();
+    assert!(!decoded_legacy.has_signed_placement());
+
+    let mut future = current;
+    future.placement_version = 2;
+    future.placement_signature = [0; 64];
+    let decoded_future = NodeAdvertisement::decode_canonical(&future.encode().unwrap()).unwrap();
+    assert!(!decoded_future.has_signed_placement());
+    assert!(
+        PlacementObservation::from_advertisement(
+            &decoded_future,
+            NOW_MS + 1,
+            2_000,
+            4_000,
+            1,
+            8,
+            0,
+            PlacementPressure::Normal,
+            false,
+            0,
+            false,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn placement_upgrade_sets_schema_when_legacy_capacity_was_unusable() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let legacy = advertisement_for_capacity(
+        SessionId::from_bytes([1; 16]),
+        &key,
+        1,
+        NOW_MS,
+        NodeCapacity::default(),
+    );
+    assert!(!legacy.has_signed_placement());
+    let upgraded = legacy
+        .with_placement_capacity(
+            NodePlacementCapacity::new(8_192, 16_384, 0, 16, 0, 8).unwrap(),
+            &key,
+        )
+        .unwrap();
+    assert!(upgraded.has_signed_placement());
+    let decoded = NodeAdvertisement::decode_canonical(&upgraded.encode().unwrap()).unwrap();
+    assert_eq!(decoded.placement_version, 1);
+    assert_eq!(decoded.placement_capacity(), upgraded.placement_capacity());
 }
 
 #[tokio::test]

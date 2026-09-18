@@ -835,6 +835,7 @@ pub async fn serve(config: Config) -> Result<()> {
     let node_publisher = Arc::new(
         node_publisher
             .with_follower_store(follower_store.clone())
+            .with_runtime(cell_runtime.clone())
             .with_telemetry(cell_runtime.telemetry_handle())
             .with_metrics(metrics.clone()),
     );
@@ -1623,8 +1624,14 @@ async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
         receive_workers: server.receives.len(),
         cell_active: cell_runtime.active_cells(),
         cell_active_capacity: cell_runtime.active_cell_capacity(),
+        cell_resident_bytes: cell_runtime.resident_bytes(),
+        cell_resident_capacity_bytes: cell_runtime.resident_capacity_bytes(),
         cell_retained_bytes: cell_runtime.retained_bytes(),
         cell_retained_capacity_bytes: cell_runtime.retained_capacity_bytes(),
+        cell_worker_jobs: cell_runtime.worker_jobs(),
+        cell_worker_job_capacity: cell_runtime.worker_job_capacity(),
+        cell_primitive_jobs: cell_runtime.primitive_jobs(),
+        cell_primitive_job_capacity: cell_runtime.primitive_job_capacity(),
         cell_local_disk_reserved_bytes: cell_runtime.local_disk_reserved_bytes(),
         cell_local_disk_capacity_bytes: cell_runtime.local_disk_capacity_bytes(),
         cell_node_log_uncovered_bytes: cell_runtime.unpublished_node_log_bytes(),

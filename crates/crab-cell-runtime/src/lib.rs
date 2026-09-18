@@ -16,8 +16,12 @@ mod client;
 mod codec;
 mod control;
 mod cron;
+mod coordination;
+#[cfg(test)]
+mod coordination_sim;
 mod effects;
 mod error;
+mod eviction;
 mod executor;
 mod follower;
 mod identity;
@@ -32,12 +36,16 @@ mod node_log_shipper;
 mod node_log_state;
 mod node_log_transport;
 mod peer;
+mod placement;
+mod pressure;
 mod publication;
+mod qualification;
 mod queue;
 mod recovery_manifest;
 mod registry;
 mod release;
 mod release_progress;
+mod resource;
 mod retention;
 mod scheduler;
 mod schema;
@@ -49,7 +57,7 @@ mod workflow;
 pub use activity_pool::{BlockingActivityPool, BlockingActivityReservation};
 pub use actor::{
     ACTIVE_CELL_NATIVE_BYTES, CellHandle, CellRuntime, CellRuntimeStats, MigratedCell,
-    NodeByteReservation,
+    NodeByteReservation, NodeJobReservation,
 };
 pub use application::{ApplicationIdentity, ApplicationIdentityStore};
 pub use authority::{CellAuthority, VersionedControl};
@@ -108,7 +116,8 @@ pub use maintenance::{
 };
 pub use node::{
     FencedNodeSession, NODE_LOG_PROTOCOL_VERSION, NodeAdvertisement, NodeCapacity, NodeDirectory,
-    NodeFailureDomain, NodeTakeoverProof, SealedNodeLog, VersionedNodeAdvertisement,
+    NodeFailureDomain, NodePlacementCapacity, NodeTakeoverProof, SealedNodeLog,
+    VersionedNodeAdvertisement,
 };
 pub use node_durability::{NodeDurability, NodeLogAuthority};
 pub use node_lease::NodeLeaseGuard;
@@ -133,7 +142,18 @@ pub use peer::{
     PeerVerifier, VerifiedPeerRequest, claimed_peer_session, decode_peer_reply, encode_peer_reply,
     wire as peer_wire,
 };
+pub use placement::{
+    PlacementEligibility, PlacementObservation, PlacementPlanner, PlacementPressure,
+    PlacementRuntimeSnapshot, PlacementScore,
+};
+pub use pressure::{
+    MovementBudget, MovementKind, MovementPermit, PressureClassifier, PressureSample, PressureState,
+};
 pub use publication::CellPublisher;
+pub use qualification::{
+    QUALIFICATION_SCHEMA_VERSION, QualificationMetric, QualificationOwnership,
+    QualificationReceipt, QualificationRunner,
+};
 pub use queue::{
     QueueClaimCommand, QueueClaimRequest, QueueControlAction, QueueControlCommand,
     QueueControlOutcome, QueueDeadLetterTarget, QueueInfo, QueueInfoQuery, QueueInfoRequest,
@@ -155,6 +175,7 @@ pub use release_progress::{
     MigrationFailure, MigrationProgress, MigrationProgressAttempt, MigrationProgressState,
     MigrationProgressStore,
 };
+pub use resource::{ResourceCost, ResourceSnapshot};
 pub use retention::{CellGarbageCollector, GarbageCollectionPolicy, GarbageCollectionReport};
 pub use scheduler::{
     DueCell, DueCellScan, SchedulerFleet, SchedulerTickOutcome, preferred_scanner,
@@ -165,7 +186,7 @@ pub use sql::{
     SqlBatch, SqlBatchCommand, SqlBatchQuery, SqlCell, SqlModule, SqlResultSet, SqlStatement,
     SqlValue, register_sql, sql_batch, sql_query_batch,
 };
-pub use telemetry::{CellTelemetry, CellTelemetryHandle};
+pub use telemetry::{CellTelemetry, CellTelemetryHandle, ResidentRouteOutcome};
 pub use worker::{
     ACTIVE_CELL_FILE_DESCRIPTORS, ACTIVE_CELL_PAGE_CACHE_BYTES, SqlWorkerPool, WorkerExecution,
 };

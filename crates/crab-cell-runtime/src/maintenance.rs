@@ -16,16 +16,25 @@ const QUEUE_DEDUP: u8 = 1 << 4;
 const WORKFLOWS: u8 = 1 << 5;
 const BLOBS: u8 = 1 << 6;
 const CRON_SCHEDULES: u8 = 1 << 7;
+const UNKNOWN: u8 = 1 << 8;
 
 /// Conservative inventory of rows that can retain executable release contracts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PersistedWorkInventory(u8);
 
 impl PersistedWorkInventory {
+    pub(crate) const fn unknown() -> Self {
+        Self(UNKNOWN)
+    }
+
     /// Reports whether contract removal can proceed without transforming durable work.
     #[must_use]
     pub const fn is_empty(self) -> bool {
         self.0 == 0
+    }
+
+    pub(crate) const fn is_unknown(self) -> bool {
+        self.0 & UNKNOWN != 0
     }
 
     /// Names the first durable work class blocking contract removal.
@@ -47,6 +56,8 @@ impl PersistedWorkInventory {
             Some("maintenance release is blocked by retained Blob objects")
         } else if self.0 & CRON_SCHEDULES != 0 {
             Some("maintenance release is blocked by retained Cron schedules")
+        } else if self.0 & UNKNOWN != 0 {
+            Some("maintenance release is blocked by unknown persisted work")
         } else {
             None
         }

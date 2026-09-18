@@ -103,5 +103,75 @@ class StorageScopeTests(unittest.TestCase):
                     self.assertEqual(result, expected)
 
 
+class CellRuntimeBoundaryTests(unittest.TestCase):
+    def metadata(self, dependency_kind="dev"):
+        return {
+            "packages": [{
+                "name": "crab-http-server",
+                "dependencies": [{
+                    "name": "crab-ltx",
+                    "kind": dependency_kind,
+                    "optional": False,
+                    "features": ["replica"],
+                }],
+            }],
+        }
+
+    def check_source(
+        self,
+        text,
+        relative="crates/crab-http-server/src/lib.rs",
+        dependency_kind="dev",
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / relative
+            source.parent.mkdir(parents=True)
+            source.write_text(text, encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                return GATES.check_cell_runtime_server_boundary(
+                    root,
+                    self.metadata(dependency_kind),
+                )
+
+    def test_production_import_is_rejected(self):
+        self.assertFalse(self.check_source("use crab_ltx::CellReplica;\nfn route() {}\n"))
+
+    def test_normal_and_build_dependencies_are_rejected(self):
+        for dependency_kind in (None, "build"):
+            with self.subTest(dependency_kind=dependency_kind):
+                self.assertFalse(
+                    self.check_source("fn route() {}\n", dependency_kind=dependency_kind)
+                )
+
+    def test_cfg_test_module_and_nested_test_module_are_admitted(self):
+        source = """fn route() {}
+
+#[cfg(test)]
+mod tests {
+    mod nested {
+        use crab_ltx::CellReplica;
+    }
+}
+
+fn later_production_code() {}
+"""
+        self.assertTrue(self.check_source(source))
+
+    def test_test_file_is_admitted_but_production_after_cfg_block_is_not(self):
+        self.assertTrue(
+            self.check_source(
+                "use crab_ltx::CellReplica;\n",
+                relative="crates/crab-http-server/src/cells/scheduler/tests.rs",
+            )
+        )
+        self.assertFalse(
+            self.check_source(
+                "#[cfg(test)]\nmod tests { use crab_ltx::CellReplica; }\n"
+                "use crab_ltx::ManagedDb;\n",
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

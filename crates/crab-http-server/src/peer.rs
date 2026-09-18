@@ -17,9 +17,9 @@ use bytes::Bytes;
 use crab_cell_runtime::{
     ApplicationIdentity, CellAuthority, CellCatalog, CellHandle, CellRuntime, CellTarget, Digest,
     Error as CellError, NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain, NodeId,
-    NodeLogAuthority, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerRoundTrip, Registry,
-    ReleaseState, ReleaseStore, SessionId, VerifiedPeerRequest, VersionedNodeAdvertisement,
-    peer_wire,
+    NodeLogAuthority, NodePlacementCapacity, PeerAuthorizer, PeerCellResolver, PeerDispatcher,
+    PeerRoundTrip, Registry, ReleaseState, ReleaseStore, SessionId, VerifiedPeerRequest,
+    VersionedNodeAdvertisement, peer_wire,
 };
 use crab_storage::CellStorageLayout;
 use ed25519_dalek::SigningKey;
@@ -92,6 +92,7 @@ pub(crate) struct NodePublisher {
     local_disk_limit_bytes: u64,
     scheduler: crate::cells::SchedulerStatus,
     follower_store: Option<crab_cell_runtime::FollowerStore>,
+    runtime: Option<CellRuntime>,
     telemetry: crab_cell_runtime::CellTelemetryHandle,
     metrics: Option<crate::metrics::Metrics>,
     lease: OnceLock<crab_cell_runtime::NodeLeaseGuard>,
@@ -152,6 +153,7 @@ impl NodePublisher {
             local_disk_limit_bytes,
             scheduler,
             follower_store: None,
+            runtime: None,
             telemetry: crab_cell_runtime::CellTelemetryHandle::default(),
             metrics: None,
             lease: OnceLock::new(),
@@ -164,6 +166,11 @@ impl NodePublisher {
         follower_store: crab_cell_runtime::FollowerStore,
     ) -> Self {
         self.follower_store = Some(follower_store);
+        self
+    }
+
+    pub(crate) fn with_runtime(mut self, runtime: CellRuntime) -> Self {
+        self.runtime = Some(runtime);
         self
     }
 
@@ -411,7 +418,7 @@ impl NodePublisher {
                 self.follower_store.as_ref(),
             )?
         };
-        Ok(NodeAdvertisement::sign(
+        let advertisement = NodeAdvertisement::sign(
             self.node,
             self.session,
             self.endpoint.clone(),
@@ -427,7 +434,42 @@ impl NodePublisher {
             vec![1],
             self.failure_domain.clone(),
             capacity,
-        )?)
+        )?;
+        if draining {
+            return Ok(advertisement);
+        }
+        let resources = self.local_resources()?;
+        let placement = NodePlacementCapacity::new(
+            resources.memory_bytes,
+            resources.disk_capacity_bytes,
+            self.runtime
+                .as_ref()
+                .map_or(0, |runtime| runtime.stats().active_cells() as u32),
+            self.runtime.as_ref().map_or(1, |runtime| {
+                runtime
+                    .stats()
+                    .active_cell_capacity()
+                    .min(u32::MAX as usize) as u32
+            }),
+            self.runtime.as_ref().map_or(0, |runtime| {
+                let stats = runtime.stats();
+                stats
+                    .worker_jobs()
+                    .saturating_add(stats.primitive_jobs())
+                    .min(u32::MAX as usize) as u32
+            }),
+            self.runtime.as_ref().map_or_else(
+                || resources.job_credits.min(u32::MAX as usize) as u32,
+                |runtime| {
+                    let stats = runtime.stats();
+                    stats
+                        .worker_job_capacity()
+                        .saturating_add(stats.primitive_job_capacity())
+                        .min(u32::MAX as usize) as u32
+                },
+            ),
+        )?;
+        Ok(advertisement.with_placement_capacity(placement, &self.signing_key)?)
     }
 }
 
@@ -654,6 +696,7 @@ fn runtime_cell_action(registry: &Registry, request: &VerifiedPeerRequest) -> Op
 
 fn runtime_principal_action(request: &VerifiedPeerRequest) -> Option<&'static str> {
     [
+        "cell.activate",
         "cell.activity.source",
         "cell.effect.source",
         "cell.scheduler.tick",
@@ -710,12 +753,23 @@ pub(crate) async fn forward(
             return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
         }
     }
-    if request.hop_count() < 2
-        && matches!(
-            receiver.resolver.resolve(request.target().clone()).await,
-            Err(CellError::CellNotActive | CellError::Fenced | CellError::CellDraining)
-        )
-    {
+    let local_resolution = receiver.resolver.resolve(request.target().clone()).await;
+    let local_unavailable = matches!(
+        &local_resolution,
+        Err(CellError::CellNotActive | CellError::Fenced | CellError::CellDraining)
+    );
+    if local_unavailable && request.permits("cell.activate") {
+        let Some(router) = server.repository_cells.as_ref() else {
+            return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+        };
+        if router
+            .activate_local_target(request.target().clone(), request.principal().clone())
+            .await
+            .is_err()
+        {
+            return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    } else if local_unavailable && request.hop_count() < 2 {
         let remaining_ms = match remaining_timeout(started, request.remaining_ms()) {
             Ok(remaining_ms) => remaining_ms.saturating_sub(1),
             Err(_) => return peer_http_error(StatusCode::GATEWAY_TIMEOUT),

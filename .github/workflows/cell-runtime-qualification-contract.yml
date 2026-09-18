@@ -1,0 +1,37 @@
+name: Cell runtime qualification contract
+
+on:
+  pull_request:
+    paths:
+      - "crates/crab-cell-runtime/**"
+      - "crates/crab-ltx/**"
+      - "crab/scripts/check-architecture-gates.py"
+      - ".github/workflows/cell-runtime-qualification-contract.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/crab-cell-runtime/**"
+      - "crates/crab-ltx/**"
+      - "crab/scripts/check-architecture-gates.py"
+      - ".github/workflows/cell-runtime-qualification-contract.yml"
+
+jobs:
+  contract:
+    name: Signed receipt and canonical contract checks
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+      - name: Validate architecture boundary
+        run: python3 crab/scripts/check-architecture-gates.py
+      - name: Validate executable design contracts
+        run: node crates/crab-cell-runtime/docs/validate.mjs
+      - name: Verify receipt, placement, pressure, and resource contracts
+        run: cargo test -p crab-cell-runtime qualification placement pressure resource --locked
+      - name: Verify canonical LTX contracts
+        run: cargo test -p crab-ltx --features replica --locked

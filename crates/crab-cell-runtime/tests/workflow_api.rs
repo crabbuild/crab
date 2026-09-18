@@ -948,16 +948,41 @@ async fn native_activity_heartbeats_and_recovers_after_node_loss() {
     let failover_registry = registry.clone();
     let failover_client = CellClient::local(registry.clone(), handle.clone());
     let failover_target = target.clone();
-    let failover_reservation = blocking_pool.try_reserve().unwrap();
+    let failover_pool = blocking_pool.clone();
     let first_attempt = tokio::spawn(async move {
-        failover_registry
-            .run_activity_once(
-                failover_client,
-                &failover_target,
-                5_000,
-                failover_reservation,
-            )
-            .await
+        // The retry activity may become due before the newly started failover activity.
+        // Consume that retry first so this attempt deterministically owns the failover lease.
+        loop {
+            let reservation = loop {
+                if let Some(reservation) = failover_pool.try_reserve().unwrap() {
+                    break reservation;
+                }
+                tokio::task::yield_now().await;
+            };
+            let outcome = match failover_registry
+                .run_activity_once(
+                    failover_client.clone(),
+                    &failover_target,
+                    5_000,
+                    Some(reservation),
+                )
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    return Err::<ActivityRunOutcome, crab_cell_runtime::ActivitySupervisorError>(
+                        error,
+                    );
+                }
+            };
+            if matches!(
+                outcome,
+                ActivityRunOutcome::Retrying { .. } | ActivityRunOutcome::Idle { .. }
+            ) {
+                continue;
+            }
+            return Ok(outcome);
+        }
     });
     // The activity claim crosses the SQL worker and the node-owned callback
     // boundary. Allow one lease interval for a busy multi-crate test runner;

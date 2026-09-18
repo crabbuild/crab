@@ -28,6 +28,8 @@ pub(crate) struct Decoder<R> {
     pub(crate) trailer: Trailer,
     hash: Crc64,
     rolling_checksum: u64,
+    #[cfg(feature = "replica")]
+    replica_index: Vec<EncodedPage>,
 }
 
 impl<R: Read> Decoder<R> {
@@ -44,6 +46,8 @@ impl<R: Read> Decoder<R> {
             trailer: Trailer::default(),
             hash: Crc64::new(),
             rolling_checksum: 0,
+            #[cfg(feature = "replica")]
+            replica_index: Vec::new(),
         }
     }
 
@@ -102,11 +106,23 @@ impl<R: Read> Decoder<R> {
             }
             let mut compressed = vec![0; compressed_size];
             self.reader.read_exact(&mut compressed)?;
+            let mut frame_hash = blake3::Hasher::new();
+            frame_hash.update(&header_bytes);
+            frame_hash.update(&size_bytes);
+            frame_hash.update(&compressed);
             let n = lz4_flex::block::decompress_into(&compressed, data)
                 .map_err(|error| CrabError::Other(Box::new(error)))?;
             if n != data.len() {
                 return Err(CrabError::LTXCorrupted);
             }
+            #[cfg(feature = "replica")]
+            self.replica_index.push(EncodedPage {
+                page: page.pgno,
+                offset,
+                size: self.reader.bytes - offset,
+                frame_hash: *frame_hash.finalize().as_bytes(),
+                checksum: checksum_page(page.pgno, data),
+            });
         } else {
             let mut decoder = lz4_flex::frame::FrameDecoder::new(&mut self.reader);
             decoder
@@ -120,6 +136,14 @@ impl<R: Read> Decoder<R> {
             {
                 return Err(CrabError::LTXCorrupted);
             }
+            #[cfg(feature = "replica")]
+            self.replica_index.push(EncodedPage {
+                page: page.pgno,
+                offset,
+                size: self.reader.bytes - offset,
+                frame_hash: [0; 32],
+                checksum: checksum_page(page.pgno, data),
+            });
         }
 
         self.index
@@ -200,6 +224,11 @@ impl<R: Read> Decoder<R> {
             *self.reader.digest.clone().finalize().as_bytes(),
         ))
     }
+
+    #[cfg(feature = "replica")]
+    pub(crate) fn replica_index(&self) -> &[EncodedPage] {
+        &self.replica_index
+    }
 }
 
 pub(crate) struct Encoder<W> {
@@ -215,6 +244,7 @@ pub(crate) struct Encoder<W> {
     closed: bool,
 }
 
+#[derive(Clone)]
 #[cfg_attr(not(feature = "replica"), expect(dead_code))]
 pub(crate) struct EncodedPage {
     pub(crate) page: u32,

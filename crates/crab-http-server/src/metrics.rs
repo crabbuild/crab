@@ -40,6 +40,7 @@ pub(crate) const ADMISSION_LABELS: [&str; ADMISSION_COUNT] =
 const TRANSFER_REJECTION_LABELS: [&str; TRANSFER_REJECTION_COUNT] = ["capacity", "coordination"];
 const DURABILITY_SOURCE_LABELS: [&str; DURABILITY_SOURCE_COUNT] = ["fleet", "object"];
 const APPEND_RESULT_LABELS: [&str; APPEND_RESULT_COUNT] = ["acked", "nacked"];
+const RESIDENT_ROUTE_LABELS: [&str; 3] = ["hit", "miss", "refused"];
 const NODE_LOG_LANE_STATE_LABELS: [&str; NODE_LOG_LANE_STATE_COUNT] =
     ["open", "degraded", "sealed"];
 const SELF_FENCE_REASON_LABELS: [&str; SELF_FENCE_REASON_COUNT] =
@@ -73,8 +74,14 @@ struct MetricsInner {
     receive_workers: Gauge,
     cell_active: Gauge,
     cell_active_capacity: Gauge,
+    cell_resident_bytes: Gauge,
+    cell_resident_capacity_bytes: Gauge,
     cell_retained_bytes: Gauge,
     cell_retained_capacity_bytes: Gauge,
+    cell_worker_jobs: Gauge,
+    cell_worker_job_capacity: Gauge,
+    cell_primitive_jobs: Gauge,
+    cell_primitive_job_capacity: Gauge,
     cell_local_disk_reserved_bytes: Gauge,
     cell_local_disk_capacity_bytes: Gauge,
     cell_node_log_uncovered_bytes: Gauge,
@@ -82,6 +89,7 @@ struct MetricsInner {
     durability_proofs: [Counter; DURABILITY_SOURCE_COUNT],
     durability_wait: [Histogram; DURABILITY_SOURCE_COUNT],
     node_log_append_bytes: [Counter; APPEND_RESULT_COUNT],
+    resident_routes: [Counter; 3],
     node_log_lanes: [Gauge; NODE_LOG_LANE_STATE_COUNT],
     session_lease_seconds: Gauge,
     self_fenced: AtomicBool,
@@ -117,8 +125,14 @@ pub(crate) struct RuntimeSnapshot {
     pub(crate) receive_workers: usize,
     pub(crate) cell_active: usize,
     pub(crate) cell_active_capacity: usize,
+    pub(crate) cell_resident_bytes: usize,
+    pub(crate) cell_resident_capacity_bytes: usize,
     pub(crate) cell_retained_bytes: usize,
     pub(crate) cell_retained_capacity_bytes: usize,
+    pub(crate) cell_worker_jobs: usize,
+    pub(crate) cell_worker_job_capacity: usize,
+    pub(crate) cell_primitive_jobs: usize,
+    pub(crate) cell_primitive_job_capacity: usize,
     pub(crate) cell_local_disk_reserved_bytes: u64,
     pub(crate) cell_local_disk_capacity_bytes: u64,
     pub(crate) cell_node_log_uncovered_bytes: u64,
@@ -176,12 +190,36 @@ impl Metrics {
                     &Key::from_static_name("crab_http_server_cell_runtime_active_cell_capacity"),
                     &METADATA,
                 ),
+                cell_resident_bytes: recorder.register_gauge(
+                    &Key::from_static_name("crab_http_server_cell_runtime_resident_bytes"),
+                    &METADATA,
+                ),
+                cell_resident_capacity_bytes: recorder.register_gauge(
+                    &Key::from_static_name("crab_http_server_cell_runtime_resident_capacity_bytes"),
+                    &METADATA,
+                ),
                 cell_retained_bytes: recorder.register_gauge(
                     &Key::from_static_name("crab_http_server_cell_runtime_retained_bytes"),
                     &METADATA,
                 ),
                 cell_retained_capacity_bytes: recorder.register_gauge(
                     &Key::from_static_name("crab_http_server_cell_runtime_retained_capacity_bytes"),
+                    &METADATA,
+                ),
+                cell_worker_jobs: recorder.register_gauge(
+                    &Key::from_static_name("crab_http_server_cell_runtime_worker_jobs"),
+                    &METADATA,
+                ),
+                cell_worker_job_capacity: recorder.register_gauge(
+                    &Key::from_static_name("crab_http_server_cell_runtime_worker_job_capacity"),
+                    &METADATA,
+                ),
+                cell_primitive_jobs: recorder.register_gauge(
+                    &Key::from_static_name("crab_http_server_cell_runtime_primitive_jobs"),
+                    &METADATA,
+                ),
+                cell_primitive_job_capacity: recorder.register_gauge(
+                    &Key::from_static_name("crab_http_server_cell_runtime_primitive_job_capacity"),
                     &METADATA,
                 ),
                 cell_local_disk_reserved_bytes: recorder.register_gauge(
@@ -222,6 +260,12 @@ impl Metrics {
                             "crab_cell_node_log_append_bytes_total",
                             &[("result", result)],
                         ),
+                        &METADATA,
+                    )
+                }),
+                resident_routes: RESIDENT_ROUTE_LABELS.map(|outcome| {
+                    recorder.register_counter(
+                        &key("crab_cell_resident_route_total", &[("outcome", outcome)]),
                         &METADATA,
                     )
                 }),
@@ -327,11 +371,29 @@ impl Metrics {
             .cell_active_capacity
             .set(snapshot.cell_active_capacity as f64);
         self.inner
+            .cell_resident_bytes
+            .set(snapshot.cell_resident_bytes as f64);
+        self.inner
+            .cell_resident_capacity_bytes
+            .set(snapshot.cell_resident_capacity_bytes as f64);
+        self.inner
             .cell_retained_bytes
             .set(snapshot.cell_retained_bytes as f64);
         self.inner
             .cell_retained_capacity_bytes
             .set(snapshot.cell_retained_capacity_bytes as f64);
+        self.inner
+            .cell_worker_jobs
+            .set(snapshot.cell_worker_jobs as f64);
+        self.inner
+            .cell_worker_job_capacity
+            .set(snapshot.cell_worker_job_capacity as f64);
+        self.inner
+            .cell_primitive_jobs
+            .set(snapshot.cell_primitive_jobs as f64);
+        self.inner
+            .cell_primitive_job_capacity
+            .set(snapshot.cell_primitive_job_capacity as f64);
         self.inner
             .cell_local_disk_reserved_bytes
             .set(snapshot.cell_local_disk_reserved_bytes as f64);
@@ -379,6 +441,15 @@ impl crab_cell_runtime::CellTelemetry for Metrics {
 
     fn node_log_append(&self, acknowledged: bool, bytes: u64) {
         self.inner.node_log_append_bytes[usize::from(!acknowledged)].increment(bytes);
+    }
+
+    fn resident_route(&self, outcome: crab_cell_runtime::ResidentRouteOutcome) {
+        let index = match outcome {
+            crab_cell_runtime::ResidentRouteOutcome::Hit => 0,
+            crab_cell_runtime::ResidentRouteOutcome::Miss => 1,
+            crab_cell_runtime::ResidentRouteOutcome::Refused => 2,
+        };
+        self.inner.resident_routes[index].increment(1);
     }
 }
 
@@ -752,6 +823,16 @@ fn describe_metrics(recorder: &impl Recorder) {
     );
     describe_gauge(
         recorder,
+        "crab_http_server_cell_runtime_resident_bytes",
+        "Native resident bytes reserved by active Cells in the shared runtime ledger.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_http_server_cell_runtime_resident_capacity_bytes",
+        "Native resident-byte ceiling in the shared runtime ledger.",
+    );
+    describe_gauge(
+        recorder,
         "crab_http_server_cell_runtime_retained_bytes",
         "Node-wide bytes currently reserved outside Cell mailboxes.",
     );
@@ -759,6 +840,26 @@ fn describe_metrics(recorder: &impl Recorder) {
         recorder,
         "crab_http_server_cell_runtime_retained_capacity_bytes",
         "Startup admission ceiling for node-wide retained bytes.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_http_server_cell_runtime_worker_jobs",
+        "SQL worker jobs currently admitted by the shared Cell ledger.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_http_server_cell_runtime_worker_job_capacity",
+        "SQL worker-job ceiling in the shared Cell ledger.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_http_server_cell_runtime_primitive_jobs",
+        "Primitive jobs currently admitted by the shared Cell ledger.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_http_server_cell_runtime_primitive_job_capacity",
+        "Primitive-job ceiling in the shared Cell ledger.",
     );
     describe_gauge(
         recorder,
@@ -794,6 +895,11 @@ fn describe_metrics(recorder: &impl Recorder) {
         recorder,
         "crab_cell_node_log_append_bytes_total",
         "Bytes attempted across bounded follower append lanes by result.",
+    );
+    describe_counter(
+        recorder,
+        "crab_cell_resident_route_total",
+        "Actor-owned resident route lookups by bounded outcome.",
     );
     describe_gauge(
         recorder,
@@ -898,8 +1004,14 @@ mod tests {
             receive_workers: 1,
             cell_active: 0,
             cell_active_capacity: 7,
+            cell_resident_bytes: 0,
+            cell_resident_capacity_bytes: 458_752,
             cell_retained_bytes: 0,
             cell_retained_capacity_bytes: 4_096,
+            cell_worker_jobs: 1,
+            cell_worker_job_capacity: 4,
+            cell_primitive_jobs: 0,
+            cell_primitive_job_capacity: 4,
             cell_local_disk_reserved_bytes: 0,
             cell_local_disk_capacity_bytes: 8_192,
             cell_node_log_uncovered_bytes: 128,
@@ -926,6 +1038,14 @@ mod tests {
         );
         <Metrics as crab_cell_runtime::CellTelemetry>::node_log_append(&metrics, true, 512);
         <Metrics as crab_cell_runtime::CellTelemetry>::node_log_append(&metrics, false, 128);
+        <Metrics as crab_cell_runtime::CellTelemetry>::resident_route(
+            &metrics,
+            crab_cell_runtime::ResidentRouteOutcome::Hit,
+        );
+        <Metrics as crab_cell_runtime::CellTelemetry>::resident_route(
+            &metrics,
+            crab_cell_runtime::ResidentRouteOutcome::Miss,
+        );
         metrics.record_self_fence(SelfFenceReason::Refresh);
         metrics.record_self_fence(SelfFenceReason::Shutdown);
         metrics.update_recovery_states(1, 0);
@@ -959,6 +1079,8 @@ mod tests {
         assert!(rendered.contains("crab_http_server_repositories 2"));
         assert!(rendered.contains("crab_http_server_cell_runtime_active_cells 0"));
         assert!(rendered.contains("crab_http_server_cell_runtime_active_cell_capacity 7"));
+        assert!(rendered.contains("crab_http_server_cell_runtime_resident_bytes 0"));
+        assert!(rendered.contains("crab_http_server_cell_runtime_resident_capacity_bytes 458752"));
         assert!(rendered.contains("crab_http_server_cell_runtime_retained_bytes 0"));
         assert!(rendered.contains("crab_http_server_cell_runtime_retained_capacity_bytes 4096"));
         assert!(rendered.contains("crab_http_server_cell_runtime_local_disk_reserved_bytes 0"));
@@ -969,6 +1091,8 @@ mod tests {
         assert!(rendered.contains("crab_cell_durability_proofs_total{source=\"object\"} 1"));
         assert!(rendered.contains("crab_cell_node_log_append_bytes_total{result=\"acked\"} 512"));
         assert!(rendered.contains("crab_cell_node_log_append_bytes_total{result=\"nacked\"} 128"));
+        assert!(rendered.contains("crab_cell_resident_route_total{outcome=\"hit\"} 1"));
+        assert!(rendered.contains("crab_cell_resident_route_total{outcome=\"miss\"} 1"));
         assert!(rendered.contains("crab_cell_self_fences_total{reason=\"refresh\"} 1"));
         assert!(rendered.contains("crab_cell_session_lease_seconds 0"));
         assert!(rendered.contains("crab_cell_node_log_recoveries{state=\"running\"} 1"));
