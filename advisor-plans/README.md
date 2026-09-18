@@ -187,6 +187,14 @@ movement/fault proof, protected Kubernetes receipts, and the named plan-016
 retain/deprecate/hard-remove decision. Plan 017 remains correctly blocked; no
 standalone export or stored prefix was removed.
 
+The signed placement snapshot now has an end-to-end local provenance check:
+`NodePublisher` publishes while holding one runtime ledger byte/job reservation,
+and the peer test verifies that the signed memory/disk totals and Cell/job
+counts come from that coherent runtime sample while free headroom remains
+clamped. Nested cgroup fixture parsing and process file-capacity checks cover
+the fail-closed host probe; process-wide parity and multi-process convergence
+remain qualification work.
+
 The coordination kernel now records a typed intent beside every local effect
 identity. A completion must match both the activation generation and its
 effect family (work, hydration, inventory, publication, proof, or renewal),

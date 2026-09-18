@@ -2091,7 +2091,19 @@ mod tests {
             crab_ltx::DiskBudget::new(1 << 20),
         )
         .unwrap();
-        let publisher = Arc::new(publisher.with_follower_store(follower_store));
+        let runtime = crab_cell_runtime::CellRuntime::new(
+            crab_cell_runtime::SqlWorkerPool::new(2, 4).unwrap(),
+            2_048,
+            session,
+        )
+        .unwrap();
+        let retained = runtime.try_reserve_node_bytes(512).unwrap();
+        let job = runtime.try_reserve_worker_job().unwrap().unwrap();
+        let publisher = Arc::new(
+            publisher
+                .with_follower_store(follower_store)
+                .with_runtime(runtime.clone()),
+        );
 
         let published = publisher.publish_initial().await.unwrap();
         publisher.lease_guard().unwrap().check().unwrap();
@@ -2100,6 +2112,19 @@ mod tests {
             crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION
         );
         assert!(published.advertisement().capacity().follower_free_bytes > 0);
+        let resources = publisher.local_resources().unwrap();
+        let placement = published.advertisement().placement_capacity().unwrap();
+        assert_eq!(placement.memory_capacity_bytes, resources.memory_bytes);
+        assert_eq!(placement.disk_capacity_bytes, resources.disk_capacity_bytes);
+        assert_eq!(placement.active_cells, 0);
+        assert_eq!(placement.max_active_cells, 4);
+        assert_eq!(placement.running_jobs, 1);
+        assert_eq!(placement.job_capacity, 6);
+        assert!(
+            published.advertisement().capacity().free_memory_bytes
+                <= resources.memory_bytes.saturating_sub(512)
+        );
+        assert!(published.advertisement().capacity().job_credits <= 5);
         assert_eq!(
             publisher
                 .advertisement(2, now_ms().unwrap(), true)
@@ -2218,5 +2243,8 @@ mod tests {
             )
             .is_err()
         );
+        drop(job);
+        drop(retained);
+        runtime.shutdown().await.unwrap();
     }
 }

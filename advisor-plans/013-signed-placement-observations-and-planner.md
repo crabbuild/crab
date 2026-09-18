@@ -1,6 +1,6 @@
 # Signed live placement observations and pure weighted planner
 
-Status: IN PROGRESS — versioned signed placement observations now carry measured memory/disk totals and one coherent runtime Cell/job snapshot; advertised free headroom is clamped by unified runtime reservations and fail-closed nested Linux cgroup probes; cold activation now uses a bounded authenticated activation hint; process-wide probe parity and multi-process convergence remain
+Status: IN PROGRESS — versioned signed placement observations now carry measured memory/disk totals and one coherent runtime Cell/job snapshot; advertised free headroom is clamped by unified runtime reservations and fail-closed nested Linux cgroup probes; cold activation now uses a bounded authenticated activation hint; process-wide probe parity and multi-process convergence remain the only placement release gates
 Priority: P0
 Effort: XL
 Risk: High
@@ -109,7 +109,7 @@ git diff --check
 
 - [x] Placement observations are versioned, session-bound, signed, timestamped,
       and rejected when forged or stale.
-- [ ] Runtime values come from the unified ledger and measured cgroup/host
+- [x] Runtime values come from the unified ledger and measured cgroup/host
       limits, with fail-safe missing-value semantics.
 - [x] The planner is pure, deterministic, permutation invariant, and uses a
       total ordering with stable tie-breaks.
@@ -120,6 +120,15 @@ git diff --check
 - [x] No planner code writes ownership/control or moves an active Cell.
 - [x] Mixed-version behavior is explicit and tested.
 - [x] Existing scheduler scan assignment and peer signature tests pass.
+
+Local provenance proof: `peer::tests::node_publisher_creates_one_local_session_and_publishes_before_serving`
+holds a runtime ledger byte and primitive-job reservation while publishing one
+advertisement, then checks the signed memory/disk totals, active-Cell/job
+snapshot, and clamped free headroom against that same runtime and measured
+`LocalResources` sample. `local_resources_include_process_file_capacity` plus
+the nested cgroup fixture tests cover the host/cgroup probe boundary and its
+fail-closed parsing rules. The remaining process-wide probe parity and
+multi-process convergence evidence belongs to plan 015.
 
 ## Stop conditions
 
