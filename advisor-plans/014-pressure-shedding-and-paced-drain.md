@@ -156,7 +156,10 @@ acquisition. The companion
 `failed_takeover_receiver_does_not_leave_authority_owned` case applies the same
 rollback to a fenced-owner takeover. Recovery overlays are deliberately not
 released by this cleanup because their follower proof must be replayed and
-sealed before the Cell becomes idle.
+sealed before the Cell becomes idle. The feature-gated
+`independent_process_receiver_failure_returns_exact_idle_root` probe repeats
+the idle failure through a separate process and the shared filesystem CAS
+authority.
 These local proofs do not replace the protected three-Pod membership-loss or
 directional-partition receipt required for release.
 

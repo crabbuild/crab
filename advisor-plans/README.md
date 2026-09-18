@@ -147,7 +147,7 @@ Local proof completed:
 
 - `crab-cell-runtime`: 210 library tests passed (one provider test ignored),
   47 default actor tests passed (one provider test ignored), and the
-  process-support actor matrix runs 51 cases with 50 passing and one provider
+  process-support actor matrix runs 52 cases with 51 passing and one provider
   test ignored. All primitive,
   migration, publication, simulator, and workflow suites pass. The ignored
   source-loss and retention tests also pass against an isolated local RustFS

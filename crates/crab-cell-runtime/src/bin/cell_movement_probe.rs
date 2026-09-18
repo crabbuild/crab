@@ -28,11 +28,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None | Some("drain") => ProbeMode::Drain,
         Some("crash") => ProbeMode::Crash,
         Some("lost-release") => ProbeMode::LostRelease,
-        Some(_) => return Err("mode must be drain, crash, or lost-release".into()),
+        Some("fail-receiver") => ProbeMode::FailReceiver,
+        Some(_) => {
+            return Err("mode must be drain, crash, lost-release, or fail-receiver".into());
+        }
     };
     if args.next().is_some() {
         return Err(
-            "usage: cell_movement_probe <store-root> <partition> <session> <destination> <hold-ms> [drain|crash|lost-release]"
+            "usage: cell_movement_probe <store-root> <partition> <session> <destination> <hold-ms> [drain|crash|lost-release|fail-receiver]"
                 .into(),
         );
     }
@@ -74,10 +77,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         session,
         endpoint: "https://process-movement-probe.invalid".into(),
     };
-    let handle = match runtime
+    let acquisition = runtime
         .acquire_idle_restored(proof, replica, authority, observed, destination, owner)
-        .await
-    {
+        .await;
+    if matches!(mode, ProbeMode::FailReceiver) {
+        match acquisition {
+            Ok(handle) => {
+                handle.drain().await?;
+                runtime.shutdown().await?;
+                return Err("receiver-failure probe unexpectedly activated the Cell".into());
+            }
+            Err(_) => {
+                runtime.shutdown().await?;
+                return Ok(());
+            }
+        }
+    }
+    let handle = match acquisition {
         Ok(handle) => handle,
         Err(error) => {
             runtime.shutdown().await?;
@@ -104,6 +120,7 @@ enum ProbeMode {
     Drain,
     Crash,
     LostRelease,
+    FailReceiver,
 }
 
 fn required(args: &mut impl Iterator<Item = String>, name: &str) -> Result<String, String> {

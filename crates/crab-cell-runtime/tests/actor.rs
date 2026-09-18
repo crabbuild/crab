@@ -2031,6 +2031,67 @@ async fn independent_processes_allow_one_idle_cell_winner() {
 
 #[cfg(feature = "process-test-support")]
 #[tokio::test(flavor = "multi_thread")]
+async fn independent_process_receiver_failure_returns_exact_idle_root() {
+    let object_root = tempfile::TempDir::new().unwrap();
+    let fixture = filesystem_fixture(b"process-movement-receiver-failure", object_root.path());
+    let session = SessionId::from_bytes([89; 16]);
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 * 1024 * 1024, session).unwrap();
+    let handle = bootstrap_on(&runtime, &fixture, session).await;
+    handle.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let idle = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let root = idle.value().ltx_root();
+    let binary = std::env::var("CARGO_BIN_EXE_cell_movement_probe")
+        .expect("Cargo must provide the movement probe binary to integration tests");
+    let destination = fixture
+        ._directory
+        .path()
+        .join("process-receiver-parent-does-not-exist")
+        .join("process-receiver.sqlite");
+    std::fs::create_dir_all(&destination).unwrap();
+    let status = tokio::task::spawn_blocking({
+        let store_root = object_root.path().to_owned();
+        move || {
+            std::process::Command::new(binary)
+                .args([
+                    store_root.as_os_str().to_string_lossy().as_ref(),
+                    "process-movement-receiver-failure",
+                    "59595959595959595959595959595959",
+                    destination.to_string_lossy().as_ref(),
+                    "0",
+                    "fail-receiver",
+                ])
+                .output()
+                .unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        status.status.success(),
+        "receiver-failure probe failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    let current = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.value().state, ControlState::Idle);
+    assert!(current.value().owner.is_none());
+    assert_eq!(current.value().ltx_root(), root);
+}
+
+#[cfg(feature = "process-test-support")]
+#[tokio::test(flavor = "multi_thread")]
 async fn crashed_process_is_fenced_before_successor_restore() {
     let object_root = tempfile::TempDir::new().unwrap();
     let fixture = filesystem_fixture(b"process-movement-crash", object_root.path());
