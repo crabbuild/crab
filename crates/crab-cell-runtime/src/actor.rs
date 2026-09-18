@@ -2394,7 +2394,7 @@ fn start_next(
             let Some(publisher) = active.publisher.take() else {
                 let mut migration = migration;
                 send_migration_reply(&mut migration, Err(Error::Fenced));
-                active.coordination.step(CoordinationInput::Fence);
+                finish_migration(active, true);
                 return;
             };
             let effect_id = active.begin_task(CoordinationEffect::Work(kind));
