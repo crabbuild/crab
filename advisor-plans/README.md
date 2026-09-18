@@ -213,6 +213,11 @@ the new transition tests cover fenced work and migration completion so a task
 cannot accidentally reopen a serving Cell or let a later request overtake an
 unpublished result.
 
+The schedule transition now distinguishes `ReadyToDeactivateFenced` from a
+normal live drain. Release-path selection therefore comes from the kernel
+decision rather than an actor-side fenced-state read, including after node-lease
+loss.
+
 Blob upload lifetimes and Cron first-due windows are validated from the
 mutation-issued timestamp, while the serialized Cell still rejects an upload
 that has expired before acceptance. This keeps absolute caller deadlines stable

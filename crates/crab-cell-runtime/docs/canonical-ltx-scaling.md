@@ -1177,7 +1177,9 @@ observations and the kernel centrally decides dispatch, wait, deactivation, or
 fence, so `actor.rs` does not duplicate those predicates. Work, migration,
 publication, renewal, and stale-hydration completions also carry their fence
 observation into one kernel transition; the actor only maps the returned `Fence`
-decision to cleanup, while pending commands remain busy until proof;
+decision to cleanup, while pending commands remain busy until proof. The
+schedule transition also distinguishes `ReadyToDeactivateFenced` from a normal
+live drain, so release-path selection does not re-read actor lifecycle state;
 background hydration and renewal use the same queue/publication/lease
 observation boundary; the test-only
 simulator replays fixed seeds and checks acknowledgement/publication invariants;

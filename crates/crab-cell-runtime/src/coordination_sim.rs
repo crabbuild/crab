@@ -415,7 +415,9 @@ impl Simulation {
                 let decision = self.state.step(CoordinationInput::BeginDrain);
                 if matches!(
                     decision,
-                    CoordinationDecision::Started | CoordinationDecision::ReadyToDeactivate
+                    CoordinationDecision::Started
+                        | CoordinationDecision::ReadyToDeactivate
+                        | CoordinationDecision::ReadyToDeactivateFenced
                 ) {
                     self.movement = MovementPhase::Quiescing;
                 }

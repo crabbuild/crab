@@ -134,6 +134,7 @@ pub(crate) enum CoordinationDecision {
     StaleEffect,
     Ignored,
     ReadyToDeactivate,
+    ReadyToDeactivateFenced,
     StartQueuedWork,
     Fence,
 }
@@ -324,19 +325,23 @@ impl CoordinationState {
                 publication_blocked,
                 lease_live,
             } => {
-                let can_deactivate = self.ready_to_deactivate(queue_empty, publisher_ready);
                 if !lease_live {
                     self.lifecycle = Lifecycle::Fenced;
                     self.busy = false;
                     self.renewing = false;
                     if self.ready_to_deactivate(queue_empty, publisher_ready) {
-                        CoordinationDecision::ReadyToDeactivate
+                        CoordinationDecision::ReadyToDeactivateFenced
                     } else {
                         CoordinationDecision::Fence
                     }
-                } else if can_deactivate && (self.is_fenced() || self.is_draining()) && queue_empty
+                } else if (self.is_fenced() || self.is_draining())
+                    && self.ready_to_deactivate(queue_empty, publisher_ready)
                 {
-                    CoordinationDecision::ReadyToDeactivate
+                    if self.is_fenced() {
+                        CoordinationDecision::ReadyToDeactivateFenced
+                    } else {
+                        CoordinationDecision::ReadyToDeactivate
+                    }
                 } else if self.is_fenced()
                     || self.busy
                     || self.renewing
@@ -803,7 +808,7 @@ mod tests {
                 publication_blocked: false,
                 lease_live: false,
             }),
-            CoordinationDecision::ReadyToDeactivate
+            CoordinationDecision::ReadyToDeactivateFenced
         );
         assert!(state.is_fenced());
     }

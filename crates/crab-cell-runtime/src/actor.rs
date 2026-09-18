@@ -1682,7 +1682,10 @@ fn start_shutdown_drain(
         }
         match schedule(active, node_lease.check().is_ok()) {
             CoordinationDecision::ReadyToDeactivate => {
-                ready.push((*cell, active.fenced(), active.unpublished_node_logs != 0));
+                ready.push((*cell, false, active.unpublished_node_logs != 0));
+            }
+            CoordinationDecision::ReadyToDeactivateFenced => {
+                ready.push((*cell, true, active.unpublished_node_logs != 0));
             }
             CoordinationDecision::Fence => fence_active(active),
             _ => {}
@@ -3565,7 +3568,7 @@ fn continue_cell(
     };
     let decision = schedule(active, node_lease.check().is_ok());
     match decision {
-        CoordinationDecision::ReadyToDeactivate if active.fenced() => {
+        CoordinationDecision::ReadyToDeactivateFenced => {
             let preserve_owner = active.unpublished_node_logs != 0;
             start_fenced_deactivate(cell, pool, cells, transitioning, tasks, preserve_owner);
         }

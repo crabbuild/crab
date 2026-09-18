@@ -185,6 +185,12 @@ decision to admission closure and queued/publication cleanup. A pending command
 still keeps `busy` set until its proof completion, so the extraction does not
 allow a later request to overtake an unpublished result.
 
+Deactivation intent is also kernel-owned: `Schedule` returns
+`ReadyToDeactivateFenced` after a fenced lease-loss path, while a draining live
+Cell returns `ReadyToDeactivate`. The actor no longer reads `active.fenced()`
+to choose the release adapter; it only executes the release effect named by the
+decision.
+
 ### 6. Update documentation
 
 Update the design's state machine and ownership table with the implemented
