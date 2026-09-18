@@ -18,6 +18,11 @@ pub struct ResourceCost {
     worker_jobs: usize,
     primitive_jobs: usize,
     hydration_jobs: usize,
+    io_slots: usize,
+    blocking_jobs: usize,
+    recovery_jobs: usize,
+    dirty_jobs: usize,
+    scratch_units: usize,
 }
 
 impl ResourceCost {
@@ -42,6 +47,11 @@ impl ResourceCost {
             worker_jobs: 0,
             primitive_jobs: 0,
             hydration_jobs: 0,
+            io_slots: 0,
+            blocking_jobs: 0,
+            recovery_jobs: 0,
+            dirty_jobs: 0,
+            scratch_units: 0,
         }
     }
 
@@ -83,6 +93,31 @@ impl ResourceCost {
     #[must_use]
     pub const fn hydration_jobs(self) -> usize {
         self.hydration_jobs
+    }
+
+    #[must_use]
+    pub const fn io_slots(self) -> usize {
+        self.io_slots
+    }
+
+    #[must_use]
+    pub const fn blocking_jobs(self) -> usize {
+        self.blocking_jobs
+    }
+
+    #[must_use]
+    pub const fn recovery_jobs(self) -> usize {
+        self.recovery_jobs
+    }
+
+    #[must_use]
+    pub const fn dirty_jobs(self) -> usize {
+        self.dirty_jobs
+    }
+
+    #[must_use]
+    pub const fn scratch_units(self) -> usize {
+        self.scratch_units
     }
 
     #[must_use]
@@ -133,6 +168,36 @@ impl ResourceCost {
         self
     }
 
+    #[must_use]
+    pub const fn with_io_slots(mut self, slots: usize) -> Self {
+        self.io_slots = slots;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_blocking_jobs(mut self, jobs: usize) -> Self {
+        self.blocking_jobs = jobs;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_recovery_jobs(mut self, jobs: usize) -> Self {
+        self.recovery_jobs = jobs;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_dirty_jobs(mut self, jobs: usize) -> Self {
+        self.dirty_jobs = jobs;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_scratch_units(mut self, units: usize) -> Self {
+        self.scratch_units = units;
+        self
+    }
+
     fn checked_add(self, other: Self) -> Option<Self> {
         Some(Self {
             active_cells: self.active_cells.checked_add(other.active_cells)?,
@@ -143,6 +208,11 @@ impl ResourceCost {
             worker_jobs: self.worker_jobs.checked_add(other.worker_jobs)?,
             primitive_jobs: self.primitive_jobs.checked_add(other.primitive_jobs)?,
             hydration_jobs: self.hydration_jobs.checked_add(other.hydration_jobs)?,
+            io_slots: self.io_slots.checked_add(other.io_slots)?,
+            blocking_jobs: self.blocking_jobs.checked_add(other.blocking_jobs)?,
+            recovery_jobs: self.recovery_jobs.checked_add(other.recovery_jobs)?,
+            dirty_jobs: self.dirty_jobs.checked_add(other.dirty_jobs)?,
+            scratch_units: self.scratch_units.checked_add(other.scratch_units)?,
         })
     }
 
@@ -156,6 +226,11 @@ impl ResourceCost {
             worker_jobs: self.worker_jobs.checked_sub(other.worker_jobs)?,
             primitive_jobs: self.primitive_jobs.checked_sub(other.primitive_jobs)?,
             hydration_jobs: self.hydration_jobs.checked_sub(other.hydration_jobs)?,
+            io_slots: self.io_slots.checked_sub(other.io_slots)?,
+            blocking_jobs: self.blocking_jobs.checked_sub(other.blocking_jobs)?,
+            recovery_jobs: self.recovery_jobs.checked_sub(other.recovery_jobs)?,
+            dirty_jobs: self.dirty_jobs.checked_sub(other.dirty_jobs)?,
+            scratch_units: self.scratch_units.checked_sub(other.scratch_units)?,
         })
     }
 
@@ -168,6 +243,11 @@ impl ResourceCost {
             && self.worker_jobs <= limit.worker_jobs
             && self.primitive_jobs <= limit.primitive_jobs
             && self.hydration_jobs <= limit.hydration_jobs
+            && self.io_slots <= limit.io_slots
+            && self.blocking_jobs <= limit.blocking_jobs
+            && self.recovery_jobs <= limit.recovery_jobs
+            && self.dirty_jobs <= limit.dirty_jobs
+            && self.scratch_units <= limit.scratch_units
     }
 }
 
@@ -249,6 +329,32 @@ impl ResourceLedger {
         Ok(())
     }
 
+    pub(crate) fn set_host_limits(
+        &self,
+        io_slots: usize,
+        blocking_jobs: usize,
+        recovery_jobs: usize,
+        dirty_jobs: usize,
+        scratch_units: usize,
+    ) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| Error::Control("resource ledger lock poisoned"))?;
+        let limit = state
+            .limit
+            .with_io_slots(io_slots)
+            .with_blocking_jobs(blocking_jobs)
+            .with_recovery_jobs(recovery_jobs)
+            .with_dirty_jobs(dirty_jobs)
+            .with_scratch_units(scratch_units);
+        if !state.used.fits_within(limit) {
+            return Err(Error::Capacity("resource ledger host limits"));
+        }
+        state.limit = limit;
+        Ok(())
+    }
+
     pub(crate) fn reconcile_disk(&self, bytes: u64) -> Result<()> {
         let mut state = self
             .state
@@ -304,9 +410,49 @@ impl crab_ltx::DiskBudgetAdmission for LedgerDiskAdmission {
     }
 }
 
+pub(crate) struct LedgerHostResourceAdmission {
+    pub(crate) state: Weak<Mutex<ResourceSnapshot>>,
+}
+
+struct LedgerHostResourcePermit {
+    _reservation: ResourceReservation,
+}
+
+impl crab_ltx::HostResourcePermit for LedgerHostResourcePermit {}
+
+impl crab_ltx::HostResourceAdmission for LedgerHostResourceAdmission {
+    fn reserve(
+        &self,
+        kind: crab_ltx::HostResourceKind,
+        units: u32,
+    ) -> crab_ltx::Result<Box<dyn crab_ltx::HostResourcePermit>> {
+        let Some(state) = self.state.upgrade() else {
+            return Err(crab_ltx::CrabError::InvalidState("runtime ledger closed"));
+        };
+        let units = usize::try_from(units)
+            .map_err(|_| crab_ltx::CrabError::Limit("runtime host resource units"))?;
+        let cost = match kind {
+            crab_ltx::HostResourceKind::Io => ResourceCost::zero().with_io_slots(units),
+            crab_ltx::HostResourceKind::BlockingJob => {
+                ResourceCost::zero().with_blocking_jobs(units)
+            }
+            crab_ltx::HostResourceKind::Recovery => ResourceCost::zero().with_recovery_jobs(units),
+            crab_ltx::HostResourceKind::Dirty => ResourceCost::zero().with_dirty_jobs(units),
+            crab_ltx::HostResourceKind::Scratch => ResourceCost::zero().with_scratch_units(units),
+        };
+        let reservation = ResourceLedger { state }
+            .try_reserve(cost)
+            .map_err(|error| crab_ltx::CrabError::Other(Box::new(error)))?;
+        Ok(Box::new(LedgerHostResourcePermit {
+            _reservation: reservation,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crab_ltx::HostResourceAdmission;
 
     #[test]
     fn reservations_are_bounded_and_return_to_baseline() {
@@ -428,5 +574,41 @@ mod tests {
         drop(reservation);
         assert_eq!(budget.used(), 0);
         assert_eq!(ledger.snapshot().unwrap().used.disk_bytes(), 0);
+    }
+
+    #[test]
+    fn ltx_host_admissions_share_one_runtime_ledger() {
+        let ledger = ResourceLedger::new(
+            ResourceCost::zero()
+                .with_io_slots(1)
+                .with_blocking_jobs(1)
+                .with_recovery_jobs(1)
+                .with_dirty_jobs(1)
+                .with_scratch_units(2),
+        );
+        let admission = LedgerHostResourceAdmission {
+            state: ledger.weak(),
+        };
+        let io = admission
+            .reserve(crab_ltx::HostResourceKind::Io, 1)
+            .unwrap();
+        assert!(
+            admission
+                .reserve(crab_ltx::HostResourceKind::Io, 1)
+                .is_err()
+        );
+        let scratch = admission
+            .reserve(crab_ltx::HostResourceKind::Scratch, 2)
+            .unwrap();
+        assert!(
+            admission
+                .reserve(crab_ltx::HostResourceKind::Scratch, 1)
+                .is_err()
+        );
+        assert_eq!(ledger.snapshot().unwrap().used.io_slots(), 1);
+        assert_eq!(ledger.snapshot().unwrap().used.scratch_units(), 2);
+        drop(scratch);
+        drop(io);
+        assert_eq!(ledger.snapshot().unwrap().used, ResourceCost::zero());
     }
 }

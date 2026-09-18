@@ -482,7 +482,10 @@ roots, page maps, sparse writers and database handles do not retain it.
 Closed semaphores reject new work. These are concurrency ceilings, not byte-weighted
 memory admission, bounded caller task queues or admission for synchronous local APIs.
 The disk budget covers managed WAL/LTX and sparse-page growth; request scheduling
-and memory admission remain host policy.
+and memory admission remain host policy. An embedding runtime may install one
+`HostResourceAdmission` so each host I/O, blocking job, recovery cohort, dirty
+cohort and scratch MiB also owns a runtime-ledger token; standalone LTX hosts
+without that hook retain the semaphore-only contract.
 
 The clock controls capture timestamps and checkpoint ages; compaction receives
 explicit monotonic times from its owner. No default provider or dependency

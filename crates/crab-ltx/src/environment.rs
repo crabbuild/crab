@@ -28,6 +28,38 @@ pub trait DiskBudgetAdmission: Send + Sync {
     }
 }
 
+/// Resource class charged by an embedding runtime for replica-host work.
+#[cfg(feature = "replica")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostResourceKind {
+    /// One bounded object-store or immutable-file I/O operation.
+    Io,
+    /// One blocking host job dispatched to the replica executor.
+    BlockingJob,
+    /// One full recovery or restore cohort.
+    Recovery,
+    /// One capture/compaction dirty-memory cohort.
+    Dirty,
+    /// One MiB of temporary scratch admission.
+    Scratch,
+}
+
+/// Admission hook used by an embedding runtime to charge host work to its
+/// node-wide resource ledger. The returned permit owns the charge until drop.
+#[cfg(feature = "replica")]
+pub trait HostResourceAdmission: Send + Sync {
+    /// Reserves `units` of one host resource without waiting.
+    fn reserve(
+        &self,
+        kind: HostResourceKind,
+        units: u32,
+    ) -> crate::Result<Box<dyn HostResourcePermit>>;
+}
+
+/// Opaque lifetime token returned by [`HostResourceAdmission::reserve`].
+#[cfg(feature = "replica")]
+pub trait HostResourcePermit: Send + Sync {}
+
 type DiskAdmissions = Vec<Arc<dyn DiskBudgetAdmission>>;
 
 /// Shared byte-precise admission for local files owned by active database work.
@@ -844,11 +876,19 @@ pub struct Host {
     #[cfg(feature = "replica")]
     io_slots: Arc<tokio::sync::Semaphore>,
     #[cfg(feature = "replica")]
+    io_capacity: usize,
+    #[cfg(feature = "replica")]
     job_slots: Arc<tokio::sync::Semaphore>,
+    #[cfg(feature = "replica")]
+    job_capacity: usize,
     #[cfg(feature = "replica")]
     recovery_slots: Arc<tokio::sync::Semaphore>,
     #[cfg(feature = "replica")]
+    recovery_capacity: usize,
+    #[cfg(feature = "replica")]
     dirty_slots: Arc<tokio::sync::Semaphore>,
+    #[cfg(feature = "replica")]
+    dirty_capacity: usize,
     #[cfg(feature = "replica")]
     scratch_slots: Arc<tokio::sync::Semaphore>,
     #[cfg(feature = "replica")]
@@ -858,11 +898,25 @@ pub struct Host {
     #[cfg(feature = "replica")]
     directory_cache: Option<Arc<DirectoryCache>>,
     #[cfg(feature = "replica")]
+    resource_admission: Option<Arc<dyn HostResourceAdmission>>,
+    #[cfg(feature = "replica")]
     recovery: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     #[cfg(feature = "replica")]
     dirty: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     #[cfg(feature = "replica")]
     scratch: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    #[cfg(feature = "replica")]
+    recovery_resource: Option<Arc<dyn HostResourcePermit>>,
+    #[cfg(feature = "replica")]
+    dirty_resource: Option<Arc<dyn HostResourcePermit>>,
+    #[cfg(feature = "replica")]
+    scratch_resource: Option<Arc<dyn HostResourcePermit>>,
+}
+
+#[cfg(feature = "replica")]
+pub(crate) struct HostIoPermit {
+    _semaphore: tokio::sync::OwnedSemaphorePermit,
+    _resource: Option<Arc<dyn HostResourcePermit>>,
 }
 
 impl Host {
@@ -941,6 +995,47 @@ impl Host {
         self
     }
 
+    /// Installs one embedding runtime ledger for bounded replica-host work.
+    #[cfg(feature = "replica")]
+    pub fn install_resource_admission(&mut self, admission: Arc<dyn HostResourceAdmission>) {
+        self.resource_admission = Some(admission);
+    }
+
+    /// Returns the currently configured object-store I/O capacity.
+    #[cfg(feature = "replica")]
+    #[must_use]
+    pub fn io_capacity(&self) -> usize {
+        self.io_capacity
+    }
+
+    /// Returns the currently configured blocking-job capacity.
+    #[cfg(feature = "replica")]
+    #[must_use]
+    pub fn job_capacity(&self) -> usize {
+        self.job_capacity
+    }
+
+    /// Returns the currently configured recovery-job capacity.
+    #[cfg(feature = "replica")]
+    #[must_use]
+    pub fn recovery_capacity(&self) -> usize {
+        self.recovery_capacity
+    }
+
+    /// Returns the currently configured dirty-memory capacity.
+    #[cfg(feature = "replica")]
+    #[must_use]
+    pub fn dirty_capacity(&self) -> usize {
+        self.dirty_capacity
+    }
+
+    /// Returns the currently configured scratch capacity in MiB units.
+    #[cfg(feature = "replica")]
+    #[must_use]
+    pub const fn scratch_capacity(&self) -> u32 {
+        self.scratch_capacity
+    }
+
     /// Returns the configured byte ceiling shared by local replica artifacts.
     #[must_use]
     pub fn local_disk_capacity(&self) -> u64 {
@@ -997,6 +1092,7 @@ impl Host {
     #[cfg(feature = "replica")]
     #[must_use]
     pub fn with_io_slots(mut self, slots: Arc<tokio::sync::Semaphore>) -> Self {
+        self.io_capacity = slots.available_permits();
         self.io_slots = slots;
         self
     }
@@ -1008,6 +1104,7 @@ impl Host {
     #[cfg(feature = "replica")]
     #[must_use]
     pub fn with_job_slots(mut self, slots: Arc<tokio::sync::Semaphore>) -> Self {
+        self.job_capacity = slots.available_permits();
         self.job_slots = slots;
         self
     }
@@ -1020,6 +1117,7 @@ impl Host {
     #[cfg(feature = "replica")]
     #[must_use]
     pub fn with_recovery_slots(mut self, slots: Arc<tokio::sync::Semaphore>) -> Self {
+        self.recovery_capacity = slots.available_permits();
         self.recovery_slots = slots;
         self
     }
@@ -1031,6 +1129,7 @@ impl Host {
     #[cfg(feature = "replica")]
     #[must_use]
     pub fn with_dirty_slots(mut self, slots: Arc<tokio::sync::Semaphore>) -> Self {
+        self.dirty_capacity = slots.available_permits();
         self.dirty_slots = slots;
         self
     }
@@ -1056,16 +1155,29 @@ impl Host {
     }
 
     #[cfg(feature = "replica")]
+    fn reserve_resource(
+        &self,
+        kind: HostResourceKind,
+        units: u32,
+    ) -> crate::Result<Option<Arc<dyn HostResourcePermit>>> {
+        self.resource_admission
+            .as_ref()
+            .map(|admission| admission.reserve(kind, units).map(Arc::from))
+            .transpose()
+    }
+
+    #[cfg(feature = "replica")]
     pub(crate) async fn for_dirty(&self) -> crate::Result<Self> {
         let mut host = self.clone();
         if host.dirty.is_none() {
-            host.dirty = Some(Arc::new(
-                self.dirty_slots
-                    .clone()
-                    .acquire_owned()
-                    .await
-                    .map_err(|e| crate::CrabError::Other(Box::new(e)))?,
-            ));
+            let permit = self
+                .dirty_slots
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|e| crate::CrabError::Other(Box::new(e)))?;
+            host.dirty_resource = self.reserve_resource(HostResourceKind::Dirty, 1)?;
+            host.dirty = Some(Arc::new(permit));
         }
         Ok(host)
     }
@@ -1074,13 +1186,14 @@ impl Host {
     pub(crate) async fn for_recovery(&self) -> crate::Result<Self> {
         let mut host = self.for_dirty().await?;
         if host.recovery.is_none() {
-            host.recovery = Some(Arc::new(
-                self.recovery_slots
-                    .clone()
-                    .acquire_owned()
-                    .await
-                    .map_err(|e| crate::CrabError::Other(Box::new(e)))?,
-            ));
+            let permit = self
+                .recovery_slots
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|e| crate::CrabError::Other(Box::new(e)))?;
+            host.recovery_resource = self.reserve_resource(HostResourceKind::Recovery, 1)?;
+            host.recovery = Some(Arc::new(permit));
         }
         Ok(host)
     }
@@ -1104,13 +1217,12 @@ impl Host {
             }
             return Ok(host);
         }
-        host.scratch = Some(Arc::new(
-            self.scratch_slots
-                .clone()
-                .acquire_many_owned(units)
-                .await
-                .map_err(|e| crate::CrabError::Other(Box::new(e)))?,
-        ));
+        let permit = self
+            .scratch_slots
+            .clone()
+            .acquire_many_owned(units)
+            .await
+            .map_err(|e| crate::CrabError::Other(Box::new(e)))?;
         let capacity = self.scratch_capacity as usize;
         let reserved_units = capacity.saturating_sub(self.scratch_slots.available_permits());
         let reserved_bytes = u64::try_from(reserved_units)
@@ -1120,34 +1232,45 @@ impl Host {
         self.scratch_monitor
             .ensure_available(reserved_bytes)
             .map_err(crate::CrabError::Io)?;
+        host.scratch_resource = self.reserve_resource(HostResourceKind::Scratch, units)?;
+        host.scratch = Some(Arc::new(permit));
         Ok(host)
     }
 
     #[cfg(feature = "replica")]
     pub(crate) fn without_recovery(mut self) -> Self {
         self.recovery = None;
+        self.recovery_resource = None;
         self
     }
 
     #[cfg(feature = "replica")]
     pub(crate) fn without_dirty(mut self) -> Self {
         self.dirty = None;
+        self.dirty_resource = None;
         self
     }
 
     #[cfg(feature = "replica")]
     pub(crate) fn without_scratch(mut self) -> Self {
         self.scratch = None;
+        self.scratch_resource = None;
         self
     }
 
     #[cfg(feature = "replica")]
-    pub(crate) async fn io_permit(&self) -> crate::Result<tokio::sync::OwnedSemaphorePermit> {
-        self.io_slots
+    pub(crate) async fn io_permit(&self) -> crate::Result<HostIoPermit> {
+        let permit = self
+            .io_slots
             .clone()
             .acquire_owned()
             .await
-            .map_err(|e| crate::CrabError::Other(Box::new(e)))
+            .map_err(|e| crate::CrabError::Other(Box::new(e)))?;
+        let resource = self.reserve_resource(HostResourceKind::Io, 1)?;
+        Ok(HostIoPermit {
+            _semaphore: permit,
+            _resource: resource,
+        })
     }
 
     #[cfg(feature = "replica")]
@@ -1203,6 +1326,7 @@ impl Host {
             .acquire_owned()
             .await
             .map_err(|e| crate::CrabError::Other(Box::new(e)))?;
+        let resource = self.reserve_resource(HostResourceKind::BlockingJob, 1)?;
         let (send, receive) = tokio::sync::oneshot::channel();
         let recovery = self.recovery.clone();
         let dirty = self.dirty.clone();
@@ -1218,6 +1342,7 @@ impl Host {
             drop(recovery);
             drop(dirty);
             drop(scratch);
+            drop(resource);
             drop(permit);
             let _ = send.send(result);
         }))?;
@@ -1258,6 +1383,8 @@ impl Default for Host {
                 .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(32)))
                 .clone(),
             #[cfg(feature = "replica")]
+            io_capacity: 32,
+            #[cfg(feature = "replica")]
             job_slots: JOBS
                 .get_or_init(|| {
                     Arc::new(tokio::sync::Semaphore::new(
@@ -1266,9 +1393,13 @@ impl Default for Host {
                 })
                 .clone(),
             #[cfg(feature = "replica")]
+            job_capacity: std::thread::available_parallelism().map_or(1, |n| n.get().min(16)),
+            #[cfg(feature = "replica")]
             recovery_slots: RECOVERY
                 .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
                 .clone(),
+            #[cfg(feature = "replica")]
+            recovery_capacity: 2,
             #[cfg(feature = "replica")]
             dirty_slots: DIRTY
                 .get_or_init(|| {
@@ -1277,6 +1408,8 @@ impl Default for Host {
                     ))
                 })
                 .clone(),
+            #[cfg(feature = "replica")]
+            dirty_capacity: std::thread::available_parallelism().map_or(1, |n| n.get().min(16)),
             #[cfg(feature = "replica")]
             scratch_slots: SCRATCH
                 .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(64 * 1024)))
@@ -1288,11 +1421,19 @@ impl Default for Host {
             #[cfg(feature = "replica")]
             directory_cache: None,
             #[cfg(feature = "replica")]
+            resource_admission: None,
+            #[cfg(feature = "replica")]
             recovery: None,
             #[cfg(feature = "replica")]
             dirty: None,
             #[cfg(feature = "replica")]
             scratch: None,
+            #[cfg(feature = "replica")]
+            recovery_resource: None,
+            #[cfg(feature = "replica")]
+            dirty_resource: None,
+            #[cfg(feature = "replica")]
+            scratch_resource: None,
         }
     }
 }

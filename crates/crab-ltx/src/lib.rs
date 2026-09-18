@@ -20,6 +20,8 @@ mod host;
 #[cfg(feature = "replica")]
 pub use environment::{DirectoryCacheStats, ScratchMonitor};
 pub use environment::{DiskBudget, DiskBudgetAdmission, DiskReservation, Host};
+#[cfg(feature = "replica")]
+pub use environment::{HostResourceAdmission, HostResourceKind, HostResourcePermit};
 mod ltx;
 mod lz4_block;
 mod managed;

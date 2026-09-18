@@ -28,8 +28,8 @@ use crate::pressure::{
 };
 use crate::publication::{CellDurabilitySubmitter, NodeDurabilitySlot, PendingDurability};
 use crate::resource::{
-    ACTIVE_CELL_NATIVE_BYTES as ACTIVE_CELL_NATIVE_BYTES_USIZE, LedgerDiskAdmission, ResourceCost,
-    ResourceLedger, ResourceReservation,
+    ACTIVE_CELL_NATIVE_BYTES as ACTIVE_CELL_NATIVE_BYTES_USIZE, LedgerDiskAdmission,
+    LedgerHostResourceAdmission, ResourceCost, ResourceLedger, ResourceReservation,
 };
 use crate::{
     ApplicationId, CatalogEntry, CatalogProof, CatalogRole, CellAuthority, CellId, CellPublisher,
@@ -96,6 +96,16 @@ pub struct CellRuntimeStats {
     primitive_job_capacity: usize,
     hydration_jobs: usize,
     hydration_job_capacity: usize,
+    io_slots: usize,
+    io_slot_capacity: usize,
+    blocking_jobs: usize,
+    blocking_job_capacity: usize,
+    recovery_jobs: usize,
+    recovery_job_capacity: usize,
+    dirty_jobs: usize,
+    dirty_job_capacity: usize,
+    scratch_units: usize,
+    scratch_unit_capacity: usize,
     local_disk_reserved_bytes: u64,
     local_disk_capacity_bytes: u64,
     unpublished_node_log_bytes: u64,
@@ -184,6 +194,66 @@ impl CellRuntimeStats {
     #[must_use]
     pub const fn hydration_job_capacity(self) -> usize {
         self.hydration_job_capacity
+    }
+
+    /// Returns bounded object-store I/O operations currently admitted.
+    #[must_use]
+    pub const fn io_slots(self) -> usize {
+        self.io_slots
+    }
+
+    /// Returns the object-store I/O operation ceiling.
+    #[must_use]
+    pub const fn io_slot_capacity(self) -> usize {
+        self.io_slot_capacity
+    }
+
+    /// Returns blocking host jobs currently admitted.
+    #[must_use]
+    pub const fn blocking_jobs(self) -> usize {
+        self.blocking_jobs
+    }
+
+    /// Returns the blocking host-job ceiling.
+    #[must_use]
+    pub const fn blocking_job_capacity(self) -> usize {
+        self.blocking_job_capacity
+    }
+
+    /// Returns full recovery cohorts currently admitted.
+    #[must_use]
+    pub const fn recovery_jobs(self) -> usize {
+        self.recovery_jobs
+    }
+
+    /// Returns the full recovery-cohort ceiling.
+    #[must_use]
+    pub const fn recovery_job_capacity(self) -> usize {
+        self.recovery_job_capacity
+    }
+
+    /// Returns dirty-memory cohorts currently admitted.
+    #[must_use]
+    pub const fn dirty_jobs(self) -> usize {
+        self.dirty_jobs
+    }
+
+    /// Returns the dirty-memory cohort ceiling.
+    #[must_use]
+    pub const fn dirty_job_capacity(self) -> usize {
+        self.dirty_job_capacity
+    }
+
+    /// Returns temporary scratch units currently admitted.
+    #[must_use]
+    pub const fn scratch_units(self) -> usize {
+        self.scratch_units
+    }
+
+    /// Returns the temporary scratch-unit ceiling.
+    #[must_use]
+    pub const fn scratch_unit_capacity(self) -> usize {
+        self.scratch_unit_capacity
     }
 
     /// Returns the bytes currently reserved in the local replica cache.
@@ -316,6 +386,17 @@ impl CellRuntime {
         pool.configure_retained_capacity(node_retained_bytes)?;
         let resources = pool.resource_ledger();
         resources.set_disk_limit(replica_host.local_disk_capacity())?;
+        resources.set_host_limits(
+            replica_host.io_capacity(),
+            replica_host.job_capacity(),
+            replica_host.recovery_capacity(),
+            replica_host.dirty_capacity(),
+            replica_host.scratch_capacity() as usize,
+        )?;
+        let mut replica_host = replica_host;
+        replica_host.install_resource_admission(Arc::new(LedgerHostResourceAdmission {
+            state: resources.weak(),
+        }));
         replica_host.install_disk_admission(Arc::new(LedgerDiskAdmission {
             state: resources.weak(),
         }))?;
@@ -503,6 +584,16 @@ impl CellRuntime {
             primitive_job_capacity,
             hydration_jobs,
             hydration_job_capacity,
+            io_slots,
+            io_slot_capacity,
+            blocking_jobs,
+            blocking_job_capacity,
+            recovery_jobs,
+            recovery_job_capacity,
+            dirty_jobs,
+            dirty_job_capacity,
+            scratch_units,
+            scratch_unit_capacity,
             disk_bytes,
             disk_capacity_bytes,
         ) = self
@@ -523,11 +614,23 @@ impl CellRuntime {
                     snapshot.limit.primitive_jobs(),
                     snapshot.used.hydration_jobs(),
                     snapshot.limit.hydration_jobs(),
+                    snapshot.used.io_slots(),
+                    snapshot.limit.io_slots(),
+                    snapshot.used.blocking_jobs(),
+                    snapshot.limit.blocking_jobs(),
+                    snapshot.used.recovery_jobs(),
+                    snapshot.limit.recovery_jobs(),
+                    snapshot.used.dirty_jobs(),
+                    snapshot.limit.dirty_jobs(),
+                    snapshot.used.scratch_units(),
+                    snapshot.limit.scratch_units(),
                     snapshot.used.disk_bytes(),
                     snapshot.limit.disk_bytes(),
                 )
             })
-            .unwrap_or((0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+            .unwrap_or((
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ));
         CellRuntimeStats {
             active_cells: self.inner.pool.active_cells(),
             active_cell_capacity: self.inner.pool.active_cell_capacity(),
@@ -543,6 +646,16 @@ impl CellRuntime {
             primitive_job_capacity,
             hydration_jobs,
             hydration_job_capacity,
+            io_slots,
+            io_slot_capacity,
+            blocking_jobs,
+            blocking_job_capacity,
+            recovery_jobs,
+            recovery_job_capacity,
+            dirty_jobs,
+            dirty_job_capacity,
+            scratch_units,
+            scratch_unit_capacity,
             local_disk_reserved_bytes: disk_bytes,
             local_disk_capacity_bytes: disk_capacity_bytes,
             unpublished_node_log_bytes: self
