@@ -138,9 +138,11 @@ CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-014-process-movement \
   independent_processes_allow_one_idle_cell_winner --locked -- --exact --nocapture
 ```
 
-This proves one idle-control winner and exact-root preservation after the
-winner drains. It does not replace the protected three-Pod owner-crash,
-membership-loss, or directional-partition receipt required for release.
+The companion `crashed_process_is_fenced_before_successor_restore` case exits
+one acquired process without draining, fences that stale session, and restores
+the exact root in a successor process. These local proofs do not replace the
+protected three-Pod membership-loss or directional-partition receipt required
+for release.
 
 ## Stop conditions
 

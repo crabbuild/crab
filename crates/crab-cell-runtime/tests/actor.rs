@@ -1785,6 +1785,7 @@ async fn independent_processes_allow_one_idle_cell_winner() {
                 "53535353535353535353535353535353",
                 first_destination.to_string_lossy().as_ref(),
                 "750",
+                "drain",
             ])
             .status()
             .unwrap()
@@ -1801,6 +1802,7 @@ async fn independent_processes_allow_one_idle_cell_winner() {
                 "54545454545454545454545454545454",
                 second_destination.to_string_lossy().as_ref(),
                 "100",
+                "drain",
             ])
             .status()
             .unwrap()
@@ -1817,6 +1819,101 @@ async fn independent_processes_allow_one_idle_cell_winner() {
         .unwrap();
     assert_eq!(final_control.value().state, ControlState::Idle);
     assert_eq!(final_control.value().ltx_root(), Some(root));
+}
+
+#[cfg(feature = "process-test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn crashed_process_is_fenced_before_successor_restore() {
+    let object_root = tempfile::TempDir::new().unwrap();
+    let fixture = filesystem_fixture(b"process-movement-crash", object_root.path());
+    let session = SessionId::from_bytes([85; 16]);
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 * 1024 * 1024, session).unwrap();
+    let handle = bootstrap_on(&runtime, &fixture, session).await;
+    handle.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+
+    let binary = std::env::var("CARGO_BIN_EXE_cell_movement_probe")
+        .expect("Cargo must provide the movement probe binary to integration tests");
+    let destination = fixture._directory.path().join("process-crashed.sqlite");
+    let status = tokio::task::spawn_blocking({
+        let store_root = object_root.path().to_owned();
+        move || {
+            std::process::Command::new(binary)
+                .stderr(std::process::Stdio::null())
+                .args([
+                    store_root.as_os_str().to_string_lossy().as_ref(),
+                    "process-movement-crash",
+                    "55555555555555555555555555555555",
+                    destination.to_string_lossy().as_ref(),
+                    "0",
+                    "crash",
+                ])
+                .status()
+                .unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    assert!(status.success());
+
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let stale = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stale.value().owner.as_ref().map(|owner| owner.session),
+        Some(SessionId::from_bytes([85; 16]))
+    );
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let successor = SessionId::from_bytes([86; 16]);
+    let fenced = fence_session(&fixture.layout, SessionId::from_bytes([85; 16]), successor).await;
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        8 * 1024 * 1024,
+        successor,
+    )
+    .unwrap();
+    let restored = runtime
+        .takeover_restored(
+            proof,
+            fixture.replica.clone(),
+            authority.clone(),
+            stale,
+            fenced.direct_takeover().unwrap(),
+            crab_cell_runtime::RecoveryManifestStore::new(
+                fixture.layout.clone(),
+                Limits::default(),
+            ),
+            fixture._directory.path().join("process-successor.sqlite"),
+            Owner {
+                session: successor,
+                endpoint: "https://process-successor.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        restored
+            .query(64, 64, |connection| {
+                let value = connection
+                    .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+                Ok(value.to_be_bytes().to_vec())
+            })
+            .await
+            .unwrap(),
+        0_i64.to_be_bytes()
+    );
+    restored.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
 }
 
 async fn wait_for_persisted_work(

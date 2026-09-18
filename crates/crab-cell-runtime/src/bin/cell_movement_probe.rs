@@ -24,6 +24,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = decode_fixed::<16>(&required(&mut args, "session")?)?;
     let destination = PathBuf::from(required(&mut args, "destination")?);
     let hold_ms = required(&mut args, "hold milliseconds")?.parse::<u64>()?;
+    let crash = match args.next().as_deref() {
+        None | Some("drain") => false,
+        Some("crash") => true,
+        Some(_) => return Err("mode must be drain or crash".into()),
+    };
     if args.next().is_some() {
         return Err(
             "usage: cell_movement_probe <store-root> <partition> <session> <destination> <hold-ms>"
@@ -78,6 +83,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     tokio::time::sleep(Duration::from_millis(hold_ms)).await;
+    if crash {
+        std::process::exit(0);
+    }
     handle.drain().await?;
     runtime.shutdown().await?;
     Ok(())
