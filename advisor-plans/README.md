@@ -68,7 +68,7 @@ conditions so an executor can use it without relying on conversation history.
 | [005](005-pure-cell-coordination-kernel.md) | Make protocol decisions pure while retaining one production adapter | P0 | XL | 004 | IN PROGRESS |
 | [006](006-deterministic-coordination-simulation.md) | Replayable adversarial schedules and broken-variant proof | P0 | L | 005 | IN PROGRESS |
 | [007](007-cell-coordination-tla-model.md) | Small-state formal model and code/model delta ledger | P1 | L | 005 | IN PROGRESS |
-| [008](008-resident-cell-local-routing.md) | Zero-metadata-I/O local handle acquisition for safe resident Cells | P0 | L | 004, 005 | IN PROGRESS |
+| [008](008-resident-cell-local-routing.md) | Zero-metadata-I/O local handle acquisition for safe resident Cells | P0 | L | 004, 005 | DONE |
 | [009](009-background-hydration-and-resident-promotion.md) | Bounded sparse hydration and verified resident promotion | P0 | L | 008 | IN PROGRESS |
 | [010](010-streaming-cell-ltx-publication.md) | Bounded-memory native and bundle publication | P0 | XL | 005 | IN PROGRESS |
 | [011](011-persistent-directory-node-cache.md) | Restart-persistent verified directory acceleration | P1 | L | 010 | DONE |
@@ -146,7 +146,7 @@ authorized standalone-contract decision.
 Local proof completed:
 
 - `crab-cell-runtime`: 207 library tests passed (one provider test ignored),
-  40 actor tests passed (one provider test ignored), and all primitive,
+  41 actor tests passed (one provider test ignored), and all primitive,
   migration, publication, simulator, and workflow suites pass. The ignored
   source-loss and retention tests also pass against an isolated local RustFS
   bucket when their provider variables are supplied. The shared
@@ -229,6 +229,14 @@ cache-enabled replica reads the same page with fewer origin bytes, proving the
 directory nodes came from the persisted cache while the page frame still comes
 from canonical storage. The test is repeatable and passes with the full
 `crab-ltx --features replica` cell-root target.
+
+Plan 008's lifecycle race is also covered by
+`resident_lookup_is_invalidated_before_drain_releases_the_cell` in
+`crates/crab-cell-runtime/tests/actor.rs`: a resident lookup succeeds before
+the canonical drain, then the actor's drain transition makes the next lookup
+miss before the handle/resource release completes. This keeps the local route
+owned by the actor and prevents a cleanup race from exposing a stale serving
+handle.
 
 The coordination kernel now records a typed intent beside every local effect
 identity. A completion must match both the activation generation and its

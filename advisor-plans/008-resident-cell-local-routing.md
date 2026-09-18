@@ -1,6 +1,6 @@
 # Actor-owned resident Cell routing
 
-Status: IN PROGRESS — actor-owned resident-only lookup, zero-read route proof, and bounded hit/miss/refusal metrics are wired; fence-race and cold-route qualification remain
+Status: DONE — actor-owned resident-only lookup, zero-read route proof, bounded hit/miss/refusal metrics, and drain-before-release invalidation qualification pass local tests
 Priority: P0
 Effort: L
 Risk: High

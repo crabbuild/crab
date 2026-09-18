@@ -1356,6 +1356,31 @@ async fn runtime_stats_follow_active_cell_lifecycle() {
     runtime.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn resident_lookup_is_invalidated_before_drain_releases_the_cell() {
+    let fixture = fixture_for(b"resident-drain-race");
+    let (runtime, handle, _pool) = activate_runtime(&fixture, 2 * 1024 * 1024).await;
+
+    assert!(
+        runtime
+            .resident_handle(&fixture.target, CatalogRole::Repository)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    handle.drain().await.unwrap();
+
+    assert!(
+        runtime
+            .resident_handle(&fixture.target, CatalogRole::Repository)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    runtime.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn churn_evicts_idle_cells_and_restores_exact_roots() {
     let first = fixture_for(b"churn-first");
