@@ -140,8 +140,8 @@ compatibility decision.
 
 The local implementation slices are present on the canonical path. The ledger
 is deliberately not marked as release-complete where the acceptance criterion
-requires a real provider, Kubernetes fault, complete advertised/metric parity,
-or an authorized standalone-contract decision.
+requires a real provider, Kubernetes fault, complete advertised-placement
+parity, or an authorized standalone-contract decision.
 
 Local proof completed:
 
@@ -151,7 +151,10 @@ Local proof completed:
   test ignored. All primitive,
   migration, publication, simulator, and workflow suites pass. The ignored
   source-loss and retention tests also pass against an isolated local RustFS
-  bucket when their provider variables are supplied. The shared
+  bucket when their provider variables are supplied. The provider-backed
+  `rustfs_mixed_primitive_inventory_churn_preserves_exact_roots` case also
+  passes the Queue/Workflow retained-work, exact-root restore, and
+  capacity-reuse proof against an isolated RustFS prefix. The shared
   runtime/SQL/hydration/primitive-job ledger (including exported hydration-job
   usage/capacity metrics) and schema-v3 receipt evidence path are covered by
   focused tests; user SQL commands now hold bounded worker
@@ -229,7 +232,7 @@ re-inspected after durable work and an unknown result remains ineligible for
 eviction. Remaining release gates are recorded in plans 009–017:
 matched warm-latency/restart receipts, provider-failure
 matrix evidence (with one local fail-first immutable PUT proof now covered),
-complete advertised/metric parity and mixed-workload resource accounting,
+complete advertised-placement parity and mixed-workload resource accounting,
 multi-process
 movement/fault proof, protected Kubernetes receipts, and the named plan-016
 retain/deprecate/hard-remove decision. Plan 017 remains correctly blocked; no
@@ -243,7 +246,7 @@ free headroom are clamped by the runtime-owned `DiskBudget`, so a larger
 filesystem probe cannot advertise bytes the actor cannot admit; the deliberately
 mismatched-capacity peer regression covers this case. Nested cgroup fixture
 parsing and process file-capacity checks cover the fail-closed host probe;
-advertised/metric parity and multi-process convergence remain qualification
+advertised-placement parity and multi-process convergence remain qualification
 work.
 
 Scheduler maintenance is also ledger-visible: migration and node-log recovery
@@ -260,9 +263,10 @@ The HTTP server builds those gauges through one
 `runtime_snapshot_projects_live_cell_ledger` installs a runtime-owned
 `DiskBudget`, reserves a nonzero disk amount through its admission hook, and
 proves live runtime reservations and capacities reach the rendered exposition
-without a second field mapping.
-Measured local-disk tolerance and provider-scale mixed-workload proof remain
-qualification gates rather than being inferred from this unit proof.
+without a second field mapping. The Compose receipt now independently measures
+each mounted Cell filesystem within the documented 1 MiB tolerance; provider-
+scale mixed-workload proof remains a qualification gate rather than being
+inferred from this unit proof.
 
 Plan 010's canonical decoder no longer calls unbounded `read_to_end` for the
 trailer/index: it drains the remaining authenticated metadata through a fixed

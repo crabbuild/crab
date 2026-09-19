@@ -112,6 +112,10 @@ artifacts). It passed the LTX round trip, Cell source-loss takeover and
 retention sweep, HTTP collaboration/takeover, native HTTP push, and receive
 fault matrix. The same checkout passed the process-level movement probes and
 the hydration shutdown-cancellation regression against the in-memory provider.
+The provider-backed
+`rustfs_mixed_primitive_inventory_churn_preserves_exact_roots` test also
+passed Queue/Workflow retained-work protection, exact-root restore, and
+capacity reuse against its isolated prefix.
 These commands are provider evidence for iteration, not release receipts;
 protected release jobs must emit the schema-v3 receipt bound to the tagged
 source and immutable image.
@@ -133,6 +137,16 @@ CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX" \
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
   cargo test -p crab-cell-runtime --test actor \
   rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
+  --locked -- --ignored --exact
+
+AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+CRAB_CELL_TEST_BUCKET="$BUCKET" \
+CRAB_CELL_TEST_ENDPOINT="$ENDPOINT" \
+CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX-mixed" \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
+  cargo test -p crab-cell-runtime --test actor \
+  rustfs_mixed_primitive_inventory_churn_preserves_exact_roots \
   --locked -- --ignored --exact
 
 AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \

@@ -555,6 +555,15 @@ fn fixture_with_limits(partition: &[u8], limits: Limits) -> Fixture {
 }
 
 fn fixture_with_limits_and_store(partition: &[u8], limits: Limits, store: Store) -> Fixture {
+    fixture_with_limits_and_store_at_prefix(partition, limits, store, Path::from("runtime"))
+}
+
+fn fixture_with_limits_and_store_at_prefix(
+    partition: &[u8],
+    limits: Limits,
+    store: Store,
+    prefix: Path,
+) -> Fixture {
     let target = CellTarget::new(
         TenantId::from_bytes([1; 16]),
         ApplicationId::from_bytes([3; 16]),
@@ -564,7 +573,7 @@ fn fixture_with_limits_and_store(partition: &[u8], limits: Limits, store: Store)
     .unwrap();
     let cell = target.cell_id();
     let incarnation = IncarnationId::from_bytes([2; 16]);
-    let layout = CellStorageLayout::new(store, Path::from("runtime"), [3; 16]);
+    let layout = CellStorageLayout::new(store, prefix, [3; 16]);
     let replica = CellReplica::new(
         layout.clone(),
         *cell.as_bytes(),
@@ -1882,9 +1891,48 @@ async fn persisted_work_blocks_idle_eviction_until_explicit_release() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mixed_primitive_inventory_blocks_churn_until_drain_and_restores_root() {
-    let queue = fixture_for(b"mixed-queue");
-    let workflow = fixture_for(b"mixed-workflow");
-    let third = fixture_for(b"mixed-third");
+    mixed_primitive_inventory_churn(Store::new(Arc::new(InMemory::new())), Path::from("runtime"))
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires an isolated pre-created RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_mixed_primitive_inventory_churn_preserves_exact_roots() {
+    let required = |name| std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
+    let store = build_explicit_store(
+        &required("CRAB_CELL_TEST_BUCKET"),
+        ObjectStoreCredentials::Aws {
+            access_key_id: required("AWS_ACCESS_KEY_ID"),
+            secret_access_key: required("AWS_SECRET_ACCESS_KEY"),
+            session_token: None,
+            region: "us-east-1".into(),
+        },
+        Some(&required("CRAB_CELL_TEST_ENDPOINT")),
+        true,
+    )
+    .unwrap();
+    let prefix = Path::from(format!(
+        "{}/mixed-primitive-churn",
+        required("CRAB_CELL_TEST_PREFIX")
+    ));
+    mixed_primitive_inventory_churn(store, prefix).await;
+}
+
+async fn mixed_primitive_inventory_churn(store: Store, prefix: Path) {
+    let queue = fixture_with_limits_and_store_at_prefix(
+        b"mixed-queue",
+        Limits::default(),
+        store.clone(),
+        prefix.clone(),
+    );
+    let workflow = fixture_with_limits_and_store_at_prefix(
+        b"mixed-workflow",
+        Limits::default(),
+        store.clone(),
+        prefix.clone(),
+    );
+    let third =
+        fixture_with_limits_and_store_at_prefix(b"mixed-third", Limits::default(), store, prefix);
     let session = SessionId::from_bytes([80; 16]);
     let runtime =
         CellRuntime::new(SqlWorkerPool::new(1, 2).unwrap(), 16 * 1024 * 1024, session).unwrap();
