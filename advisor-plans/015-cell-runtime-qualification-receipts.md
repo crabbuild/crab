@@ -193,4 +193,6 @@ must fail when handed a receipt from a different SHA or image digest.
 ## Maintenance note
 
 Receipts are release inputs. Version schema changes explicitly, keep validators
-fail-closed, and never “fix” evidence after a run; rerun from exact source.
+fail-closed—including the library `verify_for` path rejecting signed
+`passed=false` evidence—and never “fix” evidence after a run; rerun from exact
+source.

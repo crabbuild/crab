@@ -366,6 +366,9 @@ impl QualificationReceipt {
 
     /// Verifies a decoded receipt against the expected release and artifact.
     pub fn verify_for(&self, source_revision: &str, image: Digest, artifact: &[u8]) -> Result<()> {
+        if !self.passed {
+            return Err(Error::Control("qualification receipt is not passed"));
+        }
         validate_label(source_revision, "qualification source revision")?;
         if self.source_revision != source_revision || self.image() != image {
             return Err(Error::Control("qualification release identity"));
@@ -629,6 +632,34 @@ mod tests {
         receipt
             .verify_for("abc", Digest::from_bytes([1; 32]), b"artifact")
             .unwrap();
+        let failed = QualificationReceipt::new(
+            "abc".into(),
+            Digest::from_bytes([1; 32]),
+            "rustfs".into(),
+            "warm".into(),
+            "none".into(),
+            Vec::new(),
+            Digest::from_bytes(*blake3::hash(b"artifact").as_bytes()),
+            false,
+        )
+        .unwrap()
+        .with_execution(
+            "rustc".into(),
+            "ci".into(),
+            "three-node".into(),
+            1,
+            2,
+            3,
+            false,
+        )
+        .unwrap()
+        .attest(&SigningKey::from_bytes(&[4; 32]))
+        .unwrap();
+        assert!(
+            failed
+                .verify_for("abc", Digest::from_bytes([1; 32]), b"artifact")
+                .is_err()
+        );
         assert!(
             receipt
                 .verify_for("other", Digest::from_bytes([1; 32]), b"artifact")
