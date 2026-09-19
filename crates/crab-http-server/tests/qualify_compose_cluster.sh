@@ -371,21 +371,33 @@ if [ -z "$restored" ]; then
   exit 1
 fi
 
-control_after="$("${compose[@]}" exec -T server-c crab-http-server \
-  --config /etc/crab/server.toml cells status --owner demo --name hello)"
+control_after=""
+for _ in $(seq 1 45); do
+  candidate="$("${compose[@]}" exec -T server-c crab-http-server \
+    --config /etc/crab/server.toml cells status --owner demo --name hello \
+    2>/dev/null || true)"
+  if jq --exit-status \
+    --arg session_before "$session_before" \
+    --argjson epoch_before "$epoch_before" \
+    --argjson sequence_before "$sequence_before" \
+    '.state == "serving" and .owner.endpoint == "https://localhost:8989/" and
+     .owner.session != $session_before and .epoch > $epoch_before and
+     .owner_lease.state == "live" and
+     .owner_lease.expires_at_ms > .owner_lease.observed_at_ms and
+     .recovery == null and
+     .root.commit_sequence > $sequence_before' <<<"$candidate" >/dev/null 2>&1; then
+    control_after="$candidate"
+    break
+  fi
+  sleep 1
+done
+if [ -z "$control_after" ]; then
+  echo "Node C did not publish a serving status after owner takeover." >&2
+  exit 1
+fi
 session_after="$(jq --raw-output '.owner.session' <<<"$control_after")"
 epoch_after="$(jq --raw-output '.epoch' <<<"$control_after")"
 root_after_state="$(jq --compact-output '.root' <<<"$control_after")"
-jq --exit-status \
-  --arg session_before "$session_before" \
-  --argjson epoch_before "$epoch_before" \
-  --argjson sequence_before "$sequence_before" \
-  '.state == "serving" and .owner.endpoint == "https://localhost:8989/" and
-   .owner.session != $session_before and .epoch > $epoch_before and
-   .owner_lease.state == "live" and
-   .owner_lease.expires_at_ms > .owner_lease.observed_at_ms and
-   .recovery == null and
-   .root.commit_sequence > $sequence_before' <<<"$control_after" >/dev/null
 
 for _ in $(seq 1 6); do
   assert_json_eventually \
@@ -435,19 +447,30 @@ assert_json_eventually \
   "${repository_path}/labels" \
   '.items | length == 1 and .[0].name == "follower-only"' \
   "Node B did not expose the recovered label after rejoining."
-control_after_rejoin="$("${compose[@]}" exec -T server-b crab-http-server \
-  --config /etc/crab/server.toml cells status --owner demo --name hello)"
-jq --exit-status \
-  --arg session_after "$session_after" \
-  --argjson epoch_after "$epoch_after" \
-  --argjson sequence_continued "$sequence_continued" \
-  '.state == "serving" and .owner.session == $session_after and
-   .owner.endpoint == "https://localhost:8989/" and .epoch == $epoch_after and
-   .owner_lease.state == "live" and
-   .owner_lease.expires_at_ms > .owner_lease.observed_at_ms and
-   .recovery == null and
-   .root.commit_sequence == $sequence_continued' \
-  <<<"$control_after_rejoin" >/dev/null
+control_after_rejoin=""
+for _ in $(seq 1 45); do
+  candidate="$("${compose[@]}" exec -T server-b crab-http-server \
+    --config /etc/crab/server.toml cells status --owner demo --name hello \
+    2>/dev/null || true)"
+  if jq --exit-status \
+    --arg session_after "$session_after" \
+    --argjson epoch_after "$epoch_after" \
+    --argjson sequence_continued "$sequence_continued" \
+    '.state == "serving" and .owner.session == $session_after and
+     .owner.endpoint == "https://localhost:8989/" and .epoch == $epoch_after and
+     .owner_lease.state == "live" and
+     .owner_lease.expires_at_ms > .owner_lease.observed_at_ms and
+     .recovery == null and
+     .root.commit_sequence == $sequence_continued' <<<"$candidate" >/dev/null 2>&1; then
+    control_after_rejoin="$candidate"
+    break
+  fi
+  sleep 1
+done
+if [ -z "$control_after_rejoin" ]; then
+  echo "Node B did not publish the recovered serving status after rejoining." >&2
+  exit 1
+fi
 
 node_before_follower_loss="$("${compose[@]}" exec -T server-c crab-http-server \
   --config /etc/crab/server.toml cells node \
@@ -544,21 +567,32 @@ assert_json_eventually \
   "${repository_path}/issues?state=all" \
   '.items | length == 3' \
   "Node B did not expose all recovered issues after the second owner loss."
-control_after_second_loss="$("${compose[@]}" exec -T server-b crab-http-server \
-  --config /etc/crab/server.toml cells status --owner demo --name hello)"
+control_after_second_loss=""
+for _ in $(seq 1 45); do
+  candidate="$("${compose[@]}" exec -T server-b crab-http-server \
+    --config /etc/crab/server.toml cells status --owner demo --name hello \
+    2>/dev/null || true)"
+  if jq --exit-status \
+    --arg session_after "$session_after" \
+    --argjson epoch_after "$epoch_after" \
+    '.state == "serving" and .owner.session != $session_after and
+     .epoch > $epoch_after and .owner_lease.state == "live" and
+     .recovery == null' <<<"$candidate" >/dev/null 2>&1; then
+    control_after_second_loss="$candidate"
+    break
+  fi
+  sleep 1
+done
+if [ -z "$control_after_second_loss" ]; then
+  echo "Node B did not publish a serving status after the second owner loss." >&2
+  exit 1
+fi
 session_after_second_loss="$(jq --raw-output '.owner.session' \
   <<<"$control_after_second_loss")"
 epoch_after_second_loss="$(jq --raw-output '.epoch' \
   <<<"$control_after_second_loss")"
 root_after_second_loss="$(jq --compact-output '.root' \
   <<<"$control_after_second_loss")"
-jq --exit-status \
-  --arg session_after "$session_after" \
-  --argjson epoch_after "$epoch_after" \
-  '.state == "serving" and .owner.session != $session_after and
-   .epoch > $epoch_after and .owner_lease.state == "live" and
-   .recovery == null' <<<"$control_after_second_loss" >/dev/null
-
 jq --null-input \
   --arg project "$project" \
   --arg session_before "$session_before" \
