@@ -230,5 +230,36 @@ impl CoordinationState {
         self.assertFalse(self.check_kernel(kernel, "fn actor() {}\n"))
 
 
+class StandaloneLtxHardCutTests(unittest.TestCase):
+    def check_source(self, text):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "crates/crab-ltx/src/lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text(text, encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                return GATES.check_standalone_ltx_hard_cut(root)
+
+    def test_retired_epoch_head_symbols_are_rejected(self):
+        for symbol in (
+            "Replica",
+            "ReplicaHead",
+            "PagedDatabase",
+            "PagedConnection",
+            "CompactionSchedule",
+        ):
+            with self.subTest(symbol=symbol):
+                self.assertFalse(self.check_source(f"pub struct {symbol};\n"))
+
+    def test_cell_scoped_surfaces_are_admitted(self):
+        self.assertTrue(
+            self.check_source(
+                "pub struct CellReplica;\n"
+                "pub struct CellPagedDatabase;\n"
+                "pub struct CellWritableDatabase;\n"
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

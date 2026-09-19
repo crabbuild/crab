@@ -1794,6 +1794,13 @@ ALLOWED_SERVER_DEV_FIXTURES = {
 }
 CELL_RUNTIME_SERVER_SOURCE_PATHS = ("crates/crab-http-server/src",)
 CELL_RUNTIME_SERVER_IMPORT_PATTERN = "crab_ltx::"
+RETIRED_STANDALONE_LTX_SOURCE_PATHS = (
+    "crates/crab-ltx/src",
+    "crates/crab-ltx/examples",
+)
+RETIRED_STANDALONE_LTX_SYMBOLS = re.compile(
+    r"\b(?:ReplicaHead|Replica|PagedDatabase|PagedConnection|CompactionSchedule)\b"
+)
 CELL_RUNTIME_COORDINATION_KERNEL_PATH = "crates/crab-cell-runtime/src/coordination.rs"
 CELL_RUNTIME_COORDINATION_ACTOR_PATH = "crates/crab-cell-runtime/src/actor.rs"
 CELL_RUNTIME_COORDINATION_REQUIRED_KERNEL_PATTERNS = (
@@ -2415,6 +2422,30 @@ def check_cell_runtime_server_boundary(root: Path, metadata: dict) -> bool:
         return True
 
     print("error: crab-http-server escaped the canonical Cell runtime boundary:", file=sys.stderr)
+    for violation in violations:
+        print(f"  {violation}", file=sys.stderr)
+    return False
+
+
+def check_standalone_ltx_hard_cut(root: Path) -> bool:
+    """Keep the retired epoch-head API out of callable LTX source and examples."""
+    violations: list[str] = []
+    for relative_path in RETIRED_STANDALONE_LTX_SOURCE_PATHS:
+        path = root / relative_path
+        if not path.exists():
+            continue
+        candidates = [path] if path.is_file() else sorted(path.rglob("*.rs"))
+        for candidate in candidates:
+            text = candidate.read_text(encoding="utf-8")
+            for number, line in enumerate(text.splitlines(), start=1):
+                if RETIRED_STANDALONE_LTX_SYMBOLS.search(line):
+                    violations.append(f"{rel(root, candidate)}:{number}: {line.strip()}")
+
+    if not violations:
+        print("ok: standalone LTX epoch-head surfaces stay hard-removed")
+        return True
+
+    print("error: retired standalone LTX surface regressed:", file=sys.stderr)
     for violation in violations:
         print(f"  {violation}", file=sys.stderr)
     return False
@@ -4907,6 +4938,7 @@ def main() -> int:
         check_package_release_policy(metadata),
         check_server_fixture_dependencies(metadata),
         check_cell_runtime_server_boundary(root, metadata),
+        check_standalone_ltx_hard_cut(root),
         check_cell_runtime_coordination_kernel(root),
         check_workspace_dependency_policy(metadata),
         check_workspace_dependency_sources(root, metadata),
