@@ -1,6 +1,6 @@
 # Signed live placement observations and pure weighted planner
 
-Status: IN PROGRESS — versioned signed placement observations now carry measured memory/disk totals and one coherent runtime Cell/job snapshot; advertised free headroom is clamped by unified runtime reservations and fail-closed nested Linux cgroup probes; cold activation now uses a bounded authenticated activation hint; process-wide probe parity and multi-process convergence remain the only placement release gates
+Status: IN PROGRESS — versioned signed placement observations now carry measured memory/disk totals and one coherent runtime Cell/job snapshot; advertised disk capacity and free headroom are clamped by the unified runtime `DiskBudget` and reservations, with fail-closed nested Linux cgroup probes; cold activation now uses a bounded authenticated activation hint; process-wide probe parity and multi-process convergence remain the only placement release gates
 Priority: P0
 Effort: XL
 Risk: High

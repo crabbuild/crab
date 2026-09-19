@@ -223,13 +223,13 @@ standalone export or stored prefix was removed.
 The signed placement snapshot now has an end-to-end local provenance check:
 `NodePublisher` publishes while holding one runtime ledger byte/job reservation,
 and the peer test verifies that the signed memory/disk totals and Cell/job
-counts come from that coherent runtime sample while free headroom remains
-clamped. Disk headroom is additionally bounded by the runtime-owned
-`DiskBudget`, so a larger filesystem probe cannot advertise bytes the actor
-cannot admit; the deliberately mismatched-capacity peer regression covers this
-case. Nested cgroup fixture parsing and process file-capacity checks cover
-the fail-closed host probe; advertised/metric parity and multi-process convergence
-remain qualification work.
+counts come from that coherent runtime sample. Both the signed disk total and
+free headroom are clamped by the runtime-owned `DiskBudget`, so a larger
+filesystem probe cannot advertise bytes the actor cannot admit; the deliberately
+mismatched-capacity peer regression covers this case. Nested cgroup fixture
+parsing and process file-capacity checks cover the fail-closed host probe;
+advertised/metric parity and multi-process convergence remain qualification
+work.
 
 Scheduler maintenance is also ledger-visible: migration and node-log recovery
 tasks now retain a `NodeJobReservation` until their spawned futures finish,

@@ -454,9 +454,15 @@ impl NodePublisher {
         let resources = local_resources.ok_or(crate::Error::Config(
             "local resources are missing for a serving advertisement",
         ))?;
+        let placement_disk_capacity =
+            runtime_stats.map_or(resources.disk_capacity_bytes, |stats| {
+                resources
+                    .disk_capacity_bytes
+                    .min(stats.local_disk_capacity_bytes())
+            });
         let placement = NodePlacementCapacity::new(
             resources.memory_bytes,
-            resources.disk_capacity_bytes,
+            placement_disk_capacity,
             runtime_stats.map_or(
                 0,
                 crab_cell_runtime::CellRuntimeStats::placement_active_cells,
@@ -2136,6 +2142,7 @@ mod tests {
         .unwrap();
         let retained = runtime.try_reserve_node_bytes(512).unwrap();
         let job = runtime.try_reserve_worker_job().unwrap().unwrap();
+        let stats = runtime.stats();
         let publisher = Arc::new(
             publisher
                 .with_follower_store(follower_store)
@@ -2152,7 +2159,12 @@ mod tests {
         let resources = publisher.local_resources().unwrap();
         let placement = published.advertisement().placement_capacity().unwrap();
         assert_eq!(placement.memory_capacity_bytes, resources.memory_bytes);
-        assert_eq!(placement.disk_capacity_bytes, resources.disk_capacity_bytes);
+        assert_eq!(
+            placement.disk_capacity_bytes,
+            resources
+                .disk_capacity_bytes
+                .min(stats.local_disk_capacity_bytes())
+        );
         assert_eq!(placement.active_cells, 0);
         assert_eq!(placement.max_active_cells, 4);
         assert_eq!(placement.running_jobs, 1);
