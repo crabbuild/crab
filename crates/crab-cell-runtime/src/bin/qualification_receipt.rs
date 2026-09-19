@@ -114,10 +114,7 @@ fn verify_matrix(args: &mut impl Iterator<Item = String>) -> Result<(), String> 
         &fs::read(&manifest_path).map_err(|error| format!("read matrix manifest: {error}"))?,
     )
     .map_err(|error| error.to_string())?;
-    let base = manifest_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+    let base = manifest_base(&manifest_path);
     let mut receipts = Vec::with_capacity(manifest.entries().len());
     let mut artifacts = Vec::with_capacity(manifest.entries().len());
     for entry in manifest.entries() {
@@ -180,6 +177,12 @@ fn resolve_manifest_path(base: &Path, value: &str) -> Result<PathBuf, String> {
     Ok(resolved)
 }
 
+fn manifest_base(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
 fn required(args: &mut impl Iterator<Item = String>, name: &str) -> Result<String, String> {
     args.next()
         .ok_or_else(|| format!("missing {name}\n{}", usage()))
@@ -216,4 +219,26 @@ fn unix_millis() -> Result<u64, String> {
 
 fn usage() -> String {
     "usage: qualification_receipt emit <output> <source> <image-digest> <artifact> [provider workload fault]\n       qualification_receipt verify <receipt> <source> <image-digest> <artifact>\n       qualification_receipt verify-matrix <manifest> <source> <image-digest>".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::manifest_base;
+    use std::path::Path;
+
+    #[test]
+    fn relative_manifest_uses_the_current_directory() {
+        assert_eq!(
+            manifest_base(Path::new("qualification-matrix.json")),
+            Path::new(".")
+        );
+    }
+
+    #[test]
+    fn nested_manifest_uses_its_parent_directory() {
+        assert_eq!(
+            manifest_base(Path::new("evidence/qualification-matrix.json")),
+            Path::new("evidence")
+        );
+    }
 }
