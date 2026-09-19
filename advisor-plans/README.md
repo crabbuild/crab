@@ -242,8 +242,10 @@ mixed-workload proof are still explicit Plan 012 qualification gates. Runtime
 Prometheus metrics now expose usage and capacity for every host-ledger class.
 The HTTP server builds those gauges through one
 `RuntimeSnapshot::with_cell_runtime` projection;
-`runtime_snapshot_projects_live_cell_ledger` proves live runtime reservations
-and capacities reach the rendered exposition without a second field mapping.
+`runtime_snapshot_projects_live_cell_ledger` installs a runtime-owned
+`DiskBudget`, reserves a nonzero disk amount through its admission hook, and
+proves live runtime reservations and capacities reach the rendered exposition
+without a second field mapping.
 Measured local-disk tolerance and provider-scale mixed-workload proof remain
 qualification gates rather than being inferred from this unit proof.
 

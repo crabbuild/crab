@@ -205,7 +205,12 @@ scratch MiB. Tokens follow cancellation-safe work until completion, while the
 existing LTX semaphores remain the local waiters. The remaining ledger gates are
 complete advertised-metric parity, advertised-placement parity, and measured
 mixed-workload proof; those require
-qualification rather than another local counter. HTTP Prometheus
+qualification rather than another local counter. The HTTP projection
+regression installs a runtime-owned `DiskBudget`, reserves a nonzero disk
+amount through its admission hook, and checks that the rendered reserved-byte
+gauge matches `CellRuntimeStats`; this proves the disk field mapping with live
+ledger state while provider-scale tolerance remains a separate gate. HTTP
+Prometheus
 metrics now export usage and capacity for every host-ledger class, but the
 placement advertisement still publishes its narrower job-credit contract until
 qualification proves a compatible expanded observation shape.

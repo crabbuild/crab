@@ -1270,13 +1270,16 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_snapshot_projects_live_cell_ledger() {
-        let runtime = crab_cell_runtime::CellRuntime::new(
+        let disk_budget = crab_ltx::DiskBudget::new(8_192);
+        let runtime = crab_cell_runtime::CellRuntime::new_with_replica_host(
             crab_cell_runtime::SqlWorkerPool::new(1, 2).unwrap(),
             1_024,
             crab_cell_runtime::SessionId::from_bytes([3; 16]),
+            crab_ltx::Host::default().with_local_disk_budget(disk_budget.clone()),
         )
         .unwrap();
         let reservation = runtime.try_reserve_worker_job().unwrap().unwrap();
+        let disk = disk_budget.try_reserve(128).unwrap();
         let stats = runtime.stats();
         let metrics = Metrics::new().unwrap();
         let rendered = metrics.render(RuntimeSnapshot::default().with_cell_runtime(stats));
@@ -1297,7 +1300,12 @@ mod tests {
             "crab_http_server_cell_runtime_local_disk_capacity_bytes {}",
             stats.local_disk_capacity_bytes()
         )));
+        assert!(rendered.contains(&format!(
+            "crab_http_server_cell_runtime_local_disk_reserved_bytes {}",
+            stats.local_disk_reserved_bytes()
+        )));
 
+        drop(disk);
         drop(reservation);
         runtime.shutdown().await.unwrap();
     }
