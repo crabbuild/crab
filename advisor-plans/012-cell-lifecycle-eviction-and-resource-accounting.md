@@ -1,6 +1,6 @@
 # Cell quiescing, idle eviction, and unified resource accounting
 
-Status: IN PROGRESS — RAII ledger shared by active Cells, resident native bytes, active-Cell file descriptors, SQL work, hydration jobs, retained publication bytes, primitive activity/effect/migration/recovery jobs, canonical LTX `DiskBudget`, and embedded-host I/O/blocking/recovery/dirty/scratch admissions; deterministic victim selection, actor eviction, pressure pacing, retained-byte accounting, and fail-closed persisted-work refresh are wired; unknown persisted-work inventory is explicitly ineligible for eviction; descriptor admission/metrics and shared local-disk consumer wiring are now explicit; bounded two-slot/three-Cell churn, mixed Queue/Workflow inventory churn, and retained-work eviction guard tests prove canonical capacity reuse and fail-closed obligation handling; runtime Prometheus gauges now expose every ledger class and the HTTP projection consumes one canonical `CellRuntimeStats` mapping; stale session restart inventory now reserves every regular file outside the fresh process session and rejects ambiguous layouts before serving; outer peer and node-log codec work now shares the primitive-job ledger; the Compose qualification harness now asserts runtime disk/active-Cell gauge parity with the capacity report; measured local-disk tolerance and provider-scale mixed-workload proof remain
+Status: IN PROGRESS — RAII ledger shared by active Cells, resident native bytes, active-Cell file descriptors, SQL work, hydration jobs, retained publication bytes, primitive activity/effect/migration/recovery jobs, canonical LTX `DiskBudget`, and embedded-host I/O/blocking/recovery/dirty/scratch admissions; deterministic victim selection, actor eviction, pressure pacing, retained-byte accounting, and fail-closed persisted-work refresh are wired; unknown persisted-work inventory is explicitly ineligible for eviction; descriptor admission/metrics and shared local-disk consumer wiring are now explicit; bounded two-slot/three-Cell churn, mixed Queue/Workflow inventory churn, and retained-work eviction guard tests prove canonical capacity reuse and fail-closed obligation handling; runtime Prometheus gauges now expose every ledger class and the HTTP projection consumes one canonical `CellRuntimeStats` mapping; stale session restart inventory now reserves every regular file outside the fresh process session and rejects ambiguous layouts before serving; outer peer and node-log codec work now shares the primitive-job ledger; the Compose qualification harness now asserts runtime disk/active-Cell gauge parity with the capacity report and an independent filesystem probe within 1 MiB; provider-scale mixed-workload proof remains
 Priority: P0
 Effort: XL
 Risk: High
@@ -166,10 +166,11 @@ mutating the database behind the actor.
 - [x] Every listed resource consumer reserves and releases through one ledger.
 - [x] Canonical LTX local-disk reservations reconcile with the runtime ledger
       without allowing a failed admission to leak bytes.
-- [ ] Advertised/metric totals reconcile with actor state and measured local
-      disk within a documented tolerance; the local actor-to-metric projection
-      is covered by `runtime_snapshot_projects_live_cell_ledger`, while disk
-      tolerance still requires provider-scale measurement.
+- [x] Advertised/metric totals reconcile with actor state and measured local
+      disk within a documented 1 MiB probe tolerance; the local
+      actor-to-metric projection is covered by
+      `runtime_snapshot_projects_live_cell_ledger`, and the Compose receipt
+      records an independent `df` probe for each node.
 - [x] Restart inventory does not undercount existing owned files.
 - [x] Primitive jobs participate in the same limits; activity/effect scheduler
       work, release migrations, node-log recovery, and user SQL commands use
@@ -203,13 +204,14 @@ LTX host now obtains one runtime admission token for each bounded object-store
 I/O operation, blocking host job, recovery cohort, dirty-memory cohort, and
 scratch MiB. Tokens follow cancellation-safe work until completion, while the
 existing LTX semaphores remain the local waiters. The remaining ledger gates are
-complete advertised-metric parity, advertised-placement parity, and measured
-mixed-workload proof; those require
+complete advertised-placement parity and measured mixed-workload proof; those
+require
 qualification rather than another local counter. The HTTP projection
 regression installs a runtime-owned `DiskBudget`, reserves a nonzero disk
 amount through its admission hook, and checks that the rendered reserved-byte
 gauge matches `CellRuntimeStats`; this proves the disk field mapping with live
-ledger state while provider-scale tolerance remains a separate gate. HTTP
+ledger state while provider-scale mixed-workload evidence remains a separate
+gate. HTTP
 Prometheus
 metrics now export usage and capacity for every host-ledger class, but the
 placement advertisement still publishes its narrower job-credit contract until

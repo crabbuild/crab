@@ -107,6 +107,34 @@ for capacity in "$capacity_a" "$capacity_b" "$capacity_c"; do
     <<<"$capacity" >/dev/null
 done
 
+disk_probe_tolerance_bytes=$((1024 * 1024))
+disk_probe_a_kib="$("${compose[@]}" exec -T server sh -ec \
+  'df -P -k /var/lib/crab/cells | tail -n 1 | sed -e "s/^ *//" | tr -s " " | cut -d " " -f4')"
+disk_probe_b_kib="$("${compose[@]}" exec -T server-b sh -ec \
+  'df -P -k /var/lib/crab/cells | tail -n 1 | sed -e "s/^ *//" | tr -s " " | cut -d " " -f4')"
+disk_probe_c_kib="$("${compose[@]}" exec -T server-c sh -ec \
+  'df -P -k /var/lib/crab/cells | tail -n 1 | sed -e "s/^ *//" | tr -s " " | cut -d " " -f4')"
+[[ "$disk_probe_a_kib" =~ ^[0-9]+$ ]]
+[[ "$disk_probe_b_kib" =~ ^[0-9]+$ ]]
+[[ "$disk_probe_c_kib" =~ ^[0-9]+$ ]]
+disk_probe_a=$((disk_probe_a_kib * 1024))
+disk_probe_b=$((disk_probe_b_kib * 1024))
+disk_probe_c=$((disk_probe_c_kib * 1024))
+for pair in \
+  "$capacity_a|$disk_probe_a" \
+  "$capacity_b|$disk_probe_b" \
+  "$capacity_c|$disk_probe_c"; do
+  capacity="${pair%%|*}"
+  observed_disk="${pair#*|}"
+  expected_disk="$(jq -r '.resources.free_disk_bytes' <<<"$capacity")"
+  [[ "$observed_disk" =~ ^[0-9]+$ ]]
+  delta="$(jq -n \
+    --argjson expected "$expected_disk" \
+    --argjson observed "$observed_disk" \
+    '$expected - $observed | if . < 0 then -. else . end')"
+  test "$delta" -le "$disk_probe_tolerance_bytes"
+done
+
 metrics_a="$("${compose[@]}" exec -T server crab-http-server \
   --config /etc/crab/server.toml cells metrics)"
 metrics_b="$("${compose[@]}" exec -T server-b crab-http-server \
@@ -469,6 +497,10 @@ jq --null-input \
   --argjson capacity_a "$capacity_a" \
   --argjson capacity_b "$capacity_b" \
   --argjson capacity_c "$capacity_c" \
+  --argjson disk_probe_a "$disk_probe_a" \
+  --argjson disk_probe_b "$disk_probe_b" \
+  --argjson disk_probe_c "$disk_probe_c" \
+  --argjson disk_probe_tolerance_bytes "$disk_probe_tolerance_bytes" \
   --arg metrics_a "$metrics_a" \
   --arg metrics_b "$metrics_b" \
   --arg metrics_c "$metrics_c" \
@@ -527,6 +559,16 @@ jq --null-input \
       restored_labels: $second_restored_labels
     },
     capacity: {node_a: $capacity_a, node_b: $capacity_b, node_c: $capacity_c},
+    measured_disk: {
+      node_a_bytes: $disk_probe_a,
+      node_b_bytes: $disk_probe_b,
+      node_c_bytes: $disk_probe_c,
+      tolerance_bytes: $disk_probe_tolerance_bytes
+    },
     metrics: {node_a: $metrics_a, node_b: $metrics_b, node_c: $metrics_c},
-    capacity_metric_parity: {local_disk: true, active_cells: true}
+    capacity_metric_parity: {
+      local_disk: true,
+      active_cells: true,
+      measured_local_disk: true
+    }
   }'
