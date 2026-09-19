@@ -327,10 +327,83 @@ async fn exercise(server: Arc<Server>, branch: &str) {
         .repositories
         .get(&("team".into(), "repo".into()))
         .unwrap();
+    let (mut manifest, etag) =
+        crab_metadata::manifest_store::read_manifest(&repo.store, &repo.layout)
+            .await
+            .unwrap();
+    assert!(manifest.commit_graph_hash.is_some());
+    assert!(manifest.path_state_hash.is_some());
+    let attribution_url = format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/tree-attribution?rev={first}&limit=100"
+    );
+    let response = reqwest::get(&attribution_url).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let attribution: serde_json::Value =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(attribution["state"], "ready");
+    assert_eq!(attribution["items"][0]["last_commit"]["oid"], first);
+
+    manifest.path_state_hash = None;
+    crab_metadata::manifest_store::write_manifest_cas(&repo.store, &repo.layout, &manifest, &etag)
+        .await
+        .unwrap();
+    repo.invalidate().await;
+    let indexing = reqwest::get(&attribution_url).await.unwrap();
+    assert_eq!(indexing.status(), StatusCode::ACCEPTED);
+    assert_eq!(indexing.headers()[reqwest::header::RETRY_AFTER], "2");
+    let indexing: serde_json::Value =
+        serde_json::from_slice(&indexing.bytes().await.unwrap()).unwrap();
+    assert_eq!(indexing["state"], "indexing");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let response = reqwest::get(&attribution_url).await.unwrap();
+            if response.status() == StatusCode::OK {
+                let attribution: serde_json::Value =
+                    serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+                assert_eq!(attribution["state"], "ready");
+                assert_eq!(attribution["items"][0]["last_commit"]["oid"], first);
+                break;
+            }
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+        }
+    })
+    .await
+    .unwrap();
+
     let (manifest, _) = crab_metadata::manifest_store::read_manifest(&repo.store, &repo.layout)
         .await
         .unwrap();
-    assert!(manifest.commit_graph_hash.is_some());
+    let path_state_hash = manifest.path_state_hash.unwrap();
+    repo.store
+        .delete(
+            &repo
+                .layout
+                .bulk_manifest_path("path-state", &path_state_hash),
+        )
+        .await
+        .unwrap();
+    repo.invalidate().await;
+    let corrupt = reqwest::get(&attribution_url).await.unwrap();
+    assert_eq!(corrupt.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let corrupt: serde_json::Value =
+        serde_json::from_slice(&corrupt.bytes().await.unwrap()).unwrap();
+    assert_eq!(corrupt["error"]["code"], "path_state_corrupt");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let response = reqwest::get(&attribution_url).await.unwrap();
+            if response.status() == StatusCode::OK {
+                break;
+            }
+            assert!(matches!(
+                response.status(),
+                StatusCode::ACCEPTED | StatusCode::SERVICE_UNAVAILABLE
+            ));
+        }
+    })
+    .await
+    .unwrap();
     let reader = tempfile::tempdir().unwrap();
     success(
         reader.path(),

@@ -14,6 +14,10 @@ pub(crate) struct CommitGraphIndex {
 }
 
 impl CommitGraphIndex {
+    pub(crate) const fn graph(&self) -> &SplitCommitGraph {
+        &self.graph
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "graph loading validates manifest identity and two cancellation scopes"

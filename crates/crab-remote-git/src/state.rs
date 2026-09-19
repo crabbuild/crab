@@ -7,10 +7,16 @@ use crab_metadata::git_object_locator::{
 use crab_metadata::shallow_closure::ShallowClosureDescriptor;
 use crab_storage::{Store, StoreLayout};
 use crab_xet::hash::MerkleHash;
+use tokio::sync::OnceCell;
+use tokio_util::sync::CancellationToken;
 
 use crate::commit_graph::CommitGraphIndex;
+use crate::path_state::PathStateIndex;
 use crate::reader::RemoteGitReader;
-use crate::{RemoteGitRuntime, RepositoryIdentity, RepositoryOptions, RepositoryRefs};
+use crate::{
+    CorruptionStage, Error, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
+    RepositoryRefs, Result,
+};
 
 /// Immutable repository facts shared by handles and snapshots.
 pub(crate) struct RepositoryState {
@@ -31,6 +37,8 @@ pub(crate) struct RepositoryState {
     pub(crate) refs: RepositoryRefs,
     pub(crate) reader: Option<Arc<RemoteGitReader>>,
     pub(crate) commit_graph: Option<Arc<CommitGraphIndex>>,
+    pub(crate) path_state_hash: Option<Arc<str>>,
+    pub(crate) path_state: OnceCell<Arc<PathStateIndex>>,
     pub(crate) shallow_closure: Option<Arc<ShallowClosureDescriptor>>,
 }
 
@@ -40,5 +48,35 @@ impl RepositoryState {
             generation: catalog.generation,
             pack_index_hash: catalog.pack_index_hash,
         })
+    }
+
+    pub(crate) async fn path_state(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<&Arc<PathStateIndex>>> {
+        let Some(hash) = self.path_state_hash.as_deref() else {
+            return Ok(None);
+        };
+        let runtime_cancellation = self.runtime.background_cancellation();
+        let index = self
+            .path_state
+            .get_or_try_init(|| async {
+                PathStateIndex::load(
+                    &self.store,
+                    &self.layout,
+                    Some(hash),
+                    self.commit_graph.as_ref(),
+                    self.options.object_limits().max_path_state_bytes,
+                    cancellation,
+                    &runtime_cancellation,
+                )
+                .await?
+                .map(Arc::new)
+                .ok_or(Error::Corrupt {
+                    stage: CorruptionStage::PathState,
+                })
+            })
+            .await?;
+        Ok(Some(index))
     }
 }

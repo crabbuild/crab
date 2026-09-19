@@ -52,7 +52,7 @@ pub(crate) fn kind(error: &crab_remote_git::Error) -> ErrorKind {
         | E::Revision {
             reason: R::NotCommit,
         } => ErrorKind::UnsupportedCapability,
-        E::RepositoryIndexing { .. } => ErrorKind::Indexing,
+        E::RepositoryIndexing { .. } | E::PathStateIndexing { .. } => ErrorKind::Indexing,
         E::LimitExceeded { .. }
         | E::Allocation { .. }
         | E::Revision {

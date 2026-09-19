@@ -149,6 +149,25 @@ impl SplitCommitGraph {
             .get(ordinal.saturating_sub(layer_ref.base_ordinal) as usize)
     }
 
+    /// Return a layer-independent digest of the positional commit records.
+    #[must_use]
+    pub fn ordinal_digest(&self) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"crab commit ordinal identity\0");
+        hasher.update(&self.descriptor.commit_count.to_le_bytes());
+        for layer in &self.layers {
+            for record in &layer.records {
+                hasher.update(&record.oid);
+                hasher.update(&record.tree_oid);
+                hasher.update(&(record.parents.len() as u32).to_le_bytes());
+                for parent in &record.parents {
+                    hasher.update(&parent.to_le_bytes());
+                }
+            }
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
     /// Return an exact ancestry answer when both commits are in this complete graph.
     #[must_use]
     pub fn is_ancestor(&self, ancestor: &[u8; 20], descendant: &[u8; 20]) -> Option<bool> {

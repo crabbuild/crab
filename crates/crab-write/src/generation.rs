@@ -10,28 +10,36 @@ use crab_coordination::{
     GcFenceHeartbeat, GcFenceLease, PushLock, PushLockAcquireContext,
 };
 use crab_metadata::{
+    error::MetadataError,
     git_object_locator::{
         GitLocatorCoverage, GitObjectCatalogStats, GitObjectLocatorSession, GitObjectLocatorWriter,
         LocatorSweepStats,
     },
     manifest_store,
     manifests::{Manifest, PackManifestEntry},
+    path_state::{
+        PathStateIndex, PathStateInput, PathStateMutation, append_path_state, load_path_state,
+        load_path_state_checkpoint, load_path_state_checkpoint_record,
+        publish_path_state_checkpoint, upload_path_state,
+    },
     split_commit_graph::{
         CommitGraphInput, SplitCommitGraph, append_split_commit_graph, load_split_commit_graph,
         upload_split_commit_graph,
     },
 };
 use crab_remote_git::{
-    OperationContext, OperationKind, RemoteGitObject, RemoteGitRepository, RemoteGitRuntime,
-    RepositoryIdentity, RepositoryOptions,
+    ChangeKind, EntryKind, OperationContext, OperationKind, RemoteGitObject, RemoteGitRepository,
+    RemoteGitRuntime, RemoteGitSnapshot, RepositoryIdentity, RepositoryOptions, Revision,
+    TreeChange,
 };
-use crab_storage::{Store, StoreLayout};
+use crab_storage::{StorageError, Store, StoreLayout};
 use crab_xet::hash::MerkleHash;
 use tokio_util::sync::CancellationToken;
 
 use crate::{Result, WriteError, catalog::publish_inventory, finish_after_cleanup};
 
 const COMMIT_GRAPH_BATCH_SIZE: usize = 512;
+const PATH_STATE_CHECKPOINT_COMMITS: u32 = 32;
 
 struct WriterFence {
     lease: GcFenceLease,
@@ -145,6 +153,17 @@ async fn ensure_readable_state(
                 return Ok(());
             };
             maintain_commit_graph(
+                store,
+                layout,
+                &manifest,
+                commit_graph.identity,
+                Arc::clone(&commit_graph.runtime),
+                commit_graph.options,
+                cancel,
+            )
+            .await?;
+            let (manifest, _) = manifest_store::read_manifest(store, layout).await?;
+            maintain_path_state(
                 store,
                 layout,
                 &manifest,
@@ -310,6 +329,427 @@ pub async fn maintain_commit_graph(
     })?;
     upload_split_commit_graph(store, layout, &write).await?;
     attach_commit_graph_if_current(store, layout, manifest, &write.descriptor_hash).await
+}
+
+/// Build and attach exact first-parent path attribution for one current generation.
+pub async fn maintain_path_state(
+    store: &Store,
+    layout: &StoreLayout<Store>,
+    manifest: &Manifest,
+    identity: &RepositoryIdentity,
+    runtime: Arc<RemoteGitRuntime>,
+    options: RepositoryOptions,
+    cancel: &CancellationToken,
+) -> Result<bool> {
+    check_cancelled(cancel)?;
+    if manifest.refs.is_empty() {
+        return Ok(true);
+    }
+    let graph_hash = manifest.commit_graph_hash.as_deref().ok_or_else(|| {
+        WriteError::Internal("path-state maintenance requires a commit graph".to_owned())
+    })?;
+    let graph = load_split_commit_graph(
+        store,
+        layout,
+        graph_hash,
+        options.object_limits().max_commit_graph_bytes,
+    )
+    .await?;
+    if graph.descriptor.generation != manifest.generation
+        || graph.descriptor.pack_index_hash != manifest.pack_index_hash
+        || graph.descriptor.git_validation_digest != manifest.git_validation_digest
+    {
+        return Err(WriteError::CorruptObject {
+            path: layout
+                .bulk_manifest_path("commit-graph", graph_hash)
+                .to_string(),
+            reason: "path-state commit graph does not match the manifest".to_owned(),
+        });
+    }
+    if let Some(path_hash) = manifest.path_state_hash.as_deref() {
+        match load_path_state(
+            store,
+            layout,
+            path_hash,
+            &graph,
+            options.object_limits().max_path_state_bytes,
+        )
+        .await
+        {
+            Ok(_) => return Ok(true),
+            Err(error) if immutable_metadata_unavailable(&error) => {
+                if !clear_path_state_if_current(store, layout, manifest, graph_hash, path_hash)
+                    .await?
+                {
+                    return Ok(false);
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let mut replace_checkpoint = None;
+    let mut base = match load_path_state_checkpoint(
+        store,
+        layout,
+        &graph,
+        options.object_limits().max_path_state_bytes,
+    )
+    .await
+    {
+        Ok(checkpoint) => checkpoint,
+        Err(error) if immutable_metadata_unavailable(&error) => {
+            replace_checkpoint = match load_path_state_checkpoint_record(
+                store,
+                layout,
+                &graph.descriptor.git_validation_digest,
+            )
+            .await
+            {
+                Ok(checkpoint) => checkpoint.map(|checkpoint| checkpoint.descriptor_hash),
+                Err(error) if immutable_metadata_unavailable(&error) => None,
+                Err(error) => return Err(error.into()),
+            };
+            None
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if base.is_none() {
+        base = load_previous_path_state(store, layout, manifest, &graph, options).await?;
+    }
+    let repository = RemoteGitRepository::open(
+        store.clone(),
+        layout.clone(),
+        identity.clone(),
+        runtime,
+        options,
+        cancel,
+    )
+    .await?;
+    if repository.generation() != manifest.generation {
+        return Ok(false);
+    }
+    loop {
+        let first = base
+            .as_ref()
+            .map_or(0, |index| index.descriptor.commit_count);
+        let end = first
+            .saturating_add(PATH_STATE_CHECKPOINT_COMMITS)
+            .min(graph.descriptor.commit_count);
+        let inputs = collect_path_state_inputs(&repository, &graph, first, end, cancel).await?;
+        if !repository.is_current(cancel).await? {
+            return Ok(false);
+        }
+        let write = append_path_state(base, &graph, inputs)?;
+        let descriptor_hash = write.descriptor_hash.clone();
+        let commit_count = write.commit_count();
+        upload_path_state(store, layout, &write).await?;
+        if commit_count == graph.descriptor.commit_count {
+            return attach_path_state_if_current(
+                store,
+                layout,
+                manifest,
+                graph_hash,
+                &descriptor_hash,
+            )
+            .await;
+        }
+        publish_path_state_checkpoint(
+            store,
+            layout,
+            &graph,
+            &descriptor_hash,
+            commit_count,
+            replace_checkpoint.as_deref(),
+        )
+        .await?;
+        replace_checkpoint = None;
+        base = Some(write.into_index());
+    }
+}
+
+async fn load_previous_path_state(
+    store: &Store,
+    layout: &StoreLayout<Store>,
+    manifest: &Manifest,
+    current_graph: &SplitCommitGraph,
+    options: RepositoryOptions,
+) -> Result<Option<PathStateIndex>> {
+    let Some(previous_generation) = manifest.generation.checked_sub(1) else {
+        return Ok(None);
+    };
+    let history =
+        manifest_store::list_manifest_history_for_generation(store, layout, previous_generation)
+            .await?;
+    for base in history.iter().filter(|entry| {
+        entry.manifest.commit_graph_hash.is_some() && entry.manifest.path_state_hash.is_some()
+    }) {
+        let graph_hash = base
+            .manifest
+            .commit_graph_hash
+            .as_deref()
+            .ok_or_else(|| WriteError::Internal("base commit graph disappeared".to_owned()))?;
+        let path_hash =
+            base.manifest.path_state_hash.as_deref().ok_or_else(|| {
+                WriteError::Internal("base path-state index disappeared".to_owned())
+            })?;
+        let graph = match load_split_commit_graph(
+            store,
+            layout,
+            graph_hash,
+            options.object_limits().max_commit_graph_bytes,
+        )
+        .await
+        {
+            Ok(graph) => graph,
+            Err(error) if immutable_metadata_unavailable(&error) => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if graph.descriptor.generation != base.manifest.generation
+            || graph.descriptor.pack_index_hash != base.manifest.pack_index_hash
+            || graph.descriptor.git_validation_digest != base.manifest.git_validation_digest
+        {
+            continue;
+        }
+        let index = match load_path_state(
+            store,
+            layout,
+            path_hash,
+            &graph,
+            options.object_limits().max_path_state_bytes,
+        )
+        .await
+        {
+            Ok(index) => index,
+            Err(error) if immutable_metadata_unavailable(&error) => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if path_state_is_prefix(&index, current_graph) {
+            return Ok(Some(index));
+        }
+    }
+    Ok(None)
+}
+
+fn path_state_is_prefix(index: &PathStateIndex, graph: &SplitCommitGraph) -> bool {
+    index.descriptor.commit_count <= graph.descriptor.commit_count
+        && (0..index.descriptor.commit_count).all(|ordinal| {
+            index
+                .record(ordinal)
+                .zip(graph.record(ordinal))
+                .is_some_and(|(path_record, graph_record)| {
+                    path_record.oid == graph_record.oid
+                        && path_record.first_parent == graph_record.parents.first().copied()
+                })
+        })
+}
+
+fn immutable_metadata_unavailable(error: &MetadataError) -> bool {
+    matches!(
+        error,
+        MetadataError::CorruptObject { .. }
+            | MetadataError::Storage {
+                source: StorageError::CorruptObject { .. } | StorageError::NotFound { .. },
+            }
+    )
+}
+
+async fn collect_path_state_inputs(
+    repository: &RemoteGitRepository,
+    graph: &SplitCommitGraph,
+    first: u32,
+    end: u32,
+    cancel: &CancellationToken,
+) -> Result<Vec<PathStateInput>> {
+    let mut inputs = Vec::new();
+    for ordinal in first..end {
+        check_cancelled(cancel)?;
+        let operation = repository.operation(OperationKind::Compare, cancel).await?;
+        let input = async {
+            let record = graph
+                .record(ordinal)
+                .ok_or_else(|| crab_remote_git::Error::Corrupt {
+                    stage: crab_remote_git::CorruptionStage::CommitGraph,
+                })?;
+            let oid = gix_hash::ObjectId::Sha1(record.oid);
+            let snapshot = repository
+                .snapshot(&Revision::Commit(oid), &operation)
+                .await?;
+            let commit = snapshot.commit(&operation).await?;
+            let first_parent = commit.parents.first().copied();
+            let mutations = if let Some(parent) = first_parent {
+                let parent = repository
+                    .snapshot(&Revision::Commit(parent), &operation)
+                    .await?;
+                let comparison = snapshot.compare(&parent, &operation).await?;
+                path_state_mutations(&snapshot, comparison.changes, &operation).await?
+            } else {
+                root_path_state_mutations(&snapshot, &operation).await?
+            };
+            let message = commit
+                .message
+                .split(|byte| *byte == b'\n')
+                .next()
+                .unwrap_or_default()
+                .to_vec();
+            Ok::<_, crab_remote_git::Error>(PathStateInput {
+                oid: record.oid,
+                first_parent: first_parent.map(oid_bytes).transpose()?,
+                author: commit.author.name.to_vec(),
+                author_seconds: commit.author.seconds,
+                message,
+                mutations,
+            })
+        }
+        .await;
+        inputs.push(operation.finish(input).await?);
+    }
+    Ok(inputs)
+}
+
+async fn root_path_state_mutations(
+    snapshot: &RemoteGitSnapshot,
+    operation: &OperationContext,
+) -> crab_remote_git::Result<Vec<PathStateMutation>> {
+    let mut mutations = vec![PathStateMutation {
+        path: Vec::new(),
+        present: false,
+        reset: true,
+    }];
+    mutations.extend(
+        snapshot
+            .list_tree_recursive(operation)
+            .await?
+            .into_iter()
+            .map(|entry| PathStateMutation {
+                path: entry.path.as_bytes().to_vec(),
+                present: true,
+                reset: false,
+            }),
+    );
+    Ok(mutations)
+}
+
+async fn path_state_mutations(
+    snapshot: &RemoteGitSnapshot,
+    changes: Vec<TreeChange>,
+    operation: &OperationContext,
+) -> crab_remote_git::Result<Vec<PathStateMutation>> {
+    let mut mutations = Vec::new();
+    let mut replaced_trees = Vec::new();
+    for change in changes {
+        let path = change.path.as_bytes();
+        let reset = change.kind == ChangeKind::TypeChanged;
+        let present = change.new.is_some();
+        let replaced_tree = reset
+            && change
+                .new
+                .as_ref()
+                .is_some_and(|entry| entry.kind == EntryKind::Tree);
+        mutations.push(PathStateMutation {
+            path: path.to_vec(),
+            present,
+            reset,
+        });
+        if replaced_tree {
+            replaced_trees.push(path.to_vec());
+        }
+        for (index, byte) in path.iter().enumerate() {
+            if *byte == b'/' {
+                mutations.push(PathStateMutation {
+                    path: path[..index].to_vec(),
+                    present: true,
+                    reset: false,
+                });
+            }
+        }
+    }
+    if !replaced_trees.is_empty() {
+        mutations.extend(
+            snapshot
+                .list_tree_recursive(operation)
+                .await?
+                .into_iter()
+                .filter(|entry| {
+                    replaced_trees.iter().any(|prefix| {
+                        entry
+                            .path
+                            .as_bytes()
+                            .strip_prefix(prefix.as_slice())
+                            .is_some_and(|suffix| suffix.starts_with(b"/"))
+                    })
+                })
+                .map(|entry| PathStateMutation {
+                    path: entry.path.as_bytes().to_vec(),
+                    present: true,
+                    reset: false,
+                }),
+        );
+    }
+    Ok(mutations)
+}
+
+fn oid_bytes(oid: gix_hash::ObjectId) -> std::result::Result<[u8; 20], crab_remote_git::Error> {
+    oid.as_bytes()
+        .try_into()
+        .map_err(|_| crab_remote_git::Error::UnsupportedObjectFormat)
+}
+
+async fn attach_path_state_if_current(
+    store: &Store,
+    layout: &StoreLayout<Store>,
+    manifest: &Manifest,
+    graph_hash: &str,
+    path_hash: &str,
+) -> Result<bool> {
+    for attempt in 0..3 {
+        let (mut current, etag) = manifest_store::read_manifest(store, layout).await?;
+        if !same_generation(&current, manifest)
+            || current.commit_graph_hash.as_deref() != Some(graph_hash)
+        {
+            return Ok(false);
+        }
+        if current.path_state_hash.is_some() {
+            return Ok(true);
+        }
+        current.path_state_hash = Some(path_hash.to_owned());
+        match manifest_store::write_manifest_cas(store, layout, &current, &etag).await {
+            Ok(_) => return Ok(true),
+            Err(crab_metadata::error::MetadataError::ManifestCasConflict { .. }) if attempt < 2 => {
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(WriteError::Internal(
+        "path-state manifest CAS retries exhausted".to_owned(),
+    ))
+}
+
+async fn clear_path_state_if_current(
+    store: &Store,
+    layout: &StoreLayout<Store>,
+    manifest: &Manifest,
+    graph_hash: &str,
+    path_hash: &str,
+) -> Result<bool> {
+    for attempt in 0..3 {
+        let (mut current, etag) = manifest_store::read_manifest(store, layout).await?;
+        if !same_generation(&current, manifest)
+            || current.commit_graph_hash.as_deref() != Some(graph_hash)
+            || current.path_state_hash.as_deref() != Some(path_hash)
+        {
+            return Ok(false);
+        }
+        current.path_state_hash = None;
+        match manifest_store::write_manifest_cas(store, layout, &current, &etag).await {
+            Ok(_) => return Ok(true),
+            Err(crab_metadata::error::MetadataError::ManifestCasConflict { .. }) if attempt < 2 => {
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(WriteError::Internal(
+        "path-state repair CAS retries exhausted".to_owned(),
+    ))
 }
 
 async fn load_previous_commit_graph(

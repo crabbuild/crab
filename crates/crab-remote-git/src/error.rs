@@ -94,6 +94,9 @@ pub enum CorruptionStage {
     /// Immutable commit-graph acceleration metadata.
     #[error("split commit graph")]
     CommitGraph,
+    /// Immutable generation-bound path attribution metadata.
+    #[error("path-state index")]
+    PathState,
     /// Exact object-locator metadata.
     #[error("object locator")]
     Locator,
@@ -242,6 +245,10 @@ pub enum Error {
         observed: Option<u64>,
         required: u64,
     },
+
+    /// Exact path attribution has not been published for the pinned generation.
+    #[error("repository path attribution is not ready for generation {generation}")]
+    PathStateIndexing { generation: u64 },
 
     /// Revision input could not be resolved under current repository policy.
     #[error("invalid repository revision: {reason}")]
@@ -533,7 +540,7 @@ impl Error {
                 reason: RevisionError::NotCommit,
             } => "unsupported",
             Self::EmptyRepository => "empty_repository",
-            Self::RepositoryIndexing { .. } => "indexing",
+            Self::RepositoryIndexing { .. } | Self::PathStateIndexing { .. } => "indexing",
             Self::LimitExceeded { .. } => "limit",
             Self::Allocation { .. } => "allocation",
             Self::Cancelled => "cancelled",
@@ -581,6 +588,7 @@ impl Error {
             Self::RepositoryIndexing {
                 observed: Some(_), ..
             } => Some(RepositoryDiagnostic::LocatorPublicationInProgress),
+            Self::PathStateIndexing { .. } => None,
             Self::Inventory {
                 source:
                     crab_metadata::error::MetadataError::CorruptObject { .. }

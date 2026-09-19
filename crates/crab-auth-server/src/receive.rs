@@ -365,6 +365,7 @@ pub fn validate_candidate_manifest_shape(
 
     if candidate.pusher.is_some()
         || candidate.commit_graph_hash.is_some()
+        || candidate.path_state_hash.is_some()
         || candidate.ref_registry_hash.is_some()
     {
         return Err(invalid(

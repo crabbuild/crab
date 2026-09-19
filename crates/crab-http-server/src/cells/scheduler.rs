@@ -504,19 +504,19 @@ impl RepositoryCellScheduler {
             Ok(committed) => match committed.output {
                 MaintenanceTickOutcome::Applied { processed } => processed,
                 MaintenanceTickOutcome::Stale => {
-                    return self.release_after(&cell.target, release_after).await;
+                    return self.release_after(cell, release_after).await;
                 }
             },
             Err(InvocationError::Rejected(_)) => {
-                return self.release_after(&cell.target, release_after).await;
+                return self.release_after(cell, release_after).await;
             }
             Err(error) => {
                 tracing::warn!(error = %error, "Cell Tick was not resolved");
-                return self.release_after(&cell.target, release_after).await;
+                return self.release_after(cell, release_after).await;
             }
         };
         if processed != 0 {
-            return self.release_after(&cell.target, release_after).await;
+            return self.release_after(cell, release_after).await;
         }
         if self.registry.has_activity_runner(cell.target.namespace())
             && let Some(job) = self.router.reserve_primitive_job()?
@@ -543,10 +543,12 @@ impl RepositoryCellScheduler {
                     }
                 }
                 drop(job);
-                if registry.has_effect_runner(target.namespace())
-                    && let Err(error) = run_effect(&registry, &router, cell).await
-                {
-                    tracing::warn!(error = %error, "Cell effect was not resolved");
+                if registry.has_effect_runner(target.namespace()) {
+                    if let Err(error) = run_effect(&registry, &router, cell).await {
+                        tracing::warn!(error = %error, "Cell effect was not resolved");
+                    }
+                } else {
+                    drop(cell);
                 }
                 if release_after && let Err(error) = router.drain_local_target(&target).await {
                     tracing::warn!(error = %error, "Workflow scheduler Cell release failed");
@@ -557,17 +559,16 @@ impl RepositoryCellScheduler {
             return Ok(());
         }
         if !self.registry.has_effect_runner(cell.target.namespace()) {
-            return self.release_after(&cell.target, release_after).await;
+            return self.release_after(cell, release_after).await;
         }
-        let target = cell.target.clone();
         let Some(job) = self.router.reserve_primitive_job()? else {
-            return self.release_after(&target, release_after).await;
+            return self.release_after(cell, release_after).await;
         };
-        let result = match self
+        let effect = match self
             .registry
             .run_effect_once(
-                cell.client,
-                cell.target,
+                cell.client.clone(),
+                cell.target.clone(),
                 self.router.effect_peer_client(),
                 EFFECT_LEASE_MS,
             )
@@ -577,21 +578,25 @@ impl RepositoryCellScheduler {
             | Ok(EffectRunOutcome::Delivered { .. })
             | Ok(EffectRunOutcome::Retrying { .. })
             | Ok(EffectRunOutcome::Failed { .. })
-            | Ok(EffectRunOutcome::LeaseLost { .. }) => {
-                self.release_after(&target, release_after).await
-            }
-            Err(error) => {
-                tracing::warn!(error = %error, "Cell effect was not resolved");
-                self.release_after(&target, release_after).await
-            }
+            | Ok(EffectRunOutcome::LeaseLost { .. }) => Ok(()),
+            Err(error) => Err(error),
         };
         drop(job);
-        result
+        if let Err(error) = effect {
+            tracing::warn!(error = %error, "Cell effect was not resolved");
+        }
+        self.release_after(cell, release_after).await
     }
 
-    async fn release_after(&self, target: &CellTarget, release_after: bool) -> crate::Result<()> {
+    async fn release_after(
+        &self,
+        cell: super::RepositoryCell,
+        release_after: bool,
+    ) -> crate::Result<()> {
+        let target = cell.target.clone();
+        drop(cell);
         if release_after {
-            self.router.drain_local_target(target).await
+            self.router.drain_local_target(&target).await
         } else {
             Ok(())
         }
@@ -948,8 +953,8 @@ async fn run_effect(
     };
     match registry
         .run_effect_once(
-            cell.client,
-            cell.target,
+            cell.client.clone(),
+            cell.target.clone(),
             router.effect_peer_client(),
             EFFECT_LEASE_MS,
         )
