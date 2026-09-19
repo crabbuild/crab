@@ -158,6 +158,8 @@ done
 
 node_session() {
   local service="$1"
+  # The single-quoted script must expand path inside the container, not locally.
+  # shellcheck disable=SC2016
   "${compose[@]}" exec -T "$service" sh -ec '
     for path in /var/lib/crab/cells/sessions/*; do
       if [ -d "$path" ]; then
