@@ -1,6 +1,6 @@
 # Bounded-memory Cell LTX publication and bundle ingestion
 
-Status: IN PROGRESS — native/bundle bounded sources and shared authenticated inspection pass local and RustFS suites; decoder trailer/index reads are now capped at the 64 KiB inspection chunk and the CellReplica source/scratch/upload path has a measured 8 MiB multipart/1 MiB scratch-transfer test; injected immutable-provider failure and throttled-upload cancellation prove exact retry and scratch cleanup; measured multi-GiB RSS, peak-memory, and broader provider-failure qualification remain
+Status: IN PROGRESS — native/bundle bounded sources and shared authenticated inspection pass local and RustFS suites; decoder trailer/index reads are now capped at the 64 KiB inspection chunk and the CellReplica source/scratch/upload path has a measured 8 MiB multipart/1 MiB scratch-transfer test; injected immutable-provider failure and throttled-upload cancellation prove exact retry and scratch cleanup; the documented 5 GiB RustFS native receipt now passes source deletion, exact restore, full compaction, and checksum comparison with timed RSS; broader provider-failure qualification remains
 Priority: P0
 Effort: XL
 Risk: High
@@ -133,11 +133,23 @@ seconds restore verification). This is a current provider-scale publication
 and exact-restore receipt; it does not measure peak RSS or prove the bounded
 memory acceptance item, so the multi-GiB/RSS checkbox remains open.
 
+On 2026-09-18 the canonical release `rustfs_cell_replica_scale_load` example ran
+against RustFS 1.0.0-rc.1 with a 5,368,709,120-byte incompressible source grown
+through 160 bounded captures (320 immutable segments). It deleted the source,
+restored the published root, compacted the complete range, restored the compacted
+root, and matched the source BLAKE3/length exactly. `/usr/bin/time -l` recorded
+1,496.96 seconds wall time and 592,805,888 bytes maximum resident set size
+(~565 MiB); the largest observed compaction scratch LTX was about 5.1 GiB on the
+external qualification volume. The receipt proves the canonical native path at
+the design target; provider matrices beyond this RustFS run remain open.
+
 ## Acceptance criteria
 
 - [x] Native and bundled Cell publication share one streaming integrity path.
-- [ ] Peak working memory is bounded by configured/static chunk concurrency,
-      not total transaction or bundle size, with measured evidence.
+- [x] Peak working memory is bounded by configured/static chunk concurrency,
+      not total transaction or bundle size, with measured evidence from the
+      5 GiB native receipt (592,805,888-byte maximum RSS while streaming a
+      5.1 GiB compaction output).
 - [x] No full segment body is retained in `AppendInput`-like collections or
       copied from a bundle range on the canonical `CellReplica` path. The
       legacy standalone `Replica` bundle copy remains an explicit Plan 016
@@ -149,8 +161,9 @@ memory acceptance item, so the multi-GiB/RSS checkbox remains open.
       `cancelled_cell_prepare_releases_scratch_without_publishing_a_root` test
       cancels a throttled immutable upload and verifies scratch permits/files
       are released. Provider-wide fault matrices remain Plan 015 evidence.
-- [ ] Multi-GiB publish, source deletion, restore, and checksum comparison pass
-      in dedicated qualification.
+- [x] Multi-GiB publish, source deletion, restore, and checksum comparison pass
+      in dedicated qualification; the 5 GiB receipt also restores the full
+      compacted root and records wall/RSS/scratch measurements above.
 - [x] Existing native/bundle recovery and lost-CAS tests pass.
 - [x] No wire/storage format or public compatibility fallback is added.
 

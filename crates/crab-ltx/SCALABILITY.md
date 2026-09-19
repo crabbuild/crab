@@ -28,6 +28,20 @@ Treat active as simultaneously open unless the service explicitly defines an
 activation/eviction policy. Do not substitute registered database count for
 active database count when reporting capacity.
 
+## Canonical CellReplica 5 GiB receipt
+
+On 2026-09-18, the release `rustfs_cell_replica_scale_load` example ran against
+RustFS 1.0.0-rc.1 with a 5,368,709,120-byte incompressible SQLite source grown
+through 160 bounded captures (320 immutable segments). It deleted the source,
+restored the published root, compacted the complete range, restored the
+compacted root, and matched the source BLAKE3/length exactly. `/usr/bin/time -l`
+recorded 1,496.96 seconds wall time and 592,805,888 bytes maximum resident set
+size (~565 MiB); the largest observed compaction scratch LTX was about 5.1 GiB
+on the external qualification volume. This qualifies the canonical native
+CellReplica publication path at the design target. It is a provider-specific
+library receipt, not evidence for the broader 1,000–10,000-database node target,
+protected Kubernetes faults, or the pending standalone API decision.
+
 At 4 KiB pages, a 5,000 MB database contains approximately 1.22 million pages.
 The current on-store index uses 60 bytes per page: about 73 MB for one full
 index, or 732 GB across 10,000 maximum-size databases. In-memory locators,

@@ -197,16 +197,27 @@ artifact-bound records. The `qualification_receipt` binary verifies exact
 source, image, and artifact identity, and the release workflow consumes only
 that bound evidence. The isolated local RustFS LTX, Cell takeover/retention,
 HTTP collaboration, native-push, and receive-fault qualifications now pass;
-they are provider evidence, not release receipts. Multi-GiB RSS, matched
-warm-restart zero-origin latency receipts, complete advertised/metric parity,
-multi-process movement, protected Kubernetes faults, and a named standalone
-compatibility decision remain release gates. The cold-activation planner seam
+they are provider evidence, not release receipts. Matched warm-restart
+zero-origin latency receipts, complete advertised/metric parity, multi-process
+movement, protected Kubernetes faults, and a named standalone compatibility
+decision remain release gates. The cold-activation planner seam
 and its local receiver-failure rollback are implemented locally: a failed
 rooted idle acquisition or fenced-owner takeover releases the takeover through
 the canonical publisher path and leaves the exact root unowned. A pinned
 recovery overlay remains owned until its follower proof is replayed and sealed.
 The multi-process movement, membership-loss, and fleet-convergence receipts
 still belong to the protected qualification gate.
+
+The canonical native publication path now has its dedicated multi-GiB receipt:
+the release `rustfs_cell_replica_scale_load` example grew a 5,368,709,120-byte
+incompressible SQLite source through 160 bounded captures (320 immutable
+segments) against RustFS 1.0.0-rc.1, deleted the source, restored the published
+root, compacted the complete range, restored the compacted root, and matched the
+source BLAKE3/length exactly. `/usr/bin/time -l` recorded 1,496.96 seconds wall
+time and 592,805,888 bytes maximum resident set size (~565 MiB); the largest
+observed compaction scratch LTX was about 5.1 GiB on the external qualification
+volume. This closes the native 5 GiB/RSS publication gate; provider matrices,
+protected fleet receipts, and standalone-surface decisions remain separate gates.
 
 The local warm-path regression
 `resident_route_reports_zero_origin_reads_and_latency_percentiles` runs 64

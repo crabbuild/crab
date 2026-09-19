@@ -140,8 +140,8 @@ compatibility decision.
 
 The local implementation slices are present on the canonical path. The ledger
 is deliberately not marked as release-complete where the acceptance criterion
-requires a real provider, Kubernetes fault, measured multi-GiB RSS run, or an
-authorized standalone-contract decision.
+requires a real provider, Kubernetes fault, complete advertised/metric parity,
+or an authorized standalone-contract decision.
 
 Local proof completed:
 
@@ -186,8 +186,7 @@ The latest isolated local RustFS run (RustFS 1.0.0-rc.1, 2026-09-18) also
 passed the LTX round-trip/parity/CAS-race, Cell source-loss takeover, retention
 graph, HTTP receive-fault, native HTTP push, and public collaboration/takeover
 cases. These are provider/fault iteration receipts, not signed release
-evidence; protected three-Pod, multi-GiB RSS, matched-latency, and fleet gates
-remain open.
+evidence; protected three-Pod, matched-latency, and fleet gates remain open.
 
 The current checkout also passed the full local Compose/RustFS cluster
 qualification (version-5 receipt) with two owner losses, exact-root monotonicity,
@@ -203,6 +202,16 @@ The same RustFS qualification volume ran the documented `10m`
 212.797 seconds wall time, and 25.619 seconds restore verification. This
 refreshes provider-scale publication/restore evidence only; it is not a peak
 RSS or multi-Pod receipt.
+
+The same RustFS qualification volume ran the canonical release
+`rustfs_cell_replica_scale_load` example with a 5,368,709,120-byte incompressible
+source grown through 160 bounded captures (320 immutable segments). It deleted
+the source, restored the published root, compacted the complete range, restored
+the compacted root, and matched the source BLAKE3/length exactly. `/usr/bin/time
+-l` recorded 1,496.96 seconds wall time and 592,805,888 bytes maximum resident
+set size (~565 MiB); the largest observed compaction scratch LTX was about
+5.1 GiB on the external qualification volume. This closes the canonical native
+multi-GiB/RSS receipt; broader provider matrices remain open.
 
 The in-repo placement path now consumes the signed observation block for cold
 activation: the planner selects a live eligible session, sends one authenticated
@@ -253,9 +262,10 @@ Plan 010's canonical decoder no longer calls unbounded `read_to_end` for the
 trailer/index: it drains the remaining authenticated metadata through a fixed
 64 KiB buffer. `cell_prepare_bounds_source_and_scratch_transfers` measures the
 CellReplica source/scratch/upload path at no more than the 8 MiB multipart and
-1 MiB scratch-transfer bounds. A multi-GiB RSS receipt is still required before
-the peak-memory acceptance item can be checked; the legacy standalone Replica
-bundle-copy surface remains part of the pending Plan 016 decision.
+1 MiB scratch-transfer bounds. The 5 GiB native RustFS receipt now records
+592,805,888 bytes maximum RSS while restoring and compacting a 5.1 GiB scratch
+LTX; the legacy standalone Replica bundle-copy surface remains part of the
+pending Plan 016 decision.
 
 The movement simulator now includes an explicit lost-release-response event:
 after the authoritative release, the reply can disappear without restoring the
@@ -353,8 +363,9 @@ Plan 010 now has a cancellation regression in
 the first immutable upload, cancels native preparation, and verifies the
 replayable scratch namespace and scratch semaphore return to baseline. Together
 with the existing injected filesystem-failure tests and fail-first immutable
-PUT test, this closes the local failure/cancellation cleanup gate; measured
-multi-GiB RSS and provider-matrix receipts remain intentionally external.
+PUT test, this closes the local failure/cancellation cleanup gate; the 5 GiB
+RSS receipt is now recorded above, while provider-matrix receipts remain
+intentionally external.
 
 The coordination kernel now records a typed intent beside every local effect
 identity. A completion must match both the activation generation and its

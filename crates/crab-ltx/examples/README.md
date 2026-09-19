@@ -14,6 +14,7 @@ the same `crab_storage::Store` used by production callers.
 | `compact_history` | Full-chain compaction plus reopening and restoring an immutable historical manifest |
 | `repository_replication_lifecycle` | Complete per-repository lifecycle: write, capture, publish, paged read, epoch handoff, sparse write, compact, historical reopen, and exact restore |
 | `rustfs_replication_scale_load` | The 1M/10M/100M profiles with real RustFS publication, pruning, source loss, remote verification, and throughput reporting |
+| `rustfs_cell_replica_scale_load` | Canonical `CellReplica` native publication, source deletion, exact restore, and full-range compaction with streamed checksum verification |
 | `rustfs_paged_read_scale_performance` | The 1M/10M/100M profiles followed by cold RustFS head/page-map opening, paged point/range queries, and a full aggregate scan |
 
 From the repository root:
@@ -57,6 +58,13 @@ Then run the workloads with optimizations enabled:
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-main" \
   cargo run --release -p crab-ltx --features replica \
   --example rustfs_replication_scale_load --locked -- 1m
+
+# Canonical CellReplica qualification. The default is a 5 GiB source; keep all
+# source, recovery, and compaction files on a dedicated external volume.
+CRAB_CELL_LTX_TARGET_BYTES=$((5 * 1024 * 1024 * 1024)) \
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-main" \
+  cargo run --release -p crab-ltx --features replica \
+  --example rustfs_cell_replica_scale_load --locked
 
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-main" \
   cargo run --release -p crab-ltx --features replica \
