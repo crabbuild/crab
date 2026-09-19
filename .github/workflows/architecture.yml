@@ -236,8 +236,8 @@ jobs:
 
       - name: Verify LTX and Cell source-loss recovery
         run: |
-          cargo test -p crab-ltx --locked --features replica --test remote \
-            rustfs_roundtrip -- --ignored --exact --nocapture
+          cargo test -p crab-ltx --locked --features replica --test cell_roots \
+            exact_root_inventory_verifies_every_remote_dependency -- --exact --nocapture
           cargo test -p crab-cell-runtime --locked --test actor \
             rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
             -- --ignored --exact --nocapture

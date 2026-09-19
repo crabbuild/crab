@@ -149,8 +149,8 @@ AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
 CRAB_LTX_TEST_BUCKET="$BUCKET" \
 CRAB_LTX_TEST_ENDPOINT="$ENDPOINT" \
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
-  cargo test -p crab-ltx --features replica --test remote rustfs_roundtrip \
-  --locked -- --ignored --exact
+  cargo test -p crab-ltx --features replica --test cell_roots \
+  exact_root_inventory_verifies_every_remote_dependency --locked -- --exact
 
 AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
 AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
@@ -301,8 +301,8 @@ The ignored qualification tests require one fresh bucket and a unique Cell prefi
 ```bash
 CRAB_LTX_TEST_BUCKET="$BUCKET" \
 CRAB_LTX_TEST_ENDPOINT="$ENDPOINT" \
-cargo test -p crab-ltx --features replica --test remote \
-  rustfs_roundtrip -- --ignored --exact
+cargo test -p crab-ltx --features replica --test cell_roots \
+  exact_root_inventory_verifies_every_remote_dependency -- --exact
 
 CRAB_CELL_TEST_BUCKET="$BUCKET" \
 CRAB_CELL_TEST_ENDPOINT="$ENDPOINT" \
