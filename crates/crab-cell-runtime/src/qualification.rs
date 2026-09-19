@@ -364,7 +364,9 @@ impl QualificationReceipt {
         Ok(receipt)
     }
 
-    /// Verifies a decoded receipt against the expected release and artifact.
+    /// Verifies a decoded, passing receipt against the expected release and artifact.
+    ///
+    /// Failed receipts remain retainable evidence but cannot satisfy this release gate.
     pub fn verify_for(&self, source_revision: &str, image: Digest, artifact: &[u8]) -> Result<()> {
         if !self.passed {
             return Err(Error::Control("qualification receipt is not passed"));
