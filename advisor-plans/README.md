@@ -316,7 +316,11 @@ until replay is sealed. The feature-gated
 `independent_process_receiver_failure_returns_exact_idle_root` probe repeats
 the idle receiver failure in a separate OS process against the shared
 filesystem CAS authority and verifies the exact root returns to unowned
-`Idle`. Protected three-Pod movement and membership receipts remain open.
+`Idle`. The complete process-support actor target also passes once without a
+retry loop, and the simulator's
+`membership_loss_during_movement_preserves_released_root` case preserves the
+released root and watermarks when membership disappears before acquisition.
+Protected three-Pod movement and membership receipts remain open.
 
 Restart inventory is now fail-closed at the HTTP composition boundary. Each
 process gets a fresh `cells/sessions/<session-id>` directory; before the

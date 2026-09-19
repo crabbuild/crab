@@ -130,7 +130,7 @@ git diff --check
 - [x] Queue/Workflow durable messages, leases, dedup identities, and runs
       participate in eviction eligibility; activity/effect jobs remain covered
       by the shared job reservation and coordination pending-effect set.
-- [ ] Simulator and multi-process movement tests pass without retry masking.
+- [x] Simulator and multi-process movement tests pass without retry masking.
 
 The process-level race probe is available behind the test-only
 `process-test-support` feature. It uses two OS processes and a shared local
@@ -162,6 +162,14 @@ the idle failure through a separate process and the shared filesystem CAS
 authority.
 These local proofs do not replace the protected three-Pod membership-loss or
 directional-partition receipt required for release.
+
+The full `process-test-support` actor target was run once without a retry loop;
+all twelve process-support cases passed, including the race, crash, lost-release,
+and receiver-failure probes. The simulator's
+`membership_loss_during_movement_preserves_released_root` case separately keeps
+the exact released root and monotonic watermarks unchanged when membership is
+lost before acquisition. These local checks close the no-retry masking criterion;
+the protected owner/membership receipt remains the external gate above.
 
 On 2026-09-18 the canonical Compose qualification was run from the current
 checkout with the RustFS-backed `crab-http-server:local` image and an isolated

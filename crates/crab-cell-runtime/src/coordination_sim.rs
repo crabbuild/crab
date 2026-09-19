@@ -810,3 +810,26 @@ fn movement_requires_quiesce_durability_release_and_live_acquire() {
     assert_eq!(simulation.movement, MovementPhase::Idle);
     assert_eq!(simulation.owner, Some(1));
 }
+
+#[test]
+fn membership_loss_during_movement_preserves_released_root() {
+    let mut simulation = Simulation::new();
+    simulation.apply(Event::BeginPublication);
+    simulation.apply(Event::FinishPublication { succeeded: true });
+    simulation.apply(Event::MovementQuiesce);
+    simulation.apply(Event::MovementDurability);
+    simulation.apply(Event::MovementRelease);
+
+    let epoch = simulation.epoch;
+    let published_sequence = simulation.published_sequence;
+    let durable_publications = simulation.durable_publications;
+    simulation.apply(Event::MembershipLoss);
+    simulation.apply(Event::MovementAcquire);
+
+    assert_eq!(simulation.movement, MovementPhase::Released);
+    assert_eq!(simulation.owner, None);
+    assert_eq!(simulation.epoch, epoch);
+    assert_eq!(simulation.published_sequence, published_sequence);
+    assert_eq!(simulation.durable_publications, durable_publications);
+    simulation.assert_invariants();
+}
