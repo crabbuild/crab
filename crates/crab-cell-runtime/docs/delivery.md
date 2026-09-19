@@ -313,7 +313,10 @@ and C, kills B without draining, waits for B's signed session advertisement to
 expire, and requires C to restore the same root at a higher epoch before it can
 publish the next sequence. Restarted B has empty local Cell storage and must
 route to C. The script emits the exact sessions, epochs, root, sequences, and
-live admission envelopes as JSON. Because the processes share one network
+live admission envelopes as JSON. Before workload, it also compares every
+node's `cells capacity --json --live` disk and active-Cell ceilings with the
+corresponding runtime Prometheus gauges; a mismatch fails the script and the
+receipt records the parity result. Because the processes share one network
 namespace, this proves process and local-disk loss but not Pod networking or
 partition behavior.
 

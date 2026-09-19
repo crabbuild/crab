@@ -107,6 +107,27 @@ for capacity in "$capacity_a" "$capacity_b" "$capacity_c"; do
     <<<"$capacity" >/dev/null
 done
 
+metrics_a="$("${compose[@]}" exec -T server crab-http-server \
+  --config /etc/crab/server.toml cells metrics)"
+metrics_b="$("${compose[@]}" exec -T server-b crab-http-server \
+  --config /etc/crab/server.toml cells metrics)"
+metrics_c="$("${compose[@]}" exec -T server-c crab-http-server \
+  --config /etc/crab/server.toml cells metrics)"
+for pair in \
+  "$capacity_a|$metrics_a" \
+  "$capacity_b|$metrics_b" \
+  "$capacity_c|$metrics_c"; do
+  capacity="${pair%%|*}"
+  metrics="${pair#*|}"
+  expected_disk="$(jq -r '.admission.local_disk_bytes' <<<"$capacity")"
+  expected_cells="$(jq -r '.admission.active_cells' <<<"$capacity")"
+  observed_disk="$(awk '$1 == "crab_http_server_cell_runtime_local_disk_capacity_bytes" { print $2; exit }' <<<"$metrics")"
+  observed_cells="$(awk '$1 == "crab_http_server_cell_runtime_active_cell_capacity" { print $2; exit }' <<<"$metrics")"
+  test -n "$observed_disk" && test -n "$observed_cells"
+  test "$observed_disk" = "$expected_disk"
+  test "$observed_cells" = "$expected_cells"
+done
+
 create_response=""
 for _ in $(seq 1 45); do
   candidate="$(curl --fail-with-body --silent --show-error --max-time 10 \
@@ -448,6 +469,9 @@ jq --null-input \
   --argjson capacity_a "$capacity_a" \
   --argjson capacity_b "$capacity_b" \
   --argjson capacity_c "$capacity_c" \
+  --arg metrics_a "$metrics_a" \
+  --arg metrics_b "$metrics_b" \
+  --arg metrics_c "$metrics_c" \
   --argjson node_before "$node_before" \
   --argjson node_fleet_only "$node_fleet_only" \
   --argjson fleet_only_response "$fleet_only_response" \
@@ -502,5 +526,7 @@ jq --null-input \
       root_after: $root_after_second_loss,
       restored_labels: $second_restored_labels
     },
-    capacity: {node_a: $capacity_a, node_b: $capacity_b, node_c: $capacity_c}
+    capacity: {node_a: $capacity_a, node_b: $capacity_b, node_c: $capacity_c},
+    metrics: {node_a: $metrics_a, node_b: $metrics_b, node_c: $metrics_c},
+    capacity_metric_parity: {local_disk: true, active_cells: true}
   }'

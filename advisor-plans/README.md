@@ -194,9 +194,12 @@ evidence; protected three-Pod, matched-latency, and fleet gates remain open.
 The current checkout also passed the full local Compose/RustFS cluster
 qualification (version-5 receipt) with two owner losses, exact-root monotonicity,
 follower replacement, and follower-only commits under an immutable-object deny
-policy. The raw receipt is retained on the external qualification volume. It
-strengthens local process/fault evidence but is not protected Kubernetes or
-signed release evidence.
+policy. The qualification harness now also compares each node's capacity report
+with its runtime Prometheus disk and active-Cell ceilings before workload; a
+mismatch fails the run and the receipt records the parity check. The raw receipt
+is retained on the external qualification volume. It strengthens local
+process/fault evidence but is not protected Kubernetes or signed release
+evidence.
 
 The same RustFS qualification volume ran the documented `10m`
 `rustfs_replication_scale_load` profile on the current branch: 10,000,000 rows,
