@@ -161,6 +161,37 @@ shared authenticated mechanics remain private to Cell roots.
 | Existing rendezvous | [`preferred_scanner`](../src/scheduler.rs) elects a catalog scheduler scanner. It does not rank or move Cell owners. |
 | Transition safety | [`Control`](../src/control.rs) validates named single-record transitions; [`coordination.rs`](../src/coordination.rs) allocates and retires typed per-effect intents/IDs, while the actor fences completions by activation generation and effect family, drains the kernel-owned pending-effect set before fenced deactivation, and keeps effect timing coupled to the production publisher. Background hydration, renewal, persisted-work inventory refresh, drain, and shutdown pass queue/publisher/lease observations through the same kernel schedule transition before an adapter starts work. |
 
+### Closed-book LTX telemetry and the prefetch gate
+
+Capture telemetry is a fixed-size per-batch ledger. It attributes schema checks,
+WAL existence and position resolution, WAL reads and page collection, encoding,
+local writes, file sync, parent sync, verification, and checkpoint time. The
+same ledger records finite WAL strategy counters and checkpoint runs, busy
+outcomes, frames, backfill, and restarts. None of these observations is
+persisted or participates in authority, checkpoint, or recovery decisions.
+
+Replica telemetry crosses into `crab-cell-runtime` only as the closed enums
+`LtxPhase` and `LtxReadOrigin`. The runtime exports phase result/duration and
+origin request/byte counters for cold, sparse, hydrating, and resident reads.
+Cell IDs, paths, object keys, digests, and arbitrary caller strings cannot be
+labels. Root-open, authenticated-directory, frame-fetch, ordered restore-write,
+and compaction paths report success and failure through the same host hook.
+
+B-tree-guided speculative prefetch remains disabled until traces collected by
+these counters demonstrate a scan workload whose p95 improves without
+regressing the existing point-read contract. The current baseline already
+coalesces one authenticated 64-page window: `cold_open_and_restore_improve_p95_under_object_latency`
+proves one body request for a point fault under injected latency, and
+`sparse_hydration_coalesces_contiguous_cell_frames` proves fewer range requests
+than hydrated pages. A future predictor is acceptable only when all of the
+following are verified:
+
+- malformed SQLite pages produce no prediction;
+- prediction changes fetch timing only, never exact-root authority checks;
+- point reads issue no additional provider request;
+- speculative workers, bytes, and cache residency use existing host admission;
+- scan p95 improves on recorded workloads at 5/20/100 ms provider latency.
+
 ### Implementation evidence and remaining qualification
 
 The first implementation slices now have one code path each: the architecture

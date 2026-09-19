@@ -60,6 +60,50 @@ pub trait HostResourceAdmission: Send + Sync {
 #[cfg(feature = "replica")]
 pub trait HostResourcePermit: Send + Sync {}
 
+/// Finite replica phases exposed to an embedding runtime.
+#[cfg(feature = "replica")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LtxPhase {
+    Capture,
+    Preparation,
+    SchemaCheck,
+    WalExistence,
+    PositionResolution,
+    WalRead,
+    PageCollection,
+    Verification,
+    Encode,
+    LocalWrite,
+    Fsync,
+    ParentSync,
+    Checkpoint,
+    RootOpen,
+    Directory,
+    FrameFetch,
+    RestoreWrite,
+    Compaction,
+}
+
+/// Finite origin-read classes exposed to an embedding runtime.
+#[cfg(feature = "replica")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LtxReadOrigin {
+    Cold,
+    Sparse,
+    Hydrating,
+    Resident,
+}
+
+/// Non-blocking, bounded-cardinality observations emitted by replica work.
+#[cfg(feature = "replica")]
+pub trait LtxTelemetry: Send + Sync {
+    /// Records one completed phase and whether it succeeded.
+    fn phase(&self, _phase: LtxPhase, _elapsed: Duration, _succeeded: bool) {}
+
+    /// Records provider requests and returned bytes for one read class.
+    fn origin_read(&self, _origin: LtxReadOrigin, _requests: u64, _bytes: u64) {}
+}
+
 type DiskAdmissions = Vec<Arc<dyn DiskBudgetAdmission>>;
 
 /// Shared byte-precise admission for local files owned by active database work.
@@ -908,6 +952,8 @@ pub struct Host {
     #[cfg(feature = "replica")]
     resource_admission: Option<Arc<dyn HostResourceAdmission>>,
     #[cfg(feature = "replica")]
+    telemetry: Option<Arc<dyn LtxTelemetry>>,
+    #[cfg(feature = "replica")]
     recovery: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     #[cfg(feature = "replica")]
     dirty: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
@@ -1007,6 +1053,32 @@ impl Host {
     #[cfg(feature = "replica")]
     pub fn install_resource_admission(&mut self, admission: Arc<dyn HostResourceAdmission>) {
         self.resource_admission = Some(admission);
+    }
+
+    /// Sends finite replica observations to one embedding runtime.
+    #[cfg(feature = "replica")]
+    #[must_use]
+    pub fn with_ltx_telemetry(mut self, telemetry: Arc<dyn LtxTelemetry>) -> Self {
+        self.telemetry = Some(telemetry);
+        self
+    }
+
+    #[cfg(feature = "replica")]
+    pub(crate) fn observe_ltx_phase(&self, phase: LtxPhase, started: Instant, succeeded: bool) {
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.phase(
+                phase,
+                self.now_monotonic().saturating_duration_since(started),
+                succeeded,
+            );
+        }
+    }
+
+    #[cfg(feature = "replica")]
+    pub(crate) fn observe_ltx_read(&self, origin: LtxReadOrigin, bytes: usize) {
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.origin_read(origin, 1, bytes as u64);
+        }
     }
 
     /// Returns the currently configured object-store I/O capacity.
@@ -1440,6 +1512,8 @@ impl Default for Host {
             directory_cache: None,
             #[cfg(feature = "replica")]
             resource_admission: None,
+            #[cfg(feature = "replica")]
+            telemetry: None,
             #[cfg(feature = "replica")]
             recovery: None,
             #[cfg(feature = "replica")]

@@ -315,6 +315,7 @@ pub(super) struct Verification<'a> {
     pub database_pages: u32,
     pub extents: &'a BTreeMap<[u8; 32], ObjectExtent>,
     pub host: &'a Host,
+    pub origin: crate::LtxReadOrigin,
 }
 
 #[derive(Clone)]
@@ -829,6 +830,9 @@ async fn read_node(verification: &Verification<'_>, digest: [u8; 32]) -> Result<
         .store()
         .get_with_etag_bounded(&path, MAX_NODE_BYTES)
         .await?;
+    verification
+        .host
+        .observe_ltx_read(verification.origin, bytes.len());
     if *blake3::hash(&bytes).as_bytes() != digest {
         return Err(CrabError::ChecksumMismatch);
     }
@@ -859,6 +863,9 @@ async fn read_node_uncached(
         .store()
         .get_with_etag_bounded(&path, MAX_NODE_BYTES)
         .await?;
+    verification
+        .host
+        .observe_ltx_read(verification.origin, bytes.len());
     if *blake3::hash(&bytes).as_bytes() != digest {
         return Err(CrabError::ChecksumMismatch);
     }
@@ -1244,6 +1251,7 @@ mod tests {
                 database_pages: base_pages,
                 extents: &base_extents,
                 host: &replica.host,
+                origin: crate::LtxReadOrigin::Cold,
             },
             base_tree.root_digest(),
             base_tree.height(),
@@ -1258,6 +1266,7 @@ mod tests {
                 database_pages: final_pages,
                 extents: &final_extents,
                 host: &replica.host,
+                origin: crate::LtxReadOrigin::Cold,
             },
             final_tree.checksum(),
         )

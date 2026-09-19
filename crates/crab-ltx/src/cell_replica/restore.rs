@@ -88,7 +88,8 @@ pub(super) async fn run(database: &CellPagedDatabase, destination: &Path) -> Res
         if u64::from(first) != expected_page {
             return Err(CrabError::LTXCorrupted);
         }
-        let (next_file, next_checksum) = host
+        let write_started = host.now_monotonic();
+        let write = host
             .run(move || {
                 let mut next = u64::from(first);
                 match downloaded {
@@ -116,7 +117,13 @@ pub(super) async fn run(database: &CellPagedDatabase, destination: &Path) -> Res
                 }
                 Ok::<_, CrabError>((file, checksum))
             })
-            .await??;
+            .await;
+        host.observe_ltx_phase(
+            crate::LtxPhase::RestoreWrite,
+            write_started,
+            matches!(&write, Ok(Ok(_))),
+        );
+        let (next_file, next_checksum) = write??;
         file = next_file;
         checksum = next_checksum;
         expected_page += u64::from(count);
@@ -128,22 +135,38 @@ pub(super) async fn run(database: &CellPagedDatabase, destination: &Path) -> Res
         return Err(CrabError::ChecksumMismatch);
     }
     let expected_bytes = u64::from(database.page_size) * u64::from(database.database_pages);
-    host.run(move || {
-        if file.file_len()? != expected_bytes {
-            return Err(CrabError::LTXCorrupted);
-        }
-        file.sync_all()?;
-        Ok::<_, CrabError>(())
-    })
-    .await??;
+    let sync_started = host.now_monotonic();
+    let sync = host
+        .run(move || {
+            if file.file_len()? != expected_bytes {
+                return Err(CrabError::LTXCorrupted);
+            }
+            file.sync_all()?;
+            Ok::<_, CrabError>(())
+        })
+        .await;
+    host.observe_ltx_phase(
+        crate::LtxPhase::RestoreWrite,
+        sync_started,
+        matches!(&sync, Ok(Ok(()))),
+    );
+    sync??;
     let filesystem = Arc::clone(&host.filesystem);
     let source = scratch.path.clone();
     let destination = destination.to_owned();
-    host.run(move || {
-        filesystem.persist_file_new(&source, &destination)?;
-        Ok::<_, CrabError>(())
-    })
-    .await??;
+    let install_started = host.now_monotonic();
+    let install = host
+        .run(move || {
+            filesystem.persist_file_new(&source, &destination)?;
+            Ok::<_, CrabError>(())
+        })
+        .await;
+    host.observe_ltx_phase(
+        crate::LtxPhase::RestoreWrite,
+        install_started,
+        matches!(&install, Ok(Ok(()))),
+    );
+    install??;
     scratch.installed = true;
     Ok(database.position)
 }

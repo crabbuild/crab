@@ -442,7 +442,8 @@ impl CellRuntime {
             replica_host.dirty_capacity(),
             replica_host.scratch_capacity() as usize,
         )?;
-        let mut replica_host = replica_host;
+        let telemetry = crate::CellTelemetryHandle::default();
+        let mut replica_host = replica_host.with_ltx_telemetry(Arc::new(telemetry.clone()));
         replica_host.install_resource_admission(Arc::new(LedgerHostResourceAdmission {
             state: resources.weak(),
         }));
@@ -469,7 +470,7 @@ impl CellRuntime {
                 replica_host,
                 node_lease,
                 node_durability: Arc::new(std::sync::RwLock::new(None)),
-                telemetry: crate::CellTelemetryHandle::default(),
+                telemetry,
                 unpublished_node_log_bytes,
             }),
         })

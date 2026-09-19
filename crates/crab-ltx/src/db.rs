@@ -27,6 +27,7 @@ pub enum CheckpointMode {
 
 #[derive(Clone, Copy, Debug)]
 struct CheckpointPragma {
+    busy: bool,
     wal_frames: i64,
     backfilled: i64,
 }
@@ -68,10 +69,16 @@ struct LastL0Header {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TimingPhase {
     Preparation,
+    SchemaCheck,
+    WalExistence,
+    PositionResolution,
     WalRead,
+    PageCollection,
     Verification,
     Encode,
-    DurableWrite,
+    LocalWrite,
+    Fsync,
+    ParentSync,
     Checkpoint,
 }
 
@@ -122,6 +129,46 @@ impl TimingRecorder {
         self.timing.segment_count = self.timing.segment_count.saturating_add(1);
     }
 
+    pub(crate) fn add_phase_nanos(&mut self, phase: TimingPhase, elapsed: u64) {
+        self.add_phase(phase, Duration::from_nanos(elapsed));
+    }
+
+    pub(crate) fn observe_wal_image(&mut self, sparse: bool, fallback: bool, bytes: usize) {
+        if sparse {
+            self.timing.wal_sparse_reads = self.timing.wal_sparse_reads.saturating_add(1);
+        } else {
+            self.timing.wal_full_reads = self.timing.wal_full_reads.saturating_add(1);
+        }
+        if fallback {
+            self.timing.wal_fallback_reads = self.timing.wal_fallback_reads.saturating_add(1);
+        }
+        self.timing.wal_image_bytes = self.timing.wal_image_bytes.max(bytes as u64);
+    }
+
+    pub(crate) fn checkpoint_run(&mut self) {
+        self.timing.checkpoint_runs = self.timing.checkpoint_runs.saturating_add(1);
+    }
+
+    pub(crate) fn checkpoint_result(&mut self, busy: bool, frames: i64, backfilled: i64) {
+        self.timing.checkpoint_busy = self.timing.checkpoint_busy.saturating_add(u32::from(busy));
+        self.timing.checkpoint_frames = self
+            .timing
+            .checkpoint_frames
+            .saturating_add(u64::try_from(frames.max(0)).unwrap_or_default());
+        self.timing.checkpoint_backfilled = self
+            .timing
+            .checkpoint_backfilled
+            .saturating_add(u64::try_from(backfilled.max(0)).unwrap_or_default());
+    }
+
+    pub(crate) fn checkpoint_busy_error(&mut self) {
+        self.timing.checkpoint_busy_errors = self.timing.checkpoint_busy_errors.saturating_add(1);
+    }
+
+    pub(crate) fn checkpoint_restart(&mut self) {
+        self.timing.checkpoint_restarts = self.timing.checkpoint_restarts.saturating_add(1);
+    }
+
     pub(crate) fn finish(mut self, now: Instant) -> crate::CaptureTiming {
         if let Some((active, started)) = self.active.take() {
             self.add_phase(active, now.saturating_duration_since(started));
@@ -133,10 +180,16 @@ impl TimingRecorder {
     fn add_phase(&mut self, phase: TimingPhase, elapsed: Duration) {
         let target = match phase {
             TimingPhase::Preparation => &mut self.timing.preparation_nanos,
+            TimingPhase::SchemaCheck => &mut self.timing.schema_check_nanos,
+            TimingPhase::WalExistence => &mut self.timing.wal_existence_nanos,
+            TimingPhase::PositionResolution => &mut self.timing.position_resolution_nanos,
             TimingPhase::WalRead => &mut self.timing.wal_read_nanos,
+            TimingPhase::PageCollection => &mut self.timing.page_collection_nanos,
             TimingPhase::Verification => &mut self.timing.verification_nanos,
             TimingPhase::Encode => &mut self.timing.encode_nanos,
-            TimingPhase::DurableWrite => &mut self.timing.durable_write_nanos,
+            TimingPhase::LocalWrite => &mut self.timing.local_write_nanos,
+            TimingPhase::Fsync => &mut self.timing.fsync_nanos,
+            TimingPhase::ParentSync => &mut self.timing.parent_sync_nanos,
             TimingPhase::Checkpoint => &mut self.timing.checkpoint_nanos,
         };
         *target = target.saturating_add(nanos(elapsed));
@@ -532,15 +585,33 @@ impl Db {
         }
     }
 
+    pub(crate) fn timing_add_phase_nanos(&mut self, phase: TimingPhase, elapsed: u64) {
+        if let Some(recorder) = &mut self.timing {
+            recorder.add_phase_nanos(phase, elapsed);
+        }
+    }
+
+    pub(crate) fn timing_observe_wal_image(&mut self, sparse: bool, fallback: bool, bytes: usize) {
+        if let Some(recorder) = &mut self.timing {
+            recorder.observe_wal_image(sparse, fallback, bytes);
+        }
+    }
+
     pub fn sync(&mut self, required: Option<crate::commit::WalCut>) -> Result<()> {
         // Self-heal: recreate the control tables if something swept them out
         // of `sqlite_schema` from under the replicator — without them every
         // capture fails until the database is reopened. A no-op when the
         // tables exist (no schema change, no WAL write).
-        self.ensure_control_tables()?;
+        self.timing_begin(TimingPhase::SchemaCheck);
+        let schema_result = self.ensure_control_tables();
+        self.timing_end(TimingPhase::SchemaCheck);
+        schema_result?;
 
         // Ensure the WAL has at least one frame (db.go:1017-1020).
-        self.ensure_wal_exists()?;
+        self.timing_begin(TimingPhase::WalExistence);
+        let wal_result = self.ensure_wal_exists();
+        self.timing_end(TimingPhase::WalExistence);
+        wal_result?;
 
         let (orig_wal_size, new_wal_size, synced) = self.verify_and_sync()?;
 
@@ -581,9 +652,9 @@ impl Db {
             orig_wal_size = self.wal_file_size()?;
         }
 
-        self.timing_begin(TimingPhase::Verification);
+        self.timing_begin(TimingPhase::PositionResolution);
         let info_result = self.verify();
-        self.timing_end(TimingPhase::Verification);
+        self.timing_end(TimingPhase::PositionResolution);
         let info = info_result?;
 
         let synced = self.sync_inner(info)?;

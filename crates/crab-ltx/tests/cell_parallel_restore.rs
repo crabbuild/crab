@@ -3,7 +3,7 @@
 use std::{
     fmt,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU8, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -12,8 +12,8 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use crab_ltx::{
-    CaptureBatch, CaptureTiming, CellReplica, Host, Limits, ManagedDb, RootRef, VerifiedLocalPlan,
-    restore_exact,
+    CaptureBatch, CaptureTiming, CellReplica, Host, Limits, LtxPhase, LtxReadOrigin, LtxTelemetry,
+    ManagedDb, RootRef, VerifiedLocalPlan, restore_exact,
 };
 use crab_storage::{CellStorageLayout, Store};
 use futures_util::{StreamExt as _, stream::BoxStream};
@@ -27,6 +27,22 @@ const NO_FAULT: u8 = 0;
 const SHORT_RANGE: u8 = 1;
 const CORRUPT_RANGE: u8 = 2;
 const TIMEOUT_RANGE: u8 = 3;
+
+#[derive(Default)]
+struct RecordingTelemetry {
+    phases: Mutex<Vec<LtxPhase>>,
+    reads: Mutex<Vec<(LtxReadOrigin, u64, u64)>>,
+}
+
+impl LtxTelemetry for RecordingTelemetry {
+    fn phase(&self, phase: LtxPhase, _: Duration, _: bool) {
+        self.phases.lock().unwrap().push(phase);
+    }
+
+    fn origin_read(&self, origin: LtxReadOrigin, requests: u64, bytes: u64) {
+        self.reads.lock().unwrap().push((origin, requests, bytes));
+    }
+}
 
 struct ReadStats {
     active: AtomicUsize,
@@ -413,6 +429,44 @@ async fn simultaneous_restores_share_host_io_admission() {
     assert!(store.stats.peak_range_bytes.load(Ordering::SeqCst) <= 3 << 20);
     assert_eq!(std::fs::read(first).unwrap(), fixture.expected);
     assert_eq!(std::fs::read(second).unwrap(), fixture.expected);
+}
+
+#[tokio::test]
+async fn replica_telemetry_attributes_cold_sparse_and_restore_work() {
+    let fixture = fixture(4).await;
+    let store = InstrumentedStore::new(fixture.backend.clone(), Duration::ZERO);
+    let telemetry = Arc::new(RecordingTelemetry::default());
+    let host = Host::default().with_ltx_telemetry(telemetry.clone());
+    let replica = cell_replica(Store::new(store), fixture.cell, fixture.incarnation, host);
+
+    let opened = replica.open_root(&fixture.root).await.unwrap();
+    opened.paged().read_page(1).await.unwrap();
+    let output = tempfile::TempDir::new().unwrap();
+    opened
+        .restore(&output.path().join("telemetry.sqlite"))
+        .await
+        .unwrap();
+
+    let phases = telemetry.phases.lock().unwrap();
+    for expected in [
+        LtxPhase::RootOpen,
+        LtxPhase::Directory,
+        LtxPhase::FrameFetch,
+        LtxPhase::RestoreWrite,
+    ] {
+        assert!(phases.contains(&expected), "missing {expected:?}");
+    }
+    let reads = telemetry.reads.lock().unwrap();
+    for expected in [LtxReadOrigin::Cold, LtxReadOrigin::Sparse] {
+        assert!(
+            reads
+                .iter()
+                .any(|(origin, requests, bytes)| *origin == expected
+                    && *requests > 0
+                    && *bytes > 0),
+            "missing {expected:?}"
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]

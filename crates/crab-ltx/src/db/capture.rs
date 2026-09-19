@@ -3,6 +3,74 @@
 // Split from upstream db.rs; see UPSTREAM.md for Crab's changes.
 
 use super::*;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+
+struct TimedWriter<W> {
+    inner: W,
+    host: crate::Host,
+    write_nanos: Arc<AtomicU64>,
+}
+
+impl<W: std::io::Write> std::io::Write for TimedWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let started = self.host.now_monotonic();
+        let result = self.inner.write(bytes);
+        add_elapsed(&self.write_nanos, started, self.host.now_monotonic());
+        result
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+struct TimedFileIo {
+    inner: Box<dyn crate::environment::FileIo>,
+    host: crate::Host,
+    write_nanos: Arc<AtomicU64>,
+}
+
+impl crate::environment::FileIo for TimedFileIo {
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        let started = self.host.now_monotonic();
+        let result = self.inner.write_all(bytes);
+        add_elapsed(&self.write_nanos, started, self.host.now_monotonic());
+        result
+    }
+
+    fn write_all_at(&mut self, offset: u64, bytes: &[u8]) -> std::io::Result<()> {
+        let started = self.host.now_monotonic();
+        let result = self.inner.write_all_at(offset, bytes);
+        add_elapsed(&self.write_nanos, started, self.host.now_monotonic());
+        result
+    }
+
+    fn read_exact_at(&mut self, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
+        self.inner.read_exact_at(offset, len)
+    }
+
+    fn sync_all(&mut self) -> std::io::Result<()> {
+        self.inner.sync_all()
+    }
+
+    fn file_len(&self) -> std::io::Result<u64> {
+        self.inner.file_len()
+    }
+
+    fn set_len(&mut self, len: u64) -> std::io::Result<()> {
+        self.inner.set_len(len)
+    }
+}
+
+fn add_elapsed(total: &AtomicU64, started: Instant, finished: Instant) {
+    let elapsed = nanos(finished.saturating_duration_since(started));
+    let _ = total.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(elapsed))
+    });
+}
 
 impl Db {
     pub(super) fn read_valid_wal_image(
@@ -109,6 +177,7 @@ impl Db {
         // re-read so a zero-filled prefix cannot hide uncaptured commits.
         let frame_size_bytes = self.page_size as i64 + WAL_FRAME_HEADER_SIZE as i64;
         let mut sparse_tail = false;
+        let mut fallback = false;
         let mut wal = if info.snapshotting {
             let bytes = self.host.read(&self.wal_path())?;
             WalImage::whole(bytes)
@@ -124,6 +193,7 @@ impl Db {
                     image
                 }
                 Err(_) => {
+                    fallback = true;
                     let bytes = self.host.read(&self.wal_path())?;
                     WalImage::whole(bytes)
                 }
@@ -148,10 +218,12 @@ impl Db {
         if mismatch {
             info.offset = WAL_HEADER_SIZE as i64;
             if sparse_tail {
+                fallback = true;
                 let bytes = self.host.read(&self.wal_path())?;
                 wal = WalImage::whole(bytes);
             }
         }
+        self.timing_observe_wal_image(sparse_tail && !fallback, fallback, wal.bytes.capacity());
         let mut rd = if info.offset == WAL_HEADER_SIZE as i64 {
             WalReader::new(&wal.bytes).map_err(CrabError::from)?
         } else {
@@ -159,8 +231,10 @@ impl Db {
                 .map_err(CrabError::from)?
         };
 
-        let page_map_result = rd.page_map().map_err(CrabError::from);
         self.timing_end(crate::db::TimingPhase::WalRead);
+        self.timing_begin(crate::db::TimingPhase::PageCollection);
+        let page_map_result = rd.page_map().map_err(CrabError::from);
+        self.timing_end(crate::db::TimingPhase::PageCollection);
         let (page_map, max_offset, wal_commit) = page_map_result?;
         if wal_commit > 0 {
             commit = wal_commit;
@@ -326,8 +400,19 @@ impl Db {
                 .facilities
                 .filesystem
                 .open_rw(Path::new(index_filename))?;
+            let write_nanos = Arc::new(AtomicU64::new(0));
+            let output = TimedWriter {
+                inner: output,
+                host: self.host.facilities.clone(),
+                write_nanos: Arc::clone(&write_nanos),
+            };
+            let index = Box::new(TimedFileIo {
+                inner: index,
+                host: self.host.facilities.clone(),
+                write_nanos: Arc::clone(&write_nanos),
+            });
             let mut encoder = crate::codec::Encoder::new_block_spooled(output, index);
-            self.timing_begin(crate::db::TimingPhase::Encode);
+            let encode_started = self.host.now_monotonic();
             encoder.encode_header(header)?;
 
             let mut checksums = self.checksums.clone();
@@ -359,15 +444,27 @@ impl Db {
                 )?;
             }
             encoder.close(checksums.checksum())?;
-            self.timing_end(crate::db::TimingPhase::Encode);
-            let mut output = encoder.into_writer();
-            self.timing_begin(crate::db::TimingPhase::DurableWrite);
+            let encode_elapsed = nanos(
+                self.host
+                    .now_monotonic()
+                    .saturating_duration_since(encode_started),
+            );
+            let local_write_nanos = write_nanos.load(Ordering::Relaxed);
+            self.timing_add_phase_nanos(
+                crate::db::TimingPhase::Encode,
+                encode_elapsed.saturating_sub(local_write_nanos),
+            );
+            self.timing_add_phase_nanos(crate::db::TimingPhase::LocalWrite, local_write_nanos);
+            let mut output = encoder.into_writer().inner;
+            self.timing_begin(crate::db::TimingPhase::Fsync);
             output.sync_all()?;
+            self.timing_end(crate::db::TimingPhase::Fsync);
             drop(output);
             self.host.remove_file(Path::new(index_filename))?;
+            self.timing_begin(crate::db::TimingPhase::ParentSync);
             self.host
                 .rename(Path::new(tmp_filename), Path::new(filename))?;
-            self.timing_end(crate::db::TimingPhase::DurableWrite);
+            self.timing_end(crate::db::TimingPhase::ParentSync);
             Ok(checksums)
         })();
         if result.is_err() {

@@ -28,6 +28,8 @@ const SELF_FENCE_REASON_COUNT: usize = 4;
 const RECOVERY_STATE_COUNT: usize = 2;
 const RECOVERY_FAILURE_REASON_COUNT: usize = 4;
 const NODE_LOG_ROTATION_RESULT_COUNT: usize = 4;
+const LTX_PHASE_COUNT: usize = 18;
+const LTX_READ_ORIGIN_COUNT: usize = 4;
 const DURATION_BUCKETS_SECONDS: [f64; 16] = [
     0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
     600.0,
@@ -41,6 +43,30 @@ const TRANSFER_REJECTION_LABELS: [&str; TRANSFER_REJECTION_COUNT] = ["capacity",
 const DURABILITY_SOURCE_LABELS: [&str; DURABILITY_SOURCE_COUNT] = ["fleet", "object"];
 const APPEND_RESULT_LABELS: [&str; APPEND_RESULT_COUNT] = ["acked", "nacked"];
 const RESIDENT_ROUTE_LABELS: [&str; 3] = ["hit", "miss", "refused"];
+const LTX_PHASE_LABELS: [&str; LTX_PHASE_COUNT] = [
+    "capture",
+    "preparation",
+    "schema_check",
+    "wal_existence",
+    "position_resolution",
+    "wal_read",
+    "page_collection",
+    "verification",
+    "encode",
+    "local_write",
+    "fsync",
+    "parent_sync",
+    "checkpoint",
+    "root_open",
+    "directory",
+    "frame_fetch",
+    "restore_write",
+    "compaction",
+];
+const LTX_PHASE_RESULT_LABELS: [&str; 2] = ["succeeded", "failed"];
+const LTX_READ_ORIGIN_LABELS: [&str; LTX_READ_ORIGIN_COUNT] =
+    ["cold", "sparse", "hydrating", "resident"];
+const LTX_WAL_READ_LABELS: [&str; 3] = ["sparse", "full", "fallback"];
 const NODE_LOG_LANE_STATE_LABELS: [&str; NODE_LOG_LANE_STATE_COUNT] =
     ["open", "degraded", "sealed"];
 const SELF_FENCE_REASON_LABELS: [&str; SELF_FENCE_REASON_COUNT] =
@@ -104,6 +130,22 @@ struct MetricsInner {
     durability_wait: [Histogram; DURABILITY_SOURCE_COUNT],
     node_log_append_bytes: [Counter; APPEND_RESULT_COUNT],
     resident_routes: [Counter; 3],
+    ltx_phase_runs: [[Counter; 2]; LTX_PHASE_COUNT],
+    ltx_phase_duration: [Histogram; LTX_PHASE_COUNT],
+    ltx_origin_requests: [Counter; LTX_READ_ORIGIN_COUNT],
+    ltx_origin_bytes: [Counter; LTX_READ_ORIGIN_COUNT],
+    ltx_wal_reads: [Counter; 3],
+    ltx_wal_image_bytes: Counter,
+    ltx_capture_wal_bytes: Counter,
+    ltx_capture_database_bytes: Counter,
+    ltx_capture_ltx_bytes: Counter,
+    ltx_capture_segments: Counter,
+    ltx_checkpoint_runs: Counter,
+    ltx_checkpoint_busy: Counter,
+    ltx_checkpoint_busy_errors: Counter,
+    ltx_checkpoint_frames: Counter,
+    ltx_checkpoint_backfilled: Counter,
+    ltx_checkpoint_restarts: Counter,
     node_log_lanes: [Gauge; NODE_LOG_LANE_STATE_COUNT],
     session_lease_seconds: Gauge,
     self_fenced: AtomicBool,
@@ -392,6 +434,85 @@ impl Metrics {
                         &METADATA,
                     )
                 }),
+                ltx_phase_runs: LTX_PHASE_LABELS.map(|phase| {
+                    LTX_PHASE_RESULT_LABELS.map(|result| {
+                        recorder.register_counter(
+                            &key(
+                                "crab_cell_ltx_phase_total",
+                                &[("phase", phase), ("result", result)],
+                            ),
+                            &METADATA,
+                        )
+                    })
+                }),
+                ltx_phase_duration: LTX_PHASE_LABELS.map(|phase| {
+                    recorder.register_histogram(
+                        &key("crab_cell_ltx_phase_seconds", &[("phase", phase)]),
+                        &METADATA,
+                    )
+                }),
+                ltx_origin_requests: LTX_READ_ORIGIN_LABELS.map(|origin| {
+                    recorder.register_counter(
+                        &key("crab_cell_ltx_origin_requests_total", &[("origin", origin)]),
+                        &METADATA,
+                    )
+                }),
+                ltx_origin_bytes: LTX_READ_ORIGIN_LABELS.map(|origin| {
+                    recorder.register_counter(
+                        &key("crab_cell_ltx_origin_bytes_total", &[("origin", origin)]),
+                        &METADATA,
+                    )
+                }),
+                ltx_wal_reads: LTX_WAL_READ_LABELS.map(|strategy| {
+                    recorder.register_counter(
+                        &key("crab_cell_ltx_wal_reads_total", &[("strategy", strategy)]),
+                        &METADATA,
+                    )
+                }),
+                ltx_wal_image_bytes: recorder.register_counter(
+                    &Key::from_static_name("crab_cell_ltx_wal_image_bytes_total"),
+                    &METADATA,
+                ),
+                ltx_capture_wal_bytes: recorder.register_counter(
+                    &Key::from_static_name("crab_cell_ltx_capture_wal_bytes_total"),
+                    &METADATA,
+                ),
+                ltx_capture_database_bytes: recorder.register_counter(
+                    &Key::from_static_name("crab_cell_ltx_capture_database_bytes_total"),
+                    &METADATA,
+                ),
+                ltx_capture_ltx_bytes: recorder.register_counter(
+                    &Key::from_static_name("crab_cell_ltx_capture_ltx_bytes_total"),
+                    &METADATA,
+                ),
+                ltx_capture_segments: recorder.register_counter(
+                    &Key::from_static_name("crab_cell_ltx_capture_segments_total"),
+                    &METADATA,
+                ),
+                ltx_checkpoint_runs: recorder.register_counter(
+                    &Key::from_static_name("crab_cell_ltx_checkpoint_runs_total"),
+                    &METADATA,
+                ),
+                ltx_checkpoint_busy: recorder.register_counter(
+                    &Key::from_static_name("crab_cell_ltx_checkpoint_busy_total"),
+                    &METADATA,
+                ),
+                ltx_checkpoint_busy_errors: recorder.register_counter(
+                    &Key::from_static_name("crab_cell_ltx_checkpoint_busy_errors_total"),
+                    &METADATA,
+                ),
+                ltx_checkpoint_frames: recorder.register_counter(
+                    &Key::from_static_name("crab_cell_ltx_checkpoint_frames_total"),
+                    &METADATA,
+                ),
+                ltx_checkpoint_backfilled: recorder.register_counter(
+                    &Key::from_static_name("crab_cell_ltx_checkpoint_backfilled_total"),
+                    &METADATA,
+                ),
+                ltx_checkpoint_restarts: recorder.register_counter(
+                    &Key::from_static_name("crab_cell_ltx_checkpoint_restarts_total"),
+                    &METADATA,
+                ),
                 node_log_lanes: NODE_LOG_LANE_STATE_LABELS.map(|state| {
                     recorder.register_gauge(
                         &key("crab_cell_node_log_lanes", &[("state", state)]),
@@ -613,6 +734,127 @@ impl crab_cell_runtime::CellTelemetry for Metrics {
             crab_cell_runtime::ResidentRouteOutcome::Refused => 2,
         };
         self.inner.resident_routes[index].increment(1);
+    }
+
+    fn ltx_phase(&self, phase: crab_cell_runtime::LtxPhase, elapsed: Duration, succeeded: bool) {
+        let index = match phase {
+            crab_cell_runtime::LtxPhase::Capture => 0,
+            crab_cell_runtime::LtxPhase::Preparation => 1,
+            crab_cell_runtime::LtxPhase::SchemaCheck => 2,
+            crab_cell_runtime::LtxPhase::WalExistence => 3,
+            crab_cell_runtime::LtxPhase::PositionResolution => 4,
+            crab_cell_runtime::LtxPhase::WalRead => 5,
+            crab_cell_runtime::LtxPhase::PageCollection => 6,
+            crab_cell_runtime::LtxPhase::Verification => 7,
+            crab_cell_runtime::LtxPhase::Encode => 8,
+            crab_cell_runtime::LtxPhase::LocalWrite => 9,
+            crab_cell_runtime::LtxPhase::Fsync => 10,
+            crab_cell_runtime::LtxPhase::ParentSync => 11,
+            crab_cell_runtime::LtxPhase::Checkpoint => 12,
+            crab_cell_runtime::LtxPhase::RootOpen => 13,
+            crab_cell_runtime::LtxPhase::Directory => 14,
+            crab_cell_runtime::LtxPhase::FrameFetch => 15,
+            crab_cell_runtime::LtxPhase::RestoreWrite => 16,
+            crab_cell_runtime::LtxPhase::Compaction => 17,
+        };
+        self.inner.ltx_phase_runs[index][usize::from(!succeeded)].increment(1);
+        self.inner.ltx_phase_duration[index].record(elapsed.as_secs_f64());
+    }
+
+    fn ltx_origin_read(&self, origin: crab_cell_runtime::LtxReadOrigin, requests: u64, bytes: u64) {
+        let index = match origin {
+            crab_cell_runtime::LtxReadOrigin::Cold => 0,
+            crab_cell_runtime::LtxReadOrigin::Sparse => 1,
+            crab_cell_runtime::LtxReadOrigin::Hydrating => 2,
+            crab_cell_runtime::LtxReadOrigin::Resident => 3,
+        };
+        self.inner.ltx_origin_requests[index].increment(requests);
+        self.inner.ltx_origin_bytes[index].increment(bytes);
+    }
+
+    fn ltx_capture(&self, timing: &crab_cell_runtime::CaptureTiming) {
+        let phase = |phase, nanos| {
+            if nanos > 0 {
+                <Self as crab_cell_runtime::CellTelemetry>::ltx_phase(
+                    self,
+                    phase,
+                    Duration::from_nanos(nanos),
+                    true,
+                );
+            }
+        };
+        phase(crab_cell_runtime::LtxPhase::Capture, timing.total_nanos);
+        phase(
+            crab_cell_runtime::LtxPhase::Preparation,
+            timing.preparation_nanos,
+        );
+        phase(
+            crab_cell_runtime::LtxPhase::SchemaCheck,
+            timing.schema_check_nanos,
+        );
+        phase(
+            crab_cell_runtime::LtxPhase::WalExistence,
+            timing.wal_existence_nanos,
+        );
+        phase(
+            crab_cell_runtime::LtxPhase::PositionResolution,
+            timing.position_resolution_nanos,
+        );
+        phase(crab_cell_runtime::LtxPhase::WalRead, timing.wal_read_nanos);
+        phase(
+            crab_cell_runtime::LtxPhase::PageCollection,
+            timing.page_collection_nanos,
+        );
+        phase(
+            crab_cell_runtime::LtxPhase::Verification,
+            timing.verification_nanos,
+        );
+        phase(crab_cell_runtime::LtxPhase::Encode, timing.encode_nanos);
+        phase(
+            crab_cell_runtime::LtxPhase::LocalWrite,
+            timing.local_write_nanos,
+        );
+        phase(crab_cell_runtime::LtxPhase::Fsync, timing.fsync_nanos);
+        phase(
+            crab_cell_runtime::LtxPhase::ParentSync,
+            timing.parent_sync_nanos,
+        );
+        phase(
+            crab_cell_runtime::LtxPhase::Checkpoint,
+            timing.checkpoint_nanos,
+        );
+        self.inner.ltx_wal_reads[0].increment(u64::from(timing.wal_sparse_reads));
+        self.inner.ltx_wal_reads[1].increment(u64::from(timing.wal_full_reads));
+        self.inner.ltx_wal_reads[2].increment(u64::from(timing.wal_fallback_reads));
+        self.inner
+            .ltx_wal_image_bytes
+            .increment(timing.wal_image_bytes);
+        self.inner.ltx_capture_wal_bytes.increment(timing.wal_bytes);
+        self.inner
+            .ltx_capture_database_bytes
+            .increment(timing.database_bytes);
+        self.inner.ltx_capture_ltx_bytes.increment(timing.ltx_bytes);
+        self.inner
+            .ltx_capture_segments
+            .increment(u64::from(timing.segment_count));
+        self.inner
+            .ltx_checkpoint_runs
+            .increment(u64::from(timing.checkpoint_runs));
+        self.inner
+            .ltx_checkpoint_busy
+            .increment(u64::from(timing.checkpoint_busy));
+        self.inner
+            .ltx_checkpoint_busy_errors
+            .increment(u64::from(timing.checkpoint_busy_errors));
+        self.inner
+            .ltx_checkpoint_frames
+            .increment(timing.checkpoint_frames);
+        self.inner
+            .ltx_checkpoint_backfilled
+            .increment(timing.checkpoint_backfilled);
+        self.inner
+            .ltx_checkpoint_restarts
+            .increment(u64::from(timing.checkpoint_restarts));
     }
 }
 
@@ -1134,6 +1376,80 @@ fn describe_metrics(recorder: &impl Recorder) {
         "crab_cell_resident_route_total",
         "Actor-owned resident route lookups by bounded outcome.",
     );
+    describe_counter(
+        recorder,
+        "crab_cell_ltx_phase_total",
+        "Completed LTX work by bounded phase and result.",
+    );
+    recorder.describe_histogram(
+        KeyName::from_const_str("crab_cell_ltx_phase_seconds"),
+        Some(Unit::Seconds),
+        "Elapsed time for bounded LTX work phases.".into(),
+    );
+    describe_counter(
+        recorder,
+        "crab_cell_ltx_origin_requests_total",
+        "Read requests by bounded Cell residency class.",
+    );
+    describe_counter(
+        recorder,
+        "crab_cell_ltx_origin_bytes_total",
+        "Returned read bytes by bounded Cell residency class.",
+    );
+    describe_counter(
+        recorder,
+        "crab_cell_ltx_wal_reads_total",
+        "Capture WAL image reads by bounded strategy.",
+    );
+    describe_counter(
+        recorder,
+        "crab_cell_ltx_wal_image_bytes_total",
+        "Peak allocated WAL image bytes summed across Cell captures.",
+    );
+    for (name, description) in [
+        (
+            "crab_cell_ltx_capture_wal_bytes_total",
+            "Logical WAL bytes consumed by Cell captures.",
+        ),
+        (
+            "crab_cell_ltx_capture_database_bytes_total",
+            "Logical database bytes represented by Cell captures.",
+        ),
+        (
+            "crab_cell_ltx_capture_ltx_bytes_total",
+            "LTX bytes inspected by completed Cell captures.",
+        ),
+        (
+            "crab_cell_ltx_capture_segments_total",
+            "LTX segments produced by completed Cell captures.",
+        ),
+        (
+            "crab_cell_ltx_checkpoint_runs_total",
+            "SQLite checkpoint pragmas executed by Cell captures.",
+        ),
+        (
+            "crab_cell_ltx_checkpoint_busy_total",
+            "SQLite checkpoint pragmas that reported busy.",
+        ),
+        (
+            "crab_cell_ltx_checkpoint_busy_errors_total",
+            "SQLite checkpoint pragmas that failed busy or locked.",
+        ),
+        (
+            "crab_cell_ltx_checkpoint_frames_total",
+            "WAL frames reported by Cell checkpoints.",
+        ),
+        (
+            "crab_cell_ltx_checkpoint_backfilled_total",
+            "WAL frames backfilled by Cell checkpoints.",
+        ),
+        (
+            "crab_cell_ltx_checkpoint_restarts_total",
+            "Cell checkpoints that restarted the WAL lineage.",
+        ),
+    ] {
+        describe_counter(recorder, name, description);
+    }
     describe_gauge(
         recorder,
         "crab_cell_node_log_lanes",
@@ -1335,6 +1651,47 @@ mod tests {
             &metrics,
             crab_cell_runtime::ResidentRouteOutcome::Miss,
         );
+        <Metrics as crab_cell_runtime::CellTelemetry>::ltx_phase(
+            &metrics,
+            crab_cell_runtime::LtxPhase::RootOpen,
+            Duration::from_millis(10),
+            true,
+        );
+        <Metrics as crab_cell_runtime::CellTelemetry>::ltx_phase(
+            &metrics,
+            crab_cell_runtime::LtxPhase::FrameFetch,
+            Duration::from_millis(5),
+            false,
+        );
+        <Metrics as crab_cell_runtime::CellTelemetry>::ltx_origin_read(
+            &metrics,
+            crab_cell_runtime::LtxReadOrigin::Cold,
+            2,
+            1_024,
+        );
+        <Metrics as crab_cell_runtime::CellTelemetry>::ltx_origin_read(
+            &metrics,
+            crab_cell_runtime::LtxReadOrigin::Hydrating,
+            3,
+            4_096,
+        );
+        <Metrics as crab_cell_runtime::CellTelemetry>::ltx_capture(
+            &metrics,
+            &crab_cell_runtime::CaptureTiming {
+                schema_check_nanos: 1_000_000,
+                wal_sparse_reads: 1,
+                wal_image_bytes: 8_192,
+                wal_bytes: 4_096,
+                database_bytes: 16_384,
+                ltx_bytes: 2_048,
+                segment_count: 1,
+                checkpoint_runs: 1,
+                checkpoint_frames: 4,
+                checkpoint_backfilled: 3,
+                checkpoint_restarts: 1,
+                ..Default::default()
+            },
+        );
         metrics.record_self_fence(SelfFenceReason::Refresh);
         metrics.record_self_fence(SelfFenceReason::Shutdown);
         metrics.update_recovery_states(1, 0);
@@ -1394,6 +1751,31 @@ mod tests {
         assert!(rendered.contains("crab_cell_node_log_append_bytes_total{result=\"nacked\"} 128"));
         assert!(rendered.contains("crab_cell_resident_route_total{outcome=\"hit\"} 1"));
         assert!(rendered.contains("crab_cell_resident_route_total{outcome=\"miss\"} 1"));
+        assert!(
+            rendered
+                .contains("crab_cell_ltx_phase_total{phase=\"root_open\",result=\"succeeded\"} 1")
+        );
+        assert!(
+            rendered
+                .contains("crab_cell_ltx_phase_total{phase=\"frame_fetch\",result=\"failed\"} 1")
+        );
+        assert!(rendered.contains("crab_cell_ltx_phase_seconds_count{phase=\"root_open\"} 1"));
+        assert!(rendered.contains("crab_cell_ltx_origin_requests_total{origin=\"cold\"} 2"));
+        assert!(rendered.contains("crab_cell_ltx_origin_bytes_total{origin=\"cold\"} 1024"));
+        assert!(rendered.contains("crab_cell_ltx_origin_requests_total{origin=\"hydrating\"} 3"));
+        assert!(rendered.contains("crab_cell_ltx_origin_bytes_total{origin=\"hydrating\"} 4096"));
+        assert!(
+            rendered.contains(
+                "crab_cell_ltx_phase_total{phase=\"schema_check\",result=\"succeeded\"} 1"
+            )
+        );
+        assert!(rendered.contains("crab_cell_ltx_wal_reads_total{strategy=\"sparse\"} 1"));
+        assert!(rendered.contains("crab_cell_ltx_wal_image_bytes_total 8192"));
+        assert!(rendered.contains("crab_cell_ltx_capture_wal_bytes_total 4096"));
+        assert!(rendered.contains("crab_cell_ltx_checkpoint_runs_total 1"));
+        assert!(rendered.contains("crab_cell_ltx_checkpoint_frames_total 4"));
+        assert!(rendered.contains("crab_cell_ltx_checkpoint_backfilled_total 3"));
+        assert!(rendered.contains("crab_cell_ltx_checkpoint_restarts_total 1"));
         assert!(rendered.contains("crab_cell_self_fences_total{reason=\"refresh\"} 1"));
         assert!(rendered.contains("crab_cell_session_lease_seconds 0"));
         assert!(rendered.contains("crab_cell_node_log_recoveries{state=\"running\"} 1"));

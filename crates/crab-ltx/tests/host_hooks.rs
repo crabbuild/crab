@@ -518,6 +518,9 @@ fn exact_local_resume_and_all_checkpoints_preserve_the_injected_plan() {
             .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(1)"))
             .unwrap();
         let batch = writer.checkpoint(mode).unwrap();
+        assert_eq!(batch.timing.checkpoint_runs, 1);
+        assert!(batch.timing.checkpoint_frames >= batch.timing.checkpoint_backfilled);
+        assert_eq!(batch.timing.checkpoint_busy_errors, 0);
         segments.extend(batch.segments);
         let plan = host
             .verify(&segments, batch.position, Limits::default())

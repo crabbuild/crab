@@ -292,6 +292,7 @@ impl CellPagedDatabase {
                 database_pages: self.database_pages,
                 extents: &self.extents,
                 host: &self.replica.host,
+                origin: crate::LtxReadOrigin::Cold,
             },
             self.directory_digest,
             self.directory_height,
@@ -310,9 +311,19 @@ impl CellPagedDatabase {
 
     /// Reads one page by verifying every radix node and the selected LTX frame.
     pub async fn read_page(&self, page: u32) -> Result<Vec<u8>> {
+        self.read_page_with_origin(page, crate::LtxReadOrigin::Sparse)
+            .await
+    }
+
+    async fn read_page_with_origin(
+        &self,
+        page: u32,
+        origin: crate::LtxReadOrigin,
+    ) -> Result<Vec<u8>> {
         if page == crate::ltx::lock_pgno(self.page_size) && page <= self.database_pages {
             return Ok(vec![0; self.page_size as usize]);
         }
+        let directory_started = self.replica.host.now_monotonic();
         let entry = directory::lookup(
             directory::Verification {
                 layout: &self.replica.layout,
@@ -322,12 +333,19 @@ impl CellPagedDatabase {
                 database_pages: self.database_pages,
                 extents: &self.extents,
                 host: &self.replica.host,
+                origin,
             },
             self.directory_digest,
             self.directory_height,
             page,
         )
-        .await?;
+        .await;
+        self.replica.host.observe_ltx_phase(
+            crate::LtxPhase::Directory,
+            directory_started,
+            entry.is_ok(),
+        );
+        let entry = entry?;
         let extent = self
             .extents
             .get(&entry.object)
@@ -343,12 +361,20 @@ impl CellPagedDatabase {
             extent.kind,
         );
         let _permit = self.replica.host.io_permit().await?;
+        let fetch_started = self.replica.host.now_monotonic();
         let frame = self
             .replica
             .layout
             .store()
             .range_get(&path, entry.offset..end)
-            .await?;
+            .await;
+        self.replica.host.observe_ltx_phase(
+            crate::LtxPhase::FrameFetch,
+            fetch_started,
+            frame.is_ok(),
+        );
+        let frame = frame?;
+        self.replica.host.observe_ltx_read(origin, frame.len());
         if frame.len() != entry.length as usize
             || *blake3::hash(&frame).as_bytes() != entry.frame_hash
         {
@@ -361,24 +387,32 @@ impl CellPagedDatabase {
         Ok(bytes)
     }
 
-    async fn read_run(&self, first: u32, max_pages: u32) -> Result<Vec<(u32, Vec<u8>)>> {
+    async fn read_run(
+        &self,
+        first: u32,
+        max_pages: u32,
+        origin: crate::LtxReadOrigin,
+    ) -> Result<Vec<(u32, Vec<u8>)>> {
         if max_pages == 0 || first == 0 || first > self.database_pages {
             return Ok(Vec::new());
         }
         let lock = crate::ltx::lock_pgno(self.page_size);
         if first == lock {
-            return Ok(vec![(first, self.read_page(first).await?)]);
+            return Ok(vec![(
+                first,
+                self.read_page_with_origin(first, origin).await?,
+            )]);
         }
         let count = max_pages
             .min(RESTORE_WINDOW_BYTES / self.page_size)
             .min(self.database_pages - first + 1);
         let span = self
-            .lookup_spans(first, count)
+            .lookup_spans(first, count, origin)
             .await?
             .into_iter()
             .next()
             .ok_or(CrabError::LTXCorrupted)?;
-        let fetched = self.fetch_span(span).await?;
+        let fetched = self.fetch_span(span, origin).await?;
         let mut output = Vec::new();
         fetched.try_for_each_page(self.page_size, |page, bytes| {
             output.push((page, bytes));
@@ -388,16 +422,28 @@ impl CellPagedDatabase {
     }
 
     async fn read_restore_window(&self, first: u32, count: u32) -> Result<Vec<FetchedSpan>> {
-        let spans = self.lookup_spans(first, count).await?;
-        let runs = stream::iter(spans.into_iter().map(|span| self.fetch_span(span)))
-            .buffered(OBJECT_FETCH_CONCURRENCY)
-            .try_collect()
+        let spans = self
+            .lookup_spans(first, count, crate::LtxReadOrigin::Cold)
             .await?;
+        let runs = stream::iter(
+            spans
+                .into_iter()
+                .map(|span| self.fetch_span(span, crate::LtxReadOrigin::Cold)),
+        )
+        .buffered(OBJECT_FETCH_CONCURRENCY)
+        .try_collect()
+        .await?;
         Ok(runs)
     }
 
-    async fn lookup_spans(&self, first: u32, count: u32) -> Result<Vec<DirectorySpan>> {
-        directory::lookup_spans(
+    async fn lookup_spans(
+        &self,
+        first: u32,
+        count: u32,
+        origin: crate::LtxReadOrigin,
+    ) -> Result<Vec<DirectorySpan>> {
+        let started = self.replica.host.now_monotonic();
+        let result = directory::lookup_spans(
             directory::Verification {
                 layout: &self.replica.layout,
                 cell: &self.replica.cell,
@@ -406,16 +452,25 @@ impl CellPagedDatabase {
                 database_pages: self.database_pages,
                 extents: &self.extents,
                 host: &self.replica.host,
+                origin,
             },
             self.directory_digest,
             self.directory_height,
             first,
             count,
         )
-        .await
+        .await;
+        self.replica
+            .host
+            .observe_ltx_phase(crate::LtxPhase::Directory, started, result.is_ok());
+        result
     }
 
-    async fn fetch_span(&self, span: DirectorySpan) -> Result<FetchedSpan> {
+    async fn fetch_span(
+        &self,
+        span: DirectorySpan,
+        origin: crate::LtxReadOrigin,
+    ) -> Result<FetchedSpan> {
         let extent = self
             .extents
             .get(&span.object)
@@ -427,12 +482,18 @@ impl CellPagedDatabase {
             extent.kind,
         );
         let _permit = self.replica.host.io_permit().await?;
+        let started = self.replica.host.now_monotonic();
         let frames = self
             .replica
             .layout
             .store()
             .range_get(&path, span.start..span.end)
-            .await?;
+            .await;
+        self.replica
+            .host
+            .observe_ltx_phase(crate::LtxPhase::FrameFetch, started, frames.is_ok());
+        let frames = frames?;
+        self.replica.host.observe_ltx_read(origin, frames.len());
         if frames.len() as u64 != span.end - span.start {
             return Err(CrabError::ChecksumMismatch);
         }
@@ -468,8 +529,13 @@ impl CellWritableDatabase {
         self.database.page_count()
     }
 
-    pub(crate) async fn read_run(&self, first: u32, max_pages: u32) -> Result<Vec<(u32, Vec<u8>)>> {
-        self.database.read_run(first, max_pages).await
+    pub(crate) async fn read_run(
+        &self,
+        first: u32,
+        max_pages: u32,
+        origin: crate::LtxReadOrigin,
+    ) -> Result<Vec<(u32, Vec<u8>)>> {
+        self.database.read_run(first, max_pages, origin).await
     }
 
     /// Opens a fresh sparse SQLite file pinned to this exact Cell root.
@@ -810,12 +876,19 @@ impl CellReplica {
         level: u8,
         scratch_directory: &Path,
     ) -> Result<PreparedRoot> {
-        let mut replica = self.clone();
-        replica.host = self.host.for_recovery().await?;
-        let graph = replica.load_graph(base).await?;
-        let scratch_bytes = compaction_scratch_bytes(&graph)?;
-        replica.host = replica.host.for_scratch(scratch_bytes).await?;
-        compaction::prepare(&replica, base, graph, range, level, scratch_directory).await
+        let started = self.host.now_monotonic();
+        let result = async {
+            let mut replica = self.clone();
+            replica.host = self.host.for_recovery().await?;
+            let graph = replica.load_graph(base).await?;
+            let scratch_bytes = compaction_scratch_bytes(&graph)?;
+            replica.host = replica.host.for_scratch(scratch_bytes).await?;
+            compaction::prepare(&replica, base, graph, range, level, scratch_directory).await
+        }
+        .await;
+        self.host
+            .observe_ltx_phase(crate::LtxPhase::Compaction, started, result.is_ok());
+        result
     }
 
     /// Prepares one bounded level promotion, or an emergency full compaction.
@@ -824,6 +897,20 @@ impl CellReplica {
     /// level. A root near its segment or byte ceiling is compacted completely so
     /// the next append cannot strand an otherwise healthy writer at admission.
     pub async fn prepare_scheduled_compaction(
+        &self,
+        base: &RootRef,
+        scratch_directory: &Path,
+    ) -> Result<Option<PreparedRoot>> {
+        let started = self.host.now_monotonic();
+        let result = self
+            .prepare_scheduled_compaction_inner(base, scratch_directory)
+            .await;
+        self.host
+            .observe_ltx_phase(crate::LtxPhase::Compaction, started, result.is_ok());
+        result
+    }
+
+    async fn prepare_scheduled_compaction_inner(
         &self,
         base: &RootRef,
         scratch_directory: &Path,
@@ -974,6 +1061,7 @@ impl CellReplica {
                     database_pages: graph.document.database_pages,
                     extents: &base_extents,
                     host: &self.host,
+                    origin: crate::LtxReadOrigin::Cold,
                 },
                 graph.document.directory_digest,
                 graph.document.directory_height,
@@ -988,6 +1076,7 @@ impl CellReplica {
                     database_pages,
                     extents: &extents,
                     host: &self.host,
+                    origin: crate::LtxReadOrigin::Cold,
                 },
                 target.checksum,
             )
@@ -1130,6 +1219,7 @@ impl CellReplica {
             database_pages: graph.document.database_pages,
             extents: &extents,
             host: &self.host,
+            origin: crate::LtxReadOrigin::Cold,
         };
         let directory = directory::reachable_digests(
             verification,
@@ -1216,9 +1306,13 @@ impl CellReplica {
             return Err(CrabError::LTXCorrupted);
         }
         let mut digest = blake3::Hasher::new();
+        let mut read_bytes = 0usize;
         while let Some(chunk) = stream.try_next().await? {
             digest.update(&chunk);
+            read_bytes = read_bytes.saturating_add(chunk.len());
         }
+        self.host
+            .observe_ltx_read(crate::LtxReadOrigin::Cold, read_bytes);
         if digest.finalize().as_bytes() != &object.digest {
             return Err(CrabError::ChecksumMismatch);
         }
@@ -1226,6 +1320,14 @@ impl CellReplica {
     }
 
     async fn load_graph(&self, root: &RootRef) -> Result<LoadedGraph> {
+        let started = self.host.now_monotonic();
+        let result = self.load_graph_inner(root).await;
+        self.host
+            .observe_ltx_phase(crate::LtxPhase::RootOpen, started, result.is_ok());
+        result
+    }
+
+    async fn load_graph_inner(&self, root: &RootRef) -> Result<LoadedGraph> {
         self.check_scope(root)?;
         let bytes = self
             .read_object(&root.digest, CellObjectKind::Root, ROOT_BYTES)
@@ -1280,6 +1382,7 @@ impl CellReplica {
             return Err(CrabError::LTXCorrupted);
         }
         let extents = object_extents(&descriptors)?;
+        let directory_started = self.host.now_monotonic();
         let aggregate = directory::verify_root(
             directory::Verification {
                 layout: &self.layout,
@@ -1289,11 +1392,18 @@ impl CellReplica {
                 database_pages: document.database_pages,
                 extents: &extents,
                 host: &self.host,
+                origin: crate::LtxReadOrigin::Cold,
             },
             document.directory_digest,
             document.directory_height,
         )
-        .await?;
+        .await;
+        self.host.observe_ltx_phase(
+            crate::LtxPhase::Directory,
+            directory_started,
+            aggregate.is_ok(),
+        );
+        let aggregate = aggregate?;
         if aggregate.checksum != document.checksum {
             return Err(CrabError::ChecksumMismatch);
         }
@@ -1444,6 +1554,8 @@ impl CellReplica {
             .store()
             .get_with_etag_bounded(&path, max_bytes)
             .await?;
+        self.host
+            .observe_ltx_read(crate::LtxReadOrigin::Cold, bytes.len());
         Ok(bytes.to_vec())
     }
 }

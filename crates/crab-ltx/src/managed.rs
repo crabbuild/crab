@@ -93,10 +93,13 @@ impl ManagedDb {
     #[cfg(feature = "replica")]
     pub fn hydrate_step(&mut self, pages: u32) -> Result<crate::Hydration> {
         self.ensure_active()?;
-        self.paged
+        let paged = self
+            .paged
             .as_mut()
-            .ok_or(CrabError::InvalidState("not a sparse activation"))?
-            .step(&self.writer, pages)
+            .ok_or(CrabError::InvalidState("not a sparse activation"))?;
+        crate::paged_io::with_paged_io_origin(crate::LtxReadOrigin::Hydrating, || {
+            paged.step(&self.writer, pages)
+        })
     }
 
     /// Takes the provider/checksum source behind a sparse SQLite I/O error.
@@ -836,10 +839,16 @@ mod tests {
 
         let batch = db.capture().unwrap();
         let phase_nanos = batch.timing.preparation_nanos
+            + batch.timing.schema_check_nanos
+            + batch.timing.wal_existence_nanos
+            + batch.timing.position_resolution_nanos
             + batch.timing.wal_read_nanos
+            + batch.timing.page_collection_nanos
             + batch.timing.verification_nanos
             + batch.timing.encode_nanos
-            + batch.timing.durable_write_nanos
+            + batch.timing.local_write_nanos
+            + batch.timing.fsync_nanos
+            + batch.timing.parent_sync_nanos
             + batch.timing.checkpoint_nanos;
         let ltx_bytes = batch
             .segments
@@ -852,6 +861,18 @@ mod tests {
         assert_eq!(batch.timing.ltx_bytes, ltx_bytes);
         assert!(batch.timing.wal_bytes > 0);
         assert!(batch.timing.database_bytes > 0);
+        assert!(batch.timing.schema_check_nanos > 0);
+        assert!(batch.timing.wal_existence_nanos > 0);
+        assert!(batch.timing.position_resolution_nanos > 0);
+        assert!(batch.timing.page_collection_nanos > 0);
+        assert!(batch.timing.local_write_nanos > 0);
+        assert!(batch.timing.fsync_nanos > 0);
+        assert!(batch.timing.parent_sync_nanos > 0);
+        assert_eq!(
+            batch.timing.wal_sparse_reads + batch.timing.wal_full_reads,
+            1
+        );
+        assert!(batch.timing.wal_image_bytes > 0);
     }
 
     #[test]
