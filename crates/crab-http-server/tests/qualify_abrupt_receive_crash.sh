@@ -28,6 +28,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
+read_remote_head() {
+  local read_attempt
+  for read_attempt in $(seq 1 36); do
+    if git ls-remote "$remote" refs/heads/main | cut -f1; then
+      return 0
+    fi
+    if [ "$read_attempt" -lt 36 ]; then
+      sleep 10
+    fi
+  done
+  return 1
+}
+
 GIT_TERMINAL_PROMPT=0 git clone "$remote" "${work_dir}/source"
 git -C "${work_dir}/source" config user.name "Crab qualification"
 git -C "${work_dir}/source" config user.email "qualification@example.invalid"
@@ -47,19 +60,16 @@ git -C "${work_dir}/source" commit -m "qualify abrupt receive crash"
 
 old_oid="$(git -C "${work_dir}/source" rev-parse HEAD^)"
 new_oid="$(git -C "${work_dir}/source" rev-parse HEAD)"
-pack_root=/data/crab-http-server/repositories/demo/hello/packs
-baseline="$(docker exec "$rustfs_id" sh -c \
-  "find '$pack_root' -type f | wc -l")"
 
 GIT_TERMINAL_PROMPT=0 git -C "${work_dir}/source" push origin main \
   >"${work_dir}/push.log" 2>&1 &
 push_pid=$!
-observed_pack=false
+observed_staging=false
 for _attempt in $(seq 1 1200); do
-  current="$(docker exec "$rustfs_id" sh -c \
-    "find '$pack_root' -type f | wc -l")"
-  if [ "$current" -gt "$baseline" ]; then
-    observed_pack=true
+  if docker exec "$server_id" sh -c \
+    "find /var/lib/crab/cells -path '*/transfers/transfer-*/*' -type f -size +1M -print -quit" \
+    | grep -q . && kill -0 "$push_pid" 2>/dev/null; then
+    observed_staging=true
     break
   fi
   if ! kill -0 "$push_pid" 2>/dev/null; then
@@ -67,16 +77,20 @@ for _attempt in $(seq 1 1200); do
   fi
   sleep 0.05
 done
-if ! $observed_pack; then
+if ! $observed_staging; then
   sed -n '1,160p' "${work_dir}/push.log"
-  echo "No in-flight immutable pack appeared before the push stopped." >&2
+  echo "No in-flight staged Git pack appeared before the push stopped." >&2
   exit 1
 fi
 
-# Stop storage at an observed publication boundary, then remove the process
-# without allowing Crab's cooperative cancellation or drain path to run.
+# Freeze object storage while the server still owns an incomplete receive, then
+# remove the process without allowing cooperative cancellation or drain to run.
 docker pause "$rustfs_id" >/dev/null
 rustfs_paused=true
+if ! kill -0 "$push_pid" 2>/dev/null; then
+  echo "The push completed before object storage could be frozen." >&2
+  exit 1
+fi
 docker kill --signal KILL "$server_id" >/dev/null
 test "$(docker inspect "$server_id" --format '{{.State.ExitCode}}')" = 137
 docker unpause "$rustfs_id" >/dev/null
@@ -108,7 +122,10 @@ fi
 replacement_server_id="$("${compose[@]}" ps --quiet server)"
 test -n "$replacement_server_id"
 
-remote_after_crash="$(git ls-remote "$remote" refs/heads/main | cut -f1)"
+if ! remote_after_crash="$(read_remote_head)"; then
+  echo "The recovered ref did not become readable within the recovery budget." >&2
+  exit 1
+fi
 if [ "$remote_after_crash" != "$old_oid" ] && [ "$remote_after_crash" != "$new_oid" ]; then
   echo "Abrupt restart exposed unexpected ref $remote_after_crash." >&2
   exit 1
@@ -128,7 +145,11 @@ if ! $retry_succeeded; then
   exit 1
 fi
 
-test "$(git ls-remote "$remote" refs/heads/main | cut -f1)" = "$new_oid"
+if ! recovered_head="$(read_remote_head)"; then
+  echo "The committed ref did not become readable within the recovery budget." >&2
+  exit 1
+fi
+test "$recovered_head" = "$new_oid"
 verify_dir=""
 for clone_attempt in $(seq 1 36); do
   candidate="${work_dir}/verify-${clone_attempt}"

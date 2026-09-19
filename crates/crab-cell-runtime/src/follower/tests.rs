@@ -182,6 +182,56 @@ async fn append_skips_an_object_covered_queued_prefix() {
 }
 
 #[tokio::test]
+async fn covered_prefix_is_pruned_from_open_lane_before_restart() {
+    let limits = crab_ltx::Limits::default();
+    let source = tempfile::TempDir::new().unwrap();
+    let mut database = ManagedDb::open(&source.path().join("cell.sqlite"), limits).unwrap();
+    database
+        .transaction(|transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE events(id INTEGER PRIMARY KEY, body TEXT NOT NULL);\
+                 INSERT INTO events(body) VALUES ('one')",
+            )
+        })
+        .unwrap();
+    let capture = database.capture().unwrap();
+    let frames = [1, 2, 3, 4, 6]
+        .into_iter()
+        .map(|sequence| frame(sequence, capture.segments.first().unwrap(), limits))
+        .collect::<Vec<_>>();
+
+    let root = tempfile::TempDir::new().unwrap();
+    let leader = SessionId::from_bytes([1; 16]);
+    let store = FollowerStore::open(
+        root.path().to_owned(),
+        limits,
+        crab_ltx::DiskBudget::new(1 << 30),
+    )
+    .unwrap();
+    store
+        .append(leader, 2, frames[..4].to_vec(), 0)
+        .await
+        .unwrap();
+    let receipt = store
+        .append(leader, 2, vec![frames[4].clone()], 5)
+        .await
+        .unwrap();
+    assert_eq!(receipt.base_sequence, 6);
+    assert_eq!(receipt.durable_through, 6);
+
+    drop(store);
+    let store = FollowerStore::open(
+        root.path().to_owned(),
+        limits,
+        crab_ltx::DiskBudget::new(1 << 30),
+    )
+    .unwrap();
+    assert_eq!(store.seal(leader, 2).await.unwrap().base_sequence, 6);
+    assert_eq!(store.read_tail(leader, 2, 6).await.unwrap().len(), 1);
+    database.close().unwrap();
+}
+
+#[tokio::test]
 async fn restarted_lane_returns_only_the_requested_large_frame_page() {
     let limits = crab_ltx::Limits::default();
     let source = tempfile::TempDir::new().unwrap();

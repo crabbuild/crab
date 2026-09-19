@@ -7538,6 +7538,9 @@ impl PushPipeline {
         new_manifest.generation += 1;
         new_manifest.created_at = now_iso8601();
         new_manifest.session_id = uuid::Uuid::now_v7().to_string();
+        // Derived path roots are bound to the previous generation and are
+        // republished only after the new Git state is durable.
+        new_manifest.path_state_hash = None;
 
         #[cfg(feature = "gix-ref-edits")]
         {

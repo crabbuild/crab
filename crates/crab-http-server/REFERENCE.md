@@ -515,6 +515,7 @@ The blame view links commit OIDs and subjects to immutable commit details. Its a
 | `commit` | One commit, or the latest first-parent commit that changed a path |
 | `commits` | Paginated first-parent history, or the all-parent `rev - base` set |
 | `tree` | Paginated raw-byte directory entries |
+| `tree-attribution` | Last-change commit summaries for one exact tree page |
 | `search` | Bounded fuzzy file-path search without blob-body reads |
 | `file` | Highlightable file metadata and content |
 | `blob` | Exact Git blob bytes as an attachment |
@@ -536,6 +537,21 @@ Common query parameters follow these contracts:
 | `base` | Optional comparison base. Changes and diffs default to the first parent |
 
 Git paths are byte strings, not filesystem paths. The server does not normalize them. Hex encoding preserves names that are not valid UTF-8.
+
+The repository table first requests `tree` and renders that response without
+waiting for history. It then requests `tree-attribution` with the same revision,
+path, cursor and limit. Both successful responses include `generation`, `commit`
+and `directory_oid`; the browser also compares every entry path and object ID
+before adding `last_commit`. A moving branch or navigation race therefore cannot
+attach metadata from a different snapshot.
+
+When generation-bound attribution has not been published, `tree-attribution`
+returns HTTP 202 with `state: "indexing"`, `retry_after_ms`, and `Retry-After`.
+The browser retains the already rendered tree and retries. Corrupt published
+metadata returns HTTP 503 and starts a CAS-fenced rebuild. Neither case falls
+back to an interactive history scan. Large initial builds checkpoint verified
+prefixes every 32 commits; exhausting one bounded maintenance pass remains a
+202 indexing state and the next pass resumes that exact Git generation.
 
 Root commits compare against an empty tree. Path history follows the exact first-parent path. Commit history with `base` instead returns commits reachable from `rev` but not from `base`, across every parent.
 

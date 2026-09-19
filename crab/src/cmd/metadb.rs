@@ -386,6 +386,7 @@ struct GenerationOwnerIdentity {
     pack_index_hash: String,
     git_validation_digest: String,
     commit_graph_hash: Option<String>,
+    path_state_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -401,6 +402,7 @@ impl From<&crab_metadata::manifests::Manifest> for GenerationOwnerIdentity {
             pack_index_hash: manifest.pack_index_hash.clone(),
             git_validation_digest: manifest.git_validation_digest.clone(),
             commit_graph_hash: manifest.commit_graph_hash.clone(),
+            path_state_hash: manifest.path_state_hash.clone(),
         }
     }
 }

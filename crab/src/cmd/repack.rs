@@ -937,6 +937,7 @@ fn repack_manifest(mut manifest: Manifest, generation: u64, pack_index_hash: Str
     manifest.session_id = format!("repack-{generation}");
     manifest.pack_index_hash = pack_index_hash;
     manifest.commit_graph_hash = None;
+    manifest.path_state_hash = None;
     // `run` validates every replacement pack against the complete temporary
     // ODB before this helper commits its compacted inventory.
     manifest.seal_git_validation();

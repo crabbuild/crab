@@ -25,6 +25,7 @@ pub mod manifests;
 pub mod pack_metadata;
 #[cfg(feature = "storage")]
 pub mod pack_origin;
+pub mod path_state;
 #[cfg(feature = "local-index")]
 pub mod persistent_chunk_index;
 #[cfg(feature = "storage")]

@@ -48,6 +48,9 @@ pub struct Manifest {
     pub git_validation_digest: String,
     /// Blake3 hash of the complete split commit-graph descriptor.
     pub commit_graph_hash: Option<String>,
+    /// Blake3 hash of the generation-bound path-state descriptor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_state_hash: Option<String>,
     /// Blake3 hash of the ref-registry bulk object.
     pub ref_registry_hash: Option<String>,
 }
@@ -69,6 +72,7 @@ impl Manifest {
             pack_index_hash: String::new(),
             git_validation_digest: String::new(),
             commit_graph_hash: None,
+            path_state_hash: None,
             ref_registry_hash: None,
         };
         manifest.seal_git_validation();
@@ -153,6 +157,9 @@ pub fn validate_manifest_payload(manifest: &Manifest) -> Result<()> {
     }
     if let Some(hash) = &manifest.commit_graph_hash {
         validate_content_hash(hash, "manifest commit_graph_hash", "manifest")?;
+    }
+    if let Some(hash) = &manifest.path_state_hash {
+        validate_content_hash(hash, "manifest path_state_hash", "manifest")?;
     }
     if let Some(hash) = &manifest.ref_registry_hash {
         validate_content_hash(hash, "manifest ref_registry_hash", "manifest")?;
@@ -593,6 +600,17 @@ mod tests {
             .remove("git_validation_digest");
 
         assert!(serde_json::from_value::<Manifest>(json).is_err());
+    }
+
+    #[test]
+    fn manifest_without_unpublished_path_state_decodes_as_not_indexed() {
+        let manifest = Manifest::default_for_repo("refs/heads/main");
+        let mut json = serde_json::to_value(manifest).unwrap();
+        json.as_object_mut().unwrap().remove("path_state_hash");
+
+        let decoded = serde_json::from_value::<Manifest>(json).unwrap();
+
+        assert!(decoded.path_state_hash.is_none());
     }
 
     #[test]

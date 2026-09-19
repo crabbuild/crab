@@ -30,6 +30,11 @@ const RECOVERY_FAILURE_REASON_COUNT: usize = 4;
 const NODE_LOG_ROTATION_RESULT_COUNT: usize = 4;
 const LTX_PHASE_COUNT: usize = 18;
 const LTX_READ_ORIGIN_COUNT: usize = 4;
+const PROJECTION_PROBE_RESULT_COUNT: usize = 3;
+const PROJECTION_PHASE_COUNT: usize = 1;
+const PROJECTION_BUILD_RESULT_COUNT: usize = 3;
+const PROJECTION_BATCH_KIND_COUNT: usize = 4;
+const PROJECTION_ORIGIN_READ_KIND_COUNT: usize = 3;
 const DURATION_BUCKETS_SECONDS: [f64; 16] = [
     0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
     600.0,
@@ -76,6 +81,15 @@ const RECOVERY_FAILURE_REASON_LABELS: [&str; RECOVERY_FAILURE_REASON_COUNT] =
     ["storage", "capacity", "fenced", "other"];
 const NODE_LOG_ROTATION_RESULT_LABELS: [&str; NODE_LOG_ROTATION_RESULT_COUNT] =
     ["started", "pending", "failed", "completed"];
+const PROJECTION_PROBE_RESULT_LABELS: [&str; PROJECTION_PROBE_RESULT_COUNT] =
+    ["ready", "changed", "error"];
+const PROJECTION_PHASE_LABELS: [&str; PROJECTION_PHASE_COUNT] = ["reconcile"];
+const PROJECTION_BUILD_RESULT_LABELS: [&str; PROJECTION_BUILD_RESULT_COUNT] =
+    ["ok", "error", "superseded"];
+const PROJECTION_BATCH_KIND_LABELS: [&str; PROJECTION_BATCH_KIND_COUNT] =
+    ["refs", "commits", "trees", "attribution"];
+const PROJECTION_ORIGIN_READ_KIND_LABELS: [&str; PROJECTION_ORIGIN_READ_KIND_COUNT] =
+    ["snapshot", "graph", "tree"];
 const METADATA: Metadata<'static> = Metadata::new(
     "crab_http_server",
     Level::INFO,
@@ -160,6 +174,17 @@ struct MetricsInner {
     node_log_rotations: [Counter; NODE_LOG_ROTATION_RESULT_COUNT],
     catalog_refresh_failures: Counter,
     transfer_admission_rejections: [Counter; TRANSFER_REJECTION_COUNT],
+    projection_probes: [Counter; PROJECTION_PROBE_RESULT_COUNT],
+    projection_probe_seconds: [Histogram; PROJECTION_PROBE_RESULT_COUNT],
+    projection_build_seconds: [[Histogram; PROJECTION_BUILD_RESULT_COUNT]; PROJECTION_PHASE_COUNT],
+    projection_batch_rows: [Counter; PROJECTION_BATCH_KIND_COUNT],
+    projection_batch_bytes: [Counter; PROJECTION_BATCH_KIND_COUNT],
+    projection_superseded: Counter,
+    projection_ready: Gauge,
+    projection_lag_generations: Gauge,
+    projection_lag_seconds: Gauge,
+    projection_sqlite_bytes: Gauge,
+    projection_origin_reads: [Counter; PROJECTION_ORIGIN_READ_KIND_COUNT],
 }
 
 struct MethodMetrics {
@@ -595,6 +620,70 @@ impl Metrics {
                         &METADATA,
                     )
                 }),
+                projection_probes: PROJECTION_PROBE_RESULT_LABELS.map(|result| {
+                    recorder.register_counter(
+                        &key("crab_git_projection_probe_total", &[("result", result)]),
+                        &METADATA,
+                    )
+                }),
+                projection_probe_seconds: PROJECTION_PROBE_RESULT_LABELS.map(|result| {
+                    recorder.register_histogram(
+                        &key("crab_git_projection_probe_seconds", &[("result", result)]),
+                        &METADATA,
+                    )
+                }),
+                projection_build_seconds: std::array::from_fn(|phase| {
+                    std::array::from_fn(|result| {
+                        recorder.register_histogram(
+                            &key(
+                                "crab_git_projection_build_seconds",
+                                &[
+                                    ("phase", PROJECTION_PHASE_LABELS[phase]),
+                                    ("result", PROJECTION_BUILD_RESULT_LABELS[result]),
+                                ],
+                            ),
+                            &METADATA,
+                        )
+                    })
+                }),
+                projection_batch_rows: PROJECTION_BATCH_KIND_LABELS.map(|kind| {
+                    recorder.register_counter(
+                        &key("crab_git_projection_batch_rows_total", &[("kind", kind)]),
+                        &METADATA,
+                    )
+                }),
+                projection_batch_bytes: PROJECTION_BATCH_KIND_LABELS.map(|kind| {
+                    recorder.register_counter(
+                        &key("crab_git_projection_batch_bytes_total", &[("kind", kind)]),
+                        &METADATA,
+                    )
+                }),
+                projection_superseded: recorder.register_counter(
+                    &Key::from_static_name("crab_git_projection_superseded_total"),
+                    &METADATA,
+                ),
+                projection_ready: recorder.register_gauge(
+                    &Key::from_static_name("crab_git_projection_ready"),
+                    &METADATA,
+                ),
+                projection_lag_generations: recorder.register_gauge(
+                    &Key::from_static_name("crab_git_projection_lag_generations"),
+                    &METADATA,
+                ),
+                projection_lag_seconds: recorder.register_gauge(
+                    &Key::from_static_name("crab_git_projection_lag_seconds"),
+                    &METADATA,
+                ),
+                projection_sqlite_bytes: recorder.register_gauge(
+                    &Key::from_static_name("crab_git_projection_sqlite_bytes"),
+                    &METADATA,
+                ),
+                projection_origin_reads: PROJECTION_ORIGIN_READ_KIND_LABELS.map(|kind| {
+                    recorder.register_counter(
+                        &key("crab_git_projection_origin_reads_total", &[("kind", kind)]),
+                        &METADATA,
+                    )
+                }),
             }),
         })
     }
@@ -617,6 +706,50 @@ impl Metrics {
 
     pub(crate) fn record_transfer_admission_rejection(&self, coordination: bool) {
         self.inner.transfer_admission_rejections[usize::from(coordination)].increment(1);
+    }
+
+    pub(crate) fn record_projection_probe(&self, result: ProjectionProbeResult, elapsed: Duration) {
+        self.inner.projection_probes[result as usize].increment(1);
+        self.inner.projection_probe_seconds[result as usize].record(elapsed.as_secs_f64());
+    }
+
+    pub(crate) fn record_projection_build(
+        &self,
+        phase: ProjectionPhase,
+        result: ProjectionBuildResult,
+        elapsed: Duration,
+    ) {
+        self.inner.projection_build_seconds[phase as usize][result as usize]
+            .record(elapsed.as_secs_f64());
+    }
+
+    pub(crate) fn record_projection_batch(&self, kind: ProjectionBatchKind, rows: u64, bytes: u64) {
+        let index = kind as usize;
+        self.inner.projection_batch_rows[index].increment(rows);
+        self.inner.projection_batch_bytes[index].increment(bytes);
+    }
+
+    pub(crate) fn record_projection_superseded(&self) {
+        self.inner.projection_superseded.increment(1);
+    }
+
+    pub(crate) fn update_projection_state(
+        &self,
+        ready: bool,
+        lag_generations: u64,
+        lag_seconds: f64,
+        sqlite_bytes: u64,
+    ) {
+        self.inner.projection_ready.set(f64::from(ready));
+        self.inner
+            .projection_lag_generations
+            .set(lag_generations as f64);
+        self.inner.projection_lag_seconds.set(lag_seconds);
+        self.inner.projection_sqlite_bytes.set(sqlite_bytes as f64);
+    }
+
+    pub(crate) fn record_projection_origin_read(&self, kind: ProjectionOriginReadKind) {
+        self.inner.projection_origin_reads[kind as usize].increment(1);
     }
 
     pub(crate) fn render(&self, snapshot: RuntimeSnapshot) -> String {
@@ -916,6 +1049,40 @@ impl crab_cell_runtime::CellTelemetry for Metrics {
             .ltx_checkpoint_restarts
             .increment(u64::from(timing.checkpoint_restarts));
     }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ProjectionProbeResult {
+    Ready,
+    Changed,
+    Error,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ProjectionPhase {
+    Reconcile,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ProjectionBuildResult {
+    Ok,
+    Error,
+    Superseded,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ProjectionBatchKind {
+    Refs,
+    Commits,
+    Trees,
+    Attribution,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ProjectionOriginReadKind {
+    Snapshot,
+    Graph,
+    Tree,
 }
 
 #[derive(Clone, Copy)]
@@ -1574,6 +1741,61 @@ fn describe_metrics(recorder: &impl Recorder) {
         recorder,
         "crab_http_server_transfer_admission_rejections_total",
         "Transfers rejected by deployment-wide capacity or coordination failures.",
+    );
+    describe_counter(
+        recorder,
+        "crab_git_projection_probe_total",
+        "Repository projection source probes by bounded result.",
+    );
+    recorder.describe_histogram(
+        KeyName::from_const_str("crab_git_projection_probe_seconds"),
+        Some(Unit::Seconds),
+        "Repository projection source probe duration by bounded result.".into(),
+    );
+    recorder.describe_histogram(
+        KeyName::from_const_str("crab_git_projection_build_seconds"),
+        Some(Unit::Seconds),
+        "Repository projection build duration by phase and result.".into(),
+    );
+    describe_counter(
+        recorder,
+        "crab_git_projection_batch_rows_total",
+        "Rows submitted to repository projection batches by kind.",
+    );
+    describe_counter(
+        recorder,
+        "crab_git_projection_batch_bytes_total",
+        "Serialized bytes submitted to repository projection batches by kind.",
+    );
+    describe_counter(
+        recorder,
+        "crab_git_projection_superseded_total",
+        "Projection epochs superseded after an origin identity changed.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_git_projection_ready",
+        "Whether the most recently observed repository projection is ready.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_git_projection_lag_generations",
+        "Manifest generations between origin and the ready projection.",
+    );
+    recorder.describe_gauge(
+        KeyName::from_const_str("crab_git_projection_lag_seconds"),
+        Some(Unit::Seconds),
+        "Seconds since the ready projection was verified.".into(),
+    );
+    describe_gauge(
+        recorder,
+        "crab_git_projection_sqlite_bytes",
+        "Approximate repository projection SQLite bytes when available.",
+    );
+    describe_counter(
+        recorder,
+        "crab_git_projection_origin_reads_total",
+        "Origin reads performed while rebuilding repository projections by kind.",
     );
 }
 

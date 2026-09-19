@@ -1720,6 +1720,62 @@ async fn extend_reachable_bulk_objects(
         reachable.insert(path.as_ref().to_string());
     }
 
+    if let Some(ref hash) = manifest.path_state_hash {
+        let path = router.bulk_manifest_path("path-state", hash);
+        reachable.insert(path.as_ref().to_string());
+        let storage_layout = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        let descriptor = crab_metadata::path_state::load_path_state_descriptor(
+            store.as_storage(),
+            &storage_layout,
+            hash,
+            crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
+        )
+        .await?;
+        for layer in descriptor.layers {
+            reachable.insert(router.repo_path(&layer.path).as_ref().to_string());
+        }
+    } else {
+        let storage_layout = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        if let Some(checkpoint) = crab_metadata::path_state::load_path_state_checkpoint_record(
+            store.as_storage(),
+            &storage_layout,
+            &manifest.git_validation_digest,
+        )
+        .await?
+        {
+            reachable.insert(
+                router
+                    .repo_path(&crab_metadata::path_state::path_state_checkpoint_path(
+                        &manifest.git_validation_digest,
+                    ))
+                    .as_ref()
+                    .to_string(),
+            );
+            reachable.insert(
+                router
+                    .bulk_manifest_path("path-state", &checkpoint.descriptor_hash)
+                    .as_ref()
+                    .to_string(),
+            );
+            let descriptor = crab_metadata::path_state::load_path_state_descriptor(
+                store.as_storage(),
+                &storage_layout,
+                &checkpoint.descriptor_hash,
+                crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
+            )
+            .await?;
+            for layer in descriptor.layers {
+                reachable.insert(router.repo_path(&layer.path).as_ref().to_string());
+            }
+        }
+    }
+
     if let Some(ref hash) = manifest.ref_registry_hash {
         let path = router.bulk_manifest_path("ref-registry", hash);
         reachable.insert(path.as_ref().to_string());
@@ -2243,6 +2299,70 @@ async fn stream_reachable_bulk_objects(
                 .to_owned(),
         )
         .await?;
+    }
+    if let Some(hash) = &manifest.path_state_hash {
+        sink.add(
+            router
+                .bulk_manifest_path("path-state", hash)
+                .as_ref()
+                .to_owned(),
+        )
+        .await?;
+        let storage_layout = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        let descriptor = crab_metadata::path_state::load_path_state_descriptor(
+            store.as_storage(),
+            &storage_layout,
+            hash,
+            crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
+        )
+        .await?;
+        for layer in descriptor.layers {
+            sink.add(router.repo_path(&layer.path).as_ref().to_owned())
+                .await?;
+        }
+    } else {
+        let storage_layout = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        if let Some(checkpoint) = crab_metadata::path_state::load_path_state_checkpoint_record(
+            store.as_storage(),
+            &storage_layout,
+            &manifest.git_validation_digest,
+        )
+        .await?
+        {
+            sink.add(
+                router
+                    .repo_path(&crab_metadata::path_state::path_state_checkpoint_path(
+                        &manifest.git_validation_digest,
+                    ))
+                    .as_ref()
+                    .to_owned(),
+            )
+            .await?;
+            sink.add(
+                router
+                    .bulk_manifest_path("path-state", &checkpoint.descriptor_hash)
+                    .as_ref()
+                    .to_owned(),
+            )
+            .await?;
+            let descriptor = crab_metadata::path_state::load_path_state_descriptor(
+                store.as_storage(),
+                &storage_layout,
+                &checkpoint.descriptor_hash,
+                crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
+            )
+            .await?;
+            for layer in descriptor.layers {
+                sink.add(router.repo_path(&layer.path).as_ref().to_owned())
+                    .await?;
+            }
+        }
     }
     if let Some(hash) = &manifest.ref_registry_hash {
         sink.add(
@@ -3721,10 +3841,15 @@ mod tests {
     async fn gc_identifies_unreachable_objects_via_manifest() {
         use crate::metadata::manifest::{
             BulkData, Manifest, PackManifestEntry, compact_pack_index, compact_shard_index,
-            create_manifest, upload_segmented_bulk,
+            create_manifest, read_manifest, upload_segmented_bulk, write_manifest_cas,
         };
         use crate::storage::StoreLayout;
         use crate::storage::store::Store;
+        use bytes::Bytes;
+        use crab_metadata::path_state::{
+            PathStateCheckpoint, PathStateDescriptor, PathStateLayerRef,
+            path_state_checkpoint_path, path_state_layer_path,
+        };
         use object_store::memory::InMemory;
         use std::sync::Arc;
 
@@ -3762,6 +3887,42 @@ mod tests {
             .refs
             .insert("refs/heads/main".to_owned(), "a".repeat(40));
         manifest.seal_git_validation();
+        let path_layer_bytes = vec![0; 24];
+        let path_layer_hash = blake3::hash(&path_layer_bytes).to_hex().to_string();
+        let path_layer = path_state_layer_path(&path_layer_hash);
+        store
+            .put(
+                &router.repo_path(&path_layer),
+                Bytes::from(path_layer_bytes),
+            )
+            .await
+            .unwrap();
+        let descriptor = PathStateDescriptor {
+            version: 2,
+            generation: manifest.generation,
+            pack_index_hash: manifest.pack_index_hash.clone(),
+            git_validation_digest: manifest.git_validation_digest.clone(),
+            commit_ordinal_digest: "d".repeat(64),
+            commit_count: 1,
+            layers: vec![PathStateLayerRef {
+                hash: path_layer_hash,
+                path: path_layer.clone(),
+                base_ordinal: 0,
+                commit_count: 1,
+                node_count: 1,
+                bytes: 24,
+            }],
+        };
+        let descriptor_bytes = serde_json::to_vec(&descriptor).unwrap();
+        let descriptor_hash = blake3::hash(&descriptor_bytes).to_hex().to_string();
+        store
+            .put(
+                &router.bulk_manifest_path("path-state", &descriptor_hash),
+                Bytes::from(descriptor_bytes),
+            )
+            .await
+            .unwrap();
+        manifest.path_state_hash = Some(descriptor_hash.clone());
         crate::core::remote_layout::initialize(&store, &router)
             .await
             .unwrap();
@@ -3774,7 +3935,7 @@ mod tests {
 
         // The reachable set should contain both segmented index objects and
         // the immutable segments they reference.
-        assert_eq!(reachable.len(), 7);
+        assert_eq!(reachable.len(), 9);
         assert!(reachable.contains(&format!(
             "org/repo/metadata/shard/indexes/{shard_hash}.json"
         )));
@@ -3793,6 +3954,50 @@ mod tests {
             "org/repo/metadata/git-visibility-pending/v1/{}.json",
             manifest.git_validation_digest
         )));
+        assert!(
+            reachable.contains(
+                router
+                    .bulk_manifest_path("path-state", &descriptor_hash)
+                    .as_ref()
+            )
+        );
+        assert!(reachable.contains(&format!("org/repo/{path_layer}")));
+
+        let work_path = path_state_checkpoint_path(&manifest.git_validation_digest);
+        let checkpoint = PathStateCheckpoint {
+            version: 1,
+            generation: manifest.generation,
+            pack_index_hash: manifest.pack_index_hash.clone(),
+            git_validation_digest: manifest.git_validation_digest.clone(),
+            commit_ordinal_digest: descriptor.commit_ordinal_digest.clone(),
+            commit_count: descriptor.commit_count,
+            descriptor_hash: descriptor_hash.clone(),
+        };
+        store
+            .put(
+                &router.repo_path(&work_path),
+                Bytes::from(serde_json::to_vec(&checkpoint).unwrap()),
+            )
+            .await
+            .unwrap();
+        let (mut building, etag) = read_manifest(&store, &router).await.unwrap();
+        building.path_state_hash = None;
+        write_manifest_cas(&store, &router, &building, &etag)
+            .await
+            .unwrap();
+        let (_, building_reachable) = reachable_bulk_objects_from_manifest(&store, &router)
+            .await
+            .unwrap();
+        assert_eq!(building_reachable.len(), 10);
+        assert!(building_reachable.contains(&format!("org/repo/{work_path}")));
+        assert!(
+            building_reachable.contains(
+                router
+                    .bulk_manifest_path("path-state", &descriptor_hash)
+                    .as_ref()
+            )
+        );
+        assert!(building_reachable.contains(&format!("org/repo/{path_layer}")));
 
         // An object NOT in the reachable set is unreachable.
         assert!(!reachable.contains("org/repo/metadata/shard/indexes/deadbeef.json"));

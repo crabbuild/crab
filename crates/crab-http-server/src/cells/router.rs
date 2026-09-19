@@ -9,7 +9,7 @@ use crab_cell_runtime::{
     VersionedControl, peer_wire,
 };
 use crab_storage::CellStorageLayout;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use uuid::Uuid;
 
 use super::{REPOSITORY_NAMESPACE, repository_replica_limits};
@@ -29,6 +29,7 @@ pub(crate) struct RepositoryCellRouter {
     placement: PlacementPlanner,
     session_dir: PathBuf,
     activation: Arc<[Mutex<()>]>,
+    operation: Arc<[Arc<RwLock<()>>]>,
 }
 
 #[derive(Clone)]
@@ -43,6 +44,10 @@ pub(crate) struct RepositoryCell {
     pub(crate) target: CellTarget,
     pub(crate) client: CellClient,
     handle: Option<CellHandle>,
+    // Keep routing and the subsequent Cell operation in one lifecycle window.
+    // Without this guard, an eager drain can race a second request and return
+    // CellDraining or make activation observe CellAlreadyActive.
+    _operation: Option<OwnedRwLockReadGuard<()>>,
 }
 
 pub(crate) struct ScheduledRepositoryCell {
@@ -82,6 +87,10 @@ impl RepositoryCellRouter {
             session_dir,
             activation: (0..ACTIVATION_SHARDS)
                 .map(|_| Mutex::new(()))
+                .collect::<Vec<_>>()
+                .into(),
+            operation: (0..ACTIVATION_SHARDS)
+                .map(|_| Arc::new(RwLock::new(())))
                 .collect::<Vec<_>>()
                 .into(),
         })
@@ -125,6 +134,20 @@ impl RepositoryCellRouter {
             ]),
         )
         .await
+    }
+
+    pub(crate) async fn route_projection(
+        &self,
+        repository: Uuid,
+    ) -> crate::Result<ScheduledRepositoryCell> {
+        let target = CellTarget::new(
+            self.identity.tenant(),
+            self.identity.application(),
+            REPOSITORY_NAMESPACE,
+            repository.as_bytes(),
+        )?;
+        self.route_runtime(target, self.runtime_principal(&["repository.projection"]))
+            .await
     }
 
     pub(crate) async fn route_runtime(
@@ -238,7 +261,7 @@ impl RepositoryCellRouter {
                 )
                 .await?;
             let release_after = scheduled.should_release();
-            match scheduled.cell.handle {
+            match scheduled.cell.handle.as_ref() {
                 Some(handle)
                     if handle.code() == plan.from_code()
                         && handle.schema() == plan.from_schema() =>
@@ -254,6 +277,7 @@ impl RepositoryCellRouter {
                         .await?;
                 }
             }
+            drop(scheduled.cell);
             if release_after {
                 self.drain_local_target(&target).await?;
             }
@@ -285,6 +309,7 @@ impl RepositoryCellRouter {
                 self.runtime_principal(&["cell.release.inspect"]),
             )
             .await?;
+        let release_after = scheduled.should_release();
         let inventory: crate::Result<PersistedWorkInventory> = match scheduled.cell.handle.as_ref()
         {
             Some(handle) => handle
@@ -293,7 +318,8 @@ impl RepositoryCellRouter {
                 .map_err(Into::into),
             None => Err(crab_cell_runtime::Error::CellNotActive.into()),
         };
-        let drained = if scheduled.should_release() {
+        drop(scheduled.cell);
+        let drained = if release_after {
             self.drain_local_target(&target).await
         } else {
             Ok(())
@@ -357,18 +383,27 @@ impl RepositoryCellRouter {
         principal: PeerPrincipal,
         use_placement: bool,
     ) -> crate::Result<ScheduledRepositoryCell> {
+        let shard = activation_shard(&target);
+        let operation = Arc::clone(&self.operation[shard]).read_owned().await;
         if let Some(routed) = self.route_existing(&target, &principal).await? {
             return Ok(ScheduledRepositoryCell {
-                cell: routed,
+                cell: RepositoryCell {
+                    _operation: Some(operation),
+                    ..routed
+                },
                 release_after: false,
             });
         }
 
-        let shard = activation_shard(&target);
+        drop(operation);
         let _activation = self.activation[shard].lock().await;
+        let operation = Arc::clone(&self.operation[shard]).read_owned().await;
         if let Some(routed) = self.route_existing(&target, &principal).await? {
             return Ok(ScheduledRepositoryCell {
-                cell: routed,
+                cell: RepositoryCell {
+                    _operation: Some(operation),
+                    ..routed
+                },
                 release_after: false,
             });
         }
@@ -393,14 +428,20 @@ impl RepositoryCellRouter {
         {
             if let Some(routed) = self.route_existing(&target, &principal).await? {
                 return Ok(ScheduledRepositoryCell {
-                    cell: routed,
+                    cell: RepositoryCell {
+                        _operation: Some(operation),
+                        ..routed
+                    },
                     release_after: false,
                 });
             }
             return Err(crab_cell_runtime::Error::CellNotActive.into());
         }
-        self.activate_or_route(target, proof, observed, &principal)
-            .await
+        let mut routed = self
+            .activate_or_route(target, proof, observed, &principal)
+            .await?;
+        routed.cell._operation = Some(operation);
+        Ok(routed)
     }
 
     async fn activate_preferred_node(
@@ -489,6 +530,7 @@ impl RepositoryCellRouter {
                 target: target.clone(),
                 client: CellClient::local(Arc::clone(&self.registry), handle.clone()),
                 handle: Some(handle),
+                _operation: None,
             }));
         }
         let Some(proof) = self.catalog.lookup(target.cell_id()).await? else {
@@ -526,6 +568,7 @@ impl RepositoryCellRouter {
                 target: target.clone(),
                 client: CellClient::local(Arc::clone(&self.registry), handle.clone()),
                 handle: Some(handle),
+                _operation: None,
             }))
     }
 
@@ -650,6 +693,7 @@ impl RepositoryCellRouter {
                 target,
                 client: CellClient::local(Arc::clone(&self.registry), handle.clone()),
                 handle: Some(handle),
+                _operation: None,
             },
             release_after: true,
         })
@@ -665,6 +709,7 @@ impl RepositoryCellRouter {
                 Arc::clone(&self.peer.round_trip),
             ),
             handle: None,
+            _operation: None,
         }
     }
 
@@ -707,6 +752,10 @@ impl RepositoryCellRouter {
     }
 
     pub(crate) async fn drain_local_target(&self, target: &CellTarget) -> crate::Result<()> {
+        let _operation: OwnedRwLockWriteGuard<()> =
+            Arc::clone(&self.operation[activation_shard(target)])
+                .write_owned()
+                .await;
         let proof = self
             .catalog
             .lookup(target.cell_id())

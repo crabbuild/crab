@@ -432,6 +432,21 @@ fn scrub_followers(root: &Path, limits: crab_ltx::Limits) -> Result<()> {
                 }
             };
             let lane = Lane { leader, epoch };
+            let prune_temp = epoch_path.join("open.log.tmp");
+            if prune_temp.exists() {
+                // A crashed rewrite leaves the old open lane authoritative;
+                // discard only the uncommitted temporary before validation.
+                if std::fs::symlink_metadata(&prune_temp)?
+                    .file_type()
+                    .is_file()
+                {
+                    std::fs::remove_file(&prune_temp)?;
+                    sync_directory(&epoch_path)?;
+                } else {
+                    quarantine_entry(root, &epoch_path)?;
+                    continue;
+                }
+            }
             if validate_stored_lane(root, lane, limits).is_err() {
                 quarantine_entry(root, &epoch_path)?;
             }
@@ -686,7 +701,7 @@ fn append_sync(
             open_last: open_records.last().map(|record| record.sequence),
         });
     }
-    let pruned_through = prune_covered(&chunks, covered_through)?;
+    let pruned_through = prune_covered(&chunks, lane, covered_through, limits)?;
     let state = state
         .as_mut()
         .ok_or(Error::Node("follower lane state did not initialize"))?;
@@ -694,6 +709,9 @@ fn append_sync(
         state
             .records
             .retain(|sequence, _| *sequence > pruned_through);
+        let open_records = scan_chunk(&chunks.join("open.log"), lane, limits, true)?;
+        state.open_first = open_records.first().map(|record| record.sequence);
+        state.open_last = open_records.last().map(|record| record.sequence);
     }
     let mut durable_through = state
         .records
@@ -1172,11 +1190,17 @@ fn rotate_open(
     Ok(())
 }
 
-fn prune_covered(chunks: &Path, covered_through: u64) -> Result<Option<u64>> {
+fn prune_covered(
+    chunks: &Path,
+    lane: Lane,
+    covered_through: u64,
+    limits: crab_ltx::Limits,
+) -> Result<Option<u64>> {
     if !chunks.exists() {
         return Ok(None);
     }
     let mut removed = false;
+    let mut open_removed = false;
     let mut pruned_through = None;
     for entry in std::fs::read_dir(chunks)? {
         let entry = entry?;
@@ -1196,10 +1220,73 @@ fn prune_covered(chunks: &Path, covered_through: u64) -> Result<Option<u64>> {
             pruned_through = Some(pruned_through.map_or(last, |current: u64| current.max(last)));
         }
     }
+    let open_path = chunks.join("open.log");
+    if open_path.exists() {
+        let records = scan_chunk(&open_path, lane, limits, true)?;
+        let mut retained = Vec::with_capacity(records.len());
+        for record in records {
+            if record.sequence <= covered_through {
+                removed = true;
+                open_removed = true;
+                pruned_through = Some(
+                    pruned_through
+                        .map_or(record.sequence, |current: u64| current.max(record.sequence)),
+                );
+            } else {
+                retained.push(record);
+            }
+        }
+        if open_removed {
+            rewrite_open_chunk(&open_path, retained)?;
+        }
+    }
     if removed {
         sync_directory(chunks)?;
     }
     Ok(pruned_through)
+}
+
+fn rewrite_open_chunk(path: &Path, records: Vec<StoredRecord>) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or(Error::Node("follower open chunk has no parent"))?;
+    let temporary = parent.join("open.log.tmp");
+    if temporary.exists() {
+        std::fs::remove_file(&temporary)?;
+    }
+    if records.is_empty() {
+        std::fs::remove_file(path)?;
+        sync_directory(parent)?;
+        return Ok(());
+    }
+
+    // Covered prefixes are rewritten through a synced temporary and atomically
+    // renamed so a restart sees either the old contiguous lane or the new one.
+    let result = (|| {
+        let mut source = std::fs::File::open(path)?;
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        for record in records {
+            source.seek(SeekFrom::Start(record.offset))?;
+            let mut encoded = vec![0; record.length];
+            source.read_exact(&mut encoded)?;
+            if *blake3::hash(&encoded).as_bytes() != record.digest {
+                return Err(Error::Node("stored follower record changed during prune"));
+            }
+            write_record(&mut output, record.sequence, record.digest, &encoded)?;
+        }
+        output.sync_data()?;
+        drop(output);
+        std::fs::rename(&temporary, path)?;
+        sync_directory(parent)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn parse_chunk_name(name: &str) -> Option<(u64, u64)> {

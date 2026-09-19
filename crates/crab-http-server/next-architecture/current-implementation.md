@@ -22,7 +22,7 @@ Paths in this table are relative to `crates/crab-http-server/` unless stated.
 | Repository policy | [repository_settings.rs](../src/repository_settings.rs), [receive/publish.rs](../src/receive/publish.rs), [lfs.rs](../src/lfs.rs) | Branch protection and archive state use typed Cell queries and commands; Git receive, Pull merge admission, LFS, releases and the HTTP mutation boundary read the same authority | Qualify remote-owner fault paths and sustained policy-read load |
 | Authentication | [auth.rs](../src/auth.rs) | Durable sessions, identity, membership, CSRF, scoped Git tokens | Add authenticated delegation without weakening permission checks |
 | Storage client | [storage_root.rs](../src/storage_root.rs), [Store](../../crab-storage/src/store.rs) | Provider-neutral root and conditional primitives | Reuse origin access; exclude cached or staged authority reads |
-| UI | [packages/repository](../../../packages/repository) | Embedded React application and typed API consumers | Preserve visible contracts and add truthful retry/recovery states |
+| UI | [packages/repository](../../../packages/repository) | Embedded React application and typed API consumers. Tree navigation renders from the shallow `tree` action; a separate `tree-attribution` request progressively adds last-change summaries | Preserve snapshot identity checks and truthful retry/recovery states |
 | Deployment | [Helm chart](../deploy/helm/crab-http-server/README.md) | Three-replica floor, Service/Ingress, peer mTLS Secret, exec readiness, PDB, peer-aware NetworkPolicy, metrics/HPA options, ephemeral Cell storage | Qualify the three-Pod replacement and partition matrix |
 
 Current persistence is described in
@@ -30,6 +30,64 @@ Current persistence is described in
 The retired `app/v1` namespace contains the former visible objects, sequences,
 claims, reservations and tombstones. No production route reads it. Operators
 manually delete those keys at the fleet hard cut; they are not importer input.
+
+### Repository browse attribution
+
+Repository navigation no longer performs a synchronous first-parent history walk.
+The implemented flow has two independent response paths:
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant H as HTTP server
+    participant G as Remote Git tree reader
+    participant P as Persistent path-state trie
+    B->>H: tree(rev, path, page)
+    H->>G: list immediate children
+    G-->>B: renderable entries
+    B->>H: tree-attribution(same snapshot and page)
+    alt path state published
+        H->>P: lookup(commit, entry paths)
+        P-->>B: exact commit summaries
+    else index absent
+        H-->>B: 202 indexing + Retry-After
+    end
+```
+
+`crab-metadata::path_state` stores one persistent component trie root per commit.
+Changed paths copy only their touched trie branches; unchanged nodes are shared.
+Each value is a stable commit ordinal, and the same layer stores the author,
+timestamp and first message line needed by the table. Lookups are proportional
+to the requested paths and their component depth, not repository history.
+
+The descriptor is content addressed and binds generation, pack index, Git
+validation digest and the stable commit-ordinal digest. Immutable layers are
+uploaded before manifest CAS. A new Git generation clears `path_state_hash`;
+the generation owner builds it from first-parent tree diffs and publishes it
+only if all captured identities are still current. More than 32 accumulated
+layers are rewritten into one structurally shared layer, bounding cold object
+requests. Initial builds publish a CAS-monotonic checkpoint every 32 commits;
+the work record binds the complete Git and ordinal identity, survives the
+bounded maintenance pass and resumes without rescanning earlier commits. GC
+retains an active checkpoint and its layers. History recovery retains and
+verifies every layer referenced by a committed descriptor.
+
+Readers load the index only for attribution, so an index miss, large index or
+corrupt index cannot delay the base tree response. Missing metadata returns a
+retryable indexing state and starts maintenance. Corruption returns 503 and
+schedules a CAS-fenced rebuild. There is no production fallback to the removed
+raw-history directory walker. The browser merges results only when generation,
+commit, directory object ID, path and entry object ID still match.
+
+The server also runs a bounded catalog anti-entropy sweep. It probes a rotating
+batch of object-store snapshots, schedules only changed or due repositories,
+applies exponential retry backoff, and acquires maintenance capacity before
+spawning work. This catches direct `crab`/Git pushes when notifications and the
+HTTP fleet were absent. Projection probe/build/batch/supersede/origin-read
+metrics are exported with the existing server metrics endpoint. Promotion
+checks ordinal continuity and attribution reachability; collection keeps the
+current, previous-ready, and in-progress epochs while deleting immutable rows
+in bounded batches.
 
 ### Replication crate now available
 

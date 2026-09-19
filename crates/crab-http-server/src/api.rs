@@ -8,14 +8,16 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use crab_remote_git::{
-    Blob, Commit, EntryKind, Error, GitPath, HistoryTraversal, OperationKind, PageCursor,
-    PageRequest, RemoteGitRepository, RemoteGitSnapshot, Revision, RevisionError, TreeEntry,
+    Blob, Commit, CommitSummary, CorruptionStage, EntryKind, Error, GitPath, HistoryTraversal,
+    OperationKind, PageCursor, PageRequest, RemoteGitRepository, RemoteGitSnapshot, Revision,
+    RevisionError, TreeEntry,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
-use crate::{auth::Principal, server::Server};
+use crate::{auth::Principal, projection, server::Server};
 
 const MAX_INLINE_TEXT_BYTES: usize = 1024 * 1024;
 
@@ -26,6 +28,8 @@ pub(crate) enum Action {
     Commit,
     Commits,
     Tree,
+    #[serde(rename = "tree-attribution")]
+    TreeAttribution,
     Search,
     Blob,
     Asset,
@@ -45,7 +49,6 @@ pub(crate) struct Parameters {
     limit: Option<usize>,
     cursor: Option<String>,
     q: Option<String>,
-    last_commit: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -119,10 +122,17 @@ impl IntoResponse for ApiError {
                     "cancelled",
                     "The read was cancelled",
                 ),
-                Error::RepositoryIndexing { .. } => (
+                Error::RepositoryIndexing { .. } | Error::PathStateIndexing { .. } => (
                     StatusCode::SERVICE_UNAVAILABLE,
                     "indexing",
                     "Repository metadata is still being indexed. Retry shortly",
+                ),
+                Error::Corrupt {
+                    stage: CorruptionStage::PathState,
+                } => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "path_state_corrupt",
+                    "Repository attribution metadata is being rebuilt. Retry shortly",
                 ),
                 _ => (
                     StatusCode::BAD_GATEWAY,
@@ -229,15 +239,61 @@ pub(crate) async fn read(
         open_ms = timer.elapsed().as_secs_f64() * 1000.0;
         let repository = repository?;
         generation = Some(repository.generation());
+        let projection_source = if matches!(action, Action::TreeAttribution) {
+            if let Some(router) = server.repository_cells.as_ref() {
+                let source = match projection::current_source(&entry.store, &entry.layout).await {
+                    Ok(source) => source,
+                    Err(error @ crate::Error::Remote(Error::Corrupt { .. })) => {
+                        entry.schedule_maintenance(&server).await?;
+                        return Err(ApiError::Service(error));
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                let state = projection::state(router, entry.id).await?;
+                let ready = state.source_token.as_deref() == Some(source.source_token.as_str());
+                let lag_generations = state
+                    .generation
+                    .map_or(source.manifest_generation, |generation| {
+                        source.manifest_generation.saturating_sub(generation)
+                    });
+                server
+                    .metrics
+                    .update_projection_state(ready, lag_generations, 0.0, 0);
+                if !ready {
+                    entry.schedule_maintenance(&server).await?;
+                    return Ok((
+                        StatusCode::ACCEPTED,
+                        [("retry-after", "2")],
+                        Json(json!({"state":"indexing", "retry_after_ms": 2000})),
+                    )
+                        .into_response());
+                }
+                Some(source.source_token)
+            } else if !repository.path_state_available() {
+                entry.schedule_maintenance(&server).await?;
+                return Ok((
+                    StatusCode::ACCEPTED,
+                    [("retry-after", "2")],
+                    Json(json!({"state":"indexing", "retry_after_ms": 2000})),
+                )
+                    .into_response());
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let payload = execute(
             &server,
             &repository,
+            entry.id,
             action,
             &params,
             path,
             page,
             search_query,
             &cancellation,
+            projection_source.as_deref(),
         )
         .await?;
         match payload {
@@ -257,6 +313,15 @@ pub(crate) async fn read(
         }
     }
     .await;
+    if matches!(
+        &result,
+        Err(ApiError::Remote(Error::Corrupt {
+            stage: CorruptionStage::PathState,
+        })) | Err(ApiError::Remote(Error::PathStateIndexing { .. }))
+    ) && let Err(error) = entry.schedule_maintenance(&server).await
+    {
+        tracing::warn!(error = %error, "failed to schedule path-state repair");
+    }
     let response = match result {
         Ok(value) => value,
         Err(error) => error.into_response(),
@@ -367,15 +432,21 @@ fn parse_byte_range(value: &str, total: usize) -> Result<(usize, usize), ()> {
     Ok((start, end))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one dispatcher carries the already validated HTTP read context"
+)]
 async fn execute(
     server: &Server,
     repository: &RemoteGitRepository,
+    repository_id: Uuid,
     action: Action,
     params: &Parameters,
     path: GitPath,
     page: PageRequest,
     search_query: Option<&str>,
     cancellation: &CancellationToken,
+    projection_source: Option<&str>,
 ) -> crab_remote_git::Result<Payload> {
     if matches!(action, Action::Refs) {
         let refs = repository.refs();
@@ -414,6 +485,7 @@ async fn execute(
         Action::Commits if path_history => OperationKind::PathHistory,
         Action::Commits => OperationKind::History,
         Action::Tree | Action::Search => OperationKind::Tree,
+        Action::TreeAttribution => OperationKind::DirectoryAttribution,
         Action::Blob | Action::Asset | Action::File => OperationKind::Content,
         Action::Changes => OperationKind::Compare,
         Action::Diff => OperationKind::Diff,
@@ -469,24 +541,108 @@ async fn execute(
             }
             Action::Tree => {
                 let result = snapshot.list_directory(&path, &page, &operation).await?;
-                let items = if params.last_commit {
-                    let commits = snapshot
-                        .latest_directory_entry_commits(&path, &result.items, &operation)
-                        .await?;
-                    result
-                        .items
-                        .iter()
-                        .zip(commits.iter())
-                        .map(|(entry, commit)| {
-                            let mut value = entry_json(entry);
-                            value["last_commit"] = commit_summary_json(commit);
-                            value
-                        })
+                let directory = snapshot
+                    .entry(&path, &operation)
+                    .await?
+                    .ok_or(Error::PathNotFound)?;
+                json!({
+                    "directory_oid": directory.oid.to_string(),
+                    "items": result.items.iter().map(entry_json).collect::<Vec<_>>(),
+                    "next": result.next.map(|cursor|encode_cursor(&server.cursor_key,cursor)),
+                })
+            }
+            Action::TreeAttribution => {
+                let result = snapshot.list_directory(&path, &page, &operation).await?;
+                let directory = snapshot
+                    .entry(&path, &operation)
+                    .await?
+                    .ok_or(Error::PathNotFound)?;
+                let projected = server
+                    .repository_cells
+                    .as_ref()
+                    .zip(projection_source)
+                    .map(|(router, source)| {
+                        let paths = result
+                            .items
+                            .iter()
+                            .map(|entry| entry.path.as_bytes().to_vec())
+                            .collect::<Vec<_>>();
+                        (router.clone(), source.to_owned(), paths)
+                    });
+                let projected = if let Some((router, source, paths)) = projected {
+                    match projection::attribution(
+                        &router,
+                        repository_id,
+                        &source,
+                        snapshot.commit_oid().as_slice(),
+                        paths,
+                    )
+                    .await
+                    {
+                        Ok(response)
+                            if response.state == "ready"
+                                && response.items.len() == result.items.len()
+                                && response
+                                    .items
+                                    .iter()
+                                    .zip(result.items.iter())
+                                    .all(|(item, entry)| {
+                                        item.path.as_slice() == entry.path.as_bytes()
+                                    }) =>
+                        {
+                            Some(response.items)
+                        }
+                        Ok(response) => {
+                            tracing::debug!(
+                                state = %response.state,
+                                "projection attribution is not ready for the pinned snapshot"
+                            );
+                            return Err(Error::PathStateIndexing {
+                                generation: repository.generation(),
+                            });
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                error = ?error,
+                                "projection attribution query failed for the pinned snapshot"
+                            );
+                            return Err(Error::PathStateIndexing {
+                                generation: repository.generation(),
+                            });
+                        }
+                    }
+                } else {
+                    None
+                };
+                let commits = if let Some(items) = projected {
+                    items
+                        .into_iter()
+                        .map(|item| json_attribution_summary(&item))
                         .collect::<Vec<_>>()
                 } else {
-                    result.items.iter().map(entry_json).collect::<Vec<_>>()
+                    snapshot
+                        .latest_directory_entry_commits(&path, &result.items, &operation)
+                        .await?
+                        .into_iter()
+                        .map(|commit| commit_summary_json(&commit))
+                        .collect::<Vec<_>>()
                 };
-                json!({"items":items, "next":result.next.map(|cursor|encode_cursor(&server.cursor_key,cursor))})
+                let items = result
+                    .items
+                    .iter()
+                    .zip(commits.iter())
+                    .map(|(entry, commit)| {
+                        let mut value = entry_json(entry);
+                        value["last_commit"] = commit.clone();
+                        value
+                    })
+                    .collect::<Vec<_>>();
+                json!({
+                    "state": "ready",
+                    "directory_oid": directory.oid.to_string(),
+                    "items": items,
+                    "next": result.next.map(|cursor|encode_cursor(&server.cursor_key,cursor)),
+                })
             }
             Action::Search => {
                 let query = search_query.ok_or(Error::InternalInvariant {
@@ -632,13 +788,17 @@ fn commit_json(commit: &Commit) -> Value {
     json!({"oid":commit.oid.to_string(),"tree":commit.tree.to_string(),"parents":commit.parents.iter().map(ToString::to_string).collect::<Vec<_>>(),"author":String::from_utf8_lossy(&commit.author.name),"author_seconds":commit.author.seconds,"message":String::from_utf8_lossy(&commit.message),"message_hex":encode_hex(&commit.message)})
 }
 
-fn commit_summary_json(commit: &Commit) -> Value {
-    let message = commit
-        .message
-        .split(|byte| *byte == b'\n')
-        .next()
-        .unwrap_or_default();
-    json!({"oid":commit.oid.to_string(),"author":String::from_utf8_lossy(&commit.author.name),"author_seconds":commit.author.seconds,"message":String::from_utf8_lossy(message)})
+fn commit_summary_json(commit: &CommitSummary) -> Value {
+    json!({"oid":commit.oid.to_string(),"author":String::from_utf8_lossy(&commit.author),"author_seconds":commit.author_seconds,"message":String::from_utf8_lossy(&commit.message)})
+}
+
+fn json_attribution_summary(item: &projection::AttributionItem) -> Value {
+    json!({
+        "oid": encode_hex(&item.commit_oid),
+        "author": String::from_utf8_lossy(&item.author),
+        "author_seconds": item.author_seconds,
+        "message": String::from_utf8_lossy(&item.message),
+    })
 }
 
 fn path_history_json(entry: &crab_remote_git::PathHistoryEntry) -> Value {

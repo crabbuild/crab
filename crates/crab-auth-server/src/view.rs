@@ -686,6 +686,7 @@ async fn prepare_view_manifest(
         pack_index_hash,
         git_validation_digest: String::new(),
         commit_graph_hash: None,
+        path_state_hash: None,
         ref_registry_hash: None,
     };
     // View packs are generated from the already validated source workspace;

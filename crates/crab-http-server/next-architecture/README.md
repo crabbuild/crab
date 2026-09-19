@@ -67,7 +67,16 @@ The exact source-change, registration, route-adapter, compatibility-test and
 whole-image rollout sequence is the
 [native contributor procedure](../../crab-cell-runtime/docs/rust-api.md#add-a-native-feature).
 
-This design replaces collaboration JSON documents with one SQLite database per
+The Git browse projection is now rebuilt asynchronously from the canonical
+object-store snapshot. Direct `crab`/Git pushes do not require this server:
+the request-driven path and the bounded catalog anti-entropy sweep detect
+manifest or journal identity changes, import refs/commits/parents, selectively
+hydrate current/recent trees, and publish attribution through a hidden Cell
+epoch. A stale or missing projection returns `202 indexing` for derived
+attribution while the base tree/blob path remains object-store backed; a Cell
+query miss is never hidden by a history walk.
+
+The collaboration plane uses one SQLite database per
 cataloged repository. A Rust subsystem captures SQLite WAL changes into LTX
 files. Object storage holds the authoritative recovery graph. Multiple HTTP
 servers route collaboration requests to the repository's current owner, while
@@ -97,6 +106,8 @@ and deployment boundaries.
 | --- | --- |
 | [Architecture, scope, and guarantees](overview.md) | System diagram, data ownership, safety properties, and design decisions. |
 | [Current implementation and evidence](current-implementation.md) | Existing HTTP, Git, application storage, deployment, and test boundaries. |
+| [Repository browse performance](repository-browse.md) | Progressive tree rendering, persistent path attribution, publication, failure recovery, and long-term scale work. |
+| [Serverless Git and Cell projections](serverless-git-projections.md) | Direct object-store push independence, commits/trees/refs/attribution projection schema, reconciliation, races, and rebuild. |
 | [Celld architecture and Rust integration](celld-and-rust.md) | Per-cell LTX mechanics, differences from Celld, dependency strategy, and Rust ownership. |
 | [crab-ltx source integration and crate design](crab-ltx.md) | Local/remote APIs, sparse SQL, epoch inheritance, bundles, compaction, Celld provenance and qualification. |
 | [Object storage and commit publication](storage-protocol.md) | Control record, immutable recovery graph, publication CAS, and response gating. |
@@ -117,6 +128,8 @@ For storage implementation, read [Celld and Rust integration](celld-and-rust.md)
 [the crab-ltx design](crab-ltx.md),
 [commit publication](storage-protocol.md), and
 [SQLite execution](sqlite-and-data-model.md).
+For the boundary between serverless Git and GitHub-like repository APIs, read
+[Serverless Git and Cell projections](serverless-git-projections.md).
 
 The accepted baseline remains one active AppCell owner per repository UUID,
 one combined owner/head control CAS, object-store publication before success,

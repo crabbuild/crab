@@ -733,6 +733,36 @@ async fn verify_history(
         }
     }
 
+    if let Some(hash) = entry.manifest.path_state_hash.as_deref() {
+        let storage_layout = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        let descriptor = crab_metadata::path_state::load_path_state_descriptor(
+            store.as_storage(),
+            &storage_layout,
+            hash,
+            crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
+        )
+        .await?;
+        let path = router.bulk_manifest_path("path-state", hash);
+        let expected = parse_blake3(&path, hash)?;
+        let bytes = store.verify(&path, &expected).await?;
+        record_object(&mut objects, path.as_ref().to_owned(), bytes.len() as u64)?;
+        for layer in descriptor.layers {
+            let path = router.repo_path(&layer.path);
+            let expected = parse_blake3(&path, &layer.hash)?;
+            let bytes = store.verify(&path, &expected).await?;
+            if bytes.len() as u64 != layer.bytes {
+                return Err(CrabError::CorruptObject {
+                    path: path.as_ref().to_owned(),
+                    reason: "path-state layer length does not match descriptor".to_owned(),
+                });
+            }
+            record_object(&mut objects, path.as_ref().to_owned(), bytes.len() as u64)?;
+        }
+    }
+
     if !entry.manifest.refs.is_empty() && !entry.manifest.pack_index_hash.is_empty() {
         let descriptor_path = router.shallow_closure_path(&entry.manifest.git_validation_digest);
         match store.get_with_etag(&descriptor_path).await {

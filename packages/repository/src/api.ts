@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
 export interface Session {
   authenticated: boolean;
@@ -73,7 +73,12 @@ export interface Page<T> {
   items: T[];
   next: string | null;
   commit: string;
+  generation: number;
+  directory_oid?: string;
 }
+export type TreeAttribution =
+  | ({ state: "ready" } & Page<Entry>)
+  | { state: "indexing"; retry_after_ms: number };
 export interface SearchResults {
   items: Entry[];
   commit: string;
@@ -131,7 +136,17 @@ export async function request<T>(
   });
   if (response.status === 401)
     window.dispatchEvent(new Event("crab-session-expired"));
-  const body: unknown = await response.json();
+  const text = await response.text();
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    if (!response.ok) {
+      const message = text.trim().slice(0, 512);
+      throw new Error(message || `Request failed (${response.status})`);
+    }
+    throw new Error(`Server returned invalid JSON (${response.status})`);
+  }
   if (!response.ok) {
     const failure = body as { error?: { message?: string } };
     throw new Error(
@@ -151,6 +166,7 @@ export function useRequest<T>(
   url: string | null,
 ): Loaded<T> & { retry: () => void } {
   const [attempt, setAttempt] = useState(0);
+  const retry = useCallback(() => setAttempt((value) => value + 1), []);
   const [state, setState] = useState<Loaded<T> & { url?: string | null }>({
     loading: true,
   });
@@ -179,7 +195,7 @@ export function useRequest<T>(
   // Never paint the preceding route's data while the new effect is pending.
   return {
     ...(state.url === url ? state : { loading: !!url }),
-    retry: () => setAttempt((value) => value + 1),
+    retry,
   };
 }
 

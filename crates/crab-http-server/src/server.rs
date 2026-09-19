@@ -66,6 +66,10 @@ const NODE_LOG_ROTATION_FRAMES: u64 = 1_000_000;
 const RETIRED_FOLLOWER_COLLECTION_INTERVAL: Duration = Duration::from_secs(60);
 const RETIRED_FOLLOWER_GRACE_MS: i64 = 10 * 60 * 1_000;
 const RETIRED_FOLLOWER_BATCH: usize = 64;
+const PROJECTION_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
+const PROJECTION_SWEEP_BATCH: usize = 16;
+const PROJECTION_RETRY_BASE: Duration = Duration::from_secs(10);
+const PROJECTION_RETRY_MAX: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CellRuntimeBudget {
@@ -562,6 +566,54 @@ impl Repository {
         *self.pinned.lock().await = None;
     }
 
+    pub(crate) async fn schedule_maintenance(&self, server: &Server) -> Result<()> {
+        let completed = {
+            let mut worker = self.maintenance.lock().await;
+            worker
+                .as_ref()
+                .is_some_and(tokio::task::JoinHandle::is_finished)
+                .then(|| worker.take())
+                .flatten()
+        };
+        if let Some(completed) = completed {
+            completed.await??;
+            *self.pinned.lock().await = None;
+            // The next retry must reopen the just-published generation. Starting
+            // another worker here would duplicate the same immutable index build.
+            return Ok(());
+        }
+        let mut worker = self.maintenance.lock().await;
+        if worker.is_none() {
+            let permit = server
+                .maintenance_admission
+                .clone()
+                .try_acquire_owned()
+                .ok();
+            if permit.is_none() {
+                return Ok(());
+            }
+            *worker = Some(tokio::spawn(maintenance::run_with_projection(
+                self.store.clone(),
+                self.layout.clone(),
+                self.identity.clone(),
+                Arc::clone(&server.runtime),
+                server.options,
+                Arc::clone(&server.maintenance_admission),
+                permit,
+                server.cancellation.clone(),
+                server
+                    .repository_cells
+                    .clone()
+                    .map(|router| maintenance::ProjectionContext {
+                        repository_id: self.id,
+                        router,
+                        metrics: server.metrics.clone(),
+                    }),
+            )));
+        }
+        Ok(())
+    }
+
     pub async fn open(
         &self,
         server: &Server,
@@ -627,14 +679,23 @@ impl Repository {
                 Err(crab_remote_git::Error::RepositoryIndexing { .. }) => {}
                 Err(error) => return Err(error.into()),
             }
-            *worker = Some(tokio::spawn(maintenance::run(
+            *worker = Some(tokio::spawn(maintenance::run_with_projection(
                 self.store.clone(),
                 self.layout.clone(),
                 self.identity.clone(),
                 Arc::clone(&server.runtime),
                 options,
                 Arc::clone(&server.maintenance_admission),
+                None,
                 server.cancellation.clone(),
+                server
+                    .repository_cells
+                    .clone()
+                    .map(|router| maintenance::ProjectionContext {
+                        repository_id: self.id,
+                        router,
+                        metrics: server.metrics.clone(),
+                    }),
             )));
         }
         if let Some(task) = worker.as_mut() {
@@ -674,7 +735,7 @@ pub(crate) struct Server {
     pub(crate) node_healthy: AtomicBool,
     scheduler_status: crate::cells::SchedulerStatus,
     cell_capacity: CellCapacityReport,
-    metrics: crate::metrics::Metrics,
+    pub(crate) metrics: crate::metrics::Metrics,
 }
 
 impl Server {
@@ -993,6 +1054,9 @@ pub async fn serve(config: Config) -> Result<()> {
     let refresh_server = Arc::clone(&server);
     let refresh =
         tokio::spawn(async move { refresh_catalog(refresh_server, catalog_version).await });
+    let projection_sweep_server = Arc::clone(&server);
+    let projection_sweep =
+        tokio::spawn(async move { sweep_projections(projection_sweep_server).await });
     let durability_publisher = Arc::clone(&node_publisher);
     let durability_runtime = server.cell_runtime.clone();
     let durability_transport = Arc::clone(
@@ -1117,6 +1181,10 @@ pub async fn serve(config: Config) -> Result<()> {
         if let Err(error) = refresh.await {
             tracing::warn!(error = %error, "repository catalog refresh task failed");
         }
+        let projection_sweep = match projection_sweep.await {
+            Ok(result) => result,
+            Err(error) => Err(error.into()),
+        };
         let durability_recruiter = match durability_recruiter.await {
             Ok(result) => result,
             Err(error) => Err(error.into()),
@@ -1171,6 +1239,7 @@ pub async fn serve(config: Config) -> Result<()> {
             .and(durability_recruiter)
             .and(durability_rotator)
             .and(follower_collection)
+            .and(projection_sweep)
             .and(maintenance)
             .and(runtimes)
     })
@@ -1457,6 +1526,103 @@ async fn refresh_catalog(server: Arc<Server>, mut version: u64) {
                 tracing::warn!(error = ?error, "repository catalog materialization failed");
             }
         }
+    }
+}
+
+struct ProjectionSweepState {
+    source_token: String,
+    next_attempt: Instant,
+    retry_delay: Duration,
+}
+
+async fn sweep_projections(server: Arc<Server>) -> Result<()> {
+    let mut cursor = 0_usize;
+    let mut states = HashMap::<Uuid, ProjectionSweepState>::new();
+    loop {
+        tokio::select! {
+            () = server.cancellation.cancelled() => return Ok(()),
+            () = tokio::time::sleep(PROJECTION_SWEEP_INTERVAL) => {}
+        }
+        let repositories = server.repositories.values();
+        if repositories.is_empty() {
+            continue;
+        }
+        let start = cursor % repositories.len();
+        let count = repositories.len().min(PROJECTION_SWEEP_BATCH);
+        for offset in 0..count {
+            let repository = Arc::clone(&repositories[(start + offset) % repositories.len()]);
+            let now = Instant::now();
+            let probe_started = now;
+            let source = match crate::projection::current_source(
+                &repository.store,
+                &repository.layout,
+            )
+            .await
+            {
+                Ok(source) => source,
+                Err(error) => {
+                    server.metrics.record_projection_probe(
+                        crate::metrics::ProjectionProbeResult::Error,
+                        probe_started.elapsed(),
+                    );
+                    tracing::warn!(
+                        repository_id = %repository.id,
+                        error = %error,
+                        "Git projection source probe failed"
+                    );
+                    if let Err(schedule_error) = repository.schedule_maintenance(&server).await {
+                        tracing::warn!(
+                            repository_id = %repository.id,
+                            error = %schedule_error,
+                            "Git projection repair could not be scheduled"
+                        );
+                    }
+                    continue;
+                }
+            };
+            let state = states
+                .entry(repository.id)
+                .or_insert_with(|| ProjectionSweepState {
+                    source_token: String::new(),
+                    next_attempt: now,
+                    retry_delay: PROJECTION_RETRY_BASE,
+                });
+            if state.source_token != source.source_token {
+                server.metrics.record_projection_probe(
+                    crate::metrics::ProjectionProbeResult::Changed,
+                    probe_started.elapsed(),
+                );
+                server.metrics.update_projection_state(false, 0, 0.0, 0);
+                state.source_token = source.source_token.clone();
+                state.next_attempt = now;
+                state.retry_delay = PROJECTION_RETRY_BASE;
+            } else {
+                server.metrics.record_projection_probe(
+                    crate::metrics::ProjectionProbeResult::Ready,
+                    probe_started.elapsed(),
+                );
+            }
+            if now < state.next_attempt {
+                continue;
+            }
+            match repository.schedule_maintenance(&server).await {
+                Ok(()) => {
+                    state.next_attempt = now + state.retry_delay;
+                    state.retry_delay = (state.retry_delay * 2).min(PROJECTION_RETRY_MAX);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        repository_id = %repository.id,
+                        error = %error,
+                        "Git projection maintenance scheduling failed"
+                    );
+                    state.next_attempt = now + state.retry_delay;
+                    state.retry_delay = (state.retry_delay * 2).min(PROJECTION_RETRY_MAX);
+                }
+            }
+        }
+        cursor = start.saturating_add(count) % repositories.len();
+        states.retain(|repository_id, _| server.repositories.by_id(*repository_id).is_some());
     }
 }
 
