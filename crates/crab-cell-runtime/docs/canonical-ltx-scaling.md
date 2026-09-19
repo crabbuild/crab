@@ -754,7 +754,6 @@ content digest, so a retry or failover converges on one unreferenced upload
 target rather than creating a fresh key for every attempt. A process death can
 still leave that one private staging key; remote staging scavenging remains a
 provider-retention qualification and is never used as a recovery reader.
-
 ### Bound transfers
 
 The implementation uses existing configured facilities rather than new
