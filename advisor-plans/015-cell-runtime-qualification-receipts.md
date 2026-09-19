@@ -85,6 +85,15 @@ all passed. These results close the local provider/fault iteration seam; they
 remain unsigned local evidence and do not satisfy the protected three-Pod,
 multi-GiB RSS, matched-latency, or release-receipt criteria.
 
+The canonical Compose qualification was also rerun from the current checkout
+on 2026-09-18 with a freshly built `crab-http-server:local` image, RustFS, and
+an isolated project/port set. Its version-5 receipt passed the validator
+projection for two owner losses, follower replacement, exact-root monotonicity,
+and follower-only durable primitive commits. The raw receipt is retained under
+the external qualification target volume rather than tracked source. This is
+process/local-disk evidence only; it does not satisfy the protected Pod,
+matched-hardware, RSS, or signed-release rows.
+
 The typed primitive owner-loss slice now uses the same fencing and takeover
 boundary as the repository Cell path. `typed_blob_and_cron_recover_after_owner_loss`,
 `typed_kv_namespace_recovers_after_owner_loss`, and

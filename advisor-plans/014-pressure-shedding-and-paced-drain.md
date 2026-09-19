@@ -163,6 +163,16 @@ authority.
 These local proofs do not replace the protected three-Pod membership-loss or
 directional-partition receipt required for release.
 
+On 2026-09-18 the canonical Compose qualification was run from the current
+checkout with the RustFS-backed `crab-http-server:local` image and an isolated
+project. Its version-5 receipt recorded two owner deaths, changing sessions
+and epochs, monotonic exact roots, a follower replacement (epoch 1 to 47),
+follower-only commits under an immutable-object deny policy, and restored
+primitive state. The captured JSON is retained on the external qualification
+volume; this closes the local three-process movement/fault iteration seam, but
+it is not protected Kubernetes partition evidence and does not close either
+release checkbox above.
+
 ## Stop conditions
 
 - Any victim can be selected while its resource/obligation state is unknown.

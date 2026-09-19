@@ -189,6 +189,13 @@ cases. These are provider/fault iteration receipts, not signed release
 evidence; protected three-Pod, multi-GiB RSS, matched-latency, and fleet gates
 remain open.
 
+The current checkout also passed the full local Compose/RustFS cluster
+qualification (version-5 receipt) with two owner losses, exact-root monotonicity,
+follower replacement, and follower-only commits under an immutable-object deny
+policy. The raw receipt is retained on the external qualification volume. It
+strengthens local process/fault evidence but is not protected Kubernetes or
+signed release evidence.
+
 The same RustFS qualification volume ran the documented `10m`
 `rustfs_replication_scale_load` profile on the current branch: 10,000,000 rows,
 200 published segments, an 838,262,784-byte source database, exact restore of
