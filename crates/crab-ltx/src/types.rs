@@ -131,7 +131,7 @@ pub struct CaptureBatch {
 ///
 /// The ledger is not persisted and never participates in capture, checkpoint,
 /// or fencing decisions. Durations are nanoseconds from the host's monotonic
-/// clock; byte fields describe the logical work observed by the capture.
+/// clock; byte fields distinguish logical work, physical reads, and allocation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CaptureTiming {
     /// Total elapsed time for the capture phase represented by this batch.
@@ -162,6 +162,10 @@ pub struct CaptureTiming {
     pub checkpoint_nanos: u64,
     /// Logical WAL bytes consumed by the capture.
     pub wal_bytes: u64,
+    /// Largest physical WAL file length observed by the capture.
+    pub wal_file_bytes: u64,
+    /// Physical WAL bytes transferred into capture memory.
+    pub wal_read_bytes: u64,
     /// Database bytes represented by the captured commit.
     pub database_bytes: u64,
     /// LTX bytes inspected for the returned segments.
@@ -172,6 +176,8 @@ pub struct CaptureTiming {
     pub wal_sparse_reads: u32,
     /// Number of complete WAL image reads selected.
     pub wal_full_reads: u32,
+    /// Number of complete images selected before incremental WAL parsing.
+    pub wal_snapshot_reads: u32,
     /// Number of sparse WAL reads that required a complete-image retry.
     pub wal_fallback_reads: u32,
     /// Peak allocated bytes in one WAL image used by this capture.
@@ -222,11 +228,16 @@ impl CaptureTiming {
             .saturating_add(other.parent_sync_nanos);
         self.checkpoint_nanos = self.checkpoint_nanos.saturating_add(other.checkpoint_nanos);
         self.wal_bytes = self.wal_bytes.saturating_add(other.wal_bytes);
+        self.wal_file_bytes = self.wal_file_bytes.max(other.wal_file_bytes);
+        self.wal_read_bytes = self.wal_read_bytes.saturating_add(other.wal_read_bytes);
         self.database_bytes = self.database_bytes.saturating_add(other.database_bytes);
         self.ltx_bytes = self.ltx_bytes.saturating_add(other.ltx_bytes);
         self.segment_count = self.segment_count.saturating_add(other.segment_count);
         self.wal_sparse_reads = self.wal_sparse_reads.saturating_add(other.wal_sparse_reads);
         self.wal_full_reads = self.wal_full_reads.saturating_add(other.wal_full_reads);
+        self.wal_snapshot_reads = self
+            .wal_snapshot_reads
+            .saturating_add(other.wal_snapshot_reads);
         self.wal_fallback_reads = self
             .wal_fallback_reads
             .saturating_add(other.wal_fallback_reads);

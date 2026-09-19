@@ -196,6 +196,10 @@ impl VerifiedRoot {
     /// The destination and its SQLite sidecars must not exist. Every page is
     /// authenticated before an atomically installed result becomes visible.
     pub async fn restore(&self, destination: &Path) -> Result<Position> {
+        self.pages
+            .replica
+            .host
+            .observe_ltx_logical_read(crate::LtxReadOrigin::Cold);
         restore::run(&self.pages, destination).await
     }
 }
@@ -311,6 +315,9 @@ impl CellPagedDatabase {
 
     /// Reads one page by verifying every radix node and the selected LTX frame.
     pub async fn read_page(&self, page: u32) -> Result<Vec<u8>> {
+        self.replica
+            .host
+            .observe_ltx_logical_read(crate::LtxReadOrigin::Sparse);
         self.read_page_with_origin(page, crate::LtxReadOrigin::Sparse)
             .await
     }
@@ -373,8 +380,12 @@ impl CellPagedDatabase {
             fetch_started,
             frame.is_ok(),
         );
+        self.replica.host.observe_ltx_origin_request(
+            origin,
+            frame.is_ok(),
+            frame.as_ref().map_or(0, |bytes| bytes.len()),
+        );
         let frame = frame?;
-        self.replica.host.observe_ltx_read(origin, frame.len());
         if frame.len() != entry.length as usize
             || *blake3::hash(&frame).as_bytes() != entry.frame_hash
         {
@@ -492,8 +503,12 @@ impl CellPagedDatabase {
         self.replica
             .host
             .observe_ltx_phase(crate::LtxPhase::FrameFetch, started, frames.is_ok());
+        self.replica.host.observe_ltx_origin_request(
+            origin,
+            frames.is_ok(),
+            frames.as_ref().map_or(0, |bytes| bytes.len()),
+        );
         let frames = frames?;
-        self.replica.host.observe_ltx_read(origin, frames.len());
         if frames.len() as u64 != span.end - span.start {
             return Err(CrabError::ChecksumMismatch);
         }
@@ -867,7 +882,7 @@ impl CellReplica {
     /// The output retains the base TXID, checksum, commit sequence and schema.
     /// Only the authority owner may later publish the proposal as a normal root CAS.
     /// `scratch_directory` must already exist, be private to the caller and have
-    /// space for the selected indexes plus the compacted LTX and authenticated index.
+    /// space for selected bodies and indexes plus compacted LTX/index outputs.
     /// Owned scratch files are removed after success or failure.
     pub async fn prepare_compaction(
         &self,
@@ -881,7 +896,7 @@ impl CellReplica {
             let mut replica = self.clone();
             replica.host = self.host.for_recovery().await?;
             let graph = replica.load_graph(base).await?;
-            let scratch_bytes = compaction_scratch_bytes(&graph)?;
+            let scratch_bytes = compaction_scratch_bytes(&graph, range.clone())?;
             replica.host = replica.host.for_scratch(scratch_bytes).await?;
             compaction::prepare(&replica, base, graph, range, level, scratch_directory).await
         }
@@ -918,8 +933,6 @@ impl CellReplica {
         let mut replica = self.clone();
         replica.host = self.host.for_recovery().await?;
         let graph = replica.load_graph(base).await?;
-        let scratch_bytes = compaction_scratch_bytes(&graph)?;
-        replica.host = replica.host.for_scratch(scratch_bytes).await?;
         let segment_limit = MAX_SEGMENTS.min(replica.limits.max_segments);
         let stored_bytes = graph
             .descriptors
@@ -931,24 +944,33 @@ impl CellReplica {
                     .ok_or(CrabError::Limit("Cell root bytes"))
             })?;
         let byte_pressure = stored_bytes >= replica.limits.max_plan_bytes.saturating_mul(3) / 4;
-        if graph.descriptors.len() > 1
+        let selected = if graph.descriptors.len() > 1
             && (graph.descriptors.len() >= segment_limit.saturating_sub(1).max(1) || byte_pressure)
         {
             let end = graph.descriptors.len();
-            return compaction::prepare(&replica, base, graph, 0..end, 9, scratch_directory)
-                .await
-                .map(Some);
-        }
-        for level in 1..=8 {
-            if let Some(range) =
-                scheduled_compaction_range(&graph.descriptors, level, replica.limits.max_file_bytes)
-            {
-                return compaction::prepare(&replica, base, graph, range, level, scratch_directory)
-                    .await
-                    .map(Some);
+            Some((0..end, 9))
+        } else {
+            let mut selected = None;
+            for level in 1..=8 {
+                if let Some(range) = scheduled_compaction_range(
+                    &graph.descriptors,
+                    level,
+                    replica.limits.max_file_bytes,
+                ) {
+                    selected = Some((range, level));
+                    break;
+                }
             }
-        }
-        Ok(None)
+            selected
+        };
+        let Some((range, level)) = selected else {
+            return Ok(None);
+        };
+        let scratch_bytes = compaction_scratch_bytes(&graph, range.clone())?;
+        replica.host = replica.host.for_scratch(scratch_bytes).await?;
+        compaction::prepare(&replica, base, graph, range, level, scratch_directory)
+            .await
+            .map(Some)
     }
 
     async fn prepare_append(
@@ -1301,18 +1323,38 @@ impl CellReplica {
             object.kind,
         );
         let _permit = self.host.io_permit().await?;
-        let (metadata, _, mut stream) = self.layout.store().get_stream(&path, None).await?;
+        let request = self.layout.store().get_stream(&path, None).await;
+        if request.is_err() {
+            self.host
+                .observe_ltx_origin_request(crate::LtxReadOrigin::Cold, false, 0);
+        }
+        let (metadata, _, mut stream) = request?;
         if metadata.size > max_bytes || expected_bytes.is_some_and(|size| size != metadata.size) {
+            self.host
+                .observe_ltx_origin_request(crate::LtxReadOrigin::Cold, true, 0);
             return Err(CrabError::LTXCorrupted);
         }
         let mut digest = blake3::Hasher::new();
         let mut read_bytes = 0usize;
-        while let Some(chunk) = stream.try_next().await? {
-            digest.update(&chunk);
-            read_bytes = read_bytes.saturating_add(chunk.len());
+        loop {
+            match stream.try_next().await {
+                Ok(Some(chunk)) => {
+                    digest.update(&chunk);
+                    read_bytes = read_bytes.saturating_add(chunk.len());
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    self.host.observe_ltx_origin_request(
+                        crate::LtxReadOrigin::Cold,
+                        false,
+                        read_bytes,
+                    );
+                    return Err(error.into());
+                }
+            }
         }
         self.host
-            .observe_ltx_read(crate::LtxReadOrigin::Cold, read_bytes);
+            .observe_ltx_origin_request(crate::LtxReadOrigin::Cold, true, read_bytes);
         if digest.finalize().as_bytes() != &object.digest {
             return Err(CrabError::ChecksumMismatch);
         }
@@ -1549,13 +1591,17 @@ impl CellReplica {
         let path = self
             .layout
             .incarnation_object_path(&self.cell, &self.incarnation, digest, kind);
-        let (bytes, _) = self
+        let result = self
             .layout
             .store()
             .get_with_etag_bounded(&path, max_bytes)
-            .await?;
-        self.host
-            .observe_ltx_read(crate::LtxReadOrigin::Cold, bytes.len());
+            .await;
+        self.host.observe_ltx_origin_request(
+            crate::LtxReadOrigin::Cold,
+            result.is_ok(),
+            result.as_ref().map_or(0, |(bytes, _)| bytes.len()),
+        );
+        let (bytes, _) = result?;
         Ok(bytes.to_vec())
     }
 }
@@ -1598,19 +1644,29 @@ struct LoadedGraph {
     descriptors: Vec<SegmentDescriptor>,
 }
 
-fn compaction_scratch_bytes(graph: &LoadedGraph) -> Result<u64> {
+fn compaction_scratch_bytes(graph: &LoadedGraph, range: std::ops::Range<usize>) -> Result<u64> {
+    let selected = graph
+        .descriptors
+        .get(range)
+        .filter(|descriptors| !descriptors.is_empty())
+        .ok_or(CrabError::TxNotAvailable)?;
     let base = crate::recovery::full_job_scratch_bytes(
         graph.document.page_size,
         graph.document.database_pages,
     )?;
-    graph
+    let indexes = graph
         .descriptors
         .iter()
         .try_fold(base, |total, descriptor| {
             total
                 .checked_add(descriptor.index_length)
                 .ok_or(CrabError::Limit("scratch disk bytes"))
-        })
+        })?;
+    selected.iter().try_fold(indexes, |total, descriptor| {
+        total
+            .checked_add(descriptor.info.size_bytes)
+            .ok_or(CrabError::Limit("scratch disk bytes"))
+    })
 }
 
 struct AppendInput {

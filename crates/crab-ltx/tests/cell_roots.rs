@@ -1050,20 +1050,26 @@ async fn compaction_streams_large_frames_and_cleans_scratch() {
         })
         .unwrap();
     let maximum_read = Arc::new(AtomicU64::new(0));
+    let total_read = Arc::new(AtomicU64::new(0));
     let observed = Arc::clone(&maximum_read);
+    let observed_total = Arc::clone(&total_read);
     let store =
         Store::new(Arc::new(InMemory::new())).with_read_byte_observer(Arc::new(move |bytes| {
             observed.fetch_max(bytes, Ordering::SeqCst);
+            observed_total.fetch_add(bytes, Ordering::SeqCst);
         }));
     let replica = replica(store, [91; 32], [92; 16]);
-    let root = replica
-        .prepare(None, &writer.capture().unwrap(), 1, 1)
-        .await
-        .unwrap()
-        .root();
+    let cuts = writer.capture().unwrap();
+    let source_bytes = cuts
+        .segments
+        .iter()
+        .map(|segment| segment.info().size_bytes)
+        .sum::<u64>();
+    let root = replica.prepare(None, &cuts, 1, 1).await.unwrap().root();
     writer.close().unwrap();
     let scratch = tempfile::TempDir::new().unwrap();
     maximum_read.store(0, Ordering::SeqCst);
+    total_read.store(0, Ordering::SeqCst);
 
     let compacted = replica
         .prepare_compaction(&root, 0..1, 9, scratch.path())
@@ -1074,6 +1080,10 @@ async fn compaction_streams_large_frames_and_cleans_scratch() {
     assert!(
         maximum_read.load(Ordering::SeqCst) <= 1 << 20,
         "compaction must not download the complete LTX body"
+    );
+    assert!(
+        total_read.load(Ordering::SeqCst) <= source_bytes.saturating_add(2 << 20),
+        "compaction must fetch each selected body only once"
     );
     assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
     let restored = scratch.path().join("restored.sqlite");

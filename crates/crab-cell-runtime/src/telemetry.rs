@@ -26,11 +26,20 @@ pub trait CellTelemetry: Send + Sync {
     /// Records one finite LTX phase outcome.
     fn ltx_phase(&self, _phase: crab_ltx::LtxPhase, _elapsed: Duration, _succeeded: bool) {}
 
-    /// Records bounded origin read requests and returned bytes.
-    fn ltx_origin_read(&self, _origin: crab_ltx::LtxReadOrigin, _requests: u64, _bytes: u64) {}
+    /// Records one logical read attributed to a bounded residency class.
+    fn ltx_logical_read(&self, _origin: crab_ltx::LtxReadOrigin) {}
+
+    /// Records one provider attempt and the bytes returned before its outcome.
+    fn ltx_origin_request(
+        &self,
+        _origin: crab_ltx::LtxReadOrigin,
+        _outcome: crab_ltx::LtxRequestOutcome,
+        _bytes: u64,
+    ) {
+    }
 
     /// Aggregates one fixed-size capture ledger without dynamic labels.
-    fn ltx_capture(&self, _timing: &crab_ltx::CaptureTiming) {}
+    fn ltx_capture(&self, _timing: &crab_ltx::CaptureTiming, _succeeded: bool) {}
 }
 
 /// Shared late-bound telemetry sink used by runtime components.
@@ -62,7 +71,7 @@ impl CellTelemetryHandle {
         if let Some(telemetry) = self.inner.get() {
             telemetry.resident_route(outcome);
             if outcome == ResidentRouteOutcome::Hit {
-                telemetry.ltx_origin_read(crab_ltx::LtxReadOrigin::Resident, 1, 0);
+                telemetry.ltx_logical_read(crab_ltx::LtxReadOrigin::Resident);
             }
         }
     }
@@ -73,15 +82,26 @@ impl CellTelemetryHandle {
         }
     }
 
-    fn ltx_origin_read(&self, origin: crab_ltx::LtxReadOrigin, requests: u64, bytes: u64) {
+    fn ltx_logical_read(&self, origin: crab_ltx::LtxReadOrigin) {
         if let Some(telemetry) = self.inner.get() {
-            telemetry.ltx_origin_read(origin, requests, bytes);
+            telemetry.ltx_logical_read(origin);
         }
     }
 
-    pub(crate) fn ltx_capture(&self, timing: &crab_ltx::CaptureTiming) {
+    fn ltx_origin_request(
+        &self,
+        origin: crab_ltx::LtxReadOrigin,
+        outcome: crab_ltx::LtxRequestOutcome,
+        bytes: u64,
+    ) {
         if let Some(telemetry) = self.inner.get() {
-            telemetry.ltx_capture(timing);
+            telemetry.ltx_origin_request(origin, outcome, bytes);
+        }
+    }
+
+    fn ltx_capture(&self, timing: &crab_ltx::CaptureTiming, succeeded: bool) {
+        if let Some(telemetry) = self.inner.get() {
+            telemetry.ltx_capture(timing, succeeded);
         }
     }
 }
@@ -91,8 +111,21 @@ impl crab_ltx::LtxTelemetry for CellTelemetryHandle {
         self.ltx_phase(phase, elapsed, succeeded);
     }
 
-    fn origin_read(&self, origin: crab_ltx::LtxReadOrigin, requests: u64, bytes: u64) {
-        self.ltx_origin_read(origin, requests, bytes);
+    fn logical_read(&self, origin: crab_ltx::LtxReadOrigin) {
+        self.ltx_logical_read(origin);
+    }
+
+    fn origin_request(
+        &self,
+        origin: crab_ltx::LtxReadOrigin,
+        outcome: crab_ltx::LtxRequestOutcome,
+        bytes: u64,
+    ) {
+        self.ltx_origin_request(origin, outcome, bytes);
+    }
+
+    fn capture(&self, timing: &crab_ltx::CaptureTiming, succeeded: bool) {
+        self.ltx_capture(timing, succeeded);
     }
 }
 
@@ -104,7 +137,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingTelemetry {
         phases: Mutex<Vec<(crab_ltx::LtxPhase, bool)>>,
-        reads: Mutex<Vec<(crab_ltx::LtxReadOrigin, u64, u64)>>,
+        logical_reads: Mutex<Vec<crab_ltx::LtxReadOrigin>>,
+        requests: Mutex<Vec<(crab_ltx::LtxReadOrigin, crab_ltx::LtxRequestOutcome, u64)>>,
     }
 
     impl CellTelemetry for RecordingTelemetry {
@@ -112,8 +146,17 @@ mod tests {
             self.phases.lock().unwrap().push((phase, succeeded));
         }
 
-        fn ltx_origin_read(&self, origin: crab_ltx::LtxReadOrigin, requests: u64, bytes: u64) {
-            self.reads.lock().unwrap().push((origin, requests, bytes));
+        fn ltx_logical_read(&self, origin: crab_ltx::LtxReadOrigin) {
+            self.logical_reads.lock().unwrap().push(origin);
+        }
+
+        fn ltx_origin_request(
+            &self,
+            origin: crab_ltx::LtxReadOrigin,
+            outcome: crab_ltx::LtxRequestOutcome,
+            bytes: u64,
+        ) {
+            self.requests.lock().unwrap().push((origin, outcome, bytes));
         }
     }
 
@@ -129,7 +172,12 @@ mod tests {
             Duration::from_millis(2),
             true,
         );
-        crab_ltx::LtxTelemetry::origin_read(&handle, crab_ltx::LtxReadOrigin::Hydrating, 3, 4_096);
+        crab_ltx::LtxTelemetry::origin_request(
+            &handle,
+            crab_ltx::LtxReadOrigin::Hydrating,
+            crab_ltx::LtxRequestOutcome::Failed,
+            4_096,
+        );
         handle.resident_route(ResidentRouteOutcome::Hit);
 
         assert_eq!(
@@ -137,11 +185,16 @@ mod tests {
             vec![(crab_ltx::LtxPhase::Directory, true)]
         );
         assert_eq!(
-            *recording.reads.lock().unwrap(),
-            vec![
-                (crab_ltx::LtxReadOrigin::Hydrating, 3, 4_096),
-                (crab_ltx::LtxReadOrigin::Resident, 1, 0),
-            ]
+            *recording.logical_reads.lock().unwrap(),
+            vec![crab_ltx::LtxReadOrigin::Resident]
+        );
+        assert_eq!(
+            *recording.requests.lock().unwrap(),
+            vec![(
+                crab_ltx::LtxReadOrigin::Hydrating,
+                crab_ltx::LtxRequestOutcome::Failed,
+                4_096,
+            )]
         );
     }
 }

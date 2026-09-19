@@ -12,8 +12,8 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use crab_ltx::{
-    CaptureBatch, CaptureTiming, CellReplica, Host, Limits, LtxPhase, LtxReadOrigin, LtxTelemetry,
-    ManagedDb, RootRef, VerifiedLocalPlan, restore_exact,
+    CaptureBatch, CaptureTiming, CellReplica, Host, Limits, LtxPhase, LtxReadOrigin,
+    LtxRequestOutcome, LtxTelemetry, ManagedDb, RootRef, VerifiedLocalPlan, restore_exact,
 };
 use crab_storage::{CellStorageLayout, Store};
 use futures_util::{StreamExt as _, stream::BoxStream};
@@ -31,7 +31,8 @@ const TIMEOUT_RANGE: u8 = 3;
 #[derive(Default)]
 struct RecordingTelemetry {
     phases: Mutex<Vec<LtxPhase>>,
-    reads: Mutex<Vec<(LtxReadOrigin, u64, u64)>>,
+    logical_reads: Mutex<Vec<LtxReadOrigin>>,
+    reads: Mutex<Vec<(LtxReadOrigin, LtxRequestOutcome, u64)>>,
 }
 
 impl LtxTelemetry for RecordingTelemetry {
@@ -39,8 +40,12 @@ impl LtxTelemetry for RecordingTelemetry {
         self.phases.lock().unwrap().push(phase);
     }
 
-    fn origin_read(&self, origin: LtxReadOrigin, requests: u64, bytes: u64) {
-        self.reads.lock().unwrap().push((origin, requests, bytes));
+    fn logical_read(&self, origin: LtxReadOrigin) {
+        self.logical_reads.lock().unwrap().push(origin);
+    }
+
+    fn origin_request(&self, origin: LtxReadOrigin, outcome: LtxRequestOutcome, bytes: u64) {
+        self.reads.lock().unwrap().push((origin, outcome, bytes));
     }
 }
 
@@ -461,12 +466,50 @@ async fn replica_telemetry_attributes_cold_sparse_and_restore_work() {
         assert!(
             reads
                 .iter()
-                .any(|(origin, requests, bytes)| *origin == expected
-                    && *requests > 0
+                .any(|(origin, outcome, bytes)| *origin == expected
+                    && *outcome == LtxRequestOutcome::Succeeded
                     && *bytes > 0),
             "missing {expected:?}"
         );
     }
+    let logical_reads = telemetry.logical_reads.lock().unwrap();
+    assert!(logical_reads.contains(&LtxReadOrigin::Cold));
+    assert!(logical_reads.contains(&LtxReadOrigin::Sparse));
+}
+
+#[tokio::test]
+async fn failed_provider_attempt_is_not_counted_as_a_logical_retry() {
+    let fixture = fixture(0).await;
+    let store = InstrumentedStore::new(fixture.backend.clone(), Duration::ZERO);
+    let telemetry = Arc::new(RecordingTelemetry::default());
+    let host = Host::default().with_ltx_telemetry(telemetry.clone());
+    let replica = cell_replica(
+        Store::new(store.clone()),
+        fixture.cell,
+        fixture.incarnation,
+        host,
+    );
+    let opened = replica.open_root(&fixture.root).await.unwrap();
+    telemetry.logical_reads.lock().unwrap().clear();
+    telemetry.reads.lock().unwrap().clear();
+    store.arm(TIMEOUT_RANGE);
+
+    assert!(opened.paged().read_page(1).await.is_err());
+
+    assert_eq!(
+        *telemetry.logical_reads.lock().unwrap(),
+        vec![LtxReadOrigin::Sparse]
+    );
+    assert!(
+        telemetry
+            .reads
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(origin, outcome, bytes)| *origin == LtxReadOrigin::Sparse
+                && *outcome == LtxRequestOutcome::Failed
+                && *bytes == 0)
+    );
 }
 
 #[tokio::test(start_paused = true)]

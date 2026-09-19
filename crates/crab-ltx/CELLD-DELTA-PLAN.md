@@ -89,11 +89,13 @@ the default library path remains allocation-conscious and non-blocking.
 
 **Implementation status.** `CaptureBatch` now carries a bounded
 `CaptureTiming` value with preparation, WAL-read, verification, encoding,
-durable-write, checkpoint, logical-byte, and segment-count fields. The clock
+durable-write, checkpoint, logical/physical WAL-byte, and segment-count fields. The clock
 has an injectable monotonic hook with a `SystemClock` default. Timing is
-in-memory only: it does not enter LTX bytes, roots, decisions, or fencing, and
-there is no asynchronous sink or metric-label expansion yet. Runtime
-aggregation and matched workload receipts remain qualification work.
+in-memory only: it does not enter LTX bytes, roots, decisions, or fencing.
+`ManagedDb` reports successful and failed attempts through the finite runtime
+telemetry bridge. Logical reads, provider attempts/outcomes, and returned bytes
+are separate counters, and runtime aggregation uses closed labels only. Matched
+workload receipts remain qualification work.
 
 **Acceptance criteria.**
 

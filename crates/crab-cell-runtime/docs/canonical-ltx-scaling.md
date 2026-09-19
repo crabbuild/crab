@@ -166,16 +166,30 @@ shared authenticated mechanics remain private to Cell roots.
 Capture telemetry is a fixed-size per-batch ledger. It attributes schema checks,
 WAL existence and position resolution, WAL reads and page collection, encoding,
 local writes, file sync, parent sync, verification, and checkpoint time. The
-same ledger records finite WAL strategy counters and checkpoint runs, busy
-outcomes, frames, backfill, and restarts. None of these observations is
-persisted or participates in authority, checkpoint, or recovery decisions.
+same ledger records logical WAL work, physical WAL file/read bytes, allocated
+image bytes, finite read/snapshot strategy counters, and checkpoint runs, busy
+outcomes, frames, backfill, and restarts. `ManagedDb` emits the ledger for both
+successful and failed capture attempts; publication is not a second reporting
+boundary. None of these observations is persisted or participates in authority,
+checkpoint, or recovery decisions.
 
 Replica telemetry crosses into `crab-cell-runtime` only as the closed enums
-`LtxPhase` and `LtxReadOrigin`. The runtime exports phase result/duration and
-origin request/byte counters for cold, sparse, hydrating, and resident reads.
+`LtxPhase`, `LtxReadOrigin`, and `LtxRequestOutcome`. Logical reads are counted
+separately from provider attempts. Provider attempts retain succeeded/failed
+outcomes and bytes returned before failure for cold, sparse, and hydrating
+reads; resident reads increment only the logical counter and perform no
+provider operation. The runtime exports phase result/duration and these finite
+counters for cold, sparse, hydrating, and resident reads.
 Cell IDs, paths, object keys, digests, and arbitrary caller strings cannot be
 labels. Root-open, authenticated-directory, frame-fetch, ordered restore-write,
 and compaction paths report success and failure through the same host hook.
+
+Exact-root compaction downloads every selected authenticated body once into
+scratch in bounded 1 MiB chunks. The same admitted spool supplies frame decode
+and output encoding, eliminating the previous hash-verification pass followed
+by a second provider read. Source-body bytes are included in scratch admission;
+body BLAKE3, frame hash, page number, page checksum, final LTX checksum, and
+no-clobber publication checks remain unchanged.
 
 B-tree-guided speculative prefetch remains disabled until traces collected by
 these counters demonstrate a scan workload whose p95 improves without

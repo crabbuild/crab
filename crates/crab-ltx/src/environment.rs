@@ -94,14 +94,28 @@ pub enum LtxReadOrigin {
     Resident,
 }
 
+/// Finite provider-attempt outcomes exposed to an embedding runtime.
+#[cfg(feature = "replica")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LtxRequestOutcome {
+    Succeeded,
+    Failed,
+}
+
 /// Non-blocking, bounded-cardinality observations emitted by replica work.
 #[cfg(feature = "replica")]
 pub trait LtxTelemetry: Send + Sync {
     /// Records one completed phase and whether it succeeded.
     fn phase(&self, _phase: LtxPhase, _elapsed: Duration, _succeeded: bool) {}
 
-    /// Records provider requests and returned bytes for one read class.
-    fn origin_read(&self, _origin: LtxReadOrigin, _requests: u64, _bytes: u64) {}
+    /// Records one logical read issued by the runtime or a paged database.
+    fn logical_read(&self, _origin: LtxReadOrigin) {}
+
+    /// Records one provider attempt and bytes returned before its outcome.
+    fn origin_request(&self, _origin: LtxReadOrigin, _outcome: LtxRequestOutcome, _bytes: u64) {}
+
+    /// Records one complete capture attempt, including failed attempts.
+    fn capture(&self, _timing: &crate::CaptureTiming, _succeeded: bool) {}
 }
 
 type DiskAdmissions = Vec<Arc<dyn DiskBudgetAdmission>>;
@@ -1075,9 +1089,36 @@ impl Host {
     }
 
     #[cfg(feature = "replica")]
-    pub(crate) fn observe_ltx_read(&self, origin: LtxReadOrigin, bytes: usize) {
+    pub(crate) fn observe_ltx_logical_read(&self, origin: LtxReadOrigin) {
         if let Some(telemetry) = &self.telemetry {
-            telemetry.origin_read(origin, 1, bytes as u64);
+            telemetry.logical_read(origin);
+        }
+    }
+
+    #[cfg(feature = "replica")]
+    pub(crate) fn observe_ltx_origin_request(
+        &self,
+        origin: LtxReadOrigin,
+        succeeded: bool,
+        bytes: usize,
+    ) {
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.origin_request(
+                origin,
+                if succeeded {
+                    LtxRequestOutcome::Succeeded
+                } else {
+                    LtxRequestOutcome::Failed
+                },
+                bytes as u64,
+            );
+        }
+    }
+
+    #[cfg(feature = "replica")]
+    pub(crate) fn observe_ltx_capture(&self, timing: &crate::CaptureTiming, succeeded: bool) {
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.capture(timing, succeeded);
         }
     }
 

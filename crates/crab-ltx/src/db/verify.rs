@@ -131,8 +131,8 @@ impl Db {
             && data == hdr.final_page.as_slice())
     }
 
-    pub(super) fn detect_full_checkpoint(&self, known_salts: &[(u32, u32)]) -> Result<bool> {
-        let wal_bytes = self.host.read(&self.wal_path())?;
+    pub(super) fn detect_full_checkpoint(&mut self, known_salts: &[(u32, u32)]) -> Result<bool> {
+        let wal_bytes = self.read_whole_wal()?;
         let rd = WalReader::new(&wal_bytes).map_err(CrabError::from)?;
         let last_known = known_salts.last().copied().unwrap_or((0, 0));
         let mut m = rd.frame_salts_until(last_known);

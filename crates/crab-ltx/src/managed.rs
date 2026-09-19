@@ -416,14 +416,20 @@ impl ManagedDb {
     /// `prune_captured` can then release one exact acknowledged batch.
     pub fn capture(&mut self) -> Result<CaptureBatch> {
         self.ensure_active()?;
-        let result = self.capture_inner();
+        let (result, timing) = self.capture_inner();
+        #[cfg(feature = "replica")]
+        self.host.observe_ltx_capture(&timing, result.is_ok());
+        let result = result.map(|mut batch| {
+            batch.timing = timing;
+            batch
+        });
         if result.is_err() {
             self.fenced = true;
         }
         result
     }
 
-    fn capture_inner(&mut self) -> Result<CaptureBatch> {
+    fn capture_inner(&mut self) -> (Result<CaptureBatch>, crate::CaptureTiming) {
         self.db.start_timing(self.host.now_monotonic());
         self.db.timing_begin(crate::db::TimingPhase::Preparation);
         let result = (|| {
@@ -437,13 +443,7 @@ impl ManagedDb {
             Ok(batch)
         })();
         let timing = self.db.finish_timing(self.host.now_monotonic());
-        match result {
-            Ok(mut batch) => {
-                batch.timing = timing;
-                Ok(batch)
-            }
-            Err(error) => Err(error),
-        }
+        (result, timing)
     }
 
     fn collect_cuts(&mut self, before: crate::Pos) -> Result<CaptureBatch> {
@@ -485,8 +485,9 @@ impl ManagedDb {
     /// returned cuts must be published before acknowledging the operation.
     pub fn checkpoint(&mut self, mode: crate::CheckpointMode) -> Result<CaptureBatch> {
         self.ensure_active()?;
+        let (initial, mut timing) = self.capture_inner();
         let result = (|| {
-            let mut batch = self.capture_inner()?;
+            let mut batch = initial?;
             self.local_disk.try_grow(
                 self.limits
                     .max_capture_bytes
@@ -496,19 +497,18 @@ impl ManagedDb {
             let before = self.db.pos();
             self.db.start_timing(self.host.now_monotonic());
             let checkpoint_result = self.db.checkpoint(mode);
-            if let Err(error) = checkpoint_result {
-                let _ = self.db.finish_timing(self.host.now_monotonic());
-                return Err(error);
-            }
-            let extra_result = self.collect_cuts(before);
+            let extra_result = checkpoint_result.and_then(|()| self.collect_cuts(before));
             let checkpoint_timing = self.db.finish_timing(self.host.now_monotonic());
+            timing.merge(checkpoint_timing);
             let extra = extra_result?;
-            batch.timing.merge(checkpoint_timing);
+            batch.timing = timing;
             batch.segments.extend(extra.segments);
             batch.position = extra.position;
             self.reconcile_local_disk()?;
             Ok(batch)
         })();
+        #[cfg(feature = "replica")]
+        self.host.observe_ltx_capture(&timing, result.is_ok());
         if result.is_err() {
             self.fenced = true;
         }
@@ -536,7 +536,11 @@ impl ManagedDb {
     }
 
     fn snapshot_inner(&mut self, destination: &Path) -> Result<(LocalSegment, CaptureBatch)> {
-        let batch = self.capture_inner()?;
+        let (batch, timing) = self.capture_inner();
+        #[cfg(feature = "replica")]
+        self.host.observe_ltx_capture(&timing, batch.is_ok());
+        let mut batch = batch?;
+        batch.timing = timing;
         self.local_disk.try_grow(self.limits.max_file_bytes)?;
         let (mut scratch, mut output) =
             SnapshotScratch::create(&self.host, destination, self.limits.max_file_bytes)?;
@@ -873,6 +877,45 @@ mod tests {
             1
         );
         assert!(batch.timing.wal_image_bytes > 0);
+        assert!(batch.timing.wal_file_bytes >= batch.timing.wal_read_bytes);
+        assert!(batch.timing.wal_read_bytes > 0);
+        assert_eq!(batch.timing.wal_snapshot_reads, 1);
+    }
+
+    #[cfg(feature = "replica")]
+    #[test]
+    fn failed_capture_emits_its_bounded_ledger() {
+        #[derive(Default)]
+        struct CaptureTelemetry(std::sync::Mutex<Vec<(crate::CaptureTiming, bool)>>);
+
+        impl crate::LtxTelemetry for CaptureTelemetry {
+            fn capture(&self, timing: &crate::CaptureTiming, succeeded: bool) {
+                self.0.lock().unwrap().push((*timing, succeeded));
+            }
+        }
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let telemetry = Arc::new(CaptureTelemetry::default());
+        let host = crate::Host::default().with_ltx_telemetry(telemetry.clone());
+        let limits = Limits {
+            max_capture_bytes: 128,
+            ..Limits::default()
+        };
+        let mut db =
+            ManagedDb::open_with_host(&temp.path().join("failed.sqlite"), limits, host).unwrap();
+        db.transaction(|tx| {
+            tx.execute_batch(
+                "CREATE TABLE events(value BLOB); INSERT INTO events VALUES(randomblob(4096))",
+            )
+        })
+        .unwrap();
+
+        assert!(db.capture().is_err());
+        let attempts = telemetry.0.lock().unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert!(!attempts[0].1);
+        assert!(attempts[0].0.total_nanos > 0);
+        assert!(attempts[0].0.wal_read_bytes > 0);
     }
 
     #[test]

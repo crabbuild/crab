@@ -100,5 +100,6 @@ external Celld/Litestream golden fixtures, fuzzing, and measured memory/latency.
 Cell roots use an authenticated radix directory whose incremental publisher reads
 only changed leaves/ancestors; initial construction k-way merges ordered index
 streams without retaining a complete locator map. Persistent cache rebuild and
-5 GiB measured qualification remain scalability gates.
+broader multi-process/provider qualification remain scalability gates; the
+canonical 5 GiB RustFS receipt is recorded in [SCALABILITY.md](SCALABILITY.md).
 See [SCALABILITY.md](SCALABILITY.md) for the 1K–10K Cell target and remaining gates.

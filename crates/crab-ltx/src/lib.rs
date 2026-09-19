@@ -23,7 +23,7 @@ pub use environment::{DiskBudget, DiskBudgetAdmission, DiskReservation, Host};
 #[cfg(feature = "replica")]
 pub use environment::{
     HostResourceAdmission, HostResourceKind, HostResourcePermit, LtxPhase, LtxReadOrigin,
-    LtxTelemetry,
+    LtxRequestOutcome, LtxTelemetry,
 };
 mod ltx;
 mod lz4_block;
