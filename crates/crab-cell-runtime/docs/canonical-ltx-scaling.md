@@ -1163,7 +1163,8 @@ explicit Cell composition guard. It verifies that `crab-http-server` keeps
 while admitting `#[cfg(test)]` modules and dedicated `tests.rs` fixtures. The
 guard's temporary-tree regressions live in
 `crab/scripts/test_check_architecture_gates.py` under
-`CellRuntimeBoundaryTests`. Existing actor/publication tests already cover the
+`CellRuntimeBoundaryTests`; the same gate rejects the retired standalone LTX
+epoch-head symbols while admitting Cell-scoped names. Existing actor/publication tests already cover the
 required acknowledgement, fence, shutdown, and lost-CAS characterization
 cases; no duplicate runtime tests were added. Local Cargo qualification now
 passes on the required external workspace target volume; provider, Kubernetes,

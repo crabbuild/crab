@@ -184,7 +184,8 @@ Local proof completed:
 - `crab-http-server --lib`: 196 tests pass (four provider/browser tests remain
   explicitly ignored); the local RustFS collaboration/takeover, native-push,
   and receive-fault qualifications pass when run with an isolated prefix. The
-  architecture target, architecture regression tests, Clippy, formatting,
+  architecture target (including the hard-removed standalone-LTX symbol guard),
+  architecture regression tests, Clippy, formatting,
   documentation validation, the 512-seed simulator corpus, exact-seed replay,
   and TLC fast/negative/broad safety plus fair stable-provider liveness checks
   pass.
