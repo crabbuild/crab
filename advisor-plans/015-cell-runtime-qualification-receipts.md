@@ -179,6 +179,12 @@ passing receipt per row, checks the exact source/image identity, and hashes ever
 raw artifact listed by each receipt. This closes the validator implementation
 gap; it does not claim that the protected rows have been executed.
 
+The PR contract workflow now creates ten independent signed fixture receipts,
+writes a canonical relative-path manifest, and invokes `verify-matrix` from a
+fresh process. That job is deliberately a validator smoke test, not a
+qualification receipt: real release rows must come from the corresponding
+provider, scale, latency, and fault harnesses and retain their raw artifacts.
+
 ## Acceptance criteria
 
 - [ ] Every matrix row emits schema-valid evidence tied to exact source and

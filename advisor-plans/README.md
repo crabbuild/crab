@@ -200,8 +200,10 @@ and fresh-process verifier. It requires exactly one row for protocol, storage,
 publication, warm path, churn, fleet, failover, primitives, accounting, and
 compatibility; rejects path traversal and duplicate/incomplete manifests; and
 recomputes every raw artifact digest before accepting a row. This closes the
-validator implementation seam while the protected provider/Kubernetes and
-release receipts remain open.
+validator implementation seam. The contract workflow now exercises all ten
+rows with independently signed fixtures and the fresh-process CLI; those
+fixtures are explicitly not release evidence. Protected provider/Kubernetes
+and release receipts remain open.
 
 The current checkout also passed the full local Compose/RustFS cluster
 qualification (version-5 receipt) with two owner losses, exact-root monotonicity,
