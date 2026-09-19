@@ -83,6 +83,24 @@ wait_for_healthy() {
   return 1
 }
 
+assert_json_eventually() {
+  local origin="$1"
+  local path="$2"
+  local filter="$3"
+  local message="$4"
+  local candidate
+  for _ in $(seq 1 45); do
+    candidate="$(curl --fail-with-body --silent --show-error --max-time 10 \
+      "${origin}/${path}" 2>/dev/null || true)"
+    if jq --exit-status "$filter" <<<"$candidate" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "$message" >&2
+  return 1
+}
+
 up_mode=(--no-build)
 if [ "${CRAB_HTTP_CLUSTER_BUILD:-true}" = true ]; then
   up_mode=(--build)
@@ -370,16 +388,16 @@ jq --exit-status \
    .root.commit_sequence > $sequence_before' <<<"$control_after" >/dev/null
 
 for _ in $(seq 1 6); do
-  curl --fail --silent --show-error \
-    "${cluster_origin}/${repository_path}/issues?state=all" \
-    | jq --exit-status \
-      '.items | length == 1 and .[0].title == "Owner loss qualification"' \
-      >/dev/null
-  curl --fail --silent --show-error \
-    "${cluster_origin}/${repository_path}/labels" \
-    | jq --exit-status \
-      '.items | length == 1 and .[0].name == "follower-only"' \
-      >/dev/null
+  assert_json_eventually \
+    "$cluster_origin" \
+    "${repository_path}/issues?state=all" \
+    '.items | length == 1 and .[0].title == "Owner loss qualification"' \
+    "Cluster proxy did not expose the recovered issue."
+  assert_json_eventually \
+    "$cluster_origin" \
+    "${repository_path}/labels" \
+    '.items | length == 1 and .[0].name == "follower-only"' \
+    "Cluster proxy did not expose the recovered label."
 done
 
 continued="$(curl --fail-with-body --silent --show-error \
@@ -406,15 +424,17 @@ jq --exit-status \
 
 "${compose[@]}" up --detach --no-build server server-b >/dev/null
 wait_for_healthy server-b
-curl --fail --silent --show-error \
-  "${node_b_origin}/${repository_path}/issues?state=all" \
-  | jq --exit-status \
-    '.items | length == 2 and .[0].title == "Recovered owner" and
-     .[1].title == "Owner loss qualification"' >/dev/null
-curl --fail --silent --show-error \
-  "${node_b_origin}/${repository_path}/labels" \
-  | jq --exit-status \
-    '.items | length == 1 and .[0].name == "follower-only"' >/dev/null
+assert_json_eventually \
+  "$node_b_origin" \
+  "${repository_path}/issues?state=all" \
+  '.items | length == 2 and .[0].title == "Recovered owner" and
+   .[1].title == "Owner loss qualification"' \
+  "Node B did not expose the recovered issues after rejoining."
+assert_json_eventually \
+  "$node_b_origin" \
+  "${repository_path}/labels" \
+  '.items | length == 1 and .[0].name == "follower-only"' \
+  "Node B did not expose the recovered label after rejoining."
 control_after_rejoin="$("${compose[@]}" exec -T server-b crab-http-server \
   --config /etc/crab/server.toml cells status --owner demo --name hello)"
 jq --exit-status \
@@ -519,9 +539,11 @@ if [ -z "$second_restored_labels" ]; then
   echo "Node B did not recover the replacement-follower commit." >&2
   exit 1
 fi
-curl --fail --silent --show-error \
-  "${node_b_origin}/${repository_path}/issues?state=all" \
-  | jq --exit-status '.items | length == 3' >/dev/null
+assert_json_eventually \
+  "$node_b_origin" \
+  "${repository_path}/issues?state=all" \
+  '.items | length == 3' \
+  "Node B did not expose all recovered issues after the second owner loss."
 control_after_second_loss="$("${compose[@]}" exec -T server-b crab-http-server \
   --config /etc/crab/server.toml cells status --owner demo --name hello)"
 session_after_second_loss="$(jq --raw-output '.owner.session' \
