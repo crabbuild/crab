@@ -16,6 +16,11 @@ distributed relational database.
 
 [Back to the Cell runtime index](README.md)
 
+The [complete Commerce example](application-framework-example.md) shows the
+proposed framework using custom SQL Cells, KV, Blob, Queue, Cron, Workflow,
+effects, activities, generated clients, node composition, HTTP adaptation, and
+owner-loss qualification in one application.
+
 ## Design for application owners
 
 An application owner should make five durable decisions:
