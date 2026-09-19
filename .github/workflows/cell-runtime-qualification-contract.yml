@@ -47,3 +47,37 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
         run: cargo test -p crab-ltx --features replica --locked
+      - name: Smoke-test the complete qualification matrix in a fresh process
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/qualification-matrix-contract"
+          mkdir -p "$root/receipts" "$root/artifacts"
+          source_revision=0123456789abcdef0123456789abcdef01234567
+          image_digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          fixture="$root/fixture.json"
+          jq -cn '{schema: 1, kind: "qualification-matrix-contract-fixture"}' > "$fixture"
+          entries='[]'
+          for workload in protocol storage publication warm-path churn fleet failover primitives accounting compatibility; do
+            artifact="$root/artifacts/${workload}.json"
+            receipt="$root/receipts/${workload}.json"
+            cp "$fixture" "$artifact"
+            cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
+              emit "$receipt" "$source_revision" "$image_digest" "$artifact" \
+              github-actions "$workload" none
+            entries="$(jq -c \
+              --arg workload "$workload" \
+              --arg receipt "receipts/${workload}.json" \
+              --arg artifact "artifacts/${workload}.json" \
+              '. + [{workload: $workload, receipt: $receipt, artifacts: [$artifact]}]' \
+              <<< "$entries")"
+          done
+          printf '%s' "$(jq -cn --argjson entries "$entries" \
+            '{schema_version: 1, entries: $entries}')" > "$root/qualification-matrix.json"
+          (
+            cd "$root"
+            cargo run --quiet --locked --manifest-path "${GITHUB_WORKSPACE}/Cargo.toml" \
+              -p crab-cell-runtime --bin qualification_receipt -- \
+              verify-matrix qualification-matrix.json "$source_revision" "$image_digest"
+          )

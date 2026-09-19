@@ -114,7 +114,10 @@ fn verify_matrix(args: &mut impl Iterator<Item = String>) -> Result<(), String> 
         &fs::read(&manifest_path).map_err(|error| format!("read matrix manifest: {error}"))?,
     )
     .map_err(|error| error.to_string())?;
-    let base = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    let base = manifest_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let mut receipts = Vec::with_capacity(manifest.entries().len());
     let mut artifacts = Vec::with_capacity(manifest.entries().len());
     for entry in manifest.entries() {
