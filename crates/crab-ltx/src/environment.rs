@@ -7,7 +7,7 @@ use std::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(feature = "replica")]
@@ -837,6 +837,14 @@ impl ScratchMonitor for UnlimitedScratch {
 pub trait Clock: Send + Sync {
     fn unix_millis(&self) -> i64;
     fn file_age(&self, path: &Path) -> io::Result<Duration>;
+
+    /// Returns a monotonic instant for observational duration measurements.
+    ///
+    /// Implementors that only provide wall-clock behavior can keep this
+    /// default; tests may override it with a deterministic clock.
+    fn monotonic(&self) -> Instant {
+        Instant::now()
+    }
 }
 
 /// Blocking dispatch boundary; success means the job was accepted for execution.
@@ -1048,6 +1056,12 @@ impl Host {
         self.local_disk.used()
     }
 
+    /// Returns the shared local-disk budget used by replica artifacts.
+    #[must_use]
+    pub fn local_disk_budget(&self) -> DiskBudget {
+        self.local_disk.clone()
+    }
+
     /// Returns verified directory-cache usage when the cache is enabled.
     #[cfg(feature = "replica")]
     #[must_use]
@@ -1057,6 +1071,10 @@ impl Host {
 
     pub(crate) fn reserve_local_disk(&self, bytes: u64) -> crate::Result<DiskReservation> {
         self.local_disk.try_reserve(bytes)
+    }
+
+    pub(crate) fn now_monotonic(&self) -> Instant {
+        self.clock.monotonic()
     }
 
     pub(crate) fn read(&self, path: &Path, limit: u64) -> io::Result<Vec<u8>> {

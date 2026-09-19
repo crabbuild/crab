@@ -2,8 +2,12 @@
 
 Status: library improvements implemented; target capacity **not qualified**.
 Reference: Celld `10cb1303dac710dcb3b557e318e08c855261f68b`, `crates/ltx`.
-See [PARITY.md](PARITY.md) for feature and safety differences, and
+See [PARITY.md](PARITY.md) for feature and safety differences, the
+[standalone compatibility audit](../crab-cell-runtime/docs/standalone-replication-audit.md), and
 [the HTTP design](../crab-http-server/next-architecture/crab-ltx.md) for integration.
+The implementation order, Cell-runtime ownership rules, qualification gates,
+and tagged standalone-contract decision are specified in
+[Canonical Cell LTX scaling](../crab-cell-runtime/docs/canonical-ltx-scaling.md).
 
 ## Target and hardware profiles
 
@@ -62,6 +66,7 @@ does not imply that all of those bytes must reside on local disk.
 | Initial Cell roots materialized every final locator and encoded directory node | K-way ordered index merge with suffix truncation fences; each 256-page leaf uploads before the next and only radix summaries remain resident | `cell_replica::directory::tests::streamed_tree_matches_canonical_root_without_retaining_objects` matches the canonical 70,000-page root and `cell_roots::initial_streaming_directory_merges_truncation_and_regrowth` restores the newest bytes from a multi-cut initial root |
 | Writable Cell activation and each cut allocated/cloned/scanned one checksum per page | Authenticated directory leaves stream to a local 8-byte/page file in 64 KiB chunks; capture keeps a changed-page overlay, reduces truncated suffixes in 64 KiB reads, maintains the aggregate incrementally and persists positional updates only after sealing the LTX cut | `cell_roots::exact_cell_root_opens_sparse_writer_and_publishes_incrementally` checks the disk index and successor restore; `pages::file_backed_truncation_reduces_multiple_checksum_chunks_with_overlay_updates` covers multi-chunk shrink; `host_hooks::cell_checksum_write_failure_fences_after_sealing_the_cut` proves a partial index update cannot keep serving |
 | Managed capture and explicit snapshots retained every decoded page, encoded the complete LTX in memory, then reread it as one buffer | Capture feeds one page at a time through the encoder and spools its codec index; snapshots stream to a same-directory scratch file. Both sync, validate metadata plus BLAKE3 through bounded reads, and install atomically without replacement | `host_hooks::capture_and_inspection_bound_each_filesystem_transfer` captures and snapshots incompressible multi-megabyte data while asserting every LTX filesystem transfer stays below 128 KiB; the full capture, fault, checkpoint, restore, and publication suites exercise the canonical paths |
+| Cell-native and bundle publication used separate body ownership and inspection paths | Native captures copy into owned scratch and replay through one authenticated inspector; bundle rows use the same inspector and replayable source contract; the prepared root retains descriptors/indexes rather than complete segment bodies | `host_hooks::capture_and_inspection_bound_each_filesystem_transfer`, `cell_roots::prepare_does_not_write_mutable_keys`, and `cell_roots::recovered_overlay_requires_exact_predecessor_and_final_position` |
 | Partial compaction downloaded unrelated bodies | Verify the original indexed plan; fetch only selected bodies; authenticate regenerated indexes; compare independently reduced page bytes; verify replacement indexed state | `cell_roots::compaction_streams_large_frames_and_cleans_scratch`: range reads stay below the full LTX body and restored bytes remain identical |
 | Long-lived Cell writers exhausted local/remote segment admission | Reverify and prune each exact local batch only after authoritative root confirmation; before later appends, schedule a bounded eight-input level promotion or a pressure-triggered full replacement through the owner CAS | `host_hooks::captured_pruning_retries_after_removal_but_failed_parent_sync`, `cell_roots::scheduled_cell_compaction_promotes_fanout_and_preserves_root`, and `actor::dispatcher_compacts_before_segment_admission_is_exhausted` |
 | Independent Cell operations multiplied remote/recovery work | Shared I/O, CPU-job and large-recovery admission; Cell directory nodes and sparse views reuse the host-scoped cache | `cell_roots::directory_nodes_are_shared_across_exact_root_views` and `environment::cancelled_waiters_do_not_release_running_job_or_recovery_admission` |
@@ -122,6 +127,9 @@ its separately derived dirty/recovery slots bound concurrent large operations.
    directory-node cache is bounded, restart-persistent, and charged to the
    shared disk budget; exported cache
    hit/corruption/fill metrics and zero-origin warm-restart qualification remain.
+   Sparse hydration now walks each requested directory window once and then
+   coalesces only a verified contiguous frame prefix; predictive B-tree
+   prefetch remains unqualified and is not enabled.
    Finish those release gates before claiming the 5 GB/10K target; do not add an
    implicit fallback reader.
 2. **Streaming large-database operations.** Managed WAL capture now encodes
@@ -132,7 +140,10 @@ its separately derived dirty/recovery slots bound concurrent large operations.
    Cell capture checksum updates are incremental and disk-backed; truncation
    reduces its removed checksum suffix through fixed 64 KiB reads. Cell-native
    and bundle append preparation now uses replayable scratch/range sources and
-   shared authenticated inspection; Cell recovery and compaction still require
+   shared authenticated inspection; remote bundle recovery spools to a bounded
+   session/cell scratch file and retains only verified row metadata. Stale
+   session inventory accounts abandoned recovery or compaction bytes before
+   new admission, while native recovery and compaction still require
    qualification for database-sized decoded buffers, low-disk behavior and
    provider failures. Keep cryptographic body/index binding and exact output
    verification.
@@ -142,9 +153,10 @@ its separately derived dirty/recovery slots bound concurrent large operations.
    SQLite connections each. Capture/recovery/compaction share CPU- and memory-
    derived dirty slots, and full restore/compaction use byte-weighted scratch
    admission. Qualify the fixed estimates, unify active WAL/Git/LFS disk
-   accounting and implement explicit warm transitions. Fresh exact-
-   root restore is supported; reusable crash-safe local warm reopening is not.
-   Every acknowledged root must survive eviction.
+   accounting and implement explicit warm transitions. Resident/sparse/hydrating
+   lifecycle and bounded eviction are wired; reusable crash-safe local warm
+   reopening and zero-origin warm-restart proof remain. Every acknowledged root
+   must survive eviction.
 4. **Retention and collection.** The HTTP runtime now owns owner/head CAS,
    exact-response gating, ambiguous-publication reconciliation and scheduled
    representation compaction. Application backup pins now bind release metadata,

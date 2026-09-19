@@ -294,6 +294,26 @@ mod tests {
     }
 
     #[test]
+    fn restart_inventory_accounts_for_cell_recovery_and_compaction_scratch() {
+        let data = tempfile::TempDir::new().unwrap();
+        let sessions = data.path().join("sessions");
+        let stale = sessions.join("stale-session");
+        let current = sessions.join("current-session");
+        let cell = stale.join("cell");
+        std::fs::create_dir_all(&cell).unwrap();
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(cell.join(".crab-compaction-source-indexes"), [0_u8; 13]).unwrap();
+        std::fs::write(cell.join(".crab-recovery-bundle"), [0_u8; 17]).unwrap();
+
+        let budget = crab_cell_runtime::DiskBudget::new(30);
+        let inventory = reserve_restart_inventory(data.path(), &current, budget.clone()).unwrap();
+
+        assert_eq!(inventory.bytes(), 30);
+        assert_eq!(inventory.sessions(), 1);
+        assert_eq!(budget.used(), 30);
+    }
+
+    #[test]
     fn restart_inventory_fails_closed_when_stale_bytes_exceed_capacity() {
         let data = tempfile::TempDir::new().unwrap();
         let sessions = data.path().join("sessions");

@@ -421,13 +421,26 @@ impl ManagedDb {
     }
 
     fn capture_inner(&mut self) -> Result<CaptureBatch> {
-        self.ensure_capacity()?;
-        let before = self.db.pos();
-        self.db.sync(self.required_cut)?;
-        self.required_cut = None;
-        let batch = self.collect_cuts(before)?;
-        self.reconcile_local_disk()?;
-        Ok(batch)
+        self.db.start_timing(self.host.now_monotonic());
+        self.db.timing_begin(crate::db::TimingPhase::Preparation);
+        let result = (|| {
+            self.ensure_capacity()?;
+            self.db.timing_end(crate::db::TimingPhase::Preparation);
+            let before = self.db.pos();
+            self.db.sync(self.required_cut)?;
+            self.required_cut = None;
+            let batch = self.collect_cuts(before)?;
+            self.reconcile_local_disk()?;
+            Ok(batch)
+        })();
+        let timing = self.db.finish_timing(self.host.now_monotonic());
+        match result {
+            Ok(mut batch) => {
+                batch.timing = timing;
+                Ok(batch)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn collect_cuts(&mut self, before: crate::Pos) -> Result<CaptureBatch> {
@@ -442,8 +455,13 @@ impl ManagedDb {
                     max_file_bytes: self.limits.max_capture_bytes,
                 }
                 .open(&path)?;
-                let (decoded, size, digest) = ltx::inspect_reader(file)?;
+                self.db.timing_begin(crate::db::TimingPhase::Verification);
+                let inspected = ltx::inspect_reader(file);
+                self.db.timing_end(crate::db::TimingPhase::Verification);
+                let (decoded, size, digest) = inspected?;
                 let info = SegmentInfo::from_inspected(&decoded, size, digest);
+                self.db.timing_add_ltx_bytes(info.size_bytes);
+                self.db.timing_add_segment();
                 self.account_capture(&info)?;
                 let segment = LocalSegment::new(path, info);
                 #[cfg(feature = "replica")]
@@ -454,6 +472,7 @@ impl ManagedDb {
         Ok(CaptureBatch {
             segments,
             position: after.into(),
+            timing: crate::CaptureTiming::default(),
         })
     }
 
@@ -472,8 +491,16 @@ impl ManagedDb {
                     .ok_or(CrabError::Limit("local disk bytes"))?,
             )?;
             let before = self.db.pos();
-            self.db.checkpoint(mode)?;
-            let extra = self.collect_cuts(before)?;
+            self.db.start_timing(self.host.now_monotonic());
+            let checkpoint_result = self.db.checkpoint(mode);
+            if let Err(error) = checkpoint_result {
+                let _ = self.db.finish_timing(self.host.now_monotonic());
+                return Err(error);
+            }
+            let extra_result = self.collect_cuts(before);
+            let checkpoint_timing = self.db.finish_timing(self.host.now_monotonic());
+            let extra = extra_result?;
+            batch.timing.merge(checkpoint_timing);
             batch.segments.extend(extra.segments);
             batch.position = extra.position;
             self.reconcile_local_disk()?;
@@ -681,8 +708,35 @@ pub(crate) fn open_connection(path: &Path, vfs: Option<&str>) -> rusqlite::Resul
         Some(vfs) => Connection::open_with_flags_and_vfs(path, rusqlite::OpenFlags::default(), vfs),
         None => Connection::open(path),
     }?;
+    disable_lookaside(&connection)?;
     connection.pragma_update(None, "cache_size", -MANAGED_CONNECTION_PAGE_CACHE_KIB)?;
     Ok(connection)
+}
+
+fn disable_lookaside(connection: &Connection) -> rusqlite::Result<()> {
+    use rusqlite::ffi;
+
+    // SQLite's default lookaside arena reserves memory per connection. Managed
+    // LTX connections use a small, stable statement vocabulary, so keeping
+    // that arena only adds resident cost across a dense Cell fleet.
+    // SAFETY: the connection was opened immediately above and no SQLite
+    // operation has run, so no lookaside slot can be in use.
+    let result = unsafe {
+        ffi::sqlite3_db_config(
+            connection.handle(),
+            ffi::SQLITE_DBCONFIG_LOOKASIDE,
+            std::ptr::null_mut::<std::ffi::c_void>(),
+            0,
+            0,
+        )
+    };
+    if result != ffi::SQLITE_OK {
+        return Err(rusqlite::Error::SqliteFailure(
+            ffi::Error::new(result),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn read_main(connection: &Connection, offset: u64, size: usize) -> Result<Vec<u8>> {
@@ -717,10 +771,46 @@ pub(crate) fn read_main(connection: &Connection, offset: u64, size: usize) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        path::Path,
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
+        time::{Duration, Instant},
+    };
 
     #[derive(Debug, thiserror::Error)]
     #[error("inventory rejected the command")]
     struct Rejected;
+
+    struct TimingClock {
+        origin: Instant,
+        ticks: AtomicU64,
+    }
+
+    impl TimingClock {
+        fn new() -> Self {
+            Self {
+                origin: Instant::now(),
+                ticks: AtomicU64::new(0),
+            }
+        }
+    }
+
+    impl crate::environment::Clock for TimingClock {
+        fn unix_millis(&self) -> i64 {
+            123456789
+        }
+
+        fn file_age(&self, _: &Path) -> std::io::Result<Duration> {
+            Ok(Duration::ZERO)
+        }
+
+        fn monotonic(&self) -> Instant {
+            self.origin + Duration::from_micros(self.ticks.fetch_add(1, Ordering::Relaxed))
+        }
+    }
 
     #[test]
     fn managed_connections_set_the_budgeted_page_cache() {
@@ -730,6 +820,67 @@ mod tests {
             .query_row("PRAGMA cache_size", [], |row| row.get(0))
             .unwrap();
         assert_eq!(cache_kib, -MANAGED_CONNECTION_PAGE_CACHE_KIB);
+    }
+
+    #[test]
+    fn capture_reports_deterministic_bounded_timing_for_real_ltx_work() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let host = crate::Host::default().with_clock(Arc::new(TimingClock::new()));
+        let mut db =
+            ManagedDb::open_with_host(&temp.path().join("timed.sqlite"), Limits::default(), host)
+                .unwrap();
+        db.transaction(|tx| {
+            tx.execute_batch("CREATE TABLE events(value TEXT); INSERT INTO events VALUES ('ok')")
+        })
+        .unwrap();
+
+        let batch = db.capture().unwrap();
+        let phase_nanos = batch.timing.preparation_nanos
+            + batch.timing.wal_read_nanos
+            + batch.timing.verification_nanos
+            + batch.timing.encode_nanos
+            + batch.timing.durable_write_nanos
+            + batch.timing.checkpoint_nanos;
+        let ltx_bytes = batch
+            .segments
+            .iter()
+            .map(|segment| segment.info().size_bytes)
+            .sum::<u64>();
+        assert!(batch.timing.total_nanos > 0);
+        assert!(phase_nanos <= batch.timing.total_nanos);
+        assert_eq!(batch.timing.segment_count as usize, batch.segments.len());
+        assert_eq!(batch.timing.ltx_bytes, ltx_bytes);
+        assert!(batch.timing.wal_bytes > 0);
+        assert!(batch.timing.database_bytes > 0);
+    }
+
+    #[test]
+    fn managed_connections_disable_sqlite_lookaside() {
+        use rusqlite::ffi;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        for index in 0..MANAGED_SQLITE_CONNECTIONS {
+            let connection =
+                open_connection(&temp.path().join(format!("lookaside-{index}.sqlite")), None)
+                    .unwrap();
+            let _statement = connection.prepare("SELECT 1").unwrap();
+            let mut current = 0;
+            let mut highwater = 0;
+            let result = unsafe {
+                // SAFETY: the connection remains alive and is exclusively
+                // borrowed for the duration of this status query.
+                ffi::sqlite3_db_status(
+                    connection.handle(),
+                    ffi::SQLITE_DBSTATUS_LOOKASIDE_USED,
+                    &mut current,
+                    &mut highwater,
+                    0,
+                )
+            };
+            assert_eq!(result, ffi::SQLITE_OK);
+            assert_eq!(current, 0);
+            assert_eq!(highwater, 0);
+        }
     }
 
     #[test]

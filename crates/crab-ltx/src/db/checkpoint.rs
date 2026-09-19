@@ -236,17 +236,25 @@ impl Db {
         }
     }
 
-    pub(super) fn run_checkpoint_pragma(&self, mode: CheckpointMode) -> Result<CheckpointPragma> {
+    pub(super) fn run_checkpoint_pragma(
+        &mut self,
+        mode: CheckpointMode,
+    ) -> Result<CheckpointPragma> {
         let sql = format!("PRAGMA wal_checkpoint({mode})");
-        self.conn
-            .prepare_cached(&sql)
-            .map_err(CrabError::Sqlite)?
-            .query_row([], |row| {
-                Ok(CheckpointPragma {
-                    wal_frames: row.get::<_, i64>(1)?,
-                    backfilled: row.get::<_, i64>(2)?,
+        self.timing_begin(TimingPhase::Checkpoint);
+        let result = (|| -> Result<CheckpointPragma> {
+            self.conn
+                .prepare_cached(&sql)
+                .map_err(CrabError::Sqlite)?
+                .query_row([], |row| {
+                    Ok(CheckpointPragma {
+                        wal_frames: row.get::<_, i64>(1)?,
+                        backfilled: row.get::<_, i64>(2)?,
+                    })
                 })
-            })
-            .map_err(CrabError::Sqlite)
+                .map_err(CrabError::Sqlite)
+        })();
+        self.timing_end(TimingPhase::Checkpoint);
+        result
     }
 }

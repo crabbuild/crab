@@ -28,7 +28,7 @@ compatibility decision; its stored prefixes are never read as Cell roots. See
 | `ManagedDb::open(path, limits)` | Exclusive fresh capture session; owns control, read-lock and application-writer SQLite connections, each configured with a 64 KiB page-cache target |
 | `ManagedDb::{resume,resume_with_host}(plan, path, limits, …)` | New local session continuing an exact verified TXID/checksum; available without `replica` |
 | `transaction(closure)` | One locally committed SQL transaction; no remote-durability claim |
-| `capture()` | Ordered `CaptureBatch` containing every newly generated cut and its endpoint, including checkpoint cuts |
+| `capture()` | Ordered `CaptureBatch` containing every newly generated cut, its endpoint, and bounded in-memory timing observations, including checkpoint cuts |
 | `checkpoint(mode)` | Capture barrier plus PASSIVE/FULL/RESTART/TRUNCATE; returns every generated cut |
 | `snapshot(path)` | Returns `(LocalSegment, CaptureBatch)`: full `1..=txid` snapshot plus every newly captured cut |
 | `VerifiedLocalPlan::new(files, target, limits)` | Owns verified bytes of an explicitly selected snapshot-plus-deltas chain |
@@ -45,6 +45,10 @@ authenticated manifest. `LocalSegment::new` is an **unverified selection**;
 `VerifiedLocalPlan::new` validates it before recovery. Changing a path after plan
 construction cannot change its owned bytes. LTX CRC64 checks file structure and
 database state; it is not cryptographic authentication.
+
+`CaptureBatch::timing` is observational only: it is not serialized or included
+in a root digest, and ignoring it does not add asynchronous work or change
+capture, checkpoint, error, or fencing behavior.
 
 The first file must be a full snapshot. Every subsequent range starts at the
 previous maximum TXID plus one. Validation rejects gaps, overlaps, missing files,
@@ -75,6 +79,8 @@ Litestream v0.5.11 cannot read the sized-block layout; compatibility must not be
 inferred from the unchanged file-version number. Independent local vectors test
 both encodings; a full external Litestream/Celld interoperability matrix remains
 a release gate. Source revision and notices: [UPSTREAM.md](UPSTREAM.md).
+The reviewed current-Celld mechanics, adoption order, and acceptance gates are
+recorded in [CELLD-DELTA-PLAN.md](CELLD-DELTA-PLAN.md).
 
 ## Use
 
@@ -143,7 +149,7 @@ credential or S3 parser.
 | `CellWritableDatabase::open_writable(path)` | Creates a fresh sparse SQLite file and seeds exact TXID/checksum continuation |
 | `ManagedDb::{hydration,hydrate_step,take_io_error}` | Reports and advances bounded hydration through the same VFS as foreground SQL |
 | `ManagedDb::prune_captured(batch)` | Re-verifies and removes only the exact local capture batch after its root is durably acknowledged |
-| `bundle::Bundle` | Validates CRB1 ranges used by Cell recovery overlays; it does not publish mutable authority |
+| `bundle::Bundle` | Validates CRB1 ranges, supports bounded file-backed reopen and replayable upload sources for Cell recovery overlays; it does not publish mutable authority |
 
 The runtime calls `Control::publish_prepared` and `CellAuthority` to bind a
 prepared root to owner, incarnation, sequence, and response durability. A

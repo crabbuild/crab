@@ -491,6 +491,89 @@ pub(super) async fn lookup(
     }
 }
 
+/// Returns one contiguous, authenticated directory run without re-walking the
+/// radix path for every page in the window.
+pub(super) async fn lookup_run(
+    verification: Verification<'_>,
+    root: [u8; 32],
+    height: u32,
+    first: u32,
+    max_pages: u32,
+) -> Result<Vec<DirectoryEntry>> {
+    if max_pages == 0 || first == 0 || first > verification.database_pages {
+        return Ok(Vec::new());
+    }
+    let lock = crate::ltx::lock_pgno(verification.page_size);
+    let requested_last = first
+        .checked_add(max_pages - 1)
+        .ok_or(CrabError::LTXCorrupted)?
+        .min(verification.database_pages);
+    let last = if (first..=requested_last).contains(&lock) {
+        lock.checked_sub(1).ok_or(CrabError::LTXCorrupted)?
+    } else {
+        requested_last
+    };
+    if last < first {
+        return Ok(Vec::new());
+    }
+
+    let mut pending = vec![(root, height, None)];
+    let mut entries = Vec::new();
+    while let Some((digest, remaining, expected)) = pending.pop() {
+        let bytes = read_node(&verification, digest).await?;
+        let header = Header::parse(&bytes)?;
+        if (remaining == 0) != (header.kind == 0) {
+            return Err(CrabError::LTXCorrupted);
+        }
+        if header.kind == 0 {
+            let (aggregate, leaf_entries) = verify_leaf(
+                &bytes,
+                &header,
+                verification.page_size,
+                verification.database_pages,
+                verification.extents,
+            )?;
+            if expected.is_some_and(|value| value != aggregate) {
+                return Err(CrabError::ChecksumMismatch);
+            }
+            entries.extend(
+                leaf_entries
+                    .into_iter()
+                    .filter(|entry| (first..=last).contains(&entry.page)),
+            );
+            continue;
+        }
+
+        let (aggregate, children) = verify_branch(&bytes, &header)?;
+        if expected.is_some_and(|value| value != aggregate) {
+            return Err(CrabError::ChecksumMismatch);
+        }
+        let next = remaining.checked_sub(1).ok_or(CrabError::LTXCorrupted)?;
+        pending.extend(
+            children
+                .into_iter()
+                .rev()
+                .filter(|child| child.aggregate.last >= first && child.aggregate.first <= last)
+                .map(|child| (child.digest, next, Some(child.aggregate))),
+        );
+    }
+
+    let expected_entries =
+        usize::try_from(last - first + 1).map_err(|_| CrabError::LTXCorrupted)?;
+    if entries.len() != expected_entries {
+        return Err(CrabError::LTXCorrupted);
+    }
+    for (index, entry) in entries.iter().enumerate() {
+        let expected_page = first
+            .checked_add(u32::try_from(index).map_err(|_| CrabError::LTXCorrupted)?)
+            .ok_or(CrabError::LTXCorrupted)?;
+        if entry.page != expected_page {
+            return Err(CrabError::LTXCorrupted);
+        }
+    }
+    Ok(entries)
+}
+
 pub(super) async fn load_checksums(
     verification: Verification<'_>,
     root: [u8; 32],

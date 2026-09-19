@@ -124,6 +124,60 @@ impl LocalSegment {
 pub struct CaptureBatch {
     pub segments: Vec<LocalSegment>,
     pub position: Position,
+    pub timing: CaptureTiming,
+}
+
+/// Bounded, in-memory observations for one capture operation.
+///
+/// The ledger is not persisted and never participates in capture, checkpoint,
+/// or fencing decisions. Durations are nanoseconds from the host's monotonic
+/// clock; byte fields describe the logical work observed by the capture.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CaptureTiming {
+    /// Total elapsed time for the capture phase represented by this batch.
+    pub total_nanos: u64,
+    /// Time spent preparing the managed capture before WAL synchronization.
+    pub preparation_nanos: u64,
+    /// Time spent reading and parsing the WAL image.
+    pub wal_read_nanos: u64,
+    /// Time spent validating WAL or produced LTX data.
+    pub verification_nanos: u64,
+    /// Time spent encoding LTX bytes and page records.
+    pub encode_nanos: u64,
+    /// Time spent making the LTX file durable and publishing its name.
+    pub durable_write_nanos: u64,
+    /// Time spent in checkpoint maintenance associated with the capture.
+    pub checkpoint_nanos: u64,
+    /// Logical WAL bytes consumed by the capture.
+    pub wal_bytes: u64,
+    /// Database bytes represented by the captured commit.
+    pub database_bytes: u64,
+    /// LTX bytes inspected for the returned segments.
+    pub ltx_bytes: u64,
+    /// Number of segments inspected for the returned batch.
+    pub segment_count: u32,
+}
+
+impl CaptureTiming {
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.total_nanos = self.total_nanos.saturating_add(other.total_nanos);
+        self.preparation_nanos = self
+            .preparation_nanos
+            .saturating_add(other.preparation_nanos);
+        self.wal_read_nanos = self.wal_read_nanos.saturating_add(other.wal_read_nanos);
+        self.verification_nanos = self
+            .verification_nanos
+            .saturating_add(other.verification_nanos);
+        self.encode_nanos = self.encode_nanos.saturating_add(other.encode_nanos);
+        self.durable_write_nanos = self
+            .durable_write_nanos
+            .saturating_add(other.durable_write_nanos);
+        self.checkpoint_nanos = self.checkpoint_nanos.saturating_add(other.checkpoint_nanos);
+        self.wal_bytes = self.wal_bytes.saturating_add(other.wal_bytes);
+        self.database_bytes = self.database_bytes.saturating_add(other.database_bytes);
+        self.ltx_bytes = self.ltx_bytes.saturating_add(other.ltx_bytes);
+        self.segment_count = self.segment_count.saturating_add(other.segment_count);
+    }
 }
 
 // Derived from Celld's position types; private to the imported codec/engine.

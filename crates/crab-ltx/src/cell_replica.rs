@@ -72,6 +72,7 @@ pub struct RecoveryOverlay {
     bundle: crate::bundle::Bundle,
     final_position: Position,
     final_commit_sequence: u64,
+    _disk_reservation: Option<crate::DiskReservation>,
 }
 
 impl RecoveryOverlay {
@@ -87,7 +88,15 @@ impl RecoveryOverlay {
             bundle,
             final_position,
             final_commit_sequence,
+            _disk_reservation: None,
         }
+    }
+
+    /// Keeps temporary recovery storage admitted until this overlay is dropped.
+    #[must_use]
+    pub fn with_disk_reservation(mut self, reservation: crate::DiskReservation) -> Self {
+        self._disk_reservation = Some(reservation);
+        self
     }
 
     #[must_use]
@@ -333,50 +342,43 @@ impl CellPagedDatabase {
             extents: &self.extents,
             host: &self.replica.host,
         };
-        let first_entry = directory::lookup(
+        let entries = directory::lookup_run(
             verification,
             self.directory_digest,
             self.directory_height,
             first,
+            count,
         )
         .await?;
+        let first_entry = entries.first().ok_or(CrabError::LTXCorrupted)?;
         let mut end = first_entry
             .offset
             .checked_add(u64::from(first_entry.length))
             .ok_or(CrabError::LTXCorrupted)?;
-        let mut entries = vec![first_entry];
-        for offset in 1..count {
-            let page = first.checked_add(offset).ok_or(CrabError::LTXCorrupted)?;
-            if page == lock {
-                break;
-            }
-            let entry = directory::lookup(
-                verification,
-                self.directory_digest,
-                self.directory_height,
-                page,
-            )
-            .await?;
-            if entry.object != entries[0].object || entry.offset != end {
+        let object = first_entry.object;
+        let mut selected = Vec::with_capacity(entries.len());
+        selected.push(first_entry.clone());
+        for entry in entries.into_iter().skip(1) {
+            if entry.object != object || entry.offset != end {
                 break;
             }
             end = entry
                 .offset
                 .checked_add(u64::from(entry.length))
                 .ok_or(CrabError::LTXCorrupted)?;
-            entries.push(entry);
+            selected.push(entry);
         }
-        let extent = self
-            .extents
-            .get(&entries[0].object)
-            .ok_or(CrabError::LTXCorrupted)?;
+        let extent = self.extents.get(&object).ok_or(CrabError::LTXCorrupted)?;
         let path = self.replica.layout.incarnation_object_path(
             &self.replica.cell,
             &self.replica.incarnation,
-            &entries[0].object,
+            &object,
             extent.kind,
         );
-        let start = entries[0].offset;
+        let start = selected
+            .first()
+            .map(|entry| entry.offset)
+            .ok_or(CrabError::LTXCorrupted)?;
         let _permit = self.replica.host.io_permit().await?;
         let frames = self
             .replica
@@ -387,8 +389,8 @@ impl CellPagedDatabase {
         if frames.len() as u64 != end - start {
             return Err(CrabError::ChecksumMismatch);
         }
-        let mut output = Vec::with_capacity(entries.len());
-        for entry in entries {
+        let mut output = Vec::with_capacity(selected.len());
+        for entry in selected {
             let offset =
                 usize::try_from(entry.offset - start).map_err(|_| CrabError::LTXCorrupted)?;
             let frame_end = offset
@@ -696,7 +698,7 @@ impl CellReplica {
         schema: u32,
     ) -> Result<PreparedRoot> {
         self.validate_metadata(commit_sequence, schema)?;
-        if bundle.bytes().len() as u64 > self.limits.max_plan_bytes {
+        if bundle.len() > self.limits.max_plan_bytes {
             return Err(CrabError::Limit("Cell bundle bytes"));
         }
         let base_graph = match base {
@@ -706,7 +708,7 @@ impl CellReplica {
         self.validate_append_sequence(&base_graph, commit_sequence)?;
 
         let (repository, epoch) = crate::bundle::cell_identity(&self.cell, &self.incarnation);
-        let bundle_digest = *blake3::hash(bundle.bytes()).as_bytes();
+        let bundle_digest = bundle.digest();
         let mut inputs = Vec::new();
         let mut selected_bytes = 0_u64;
         let mut prospective = base_graph
@@ -730,8 +732,8 @@ impl CellReplica {
                 bundle_digest,
                 row.offset,
             ));
-            let bytes = bundle.segment(index)?;
-            let (file, size, digest, pages) = crate::ltx::inspect_bytes_with_index(bytes)?;
+            let bytes = bundle.read_segment(index)?;
+            let (file, size, digest, pages) = crate::ltx::inspect_bytes_with_index(&bytes)?;
             if size != row.info.size_bytes
                 || digest != row.info.blake3
                 || crate::SegmentInfo::from_inspected(&file, size, digest) != row.info
@@ -761,7 +763,7 @@ impl CellReplica {
             target,
             commit_sequence,
             schema,
-            Some(bundle.shared_bytes()),
+            Some(bundle),
         )
         .await
     }
@@ -842,7 +844,7 @@ impl CellReplica {
         target: Position,
         commit_sequence: u64,
         schema: u32,
-        bundle: Option<Bytes>,
+        bundle: Option<&crate::bundle::Bundle>,
     ) -> Result<PreparedRoot> {
         let prepared = inputs
             .into_iter()
@@ -874,10 +876,8 @@ impl CellReplica {
             .unwrap_or_default();
         descriptors.extend(prepared.iter().map(|segment| segment.descriptor.clone()));
         self.validate_chain(&descriptors, target)?;
-        if let Some(bytes) = bundle {
-            let digest = *blake3::hash(&bytes).as_bytes();
-            self.put_object_bytes(&digest, CellObjectKind::Bundle, bytes)
-                .await?;
+        if let Some(bundle) = bundle {
+            self.put_bundle(bundle).await?;
         }
         let mut directory_inputs = Vec::with_capacity(prepared.len());
         for segment in prepared {
@@ -1343,6 +1343,55 @@ impl CellReplica {
         Ok(())
     }
 
+    async fn put_bundle(&self, bundle: &crate::bundle::Bundle) -> Result<()> {
+        let digest = bundle.digest();
+        if bundle.len() > self.limits.max_plan_bytes {
+            return Err(CrabError::Limit("Cell bundle bytes"));
+        }
+        let path = self.layout.incarnation_object_path(
+            &self.cell,
+            &self.incarnation,
+            &digest,
+            CellObjectKind::Bundle,
+        );
+        let staged = self.layout.incarnation_staging_path(
+            &self.cell,
+            &self.incarnation,
+            &digest,
+            CellObjectKind::Bundle,
+        );
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let _permit = self.host.io_permit().await?;
+        let upload = self
+            .layout
+            .store()
+            .put_multipart_source_retry(
+                &staged,
+                bundle.upload_source(),
+                bundle.len(),
+                digest,
+                MULTIPART_BYTES,
+                &cancel,
+                None,
+            )
+            .await;
+        if let Err(error) = upload {
+            return match cleanup_staged(self.layout.store(), &staged).await {
+                Ok(()) => Err(error.into()),
+                Err(cleanup_error) => Err(cleanup_error),
+            };
+        }
+        let promotion = self
+            .layout
+            .store()
+            .promote_staged_content_addressed_object(&staged, &path, digest, bundle.len())
+            .await;
+        match cleanup_staged(self.layout.store(), &staged).await {
+            Err(error) => Err(error),
+            Ok(()) => promotion.map(|_| ()).map_err(Into::into),
+        }
+    }
+
     async fn read_object(
         &self,
         digest: &[u8; 32],
@@ -1445,6 +1494,17 @@ struct DirectoryInput {
 }
 
 const STREAM_COPY_BYTES: usize = 1 << 20;
+const MULTIPART_BYTES: usize = 8 << 20;
+
+async fn cleanup_staged(
+    store: &crab_storage::Store,
+    path: &object_store::path::Path,
+) -> Result<()> {
+    match store.delete(path).await {
+        Ok(()) | Err(crab_storage::StorageError::NotFound { .. }) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
 
 struct ScratchFile {
     filesystem: Arc<dyn crate::environment::FileSystem>,

@@ -88,7 +88,8 @@ The runtime applies these rules:
 - **Single writer**: one owner session and epoch may publish the next root
 - **Fencing**: an ownership mismatch closes admission before more SQL runs
 - **Exact recovery**: takeover opens the root named by authoritative control
-- **No peer-disk durability**: local files are disposable caches
+- **Disposable owner-local SQLite**: selected followers may durably fsync recent
+  LTX tails, but the owner's mutable SQLite files remain disposable caches
 - **Bounded work**: commands, results, queues, workers, memory, and disk have explicit limits
 
 Read [runtime.md](runtime.md) for the actor and failure state machines. Read [storage.md](storage.md) for identity, control, root, and LTX formats.
@@ -184,6 +185,7 @@ This rule removes compatibility branches from product code. It does not permit d
 | Design an application from entity, shard, workflow, and read-model Cells | [Application framework](application-framework.md) |
 | Understand the actor, publication, timeout, or takeover path | [Runtime execution](runtime.md) |
 | Design follower durability, response gating, and warm failover | [Follower durability and warm failover](failover-and-followers.md) |
+| Complete canonical LTX scaling and decide standalone replication | [Canonical Cell LTX scaling](canonical-ltx-scaling.md) |
 | Inspect persistent identities, paths, control JSON, or LTX roots | [Storage and recovery](storage.md) |
 | Implement SQL, KV, Blob, Queue, Cron, Workflow, or effects | [Primitive contracts](primitives.md) |
 | Add a native product feature | [Rust programming model](rust-api.md) |

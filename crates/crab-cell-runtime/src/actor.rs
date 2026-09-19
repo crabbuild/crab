@@ -413,6 +413,15 @@ impl CellRuntime {
         )
     }
 
+    /// Returns the budget shared by this runtime's local replica artifacts.
+    ///
+    /// Recovery admission must use this same ledger so streamed bundle bytes
+    /// cannot bypass WAL, cache, or sparse-page reservations.
+    #[must_use]
+    pub fn local_disk_budget(&self) -> crab_ltx::DiskBudget {
+        self.inner.replica_host.local_disk_budget()
+    }
+
     fn new_inner(
         pool: SqlWorkerPool,
         node_retained_bytes: usize,

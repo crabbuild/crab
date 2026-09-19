@@ -92,6 +92,7 @@ impl Db {
         if info.offset == WAL_HEADER_SIZE as i64 {
             self.checkpointed_wal_offset = WAL_HEADER_SIZE as i64;
         }
+        self.timing_begin(crate::db::TimingPhase::WalRead);
         let pos = self.position;
         let tx_id = Txid(pos.txid.0.checked_add(1).ok_or(CrabError::TxNotAvailable)?);
         let filename = self.ltx_path(0, tx_id, tx_id);
@@ -158,7 +159,9 @@ impl Db {
                 .map_err(CrabError::from)?
         };
 
-        let (page_map, max_offset, wal_commit) = rd.page_map().map_err(CrabError::from)?;
+        let page_map_result = rd.page_map().map_err(CrabError::from);
+        self.timing_end(crate::db::TimingPhase::WalRead);
+        let (page_map, max_offset, wal_commit) = page_map_result?;
         if wal_commit > 0 {
             commit = wal_commit;
         }
@@ -183,6 +186,9 @@ impl Db {
         if !info.snapshotting && sz == 0 {
             return Ok(false);
         }
+
+        self.timing_add_wal_bytes(u64::try_from(sz).unwrap_or_default());
+        self.timing_add_database_bytes(u64::from(commit).saturating_mul(u64::from(self.page_size)));
 
         let (rd_salt1, rd_salt2) = rd.salt();
 
@@ -218,25 +224,33 @@ impl Db {
         // A directory that vanished under a ready flag is recreated once and
         // the complete cut is retried. The candidate checksum index remains
         // isolated until the output has been synced and renamed.
-        let write = || {
-            self.write_streamed_cut(
-                &tmp_filename,
-                &index_filename,
-                &filename,
-                header,
-                &wal,
-                &page_map,
-                info.snapshotting,
-                info.prev_commit,
-                commit,
-            )
-        };
-        let mut checksums = match write() {
+        let write_result = self.write_streamed_cut(
+            &tmp_filename,
+            &index_filename,
+            &filename,
+            header,
+            &wal,
+            &page_map,
+            info.snapshotting,
+            info.prev_commit,
+            commit,
+        );
+        let mut checksums = match write_result {
             Err(CrabError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 if let Some(parent) = &parent {
                     self.host.create_dir_all(parent)?;
                 }
-                write()?
+                self.write_streamed_cut(
+                    &tmp_filename,
+                    &index_filename,
+                    &filename,
+                    header,
+                    &wal,
+                    &page_map,
+                    info.snapshotting,
+                    info.prev_commit,
+                    commit,
+                )?
             }
             other => other?,
         };
@@ -288,7 +302,7 @@ impl Db {
 
     #[expect(clippy::too_many_arguments)]
     fn write_streamed_cut(
-        &self,
+        &mut self,
         tmp_filename: &str,
         index_filename: &str,
         filename: &str,
@@ -313,6 +327,7 @@ impl Db {
                 .filesystem
                 .open_rw(Path::new(index_filename))?;
             let mut encoder = crate::codec::Encoder::new_block_spooled(output, index);
+            self.timing_begin(crate::db::TimingPhase::Encode);
             encoder.encode_header(header)?;
 
             let mut checksums = self.checksums.clone();
@@ -344,12 +359,15 @@ impl Db {
                 )?;
             }
             encoder.close(checksums.checksum())?;
+            self.timing_end(crate::db::TimingPhase::Encode);
             let mut output = encoder.into_writer();
+            self.timing_begin(crate::db::TimingPhase::DurableWrite);
             output.sync_all()?;
             drop(output);
             self.host.remove_file(Path::new(index_filename))?;
             self.host
                 .rename(Path::new(tmp_filename), Path::new(filename))?;
+            self.timing_end(crate::db::TimingPhase::DurableWrite);
             Ok(checksums)
         })();
         if result.is_err() {

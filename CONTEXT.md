@@ -71,3 +71,32 @@ _Avoid_: Shared state
 **Repository read view**:
 An immutable repository generation plus its validated committed-journal overlay, used to resolve refs, trees, objects, and version-bound attributes consistently for one request.
 _Avoid_: Mutable repository handle, when referring to a pinned view
+
+## Cell Runtime language
+
+**Cell**:
+A durably identified, single-writer Rust execution unit whose mutable SQLite
+state is recovered from one authoritative immutable root.
+_Avoid_: Process, actor, or replica when referring to the durable identity
+
+**Cell authority**:
+The sole conditional-write record for a Cell's owner, epoch, lifecycle state,
+root, recovery overlay, code, schema, and next due time.
+_Avoid_: Placement plan, route cache, or local SQLite file
+
+**Coordination kernel**:
+The proposed sans-I/O module that decides Cell lifecycle, fencing, durability,
+recovery, and movement from explicit observations and returns ordered effects.
+Production and deterministic simulation use the same interface.
+_Avoid_: Simulator model or async adapter
+
+**Resident Cell**:
+An active local Cell whose inherited allocated SQLite pages are all verified
+and materialized or superseded, so a qualified local read needs no object-store
+operation.
+_Avoid_: Cache-warm or sparse-active Cell
+
+**Placement plan**:
+An advisory, revision-pinned ranking or movement decision derived from signed
+fleet capacity. It never grants ownership; Cell authority remains decisive.
+_Avoid_: Ownership record or scheduler assignment
