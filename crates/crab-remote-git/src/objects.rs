@@ -107,6 +107,34 @@ pub struct Commit {
     pub signature_headers: Vec<SignatureHeader>,
 }
 
+/// Commit metadata required by directory-entry attribution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitSummary {
+    /// Verified commit object ID.
+    pub oid: ObjectId,
+    /// Exact author name bytes.
+    pub author: Bytes,
+    /// Author timestamp in Unix seconds.
+    pub author_seconds: i64,
+    /// First commit-message line bytes.
+    pub message: Bytes,
+}
+
+impl From<&Commit> for CommitSummary {
+    fn from(commit: &Commit) -> Self {
+        Self {
+            oid: commit.oid,
+            author: commit.author.name.clone(),
+            author_seconds: commit.author.seconds,
+            message: commit
+                .message
+                .split(|byte| *byte == b'\n')
+                .next()
+                .map_or_else(Bytes::new, Bytes::copy_from_slice),
+        }
+    }
+}
+
 /// Verified, owned annotated-tag metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnotatedTag {

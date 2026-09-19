@@ -58,6 +58,22 @@ it("shows the server error rather than pretending failed data loaded", async () 
   ).rejects.toThrow("Read budget exceeded");
 });
 
+it("shows a plain-text server error instead of a JSON parse failure", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      async () =>
+        new Response("Failed to deserialize query string", {
+          status: 400,
+          headers: { "Content-Type": "text/plain; charset=utf-8" },
+        }),
+    ),
+  );
+  await expect(
+    request("/api/repos/team/repo.name/tree", new AbortController().signal),
+  ).rejects.toThrow("Failed to deserialize query string");
+});
+
 it("notifies the application when a repository request loses its session", async () => {
   const browser = new EventTarget();
   const expired = vi.fn();

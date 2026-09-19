@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1430" role="img" aria-labelledby="title description">
+  <title id="title">One bucket. Many repositories.</title>
+  <desc id="description">Celld-inspired Git hosting reference design. The load balancer sends developer and CI requests to any healthy application server without knowing repository ownership. The receiving server serves locally if it owns the repository, otherwise it proxies to the active owner. Dashed server-to-server arrows show this internal routing, not database replication. Each server hosts many cells, with one SQLite database per repository. One shared S3 bucket stores ownership records, snapshots and LTX changes, and Git objects. LTX publication supports recovery on a replacement server. Compute and networking remain required; ownership requires conditional writes and fencing. The illustrated bucket-first design acknowledges mutations after durable publication.</desc>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0 H0 V40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+    </pattern>
+    <marker id="cyan" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto-start-reverse"><path d="M0 0 L9 3.5 L0 7 Z" fill="#22d3ee"/></marker>
+    <marker id="violet" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto-start-reverse"><path d="M0 0 L9 3.5 L0 7 Z" fill="#a78bfa"/></marker>
+    <style>
+      text { font-family: 'SF Mono', 'DejaVu Sans Mono', monospace; fill: #f8fafc; }
+      .title { font-size: 56px; font-weight: 700; letter-spacing: -2px; }
+      .name { font-size: 30px; font-weight: 600; }
+      .label { font-size: 25px; fill: #cbd5e1; }
+      .note { font-size: 21px; fill: #94a3b8; }
+      .routing { font-size: 18px; fill: #22d3ee; text-anchor: middle; }
+      .layer { font-size: 18px; fill: #94a3b8; letter-spacing: 2px; }
+      .cell { fill: #241c41; stroke: #a78bfa; }
+      .repo { font-size: 21px; text-anchor: middle; }
+      .rule { font-size: 18px; fill: #a7f3d0; text-anchor: middle; }
+      .request { fill: none; stroke: #22d3ee; stroke-width: 3; marker-end: url(#cyan); }
+      .peer { fill: none; stroke: #22d3ee; stroke-width: 2.5; stroke-dasharray: 6 5; marker-start: url(#cyan); marker-end: url(#cyan); }
+      .state { fill: none; stroke: #a78bfa; stroke-width: 3; marker-start: url(#violet); marker-end: url(#violet); }
+    </style>
+  </defs>
+  <rect width="1600" height="1430" fill="#0f172a"/>
+  <rect width="1600" height="1430" fill="url(#grid)"/>
+
+  <path class="request" d="M800 265 V325"/>
+  <path d="M800 405 V465 M290 465 H1310" fill="none" stroke="#22d3ee" stroke-width="3"/>
+  <path class="request" d="M290 465 V520"/>
+  <path class="request" d="M800 465 V520"/>
+  <path class="request" d="M1310 465 V520"/>
+
+  <rect x="430" y="185" width="740" height="80" rx="14" fill="#083344" stroke="#22d3ee" stroke-width="2"/>
+  <rect x="525" y="325" width="550" height="80" rx="14" fill="#302516" stroke="#fbbf24" stroke-width="2"/>
+  <text x="800" y="236" class="name" text-anchor="middle">Developers · Git clients · CI</text>
+  <text x="800" y="376" class="name" text-anchor="middle">Load balancer</text>
+  <text x="840" y="444" class="note">Any healthy server</text>
+
+  <text x="110" y="233" class="layer">CLIENTS</text>
+  <text x="110" y="373" class="layer">INGRESS</text>
+  <text x="110" y="502" class="layer">SERVERS</text>
+  <text x="110" y="1000" class="layer">STORAGE</text>
+
+  <g transform="translate(0 140)">
+  <path class="peer" d="M470 510 H620"/>
+  <path class="peer" d="M980 510 H1130"/>
+  <path class="state" d="M290 750 V880"/>
+  <path class="state" d="M800 750 V880"/>
+  <path class="state" d="M1310 750 V880"/>
+
+  <rect x="110" y="380" width="360" height="370" rx="16" fill="#0c302f" stroke="#34d399" stroke-width="2"/>
+  <rect x="620" y="380" width="360" height="370" rx="16" fill="#0c302f" stroke="#34d399" stroke-width="2"/>
+  <rect x="1130" y="380" width="360" height="370" rx="16" fill="#0c302f" stroke="#34d399" stroke-width="2"/>
+  <path d="M140 644 H440 M650 644 H950 M1160 644 H1460" fill="none" stroke="#34d399" stroke-opacity="0.4"/>
+  <rect x="140" y="445" width="300" height="40" rx="8" class="cell"/>
+  <rect x="140" y="497" width="300" height="40" rx="8" class="cell"/>
+  <rect x="140" y="549" width="300" height="40" rx="8" class="cell"/>
+  <rect x="650" y="445" width="300" height="40" rx="8" class="cell"/>
+  <rect x="650" y="497" width="300" height="40" rx="8" class="cell"/>
+  <rect x="650" y="549" width="300" height="40" rx="8" class="cell"/>
+  <rect x="1160" y="445" width="300" height="40" rx="8" class="cell"/>
+  <rect x="1160" y="497" width="300" height="40" rx="8" class="cell"/>
+  <rect x="1160" y="549" width="300" height="40" rx="8" class="cell"/>
+
+  <rect x="125" y="780" width="330" height="70" rx="8" fill="#0f172a"/>
+  <rect x="635" y="780" width="330" height="70" rx="8" fill="#0f172a"/>
+  <rect x="1145" y="780" width="330" height="70" rx="8" fill="#0f172a"/>
+  <rect x="110" y="880" width="1380" height="300" rx="18" fill="#201937" stroke="#a78bfa" stroke-width="2"/>
+  <path d="M610 965 V1145 M1060 965 V1145" fill="none" stroke="#66558a" stroke-width="1.5"/>
+
+  <text x="545" y="467" class="routing">Proxy if</text>
+  <text x="545" y="491" class="routing">not owner</text>
+  <text x="1055" y="467" class="routing">Proxy if</text>
+  <text x="1055" y="491" class="routing">not owner</text>
+
+  <text x="290" y="422" class="label" text-anchor="middle">Server A</text>
+  <text x="800" y="422" class="label" text-anchor="middle">Server B</text>
+  <text x="1310" y="422" class="label" text-anchor="middle">Server C</text>
+  <text x="290" y="472" class="repo">acme/api · SQLite</text>
+  <text x="290" y="524" class="repo">acme/auth · SQLite</text>
+  <text x="290" y="576" class="repo">team/docs · SQLite</text>
+  <text x="800" y="472" class="repo">acme/web · SQLite</text>
+  <text x="800" y="524" class="repo">team/sdk · SQLite</text>
+  <text x="800" y="576" class="repo">demo/app · SQLite</text>
+  <text x="1310" y="472" class="repo">acme/mobile · SQLite</text>
+  <text x="1310" y="524" class="repo">team/infra · SQLite</text>
+  <text x="1310" y="576" class="repo">demo/site · SQLite</text>
+  <text x="290" y="625" class="note" text-anchor="middle">… many more repo cells</text>
+  <text x="800" y="625" class="note" text-anchor="middle">… many more repo cells</text>
+  <text x="1310" y="625" class="note" text-anchor="middle">… many more repo cells</text>
+
+  <text x="290" y="672" class="rule">Own → serve · Peer → proxy</text>
+  <text x="290" y="696" class="rule">Eligible → CAS + restore</text>
+  <text x="290" y="720" class="rule">Renew lease · Lost → stop</text>
+  <text x="800" y="672" class="rule">Own → serve · Peer → proxy</text>
+  <text x="800" y="696" class="rule">Eligible → CAS + restore</text>
+  <text x="800" y="720" class="rule">Renew lease · Lost → stop</text>
+  <text x="1310" y="672" class="rule">Own → serve · Peer → proxy</text>
+  <text x="1310" y="696" class="rule">Eligible → CAS + restore</text>
+  <text x="1310" y="720" class="rule">Renew lease · Lost → stop</text>
+
+  <text x="290" y="804" class="note" text-anchor="middle">Read control ↕ CAS</text>
+  <text x="800" y="804" class="note" text-anchor="middle">Read control ↕ CAS</text>
+  <text x="1310" y="804" class="note" text-anchor="middle">Read control ↕ CAS</text>
+  <text x="290" y="836" class="label" text-anchor="middle">LTX ↓  ↑ Restore</text>
+  <text x="800" y="836" class="label" text-anchor="middle">LTX ↓  ↑ Restore</text>
+  <text x="1310" y="836" class="label" text-anchor="middle">LTX ↓  ↑ Restore</text>
+
+  <text x="800" y="933" class="name" text-anchor="middle">One S3 bucket</text>
+  <text x="365" y="988" class="label" text-anchor="middle">Per-repo control.json</text>
+  <text x="365" y="1024" class="note" text-anchor="middle">Owner session + peer endpoint</text>
+  <text x="365" y="1058" class="note" text-anchor="middle">Epoch · state · lease sequence</text>
+  <text x="365" y="1092" class="note" text-anchor="middle">Published head (same object)</text>
+  <text x="365" y="1126" class="note" text-anchor="middle">ETag-checked updates (CAS)</text>
+  <text x="835" y="988" class="label" text-anchor="middle">SQLite recovery</text>
+  <text x="835" y="1024" class="note" text-anchor="middle">Snapshots + LTX segments</text>
+  <text x="835" y="1058" class="note" text-anchor="middle">Immutable recovery manifests</text>
+  <text x="835" y="1092" class="note" text-anchor="middle">Selected by control head</text>
+  <text x="1275" y="988" class="label" text-anchor="middle">Git data</text>
+  <text x="1275" y="1024" class="note" text-anchor="middle">Git packs + LFS objects</text>
+  <text x="1275" y="1058" class="note" text-anchor="middle">Separate object prefixes</text>
+  <text x="800" y="1216" class="note" text-anchor="middle">Acquire only when idle or takeover-qualified · One active owner per repo</text>
+  <text x="800" y="1246" class="note" text-anchor="middle">CAS = compare-and-swap · Stale owners cannot publish a new head</text>
+  </g>
+
+  <text x="110" y="63" class="note">CELLD-INSPIRED REFERENCE / GIT HOSTING</text>
+  <text x="110" y="133" class="title">One bucket. Many repositories.</text>
+</svg>

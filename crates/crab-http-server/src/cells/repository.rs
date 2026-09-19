@@ -569,6 +569,7 @@ impl Query for GetComment {
 mod checks;
 mod checks_codec;
 mod operations;
+pub(crate) mod projection;
 mod pulls;
 mod pulls_codec;
 mod releases;
@@ -628,7 +629,8 @@ pub(crate) fn register(registry: &mut RegistryBuilder) -> crab_cell_runtime::Res
     registry.bind_query::<GetPullMergeSubmission>()?;
     registry.bind_query::<GetRelease>()?;
     registry.bind_query::<GetReleaseSubmission>()?;
-    registry.bind_query::<ListReleases>()
+    registry.bind_query::<ListReleases>()?;
+    projection::register(registry)
 }
 
 fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlStatement {

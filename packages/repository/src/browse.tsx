@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Button } from "@primer/react";
 import {
   BookIcon,
@@ -16,6 +16,7 @@ import {
   type Page,
   type Commit,
   type Repository,
+  type TreeAttribution,
 } from "./api";
 import { Link, Result, date, relativeDate, short } from "./ui";
 import { compareFileItems } from "./entry-sort";
@@ -121,13 +122,49 @@ export function Directory({
       path_hex: path,
       cursor,
       limit: "100",
-      last_commit: "true",
     }),
   );
+  const attribution = useRequest<TreeAttribution>(
+    state.data
+      ? endpoint(repo, "tree-attribution", {
+          rev,
+          path_hex: path,
+          cursor,
+          limit: "100",
+        })
+      : null,
+  );
+  useEffect(() => {
+    if (attribution.data?.state !== "indexing") return;
+    const timer = window.setTimeout(
+      attribution.retry,
+      attribution.data.retry_after_ms,
+    );
+    return () => window.clearTimeout(timer);
+  }, [attribution.data, attribution.retry]);
   return (
     <Result state={state}>
       {(page) => {
-        const readme = readmeEntry(page.items);
+        const attributionPage =
+          attribution.data?.state === "ready" ? attribution.data : null;
+        const currentAttribution =
+          attributionPage?.generation === page.generation &&
+          attributionPage.commit === page.commit &&
+          attributionPage.directory_oid === page.directory_oid
+            ? new Map(
+                attributionPage.items.map((entry) => [
+                  `${entry.path_hex}:${entry.oid}`,
+                  entry.last_commit,
+                ]),
+              )
+            : null;
+        const items = page.items.map((entry) => ({
+          ...entry,
+          last_commit: currentAttribution?.get(
+            `${entry.path_hex}:${entry.oid}`,
+          ),
+        }));
+        const readme = readmeEntry(items);
         return (
           <>
             <section
@@ -135,7 +172,13 @@ export function Directory({
               aria-label="Folders and files"
             >
               {header}
-              {page.items.length === 0 ? (
+              {attribution.error && (
+                <div className="notice" role="status">
+                  Commit metadata is temporarily unavailable.{" "}
+                  <Button onClick={attribution.retry}>Try again</Button>
+                </div>
+              )}
+              {items.length === 0 ? (
                 <div className="notice">This directory is empty.</div>
               ) : (
                 <table className="file-table">
@@ -147,7 +190,7 @@ export function Directory({
                     </tr>
                   </thead>
                   <tbody>
-                    {[...page.items]
+                    {[...items]
                       .sort((left, right) =>
                         compareFileItems(
                           left.path.split("/").at(-1) ?? left.path,
@@ -191,7 +234,13 @@ export function Directory({
                                 {entry.last_commit.message || "Untitled commit"}
                               </Link>
                             ) : (
-                              <span className="muted">Unavailable</span>
+                              <span className="muted">
+                                {attribution.loading
+                                  ? "Loading…"
+                                  : attribution.data?.state === "indexing"
+                                    ? "Indexing…"
+                                    : "Unavailable"}
+                              </span>
                             )}
                           </td>
                           <td className="directory-commit-date muted">

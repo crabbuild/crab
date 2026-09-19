@@ -21,6 +21,7 @@ mod maintenance;
 mod metrics;
 mod peer;
 mod peer_tls;
+mod projection;
 mod pulls;
 mod receive;
 mod releases;

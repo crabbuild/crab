@@ -9,6 +9,7 @@ mod objects;
 mod operation;
 mod pack;
 mod path;
+mod path_state;
 mod reader;
 mod refs;
 mod repository;
@@ -31,8 +32,8 @@ pub use metrics::{
     CacheOutcome, MetricKind, MetricObservation, MetricOutcome, NoopMetrics, RemoteGitMetrics,
 };
 pub use objects::{
-    AnnotatedTag, Blob, BlobMetadata, Commit, ContentClassification, EntryKind, EntryMode,
-    Signature, SignatureHeader, TreeEntry,
+    AnnotatedTag, Blob, BlobMetadata, Commit, CommitSummary, ContentClassification, EntryKind,
+    EntryMode, Signature, SignatureHeader, TreeEntry,
 };
 pub use operation::{OperationContext, OperationKind, ShallowClosureSelection};
 pub use pack::{

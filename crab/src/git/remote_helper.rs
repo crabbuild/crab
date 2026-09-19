@@ -3733,6 +3733,7 @@ mod tests {
             pack_index_hash: String::new(),
             git_validation_digest: String::new(),
             commit_graph_hash: None,
+            path_state_hash: None,
             ref_registry_hash: None,
         };
         manifest.seal_git_validation();
@@ -5748,6 +5749,7 @@ mod tests {
             pack_index_hash: String::new(),
             git_validation_digest: String::new(),
             commit_graph_hash: None,
+            path_state_hash: None,
             ref_registry_hash: None,
         };
         manifest.seal_git_validation();
@@ -5846,6 +5848,7 @@ mod tests {
             pack_index_hash: String::new(),
             git_validation_digest: String::new(),
             commit_graph_hash: None,
+            path_state_hash: None,
             ref_registry_hash: None,
         };
         manifest.seal_git_validation();

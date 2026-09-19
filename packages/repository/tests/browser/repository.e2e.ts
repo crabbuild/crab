@@ -492,9 +492,15 @@ test.beforeEach(async ({ page }) => {
         },
       });
     }
-    if (url.pathname.endsWith("/tree"))
+    if (
+      url.pathname.endsWith("/tree") ||
+      url.pathname.endsWith("/tree-attribution")
+    )
       return route.fulfill({
         json: {
+          ...(url.pathname.endsWith("/tree-attribution")
+            ? { state: "ready" }
+            : {}),
           items: (url.searchParams.get("path_hex") === pathHex("src")
             ? [["src/index.ts", "Blob"]]
             : url.searchParams.get("path_hex")
@@ -516,7 +522,7 @@ test.beforeEach(async ({ page }) => {
             kind,
             oid,
             mode: kind === "Tree" ? "040000" : "100644",
-            ...(url.searchParams.get("last_commit") === "true"
+            ...(url.pathname.endsWith("/tree-attribution")
               ? {
                   last_commit: {
                     oid,
@@ -529,6 +535,8 @@ test.beforeEach(async ({ page }) => {
           })),
           next: null,
           commit: oid,
+          generation: 1,
+          directory_oid: oid,
         },
       });
     if (url.pathname.endsWith("/file")) {

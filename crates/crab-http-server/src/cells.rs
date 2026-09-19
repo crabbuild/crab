@@ -48,6 +48,9 @@ pub(crate) const REPOSITORY_TICK_COMMAND_ID: u32 = 5;
 pub(crate) const REPOSITORY_EFFECT_CLAIM_COMMAND_ID: u32 = 6;
 pub(crate) const REPOSITORY_EFFECT_LEASE_COMMAND_ID: u32 = 7;
 pub(crate) const REPOSITORY_EFFECT_VALIDATE_QUERY_ID: u32 = 5;
+pub(crate) const REPOSITORY_PROJECTION_COMMAND_ID: u32 = 31;
+pub(crate) const REPOSITORY_PROJECTION_STATE_QUERY_ID: u32 = 27;
+pub(crate) const REPOSITORY_PROJECTION_ATTRIBUTION_QUERY_ID: u32 = 28;
 const MAX_LIVE_NODES: usize = 10_000;
 const MAX_MIGRATION_STATUS_LIMIT: usize = 256;
 const MAX_MIGRATION_STATUS_EXAMINED: usize = 1_024;
@@ -95,6 +98,7 @@ const REPOSITORY_COMMANDS: &[OperationDescriptor] = &[
     operation(28, 32 * 1024, 1024 * 1024),
     operation(29, 32 * 1024, 1024 * 1024),
     operation(30, 4 * 1024, 1024 * 1024),
+    operation(REPOSITORY_PROJECTION_COMMAND_ID, 768 * 1024, 64),
 ];
 const REPOSITORY_QUERIES: &[OperationDescriptor] = &[
     operation(1, 8, 80 * 1024),
@@ -123,6 +127,12 @@ const REPOSITORY_QUERIES: &[OperationDescriptor] = &[
     operation(24, 8, 1024 * 1024),
     operation(25, 64, 1024 * 1024),
     operation(26, 4 * 1024, 1024 * 1024),
+    operation(REPOSITORY_PROJECTION_STATE_QUERY_ID, 8, 1024 * 1024),
+    operation(
+        REPOSITORY_PROJECTION_ATTRIBUTION_QUERY_ID,
+        64 * 1024,
+        1024 * 1024,
+    ),
 ];
 
 pub(super) fn repository_replica_limits() -> ReplicaLimits {
@@ -2113,7 +2123,7 @@ mod tests {
         assert_eq!(descriptor["modules"][0]["name"], "repository");
         assert_eq!(
             descriptor["modules"][0]["code"],
-            "0a569f7c84cae0a027342055c86295c9de601e877f5ebac418a63b5f2526178e"
+            "420552424e5edf42ff35c9c0e3c7ed66f3a23202a61fec343987d7dd14b51fb3"
         );
         assert_eq!(descriptor["modules"][0]["schema_min"], 1);
         assert_eq!(descriptor["modules"][0]["schema_max"], 1);
@@ -2122,14 +2132,14 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            30
+            31
         );
         assert_eq!(
             descriptor["modules"][0]["queries"]
                 .as_array()
                 .unwrap()
                 .len(),
-            26
+            28
         );
         assert_eq!(descriptor["namespaces"][0]["role"], "repository");
         assert_eq!(descriptor["namespaces"][0]["shards"], 1);

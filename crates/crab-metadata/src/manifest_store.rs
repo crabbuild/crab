@@ -507,6 +507,7 @@ pub async fn compact_ref_journal(
     manifest.pack_index_hash = pack_index_hash;
     // The old summary does not cover journal-only ref advances.
     manifest.commit_graph_hash = None;
+    manifest.path_state_hash = None;
     manifest.seal_git_validation();
     let mut edited_refs = snapshot
         .journal
@@ -1488,6 +1489,7 @@ mod tests {
             pack_index_hash: pack_hash.clone(),
             git_validation_digest: String::new(),
             commit_graph_hash: None,
+            path_state_hash: None,
             ref_registry_hash: None,
         };
         manifest.seal_git_validation();

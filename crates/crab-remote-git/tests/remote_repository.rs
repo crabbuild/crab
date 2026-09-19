@@ -4180,22 +4180,11 @@ async fn semantic_changes_cover_modes_types_rename_like_paths_binary_and_pointer
         let directory = head
             .list_directory(&GitPath::root(), &PageRequest::new(100, None)?, &operation)
             .await?;
-        let latest = head
+        let error = head
             .latest_directory_entry_commits(&GitPath::root(), &directory.items, &operation)
-            .await?;
-        assert_eq!(latest.len(), directory.items.len());
-        for (entry, commit) in directory.items.iter().zip(latest) {
-            let expected = if entry.path.as_bytes() == b"same" {
-                fixture.semantic_base_commit
-            } else {
-                fixture.semantic_head_commit
-            };
-            assert_eq!(
-                commit.oid, expected,
-                "wrong latest commit for {}",
-                entry.path
-            );
-        }
+            .await
+            .expect_err("attribution requires its generation-bound index");
+        assert!(matches!(error, Error::PathStateIndexing { .. }));
 
         let binary = head
             .diff(

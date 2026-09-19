@@ -113,6 +113,7 @@ pub struct ObjectLimits {
     pub max_object_bytes: u64,
     pub max_pack_index_bytes: u64,
     pub max_commit_graph_bytes: u64,
+    pub max_path_state_bytes: u64,
     pub max_delta_depth: usize,
     pub max_tag_depth: usize,
 }
@@ -126,6 +127,7 @@ impl Default for ObjectLimits {
             max_pack_index_bytes: 128 * 1024 * 1024,
             max_commit_graph_bytes:
                 crab_metadata::split_commit_graph::DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
+            max_path_state_bytes: crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
             max_delta_depth: 128,
             max_tag_depth: 32,
         }
@@ -211,6 +213,7 @@ fn validate_object_limits(limits: ObjectLimits) -> Result<()> {
         ("max_object_bytes", limits.max_object_bytes),
         ("max_pack_index_bytes", limits.max_pack_index_bytes),
         ("max_commit_graph_bytes", limits.max_commit_graph_bytes),
+        ("max_path_state_bytes", limits.max_path_state_bytes),
         ("max_delta_depth", limits.max_delta_depth as u64),
         ("max_tag_depth", limits.max_tag_depth as u64),
     ] {
@@ -428,6 +431,8 @@ impl RemoteGitRepository {
                 refs,
                 reader: Some(reader),
                 commit_graph: None,
+                path_state_hash: None,
+                path_state: tokio::sync::OnceCell::new(),
                 shallow_closure: None,
             }),
             generated_pack_lease_provider: None,
@@ -565,6 +570,8 @@ impl RemoteGitRepository {
                     refs,
                     reader: None,
                     commit_graph: None,
+                    path_state_hash: None,
+                    path_state: tokio::sync::OnceCell::new(),
                     shallow_closure: None,
                 };
                 return Ok(Self {
@@ -703,6 +710,8 @@ impl RemoteGitRepository {
                     refs,
                     reader: Some(Arc::new(reader)),
                     commit_graph,
+                    path_state_hash: manifest.path_state_hash.as_deref().map(Arc::from),
+                    path_state: tokio::sync::OnceCell::new(),
                     shallow_closure,
                 };
                 return Ok(Self {
@@ -757,6 +766,12 @@ impl RemoteGitRepository {
     #[must_use]
     pub fn commit_graph_available(&self) -> bool {
         self.state.commit_graph.is_some()
+    }
+
+    /// Return whether exact path attribution was published for this generation.
+    #[must_use]
+    pub fn path_state_available(&self) -> bool {
+        self.state.path_state_hash.is_some()
     }
 
     pub(crate) fn git_validation_digest(&self) -> &str {

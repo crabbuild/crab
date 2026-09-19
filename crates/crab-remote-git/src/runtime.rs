@@ -1069,6 +1069,7 @@ fn manifest_bytes(manifest: &Manifest) -> usize {
         .saturating_add(manifest.pack_index_hash.len())
         .saturating_add(manifest.git_validation_digest.len())
         .saturating_add(optional(&manifest.commit_graph_hash))
+        .saturating_add(optional(&manifest.path_state_hash))
         .saturating_add(optional(&manifest.ref_registry_hash))
         .saturating_add(
             manifest
