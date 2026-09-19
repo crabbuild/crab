@@ -41,7 +41,12 @@ impl<M: BlobModule> Command for BlobCommand<M> {
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
     ) -> crate::Result<CommandResult<Self::Output>> {
-        let outcome = blob_mutate(context.primitive_transaction(), context.now_ms(), &input)?;
+        let outcome = blob_mutate(
+            context.primitive_transaction(),
+            context.now_ms(),
+            context.issued_at_ms(),
+            &input,
+        )?;
         Ok(match outcome {
             BlobMutationOutcome::NotFound | BlobMutationOutcome::Conflict => {
                 CommandResult::Rejected(outcome)

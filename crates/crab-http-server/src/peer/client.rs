@@ -8,8 +8,8 @@ use std::{
 
 use axum::http::{StatusCode, header};
 use crab_cell_runtime::{
-    ApplicationIdentity, CellAuthority, CellTarget, Digest, Error as CellError, NodeDirectory,
-    PeerRoundTrip, SessionId, peer_wire,
+    ApplicationIdentity, CellAuthority, CellTarget, Digest, Error as CellError, NodeAdvertisement,
+    NodeDirectory, PeerRoundTrip, SessionId, peer_wire,
 };
 use futures_util::StreamExt;
 
@@ -80,6 +80,43 @@ impl PeerHttpRoundTrip {
             }
         }
         Err(last_retry.unwrap_or(CellError::CellNotActive))
+    }
+
+    async fn send_to_node_inner(
+        &self,
+        target: CellTarget,
+        node: NodeAdvertisement,
+        request: Vec<u8>,
+        timeout_ms: u32,
+    ) -> crab_cell_runtime::Result<Vec<u8>> {
+        if target.tenant() != self.identity.tenant()
+            || target.application() != self.identity.application()
+        {
+            return Err(CellError::PeerAuthorization(
+                "Cell target is outside the routed application",
+            ));
+        }
+        if node.session() == self.session {
+            return Err(CellError::CellNotActive);
+        }
+        let now_ms = now_ms().map_err(peer_transport)?;
+        if node.expires_at_ms() <= now_ms || node.endpoint().is_empty() {
+            return Err(CellError::CellNotActive);
+        }
+        let owner = RemotePeer {
+            session: node.session(),
+            endpoint: url::Url::parse(node.endpoint()).map_err(peer_transport)?,
+            certificate: node.certificate(),
+            public_key: node.verifying_key()?.to_bytes(),
+        };
+        match self.send_once(&owner, request, timeout_ms).await? {
+            PeerHttpAttempt::Reply(reply) => Ok(reply),
+            PeerHttpAttempt::Retry(error) => Err(error),
+            PeerHttpAttempt::Unknown(error) => Err(CellError::PeerTransportUnknown {
+                context: "peer HTTP activation response was lost or invalid",
+                source: Box::new(error),
+            }),
+        }
     }
 
     async fn owner(&self, target: &CellTarget) -> crab_cell_runtime::Result<RemotePeer> {
@@ -257,6 +294,21 @@ impl PeerRoundTrip for PeerHttpRoundTrip {
     ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>> {
         let round_trip = self.clone();
         Box::pin(async move { round_trip.send_inner(target, request, remaining_ms).await })
+    }
+
+    fn send_to_node(
+        &self,
+        target: CellTarget,
+        node: NodeAdvertisement,
+        request: Vec<u8>,
+        remaining_ms: u32,
+    ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>> {
+        let round_trip = self.clone();
+        Box::pin(async move {
+            round_trip
+                .send_to_node_inner(target, node, request, remaining_ms)
+                .await
+        })
     }
 }
 

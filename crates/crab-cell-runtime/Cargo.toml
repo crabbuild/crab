@@ -8,12 +8,23 @@ rust-version.workspace = true
 publish = false
 description = "Embedded SQLite Cell runtime contracts for Crab"
 
+[[bin]]
+name = "cell_movement_probe"
+path = "src/bin/cell_movement_probe.rs"
+required-features = ["process-test-support"]
+
+[features]
+default = []
+process-test-support = ["dep:async-trait", "dep:fs4"]
+
 [dependencies]
+async-trait = { workspace = true, optional = true }
 blake3.workspace = true
 bytes.workspace = true
 crab-storage.workspace = true
 crab-ltx = { workspace = true, features = ["replica"] }
 ed25519-dalek.workspace = true
+fs4 = { version = "0.13", optional = true }
 futures-util.workspace = true
 object_store.workspace = true
 prost.workspace = true

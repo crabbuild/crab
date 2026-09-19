@@ -293,6 +293,38 @@ pub(crate) fn inspect_reader(reader: impl std::io::Read) -> Result<(DecodedFile,
     Ok((file, size, digest))
 }
 
+/// Inspects a replica-sized LTX stream without retaining its body.
+///
+/// The page index is small metadata (one entry per page); page bodies are
+/// decoded into the caller-provided decoder scratch and are never accumulated.
+#[cfg(feature = "replica")]
+pub(crate) fn inspect_reader_with_index(
+    reader: impl std::io::Read,
+) -> Result<(DecodedFile, u64, [u8; 32], Vec<crate::codec::EncodedPage>)> {
+    let mut decoder = crate::codec::Decoder::new(reader);
+    decoder.decode_header()?;
+    let mut data = vec![0; decoder.header.page_size as usize];
+    while decoder.decode_page(&mut data)?.is_some() {}
+    decoder.close()?;
+    let (size, digest) = decoder.artifact()?;
+    Ok((
+        DecodedFile {
+            header: decoder.header,
+            trailer: decoder.trailer,
+        },
+        size,
+        digest,
+        decoder.replica_index().to_vec(),
+    ))
+}
+
+#[cfg(feature = "replica")]
+pub(crate) fn inspect_bytes_with_index(
+    bytes: &[u8],
+) -> Result<(DecodedFile, u64, [u8; 32], Vec<crate::codec::EncodedPage>)> {
+    inspect_reader_with_index(std::io::Cursor::new(bytes))
+}
+
 pub(crate) fn decode_file_with_pages(bytes: &[u8]) -> Result<(DecodedFile, DecodedPages)> {
     decode_file_inner(bytes, true)
 }

@@ -5,6 +5,14 @@ integration surfaces should be recorded here before release.
 
 ## Unreleased
 
+### Cell Runtime
+
+- Consolidated SQLite replication on the canonical `CellRuntime`/`CellReplica`
+  path and hard-removed the standalone `crab-ltx` epoch-head, paged database,
+  and compaction-scheduler APIs. Objects written by the tagged standalone
+  layout are not read as Cell roots; migrate them with an explicit offline
+  export/import procedure before upgrading.
+
 ## 1.2.4 - 2026-09-14
 
 ### S3 Gateway

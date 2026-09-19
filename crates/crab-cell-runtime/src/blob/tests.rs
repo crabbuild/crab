@@ -15,6 +15,7 @@ fn multipart_publish_is_atomic_conditional_and_range_readable() {
         blob_mutate(
             &transaction,
             1,
+            1,
             &BlobMutation::Begin {
                 key: key.clone(),
                 upload_id,
@@ -32,6 +33,7 @@ fn multipart_publish_is_atomic_conditional_and_range_readable() {
             blob_mutate(
                 &transaction,
                 2,
+                2,
                 &BlobMutation::PutPart {
                     key: key.clone(),
                     upload_id,
@@ -45,6 +47,7 @@ fn multipart_publish_is_atomic_conditional_and_range_readable() {
     }
     let BlobMutationOutcome::Committed { etag, size } = blob_mutate(
         &transaction,
+        3,
         3,
         &BlobMutation::Complete {
             key: key.clone(),
@@ -87,6 +90,7 @@ fn multipart_publish_is_atomic_conditional_and_range_readable() {
         blob_mutate(
             &transaction,
             4,
+            4,
             &BlobMutation::Delete {
                 key,
                 condition: BlobCondition::Etag([9; 32]),
@@ -100,4 +104,40 @@ fn multipart_publish_is_atomic_conditional_and_range_readable() {
 #[test]
 fn checked_in_blob_schema_matches_runtime_schema() {
     assert_eq!(BLOB_SCHEMA, include_str!("../../docs/contracts/blob.sql"));
+}
+
+#[test]
+fn upload_lifetime_uses_request_issue_time_but_rejects_expired_acceptance() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    let transaction = connection.transaction().unwrap();
+    install_blob_schema(&transaction).unwrap();
+    let mutation = BlobMutation::Begin {
+        key: b"logs/issue-time".to_vec(),
+        upload_id: [2; 16],
+        condition: BlobCondition::Missing,
+        content_type: None,
+        metadata: Vec::new(),
+        expires_at_ms: 60_001,
+    };
+
+    assert_eq!(
+        blob_mutate(&transaction, 1_500, 1, &mutation).unwrap(),
+        BlobMutationOutcome::Begun
+    );
+    assert!(matches!(
+        blob_mutate(
+            &transaction,
+            60_001,
+            1,
+            &BlobMutation::Begin {
+                key: b"logs/issue-time".to_vec(),
+                upload_id: [3; 16],
+                condition: BlobCondition::Missing,
+                content_type: None,
+                metadata: Vec::new(),
+                expires_at_ms: 60_001,
+            },
+        ),
+        Err(Error::Command("blob upload has already expired"))
+    ));
 }

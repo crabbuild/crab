@@ -1,11 +1,12 @@
 use std::{path::PathBuf, sync::Arc};
 
 use crab_cell_runtime::{
-    ApplicationIdentity, CatalogProof, CellAuthority, CellCatalog, CellClient, CellDescription,
-    CellHandle, CellReplica, CellRuntime, CellTarget, ControlState, EffectPeerClient,
-    MAX_ACTIVITY_PAYLOAD_BYTES, MigrationPeerClient, NodeByteReservation, NodeDirectory, Owner,
-    PeerPrincipal, PeerRoundTrip, PeerSigner, PersistedWorkInventory, Registry, ReleaseState,
-    ReleaseStore, VersionedControl,
+    ApplicationIdentity, CatalogProof, CatalogRole, CellAuthority, CellCatalog, CellClient,
+    CellDescription, CellHandle, CellReplica, CellRuntime, CellTarget, ControlState,
+    EffectPeerClient, MAX_ACTIVITY_PAYLOAD_BYTES, MigrationPeerClient, NodeByteReservation,
+    NodeDirectory, NodeJobReservation, Owner, PeerOperation, PeerPrincipal, PeerRoundTrip,
+    PeerSigner, PersistedWorkInventory, PlacementPlanner, Registry, ReleaseState, ReleaseStore,
+    VersionedControl, peer_wire,
 };
 use crab_storage::CellStorageLayout;
 use tokio::sync::Mutex;
@@ -25,6 +26,7 @@ pub(crate) struct RepositoryCellRouter {
     authority: CellAuthority,
     runtime: CellRuntime,
     peer: RepositoryCellPeer,
+    placement: PlacementPlanner,
     session_dir: PathBuf,
     activation: Arc<[Mutex<()>]>,
 }
@@ -76,6 +78,7 @@ impl RepositoryCellRouter {
             registry,
             runtime,
             peer,
+            placement: PlacementPlanner::default(),
             session_dir,
             activation: (0..ACTIVATION_SHARDS)
                 .map(|_| Mutex::new(()))
@@ -138,6 +141,30 @@ impl RepositoryCellRouter {
             .into());
         }
         self.route_target(target, principal).await
+    }
+
+    /// Activates a target on this node without consulting the fleet planner.
+    ///
+    /// A peer that was selected by the ingress planner uses this bounded seam
+    /// so a second node cannot recursively choose a third destination. The
+    /// normal authority CAS and actor admission still decide whether activation
+    /// succeeds.
+    pub(crate) async fn activate_local_target(
+        &self,
+        target: CellTarget,
+        principal: PeerPrincipal,
+    ) -> crate::Result<ScheduledRepositoryCell> {
+        if target.namespace() != REPOSITORY_NAMESPACE {
+            return Err(crab_cell_runtime::Error::PeerAuthorization(
+                "peer activation targets an unsupported namespace",
+            )
+            .into());
+        }
+        let scheduled = self.route_target_inner(target, principal, false).await?;
+        if scheduled.cell.handle.is_none() {
+            return Err(crab_cell_runtime::Error::CellNotActive.into());
+        }
+        Ok(scheduled)
     }
 
     pub(crate) fn registry(&self) -> Arc<Registry> {
@@ -308,10 +335,23 @@ impl RepositoryCellRouter {
             .map_err(Into::into)
     }
 
+    pub(crate) fn reserve_primitive_job(&self) -> crate::Result<Option<NodeJobReservation>> {
+        self.runtime.try_reserve_worker_job().map_err(Into::into)
+    }
+
     async fn route_target(
         &self,
         target: CellTarget,
         principal: PeerPrincipal,
+    ) -> crate::Result<ScheduledRepositoryCell> {
+        self.route_target_inner(target, principal, true).await
+    }
+
+    async fn route_target_inner(
+        &self,
+        target: CellTarget,
+        principal: PeerPrincipal,
+        use_placement: bool,
     ) -> crate::Result<ScheduledRepositoryCell> {
         if let Some(routed) = self.route_existing(&target, &principal).await? {
             return Ok(ScheduledRepositoryCell {
@@ -342,8 +382,86 @@ impl RepositoryCellRouter {
         if observed.value().root.is_none() {
             return Err(crab_cell_runtime::Error::CellNotActive.into());
         }
+        if use_placement
+            && self
+                .activate_preferred_node(&target, &observed, &principal)
+                .await?
+        {
+            if let Some(routed) = self.route_existing(&target, &principal).await? {
+                return Ok(ScheduledRepositoryCell {
+                    cell: routed,
+                    release_after: false,
+                });
+            }
+            return Err(crab_cell_runtime::Error::CellNotActive.into());
+        }
         self.activate_or_route(target, proof, observed, &principal)
             .await
+    }
+
+    async fn activate_preferred_node(
+        &self,
+        target: &CellTarget,
+        observed: &VersionedControl,
+        principal: &PeerPrincipal,
+    ) -> crate::Result<bool> {
+        if observed
+            .value()
+            .owner
+            .as_ref()
+            .is_some_and(|owner| owner.session == self.peer.owner.session)
+        {
+            return Ok(false);
+        }
+        let now_ms = super::unix_now_ms()?;
+        let Some(score) = self
+            .peer
+            .directory
+            .choose_advertised_placement(
+                &self.placement,
+                target.cell_id(),
+                now_ms,
+                self.peer.owner.session,
+                1_024,
+            )
+            .await?
+        else {
+            // A fully legacy fleet has no placement contract yet. Preserve
+            // ordinary local acquisition until the rollout has one signed
+            // observation to consume; mixed fleets never select legacy nodes.
+            return Ok(false);
+        };
+        if score.session == self.peer.owner.session {
+            return Ok(false);
+        }
+        let node = self
+            .peer
+            .directory
+            .load(score.session, now_ms)
+            .await?
+            .ok_or(crab_cell_runtime::Error::CellNotActive)?
+            .advertisement()
+            .clone();
+        match self
+            .peer
+            .activate_remote(target.clone(), node, principal, now_ms)
+            .await
+        {
+            Ok(()) => Ok(true),
+            Err(crate::Error::Cell(
+                error @ (crab_cell_runtime::Error::CellNotActive
+                | crab_cell_runtime::Error::Deadline
+                | crab_cell_runtime::Error::PeerTransport { .. }
+                | crab_cell_runtime::Error::PeerTransportUnknown { .. }),
+            )) => {
+                // Placement is advisory. A stale or unreachable destination must
+                // not turn a cold request into an outage; local authority CAS
+                // remains the fail-closed acquisition path.
+                tracing::debug!(error = %error, "preferred Cell activation was unavailable");
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub(crate) async fn verify_repositories(
@@ -358,6 +476,17 @@ impl RepositoryCellRouter {
         target: &CellTarget,
         principal: &PeerPrincipal,
     ) -> crate::Result<Option<RepositoryCell>> {
+        if let Some(handle) = self
+            .runtime
+            .resident_handle(target, CatalogRole::Repository)
+            .await?
+        {
+            return Ok(Some(RepositoryCell {
+                target: target.clone(),
+                client: CellClient::local(Arc::clone(&self.registry), handle.clone()),
+                handle: Some(handle),
+            }));
+        }
         let Some(proof) = self.catalog.lookup(target.cell_id()).await? else {
             return Ok(None);
         };
@@ -597,6 +726,75 @@ impl RepositoryCellPeer {
             owner,
         }
     }
+
+    async fn activate_remote(
+        &self,
+        target: CellTarget,
+        node: crab_cell_runtime::NodeAdvertisement,
+        _principal: &PeerPrincipal,
+        now_ms: i64,
+    ) -> crate::Result<()> {
+        let expires_at_ms = now_ms
+            .checked_add(30_000)
+            .ok_or(crab_cell_runtime::Error::Peer(
+                "activation deadline overflow",
+            ))?;
+        let principal = PeerPrincipal {
+            issuer: format!(
+                "crab-runtime:{}",
+                encode_hex(self.directory.fleet().as_bytes())
+            ),
+            subject: encode_hex(self.owner.session.as_bytes()),
+            actions: vec!["cell.activate".to_owned()],
+        };
+        let request = self.signer.sign(
+            principal,
+            now_ms,
+            expires_at_ms,
+            30_000,
+            PeerOperation::Read(peer_wire::ReadRequest {
+                target: Some(peer_target(&target)),
+                timeout_ms: 30_000,
+                minimum: None,
+                operation: Some(peer_wire::read_request::Operation::Describe(true)),
+            }),
+        )?;
+        let reply = self
+            .round_trip
+            .send_to_node(target.clone(), node, request, 30_000)
+            .await?;
+        let reply = crab_cell_runtime::decode_peer_reply(&reply)?;
+        match reply.outcome {
+            Some(peer_wire::peer_reply::Outcome::Read(read)) => match read.result {
+                Some(peer_wire::read_reply::Result::Description(description))
+                    if description.cell_id.as_slice() == target.cell_id().as_bytes() =>
+                {
+                    Ok(())
+                }
+                _ => Err(crab_cell_runtime::Error::Peer(
+                    "preferred node did not activate the requested Cell",
+                )
+                .into()),
+            },
+            Some(peer_wire::peer_reply::Outcome::Error(error)) => {
+                let _ = error;
+                Err(crab_cell_runtime::Error::Peer("preferred node rejected activation").into())
+            }
+            _ => Err(crab_cell_runtime::Error::Peer(
+                "preferred node returned an unexpected activation reply",
+            )
+            .into()),
+        }
+    }
+}
+
+fn peer_target(target: &CellTarget) -> peer_wire::Target {
+    peer_wire::Target {
+        tenant_id: target.tenant().as_bytes().to_vec(),
+        application_id: target.application().as_bytes().to_vec(),
+        namespace_id: target.namespace().as_bytes().to_vec(),
+        partition: target.partition().to_vec(),
+    }
 }
 
 fn activation_shard(target: &CellTarget) -> usize {
@@ -650,13 +848,18 @@ fn encode_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{future::Future, pin::Pin, time::UNIX_EPOCH};
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::{Arc, Mutex},
+        time::UNIX_EPOCH,
+    };
 
     use crab_cell_runtime::{
         ApplicationId, IncarnationId, MutationIdentity, NodeAdvertisement, NodeCapacity, RequestId,
         SessionId, SqlWorkerPool, TenantId, Transition,
     };
-    use crab_storage::Store;
+    use crab_storage::{StorageReadKind, Store};
     use ed25519_dalek::SigningKey;
     use object_store::{memory::InMemory, path::Path as ObjectPath};
 
@@ -686,8 +889,17 @@ mod tests {
             TenantId::from_bytes([1; 16]),
             ApplicationId::from_bytes([2; 16]),
         );
+        let reads = Arc::new(Mutex::new(Vec::<StorageReadKind>::new()));
+        let observed_reads = Arc::clone(&reads);
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            Store::new(Arc::new(InMemory::new())).with_read_request_observer(Arc::new(
+                move |kind| {
+                    observed_reads
+                        .lock()
+                        .expect("read observer lock")
+                        .push(kind)
+                },
+            )),
             ObjectPath::from("repository-router"),
             *identity.application().as_bytes(),
         );
@@ -793,10 +1005,12 @@ mod tests {
         else {
             panic!("successful issue command returned a rejection outcome");
         };
+        reads.lock().unwrap().clear();
         let reused = first
             .route(repository, &principal, "repository.read")
             .await
             .unwrap();
+        assert!(reads.lock().unwrap().is_empty());
         assert_eq!(
             reused
                 .client

@@ -2,7 +2,9 @@ use std::collections::VecDeque;
 
 use crab_ltx::{CaptureBatch, ManagedDb, TransactionError, rusqlite::OptionalExtension};
 
-use crate::{CellId, Digest, Error, IncarnationId, RequestId, Result};
+use crate::{
+    CatalogRole, CellId, Digest, Error, IncarnationId, PersistedWorkInventory, RequestId, Result,
+};
 
 const MAX_RESULT_BYTES: usize = 1 << 20;
 const MAX_REQUEST_LIFETIME_MS: i64 = 24 * 60 * 60 * 1000;
@@ -576,6 +578,60 @@ impl CellExecutor {
         match result {
             Ok(result) if result.len() <= max_result_bytes => Ok(result),
             Ok(_) => Err(Error::Command("query result exceeds command limit")),
+            Err(crab_ltx::QueryError::Operation(error)) => Err(error),
+            Err(crab_ltx::QueryError::Sqlite(error)) => {
+                self.fenced = true;
+                Err(error.into())
+            }
+            Err(crab_ltx::QueryError::State(error)) => {
+                self.fenced = true;
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Resolves a bounded number of sparse pages without publishing or
+    /// competing with the actor's foreground SQL admission.
+    pub(crate) fn hydrate_step(&mut self, pages: u32) -> Result<Option<crab_ltx::Hydration>> {
+        if self.fenced {
+            return Err(Error::Fenced);
+        }
+        if pages == 0 {
+            return Err(Error::Capacity("hydration pages"));
+        }
+        let Some(_) = self.db.hydration()? else {
+            return Ok(None);
+        };
+        match self.db.hydrate_step(pages) {
+            Ok(hydration) => Ok(Some(hydration)),
+            Err(error) => {
+                self.fenced = true;
+                Err(error.into())
+            }
+        }
+    }
+
+    pub(crate) fn hydration(&self) -> Result<Option<crab_ltx::Hydration>> {
+        self.db.hydration().map_err(Into::into)
+    }
+
+    /// Reads the durable work classes that can block safe owner release.
+    pub(crate) fn persisted_work_inventory(
+        &mut self,
+        role: CatalogRole,
+    ) -> Result<PersistedWorkInventory> {
+        if self.fenced {
+            return Err(Error::Fenced);
+        }
+        let result = self
+            .db
+            .query_with(|connection| crate::maintenance::inspect_persisted_work(connection, role));
+        if let Some(error) = self.db.take_io_error() {
+            self.fenced = true;
+            return Err(ltx_error(error));
+        }
+        match result {
+            Ok(inventory) => Ok(inventory),
             Err(crab_ltx::QueryError::Operation(error)) => Err(error),
             Err(crab_ltx::QueryError::Sqlite(error)) => {
                 self.fenced = true;

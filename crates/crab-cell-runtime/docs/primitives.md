@@ -190,7 +190,7 @@ Blob supports:
 | Object | 1 GiB |
 | Range read | 512 KiB |
 | User metadata | 8 KiB |
-| Upload lifetime | 1 minute to 7 days |
+| Upload lifetime | 1 minute to 7 days from mutation issuance; acceptance rejects an already expired upload |
 | List | 128 objects from one explicit shard |
 
 Blob bodies intentionally remain in the Cell database. This makes publication, backup, exact-root recovery, retention, and conditional replacement one failure domain. Moving bodies to a separate object-store path would require a staged-body publication protocol and independent reachability GC before it could preserve the same contract.
@@ -210,6 +210,13 @@ The destination receives `CronInvocation`, which includes schedule ID, generatio
 | Catch-up | One durable occurrence at a time, bounded by Tick budget |
 | Delivery | Durable effect with destination inbox deduplication |
 | Controls | Upsert, pause, resume at an explicit time, delete |
+
+Blob upload lifetime and Cron's first-due window are evaluated from the
+mutation's issued timestamp. The serialized Cell still rejects a Blob upload
+whose expiry has passed before acceptance. A Cron schedule whose due time
+passes while the mutation is waiting is accepted and becomes eligible on the
+next Tick, preserving the caller's absolute schedule without making request
+latency a correctness failure.
 
 An owner crash after commit cannot lose an occurrence: the effect and next occurrence are in the same LTX root. A retry cannot execute the destination command twice because its inbox resolves the stable effect identity.
 

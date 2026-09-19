@@ -106,6 +106,15 @@ jobs:
           ref: ${{ needs.prepare.outputs.source_sha }}
           persist-credentials: false
 
+      - name: Set up Rust for receipt verification
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+
+      - name: Download exact-source qualification evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cell-runtime-qualification-${{ github.run_id }}
+          path: ${{ runner.temp }}/crab-cell-runtime-qualification
+
       - name: Package the Helm chart
         shell: bash
         env:
@@ -240,6 +249,31 @@ jobs:
             | sort == ["amd64", "arm64"]
           ' "${RUNNER_TEMP}/crab-http-server-manifest.json"
 
+      - name: Bind and verify the release qualification receipt
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+
+          evidence_dir="${RUNNER_TEMP}/crab-cell-runtime-qualification"
+          test "$(cat "$evidence_dir/source-revision")" = "$SOURCE_SHA"
+          test -s "$evidence_dir/cluster-receipt.json"
+          test -s "$evidence_dir/artifact.sha256"
+          (cd "$evidence_dir" && sha256sum --check artifact.sha256)
+
+          release_dir="${RUNNER_TEMP}/crab-http-server-release"
+          mkdir -p "$release_dir"
+          export CARGO_TARGET_DIR="${RUNNER_TEMP}/crab-cell-runtime-target"
+          cargo run --locked --quiet -p crab-cell-runtime --bin qualification_receipt \
+            -- emit "$release_dir/cell-runtime-qualification.json" \
+            "$SOURCE_SHA" "$IMAGE_DIGEST" "$evidence_dir/cluster-receipt.json" \
+            github-actions http-server-release none
+          cargo run --locked --quiet -p crab-cell-runtime --bin qualification_receipt \
+            -- verify "$release_dir/cell-runtime-qualification.json" \
+            "$SOURCE_SHA" "$IMAGE_DIGEST" "$evidence_dir/cluster-receipt.json"
+
       - name: Publish and verify the Helm chart
         id: chart
         shell: bash
@@ -356,6 +390,7 @@ jobs:
           - Helm chart: \`oci://${CHART_REGISTRY}/crab-http-server@${CHART_DIGEST}\`
           - Chart package: \`crab-http-server-${VERSION}.tgz\` (\`${chart_package_digest}\`)
           - Platforms: \`linux/amd64\`, \`linux/arm64\`
+          - Cell runtime qualification: \`cell-runtime-qualification.json\`, bound to the source and image above.
 
           Download and verify the signed deployment record:
 
@@ -374,6 +409,7 @@ jobs:
           gh release create "$TAG" \
             "$release_dir/crab-http-server-release.json" \
             "$release_dir/crab-http-server-release.attestation.json" \
+            "$release_dir/cell-runtime-qualification.json" \
             "${RUNNER_TEMP}/chart/crab-http-server-${VERSION}.tgz" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \

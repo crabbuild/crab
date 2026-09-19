@@ -699,7 +699,7 @@ impl CellTransport for LocalCellTransport {
                     output_limit,
                     move |transaction| {
                         let sequence = next_sequence(transaction)?;
-                        registry.execute_command(
+                        registry.execute_command_with_issue_time(
                             transaction,
                             CommandInvocation {
                                 module: command.module,
@@ -711,6 +711,7 @@ impl CellTransport for LocalCellTransport {
                                 now_ms: command.now_ms,
                                 input: &command.input,
                             },
+                            command.identity.issued_at_ms,
                         )
                     },
                 )

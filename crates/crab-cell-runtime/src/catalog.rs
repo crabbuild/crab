@@ -179,6 +179,15 @@ impl CatalogShardScan {
 }
 
 impl CatalogProof {
+    /// Creates a process-local identity proof for an actor-owned resident.
+    ///
+    /// Revision zero is intentional: this value is never written as catalog
+    /// authority or used for retention; the actor lifecycle is the freshness
+    /// boundary and the slow route still performs a verified catalog scan.
+    pub(crate) fn local(entry: CatalogEntry) -> Self {
+        Self { entry, revision: 0 }
+    }
+
     #[must_use]
     pub const fn entry(&self) -> &CatalogEntry {
         &self.entry

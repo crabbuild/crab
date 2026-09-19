@@ -501,7 +501,18 @@ struct NodeAdvertisementStatus {
     expires_at_ms: i64,
     follower_free_bytes: u64,
     follower_retained_bytes: u64,
+    placement: Option<NodePlacementStatus>,
     log: Option<NodeLogStatus>,
+}
+
+#[derive(Serialize)]
+struct NodePlacementStatus {
+    memory_capacity_bytes: u64,
+    disk_capacity_bytes: u64,
+    active_cells: u32,
+    max_active_cells: u32,
+    running_jobs: u32,
+    job_capacity: u32,
 }
 
 #[derive(Serialize)]
@@ -562,6 +573,16 @@ fn node_advertisement_status(advertisement: &NodeAdvertisement) -> NodeAdvertise
         expires_at_ms: advertisement.expires_at_ms(),
         follower_free_bytes: capacity.follower_free_bytes,
         follower_retained_bytes: capacity.follower_retained_bytes,
+        placement: advertisement
+            .placement_capacity()
+            .map(|placement| NodePlacementStatus {
+                memory_capacity_bytes: placement.memory_capacity_bytes,
+                disk_capacity_bytes: placement.disk_capacity_bytes,
+                active_cells: placement.active_cells,
+                max_active_cells: placement.max_active_cells,
+                running_jobs: placement.running_jobs,
+                job_capacity: placement.job_capacity,
+            }),
         log: advertisement.log().map(|log| NodeLogStatus {
             state: match log.phase() {
                 NodeLogPhase::Open => "open",

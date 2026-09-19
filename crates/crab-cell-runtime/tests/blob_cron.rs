@@ -1,5 +1,7 @@
 use std::{sync::Arc, time::UNIX_EPOCH};
 
+mod support;
+
 use crab_cell_runtime::{
     ApplicationId, BlobCondition, BlobModule, BlobMutation, BlobMutationOutcome, BlobNamespace,
     BlobQuery, BlobQueryResult, BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority,
@@ -160,7 +162,7 @@ fn blob_and_cron_bindings_match_release_descriptors() {
 }
 
 #[tokio::test]
-async fn typed_blob_and_cron_publish_through_the_cell_actor() {
+async fn typed_blob_and_cron_recover_after_owner_loss() {
     let registry = registry();
     let tenant = TenantId::from_bytes([20; 16]);
     let application = ApplicationId::from_bytes([21; 16]);
@@ -290,7 +292,72 @@ async fn typed_blob_and_cron_publish_through_the_cell_actor() {
         read.output,
         BlobQueryResult::Read(Some(ref value)) if value.bytes == b"published"
     ));
-    blob_handle.drain().await.unwrap();
+    drop(blobs);
+    drop(blob_handle);
+    drop(blob_runtime);
+    let stale_blob = authority
+        .load(blob_target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let blob_successor = SessionId::from_bytes([34; 16]);
+    let blob_takeover = support::fence_session(&layout, blob_session, blob_successor).await;
+    let blob_runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 10).unwrap(),
+        16 * 1024 * 1024,
+        blob_successor,
+    )
+    .unwrap();
+    let blob_restored = blob_runtime
+        .takeover_restored(
+            catalog
+                .lookup(blob_target.cell_id())
+                .await
+                .unwrap()
+                .unwrap(),
+            CellReplica::new(
+                layout.clone(),
+                *blob_target.cell_id().as_bytes(),
+                *blob_incarnation.as_bytes(),
+                Limits::default(),
+            )
+            .unwrap(),
+            authority.clone(),
+            stale_blob,
+            blob_takeover.direct_takeover().unwrap(),
+            crab_cell_runtime::RecoveryManifestStore::new(layout.clone(), Limits::default()),
+            directory.path().join("blob-takeover.sqlite"),
+            Owner {
+                session: blob_successor,
+                endpoint: "https://blob-successor.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let restored_blobs = BlobNamespace::<TestBlob>::new(
+        CellClient::local(registry.clone(), blob_restored.clone()),
+        tenant,
+        application,
+    )
+    .unwrap();
+    assert!(matches!(
+        restored_blobs
+            .query(
+                BlobQuery::Read {
+                    key: b"artifacts/result".to_vec(),
+                    offset: 0,
+                    limit: 32,
+                },
+                Some(committed.receipt),
+            )
+            .await
+            .unwrap()
+            .output,
+        BlobQueryResult::Read(Some(ref value)) if value.bytes == b"published"
+    ));
+    drop(restored_blobs);
+    blob_restored.drain().await.unwrap();
+    blob_runtime.shutdown().await.unwrap();
 
     let cron_target =
         CellTarget::new(tenant, application, CRON_NAMESPACE, &0_u32.to_be_bytes()).unwrap();
@@ -336,7 +403,7 @@ async fn typed_blob_and_cron_publish_through_the_cell_actor() {
         .bootstrap(
             cron_proof,
             cron_replica,
-            authority,
+            authority.clone(),
             cron_control,
             directory.path().join("cron.sqlite"),
             crab_cell_runtime::install_cron_schema,
@@ -346,16 +413,17 @@ async fn typed_blob_and_cron_publish_through_the_cell_actor() {
     let cron_client = CellClient::local(registry.clone(), cron_handle.clone());
     let cron = CronNamespace::<TestCron>::new(cron_client.clone(), tenant, application).unwrap();
     let schedule_id = [31; 16];
+    let cron_start_now_ms = now_ms();
     let scheduled = cron
         .mutate(
-            identity(32, start_now_ms),
+            identity(32, cron_start_now_ms),
             CronMutation::Upsert {
                 schedule_id,
                 target_index: 0,
                 target_partition: b"destination".to_vec(),
                 payload: b"run".to_vec(),
                 interval_ms: 1_000,
-                next_due_ms: start_now_ms + 100,
+                next_due_ms: cron_start_now_ms + 100,
             },
         )
         .await
@@ -365,7 +433,7 @@ async fn typed_blob_and_cron_publish_through_the_cell_actor() {
     let tick = registry
         .run_maintenance_once(
             cron_client,
-            cron_target,
+            cron_target.clone(),
             identity(33, tick_now_ms),
             MaintenanceTickRequest {
                 expected_commit_sequence: scheduled.receipt.commit_sequence,
@@ -382,7 +450,61 @@ async fn typed_blob_and_cron_publish_through_the_cell_actor() {
         state.output,
         CronQueryResult::Get(Some(ref schedule)) if schedule.occurrence == 1
     ));
-    cron_handle.drain().await.unwrap();
+    drop(cron);
+    drop(cron_handle);
+    drop(cron_runtime);
+    let stale_cron = authority
+        .load(cron_target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let cron_successor = SessionId::from_bytes([35; 16]);
+    let cron_takeover = support::fence_session(&layout, cron_session, cron_successor).await;
+    let cron_runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 10).unwrap(),
+        16 * 1024 * 1024,
+        cron_successor,
+    )
+    .unwrap();
+    let cron_restored = cron_runtime
+        .takeover_restored(
+            catalog
+                .lookup(cron_target.cell_id())
+                .await
+                .unwrap()
+                .unwrap(),
+            CellReplica::new(
+                layout.clone(),
+                *cron_target.cell_id().as_bytes(),
+                *cron_incarnation.as_bytes(),
+                Limits::default(),
+            )
+            .unwrap(),
+            authority.clone(),
+            stale_cron,
+            cron_takeover.direct_takeover().unwrap(),
+            crab_cell_runtime::RecoveryManifestStore::new(layout.clone(), Limits::default()),
+            directory.path().join("cron-takeover.sqlite"),
+            Owner {
+                session: cron_successor,
+                endpoint: "https://cron-successor.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let restored_cron = CronNamespace::<TestCron>::new(
+        CellClient::local(registry, cron_restored.clone()),
+        tenant,
+        application,
+    )
+    .unwrap();
+    assert!(matches!(
+        restored_cron.get(schedule_id, Some(tick.receipt)).await.unwrap().output,
+        CronQueryResult::Get(Some(ref schedule)) if schedule.occurrence == 1
+    ));
+    drop(restored_cron);
+    cron_restored.drain().await.unwrap();
+    cron_runtime.shutdown().await.unwrap();
 }
 
 fn registry() -> Arc<crab_cell_runtime::Registry> {

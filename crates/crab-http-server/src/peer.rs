@@ -17,9 +17,9 @@ use bytes::Bytes;
 use crab_cell_runtime::{
     ApplicationIdentity, CellAuthority, CellCatalog, CellHandle, CellRuntime, CellTarget, Digest,
     Error as CellError, NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain, NodeId,
-    NodeLogAuthority, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerRoundTrip, Registry,
-    ReleaseState, ReleaseStore, SessionId, VerifiedPeerRequest, VersionedNodeAdvertisement,
-    peer_wire,
+    NodeLogAuthority, NodePlacementCapacity, PeerAuthorizer, PeerCellResolver, PeerDispatcher,
+    PeerRoundTrip, Registry, ReleaseState, ReleaseStore, SessionId, VerifiedPeerRequest,
+    VersionedNodeAdvertisement, encode_peer_reply, peer_wire,
 };
 use crab_storage::CellStorageLayout;
 use ed25519_dalek::SigningKey;
@@ -42,6 +42,10 @@ const ADVERTISEMENT_LIFETIME_MS: i64 = 10_000;
 const ADVERTISEMENT_EXPIRY_MARGIN_MS: i64 = 1_000;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
 const HEARTBEAT_RETRY: Duration = Duration::from_millis(500);
+
+fn reserve_peer_codec(runtime: &CellRuntime) -> Option<crab_cell_runtime::NodeJobReservation> {
+    runtime.try_reserve_worker_job().ok().flatten()
+}
 
 #[derive(Clone)]
 pub(crate) struct PeerReceiver {
@@ -92,6 +96,7 @@ pub(crate) struct NodePublisher {
     local_disk_limit_bytes: u64,
     scheduler: crate::cells::SchedulerStatus,
     follower_store: Option<crab_cell_runtime::FollowerStore>,
+    runtime: Option<CellRuntime>,
     telemetry: crab_cell_runtime::CellTelemetryHandle,
     metrics: Option<crate::metrics::Metrics>,
     lease: OnceLock<crab_cell_runtime::NodeLeaseGuard>,
@@ -152,6 +157,7 @@ impl NodePublisher {
             local_disk_limit_bytes,
             scheduler,
             follower_store: None,
+            runtime: None,
             telemetry: crab_cell_runtime::CellTelemetryHandle::default(),
             metrics: None,
             lease: OnceLock::new(),
@@ -164,6 +170,11 @@ impl NodePublisher {
         follower_store: crab_cell_runtime::FollowerStore,
     ) -> Self {
         self.follower_store = Some(follower_store);
+        self
+    }
+
+    pub(crate) fn with_runtime(mut self, runtime: CellRuntime) -> Self {
+        self.runtime = Some(runtime);
         self
     }
 
@@ -389,7 +400,12 @@ impl NodePublisher {
         now_ms: i64,
         draining: bool,
     ) -> crate::Result<NodeAdvertisement> {
-        let capacity = if draining {
+        let local_resources = if draining {
+            None
+        } else {
+            Some(self.local_resources()?)
+        };
+        let mut capacity = if draining {
             NodeCapacity {
                 free_memory_bytes: 0,
                 free_disk_bytes: 0,
@@ -411,7 +427,11 @@ impl NodePublisher {
                 self.follower_store.as_ref(),
             )?
         };
-        Ok(NodeAdvertisement::sign(
+        let runtime_stats = self.runtime.as_ref().map(CellRuntime::stats);
+        if let (Some(resources), Some(stats)) = (local_resources, runtime_stats) {
+            constrain_capacity_to_runtime(&mut capacity, resources, stats);
+        }
+        let advertisement = NodeAdvertisement::sign(
             self.node,
             self.session,
             self.endpoint.clone(),
@@ -427,8 +447,64 @@ impl NodePublisher {
             vec![1],
             self.failure_domain.clone(),
             capacity,
-        )?)
+        )?;
+        if draining {
+            return Ok(advertisement);
+        }
+        let resources = local_resources.ok_or(crate::Error::Config(
+            "local resources are missing for a serving advertisement",
+        ))?;
+        let placement_disk_capacity =
+            runtime_stats.map_or(resources.disk_capacity_bytes, |stats| {
+                resources
+                    .disk_capacity_bytes
+                    .min(stats.local_disk_capacity_bytes())
+            });
+        let placement = NodePlacementCapacity::new(
+            resources.memory_bytes,
+            placement_disk_capacity,
+            runtime_stats.map_or(
+                0,
+                crab_cell_runtime::CellRuntimeStats::placement_active_cells,
+            ),
+            runtime_stats.map_or(1, |stats| stats.placement_active_cell_capacity()),
+            runtime_stats.map_or(0, |stats| stats.placement_running_jobs()),
+            runtime_stats.map_or_else(
+                || resources.job_credits.min(u32::MAX as usize) as u32,
+                |stats| stats.placement_job_capacity(),
+            ),
+        )?;
+        Ok(advertisement.with_placement_capacity(placement, &self.signing_key)?)
     }
+}
+
+fn constrain_capacity_to_runtime(
+    capacity: &mut NodeCapacity,
+    resources: LocalResources,
+    runtime: crab_cell_runtime::CellRuntimeStats,
+) {
+    let reserved_memory = u64::try_from(runtime.resident_bytes())
+        .unwrap_or(u64::MAX)
+        .saturating_add(u64::try_from(runtime.retained_bytes()).unwrap_or(u64::MAX));
+    let ledger_memory = resources.memory_bytes.saturating_sub(reserved_memory);
+    capacity.free_memory_bytes = capacity.free_memory_bytes.min(ledger_memory);
+
+    // The runtime's DiskBudget is the admission owner.  A filesystem probe
+    // can be larger than that budget, but advertising the probe alone would
+    // let placement promise bytes the runtime cannot admit.
+    let disk_capacity = resources
+        .disk_capacity_bytes
+        .min(runtime.local_disk_capacity_bytes());
+    let ledger_disk = disk_capacity.saturating_sub(runtime.local_disk_reserved_bytes());
+    capacity.free_disk_bytes = capacity.free_disk_bytes.min(ledger_disk);
+    capacity.follower_free_bytes = capacity.follower_free_bytes.min(capacity.free_disk_bytes);
+
+    // Keep the signed placement scalar on its existing worker/primitive contract;
+    // host-ledger classes have separate metrics until the observation shape grows.
+    let running_jobs = runtime.placement_running_jobs();
+    let job_capacity = runtime.placement_job_capacity();
+    let free_jobs = job_capacity.saturating_sub(running_jobs);
+    capacity.job_credits = capacity.job_credits.min(free_jobs);
 }
 
 impl NodeLogAuthority for NodePublisher {
@@ -654,6 +730,7 @@ fn runtime_cell_action(registry: &Registry, request: &VerifiedPeerRequest) -> Op
 
 fn runtime_principal_action(request: &VerifiedPeerRequest) -> Option<&'static str> {
     [
+        "cell.activate",
         "cell.activity.source",
         "cell.effect.source",
         "cell.scheduler.tick",
@@ -683,13 +760,18 @@ pub(crate) async fn forward(
         Ok(now_ms) => now_ms,
         Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
     };
-    let request = match receiver
-        .directory
-        .verify_peer_request(&body, identity.certificate(), identity.public_key(), now_ms)
-        .await
-    {
-        Ok(request) => request,
-        Err(_) => return peer_http_error(StatusCode::UNAUTHORIZED),
+    let request = {
+        let Some(_codec) = reserve_peer_codec(&server.cell_runtime) else {
+            return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+        };
+        match receiver
+            .directory
+            .verify_peer_request(&body, identity.certificate(), identity.public_key(), now_ms)
+            .await
+        {
+            Ok(request) => request,
+            Err(_) => return peer_http_error(StatusCode::UNAUTHORIZED),
+        }
     };
     if server.authorize(&request).is_err() {
         return peer_http_error(StatusCode::UNAUTHORIZED);
@@ -710,12 +792,23 @@ pub(crate) async fn forward(
             return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
         }
     }
-    if request.hop_count() < 2
-        && matches!(
-            receiver.resolver.resolve(request.target().clone()).await,
-            Err(CellError::CellNotActive | CellError::Fenced | CellError::CellDraining)
-        )
-    {
+    let local_resolution = receiver.resolver.resolve(request.target().clone()).await;
+    let local_unavailable = matches!(
+        &local_resolution,
+        Err(CellError::CellNotActive | CellError::Fenced | CellError::CellDraining)
+    );
+    if local_unavailable && request.permits("cell.activate") {
+        let Some(router) = server.repository_cells.as_ref() else {
+            return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+        };
+        if router
+            .activate_local_target(request.target().clone(), request.principal().clone())
+            .await
+            .is_err()
+        {
+            return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    } else if local_unavailable && request.hop_count() < 2 {
         let remaining_ms = match remaining_timeout(started, request.remaining_ms()) {
             Ok(remaining_ms) => remaining_ms.saturating_sub(1),
             Err(_) => return peer_http_error(StatusCode::GATEWAY_TIMEOUT),
@@ -741,7 +834,11 @@ pub(crate) async fn forward(
         Arc::new(receiver.resolver.clone()),
         Arc::clone(&server) as Arc<dyn PeerAuthorizer>,
     );
-    match dispatcher.dispatch_bytes(&request, now_ms).await {
+    let reply = dispatcher.dispatch(&request, now_ms).await;
+    let Some(_codec) = reserve_peer_codec(&server.cell_runtime) else {
+        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    match encode_peer_reply(&reply) {
         Ok(body) => peer_http_reply(body),
         Err(_) => peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
     }
@@ -782,9 +879,14 @@ pub(crate) async fn append_node_log(
     if !authenticated_session(receiver, leader, &identity, now_ms).await {
         return peer_http_error(StatusCode::UNAUTHORIZED);
     }
-    let (covered_through, frames) = match decode_append_batch(body) {
-        Ok(batch) => batch,
-        Err(()) => return peer_http_error(StatusCode::BAD_REQUEST),
+    let (covered_through, frames) = {
+        let Some(_codec) = reserve_peer_codec(&server.cell_runtime) else {
+            return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+        };
+        match decode_append_batch(body) {
+            Ok(batch) => batch,
+            Err(()) => return peer_http_error(StatusCode::BAD_REQUEST),
+        }
     };
     if receiver
         .directory
@@ -915,18 +1017,23 @@ pub(crate) async fn tail_node_log(
         return peer_http_error(StatusCode::FORBIDDEN);
     }
     match store.read_tail_page(leader, epoch, first).await {
-        Ok(page) => match encode_tail_page(page) {
-            Ok(body) => (
-                StatusCode::OK,
-                [
-                    (header::CONTENT_TYPE, NODE_LOG_MEDIA_TYPE),
-                    (header::CACHE_CONTROL, "no-store"),
-                ],
-                body,
-            )
-                .into_response(),
-            Err(()) => peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
-        },
+        Ok(page) => {
+            let Some(_codec) = reserve_peer_codec(&server.cell_runtime) else {
+                return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+            };
+            match encode_tail_page(page) {
+                Ok(body) => (
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, NODE_LOG_MEDIA_TYPE),
+                        (header::CACHE_CONTROL, "no-store"),
+                    ],
+                    body,
+                )
+                    .into_response(),
+                Err(()) => peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
+            }
+        }
         Err(CellError::Node(_)) | Err(CellError::Ltx(_)) => peer_http_error(StatusCode::CONFLICT),
         Err(_) => peer_http_error(StatusCode::SERVICE_UNAVAILABLE),
     }
@@ -1145,8 +1252,7 @@ pub(crate) fn local_resources(
 fn effective_memory_limit(system_total: u64) -> u64 {
     #[cfg(target_os = "linux")]
     {
-        let cgroup_limit = cgroup_memory_limit("/sys/fs/cgroup/memory.max")
-            .or_else(|| cgroup_memory_limit("/sys/fs/cgroup/memory/memory.limit_in_bytes"));
+        let cgroup_limit = cgroup_memory_limit_from_process();
         if let Some(cgroup_limit) = cgroup_limit {
             return system_total.min(cgroup_limit);
         }
@@ -1157,14 +1263,7 @@ fn effective_memory_limit(system_total: u64) -> u64 {
 fn effective_memory_available(system_available: u64) -> u64 {
     #[cfg(target_os = "linux")]
     {
-        let cgroup_available =
-            cgroup_available_memory("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current")
-                .or_else(|| {
-                    cgroup_available_memory(
-                        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
-                        "/sys/fs/cgroup/memory/memory.usage_in_bytes",
-                    )
-                });
+        let cgroup_available = cgroup_available_memory_from_process();
         if let Some(cgroup_available) = cgroup_available {
             return system_available.min(cgroup_available);
         }
@@ -1173,23 +1272,178 @@ fn effective_memory_available(system_available: u64) -> u64 {
 }
 
 #[cfg(target_os = "linux")]
-fn cgroup_available_memory(limit_path: &str, usage_path: &str) -> Option<u64> {
-    let limit = cgroup_memory_limit(limit_path)?;
-    let usage = std::fs::read_to_string(usage_path)
-        .ok()?
-        .trim()
-        .parse::<u64>()
-        .ok()?;
-    limit.checked_sub(usage)
+fn cgroup_memory_limit_from_process() -> Option<u64> {
+    for (limit_path, _) in cgroup_memory_paths() {
+        match std::fs::read_to_string(limit_path) {
+            Ok(value) => return parse_cgroup_limit(&value),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 #[cfg(target_os = "linux")]
-fn cgroup_memory_limit(path: &str) -> Option<u64> {
-    let limit = std::fs::read_to_string(path).ok()?;
-    if limit.trim() == "max" {
+fn cgroup_available_memory_from_process() -> Option<u64> {
+    for (limit_path, usage_path) in cgroup_memory_paths() {
+        let limit = match std::fs::read_to_string(limit_path) {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        };
+        let usage = match std::fs::read_to_string(usage_path) {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        };
+        return parse_cgroup_available(&limit, &usage);
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_memory_paths() -> Vec<(PathBuf, PathBuf)> {
+    let membership = std::fs::read_to_string("/proc/self/cgroup").ok();
+    let mounts = std::fs::read_to_string("/proc/self/mountinfo").ok();
+    let mut paths = Vec::new();
+    if let (Some(membership), Some(mounts)) = (membership.as_deref(), mounts.as_deref()) {
+        for (v2, limit_name, usage_name) in [
+            (true, "memory.max", "memory.current"),
+            (false, "memory.limit_in_bytes", "memory.usage_in_bytes"),
+        ] {
+            let Some(relative) = parse_cgroup_membership(membership, v2) else {
+                continue;
+            };
+            for mount in parse_cgroup_mountpoints(mounts, v2) {
+                let Some(base) = join_cgroup_path(&mount, &relative) else {
+                    continue;
+                };
+                let candidate = (base.join(limit_name), base.join(usage_name));
+                if !paths.contains(&candidate) {
+                    paths.push(candidate);
+                }
+            }
+        }
+    }
+    for candidate in [
+        (
+            PathBuf::from("/sys/fs/cgroup/memory.max"),
+            PathBuf::from("/sys/fs/cgroup/memory.current"),
+        ),
+        (
+            PathBuf::from("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+            PathBuf::from("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+        ),
+    ] {
+        if !paths.contains(&candidate) {
+            paths.push(candidate);
+        }
+    }
+    paths
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_cgroup_membership(contents: &str, v2: bool) -> Option<String> {
+    contents.lines().find_map(|line| {
+        let mut fields = line.splitn(3, ':');
+        let hierarchy = fields.next()?;
+        let controllers = fields.next()?;
+        let relative = fields.next()?.trim();
+        let matches = if v2 {
+            hierarchy == "0" && controllers.is_empty()
+        } else {
+            controllers
+                .split(',')
+                .any(|controller| controller == "memory")
+        };
+        matches.then(|| relative.to_owned())
+    })
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_cgroup_mountpoints(contents: &str, v2: bool) -> Vec<PathBuf> {
+    contents
+        .lines()
+        .filter_map(|line| {
+            let (mount_info, filesystem_info) = line.split_once(" - ")?;
+            let mount_fields = mount_info.split_whitespace().collect::<Vec<_>>();
+            let filesystem_fields = filesystem_info.split_whitespace().collect::<Vec<_>>();
+            let filesystem = filesystem_fields.first().copied()?;
+            let mount_options = filesystem_fields.get(2).copied().unwrap_or_default();
+            let super_options = filesystem_fields.get(3).copied().unwrap_or_default();
+            let is_memory_mount = v2
+                .then_some(filesystem == "cgroup2")
+                .or_else(|| {
+                    (!v2 && filesystem == "cgroup").then(|| {
+                        mount_options
+                            .split(',')
+                            .chain(super_options.split(','))
+                            .any(|option| option == "memory")
+                    })
+                })
+                .unwrap_or(false);
+            if !is_memory_mount {
+                return None;
+            }
+            decode_mountinfo_path(mount_fields.get(4).copied()?)
+        })
+        .collect()
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn decode_mountinfo_path(encoded: &str) -> Option<PathBuf> {
+    let mut decoded = String::with_capacity(encoded.len());
+    let mut chars = encoded.chars();
+    while let Some(character) = chars.next() {
+        if character != '\\' {
+            decoded.push(character);
+            continue;
+        }
+        let escape = chars.next()?;
+        decoded.push(match escape {
+            '0' => match (chars.next()?, chars.next()?) {
+                ('4', '0') => ' ',
+                ('1', '1') => '\t',
+                _ => return None,
+            },
+            '1' => {
+                if chars.next()? != '3' || chars.next()? != '4' {
+                    return None;
+                }
+                '\\'
+            }
+            _ => return None,
+        });
+    }
+    Some(PathBuf::from(decoded))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn join_cgroup_path(mountpoint: &Path, relative: &str) -> Option<PathBuf> {
+    if relative
+        .split('/')
+        .any(|segment| segment == ".." || segment.contains('\0'))
+    {
         return None;
     }
-    limit.trim().parse().ok()
+    Some(if relative == "/" || relative.is_empty() {
+        mountpoint.to_owned()
+    } else {
+        mountpoint.join(relative.trim_start_matches('/'))
+    })
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_cgroup_limit(value: &str) -> Option<u64> {
+    let value = value.trim();
+    (!value.is_empty() && value != "max")
+        .then(|| value.parse::<u64>().ok())
+        .flatten()
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_cgroup_available(limit: &str, usage: &str) -> Option<u64> {
+    parse_cgroup_limit(limit)?.checked_sub(usage.trim().parse().ok()?)
 }
 
 fn encode_session(session: SessionId) -> String {
@@ -1416,6 +1670,23 @@ mod tests {
         assert!(decode_session("0101010101010101010101010101010G").is_err());
     }
 
+    #[tokio::test]
+    async fn peer_codec_reservation_uses_primitive_job_budget() {
+        let runtime = crab_cell_runtime::CellRuntime::new(
+            crab_cell_runtime::SqlWorkerPool::new(1, 1).unwrap(),
+            1_024,
+            SessionId::from_bytes([2; 16]),
+        )
+        .unwrap();
+
+        let first = reserve_peer_codec(&runtime).expect("one primitive job is available");
+        assert!(reserve_peer_codec(&runtime).is_none());
+        drop(first);
+        assert!(reserve_peer_codec(&runtime).is_some());
+
+        runtime.shutdown().await.unwrap();
+    }
+
     #[test]
     fn local_resources_include_process_file_capacity() {
         let directory = TempDir::new().unwrap();
@@ -1428,6 +1699,104 @@ mod tests {
         assert_eq!(resources.disk_limit_bytes, 32 * 1024 * 1024 * 1024);
         assert!(resources.disk_capacity_bytes <= resources.disk_limit_bytes);
         assert!(resources.free_disk_bytes <= resources.disk_capacity_bytes);
+    }
+
+    #[test]
+    fn cgroup_probe_parsing_is_fail_closed_and_monotonic() {
+        assert_eq!(parse_cgroup_limit(" 4096\n"), Some(4096));
+        assert_eq!(parse_cgroup_limit("max"), None);
+        assert_eq!(parse_cgroup_limit(""), None);
+        assert_eq!(parse_cgroup_limit("not-a-number"), None);
+        assert_eq!(parse_cgroup_limit("0"), Some(0));
+        assert_eq!(parse_cgroup_available("4096", "1024"), Some(3072));
+        assert_eq!(parse_cgroup_available("4096", "4097"), None);
+        assert_eq!(parse_cgroup_available("max", "1024"), None);
+        assert_eq!(parse_cgroup_available("4096", "invalid"), None);
+    }
+
+    #[test]
+    fn cgroup_fixture_resolution_follows_nested_membership() {
+        let membership = "11:memory:/kubepods.slice/pod.slice\n0::/user.slice/crab";
+        assert_eq!(
+            parse_cgroup_membership(membership, true),
+            Some("/user.slice/crab".to_owned())
+        );
+        assert_eq!(
+            parse_cgroup_membership(membership, false),
+            Some("/kubepods.slice/pod.slice".to_owned())
+        );
+
+        let mounts = concat!(
+            "29 23 0:26 / /sys/fs/cgroup rw,nosuid - cgroup2 cgroup rw\n",
+            "30 23 0:27 / /sys/fs/cgroup/memory rw - cgroup cgroup rw,memory\n",
+            "31 23 0:28 / /sys/fs/cgroup/cpu rw - cgroup cgroup rw,cpu\n",
+        );
+        assert_eq!(
+            parse_cgroup_mountpoints(mounts, true),
+            vec![PathBuf::from("/sys/fs/cgroup")]
+        );
+        assert_eq!(
+            parse_cgroup_mountpoints(mounts, false),
+            vec![PathBuf::from("/sys/fs/cgroup/memory")]
+        );
+        assert_eq!(
+            join_cgroup_path(Path::new("/sys/fs/cgroup"), "/user.slice/crab"),
+            Some(PathBuf::from("/sys/fs/cgroup/user.slice/crab"))
+        );
+        assert!(join_cgroup_path(Path::new("/sys/fs/cgroup"), "/../host").is_none());
+        assert_eq!(
+            decode_mountinfo_path("/sys/with\\040space"),
+            Some(PathBuf::from("/sys/with space"))
+        );
+    }
+
+    #[tokio::test]
+    async fn placement_capacity_respects_runtime_reservations() {
+        // Host::default shares one process-wide disk budget; this fixture must
+        // not cross-charge unrelated tests that run in parallel.
+        let disk_budget = crab_ltx::DiskBudget::new(1_000);
+        let runtime = crab_cell_runtime::CellRuntime::new_with_replica_host(
+            crab_cell_runtime::SqlWorkerPool::new(2, 4).unwrap(),
+            2_048,
+            SessionId::from_bytes([21; 16]),
+            crab_ltx::Host::default().with_local_disk_budget(disk_budget.clone()),
+        )
+        .unwrap();
+        let disk = disk_budget.try_reserve(100).unwrap();
+        let retained = runtime.try_reserve_node_bytes(512).unwrap();
+        let job = runtime.try_reserve_worker_job().unwrap().unwrap();
+        let stats = runtime.stats();
+        assert_eq!(stats.placement_active_cells(), 0);
+        assert_eq!(stats.placement_active_cell_capacity(), 4);
+        assert_eq!(stats.placement_running_jobs(), 1);
+        assert_eq!(stats.placement_job_capacity(), 6);
+        let mut capacity = NodeCapacity {
+            free_memory_bytes: 4_096,
+            free_disk_bytes: 950,
+            follower_free_bytes: 950,
+            job_credits: 10,
+            ..NodeCapacity::default()
+        };
+        constrain_capacity_to_runtime(
+            &mut capacity,
+            LocalResources {
+                memory_bytes: 1_024,
+                disk_limit_bytes: 1_000,
+                disk_capacity_bytes: 2_000,
+                free_disk_bytes: 900,
+                available_file_descriptors: 100,
+                job_credits: 10,
+            },
+            stats,
+        );
+        assert_eq!(capacity.free_memory_bytes, 512);
+        assert_eq!(capacity.free_disk_bytes, 900);
+        assert_eq!(capacity.follower_free_bytes, 900);
+        assert_eq!(capacity.job_credits, 5);
+        drop(disk);
+        drop(job);
+        drop(retained);
+        runtime.shutdown().await.unwrap();
     }
 
     fn repository() -> RepositoryConfig {
@@ -1764,7 +2133,21 @@ mod tests {
             crab_ltx::DiskBudget::new(1 << 20),
         )
         .unwrap();
-        let publisher = Arc::new(publisher.with_follower_store(follower_store));
+        let runtime = crab_cell_runtime::CellRuntime::new_with_replica_host(
+            crab_cell_runtime::SqlWorkerPool::new(2, 4).unwrap(),
+            2_048,
+            session,
+            crab_ltx::Host::default().with_local_disk_budget(crab_ltx::DiskBudget::new(1 << 20)),
+        )
+        .unwrap();
+        let retained = runtime.try_reserve_node_bytes(512).unwrap();
+        let job = runtime.try_reserve_worker_job().unwrap().unwrap();
+        let stats = runtime.stats();
+        let publisher = Arc::new(
+            publisher
+                .with_follower_store(follower_store)
+                .with_runtime(runtime.clone()),
+        );
 
         let published = publisher.publish_initial().await.unwrap();
         publisher.lease_guard().unwrap().check().unwrap();
@@ -1773,6 +2156,24 @@ mod tests {
             crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION
         );
         assert!(published.advertisement().capacity().follower_free_bytes > 0);
+        let resources = publisher.local_resources().unwrap();
+        let placement = published.advertisement().placement_capacity().unwrap();
+        assert_eq!(placement.memory_capacity_bytes, resources.memory_bytes);
+        assert_eq!(
+            placement.disk_capacity_bytes,
+            resources
+                .disk_capacity_bytes
+                .min(stats.local_disk_capacity_bytes())
+        );
+        assert_eq!(placement.active_cells, 0);
+        assert_eq!(placement.max_active_cells, 4);
+        assert_eq!(placement.running_jobs, 1);
+        assert_eq!(placement.job_capacity, 6);
+        assert!(
+            published.advertisement().capacity().free_memory_bytes
+                <= resources.memory_bytes.saturating_sub(512)
+        );
+        assert!(published.advertisement().capacity().job_credits <= 5);
         assert_eq!(
             publisher
                 .advertisement(2, now_ms().unwrap(), true)
@@ -1891,5 +2292,8 @@ mod tests {
             )
             .is_err()
         );
+        drop(job);
+        drop(retained);
+        runtime.shutdown().await.unwrap();
     }
 }

@@ -71,36 +71,6 @@ impl VerifiedLocalPlan {
         Ok(plan)
     }
 
-    #[cfg(feature = "replica")]
-    pub(crate) fn from_bytes(
-        inputs: Vec<Vec<u8>>,
-        infos: &[SegmentInfo],
-        target: Position,
-        limits: Limits,
-    ) -> Result<Self> {
-        let limits = limits.validate()?;
-        if inputs.is_empty() || inputs.len() != infos.len() || inputs.len() > limits.max_segments {
-            return Err(CrabError::Limit("plan segments"));
-        }
-        let mut total = 0u64;
-        for (bytes, info) in inputs.iter().zip(infos) {
-            total = total
-                .checked_add(bytes.len() as u64)
-                .ok_or(CrabError::Limit("plan bytes"))?;
-            if total > limits.max_plan_bytes {
-                return Err(CrabError::Limit("plan bytes"));
-            }
-            verify_segment(bytes, info, limits)?;
-        }
-        let plan = Self {
-            inputs,
-            position: target,
-            limits,
-        };
-        plan.image()?;
-        Ok(plan)
-    }
-
     #[must_use]
     pub fn position(&self) -> Position {
         self.position

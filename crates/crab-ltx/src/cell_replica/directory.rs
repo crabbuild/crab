@@ -65,6 +65,27 @@ fn node_cache() -> &'static Mutex<NodeCache> {
     CACHE.get_or_init(|| Mutex::new(NodeCache::default()))
 }
 
+pub(super) fn cache_uploaded(
+    layout: &CellStorageLayout,
+    cell: &[u8; 32],
+    incarnation: &[u8; 16],
+    digest: [u8; 32],
+    bytes: &[u8],
+) -> Result<()> {
+    let path =
+        layout.incarnation_object_path(cell, incarnation, &digest, CellObjectKind::Directory);
+    let key = CacheKey {
+        store: layout.immutable_cache_identity(),
+        path: path.to_string(),
+        digest,
+    };
+    node_cache()
+        .lock()
+        .map_err(|_| CrabError::InvalidState("Cell directory cache poisoned"))?
+        .insert(key, bytes.to_vec().into());
+    Ok(())
+}
+
 #[derive(Clone)]
 pub(super) struct DirectoryEntry {
     pub page: u32,
@@ -654,6 +675,31 @@ async fn read_node(verification: &Verification<'_>, digest: [u8; 32]) -> Result<
     {
         return Ok(bytes);
     }
+    let persistent_key = format!(
+        "v1:{}:{}",
+        path,
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    if let Some(bytes) = verification
+        .host
+        .directory_cache_get(persistent_key.clone(), MAX_NODE_BYTES)
+        .await?
+    {
+        if bytes.len() <= MAX_NODE_BYTES as usize && *blake3::hash(&bytes).as_bytes() == digest {
+            let bytes: Arc<[u8]> = bytes.into();
+            return Ok(node_cache()
+                .lock()
+                .map_err(|_| CrabError::InvalidState("Cell directory cache poisoned"))?
+                .insert(key, bytes));
+        }
+        let _ = verification
+            .host
+            .directory_cache_invalidate(persistent_key.clone())
+            .await;
+    }
     let _permit = verification.host.io_permit().await?;
     let (bytes, _) = verification
         .layout
@@ -663,6 +709,10 @@ async fn read_node(verification: &Verification<'_>, digest: [u8; 32]) -> Result<
     if *blake3::hash(&bytes).as_bytes() != digest {
         return Err(CrabError::ChecksumMismatch);
     }
+    let _ = verification
+        .host
+        .directory_cache_put(persistent_key, bytes.to_vec(), MAX_NODE_BYTES)
+        .await;
     let bytes: Arc<[u8]> = bytes.to_vec().into();
     Ok(node_cache()
         .lock()
@@ -901,9 +951,11 @@ fn array<const N: usize>(bytes: &[u8]) -> Result<[u8; N]> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
-    use crab_storage::Store;
+    use bytes::Bytes;
+    use crab_storage::{CellObjectKind, Store};
     use object_store::{memory::InMemory, path::Path};
 
     use super::*;
@@ -975,6 +1027,121 @@ mod tests {
                 .len(),
             canonical.objects().len()
         );
+    }
+
+    #[tokio::test]
+    async fn incremental_update_rebuilds_the_last_height_two_branch() {
+        let page_size = 4096;
+        let base_pages = 401_938;
+        let final_pages = 403_220;
+        let lock = crate::ltx::lock_pgno(page_size);
+        let cell = [8; 32];
+        let incarnation = [9; 16];
+        let store = Store::new(Arc::new(InMemory::new()));
+        let layout = CellStorageLayout::new(store.clone(), Path::from("update"), incarnation);
+        let replica = super::super::CellReplica::new(
+            layout.clone(),
+            cell,
+            incarnation,
+            crate::Limits::default(),
+        )
+        .unwrap();
+        let entry = |page: u32, object: [u8; 32]| DirectoryEntry {
+            page,
+            object,
+            offset: u64::from(page) * 100,
+            length: 100,
+            frame_hash: [page as u8; 32],
+            checksum: crate::CHECKSUM_FLAG | u64::from(page),
+        };
+        let pages = |end: u32, object| {
+            (1..=end)
+                .filter(|page| *page != lock)
+                .map(|page| (page, entry(page, object)))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let base_entries = pages(base_pages, [1; 32]);
+        let final_entries = pages(final_pages, [1; 32])
+            .into_iter()
+            .map(|(page, mut entry)| {
+                if page <= 2 || page > base_pages {
+                    entry.object = [2; 32];
+                }
+                (page, entry)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let base_tree = DirectoryTree::build(base_entries, page_size, base_pages).unwrap();
+        for object in &base_tree.objects {
+            let path = layout.incarnation_object_path(
+                &cell,
+                &incarnation,
+                &object.digest,
+                CellObjectKind::Directory,
+            );
+            store
+                .put(&path, Bytes::from(object.bytes.clone()))
+                .await
+                .unwrap();
+        }
+        let final_tree =
+            DirectoryTree::build(final_entries.clone(), page_size, final_pages).unwrap();
+        let changes = final_entries
+            .into_iter()
+            .filter(|(page, _)| *page <= 2 || *page > base_pages)
+            .collect::<BTreeMap<_, _>>();
+        let base_extents = BTreeMap::from([(
+            [1; 32],
+            ObjectExtent {
+                kind: CellObjectKind::Ltx,
+                ranges: std::iter::once(0..50_000_000).collect(),
+            },
+        )]);
+        let final_extents = BTreeMap::from([
+            (
+                [1; 32],
+                ObjectExtent {
+                    kind: CellObjectKind::Ltx,
+                    ranges: std::iter::once(0..50_000_000).collect(),
+                },
+            ),
+            (
+                [2; 32],
+                ObjectExtent {
+                    kind: CellObjectKind::Ltx,
+                    ranges: std::iter::once(0..50_000_000).collect(),
+                },
+            ),
+        ]);
+        let updated = DirectoryTree::update(
+            Verification {
+                layout: &layout,
+                cell: &cell,
+                incarnation: &incarnation,
+                page_size,
+                database_pages: base_pages,
+                extents: &base_extents,
+                host: &replica.host,
+            },
+            base_tree.root_digest(),
+            base_tree.height(),
+            base_tree.root.aggregate,
+            changes,
+            base_pages,
+            Verification {
+                layout: &layout,
+                cell: &cell,
+                incarnation: &incarnation,
+                page_size,
+                database_pages: final_pages,
+                extents: &final_extents,
+                host: &replica.host,
+            },
+            final_tree.checksum(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.root_digest(), final_tree.root_digest());
+        assert_eq!(updated.height(), final_tree.height());
     }
 
     #[test]

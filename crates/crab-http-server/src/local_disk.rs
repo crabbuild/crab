@@ -1,4 +1,5 @@
 use std::{
+    io,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -27,8 +28,28 @@ pub(crate) struct LocalStaging {
     root: Arc<PathBuf>,
     budget: crab_cell_runtime::DiskBudget,
     disk_reserve_bytes: u64,
+    restart_inventory: Option<Arc<RestartDiskInventory>>,
     #[cfg(test)]
     _root_owner: Option<Arc<tempfile::TempDir>>,
+}
+
+#[derive(Debug)]
+struct RestartDiskInventory {
+    _reservation: crab_cell_runtime::DiskReservation,
+    _bytes: u64,
+    _sessions: usize,
+}
+
+impl RestartDiskInventory {
+    #[cfg(test)]
+    fn bytes(&self) -> u64 {
+        self._bytes
+    }
+
+    #[cfg(test)]
+    fn sessions(&self) -> usize {
+        self._sessions
+    }
 }
 
 impl LocalStaging {
@@ -45,9 +66,27 @@ impl LocalStaging {
             root: Arc::new(root),
             budget,
             disk_reserve_bytes,
+            restart_inventory: None,
             #[cfg(test)]
             _root_owner: None,
         })
+    }
+
+    pub(crate) fn new_with_restart_inventory(
+        root: PathBuf,
+        budget: crab_cell_runtime::DiskBudget,
+        disk_reserve_bytes: u64,
+        data_dir: &Path,
+        current_session: &Path,
+    ) -> Result<Self, Error> {
+        let inventory = Arc::new(reserve_restart_inventory(
+            data_dir,
+            current_session,
+            budget.clone(),
+        )?);
+        let mut staging = Self::new(root, budget, disk_reserve_bytes)?;
+        staging.restart_inventory = Some(inventory);
+        Ok(staging)
     }
 
     #[cfg(test)]
@@ -134,6 +173,87 @@ impl LocalStaging {
     }
 }
 
+fn reserve_restart_inventory(
+    data_dir: &Path,
+    current_session: &Path,
+    budget: crab_cell_runtime::DiskBudget,
+) -> Result<RestartDiskInventory, Error> {
+    let sessions = data_dir.join("sessions");
+    let current_name = current_session
+        .file_name()
+        .ok_or_else(|| invalid_inventory("current session has no directory name"))?;
+    if current_session.parent() != Some(sessions.as_path()) {
+        return Err(invalid_inventory("current session is outside the sessions root").into());
+    }
+    match std::fs::symlink_metadata(&sessions) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return Err(invalid_inventory("sessions root is not a directory").into());
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(RestartDiskInventory {
+                _reservation: budget.try_reserve(0).map_err(|_| Error::Busy)?,
+                _bytes: 0,
+                _sessions: 0,
+            });
+        }
+        Err(error) => return Err(error.into()),
+    }
+    let current_metadata = std::fs::symlink_metadata(current_session)?;
+    if !current_metadata.is_dir() || current_metadata.file_type().is_symlink() {
+        return Err(invalid_inventory("current session is not a regular directory").into());
+    }
+
+    let mut bytes = 0_u64;
+    let mut session_count = 0_usize;
+    for entry in std::fs::read_dir(&sessions)? {
+        let entry = entry?;
+        if entry.file_name() == current_name {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        if !metadata.is_dir() {
+            return Err(invalid_inventory("sessions root contains a non-directory entry").into());
+        }
+        bytes = bytes
+            .checked_add(inventory_bytes(&entry.path())?)
+            .ok_or(Error::TooLarge)?;
+        session_count = session_count.checked_add(1).ok_or(Error::TooLarge)?;
+    }
+
+    let reservation = budget.try_reserve(bytes).map_err(|_| Error::Busy)?;
+    Ok(RestartDiskInventory {
+        _reservation: reservation,
+        _bytes: bytes,
+        _sessions: session_count,
+    })
+}
+
+fn inventory_bytes(path: &Path) -> Result<u64, Error> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(invalid_inventory("restart inventory contains a symlink").into());
+    }
+    if file_type.is_file() {
+        return Ok(metadata.len());
+    }
+    if !file_type.is_dir() {
+        return Err(invalid_inventory("restart inventory contains a special file").into());
+    }
+    let mut bytes = 0_u64;
+    for entry in std::fs::read_dir(path)? {
+        bytes = bytes
+            .checked_add(inventory_bytes(&entry?.path())?)
+            .ok_or(Error::TooLarge)?;
+    }
+    Ok(bytes)
+}
+
+fn invalid_inventory(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
 pub(crate) struct StagingDirectory {
     directory: tempfile::TempDir,
     _reservation: crab_cell_runtime::DiskReservation,
@@ -148,6 +268,96 @@ impl StagingDirectory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restart_inventory_counts_stale_sessions_but_not_the_new_session() {
+        let data = tempfile::TempDir::new().unwrap();
+        let sessions = data.path().join("sessions");
+        let stale = sessions.join("stale-session");
+        let current = sessions.join("current-session");
+        std::fs::create_dir_all(stale.join("cell/.crab-cell-directory-cache")).unwrap();
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(stale.join("cell.sqlite"), [0_u8; 17]).unwrap();
+        std::fs::write(
+            stale.join("cell/.crab-cell-directory-cache/node"),
+            [0_u8; 23],
+        )
+        .unwrap();
+        std::fs::write(current.join("new.sqlite"), [0_u8; 101]).unwrap();
+
+        let budget = crab_cell_runtime::DiskBudget::new(40);
+        let inventory = reserve_restart_inventory(data.path(), &current, budget.clone()).unwrap();
+
+        assert_eq!(inventory.bytes(), 40);
+        assert_eq!(inventory.sessions(), 1);
+        assert_eq!(budget.used(), 40);
+    }
+
+    #[test]
+    fn restart_inventory_fails_closed_when_stale_bytes_exceed_capacity() {
+        let data = tempfile::TempDir::new().unwrap();
+        let sessions = data.path().join("sessions");
+        let stale = sessions.join("stale-session");
+        let current = sessions.join("current-session");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(stale.join("cell.sqlite"), [0_u8; 9]).unwrap();
+
+        let budget = crab_cell_runtime::DiskBudget::new(8);
+        assert!(matches!(
+            reserve_restart_inventory(data.path(), &current, budget.clone()),
+            Err(Error::Busy)
+        ));
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn staging_holds_restart_inventory_until_the_owner_drops() {
+        let data = tempfile::TempDir::new().unwrap();
+        let sessions = data.path().join("sessions");
+        let stale = sessions.join("stale-session");
+        let current = sessions.join("current-session");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(stale.join("cell.sqlite"), [0_u8; 7]).unwrap();
+        let budget = crab_cell_runtime::DiskBudget::new(16);
+
+        let staging = LocalStaging::new_with_restart_inventory(
+            current.join("transfers"),
+            budget.clone(),
+            0,
+            data.path(),
+            &current,
+        )
+        .unwrap();
+        assert_eq!(budget.used(), 7);
+        drop(staging);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn restart_inventory_rejects_symlinked_owned_files() {
+        let data = tempfile::TempDir::new().unwrap();
+        let sessions = data.path().join("sessions");
+        let stale = sessions.join("stale-session");
+        let current = sessions.join("current-session");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(data.path().join("outside"), [0_u8; 1]).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(data.path().join("outside"), stale.join("link")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(data.path().join("outside"), stale.join("link"))
+            .unwrap();
+
+        let error = reserve_restart_inventory(
+            data.path(),
+            &current,
+            crab_cell_runtime::DiskBudget::new(16),
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::Io(source) if source.kind() == io::ErrorKind::InvalidData));
+    }
 
     #[tokio::test]
     async fn capacity_precedes_creation_and_releases_with_the_directory() {

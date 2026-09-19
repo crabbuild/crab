@@ -8,7 +8,7 @@ use crate::{CrabError, Host, Result};
 
 const MULTIPART_BYTES: usize = 8 << 20;
 
-pub(super) async fn upload(
+pub(crate) async fn upload(
     replica: &CellReplica,
     source: &Path,
     digest: &[u8; 32],

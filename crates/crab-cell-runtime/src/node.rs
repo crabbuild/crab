@@ -4,6 +4,9 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
+use crate::placement::{
+    PlacementObservation, PlacementPlanner, PlacementRuntimeSnapshot, PlacementScore,
+};
 use crate::{
     Digest, Error, NodeId, NodeLogPhase, NodeLogRotationBarrier, NodeLogStatus, NodeRecoveryClaim,
     Result, SessionId,
@@ -19,7 +22,9 @@ const MAX_CLOCK_SKEW_MS: i64 = 5 * 60_000;
 const STALE_ADVERTISEMENT_RETENTION_MS: i64 = MAX_CLOCK_SKEW_MS + MAX_ADVERTISEMENT_LIFETIME_MS;
 const MAX_STALE_COLLECTION_ITEMS: usize = 1_024;
 const SIGNING_DOMAIN: &[u8] = b"crab.node.v1\0";
+const PLACEMENT_SIGNING_DOMAIN: &[u8] = b"crab.node-placement.v1\0";
 const NODE_LOG_SELECTION_DOMAIN: &[u8] = b"crab.node-log.member.v1\0";
+const PLACEMENT_SCHEMA_VERSION: u32 = 1;
 
 /// Current private follower-log wire and persistence protocol.
 pub const NODE_LOG_PROTOCOL_VERSION: u32 = 1;
@@ -33,6 +38,76 @@ pub struct NodeCapacity {
     pub follower_retained_bytes: u64,
     pub job_credits: u32,
     pub log_protocol: u32,
+}
+
+/// Signed runtime capacity measurements used by the placement planner.
+///
+/// The ordinary capacity hints remain intentionally small and compatible with
+/// older node records. This optional block carries the totals and live counts
+/// required to compare a node's usable headroom without guessing from host
+/// totals on the receiving side.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NodePlacementCapacity {
+    pub memory_capacity_bytes: u64,
+    pub disk_capacity_bytes: u64,
+    pub active_cells: u32,
+    pub max_active_cells: u32,
+    pub running_jobs: u32,
+    pub job_capacity: u32,
+}
+
+impl NodePlacementCapacity {
+    /// Creates a bounded placement snapshot from measured node totals.
+    pub const fn new(
+        memory_capacity_bytes: u64,
+        disk_capacity_bytes: u64,
+        active_cells: u32,
+        max_active_cells: u32,
+        running_jobs: u32,
+        job_capacity: u32,
+    ) -> Result<Self> {
+        if memory_capacity_bytes == 0
+            || disk_capacity_bytes == 0
+            || max_active_cells == 0
+            || active_cells > max_active_cells
+            || job_capacity == 0
+            || running_jobs > job_capacity
+        {
+            return Err(Error::Node("placement capacity is invalid"));
+        }
+        Ok(Self {
+            memory_capacity_bytes,
+            disk_capacity_bytes,
+            active_cells,
+            max_active_cells,
+            running_jobs,
+            job_capacity,
+        })
+    }
+
+    fn validate(self) -> Result<()> {
+        Self::new(
+            self.memory_capacity_bytes,
+            self.disk_capacity_bytes,
+            self.active_cells,
+            self.max_active_cells,
+            self.running_jobs,
+            self.job_capacity,
+        )
+        .map(|_| ())
+    }
+
+    fn from_capacity(capacity: NodeCapacity) -> Option<Self> {
+        Self::new(
+            capacity.free_memory_bytes,
+            capacity.free_disk_bytes,
+            0,
+            1,
+            0,
+            capacity.job_credits,
+        )
+        .ok()
+    }
 }
 
 /// Stable topology labels used only to prefer independent follower nodes.
@@ -98,6 +173,9 @@ pub struct NodeAdvertisement {
     capacity: NodeCapacity,
     log: Option<NodeLogStatus>,
     signature: [u8; 64],
+    placement_version: u32,
+    placement_signature: [u8; 64],
+    placement: Option<NodePlacementCapacity>,
 }
 
 impl NodeAdvertisement {
@@ -123,6 +201,7 @@ impl NodeAdvertisement {
         failure_domain: NodeFailureDomain,
         capacity: NodeCapacity,
     ) -> Result<Self> {
+        let placement = NodePlacementCapacity::from_capacity(capacity);
         let mut advertisement = Self {
             node,
             session,
@@ -142,9 +221,17 @@ impl NodeAdvertisement {
             capacity,
             log: None,
             signature: [0; 64],
+            placement_version: placement.map_or(0, |_| PLACEMENT_SCHEMA_VERSION),
+            placement_signature: [0; 64],
+            placement,
         };
         advertisement.validate_shape()?;
         advertisement.signature = signing_key.sign(&advertisement.signing_bytes()?).to_bytes();
+        if advertisement.placement.is_some() {
+            advertisement.placement_signature = signing_key
+                .sign(&advertisement.placement_signing_bytes()?)
+                .to_bytes();
+        }
         Ok(advertisement)
     }
 
@@ -203,6 +290,11 @@ impl NodeAdvertisement {
     }
 
     #[must_use]
+    pub const fn issued_at_ms(&self) -> i64 {
+        self.issued_at_ms
+    }
+
+    #[must_use]
     pub fn module_digests(&self) -> &[Digest] {
         &self.module_digests
     }
@@ -220,6 +312,38 @@ impl NodeAdvertisement {
     #[must_use]
     pub const fn capacity(&self) -> NodeCapacity {
         self.capacity
+    }
+
+    /// Returns the optional signed runtime snapshot used for placement.
+    #[must_use]
+    pub const fn placement_capacity(&self) -> Option<NodePlacementCapacity> {
+        self.placement
+    }
+
+    /// Replaces the signed runtime snapshot after the caller has measured the
+    /// node-wide ledger and local disk envelope.
+    pub fn with_placement_capacity(
+        mut self,
+        placement: NodePlacementCapacity,
+        signing_key: &SigningKey,
+    ) -> Result<Self> {
+        placement.validate()?;
+        self.placement = Some(placement);
+        self.placement_version = PLACEMENT_SCHEMA_VERSION;
+        self.placement_signature = signing_key
+            .sign(&self.placement_signing_bytes()?)
+            .to_bytes();
+        Ok(self)
+    }
+
+    /// Reports whether this advertisement carries an authenticated placement
+    /// snapshot. Legacy identity-only records remain readable but are never
+    /// eligible for weighted ownership placement.
+    #[must_use]
+    pub fn has_signed_placement(&self) -> bool {
+        self.placement_version == PLACEMENT_SCHEMA_VERSION
+            && self.placement.is_some()
+            && self.placement_signature.iter().any(|byte| *byte != 0)
     }
 
     #[must_use]
@@ -295,6 +419,9 @@ impl NodeAdvertisement {
         {
             return Err(Error::Node("advertisement follower capacity is invalid"));
         }
+        if let Some(placement) = self.placement {
+            placement.validate()?;
+        }
         if self.module_digests.is_empty()
             || self.module_digests.len() > MAX_MODULES
             || !self
@@ -317,13 +444,52 @@ impl NodeAdvertisement {
                 &self.signing_bytes()?,
                 &Signature::from_bytes(&self.signature),
             )
-            .map_err(Error::PeerSignature)
+            .map_err(Error::PeerSignature)?;
+        match self.placement_version {
+            0 => {
+                if self.placement_signature.iter().any(|byte| *byte != 0) {
+                    return Err(Error::Node("legacy placement record carries a signature"));
+                }
+            }
+            PLACEMENT_SCHEMA_VERSION => {
+                if !self.has_signed_placement() {
+                    return Err(Error::Node("placement signature is missing"));
+                }
+                self.verifying_key()?
+                    .verify(
+                        &self.placement_signing_bytes()?,
+                        &Signature::from_bytes(&self.placement_signature),
+                    )
+                    .map_err(Error::PeerSignature)?;
+            }
+            _ => {
+                // Unknown placement schemas remain readable for identity and
+                // liveness. They are never eligible for placement until this
+                // binary understands and verifies their signed fields.
+            }
+        }
+        Ok(())
     }
 
     fn signing_bytes(&self) -> Result<Vec<u8>> {
         let unsigned = serde_json::to_vec(&RawUnsignedIdentity::from(self))?;
         let mut bytes = Vec::with_capacity(SIGNING_DOMAIN.len() + unsigned.len());
         bytes.extend_from_slice(SIGNING_DOMAIN);
+        bytes.extend_from_slice(&unsigned);
+        Ok(bytes)
+    }
+
+    fn placement_signing_bytes(&self) -> Result<Vec<u8>> {
+        let mut unsigned = RawAdvertisement::from(self);
+        unsigned.placement_signature = None;
+        unsigned.log = None;
+        // The directory assigns the monotonic heartbeat generation during a
+        // CAS refresh; the signed lease timestamps/progress remain immutable
+        // evidence while this server-owned counter is intentionally excluded.
+        unsigned.lease.generation.clear();
+        let unsigned = serde_json::to_vec(&unsigned)?;
+        let mut bytes = Vec::with_capacity(PLACEMENT_SIGNING_DOMAIN.len() + unsigned.len());
+        bytes.extend_from_slice(PLACEMENT_SIGNING_DOMAIN);
         bytes.extend_from_slice(&unsigned);
         Ok(bytes)
     }
@@ -933,6 +1099,76 @@ impl NodeDirectory {
             return Err(Error::Node("multiple live sessions advertise one node"));
         }
         Ok(advertisements)
+    }
+
+    /// Ranks live, signature-verified nodes using measured runtime snapshots.
+    ///
+    /// The directory contributes only authenticated advertisement capacity and
+    /// lease age. Runtime counters are required explicitly; an absent snapshot
+    /// is omitted instead of being interpreted as idle capacity.
+    pub async fn choose_placement(
+        &self,
+        planner: &PlacementPlanner,
+        cell: crate::CellId,
+        now_ms: i64,
+        snapshots: &[PlacementRuntimeSnapshot],
+        limit: usize,
+    ) -> Result<Option<PlacementScore>> {
+        let live = self.live(now_ms, limit).await?;
+        let observations = live
+            .iter()
+            .filter_map(|advertisement| {
+                snapshots
+                    .iter()
+                    .find(|snapshot| snapshot.node == advertisement.node())
+                    .and_then(|snapshot| {
+                        PlacementObservation::from_advertisement(
+                            advertisement,
+                            now_ms,
+                            snapshot.memory_capacity_bytes,
+                            snapshot.disk_capacity_bytes,
+                            snapshot.active_cells,
+                            snapshot.max_active_cells,
+                            snapshot.running_jobs,
+                            snapshot.pressure,
+                            snapshot.draining,
+                            snapshot.locality_bonus,
+                            snapshot.current_owner,
+                        )
+                        .ok()
+                    })
+            })
+            .collect::<Vec<_>>();
+        planner.choose(cell, now_ms, &observations)
+    }
+
+    /// Chooses a destination using only authenticated, measured placement
+    /// blocks advertised by the current live fleet.
+    ///
+    /// Nodes that have not rolled out the placement block are omitted. They
+    /// remain usable for ordinary authority routing but cannot become an
+    /// advisory destination through this method.
+    pub async fn choose_advertised_placement(
+        &self,
+        planner: &PlacementPlanner,
+        cell: crate::CellId,
+        now_ms: i64,
+        current_session: SessionId,
+        limit: usize,
+    ) -> Result<Option<PlacementScore>> {
+        let live = self.live(now_ms, limit).await?;
+        let observations = live
+            .iter()
+            .filter_map(|advertisement| {
+                PlacementObservation::from_signed_advertisement(
+                    advertisement,
+                    now_ms,
+                    advertisement.session() == current_session,
+                )
+                .ok()
+            })
+            .collect::<Vec<_>>();
+        planner.choose(cell, now_ms, &observations)
     }
 
     /// Resolves a stable physical node to its one current live boot session.
@@ -2054,6 +2290,12 @@ struct RawAdvertisement {
     lease: RawLease,
     log: Option<RawNodeLog>,
     capacity: RawCapacity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    placement: Option<RawPlacementCapacity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    placement_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    placement_signature: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -2087,6 +2329,20 @@ impl From<&NodeAdvertisement> for RawAdvertisement {
                 job_credits: value.capacity.job_credits,
                 log_protocol: value.capacity.log_protocol,
             },
+            placement: value.placement.map(|placement| RawPlacementCapacity {
+                memory_capacity_bytes: placement.memory_capacity_bytes.to_string(),
+                disk_capacity_bytes: placement.disk_capacity_bytes.to_string(),
+                active_cells: placement.active_cells,
+                max_active_cells: placement.max_active_cells,
+                running_jobs: placement.running_jobs,
+                job_capacity: placement.job_capacity,
+            }),
+            placement_version: (value.placement_version != 0).then_some(value.placement_version),
+            placement_signature: value
+                .placement_signature
+                .iter()
+                .any(|byte| *byte != 0)
+                .then(|| encode_hex(&value.placement_signature)),
         }
     }
 }
@@ -2109,6 +2365,17 @@ struct RawCapacity {
     follower_retained_bytes: String,
     job_credits: u32,
     log_protocol: u32,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawPlacementCapacity {
+    memory_capacity_bytes: String,
+    disk_capacity_bytes: String,
+    active_cells: u32,
+    max_active_cells: u32,
+    running_jobs: u32,
+    job_capacity: u32,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -2181,8 +2448,27 @@ impl TryFrom<RawAdvertisement> for NodeAdvertisement {
                 job_credits: value.capacity.job_credits,
                 log_protocol: value.capacity.log_protocol,
             },
+            placement: value
+                .placement
+                .map(|placement| {
+                    NodePlacementCapacity::new(
+                        canonical_u64(&placement.memory_capacity_bytes)?,
+                        canonical_u64(&placement.disk_capacity_bytes)?,
+                        placement.active_cells,
+                        placement.max_active_cells,
+                        placement.running_jobs,
+                        placement.job_capacity,
+                    )
+                })
+                .transpose()?,
             log: value.log.map(|log| decode_log(node, log)).transpose()?,
             signature: decode_hex(&value.identity.signature)?,
+            placement_version: value.placement_version.unwrap_or(0),
+            placement_signature: value
+                .placement_signature
+                .map(|signature| decode_hex(&signature))
+                .transpose()?
+                .unwrap_or([0; 64]),
         })
     }
 }

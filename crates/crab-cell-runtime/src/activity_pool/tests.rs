@@ -73,6 +73,21 @@ async fn handler_panic_isolated_from_next_job() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn completed_callback_releases_capacity_before_result_is_observed() {
+    let pool = BlockingActivityPool::new(1).unwrap();
+    let result = pool
+        .try_reserve()
+        .unwrap()
+        .unwrap()
+        .execute(completed(9))
+        .await
+        .unwrap();
+    assert_eq!(result, ActivityExecution::Completed(vec![9]));
+    assert!(pool.try_reserve().unwrap().is_some());
+    pool.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn shutdown_drains_submitted_callbacks_and_closes_admission() {
     let pool = BlockingActivityPool::new(1).unwrap();
     let reservation = pool.try_reserve().unwrap().unwrap();

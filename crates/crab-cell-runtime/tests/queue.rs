@@ -1,5 +1,7 @@
 use std::{sync::Arc, time::UNIX_EPOCH};
 
+mod support;
+
 use crab_cell_runtime::{
     ApplicationId, BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellCatalog,
     CellClient, CellModule, CellRuntime, CellTarget, Digest, IncarnationId, InvocationError,
@@ -546,7 +548,7 @@ fn retry_and_expired_reclaim_preserve_attempt_limits_and_cleanup_bounds() {
 }
 
 #[tokio::test]
-async fn typed_queue_namespace_publishes_validates_and_survives_restore() {
+async fn typed_queue_namespace_recovers_after_owner_loss() {
     let registry = queue_registry();
     let target = CellTarget::new(
         TenantId::from_bytes([1; 16]),
@@ -675,9 +677,10 @@ async fn typed_queue_namespace_publishes_validates_and_survives_restore() {
             .unwrap()
             .output
     );
-    handle.drain().await.unwrap();
-
-    let idle = authority.load(cell).await.unwrap().unwrap();
+    drop(queue);
+    drop(handle);
+    drop(runtime);
+    let stale = authority.load(cell).await.unwrap().unwrap();
     let second_session = SessionId::from_bytes([11; 16]);
     let runtime = CellRuntime::new(
         SqlWorkerPool::new(1, 10).unwrap(),
@@ -686,11 +689,16 @@ async fn typed_queue_namespace_publishes_validates_and_survives_restore() {
     )
     .unwrap();
     let restored = runtime
-        .acquire_idle_restored(
+        .takeover_restored(
             proof,
             replica,
-            authority,
-            idle,
+            authority.clone(),
+            stale,
+            support::fence_session(&layout, first_session, second_session)
+                .await
+                .direct_takeover()
+                .unwrap(),
+            crab_cell_runtime::RecoveryManifestStore::new(layout.clone(), Limits::default()),
             directory.path().join("second.sqlite"),
             Owner {
                 session: second_session,
@@ -729,4 +737,5 @@ async fn typed_queue_namespace_publishes_validates_and_survives_restore() {
         }
     );
     restored.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
 }

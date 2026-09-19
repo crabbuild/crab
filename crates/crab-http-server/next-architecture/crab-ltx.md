@@ -3,7 +3,7 @@
 [Design index](README.md) · Local/remote library and issue/comment/label/status/check/settings HTTP integration implemented.
 
 [crab-ltx](../../crab-ltx/README.md) now implements the embedded local SQLite
-WAL-to-LTX mechanics and optional `replica` transport/paged reads. The Cargo member contains a pinned, modified source
+WAL-to-LTX mechanics and optional canonical Cell-root transport. The Cargo member contains a pinned, modified source
 integration of `celld-ltx`, not a Git dependency or separate daemon.
 The HTTP server consumes it through `crab-cell-runtime`: repository issue,
 comment, label, commit-status, check-run, repository-policy, Pull and Release
@@ -20,10 +20,10 @@ performance and process/network fault qualification remain delivery work.
 | Snapshot | Full local snapshot plus ownership of every newly generated capture cut |
 | Restore | Explicit snapshot-plus-deltas plan; exact ranges/digests/checksums; owned verified bytes; new-file installation |
 | Compaction | Full snapshots and selected-body delta ranges; exact reduced bytes and replacement indexed state verified; bounded eight-input Cell level scheduling plus pressure-triggered full replacement |
-| Remote replication (`replica` feature) | Existing `crab-storage` transport; immutable LTX/index/manifest objects; conditional epoch-head publication |
-| Remote recovery/compaction | Pinned cross-epoch inheritance, exact restore/resume, bundle locations and compaction guarded by head CAS |
-| Paged SQL | Authenticated immutable views and writable sparse activation; incremental hydration, bounded range read-ahead |
-| Failure/retention | Capture failure fences the handle; fresh-directory reactivation; exact batch/head pruning reverifies local bytes before deleting and releasing admission accounting |
+| Cell root transport (`replica` feature) | Existing `crab-storage` transport; immutable Cell/incarnation-scoped LTX/index/directory/root objects; publication remains authority CAS |
+| Cell recovery/compaction | Pinned exact `RootRef` recovery, bundle overlays, and compaction guarded by Cell authority CAS |
+| Paged SQL | Authenticated `CellPagedDatabase` and `CellWritableDatabase`; incremental hydration, bounded range read-ahead |
+| Failure/retention | Capture failure fences the handle; fresh-directory reactivation; exact batch pruning reverifies local bytes before deleting and releasing admission accounting |
 | Host facilities | Injectable filesystem/base VFS/clock/executor; shared page-fault worker/cache and I/O/job/recovery/dirty concurrency budgets; one-MiB full-job scratch permits; temporary reservations follow cancelled jobs but are removed from returned long-lived handles |
 | Server wiring | All repository collaboration metadata, owner/control publication, scheduled owner-bound compaction, exact local-cut pruning, local/remote/idle/stale-owner routing, public HTTP response gating and source-loss restore are wired; immutable Release asset bodies remain object data by design |
 
@@ -32,41 +32,39 @@ Source and usage: [crate README](../../crab-ltx/README.md),
 [import inventory/notices](../../crab-ltx/UPSTREAM.md).
 Local proof includes real SQLite, process kill followed by source-directory loss,
 independent CRC/format vectors and exact snapshot/compaction comparison. It does
-not qualify the multi-node server. A separate real RustFS library round trip
-exercises upload/head publication, source loss, paged SQL and remote compaction.
+not qualify the multi-node server. A separate real RustFS Cell round trip
+exercises root preparation/publication, source loss, sparse SQL and compaction.
 
-### Remote library versus HTTP authority
+### Cell LTX library versus HTTP authority
 
-The optional `Replica` is an exact-plan orchestration layer, not a repository
-actor or lease service. It verifies new cuts against an authenticated predecessor
-page map (reused by live receipts, rebuilt from indexes after restart), uploads
-content-addressed LTX and authenticated page indexes, persists an immutable
-manifest, then conditionally changes a per-epoch head. `ReplicaHead::manifest_digest()`
-is the frozen recovery root; `open_exact()` reopens it without reading an
-unfenced mutable head. Errors and cancellation require exact-head reconciliation.
+`CellReplica` prepares exact immutable roots, not a repository actor or lease
+service. It verifies native or Cell-scoped bundle cuts against the authenticated
+predecessor directory, uploads content-addressed LTX/index/directory objects,
+and returns a `PreparedRoot`. `CellAuthority` alone binds that root to the
+owner, incarnation, sequence, and response durability.
 
 This does **not** replace the combined owner/head CAS in
 [storage-protocol.md](storage-protocol.md). The HTTP coordinator must pin/bind
-the immutable manifest digest to its own authoritative control record before
-releasing a response. Recovery uses that pinned root, never a former owner's
-mutable epoch head. There is no independent lease acquisition or remote GC.
+the prepared root to its own authoritative control record before releasing a
+response. Recovery uses that exact root, never local files or a mutable remote
+prefix. There is no independent lease acquisition or remote GC.
 
-The library now supports both immutable views and writable sparse activation.
-`PagedDatabase::open_writable` seeds the checksum index from authenticated page
-metadata and continues the inherited TXID without downloading the full database.
-`inherit` admits destination limits before I/O, verifies destination indexes and
-referenced object sizes, and publishes the pinned parent without reading bodies.
+The library supports authenticated Cell views and writable sparse activation.
+`CellWritableDatabase::open_writable` seeds the checksum index from the exact
+root and continues the inherited TXID without downloading the full database.
+`CellReplica::open_root` admits destination limits before I/O and validates the
+root graph without reading every body.
 Body corruption fails on authenticated page demand; full restore still verifies
 the complete chain. This requires trusted publication metadata and object retention.
 Foreground faults and owner-driven hydration share write/truncate bookkeeping;
 capture/snapshot reads also use the VFS. Each frame is BLAKE3/CRC verified.
 The existing full-restore server activation protocol remains a valid initial
 policy; selecting sparse activation still requires HTTP admission/output-gate wiring.
-See the [remote API, layout and limits](../../crab-ltx/README.md#object-store-replication-and-paged-sqlite).
+See the [Cell API, layout and limits](../../crab-ltx/README.md#object-store-cell-roots-and-sparse-sql).
 The [functional parity matrix](../../crab-ltx/PARITY.md) records the latest
 capabilities and intentional deviations from the pinned Celld implementation.
 
-The server can now supply one `Host` throughout local resume, replica recovery,
+The server can now supply one `Host` throughout local resume, Cell recovery,
 and sparse activation. Its filesystem and SQLite base VFS must share a namespace;
 the VFS registration must remain process-lifetime. The executor separates finite
 blocking jobs from independently progressing, joined page-fault workers. Do not
@@ -160,18 +158,18 @@ flowchart TB
 | LTX codec, file checksums, rolling database checksum | `crab-ltx` |
 | Apply an explicit verified segment plan to local scratch | `crab-ltx` |
 | Snapshot and compact a fixed database position | `crab-ltx` |
-| Exact epoch replica heads, immutable manifest roots, paged SQL | Optional `crab-ltx::Replica`; not HTTP ownership authority |
+| Exact Cell roots and paged SQL | `crab-ltx::CellReplica`; not HTTP ownership authority |
 | Issue/PR SQL, request deduplication, application revision | HTTP domain/database layer |
 | Generation, session, epoch, activation and route authority | HTTP AppCell/control layer |
 | Choose and publish recovery manifests; release response barrier | HTTP publication coordinator |
 | Provider credentials, conditional writes, immutable object transport | `crab-storage` through server composition |
 | Remote retention roots, collection authorization and scheduling | HTTP maintenance layer |
 
-The crate operates on local files and explicit recovery roots. It needs no HTTP server,
+The crate operates on local files and explicit Cell recovery roots. It needs no HTTP server,
 Git runtime, cloud credentials or repository catalog. It cannot return an HTTP
 success, change a lease, select an owner, or pick the latest remote generation.
-The server decides which recovery graph to fetch; `crab-ltx` verifies and applies
-the given graph's artifacts. The optional replica handles its named remote graph
+The server decides which recovery root graph to fetch; `crab-ltx` verifies and applies
+the given graph's artifacts. `CellReplica` handles its scoped immutable graph
 through `crab-storage`. Upload completion is a transport result,
 separate from the server's control-CAS publication proof.
 
@@ -191,13 +189,13 @@ All paths are relative to the pinned Celld repository.
 | `crates/ltx/src/compactor.rs`: `Compactor` | Reuse page merge and encoding against an explicit validated input set |
 | `replica.rs`: `restore_from_plan_with_download_slots` and local apply helpers | Reference only; Crab implements local apply/install in `recovery.rs`, without copying discovery or transport |
 | `host.rs`: `LtxHost`, `FileSystem` | Preserve useful filesystem/fault seams; connect blocking work to Crab's bounded executor |
-| `replica.rs`: `Replica::sync`, `Replica::pos` | Ordered upload adapted to verified chains, immutable roots and conditional epoch heads; not HTTP publication authority |
-| `client/mod.rs`: `ReplicaClient` | Existing `crab-storage` facade implements exact named transport; no listing or deletion in the recovery API |
+| `replica.rs`: upstream sync/position helpers | Adapted behind `CellReplica` for verified chains and immutable Cell roots; not HTTP publication authority |
+| `client/mod.rs`: upstream client | Existing `crab-storage` facade implements exact named transport; no listing or deletion in the recovery API |
 | `client/object_store.rs`, `replica_url.rs` | Omit provider construction; Crab already owns storage and credentials |
-| `replica_compactor.rs`, `compaction_level.rs` | Verified range/full compaction with head CAS and bounded monotonic scheduling; inputs retained |
-| `paged.rs`, `paged_vfs.rs` | Authenticated immutable and writable sparse VFS, hydration and bounded verified read-ahead |
-| `client/epochs.rs` | Explicit pinned parent and flattened origin locations; no listing-based authority |
-| `bundle.rs`, `client/bundle.rs` | Checked CRB1 envelope and manifest-selected bundle ranges; no fallback after arbitrary transport errors |
+| `replica_compactor.rs`, `compaction_level.rs` | Verified range/full Cell compaction with authority CAS and bounded runtime scheduling; inputs retained |
+| `paged.rs`, upstream `paged_vfs.rs` adaptation in `writable_vfs.rs` | Private authenticated index/frame helpers behind Cell sparse VFS, hydration and bounded verified read-ahead; the standalone read-only VFS was removed |
+| `client/epochs.rs` | Exact Cell root references and flattened object locations; no listing-based authority |
+| `bundle.rs`, `client/bundle.rs` | Checked CRB1 envelope and Cell-scoped bundle ranges; no fallback after arbitrary transport errors |
 | Celld node-log integration | Outside the LTX library and Crab's bucket-published durability contract |
 
 Source entry points: [Db](https://github.com/denoland/celld/blob/10cb1303dac710dcb3b557e318e08c855261f68b/crates/ltx/src/db.rs),
@@ -253,8 +251,9 @@ resource admission must budget all of them.
 7. On drain, settle accepted publication, close the application connection and
    managed capture handles, then release the owner through the server coordinator.
 
-`Db::sync()` is synchronous capture and checkpoint work. `Replica::sync()` is
-asynchronous upload work. Neither means that Crab's manifest head has published.
+`Db::sync()` is synchronous capture and checkpoint work. `CellReplica::prepare`
+is asynchronous immutable-root work. Neither means that Cell authority has
+published.
 Celld's host calls into this machinery from its own replication runtime; see
 [the host integration](https://github.com/denoland/celld/blob/10cb1303dac710dcb3b557e318e08c855261f68b/crates/celld/ltx_repl.rs).
 
@@ -288,8 +287,8 @@ There are three different checksums/identities:
 | Rolling page checksum | Database page state before/after applying a captured cut |
 
 Upstream normal L0 capture sets `HEADER_FLAG_NO_CHECKSUM` and emits a zero
-post-apply checksum. `Replica::sync()` can also advance its position with a zero
-checksum. Those positions are unsuitable as Crab's `database_checksum` proof.
+post-apply checksum. Those positions are unsuitable as Crab's
+`database_checksum` proof and are rejected by the Cell preparation contract.
 This is visible in [capture encoding](https://github.com/denoland/celld/blob/10cb1303dac710dcb3b557e318e08c855261f68b/crates/ltx/src/db.rs#L1447-L1531)
 and [upload position handling](https://github.com/denoland/celld/blob/10cb1303dac710dcb3b557e318e08c855261f68b/crates/ltx/src/replica.rs#L211-L252).
 
@@ -457,21 +456,20 @@ did not start and lets the runtime return capacity without fencing. These are
 not RSS quotas;
 `Host::with_scratch_monitor` also lets the server remeasure actual free space
 after weighted full-job admission and before remote body downloads.
-standalone plan verification/compaction retains input buffers, while Cell
-compaction uses bounded memory plus local scratch. Aggregate capture accounting
+Local plan verification retains input buffers, while Cell compaction uses bounded
+memory plus local scratch. Aggregate capture accounting
 can fail after local files have been installed. Reserve headroom.
 The Cell checksum index is disk-backed and its ordinary capture path is
 O(changed pages); truncation must additionally read the removed checksum suffix.
-Standalone local capture still uses an in-memory dense base. Oversized cells
-receive a clear capacity failure. Cell restore and compaction streaming are
+Local capture still uses an in-memory dense base. Oversized cells receive a clear
+capacity failure. Cell restore and compaction streaming are
 implemented; measured 5 GB/low-disk qualification remains follow-up evidence,
 not an assumed property.
 
 ## Compaction and cleanup
 
-The standalone API uses the upstream-derived compactor on a verified snapshot
-chain or exact contiguous delta span. `CellReplica::prepare_compaction` instead
-acquires recovery admission, range-fetches and verifies every authenticated
+`CellReplica::prepare_compaction` acquires recovery admission, range-fetches and
+verifies every authenticated
 index into caller-owned scratch, then externally merges one cursor per segment.
 It streams every selected LTX range through its manifest BLAKE3, fetches selected
 immutable frames in adjacent runs capped at 1 MiB, verifies frame and page
@@ -481,21 +479,22 @@ rebuilds the final radix directory from original and replacement sidecars and
 returns a representation-only `PreparedRoot`. The server publishes that root
 with the unchanged application revision through the normal authority CAS; a
 failed CAS leaves orphan immutable objects, not permission to delete inputs.
-The optional standalone `Replica::compact` still implements its own upload and
-epoch-head CAS. Neither API turns the standalone epoch head into HTTP authority.
 
 Keep remote deletion out of the first crate API. Upstream `ReplicaClient`
 includes listing, `delete_ltx_files` and `delete_all`; importing that entire
 trait into production would expose capabilities the restore/capture caller does
 not need. Server-side retention owns remote pins and deletion scope.
 
-`ManagedDb::prune_published` removes only exact local artifacts named in a
-published `ReplicaHead`, restoring local retention admission. Prune before
-remote compaction removes those exact descriptors. In-flight cuts remain retained;
-the managed cursor owns its WAL continuity proof independently of removed files.
-Release of one publication pin does not mean
+`ManagedDb::prune_captured` removes only exact local artifacts named in an
+acknowledged Cell capture batch, restoring local retention admission. In-flight
+cuts remain retained; the managed cursor owns its WAL continuity proof
+independently of removed files. Release of one publication pin does not mean
 every segment can be deleted. Close all handles before removing a retired
-activation's scratch, and scope removal to that activation's validated directory.
+activation’s scratch, and scope removal to that activation’s validated directory.
+
+The former standalone compactor and epoch-head CAS were deleted with the
+standalone API. They are retained here only as upstream provenance, not as
+callable Crab surfaces.
 
 ## Errors, cancellation, and observability
 

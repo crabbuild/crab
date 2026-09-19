@@ -9,7 +9,7 @@ use prost::Message;
 
 use crate::{
     CellDescription, CellId, CellTarget, Digest, EffectClaim, Error, IncarnationId, MigrationPlan,
-    MutationIdentity, Receipt, Resolution, Result, StoredOutcome,
+    MutationIdentity, NodeAdvertisement, Receipt, Resolution, Result, StoredOutcome,
     client::{CellTransport, EncodedCommand, EncodedObservation, EncodedQuery, EncodedResolve},
 };
 
@@ -25,6 +25,22 @@ pub trait PeerRoundTrip: Send + Sync + 'static {
         request: Vec<u8>,
         remaining_ms: u32,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'static>>;
+
+    /// Sends one already-authenticated request to a live enrolled node.
+    ///
+    /// This is an activation hint, not an ownership operation. The receiving
+    /// node must still acquire the Cell through the normal authority CAS before
+    /// it can serve the request. Implementations that only route through the
+    /// current owner may keep the default fail-closed behavior.
+    fn send_to_node(
+        &self,
+        _target: CellTarget,
+        _node: NodeAdvertisement,
+        _request: Vec<u8>,
+        _remaining_ms: u32,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'static>> {
+        Box::pin(async { Err(Error::Peer("direct node activation is unavailable")) })
+    }
 }
 
 pub(crate) struct PeerClientTransport {

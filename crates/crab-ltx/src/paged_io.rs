@@ -1,6 +1,6 @@
 //! Shared, bounded bridge between blocking SQLite calls and asynchronous stores.
 
-use crate::{CellWritableDatabase, CrabError, PagedDatabase, Result};
+use crate::{CellWritableDatabase, CrabError, Result};
 use std::{
     cell::Cell,
     collections::{HashMap, VecDeque},
@@ -46,56 +46,48 @@ fn deadline() -> Instant {
 
 #[derive(Clone)]
 pub(crate) enum Database {
-    Replica(PagedDatabase),
     Cell(CellWritableDatabase),
 }
 
 impl Database {
     pub(crate) fn host(&self) -> crate::Host {
         match self {
-            Self::Replica(database) => database.host(),
             Self::Cell(database) => database.host(),
         }
     }
 
     pub(crate) fn limits(&self) -> crate::Limits {
         match self {
-            Self::Replica(database) => database.limits(),
             Self::Cell(database) => database.limits(),
         }
     }
 
     pub(crate) fn page_size(&self) -> u32 {
         match self {
-            Self::Replica(database) => database.page_size(),
             Self::Cell(database) => database.page_size(),
         }
     }
 
     pub(crate) fn page_count(&self) -> u32 {
         match self {
-            Self::Replica(database) => database.page_count(),
             Self::Cell(database) => database.page_count(),
         }
     }
 
     pub(crate) fn position(&self) -> crate::Position {
         match self {
-            Self::Replica(database) => database.position(),
             Self::Cell(database) => database.position(),
         }
     }
 
     pub(crate) fn checksums(&self) -> Result<crate::pages::PageChecksums> {
         match self {
-            Self::Replica(database) => database.checksums(),
             Self::Cell(database) => Ok(database.checksums()),
         }
     }
 
     async fn read_run(&self, first: u32, max_pages: u32) -> Result<Pages> {
         match self {
-            Self::Replica(database) => database.read_run(first, max_pages).await,
             Self::Cell(database) => database.read_run(first, max_pages).await,
         }
     }

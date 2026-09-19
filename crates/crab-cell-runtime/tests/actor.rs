@@ -8,13 +8,18 @@ use std::{
 };
 
 use bytes::Bytes;
+#[cfg(feature = "process-test-support")]
+#[path = "../src/process_store.rs"]
+mod process_store;
+
 use crab_cell_runtime::{
-    AppendRequest, ApplicationId, CatalogEntry, CatalogRole, CellAuthority, CellRuntime,
-    CellTarget, ControlState, Digest, DiskBudget, DurabilityGate, FollowerReceipt, HandlerOutcome,
-    InboxDelivery, IncarnationId, MutationIdentity, NamespaceId, NodeDurability, NodeId,
-    NodeLeaseGuard, NodeLogAuthority, NodeLogRotationBarrier, NodeLogShipper, NodeLogTransport,
-    Owner, ReplicaHost, RequestId, Resolution, RetireRequest, SealRequest, SessionId,
-    SqlWorkerPool, StoredOutcome, TailRequest, TenantId, Transition,
+    ACTIVE_CELL_FILE_DESCRIPTORS, AppendRequest, ApplicationId, CatalogEntry, CatalogRole,
+    CellAuthority, CellRuntime, CellTarget, ControlState, Digest, DiskBudget, DurabilityGate,
+    FollowerReceipt, HandlerOutcome, InboxDelivery, IncarnationId, MutationIdentity, NamespaceId,
+    NodeDurability, NodeId, NodeLeaseGuard, NodeLogAuthority, NodeLogRotationBarrier,
+    NodeLogShipper, NodeLogTransport, Owner, PressureSample, PressureState, ReplicaHost, RequestId,
+    Resolution, RetireRequest, SealRequest, SessionId, SqlWorkerPool, StoredOutcome, TailRequest,
+    TenantId, Transition, install_queue_schema, install_workflow_schema,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{
@@ -35,8 +40,13 @@ struct PausingStore {
     failed: AtomicBool,
     blocked: AtomicBool,
     released: AtomicBool,
+    get_armed: AtomicBool,
+    get_blocked: AtomicBool,
+    get_released: AtomicBool,
     entered: Notify,
     release: Notify,
+    get_entered: Notify,
+    get_release: Notify,
     parallel_catalog_heads: AtomicBool,
     catalog_head_barrier: tokio::sync::Barrier,
 }
@@ -50,8 +60,13 @@ impl PausingStore {
             failed: AtomicBool::new(false),
             blocked: AtomicBool::new(false),
             released: AtomicBool::new(false),
+            get_armed: AtomicBool::new(false),
+            get_blocked: AtomicBool::new(false),
+            get_released: AtomicBool::new(false),
             entered: Notify::new(),
             release: Notify::new(),
+            get_entered: Notify::new(),
+            get_release: Notify::new(),
             parallel_catalog_heads: AtomicBool::new(false),
             catalog_head_barrier: tokio::sync::Barrier::new(2),
         }
@@ -88,6 +103,21 @@ impl PausingStore {
     fn release(&self) {
         self.released.store(true, Ordering::Release);
         self.release.notify_waiters();
+    }
+
+    fn arm_gets(&self) {
+        self.get_armed.store(true, Ordering::Release);
+    }
+
+    async fn wait_until_get_blocked(&self) {
+        while !self.get_blocked.load(Ordering::Acquire) {
+            self.get_entered.notified().await;
+        }
+    }
+
+    fn release_gets(&self) {
+        self.get_released.store(true, Ordering::Release);
+        self.get_release.notify_waiters();
     }
 }
 
@@ -138,6 +168,13 @@ impl ObjectStore for PausingStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
+        if self.get_armed.load(Ordering::Acquire) && !self.get_blocked.swap(true, Ordering::AcqRel)
+        {
+            self.get_entered.notify_waiters();
+            while !self.get_released.load(Ordering::Acquire) {
+                self.get_release.notified().await;
+            }
+        }
         if self.parallel_catalog_heads.load(Ordering::Acquire)
             && location.as_ref().ends_with("/head.json")
         {
@@ -518,6 +555,15 @@ fn fixture_with_limits(partition: &[u8], limits: Limits) -> Fixture {
 }
 
 fn fixture_with_limits_and_store(partition: &[u8], limits: Limits, store: Store) -> Fixture {
+    fixture_with_limits_and_store_at_prefix(partition, limits, store, Path::from("runtime"))
+}
+
+fn fixture_with_limits_and_store_at_prefix(
+    partition: &[u8],
+    limits: Limits,
+    store: Store,
+    prefix: Path,
+) -> Fixture {
     let target = CellTarget::new(
         TenantId::from_bytes([1; 16]),
         ApplicationId::from_bytes([3; 16]),
@@ -527,7 +573,7 @@ fn fixture_with_limits_and_store(partition: &[u8], limits: Limits, store: Store)
     .unwrap();
     let cell = target.cell_id();
     let incarnation = IncarnationId::from_bytes([2; 16]);
-    let layout = CellStorageLayout::new(store, Path::from("runtime"), [3; 16]);
+    let layout = CellStorageLayout::new(store, prefix, [3; 16]);
     let replica = CellReplica::new(
         layout.clone(),
         *cell.as_bytes(),
@@ -544,6 +590,12 @@ fn fixture_with_limits_and_store(partition: &[u8], limits: Limits, store: Store)
         layout,
         replica,
     }
+}
+
+#[cfg(feature = "process-test-support")]
+fn filesystem_fixture(partition: &[u8], root: &std::path::Path) -> Fixture {
+    let store = process_store::FilesystemCasStore::new(root).unwrap();
+    fixture_with_limits_and_store(partition, Limits::default(), Store::new(Arc::new(store)))
 }
 
 async fn activate(fixture: &Fixture, node_bytes: usize) -> crab_cell_runtime::CellHandle {
@@ -578,6 +630,11 @@ async fn node_byte_reservation_rejects_overcommit_and_releases_capacity() {
     let full = runtime.stats();
     assert_eq!(full.active_cells(), 0);
     assert_eq!(full.active_cell_capacity(), 1);
+    assert_eq!(full.file_descriptors(), 0);
+    assert_eq!(
+        full.file_descriptor_capacity(),
+        ACTIVE_CELL_FILE_DESCRIPTORS
+    );
     assert_eq!(full.retained_bytes(), 1_024);
     assert_eq!(full.retained_capacity_bytes(), 1_024);
     assert_eq!(full.local_disk_reserved_bytes(), 512);
@@ -590,11 +647,45 @@ async fn node_byte_reservation_rejects_overcommit_and_releases_capacity() {
     drop(held);
     drop(disk);
     let empty = runtime.stats();
+    assert_eq!(empty.file_descriptors(), 0);
+    assert_eq!(
+        empty.file_descriptor_capacity(),
+        ACTIVE_CELL_FILE_DESCRIPTORS
+    );
     assert_eq!(empty.retained_bytes(), 0);
     assert_eq!(empty.local_disk_reserved_bytes(), 0);
     let released = runtime.try_reserve_node_bytes(1_024).unwrap();
     drop(released);
 
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn actor_pressure_observation_uses_hysteresis_and_shared_eviction_path() {
+    let session = SessionId::from_bytes([41; 16]);
+    let runtime = CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 1_024, session).unwrap();
+    let high = PressureSample {
+        at_ms: 0,
+        memory_used_permille: 900,
+        disk_used_permille: 100,
+        jobs_used_permille: 100,
+        stale: false,
+    };
+    assert_eq!(
+        runtime.observe_pressure(high).await.unwrap(),
+        PressureState::Normal
+    );
+    assert_eq!(
+        runtime
+            .observe_pressure(PressureSample {
+                at_ms: 1_000,
+                ..high
+            })
+            .await
+            .unwrap(),
+        PressureState::Shedding
+    );
+    assert_eq!(runtime.evict_idle(1).await.unwrap(), 0);
     runtime.shutdown().await.unwrap();
 }
 
@@ -1293,9 +1384,1099 @@ async fn runtime_stats_follow_active_cell_lifecycle() {
     let (runtime, handle, _pool) = activate_runtime(&fixture, 2 * 1024 * 1024).await;
 
     assert_eq!(runtime.stats().active_cells(), 1);
+    assert_eq!(
+        runtime.stats().resident_bytes(),
+        crab_cell_runtime::ACTIVE_CELL_NATIVE_BYTES as usize
+    );
+    assert_eq!(
+        runtime.stats().resident_capacity_bytes(),
+        10 * crab_cell_runtime::ACTIVE_CELL_NATIVE_BYTES as usize
+    );
+    assert_eq!(
+        runtime.stats().file_descriptors(),
+        ACTIVE_CELL_FILE_DESCRIPTORS
+    );
+    assert_eq!(
+        runtime.stats().file_descriptor_capacity(),
+        10 * ACTIVE_CELL_FILE_DESCRIPTORS
+    );
+    handle.drain().await.unwrap();
+    assert_eq!(runtime.stats().active_cells(), 0);
+    assert_eq!(runtime.stats().resident_bytes(), 0);
+    assert_eq!(runtime.stats().file_descriptors(), 0);
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn resident_lookup_is_invalidated_before_drain_releases_the_cell() {
+    let fixture = fixture_for(b"resident-drain-race");
+    let (runtime, handle, _pool) = activate_runtime(&fixture, 2 * 1024 * 1024).await;
+
+    assert!(
+        runtime
+            .resident_handle(&fixture.target, CatalogRole::Repository)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    handle.drain().await.unwrap();
+
+    assert!(
+        runtime
+            .resident_handle(&fixture.target, CatalogRole::Repository)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resident_route_reports_zero_origin_reads_and_latency_percentiles() {
+    let origin_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_reads = Arc::clone(&origin_reads);
+    let store =
+        Store::new(Arc::new(InMemory::new())).with_read_request_observer(Arc::new(move |_kind| {
+            observed_reads.fetch_add(1, Ordering::AcqRel);
+        }));
+    let fixture =
+        fixture_with_limits_and_store(b"resident-warm-qualification", Limits::default(), store);
+    let (runtime, handle, _pool) = activate_runtime(&fixture, 2 * 1024 * 1024).await;
+    origin_reads.store(0, Ordering::Release);
+
+    let mut samples = Vec::with_capacity(64);
+    for _ in 0..64 {
+        let started = std::time::Instant::now();
+        let resident = runtime
+            .resident_handle(&fixture.target, CatalogRole::Repository)
+            .await
+            .unwrap()
+            .expect("bootstrapped Cell must remain resident");
+        let value = resident
+            .query(64, 64, |connection| {
+                let value = connection
+                    .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+                Ok(value.to_be_bytes().to_vec())
+            })
+            .await
+            .unwrap();
+        assert_eq!(i64::from_be_bytes(value.try_into().unwrap()), 0);
+        samples.push(started.elapsed());
+    }
+
+    samples.sort_unstable();
+    let percentile = |percent: usize| {
+        let index = ((samples.len() - 1) * percent).div_ceil(100);
+        samples[index]
+    };
+    println!(
+        "resident warm route: samples={} p50_us={} p95_us={} p99_us={} max_us={}",
+        samples.len(),
+        percentile(50).as_micros(),
+        percentile(95).as_micros(),
+        percentile(99).as_micros(),
+        samples.last().unwrap().as_micros()
+    );
+    assert_eq!(origin_reads.load(Ordering::Acquire), 0);
+
+    handle.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restored_sparse_route_promotes_before_zero_origin_reads() {
+    let origin_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_reads = Arc::clone(&origin_reads);
+    let store =
+        Store::new(Arc::new(InMemory::new())).with_read_request_observer(Arc::new(move |_kind| {
+            observed_reads.fetch_add(1, Ordering::AcqRel);
+        }));
+    let fixture = fixture_with_limits_and_store(
+        b"resident-warm-restart-qualification",
+        Limits::default(),
+        store,
+    );
+    let session = SessionId::from_bytes([110; 16]);
+    let first_runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024, session).unwrap();
+    let handle = bootstrap_on(&first_runtime, &fixture, session).await;
+    handle.drain().await.unwrap();
+    first_runtime.shutdown().await.unwrap();
+
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let idle = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let successor = SessionId::from_bytes([111; 16]);
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        16 * 1024 * 1024,
+        successor,
+    )
+    .unwrap();
+    let restored = runtime
+        .acquire_idle_restored(
+            proof,
+            fixture.replica.clone(),
+            authority,
+            idle,
+            fixture._directory.path().join("warm-restart.sqlite"),
+            Owner {
+                session: successor,
+                endpoint: "https://warm-restart.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if runtime
+                .resident_handle(&fixture.target, CatalogRole::Repository)
+                .await
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    origin_reads.store(0, Ordering::Release);
+
+    let resident = runtime
+        .resident_handle(&fixture.target, CatalogRole::Repository)
+        .await
+        .unwrap()
+        .expect("verified sparse restore must promote to resident");
+    let value = resident
+        .query(64, 64, |connection| {
+            let value = connection
+                .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+            Ok(value.to_be_bytes().to_vec())
+        })
+        .await
+        .unwrap();
+    assert_eq!(i64::from_be_bytes(value.try_into().unwrap()), 0);
+    assert_eq!(origin_reads.load(Ordering::Acquire), 0);
+
+    restored.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_releases_a_hydration_reservation_after_an_origin_wait() {
+    let pausing = Arc::new(PausingStore::new(Arc::new(InMemory::new())));
+    let fixture = fixture_with_limits_and_store(
+        b"hydration-shutdown-cancellation",
+        Limits::default(),
+        Store::new(pausing.clone()),
+    );
+    let first_session = SessionId::from_bytes([113; 16]);
+    let first_runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        64 * 1024 * 1024,
+        first_session,
+    )
+    .unwrap();
+    let handle = bootstrap_role_on(
+        &first_runtime,
+        &fixture,
+        first_session,
+        CatalogRole::Repository,
+        |transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE payload(value BLOB NOT NULL);\
+                 WITH RECURSIVE numbers(value) AS (\
+                   SELECT 1 UNION ALL SELECT value + 1 FROM numbers WHERE value < 512\
+                 )\
+                 INSERT INTO payload(value) SELECT zeroblob(16384) FROM numbers;",
+            )?;
+            Ok(())
+        },
+    )
+    .await;
+    handle.drain().await.unwrap();
+    first_runtime.shutdown().await.unwrap();
+
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let observed = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let successor = SessionId::from_bytes([114; 16]);
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        64 * 1024 * 1024,
+        successor,
+    )
+    .unwrap();
+    let restored = runtime
+        .acquire_idle_restored(
+            proof,
+            fixture.replica.clone(),
+            authority,
+            observed,
+            fixture._directory.path().join("hydration-shutdown.sqlite"),
+            Owner {
+                session: successor,
+                endpoint: "https://hydration-shutdown.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    pausing.arm_gets();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        pausing.wait_until_get_blocked(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(runtime.stats().hydration_jobs(), 1);
+
+    let shutdown_runtime = runtime.clone();
+    let shutdown = tokio::spawn(async move { shutdown_runtime.shutdown().await });
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    pausing.release_gets();
+    shutdown.await.unwrap().unwrap();
+    assert_eq!(runtime.stats().hydration_jobs(), 0);
+    drop(restored);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_idle_receiver_does_not_leave_authority_owned() {
+    let fixture = fixture_for(b"receiver-activation-failure");
+    let session = SessionId::from_bytes([112; 16]);
+    let first_runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024, session).unwrap();
+    let handle = bootstrap_on(&first_runtime, &fixture, session).await;
+    handle.drain().await.unwrap();
+    first_runtime.shutdown().await.unwrap();
+
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let idle = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let expected_root = idle.value().root.clone();
+    let successor = SessionId::from_bytes([113; 16]);
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        16 * 1024 * 1024,
+        successor,
+    )
+    .unwrap();
+    let missing_parent = fixture
+        ._directory
+        .path()
+        .join("receiver-parent-does-not-exist")
+        .join("receiver.sqlite");
+    assert!(
+        runtime
+            .acquire_idle_restored(
+                proof,
+                fixture.replica.clone(),
+                authority.clone(),
+                idle,
+                missing_parent,
+                Owner {
+                    session: successor,
+                    endpoint: "https://receiver-failure.internal:8081".into(),
+                },
+            )
+            .await
+            .is_err()
+    );
+
+    let current = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.value().state, ControlState::Idle);
+    assert!(current.value().owner.is_none());
+    assert_eq!(current.value().root, expected_root);
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn churn_evicts_idle_cells_and_restores_exact_roots() {
+    let first = fixture_for(b"churn-first");
+    let second = fixture_for(b"churn-second");
+    let third = fixture_for(b"churn-third");
+    let session = SessionId::from_bytes([74; 16]);
+    let runtime = CellRuntime::new_with_replica_host(
+        SqlWorkerPool::new(1, 2).unwrap(),
+        16 * 1024 * 1024,
+        session,
+        ReplicaHost::default().with_local_disk_budget(DiskBudget::new(64 * 1024 * 1024)),
+    )
+    .unwrap();
+
+    let first_handle = bootstrap_on(&runtime, &first, session).await;
+    let second_handle = bootstrap_on(&runtime, &second, session).await;
+
+    let authority_first = CellAuthority::new(first.layout.clone());
+    let authority_second = CellAuthority::new(second.layout.clone());
+    let root_first = authority_first
+        .load(first.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap()
+        .value()
+        .ltx_root()
+        .unwrap();
+    let root_second = authority_second
+        .load(second.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap()
+        .value()
+        .ltx_root()
+        .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if runtime.evict_idle(1).await.unwrap() == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let (evicted_fixture, evicted_authority, evicted_root, evicted_idle) =
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let first_control = authority_first
+                    .load(first.target.cell_id())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if first_control.value().state == ControlState::Idle {
+                    break (&first, &authority_first, root_first, first_control);
+                }
+                let second_control = authority_second
+                    .load(second.target.cell_id())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if second_control.value().state == ControlState::Idle {
+                    break (&second, &authority_second, root_second, second_control);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(evicted_idle.value().ltx_root(), Some(evicted_root));
+    assert_eq!(runtime.stats().active_cells(), 1);
+
+    let catalog = crab_cell_runtime::CellCatalog::new(
+        evicted_fixture.layout.clone(),
+        evicted_fixture.target.tenant(),
+    );
+    let proof = catalog
+        .lookup(evicted_fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let restored = runtime
+        .acquire_idle_restored(
+            proof,
+            evicted_fixture.replica.clone(),
+            evicted_authority.clone(),
+            evicted_idle,
+            evicted_fixture
+                ._directory
+                .path()
+                .join("churn-restored.sqlite"),
+            Owner {
+                session,
+                endpoint: "https://churn-successor.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        restored
+            .query(64, 64, |connection| {
+                let value = connection
+                    .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+                Ok(value.to_be_bytes().to_vec())
+            })
+            .await
+            .unwrap(),
+        0_i64.to_be_bytes()
+    );
+    restored.drain().await.unwrap();
+
+    let third_handle = bootstrap_on(&runtime, &third, session).await;
+    assert_eq!(runtime.stats().active_cells(), 2);
+    third_handle.drain().await.unwrap();
+    if evicted_fixture.target.cell_id() == first.target.cell_id() {
+        second_handle.drain().await.unwrap();
+    } else {
+        first_handle.drain().await.unwrap();
+    }
+    assert_eq!(runtime.stats().active_cells(), 0);
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn persisted_work_blocks_idle_eviction_until_explicit_release() {
+    let fixture = fixture_for(b"eviction-persisted-work");
+    let session = SessionId::from_bytes([78; 16]);
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 * 1024 * 1024, session).unwrap();
+    let handle = bootstrap_on(&runtime, &fixture, session).await;
+    assert!(matches!(
+        handle
+            .execute(
+                identity(79),
+                Digest::from_bytes([79; 32]),
+                20,
+                64,
+                64,
+                |transaction| {
+                    transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                    Ok(HandlerOutcome::Success(Vec::new()))
+                },
+            )
+            .await
+            .unwrap(),
+        StoredOutcome::Success {
+            commit_sequence: 1,
+            ..
+        }
+    ));
+
+    assert_eq!(runtime.evict_idle(1).await.unwrap(), 0);
+    assert_eq!(runtime.stats().active_cells(), 1);
+
     handle.drain().await.unwrap();
     assert_eq!(runtime.stats().active_cells(), 0);
     runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mixed_primitive_inventory_blocks_churn_until_drain_and_restores_root() {
+    mixed_primitive_inventory_churn(Store::new(Arc::new(InMemory::new())), Path::from("runtime"))
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires an isolated pre-created RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_mixed_primitive_inventory_churn_preserves_exact_roots() {
+    let required = |name| std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
+    let store = build_explicit_store(
+        &required("CRAB_CELL_TEST_BUCKET"),
+        ObjectStoreCredentials::Aws {
+            access_key_id: required("AWS_ACCESS_KEY_ID"),
+            secret_access_key: required("AWS_SECRET_ACCESS_KEY"),
+            session_token: None,
+            region: "us-east-1".into(),
+        },
+        Some(&required("CRAB_CELL_TEST_ENDPOINT")),
+        true,
+    )
+    .unwrap();
+    let prefix = Path::from(format!(
+        "{}/mixed-primitive-churn",
+        required("CRAB_CELL_TEST_PREFIX")
+    ));
+    mixed_primitive_inventory_churn(store, prefix).await;
+}
+
+async fn mixed_primitive_inventory_churn(store: Store, prefix: Path) {
+    let queue = fixture_with_limits_and_store_at_prefix(
+        b"mixed-queue",
+        Limits::default(),
+        store.clone(),
+        prefix.clone(),
+    );
+    let workflow = fixture_with_limits_and_store_at_prefix(
+        b"mixed-workflow",
+        Limits::default(),
+        store.clone(),
+        prefix.clone(),
+    );
+    let third =
+        fixture_with_limits_and_store_at_prefix(b"mixed-third", Limits::default(), store, prefix);
+    let session = SessionId::from_bytes([80; 16]);
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 2).unwrap(), 16 * 1024 * 1024, session).unwrap();
+
+    let queue_handle = bootstrap_role_on(
+        &runtime,
+        &queue,
+        session,
+        CatalogRole::Queue,
+        |transaction| {
+            install_queue_schema(transaction)?;
+            transaction.execute(
+                "INSERT INTO queue_messages VALUES (zeroblob(16), X'01', 0, 0, 1, 1000, NULL, NULL, NULL, NULL)",
+                [],
+            )?;
+            Ok(())
+        },
+    )
+    .await;
+    let workflow_handle = bootstrap_role_on(
+        &runtime,
+        &workflow,
+        session,
+        CatalogRole::Workflow,
+        |transaction| {
+            install_workflow_schema(transaction)?;
+            transaction.execute(
+                "INSERT INTO workflow_runs VALUES (X'02', zeroblob(16), zeroblob(32), 0, X'', 0, NULL, NULL)",
+                [],
+            )?;
+            Ok(())
+        },
+    )
+    .await;
+
+    wait_for_persisted_work(
+        &queue_handle,
+        CatalogRole::Queue,
+        "maintenance release is blocked by retained Queue messages",
+    )
+    .await;
+    wait_for_persisted_work(
+        &workflow_handle,
+        CatalogRole::Workflow,
+        "maintenance release is blocked by retained Workflow runs",
+    )
+    .await;
+
+    assert_eq!(runtime.evict_idle(2).await.unwrap(), 0);
+    assert_eq!(runtime.stats().active_cells(), 2);
+
+    let queue_authority = CellAuthority::new(queue.layout.clone());
+    let queue_root = queue_authority
+        .load(queue.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let queue_root = queue_root.value().ltx_root().unwrap();
+
+    queue_handle.drain().await.unwrap();
+    workflow_handle.drain().await.unwrap();
+    assert_eq!(runtime.stats().active_cells(), 0);
+    let queue_idle = queue_authority
+        .load(queue.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let queue_proof =
+        crab_cell_runtime::CellCatalog::new(queue.layout.clone(), queue.target.tenant())
+            .lookup(queue.target.cell_id())
+            .await
+            .unwrap()
+            .unwrap();
+    let restored = runtime
+        .acquire_idle_restored(
+            queue_proof,
+            queue.replica.clone(),
+            queue_authority,
+            queue_idle,
+            queue._directory.path().join("mixed-queue-restored.sqlite"),
+            Owner {
+                session,
+                endpoint: "https://mixed-successor.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        restored
+            .query(64, 64, |connection| {
+                let count =
+                    connection.query_row("SELECT count(*) FROM queue_messages", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?;
+                Ok(count.to_be_bytes().to_vec())
+            })
+            .await
+            .unwrap(),
+        1_i64.to_be_bytes()
+    );
+    assert_eq!(
+        crab_cell_runtime::CellAuthority::new(queue.layout.clone())
+            .load(queue.target.cell_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .value()
+            .ltx_root(),
+        Some(queue_root)
+    );
+    restored.drain().await.unwrap();
+
+    let third_handle = bootstrap_on(&runtime, &third, session).await;
+    assert_eq!(runtime.stats().active_cells(), 1);
+    third_handle.drain().await.unwrap();
+    assert_eq!(runtime.stats().active_cells(), 0);
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn released_cell_is_acquired_by_one_successor_runtime() {
+    let fixture = fixture_for(b"successor-runtime-movement");
+    let first_session = SessionId::from_bytes([81; 16]);
+    let second_session = SessionId::from_bytes([82; 16]);
+    let first_runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        8 * 1024 * 1024,
+        first_session,
+    )
+    .unwrap();
+    let handle = bootstrap_on(&first_runtime, &fixture, first_session).await;
+    handle.drain().await.unwrap();
+    assert_eq!(first_runtime.stats().active_cells(), 0);
+
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let idle = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(idle.value().state, ControlState::Idle);
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let second_runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        8 * 1024 * 1024,
+        second_session,
+    )
+    .unwrap();
+    let successor = second_runtime
+        .acquire_idle_restored(
+            proof,
+            fixture.replica.clone(),
+            authority.clone(),
+            idle,
+            fixture._directory.path().join("successor.sqlite"),
+            Owner {
+                session: second_session,
+                endpoint: "https://successor.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(first_runtime.stats().active_cells(), 0);
+    assert_eq!(second_runtime.stats().active_cells(), 1);
+    assert_eq!(
+        authority
+            .load(fixture.target.cell_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .value()
+            .owner
+            .as_ref()
+            .map(|owner| owner.session),
+        Some(second_session)
+    );
+
+    successor.drain().await.unwrap();
+    assert_eq!(second_runtime.stats().active_cells(), 0);
+    second_runtime.shutdown().await.unwrap();
+    first_runtime.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "process-test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn independent_processes_allow_one_idle_cell_winner() {
+    let object_root = tempfile::TempDir::new().unwrap();
+    let fixture = filesystem_fixture(b"process-movement-race", object_root.path());
+    let session = SessionId::from_bytes([83; 16]);
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 * 1024 * 1024, session).unwrap();
+    let handle = bootstrap_on(&runtime, &fixture, session).await;
+    handle.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let idle = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(idle.value().state, ControlState::Idle);
+    let root = idle.value().ltx_root().unwrap();
+    let binary = std::env::var("CARGO_BIN_EXE_cell_movement_probe")
+        .expect("Cargo must provide the movement probe binary to integration tests");
+    let store_root = object_root.path().to_owned();
+    let partition = "process-movement-race";
+    let first_destination = fixture._directory.path().join("process-first.sqlite");
+    let second_destination = fixture._directory.path().join("process-second.sqlite");
+    let first_store_root = store_root.clone();
+    let first_binary = binary.clone();
+    let first = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(first_binary)
+            .stderr(std::process::Stdio::null())
+            .args([
+                first_store_root.as_os_str().to_string_lossy().as_ref(),
+                partition,
+                "53535353535353535353535353535353",
+                first_destination.to_string_lossy().as_ref(),
+                "750",
+                "drain",
+            ])
+            .status()
+            .unwrap()
+    });
+    let second_store_root = store_root;
+    let second_binary = binary;
+    let second = tokio::task::spawn_blocking(move || {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        std::process::Command::new(second_binary)
+            .stderr(std::process::Stdio::null())
+            .args([
+                second_store_root.as_os_str().to_string_lossy().as_ref(),
+                partition,
+                "54545454545454545454545454545454",
+                second_destination.to_string_lossy().as_ref(),
+                "100",
+                "drain",
+            ])
+            .status()
+            .unwrap()
+    });
+    let (first, second) = tokio::join!(first, second);
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert_ne!(first.success(), second.success());
+
+    let final_control = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(final_control.value().state, ControlState::Idle);
+    assert_eq!(final_control.value().ltx_root(), Some(root));
+}
+
+#[cfg(feature = "process-test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn independent_process_receiver_failure_returns_exact_idle_root() {
+    let object_root = tempfile::TempDir::new().unwrap();
+    let fixture = filesystem_fixture(b"process-movement-receiver-failure", object_root.path());
+    let session = SessionId::from_bytes([89; 16]);
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 * 1024 * 1024, session).unwrap();
+    let handle = bootstrap_on(&runtime, &fixture, session).await;
+    handle.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let idle = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let root = idle.value().ltx_root();
+    let binary = std::env::var("CARGO_BIN_EXE_cell_movement_probe")
+        .expect("Cargo must provide the movement probe binary to integration tests");
+    let destination = fixture
+        ._directory
+        .path()
+        .join("process-receiver-parent-does-not-exist")
+        .join("process-receiver.sqlite");
+    std::fs::create_dir_all(&destination).unwrap();
+    let status = tokio::task::spawn_blocking({
+        let store_root = object_root.path().to_owned();
+        move || {
+            std::process::Command::new(binary)
+                .args([
+                    store_root.as_os_str().to_string_lossy().as_ref(),
+                    "process-movement-receiver-failure",
+                    "59595959595959595959595959595959",
+                    destination.to_string_lossy().as_ref(),
+                    "0",
+                    "fail-receiver",
+                ])
+                .output()
+                .unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        status.status.success(),
+        "receiver-failure probe failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    let current = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.value().state, ControlState::Idle);
+    assert!(current.value().owner.is_none());
+    assert_eq!(current.value().ltx_root(), root);
+}
+
+#[cfg(feature = "process-test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn crashed_process_is_fenced_before_successor_restore() {
+    let object_root = tempfile::TempDir::new().unwrap();
+    let fixture = filesystem_fixture(b"process-movement-crash", object_root.path());
+    let session = SessionId::from_bytes([85; 16]);
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 * 1024 * 1024, session).unwrap();
+    let handle = bootstrap_on(&runtime, &fixture, session).await;
+    handle.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+
+    let binary = std::env::var("CARGO_BIN_EXE_cell_movement_probe")
+        .expect("Cargo must provide the movement probe binary to integration tests");
+    let destination = fixture._directory.path().join("process-crashed.sqlite");
+    let status = tokio::task::spawn_blocking({
+        let store_root = object_root.path().to_owned();
+        move || {
+            std::process::Command::new(binary)
+                .stderr(std::process::Stdio::null())
+                .args([
+                    store_root.as_os_str().to_string_lossy().as_ref(),
+                    "process-movement-crash",
+                    "55555555555555555555555555555555",
+                    destination.to_string_lossy().as_ref(),
+                    "0",
+                    "crash",
+                ])
+                .status()
+                .unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    assert!(status.success());
+
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let stale = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stale.value().owner.as_ref().map(|owner| owner.session),
+        Some(SessionId::from_bytes([85; 16]))
+    );
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let successor = SessionId::from_bytes([86; 16]);
+    let fenced = fence_session(&fixture.layout, SessionId::from_bytes([85; 16]), successor).await;
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        8 * 1024 * 1024,
+        successor,
+    )
+    .unwrap();
+    let restored = runtime
+        .takeover_restored(
+            proof,
+            fixture.replica.clone(),
+            authority.clone(),
+            stale,
+            fenced.direct_takeover().unwrap(),
+            crab_cell_runtime::RecoveryManifestStore::new(
+                fixture.layout.clone(),
+                Limits::default(),
+            ),
+            fixture._directory.path().join("process-successor.sqlite"),
+            Owner {
+                session: successor,
+                endpoint: "https://process-successor.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        restored
+            .query(64, 64, |connection| {
+                let value = connection
+                    .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+                Ok(value.to_be_bytes().to_vec())
+            })
+            .await
+            .unwrap(),
+        0_i64.to_be_bytes()
+    );
+    restored.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "process-test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn lost_release_response_is_reconciled_before_successor_acquire() {
+    let object_root = tempfile::TempDir::new().unwrap();
+    let fixture = filesystem_fixture(b"process-movement-lost-release", object_root.path());
+    let session = SessionId::from_bytes([87; 16]);
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 * 1024 * 1024, session).unwrap();
+    let handle = bootstrap_on(&runtime, &fixture, session).await;
+    handle.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+
+    let binary = std::env::var("CARGO_BIN_EXE_cell_movement_probe")
+        .expect("Cargo must provide the movement probe binary to integration tests");
+    let status = tokio::task::spawn_blocking({
+        let store_root = object_root.path().to_owned();
+        let destination = fixture
+            ._directory
+            .path()
+            .join("process-lost-release.sqlite");
+        move || {
+            std::process::Command::new(binary)
+                .stderr(std::process::Stdio::null())
+                .args([
+                    store_root.as_os_str().to_string_lossy().as_ref(),
+                    "process-movement-lost-release",
+                    "57575757575757575757575757575757",
+                    destination.to_string_lossy().as_ref(),
+                    "0",
+                    "lost-release",
+                ])
+                .status()
+                .unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    assert!(status.success());
+
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let idle = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(idle.value().state, ControlState::Idle);
+    let root = idle.value().ltx_root().unwrap();
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let successor = SessionId::from_bytes([88; 16]);
+    let successor_runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        8 * 1024 * 1024,
+        successor,
+    )
+    .unwrap();
+    let restored = successor_runtime
+        .acquire_idle_restored(
+            proof,
+            fixture.replica.clone(),
+            authority.clone(),
+            idle,
+            fixture
+                ._directory
+                .path()
+                .join("process-lost-release-successor.sqlite"),
+            Owner {
+                session: successor,
+                endpoint: "https://process-lost-release-successor.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        restored
+            .query(64, 64, |connection| {
+                let value = connection
+                    .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+                Ok(value.to_be_bytes().to_vec())
+            })
+            .await
+            .unwrap(),
+        0_i64.to_be_bytes()
+    );
+    restored.drain().await.unwrap();
+    successor_runtime.shutdown().await.unwrap();
+    assert_eq!(
+        authority
+            .load(fixture.target.cell_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .value()
+            .ltx_root(),
+        Some(root)
+    );
+}
+
+async fn wait_for_persisted_work(
+    handle: &crab_cell_runtime::CellHandle,
+    role: CatalogRole,
+    blocker: &'static str,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if handle
+                .persisted_work_inventory(role)
+                .await
+                .unwrap()
+                .first_blocker()
+                == Some(blocker)
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 async fn bootstrap_on(
@@ -1303,17 +2484,40 @@ async fn bootstrap_on(
     fixture: &Fixture,
     session: SessionId,
 ) -> crab_cell_runtime::CellHandle {
+    bootstrap_role_on(
+        runtime,
+        fixture,
+        session,
+        CatalogRole::Repository,
+        |transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE counter(value INTEGER NOT NULL); INSERT INTO counter VALUES (0)",
+            )?;
+            Ok(())
+        },
+    )
+    .await
+}
+
+async fn bootstrap_role_on<F>(
+    runtime: &CellRuntime,
+    fixture: &Fixture,
+    session: SessionId,
+    role: CatalogRole,
+    initialize: F,
+) -> crab_cell_runtime::CellHandle
+where
+    F: for<'connection> FnOnce(
+            &crab_ltx::rusqlite::Transaction<'connection>,
+        ) -> crab_cell_runtime::Result<()>
+        + Send
+        + 'static,
+{
     let catalog =
         crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
     let proof = catalog
         .provision(
-            CatalogEntry::new(
-                &fixture.target,
-                CatalogRole::Repository,
-                Digest::from_bytes([5; 32]),
-                1,
-            )
-            .unwrap(),
+            CatalogEntry::new(&fixture.target, role, Digest::from_bytes([5; 32]), 1).unwrap(),
         )
         .await
         .unwrap();
@@ -1336,12 +2540,7 @@ async fn bootstrap_on(
             authority,
             observed,
             fixture.database.clone(),
-            |transaction| {
-                transaction.execute_batch(
-                    "CREATE TABLE counter(value INTEGER NOT NULL); INSERT INTO counter VALUES (0)",
-                )?;
-                Ok(())
-            },
+            initialize,
         )
         .await
         .unwrap()
@@ -1972,6 +3171,73 @@ async fn unchanged_dead_owner_is_taken_over_then_restored() {
     assert_eq!(owned.value().epoch, 2);
     assert_eq!(owned.value().owner.as_ref().unwrap().session, session);
     restored.drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_takeover_receiver_does_not_leave_authority_owned() {
+    let fixture = fixture_for(b"takeover-receiver-activation-failure");
+    let handle = activate(&fixture, 16 * 1024 * 1024).await;
+    drop(handle);
+
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let stale = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let expected_root = stale.value().root.clone();
+    let previous = stale.value().owner.as_ref().unwrap().session;
+    let successor = SessionId::from_bytes([44; 16]);
+    let takeover = fence_session(&fixture.layout, previous, successor).await;
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        16 * 1024 * 1024,
+        successor,
+    )
+    .unwrap();
+    let missing_parent = fixture
+        ._directory
+        .path()
+        .join("takeover-receiver-parent-does-not-exist")
+        .join("takeover-receiver.sqlite");
+    assert!(
+        runtime
+            .takeover_restored(
+                proof,
+                fixture.replica.clone(),
+                authority.clone(),
+                stale,
+                takeover.direct_takeover().unwrap(),
+                crab_cell_runtime::RecoveryManifestStore::new(
+                    fixture.layout.clone(),
+                    Limits::default(),
+                ),
+                missing_parent,
+                Owner {
+                    session: successor,
+                    endpoint: "https://takeover-receiver-failure.internal:8081".into(),
+                },
+            )
+            .await
+            .is_err()
+    );
+
+    let current = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.value().state, ControlState::Idle);
+    assert!(current.value().owner.is_none());
+    assert_eq!(current.value().root, expected_root);
+    runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]

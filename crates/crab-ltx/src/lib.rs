@@ -4,9 +4,9 @@
 //! Local SQLite WAL capture and exact, checksum-verified LTX recovery.
 //!
 //! Local capture is synchronous; use a dedicated database thread or blocking
-//! executor. The optional `replica` feature adds object-store replication and
-//! exact epoch inheritance, bundles, compaction and sparse paged SQL.
-//! Leases and HTTP policy remain caller-owned.
+//! executor. The optional `replica` feature adds Cell-root publication,
+//! authenticated bundles, compaction, and sparse paged SQL. Leases and HTTP
+//! policy remain caller-owned.
 
 #![doc = include_str!("../README.md")]
 
@@ -18,8 +18,10 @@ pub mod environment;
 mod error;
 mod host;
 #[cfg(feature = "replica")]
-pub use environment::ScratchMonitor;
-pub use environment::{DiskBudget, DiskReservation, Host};
+pub use environment::{DirectoryCacheStats, ScratchMonitor};
+pub use environment::{DiskBudget, DiskBudgetAdmission, DiskReservation, Host};
+#[cfg(feature = "replica")]
+pub use environment::{HostResourceAdmission, HostResourceKind, HostResourcePermit};
 mod ltx;
 mod lz4_block;
 mod managed;
@@ -41,15 +43,7 @@ mod paged_io;
 #[cfg(feature = "replica")]
 pub use paged_io::with_paged_io_deadline;
 #[cfg(feature = "replica")]
-mod paged_vfs;
-#[cfg(feature = "replica")]
-mod replica;
-#[cfg(feature = "replica")]
 mod writable_vfs;
-#[cfg(feature = "replica")]
-pub use writable_vfs::Hydration;
-#[cfg(feature = "replica")]
-mod schedule;
 #[cfg(feature = "replica")]
 pub use cell_replica::{
     CellObjectRef, CellPagedDatabase, CellReplica, CellWritableDatabase, PreparedRoot,
@@ -58,15 +52,9 @@ pub use cell_replica::{
 #[cfg(feature = "replica")]
 pub use node_frame::{NodeFrameScope, VerifiedNodeFrame, encode_node_frame, inspect_node_frame};
 #[cfg(feature = "replica")]
-pub use paged::PagedDatabase;
-#[cfg(feature = "replica")]
-pub use paged_vfs::PagedConnection;
-#[cfg(feature = "replica")]
-pub use replica::{Replica, ReplicaHead};
-#[cfg(feature = "replica")]
-pub use schedule::CompactionSchedule;
+pub use writable_vfs::Hydration;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "replica"))]
 mod format_tests;
 
 pub use db::CheckpointMode;

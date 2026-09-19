@@ -7,14 +7,18 @@ use crab_ltx::{
 #[cfg(feature = "replica")]
 use crab_storage::{CellStorageLayout, Store};
 #[cfg(feature = "replica")]
+use object_store::throttle::{ThrottleConfig, ThrottledStore};
+#[cfg(feature = "replica")]
 use object_store::{memory::InMemory, path::Path as ObjectPath};
+#[cfg(feature = "replica")]
+use std::time::Duration;
 use std::{
     collections::BTreeSet,
     io,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -24,6 +28,7 @@ struct Faults {
     calls: Arc<Mutex<BTreeSet<&'static str>>>,
     largest_read: Arc<AtomicUsize>,
     largest_write: Arc<AtomicUsize>,
+    track_all: Arc<AtomicBool>,
 }
 
 impl Faults {
@@ -42,12 +47,12 @@ impl Faults {
 struct File {
     inner: Box<dyn FileIo>,
     faults: Faults,
-    ltx: bool,
+    track: bool,
 }
 
 impl FileIo for File {
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
-        if self.ltx {
+        if self.track {
             self.faults
                 .largest_write
                 .fetch_max(bytes.len(), Ordering::Relaxed);
@@ -59,7 +64,7 @@ impl FileIo for File {
         self.inner.write_all(bytes)
     }
     fn write_all_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()> {
-        if self.ltx {
+        if self.track {
             self.faults
                 .largest_write
                 .fetch_max(bytes.len(), Ordering::Relaxed);
@@ -71,7 +76,7 @@ impl FileIo for File {
         self.inner.write_all_at(offset, bytes)
     }
     fn read_exact_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
-        if self.ltx {
+        if self.track {
             self.faults.largest_read.fetch_max(len, Ordering::Relaxed);
         }
         self.faults.check("read_exact_at")?;
@@ -105,7 +110,8 @@ impl FileSystem for Faults {
         Ok(Box::new(File {
             inner: DirectFileSystem.open(path)?,
             faults: self.clone(),
-            ltx: path.to_string_lossy().contains(".ltx"),
+            track: self.track_all.load(Ordering::Relaxed)
+                || path.to_string_lossy().contains(".ltx"),
         }))
     }
     fn open_rw(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
@@ -113,7 +119,8 @@ impl FileSystem for Faults {
         Ok(Box::new(File {
             inner: DirectFileSystem.open_rw(path)?,
             faults: self.clone(),
-            ltx: path.to_string_lossy().contains(".ltx"),
+            track: self.track_all.load(Ordering::Relaxed)
+                || path.to_string_lossy().contains(".ltx"),
         }))
     }
     fn create(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
@@ -121,7 +128,8 @@ impl FileSystem for Faults {
         Ok(Box::new(File {
             inner: DirectFileSystem.create(path)?,
             faults: self.clone(),
-            ltx: path.to_string_lossy().contains(".ltx"),
+            track: self.track_all.load(Ordering::Relaxed)
+                || path.to_string_lossy().contains(".ltx"),
         }))
     }
     filesystem_operation!(file_len(path: &Path) -> u64);
@@ -191,6 +199,49 @@ fn capture_and_inspection_bound_each_filesystem_transfer() {
     assert!(snapshot.info().size_bytes > 1_000_000);
     assert!(faults.largest_write.load(Ordering::Relaxed) < 128 * 1024);
     assert!(faults.largest_read.load(Ordering::Relaxed) < 128 * 1024);
+}
+
+#[cfg(feature = "replica")]
+#[tokio::test(flavor = "multi_thread")]
+async fn cell_prepare_bounds_source_and_scratch_transfers() {
+    let (directory, faults, host, mut writer) = fixture();
+    writer
+        .transaction(|tx| {
+            tx.execute("INSERT INTO t VALUES(randomblob(10000000))", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let captured = writer.capture().unwrap();
+    faults.track_all.store(true, Ordering::Relaxed);
+    faults.largest_read.store(0, Ordering::Relaxed);
+    faults.largest_write.store(0, Ordering::Relaxed);
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("cell-streaming-bound"),
+            [31; 16],
+        ),
+        [32; 32],
+        [33; 16],
+        Limits::default(),
+    )
+    .unwrap()
+    .with_host(host);
+
+    replica.prepare(None, &captured, 1, 1).await.unwrap();
+
+    assert!(
+        faults.largest_read.load(Ordering::Relaxed) <= 8 * 1024 * 1024,
+        "largest source read was {} bytes",
+        faults.largest_read.load(Ordering::Relaxed)
+    );
+    assert!(
+        faults.largest_write.load(Ordering::Relaxed) <= 1 << 20,
+        "largest scratch write was {} bytes",
+        faults.largest_write.load(Ordering::Relaxed)
+    );
+    writer.close().unwrap();
+    drop(directory);
 }
 
 #[cfg(feature = "replica")]
@@ -277,6 +328,63 @@ async fn cell_compaction_uses_injected_filesystem_and_cleans_failed_scratch() {
         .unwrap();
     assert_eq!(compacted.root().position, root.position);
     assert!(faults.calls.lock().unwrap().contains("open_rw"));
+}
+
+#[cfg(feature = "replica")]
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelled_cell_prepare_releases_scratch_without_publishing_a_root() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let mut writer =
+        ManagedDb::open(&directory.path().join("source.sqlite"), Limits::default()).unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction
+                .execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES(randomblob(2000000))")
+        })
+        .unwrap();
+    let captures = writer.capture().unwrap();
+    let backend = Arc::new(ThrottledStore::new(
+        InMemory::new(),
+        ThrottleConfig {
+            wait_put_per_call: Duration::from_secs(5),
+            ..ThrottleConfig::default()
+        },
+    ));
+    let scratch_slots = Arc::new(tokio::sync::Semaphore::new(64));
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(backend),
+            ObjectPath::from("cell-cancelled-prepare"),
+            [21; 16],
+        ),
+        [22; 32],
+        [23; 16],
+        Limits::default(),
+    )
+    .unwrap()
+    .with_host(
+        Host::default()
+            .with_scratch_slots(Arc::clone(&scratch_slots))
+            .with_local_disk_budget(crab_ltx::DiskBudget::new(64 * 1024 * 1024)),
+    );
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(250),
+        replica.prepare(None, &captures, 1, 1),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "the throttled immutable upload must be cancelled"
+    );
+    assert_eq!(scratch_slots.available_permits(), 64);
+    assert!(!std::fs::read_dir(directory.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".crab-cell-segment-")
+    }));
 }
 
 #[cfg(feature = "replica")]
@@ -459,154 +567,18 @@ fn unknown_sqlite_vfs_does_not_fall_back_to_the_platform_vfs() {
 }
 
 #[cfg(feature = "replica")]
-mod remote {
-    use super::*;
-    use crab_ltx::{
-        Replica,
-        environment::{Executor, Worker},
-    };
-    use crab_storage::{Store, StoreLayout};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[derive(Default)]
-    struct Jobs {
-        started: Arc<AtomicUsize>,
-        joined: Arc<AtomicUsize>,
-        dispatches: AtomicUsize,
-    }
-    struct Join {
-        thread: std::thread::JoinHandle<()>,
-        joined: Arc<AtomicUsize>,
-    }
-    impl Worker for Join {
-        fn join(self: Box<Self>) -> io::Result<()> {
-            self.thread.join().unwrap();
-            self.joined.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-    }
-    impl Executor for Jobs {
-        fn dispatch(&self, job: Box<dyn FnOnce() + Send>) -> io::Result<()> {
-            self.dispatches.fetch_add(1, Ordering::SeqCst);
-            std::thread::Builder::new().spawn(job)?;
-            Ok(())
-        }
-        fn start_worker(&self, job: Box<dyn FnOnce() + Send>) -> io::Result<Box<dyn Worker>> {
-            self.started.fetch_add(1, Ordering::SeqCst);
-            Ok(Box::new(Join {
-                thread: std::thread::Builder::new().spawn(job)?,
-                joined: self.joined.clone(),
-            }))
-        }
-    }
-
-    fn replica(host: Host) -> Replica {
-        Replica::new(
-            StoreLayout::new(
-                Store::new(Arc::new(object_store::memory::InMemory::new())),
-                "hooks".into(),
-            ),
-            "epoch",
-            Limits::default(),
-        )
-        .unwrap()
-        .with_host(host)
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn remote_restore_sparse_activation_and_worker_lifetime_use_one_host() {
-        let (directory, faults, host, mut writer) = fixture();
-        let jobs = Arc::new(Jobs::default());
-        // Selecting the named platform VFS exercises a non-default wrapper
-        // registration without assuming Unix-specific VFS names in this test.
-        let name = unsafe {
-            // SAFETY: SQLite is initialized by fixture; its default registration
-            // and NUL-terminated name live for the process lifetime.
-            std::ffi::CStr::from_ptr(
-                (*crab_ltx::rusqlite::ffi::sqlite3_vfs_find(std::ptr::null())).zName,
-            )
-            .to_str()
-            .unwrap()
-            .to_owned()
-        };
-        let replica = replica(host.with_executor(jobs.clone()).with_sqlite_vfs(&name));
-        let batch = writer.capture().unwrap();
-        let head = replica.replicate(&batch, None).await.unwrap();
-        let restored = directory.path().join("restored");
-        faults.arm(Some("persist_new"));
-        injected(replica.restore(&head, &restored).await);
-        assert!(!restored.exists());
-        faults.arm(None);
-        replica.restore(&head, &restored).await.unwrap();
-
-        for operation in ["create", "set_len", "sync_all", "sync_parent"] {
-            let paged = replica.paged(&head).await.unwrap();
-            let path = directory.path().join(operation);
-            faults.arm(Some(operation));
-            injected(paged.open_writable(&path));
-            faults.arm(None);
-        }
-        let paged = replica.paged(&head).await.unwrap();
-        let mut sparse = paged
-            .open_writable(&directory.path().join("sparse"))
-            .unwrap();
-        sparse
-            .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(9)"))
-            .unwrap();
-        while !sparse.hydrate_step(2).unwrap().complete() {}
-        let captured = sparse.checkpoint(CheckpointMode::Truncate).unwrap();
-        let head = replica.replicate(&captured, Some(&head)).await.unwrap();
-        sparse.close().unwrap();
-        let paged = replica.paged(&head).await.unwrap();
-        let view = paged.open_sqlite().unwrap();
-        let count: usize = view
-            .connection()
-            .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(count, 2);
-        drop(view);
-        assert_eq!(jobs.started.load(Ordering::SeqCst), 2);
-        assert_eq!(jobs.joined.load(Ordering::SeqCst), 2);
-        assert!(jobs.dispatches.load(Ordering::SeqCst) > 0);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn many_views_share_one_host_io_worker() {
-        let (_directory, _faults, host, mut writer) = fixture();
-        let jobs = Arc::new(Jobs::default());
-        let replica = replica(host.with_executor(jobs.clone()));
-        let head = replica
-            .replicate(&writer.capture().unwrap(), None)
-            .await
-            .unwrap();
-        let mut views = Vec::new();
-        for _ in 0..16 {
-            views.push(replica.paged(&head).await.unwrap().open_sqlite().unwrap());
-        }
-        assert_eq!(
-            jobs.started.load(Ordering::SeqCst),
-            1,
-            "view count must not multiply I/O threads"
-        );
-        drop(views);
-        drop(head);
-        drop(replica);
-        assert_eq!(jobs.joined.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn captured_pruning_retries_after_removal_but_failed_parent_sync() {
-        let (_directory, faults, _host, mut writer) = fixture();
-        let batch = writer.capture().unwrap();
-        faults.arm(Some("sync_parent"));
-        injected(writer.prune_captured(&batch));
-        assert!(!batch.segments[0].path().exists());
-        faults.arm(None);
-        assert_eq!(writer.prune_captured(&batch).unwrap(), batch.segments.len());
-        assert_eq!(writer.prune_captured(&batch).unwrap(), 0);
-        writer
-            .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(3)"))
-            .unwrap();
-        writer.capture().unwrap();
-    }
+#[test]
+fn captured_pruning_retries_after_removal_but_failed_parent_sync() {
+    let (_directory, faults, _host, mut writer) = fixture();
+    let batch = writer.capture().unwrap();
+    faults.arm(Some("sync_parent"));
+    injected(writer.prune_captured(&batch));
+    assert!(!batch.segments[0].path().exists());
+    faults.arm(None);
+    assert_eq!(writer.prune_captured(&batch).unwrap(), batch.segments.len());
+    assert_eq!(writer.prune_captured(&batch).unwrap(), 0);
+    writer
+        .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(3)"))
+        .unwrap();
+    writer.capture().unwrap();
 }

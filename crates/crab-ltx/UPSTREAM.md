@@ -1,5 +1,8 @@
 # Source provenance and intentional changes
 
+The removed standalone export and shipped-contract evidence is tracked in
+[`crab-cell-runtime`'s compatibility audit](../crab-cell-runtime/docs/standalone-replication-audit.md).
+
 Source repository: [denoland/celld](https://github.com/denoland/celld).
 Pinned revision: `10cb1303dac710dcb3b557e318e08c855261f68b`.
 Original subtree: `crates/ltx`; package `celld-ltx`, version `0.0.0`, unpublished.
@@ -49,14 +52,14 @@ Paths in the first column are relative to upstream `crates/ltx/`.
 | `src/compactor.rs` | `e2101df9a95012c644e191ecf86b564f7ddf5f172f77d707d5d178df6cd70ce7` | Adapted exact-input page merge |
 | `src/host.rs` | `6b876f9ab1344e5c915ac0d4ef5ecab3ae88e30bd0490f7255dac673ff7781ff` | Bounded local I/O, filesystem/clock, named SQLite VFS and executor/worker injection in `environment.rs` |
 | `src/error.rs` | `50f0f6a6c7ca6dbd3d5987ddde5c5896877e7031cd3f3190a288e9434e52f21b` | Reference; replaced by Crab source-preserving errors without remote reset hints |
-| `src/replica.rs` | `90f7a22cefb331b08fa84933d5000dd1b9cd690506467762fe4915b278bf1bd3` | Reference for ordered uploads/restore; exact-plan orchestration in `replica.rs` |
-| `src/replica_compactor.rs` | `77415fe347069635b3b8ce5451c8b5cfc45534de1a9889d61cd2142eb7d2fa3d` | Additive remote compaction adapted to exact ranges/full chains and head CAS |
-| `src/paged.rs` | `c40c2c54872bdbd93ff81dda3837799857a22f0f391931633278ac52b1b3f977` | Page-map/ranged-frame design adapted with authenticated sidecars and per-cut checksum verification |
-| `src/paged_vfs.rs` | `9e7a5e5a379277aa2c9b6ef44f618607ccf66dfa4c2c1d9aeee35f74c149ac3c` | Immutable and writable sparse VFS; static registration, per-file Arc lifetime, checked partial writes/truncation |
+| `src/replica.rs` | `90f7a22cefb331b08fa84933d5000dd1b9cd690506467762fe4915b278bf1bd3` | Historical reference only; standalone epoch-head implementation hard-removed under the compatibility decision |
+| `src/replica_compactor.rs` | `77415fe347069635b3b8ce5451c8b5cfc45534de1a9889d61cd2142eb7d2fa3d` | Historical compaction reference; retained behavior lives behind Cell root preparation |
+| `src/paged.rs` | `c40c2c54872bdbd93ff81dda3837799857a22f0f391931633278ac52b1b3f977` | Private authenticated index/frame helpers retained for Cell directories; public page-map facade removed |
+| `src/paged_vfs.rs` | `9e7a5e5a379277aa2c9b6ef44f618607ccf66dfa4c2c1d9aeee35f74c149ac3c` | Adapted writable sparse VFS retained for Cell activation; standalone read-only VFS removed |
 | `src/bundle.rs` | `3a8d2399fc4bcfe7de6475d1768aaba88ab7f2cceb45bbd6a62a46e2eebeeedc` | Verbatim-envelope design adapted to checked CRB1 rows, exact ranges and digests |
 | `src/client/bundle.rs` | `46b13a307db780e58a9f2efdb70a7f63b1aebd5c9b897970010c087bb0cba43f` | Manifest-selected bundle extents replace fallback after arbitrary native-read failures |
 | `src/client/epochs.rs` | `a84c20df2e0a43ad98540eeb0fd20f5aefc4aa8555c8ff3e5636391d8dcf4997` | Pinned inheritance with explicit origin descriptors replaces listing-based chain selection |
-| `src/compaction_level.rs` | `02b99b8532cd4da0ab40ad75a9e96ee85f95ceec82afbf3a7efff0b51299e2cc` | Caller-driven bounded monotonic scheduling in `schedule.rs` |
+| `src/compaction_level.rs` | `02b99b8532cd4da0ab40ad75a9e96ee85f95ceec82afbf3a7efff0b51299e2cc` | Historical scheduling reference; Cell compaction scheduling is runtime-owned |
 | `src/client/mod.rs` | `b2f8d0920291fe33e07d5a1812027dc26c9de31d7efeab9efb794f2b97923438` | Transport contract reference, narrowed to exact named operations |
 | `src/client/object_store.rs` | `044692dcdbcf2cb2006e9966fb8831f1e984f7f59713bafb3b44564dbad95663` | Upload/range reference; use `crab-storage` instead of copied provider construction |
 | `README.md` | `ca048adf266be29471c81d34577b88eb7545b44350575f51be69cd136e5be73c` | Attribution/format contract retained above and in Crab README |
@@ -83,7 +86,7 @@ Paths in the first column are relative to upstream `crates/ltx/`.
    continuation. No arbitrary published/unpublished local restart is claimed.
 6. Bounded artifact/WAL reads and complete library-owned filesystem/clock injection; main-page
    reads traverse SQLite's VFS, including snapshot/capture on sparse files.
-   Replica blocking dispatch is injectable. Preserve source errors,
+   Cell blocking dispatch is injectable. Preserve source errors,
    replace reachable `expect` conversions, and use SQLite transaction state
    instead of message-string matching when rolling back.
 7. Decoder additionally checks page ordering/coverage, actual index offsets and
@@ -101,10 +104,10 @@ Paths in the first column are relative to upstream `crates/ltx/`.
     forwarding helpers. A checkpoint error fences the managed handle instead of
     swallowing a busy error that could conceal failed read-lock reacquisition.
 
-11. Optional replica support adds immutable content-addressed LTX, page-index and
-    manifest objects, conditional epoch-head publication, exact historical roots,
-    inherited exact recovery, bundles and range/full compaction. No listing/latest
-    inference or remote deletion. The epoch head is not HTTP owner authority.
+11. Optional Cell support adds immutable content-addressed LTX, page-index,
+    directory, and root objects, exact root recovery, bundles and range/full
+    compaction. No listing/latest inference, epoch-head reader, or remote
+    deletion. Cell authority is not implemented in this crate.
 12. Paged reads authenticate compressed frames using a hash-pinned index and
     verify decoded page checksums. Apply intermediate truncations before regrowth.
     Both SQLite VFS modes use dedicated I/O threads rather than signed-URL

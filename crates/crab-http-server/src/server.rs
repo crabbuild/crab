@@ -803,10 +803,12 @@ pub async fn serve(config: Config) -> Result<()> {
     let cell_budget = CellRuntimeBudget::from_resources(local_resources)?;
     let cell_capacity = CellCapacityReport::new(local_resources, cell_budget);
     let local_disk = cell_budget.local_disk();
-    let local_staging = crate::local_disk::LocalStaging::new(
+    let local_staging = crate::local_disk::LocalStaging::new_with_restart_inventory(
         session_dir.join("transfers"),
         local_disk.clone(),
         cell_budget.disk_reserve_bytes,
+        &config.cells.data_dir,
+        &session_dir,
     )
     .map_err(|source| crate::Error::LocalStaging {
         source: Box::new(source),
@@ -835,6 +837,7 @@ pub async fn serve(config: Config) -> Result<()> {
     let node_publisher = Arc::new(
         node_publisher
             .with_follower_store(follower_store.clone())
+            .with_runtime(cell_runtime.clone())
             .with_telemetry(cell_runtime.telemetry_handle())
             .with_metrics(metrics.clone()),
     );
@@ -1613,38 +1616,36 @@ async fn render_capacity(State(server): State<Arc<Server>>) -> Response {
 async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
     let scheduler_now_ms = crate::cells::unix_now_ms().unwrap_or(0);
     let cell_runtime = server.cell_runtime.stats();
-    let body = server.metrics.render(crate::metrics::RuntimeSnapshot {
-        repositories: server.repositories.len(),
-        catalog_healthy: server.catalog_healthy.load(Ordering::Acquire),
-        scheduler_healthy: server.scheduler_status.is_healthy(scheduler_now_ms),
-        scheduler_progress: server.scheduler_status.progress(),
-        scheduler_lag_seconds: server.scheduler_status.lag_ms(scheduler_now_ms) as f64 / 1_000.0,
-        draining: server.cancellation.is_cancelled(),
-        receive_workers: server.receives.len(),
-        cell_active: cell_runtime.active_cells(),
-        cell_active_capacity: cell_runtime.active_cell_capacity(),
-        cell_retained_bytes: cell_runtime.retained_bytes(),
-        cell_retained_capacity_bytes: cell_runtime.retained_capacity_bytes(),
-        cell_local_disk_reserved_bytes: cell_runtime.local_disk_reserved_bytes(),
-        cell_local_disk_capacity_bytes: cell_runtime.local_disk_capacity_bytes(),
-        cell_node_log_uncovered_bytes: cell_runtime.unpublished_node_log_bytes(),
-        cell_follower_retained_bytes: server
-            .follower_store
-            .as_ref()
-            .map_or(0, crab_cell_runtime::FollowerStore::retained_bytes),
-        admission_available: [
-            server.admission.available_permits(),
-            server.transfer_admission.available_permits(),
-            server.app_admission.available_permits(),
-            server.maintenance_admission.available_permits(),
-        ],
-        admission_capacity: [
-            READ_ADMISSION_CAPACITY,
-            GIT_ADMISSION_CAPACITY,
-            APP_ADMISSION_CAPACITY,
-            MAINTENANCE_ADMISSION_CAPACITY,
-        ],
-    });
+    let body = server.metrics.render(
+        crate::metrics::RuntimeSnapshot {
+            repositories: server.repositories.len(),
+            catalog_healthy: server.catalog_healthy.load(Ordering::Acquire),
+            scheduler_healthy: server.scheduler_status.is_healthy(scheduler_now_ms),
+            scheduler_progress: server.scheduler_status.progress(),
+            scheduler_lag_seconds: server.scheduler_status.lag_ms(scheduler_now_ms) as f64
+                / 1_000.0,
+            draining: server.cancellation.is_cancelled(),
+            receive_workers: server.receives.len(),
+            cell_follower_retained_bytes: server
+                .follower_store
+                .as_ref()
+                .map_or(0, crab_cell_runtime::FollowerStore::retained_bytes),
+            admission_available: [
+                server.admission.available_permits(),
+                server.transfer_admission.available_permits(),
+                server.app_admission.available_permits(),
+                server.maintenance_admission.available_permits(),
+            ],
+            admission_capacity: [
+                READ_ADMISSION_CAPACITY,
+                GIT_ADMISSION_CAPACITY,
+                APP_ADMISSION_CAPACITY,
+                MAINTENANCE_ADMISSION_CAPACITY,
+            ],
+            ..crate::metrics::RuntimeSnapshot::default()
+        }
+        .with_cell_runtime(cell_runtime),
+    );
     (
         [
             (

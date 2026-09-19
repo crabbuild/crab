@@ -181,6 +181,7 @@ This rule removes compatibility branches from product code. It does not permit d
 
 | Task | Read |
 | --- | --- |
+| Design an application from entity, shard, workflow, and read-model Cells | [Application framework](application-framework.md) |
 | Understand the actor, publication, timeout, or takeover path | [Runtime execution](runtime.md) |
 | Design follower durability, response gating, and warm failover | [Follower durability and warm failover](failover-and-followers.md) |
 | Inspect persistent identities, paths, control JSON, or LTX roots | [Storage and recovery](storage.md) |

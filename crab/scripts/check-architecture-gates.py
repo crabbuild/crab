@@ -1792,6 +1792,63 @@ ALLOWED_SERVER_DEV_FIXTURES = {
     "crab-cache-server": {"crab", "crab-cache-store"},
     "crab-s3-gateway": set(),
 }
+CELL_RUNTIME_SERVER_SOURCE_PATHS = ("crates/crab-http-server/src",)
+CELL_RUNTIME_SERVER_IMPORT_PATTERN = "crab_ltx::"
+RETIRED_STANDALONE_LTX_SOURCE_PATHS = (
+    "crates/crab-ltx/src",
+    "crates/crab-ltx/examples",
+)
+RETIRED_STANDALONE_LTX_FILENAMES = frozenset(
+    {
+        "replica.rs",
+        "schedule.rs",
+        "paged_vfs.rs",
+        "replica_roundtrip.rs",
+        "paged_read.rs",
+        "sparse_writer.rs",
+        "compact_history.rs",
+        "repository_replication_lifecycle.rs",
+        "rustfs_replication_scale_load.rs",
+        "rustfs_paged_read_scale_performance.rs",
+    }
+)
+RETIRED_STANDALONE_LTX_PATHS = (
+    "crates/crab-ltx/src/replica",
+    "crates/crab-ltx/src/paged/map.rs",
+)
+RETIRED_STANDALONE_LTX_SYMBOLS = re.compile(
+    r"\b(?:ReplicaHead|Replica|PagedDatabase|PagedConnection|CompactionSchedule)\b"
+)
+RETIRED_STANDALONE_LTX_MARKERS = re.compile(
+    r"(?:ltx/<epoch>|head\.json|manifest\.json)"
+)
+CELL_RUNTIME_COORDINATION_KERNEL_PATH = "crates/crab-cell-runtime/src/coordination.rs"
+CELL_RUNTIME_COORDINATION_ACTOR_PATH = "crates/crab-cell-runtime/src/actor.rs"
+CELL_RUNTIME_COORDINATION_REQUIRED_KERNEL_PATTERNS = (
+    "pub(crate) enum CoordinationInput",
+    "pub(crate) enum CoordinationDecision",
+    "pub(crate) struct CoordinationState",
+    "pub(crate) fn step(&mut self, input: CoordinationInput)",
+)
+CELL_RUNTIME_COORDINATION_REQUIRED_ACTOR_PATTERNS = (
+    "CoordinationState",
+    "coordination.step(CoordinationInput::",
+)
+CELL_RUNTIME_COORDINATION_FORBIDDEN_KERNEL_PATTERNS = (
+    "async fn",
+    ".await",
+    "tokio::",
+    "object_store",
+    "rusqlite",
+    "reqwest::",
+    "std::fs",
+    "std::net",
+    "std::time",
+    "rand::",
+    "getrandom",
+    "spawn_blocking",
+    "Command::new(",
+)
 WORKSPACE_DEPENDENCY_POLICY = {
     "crab-cell-runtime": {"normal": {"crab-ltx", "crab-storage"}},
     "crab-ltx": {"normal": {"crab-storage"}},
@@ -2251,6 +2308,216 @@ def check_server_fixture_dependencies(metadata: dict) -> bool:
         return True
 
     print("error: server fixture dependency policy drifted:", file=sys.stderr)
+    for violation in violations:
+        print(f"  {violation}", file=sys.stderr)
+    return False
+
+
+def rust_brace_delta(line: str, state: dict[str, object]) -> int:
+    """Count Rust braces while ignoring comments and string/character bodies."""
+    delta = 0
+    index = 0
+    while index < len(line):
+        if state.get("block_comment", 0):
+            end = line.find("*/", index)
+            if end < 0:
+                return delta
+            state["block_comment"] = int(state["block_comment"]) - 1
+            index = end + 2
+            continue
+
+        raw_hashes = state.get("raw_hashes")
+        if raw_hashes is not None:
+            terminator = '"' + ("#" * int(raw_hashes))
+            end = line.find(terminator, index)
+            if end < 0:
+                return delta
+            state["raw_hashes"] = None
+            index = end + len(terminator)
+            continue
+
+        string = state.get("string")
+        if string is not None:
+            if line[index] == "\\":
+                index += 2
+                continue
+            if line[index] == string:
+                state["string"] = None
+            index += 1
+            continue
+
+        if line.startswith("//", index):
+            break
+        if line.startswith("/*", index):
+            state["block_comment"] = int(state.get("block_comment", 0)) + 1
+            index += 2
+            continue
+        if line.startswith("r", index):
+            raw = re.match(r'r(#+)?"', line[index:])
+            if raw:
+                state["raw_hashes"] = len(raw.group(1) or "")
+                index += len(raw.group(0))
+                continue
+        if line[index] == '"':
+            state["string"] = '"'
+            index += 1
+            continue
+        if line[index] == "'":
+            # Rust lifetimes (`'a`) are not character literals. Only enter
+            # character mode when a closing quote is visible on this line.
+            escaped = index + 1 < len(line) and line[index + 1] == "\\"
+            character = escaped and index + 3 < len(line) and line[index + 3] == "'"
+            character = character or index + 2 < len(line) and line[index + 2] == "'"
+            if character:
+                state["string"] = "'"
+                index += 1
+                continue
+            index += 1
+            continue
+        if line[index] == "{":
+            delta += 1
+        elif line[index] == "}":
+            delta -= 1
+        index += 1
+    return delta
+
+
+def rust_test_only_lines(text: str) -> set[int]:
+    """Return one-based lines enclosed by cfg(test) modules or test functions."""
+    allowed: set[int] = set()
+    state: dict[str, object] = {"block_comment": 0, "raw_hashes": None, "string": None}
+    depth = 0
+    pending_test_block = False
+    active_test_bases: list[int] = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        if re.search(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]", line):
+            pending_test_block = True
+        if re.search(r"#\s*\[\s*(?:tokio::)?test(?:\s*\([^]]*\))?\s*\]", line):
+            pending_test_block = True
+
+        before = depth
+        delta = rust_brace_delta(line, state)
+        if active_test_bases or (pending_test_block and delta > 0):
+            allowed.add(number)
+        if pending_test_block and delta > 0:
+            active_test_bases.append(before)
+            pending_test_block = False
+
+        depth += delta
+        while active_test_bases and depth <= active_test_bases[-1]:
+            active_test_bases.pop()
+    return allowed
+
+
+def check_cell_runtime_server_boundary(root: Path, metadata: dict) -> bool:
+    """Keep crab-http-server's production Cell ownership behind crab-cell-runtime."""
+    violations: list[str] = []
+    package = package_by_name(metadata, "crab-http-server")
+    for dependency in package["dependencies"]:
+        if dependency["name"] != "crab-ltx":
+            continue
+        kind = dependency_kind(dependency)
+        if kind != "dev":
+            violations.append(
+                f"crab-http-server: {kind}-depends on crab-ltx; production Cell ownership belongs to crab-cell-runtime"
+            )
+
+    for relative_path in CELL_RUNTIME_SERVER_SOURCE_PATHS:
+        path = root / relative_path
+        if not path.exists():
+            violations.append(f"{relative_path}: missing Cell runtime boundary scan path")
+            continue
+        candidates = [path] if path.is_file() else sorted(path.rglob("*.rs"))
+        for candidate in candidates:
+            relative = rel(root, candidate)
+            text = candidate.read_text(encoding="utf-8")
+            allowed_lines = rust_test_only_lines(text)
+            if candidate.name == "tests.rs" or "tests" in candidate.parts:
+                allowed_lines.update(range(1, len(text.splitlines()) + 1))
+            for number, line in enumerate(text.splitlines(), start=1):
+                if CELL_RUNTIME_SERVER_IMPORT_PATTERN in line and number not in allowed_lines:
+                    violations.append(f"{relative}:{number}: {line.strip()}")
+
+    if not violations:
+        print("ok: crab-http-server production Cell ownership stays behind crab-cell-runtime")
+        return True
+
+    print("error: crab-http-server escaped the canonical Cell runtime boundary:", file=sys.stderr)
+    for violation in violations:
+        print(f"  {violation}", file=sys.stderr)
+    return False
+
+
+def check_standalone_ltx_hard_cut(root: Path) -> bool:
+    """Keep the retired epoch-head API out of callable LTX source and examples."""
+    violations: list[str] = []
+    for relative_path in RETIRED_STANDALONE_LTX_PATHS:
+        if (root / relative_path).exists():
+            violations.append(f"{relative_path}: retired standalone LTX path")
+    for relative_path in RETIRED_STANDALONE_LTX_SOURCE_PATHS:
+        path = root / relative_path
+        if not path.exists():
+            continue
+        candidates = [path] if path.is_file() else sorted(path.rglob("*.rs"))
+        for candidate in candidates:
+            if candidate.name in RETIRED_STANDALONE_LTX_FILENAMES:
+                violations.append(f"{rel(root, candidate)}: retired standalone LTX module")
+            text = candidate.read_text(encoding="utf-8")
+            for number, line in enumerate(text.splitlines(), start=1):
+                if RETIRED_STANDALONE_LTX_SYMBOLS.search(line) or RETIRED_STANDALONE_LTX_MARKERS.search(
+                    line
+                ):
+                    violations.append(f"{rel(root, candidate)}:{number}: {line.strip()}")
+
+    if not violations:
+        print("ok: standalone LTX epoch-head surfaces stay hard-removed")
+        return True
+
+    print("error: retired standalone LTX surface regressed:", file=sys.stderr)
+    for violation in violations:
+        print(f"  {violation}", file=sys.stderr)
+    return False
+
+
+def check_cell_runtime_coordination_kernel(root: Path) -> bool:
+    """Keep volatile coordination decisions pure and actor-owned in production."""
+    violations: list[str] = []
+    kernel = root / CELL_RUNTIME_COORDINATION_KERNEL_PATH
+    actor = root / CELL_RUNTIME_COORDINATION_ACTOR_PATH
+
+    if not kernel.exists():
+        violations.append(f"{CELL_RUNTIME_COORDINATION_KERNEL_PATH}: missing coordination kernel")
+    else:
+        kernel_text = kernel.read_text(encoding="utf-8")
+        for pattern in CELL_RUNTIME_COORDINATION_REQUIRED_KERNEL_PATTERNS:
+            if pattern not in kernel_text:
+                violations.append(
+                    f"{CELL_RUNTIME_COORDINATION_KERNEL_PATH}: missing {pattern!r}"
+                )
+        allowed_lines = rust_test_only_lines(kernel_text)
+        for number, line in enumerate(kernel_text.splitlines(), start=1):
+            if number in allowed_lines:
+                continue
+            for pattern in CELL_RUNTIME_COORDINATION_FORBIDDEN_KERNEL_PATTERNS:
+                if pattern in line:
+                    violations.append(
+                        f"{CELL_RUNTIME_COORDINATION_KERNEL_PATH}:{number}: "
+                        f"forbidden adapter dependency {pattern!r}"
+                    )
+
+    if not actor.exists():
+        violations.append(f"{CELL_RUNTIME_COORDINATION_ACTOR_PATH}: missing actor adapter")
+    else:
+        actor_text = actor.read_text(encoding="utf-8")
+        for pattern in CELL_RUNTIME_COORDINATION_REQUIRED_ACTOR_PATTERNS:
+            if pattern not in actor_text:
+                violations.append(f"{CELL_RUNTIME_COORDINATION_ACTOR_PATH}: missing {pattern!r}")
+
+    if not violations:
+        print("ok: Cell coordination decisions stay in the pure kernel")
+        return True
+
+    print("error: Cell coordination escaped the pure kernel boundary:", file=sys.stderr)
     for violation in violations:
         print(f"  {violation}", file=sys.stderr)
     return False
@@ -4698,6 +4965,9 @@ def main() -> int:
         check_object_store_features(metadata),
         check_package_release_policy(metadata),
         check_server_fixture_dependencies(metadata),
+        check_cell_runtime_server_boundary(root, metadata),
+        check_standalone_ltx_hard_cut(root),
+        check_cell_runtime_coordination_kernel(root),
         check_workspace_dependency_policy(metadata),
         check_workspace_dependency_sources(root, metadata),
         check_workspace_xet_dependency_sources(root, metadata),

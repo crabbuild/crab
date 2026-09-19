@@ -171,12 +171,20 @@ fn mutate_node<'a>(
             }
             for child in decoded {
                 let child_index = index_for_page(child.aggregate.first, level - 1)?;
-                if index_for_page(child.aggregate.last, level - 1)? != child_index
-                    || child_index / FANOUT as u32 != index
-                    || children.insert(child_index, child).is_some()
-                {
+                let last_index = index_for_page(child.aggregate.last, level - 1)?;
+                let invalid_range =
+                    last_index != child_index || child_index / FANOUT as u32 != index;
+                let duplicate = children.contains_key(&child_index);
+                if invalid_range || duplicate {
                     return Err(CrabError::LTXCorrupted);
                 }
+                // Branch records authenticate ranges but omit indexes; restore the
+                // derived placement before parent rebuilding can sort children.
+                let child = Node {
+                    index: child_index,
+                    ..child
+                };
+                children.insert(child_index, child);
             }
         }
 

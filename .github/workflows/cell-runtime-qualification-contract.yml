@@ -1,0 +1,95 @@
+name: Cell runtime qualification contract
+
+on:
+  pull_request:
+    paths:
+      - "crates/crab-cell-runtime/**"
+      - "crates/crab-ltx/**"
+      - "crab/scripts/check-architecture-gates.py"
+      - ".github/workflows/cell-runtime-qualification-contract.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/crab-cell-runtime/**"
+      - "crates/crab-ltx/**"
+      - "crab/scripts/check-architecture-gates.py"
+      - ".github/workflows/cell-runtime-qualification-contract.yml"
+
+jobs:
+  contract:
+    name: Signed receipt and canonical contract checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Install contract validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y protobuf-compiler sqlite3
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
+      - name: Validate architecture boundary
+        run: python3 crab/scripts/check-architecture-gates.py
+      - name: Validate executable design contracts
+        run: node crates/crab-cell-runtime/docs/validate.mjs
+      - name: Keep Compose receipt schema gate synchronized
+        shell: bash
+        run: |
+          set -euo pipefail
+          harness_version="$(sed -n \
+            's/^[[:space:]]*version:[[:space:]]*\([0-9][0-9]*\),$/\1/p' \
+            crates/crab-http-server/tests/qualify_compose_cluster.sh | head -1)"
+          gate_versions="$(sed -n \
+            's/.*\.version == \([0-9][0-9]*\) and.*/\1/p' \
+            .github/workflows/http-server-container.yml | sort -u)"
+          test -n "$harness_version"
+          test "$gate_versions" = "$harness_version"
+      - name: Verify receipt, placement, pressure, and resource contracts
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
+        run: |
+          set -euo pipefail
+          for filter in qualification placement pressure resource; do
+            cargo test -p crab-cell-runtime "${filter}" --locked
+          done
+      - name: Verify canonical LTX contracts
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
+        run: cargo test -p crab-ltx --features replica --locked
+      - name: Smoke-test the complete qualification matrix in a fresh process
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/qualification-matrix-contract"
+          mkdir -p "$root/receipts" "$root/artifacts"
+          source_revision=0123456789abcdef0123456789abcdef01234567
+          image_digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          fixture="$root/fixture.json"
+          jq -cn '{schema: 1, kind: "qualification-matrix-contract-fixture"}' > "$fixture"
+          entries='[]'
+          for workload in protocol storage publication warm-path churn fleet failover primitives accounting compatibility; do
+            artifact="$root/artifacts/${workload}.json"
+            receipt="$root/receipts/${workload}.json"
+            cp "$fixture" "$artifact"
+            cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
+              emit "$receipt" "$source_revision" "$image_digest" "$artifact" \
+              github-actions "$workload" none
+            entries="$(jq -c \
+              --arg workload "$workload" \
+              --arg receipt "receipts/${workload}.json" \
+              --arg artifact "artifacts/${workload}.json" \
+              '. + [{workload: $workload, receipt: $receipt, artifacts: [$artifact]}]' \
+              <<< "$entries")"
+          done
+          printf '%s' "$(jq -cn --argjson entries "$entries" \
+            '{schema_version: 1, entries: $entries}')" > "$root/qualification-matrix.json"
+          (
+            cd "$root"
+            cargo run --quiet --locked --manifest-path "${GITHUB_WORKSPACE}/Cargo.toml" \
+              -p crab-cell-runtime --bin qualification_receipt -- \
+              verify-matrix qualification-matrix.json "$source_revision" "$image_digest"
+          )

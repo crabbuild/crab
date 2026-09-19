@@ -180,6 +180,10 @@ Missing allocated pages are corruption. The runtime never converts them to zero-
 ## Share one local disk budget
 
 `DiskBudget` and `DiskReservation` account every local byte on the configured volume.
+When a `CellRuntime` owns the host, its ledger installs a reconciliation
+admission on that budget. Existing bytes are imported at startup and later
+reserve, resize, release, and late-host paths update the same ledger, so the
+runtime's advertised disk usage cannot drift from LTX's local admission.
 
 ```mermaid
 flowchart LR

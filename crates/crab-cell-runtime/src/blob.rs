@@ -19,6 +19,12 @@ const MAX_CONTENT_TYPE_BYTES: usize = 256;
 const MIN_UPLOAD_LIFETIME_MS: i64 = 60_000;
 const MAX_UPLOAD_LIFETIME_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 
+#[derive(Clone, Copy)]
+struct BlobMutationTimes {
+    now_ms: i64,
+    issued_at_ms: i64,
+}
+
 /// Conditional publication rule captured when an upload begins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlobCondition {
@@ -135,9 +141,11 @@ pub fn install_blob_schema(transaction: &Transaction<'_>) -> Result<()> {
 pub fn blob_mutate(
     transaction: &Transaction<'_>,
     now_ms: i64,
+    issued_at_ms: i64,
     mutation: &BlobMutation,
 ) -> Result<BlobMutationOutcome> {
     validate_now(now_ms)?;
+    validate_now(issued_at_ms)?;
     match mutation {
         BlobMutation::Begin {
             key,
@@ -148,7 +156,10 @@ pub fn blob_mutate(
             expires_at_ms,
         } => begin_upload(
             transaction,
-            now_ms,
+            BlobMutationTimes {
+                now_ms,
+                issued_at_ms,
+            },
             key,
             *upload_id,
             *condition,
@@ -212,7 +223,7 @@ pub fn blob_cleanup_expired(
 
 fn begin_upload(
     transaction: &Transaction<'_>,
-    now_ms: i64,
+    times: BlobMutationTimes,
     key: &[u8],
     upload_id: [u8; 16],
     condition: BlobCondition,
@@ -223,12 +234,15 @@ fn begin_upload(
     validate_key(key)?;
     validate_metadata(content_type, metadata)?;
     let lifetime = expires_at_ms
-        .checked_sub(now_ms)
+        .checked_sub(times.issued_at_ms)
         .ok_or(Error::Command("blob upload expiry overflow"))?;
     if !(MIN_UPLOAD_LIFETIME_MS..=MAX_UPLOAD_LIFETIME_MS).contains(&lifetime) {
         return Err(Error::Command(
             "blob upload lifetime must be between one minute and seven days",
         ));
+    }
+    if expires_at_ms <= times.now_ms {
+        return Err(Error::Command("blob upload has already expired"));
     }
     let digest = begin_digest(key, condition, content_type, metadata, expires_at_ms);
     let existing = transaction
@@ -256,7 +270,7 @@ fn begin_upload(
             expected_etag.as_ref().map(<[u8; 32]>::as_slice),
             content_type,
             metadata,
-            now_ms,
+            times.now_ms,
             expires_at_ms,
         ),
     )?;
