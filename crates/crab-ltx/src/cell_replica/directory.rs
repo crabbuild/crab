@@ -825,14 +825,17 @@ async fn read_node(verification: &Verification<'_>, digest: [u8; 32]) -> Result<
             .await;
     }
     let _permit = verification.host.io_permit().await?;
-    let (bytes, _) = verification
+    let result = verification
         .layout
         .store()
         .get_with_etag_bounded(&path, MAX_NODE_BYTES)
-        .await?;
-    verification
-        .host
-        .observe_ltx_read(verification.origin, bytes.len());
+        .await;
+    verification.host.observe_ltx_origin_request(
+        verification.origin,
+        result.is_ok(),
+        result.as_ref().map_or(0, |(bytes, _)| bytes.len()),
+    );
+    let (bytes, _) = result?;
     if *blake3::hash(&bytes).as_bytes() != digest {
         return Err(CrabError::ChecksumMismatch);
     }
@@ -858,14 +861,17 @@ async fn read_node_uncached(
         CellObjectKind::Directory,
     );
     let _permit = verification.host.io_permit().await?;
-    let (bytes, _) = verification
+    let result = verification
         .layout
         .store()
         .get_with_etag_bounded(&path, MAX_NODE_BYTES)
-        .await?;
-    verification
-        .host
-        .observe_ltx_read(verification.origin, bytes.len());
+        .await;
+    verification.host.observe_ltx_origin_request(
+        verification.origin,
+        result.is_ok(),
+        result.as_ref().map_or(0, |(bytes, _)| bytes.len()),
+    );
+    let (bytes, _) = result?;
     if *blake3::hash(&bytes).as_bytes() != digest {
         return Err(CrabError::ChecksumMismatch);
     }

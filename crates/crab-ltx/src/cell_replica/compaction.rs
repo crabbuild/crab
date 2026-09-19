@@ -9,8 +9,7 @@ use std::{
 use crab_storage::CellObjectKind;
 
 use super::{
-    CellReplica, DirectoryEntry, LoadedGraph, ObjectExtent, PreparedRoot, RootRef,
-    SegmentDescriptor, directory, object_extents,
+    CellReplica, DirectoryEntry, LoadedGraph, PreparedRoot, RootRef, SegmentDescriptor, directory,
 };
 use crate::{CrabError, Result, SegmentInfo, Txid, environment::FileIo};
 
@@ -43,18 +42,19 @@ pub(super) async fn prepare(
 
     let mut scratch = ScratchFiles::new(&replica.host, scratch_directory);
     let original_indexes = scratch.create("source-indexes")?;
+    let original_bodies = scratch.create("source-bodies")?;
     let compacted_ltx = scratch.create("compacted-ltx")?;
     let codec_index = scratch.create("codec-index")?;
     let compacted_index = scratch.create("compacted-index")?;
     let spooled = spool_indexes(replica, &graph.descriptors, &original_indexes).await?;
     let selected_inputs = spooled[range.clone()].to_vec();
-    verify_selected_bodies(replica, &selected_inputs).await?;
-    let extents = object_extents(&graph.descriptors)?;
+    let body_inputs = spool_selected_bodies(replica, &selected_inputs, &original_bodies).await?;
     let artifacts = write_compacted(
         replica,
         &selected_inputs,
         &original_indexes,
-        &extents,
+        &original_bodies,
+        &body_inputs,
         &compacted_ltx,
         &codec_index,
         &compacted_index,
@@ -134,7 +134,14 @@ pub(super) async fn prepare(
         .await
 }
 
-async fn verify_selected_bodies(replica: &CellReplica, inputs: &[SpoolInput]) -> Result<()> {
+async fn spool_selected_bodies(
+    replica: &CellReplica,
+    inputs: &[SpoolInput],
+    destination: &Path,
+) -> Result<Vec<BodySpoolInput>> {
+    let mut file = replica.host.filesystem.open_rw(destination)?;
+    let mut spooled = Vec::with_capacity(inputs.len());
+    let mut destination_offset = 0_u64;
     for input in inputs {
         let descriptor = &input.descriptor;
         let start = descriptor.offset();
@@ -159,17 +166,42 @@ async fn verify_selected_bodies(replica: &CellReplica, inputs: &[SpoolInput]) ->
                 .store()
                 .range_get(&path, offset..next)
                 .await?;
+            drop(_permit);
             if bytes.len() as u64 != next - offset {
                 return Err(CrabError::ChecksumMismatch);
             }
             hasher.update(&bytes);
+            file = replica
+                .host
+                .run(move || {
+                    file.write_all(&bytes)?;
+                    Ok::<_, CrabError>(file)
+                })
+                .await??;
             offset = next;
         }
         if *hasher.finalize().as_bytes() != descriptor.info.blake3 {
             return Err(CrabError::ChecksumMismatch);
         }
+        spooled.push(BodySpoolInput {
+            descriptor: descriptor.clone(),
+            start: destination_offset,
+        });
+        destination_offset = destination_offset
+            .checked_add(descriptor.info.size_bytes)
+            .ok_or(CrabError::Limit("compaction body spool"))?;
     }
-    Ok(())
+    replica
+        .host
+        .run(move || {
+            if file.file_len()? != destination_offset {
+                return Err(CrabError::LTXCorrupted);
+            }
+            file.sync_all()?;
+            Ok::<_, CrabError>(())
+        })
+        .await??;
+    Ok(spooled)
 }
 
 async fn spool_indexes(
@@ -252,12 +284,14 @@ async fn write_compacted(
     replica: &CellReplica,
     inputs: &[SpoolInput],
     spool_path: &Path,
-    extents: &std::collections::BTreeMap<[u8; 32], ObjectExtent>,
+    body_path: &Path,
+    body_inputs: &[BodySpoolInput],
     ltx_path: &Path,
     codec_index_path: &Path,
     index_path: &Path,
 ) -> Result<CompactedArtifacts> {
     let source = replica.host.filesystem.open(spool_path)?;
+    let mut body_source = replica.host.filesystem.open(body_path)?;
     let mut entries = MergedEntries::new(vec![source], inputs.to_vec())?;
     let output_file = replica.host.filesystem.open_rw(ltx_path)?;
     let codec_index_file = replica.host.filesystem.open_rw(codec_index_path)?;
@@ -293,7 +327,18 @@ async fn write_compacted(
             }
             batch.push(entry);
         }
-        let pages = read_pages(replica, &batch, extents, first.descriptor.info.page_size).await?;
+        let range = body_range(&batch, body_inputs)?;
+        let page_size = first.descriptor.info.page_size;
+        let returned = replica
+            .host
+            .run(move || {
+                let frames = body_source.read_exact_at(range.start, range.length)?;
+                let pages = decode_pages(&batch, &frames, page_size)?;
+                Ok::<_, CrabError>((body_source, pages))
+            })
+            .await??;
+        body_source = returned.0;
+        let pages = returned.1;
         state = replica.host.run(move || state.encode(pages)).await??;
     }
     let post_checksum = last.descriptor.info.post_checksum;
@@ -303,42 +348,42 @@ async fn write_compacted(
         .await?
 }
 
-async fn read_pages(
-    replica: &CellReplica,
-    entries: &[DirectoryEntry],
-    extents: &std::collections::BTreeMap<[u8; 32], ObjectExtent>,
-    page_size: u32,
-) -> Result<Vec<(u32, Vec<u8>)>> {
+fn body_range(entries: &[DirectoryEntry], inputs: &[BodySpoolInput]) -> Result<LocalBodyRange> {
     let first = entries.first().ok_or(CrabError::LTXCorrupted)?;
     let last = entries.last().ok_or(CrabError::LTXCorrupted)?;
     let end = last
         .offset
         .checked_add(u64::from(last.length))
         .ok_or(CrabError::LTXCorrupted)?;
-    let extent = extents.get(&first.object).ok_or(CrabError::LTXCorrupted)?;
-    if entries.iter().any(|entry| entry.object != first.object)
-        || !extent
-            .ranges
-            .iter()
-            .any(|range| range.start <= first.offset && end <= range.end)
-    {
+    if entries.iter().any(|entry| entry.object != first.object) {
         return Err(CrabError::LTXCorrupted);
     }
-    let path = replica.layout.incarnation_object_path(
-        &replica.cell,
-        &replica.incarnation,
-        &first.object,
-        extent.kind,
-    );
-    let _permit = replica.host.io_permit().await?;
-    let frames = replica
-        .layout
-        .store()
-        .range_get(&path, first.offset..end)
-        .await?;
-    if frames.len() as u64 != end - first.offset {
-        return Err(CrabError::ChecksumMismatch);
-    }
+    let input = inputs
+        .iter()
+        .find(|input| {
+            input.descriptor.object_digest() == first.object
+                && input.descriptor.offset() <= first.offset
+                && input
+                    .descriptor
+                    .offset()
+                    .checked_add(input.descriptor.info.size_bytes)
+                    .is_some_and(|input_end| end <= input_end)
+        })
+        .ok_or(CrabError::LTXCorrupted)?;
+    let start = input
+        .start
+        .checked_add(first.offset - input.descriptor.offset())
+        .ok_or(CrabError::LTXCorrupted)?;
+    let length = usize::try_from(end - first.offset).map_err(|_| CrabError::LTXCorrupted)?;
+    Ok(LocalBodyRange { start, length })
+}
+
+fn decode_pages(
+    entries: &[DirectoryEntry],
+    frames: &[u8],
+    page_size: u32,
+) -> Result<Vec<(u32, Vec<u8>)>> {
+    let first = entries.first().ok_or(CrabError::LTXCorrupted)?;
     let mut pages = Vec::with_capacity(entries.len());
     for entry in entries {
         let start =
@@ -493,6 +538,17 @@ struct SpoolInput {
     source: usize,
     start: u64,
     length: u64,
+}
+
+#[derive(Clone)]
+struct BodySpoolInput {
+    descriptor: SegmentDescriptor,
+    start: u64,
+}
+
+struct LocalBodyRange {
+    start: u64,
+    length: usize,
 }
 
 struct SpoolCursor {

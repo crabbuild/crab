@@ -3,6 +3,7 @@
 // Split from upstream db.rs; see UPSTREAM.md for Crab's changes.
 
 use super::*;
+use std::cell::Cell;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -82,8 +83,11 @@ impl Db {
         let offset = info.offset;
         let salt1 = info.salt1;
         let salt2 = info.salt2;
-        Ok(self.with_wal_file(|file| {
+        let read_bytes = Cell::new(0_u64);
+        let file_bytes = Cell::new(0_u64);
+        let result = self.with_wal_file(|file| {
             let file_len = file.file_len()? as usize;
+            file_bytes.set(file_len as u64);
             if file_len < WAL_HEADER_SIZE || start < WAL_HEADER_SIZE || start >= file_len {
                 return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
             }
@@ -95,6 +99,7 @@ impl Db {
 
             let tail_base = if start == WAL_HEADER_SIZE { 0 } else { start };
             let mut bytes = file.read_exact_at(0, WAL_HEADER_SIZE)?;
+            read_bytes.set(read_bytes.get().saturating_add(bytes.len() as u64));
             let mut cursor = start;
             let mut target_frames = 1_usize;
             loop {
@@ -103,6 +108,7 @@ impl Db {
                     .min(complete_end);
                 if target_end > cursor {
                     let chunk = file.read_exact_at(cursor as u64, target_end - cursor)?;
+                    read_bytes.set(read_bytes.get().saturating_add(chunk.len() as u64));
                     bytes.extend_from_slice(&chunk);
                     cursor = target_end;
                 }
@@ -148,7 +154,9 @@ impl Db {
                 }
                 target_frames = target_frames.saturating_mul(2);
             }
-        })?)
+        });
+        self.timing_observe_wal_transfer(file_bytes.get(), read_bytes.get());
+        Ok(result?)
     }
 
     pub(super) fn sync_inner(&mut self, mut info: SyncInfo) -> Result<bool> {
@@ -178,8 +186,11 @@ impl Db {
         let frame_size_bytes = self.page_size as i64 + WAL_FRAME_HEADER_SIZE as i64;
         let mut sparse_tail = false;
         let mut fallback = false;
+        if info.snapshotting {
+            self.timing_observe_wal_snapshot();
+        }
         let mut wal = if info.snapshotting {
-            let bytes = self.host.read(&self.wal_path())?;
+            let bytes = self.read_whole_wal()?;
             WalImage::whole(bytes)
         } else {
             let start = if info.offset <= WAL_HEADER_SIZE as i64 + frame_size_bytes {
@@ -194,7 +205,7 @@ impl Db {
                 }
                 Err(_) => {
                     fallback = true;
-                    let bytes = self.host.read(&self.wal_path())?;
+                    let bytes = self.read_whole_wal()?;
                     WalImage::whole(bytes)
                 }
             }
@@ -219,7 +230,7 @@ impl Db {
             info.offset = WAL_HEADER_SIZE as i64;
             if sparse_tail {
                 fallback = true;
-                let bytes = self.host.read(&self.wal_path())?;
+                let bytes = self.read_whole_wal()?;
                 wal = WalImage::whole(bytes);
             }
         }

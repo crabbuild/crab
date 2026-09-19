@@ -145,6 +145,15 @@ impl TimingRecorder {
         self.timing.wal_image_bytes = self.timing.wal_image_bytes.max(bytes as u64);
     }
 
+    pub(crate) fn observe_wal_transfer(&mut self, file_bytes: u64, read_bytes: u64) {
+        self.timing.wal_file_bytes = self.timing.wal_file_bytes.max(file_bytes);
+        self.timing.wal_read_bytes = self.timing.wal_read_bytes.saturating_add(read_bytes);
+    }
+
+    pub(crate) fn observe_wal_snapshot(&mut self) {
+        self.timing.wal_snapshot_reads = self.timing.wal_snapshot_reads.saturating_add(1);
+    }
+
     pub(crate) fn checkpoint_run(&mut self) {
         self.timing.checkpoint_runs = self.timing.checkpoint_runs.saturating_add(1);
     }
@@ -459,11 +468,20 @@ impl Db {
 
     fn wal_header_bytes(&mut self) -> Result<[u8; WAL_HEADER_SIZE]> {
         let bytes = self.with_wal_file(|file| file.read_exact_at(0, WAL_HEADER_SIZE))?;
+        self.timing_observe_wal_transfer(0, bytes.len() as u64);
         bytes.try_into().map_err(|_| CrabError::LTXCorrupted)
     }
 
     fn wal_bytes_at(&mut self, offset: i64, n: i64) -> Result<Vec<u8>> {
-        Ok(self.with_wal_file(|file| file.read_exact_at(offset as u64, n as usize))?)
+        let bytes = self.with_wal_file(|file| file.read_exact_at(offset as u64, n as usize))?;
+        self.timing_observe_wal_transfer(0, bytes.len() as u64);
+        Ok(bytes)
+    }
+
+    fn read_whole_wal(&mut self) -> Result<Vec<u8>> {
+        let bytes = self.host.read(&self.wal_path())?;
+        self.timing_observe_wal_transfer(bytes.len() as u64, bytes.len() as u64);
+        Ok(bytes)
     }
 
     fn ensure_wal_exists(&mut self) -> Result<()> {
@@ -481,7 +499,10 @@ impl Db {
 
     fn wal_file_size(&mut self) -> Result<i64> {
         match self.with_wal_file(|file| file.file_len()) {
-            Ok(len) => Ok(len as i64),
+            Ok(len) => {
+                self.timing_observe_wal_transfer(len, 0);
+                Ok(len as i64)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
             Err(e) => Err(e.into()),
         }
@@ -597,6 +618,18 @@ impl Db {
         }
     }
 
+    pub(crate) fn timing_observe_wal_transfer(&mut self, file_bytes: u64, read_bytes: u64) {
+        if let Some(recorder) = &mut self.timing {
+            recorder.observe_wal_transfer(file_bytes, read_bytes);
+        }
+    }
+
+    pub(crate) fn timing_observe_wal_snapshot(&mut self) {
+        if let Some(recorder) = &mut self.timing {
+            recorder.observe_wal_snapshot();
+        }
+    }
+
     pub fn sync(&mut self, required: Option<crate::commit::WalCut>) -> Result<()> {
         // Self-heal: recreate the control tables if something swept them out
         // of `sqlite_schema` from under the replicator — without them every
@@ -675,7 +708,7 @@ impl Db {
         let db_size = self.db_file_size()?;
         let mut commit = (db_size / self.page_size as i64) as u32;
 
-        let wal = WalImage::whole(self.host.read(&self.wal_path())?);
+        let wal = WalImage::whole(self.read_whole_wal()?);
         let mut rd = WalReader::new(&wal.bytes).map_err(CrabError::from)?;
         let (page_map, max_offset, wal_commit) = rd.page_map().map_err(CrabError::from)?;
         if wal_commit > 0 {

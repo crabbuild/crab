@@ -78,7 +78,7 @@ pub use codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 pub use control::{Control, ControlState, Owner, RecoveryOverlayRef, RootRef, Transition};
 pub use crab_ltx::{
     CaptureTiming, CellReplica, DiskBudget, DiskReservation, Host as ReplicaHost,
-    Limits as ReplicaLimits, LtxPhase, LtxReadOrigin, ScratchMonitor,
+    Limits as ReplicaLimits, LtxPhase, LtxReadOrigin, LtxRequestOutcome, ScratchMonitor,
 };
 pub use cron::{
     CronCommand, CronInvocation, CronModule, CronMutation, CronMutationOutcome, CronNamespace,

@@ -132,10 +132,14 @@ struct MetricsInner {
     resident_routes: [Counter; 3],
     ltx_phase_runs: [[Counter; 2]; LTX_PHASE_COUNT],
     ltx_phase_duration: [Histogram; LTX_PHASE_COUNT],
-    ltx_origin_requests: [Counter; LTX_READ_ORIGIN_COUNT],
+    ltx_logical_reads: [Counter; LTX_READ_ORIGIN_COUNT],
+    ltx_origin_requests: [[Counter; 2]; LTX_READ_ORIGIN_COUNT],
     ltx_origin_bytes: [Counter; LTX_READ_ORIGIN_COUNT],
     ltx_wal_reads: [Counter; 3],
     ltx_wal_image_bytes: Counter,
+    ltx_wal_file_bytes: Counter,
+    ltx_wal_read_bytes: Counter,
+    ltx_wal_snapshot_reads: Counter,
     ltx_capture_wal_bytes: Counter,
     ltx_capture_database_bytes: Counter,
     ltx_capture_ltx_bytes: Counter,
@@ -451,11 +455,22 @@ impl Metrics {
                         &METADATA,
                     )
                 }),
-                ltx_origin_requests: LTX_READ_ORIGIN_LABELS.map(|origin| {
+                ltx_logical_reads: LTX_READ_ORIGIN_LABELS.map(|origin| {
                     recorder.register_counter(
-                        &key("crab_cell_ltx_origin_requests_total", &[("origin", origin)]),
+                        &key("crab_cell_ltx_logical_reads_total", &[("origin", origin)]),
                         &METADATA,
                     )
+                }),
+                ltx_origin_requests: LTX_READ_ORIGIN_LABELS.map(|origin| {
+                    LTX_PHASE_RESULT_LABELS.map(|result| {
+                        recorder.register_counter(
+                            &key(
+                                "crab_cell_ltx_origin_requests_total",
+                                &[("origin", origin), ("result", result)],
+                            ),
+                            &METADATA,
+                        )
+                    })
                 }),
                 ltx_origin_bytes: LTX_READ_ORIGIN_LABELS.map(|origin| {
                     recorder.register_counter(
@@ -471,6 +486,18 @@ impl Metrics {
                 }),
                 ltx_wal_image_bytes: recorder.register_counter(
                     &Key::from_static_name("crab_cell_ltx_wal_image_bytes_total"),
+                    &METADATA,
+                ),
+                ltx_wal_file_bytes: recorder.register_counter(
+                    &Key::from_static_name("crab_cell_ltx_wal_file_bytes_total"),
+                    &METADATA,
+                ),
+                ltx_wal_read_bytes: recorder.register_counter(
+                    &Key::from_static_name("crab_cell_ltx_wal_read_bytes_total"),
+                    &METADATA,
+                ),
+                ltx_wal_snapshot_reads: recorder.register_counter(
+                    &Key::from_static_name("crab_cell_ltx_wal_snapshot_reads_total"),
                     &METADATA,
                 ),
                 ltx_capture_wal_bytes: recorder.register_counter(
@@ -761,29 +788,53 @@ impl crab_cell_runtime::CellTelemetry for Metrics {
         self.inner.ltx_phase_duration[index].record(elapsed.as_secs_f64());
     }
 
-    fn ltx_origin_read(&self, origin: crab_cell_runtime::LtxReadOrigin, requests: u64, bytes: u64) {
+    fn ltx_logical_read(&self, origin: crab_cell_runtime::LtxReadOrigin) {
         let index = match origin {
             crab_cell_runtime::LtxReadOrigin::Cold => 0,
             crab_cell_runtime::LtxReadOrigin::Sparse => 1,
             crab_cell_runtime::LtxReadOrigin::Hydrating => 2,
             crab_cell_runtime::LtxReadOrigin::Resident => 3,
         };
-        self.inner.ltx_origin_requests[index].increment(requests);
+        self.inner.ltx_logical_reads[index].increment(1);
+    }
+
+    fn ltx_origin_request(
+        &self,
+        origin: crab_cell_runtime::LtxReadOrigin,
+        outcome: crab_cell_runtime::LtxRequestOutcome,
+        bytes: u64,
+    ) {
+        let index = match origin {
+            crab_cell_runtime::LtxReadOrigin::Cold => 0,
+            crab_cell_runtime::LtxReadOrigin::Sparse => 1,
+            crab_cell_runtime::LtxReadOrigin::Hydrating => 2,
+            crab_cell_runtime::LtxReadOrigin::Resident => 3,
+        };
+        let outcome = match outcome {
+            crab_cell_runtime::LtxRequestOutcome::Succeeded => 0,
+            crab_cell_runtime::LtxRequestOutcome::Failed => 1,
+        };
+        self.inner.ltx_origin_requests[index][outcome].increment(1);
         self.inner.ltx_origin_bytes[index].increment(bytes);
     }
 
-    fn ltx_capture(&self, timing: &crab_cell_runtime::CaptureTiming) {
+    fn ltx_capture(&self, timing: &crab_cell_runtime::CaptureTiming, succeeded: bool) {
+        <Self as crab_cell_runtime::CellTelemetry>::ltx_phase(
+            self,
+            crab_cell_runtime::LtxPhase::Capture,
+            Duration::from_nanos(timing.total_nanos),
+            succeeded,
+        );
         let phase = |phase, nanos| {
             if nanos > 0 {
                 <Self as crab_cell_runtime::CellTelemetry>::ltx_phase(
                     self,
                     phase,
                     Duration::from_nanos(nanos),
-                    true,
+                    succeeded,
                 );
             }
         };
-        phase(crab_cell_runtime::LtxPhase::Capture, timing.total_nanos);
         phase(
             crab_cell_runtime::LtxPhase::Preparation,
             timing.preparation_nanos,
@@ -829,6 +880,15 @@ impl crab_cell_runtime::CellTelemetry for Metrics {
         self.inner
             .ltx_wal_image_bytes
             .increment(timing.wal_image_bytes);
+        self.inner
+            .ltx_wal_file_bytes
+            .increment(timing.wal_file_bytes);
+        self.inner
+            .ltx_wal_read_bytes
+            .increment(timing.wal_read_bytes);
+        self.inner
+            .ltx_wal_snapshot_reads
+            .increment(u64::from(timing.wal_snapshot_reads));
         self.inner.ltx_capture_wal_bytes.increment(timing.wal_bytes);
         self.inner
             .ltx_capture_database_bytes
@@ -1388,8 +1448,13 @@ fn describe_metrics(recorder: &impl Recorder) {
     );
     describe_counter(
         recorder,
+        "crab_cell_ltx_logical_reads_total",
+        "Logical Cell reads by bounded residency class.",
+    );
+    describe_counter(
+        recorder,
         "crab_cell_ltx_origin_requests_total",
-        "Read requests by bounded Cell residency class.",
+        "Provider read attempts by bounded Cell residency class and result.",
     );
     describe_counter(
         recorder,
@@ -1405,6 +1470,21 @@ fn describe_metrics(recorder: &impl Recorder) {
         recorder,
         "crab_cell_ltx_wal_image_bytes_total",
         "Peak allocated WAL image bytes summed across Cell captures.",
+    );
+    describe_counter(
+        recorder,
+        "crab_cell_ltx_wal_file_bytes_total",
+        "Largest observed physical WAL file bytes summed across Cell captures.",
+    );
+    describe_counter(
+        recorder,
+        "crab_cell_ltx_wal_read_bytes_total",
+        "Physical WAL bytes transferred into capture memory.",
+    );
+    describe_counter(
+        recorder,
+        "crab_cell_ltx_wal_snapshot_reads_total",
+        "Complete WAL images selected before incremental WAL parsing.",
     );
     for (name, description) in [
         (
@@ -1663,16 +1743,20 @@ mod tests {
             Duration::from_millis(5),
             false,
         );
-        <Metrics as crab_cell_runtime::CellTelemetry>::ltx_origin_read(
+        <Metrics as crab_cell_runtime::CellTelemetry>::ltx_logical_read(
+            &metrics,
+            crab_cell_runtime::LtxReadOrigin::Resident,
+        );
+        <Metrics as crab_cell_runtime::CellTelemetry>::ltx_origin_request(
             &metrics,
             crab_cell_runtime::LtxReadOrigin::Cold,
-            2,
+            crab_cell_runtime::LtxRequestOutcome::Succeeded,
             1_024,
         );
-        <Metrics as crab_cell_runtime::CellTelemetry>::ltx_origin_read(
+        <Metrics as crab_cell_runtime::CellTelemetry>::ltx_origin_request(
             &metrics,
             crab_cell_runtime::LtxReadOrigin::Hydrating,
-            3,
+            crab_cell_runtime::LtxRequestOutcome::Failed,
             4_096,
         );
         <Metrics as crab_cell_runtime::CellTelemetry>::ltx_capture(
@@ -1681,6 +1765,9 @@ mod tests {
                 schema_check_nanos: 1_000_000,
                 wal_sparse_reads: 1,
                 wal_image_bytes: 8_192,
+                wal_file_bytes: 12_288,
+                wal_read_bytes: 4_160,
+                wal_snapshot_reads: 1,
                 wal_bytes: 4_096,
                 database_bytes: 16_384,
                 ltx_bytes: 2_048,
@@ -1691,6 +1778,7 @@ mod tests {
                 checkpoint_restarts: 1,
                 ..Default::default()
             },
+            true,
         );
         metrics.record_self_fence(SelfFenceReason::Refresh);
         metrics.record_self_fence(SelfFenceReason::Shutdown);
@@ -1760,9 +1848,14 @@ mod tests {
                 .contains("crab_cell_ltx_phase_total{phase=\"frame_fetch\",result=\"failed\"} 1")
         );
         assert!(rendered.contains("crab_cell_ltx_phase_seconds_count{phase=\"root_open\"} 1"));
-        assert!(rendered.contains("crab_cell_ltx_origin_requests_total{origin=\"cold\"} 2"));
+        assert!(rendered.contains("crab_cell_ltx_logical_reads_total{origin=\"resident\"} 1"));
+        assert!(rendered.contains(
+            "crab_cell_ltx_origin_requests_total{origin=\"cold\",result=\"succeeded\"} 1"
+        ));
         assert!(rendered.contains("crab_cell_ltx_origin_bytes_total{origin=\"cold\"} 1024"));
-        assert!(rendered.contains("crab_cell_ltx_origin_requests_total{origin=\"hydrating\"} 3"));
+        assert!(rendered.contains(
+            "crab_cell_ltx_origin_requests_total{origin=\"hydrating\",result=\"failed\"} 1"
+        ));
         assert!(rendered.contains("crab_cell_ltx_origin_bytes_total{origin=\"hydrating\"} 4096"));
         assert!(
             rendered.contains(
@@ -1771,6 +1864,9 @@ mod tests {
         );
         assert!(rendered.contains("crab_cell_ltx_wal_reads_total{strategy=\"sparse\"} 1"));
         assert!(rendered.contains("crab_cell_ltx_wal_image_bytes_total 8192"));
+        assert!(rendered.contains("crab_cell_ltx_wal_file_bytes_total 12288"));
+        assert!(rendered.contains("crab_cell_ltx_wal_read_bytes_total 4160"));
+        assert!(rendered.contains("crab_cell_ltx_wal_snapshot_reads_total 1"));
         assert!(rendered.contains("crab_cell_ltx_capture_wal_bytes_total 4096"));
         assert!(rendered.contains("crab_cell_ltx_checkpoint_runs_total 1"));
         assert!(rendered.contains("crab_cell_ltx_checkpoint_frames_total 4"));

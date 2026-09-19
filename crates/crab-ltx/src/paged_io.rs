@@ -276,6 +276,8 @@ impl Io {
     }
 
     pub(crate) fn page(&self, page: u32) -> Result<Vec<u8>> {
+        let origin = ORIGIN.get();
+        self.database.host().observe_ltx_logical_read(origin);
         let _gate = self
             .gate
             .lock()
@@ -297,7 +299,7 @@ impl Io {
             database: self.database.clone(),
             view: self.view,
             page,
-            origin: ORIGIN.get(),
+            origin,
             deadline,
             reply,
         };
