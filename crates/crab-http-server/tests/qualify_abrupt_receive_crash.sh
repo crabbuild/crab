@@ -28,6 +28,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
+read_remote_head() {
+  local read_attempt
+  for read_attempt in $(seq 1 36); do
+    if git ls-remote "$remote" refs/heads/main | cut -f1; then
+      return 0
+    fi
+    if [ "$read_attempt" -lt 36 ]; then
+      sleep 10
+    fi
+  done
+  return 1
+}
+
 GIT_TERMINAL_PROMPT=0 git clone "$remote" "${work_dir}/source"
 git -C "${work_dir}/source" config user.name "Crab qualification"
 git -C "${work_dir}/source" config user.email "qualification@example.invalid"
@@ -109,7 +122,10 @@ fi
 replacement_server_id="$("${compose[@]}" ps --quiet server)"
 test -n "$replacement_server_id"
 
-remote_after_crash="$(git ls-remote "$remote" refs/heads/main | cut -f1)"
+if ! remote_after_crash="$(read_remote_head)"; then
+  echo "The recovered ref did not become readable within the recovery budget." >&2
+  exit 1
+fi
 if [ "$remote_after_crash" != "$old_oid" ] && [ "$remote_after_crash" != "$new_oid" ]; then
   echo "Abrupt restart exposed unexpected ref $remote_after_crash." >&2
   exit 1
@@ -129,7 +145,11 @@ if ! $retry_succeeded; then
   exit 1
 fi
 
-test "$(git ls-remote "$remote" refs/heads/main | cut -f1)" = "$new_oid"
+if ! recovered_head="$(read_remote_head)"; then
+  echo "The committed ref did not become readable within the recovery budget." >&2
+  exit 1
+fi
+test "$recovered_head" = "$new_oid"
 verify_dir=""
 for clone_attempt in $(seq 1 36); do
   candidate="${work_dir}/verify-${clone_attempt}"
