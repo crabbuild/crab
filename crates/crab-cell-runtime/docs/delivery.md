@@ -110,9 +110,11 @@ The local RustFS qualification pass on 2026-09-18 used one isolated bucket and
 unique prefixes with explicit credentials (the credentials were not written to
 artifacts). It passed the LTX round trip, Cell source-loss takeover and
 retention sweep, HTTP collaboration/takeover, native HTTP push, and receive
-fault matrix. These commands are provider evidence for iteration, not release
-receipts; protected release jobs must emit the schema-v3 receipt bound to the
-tagged source and immutable image.
+fault matrix. The same checkout passed the process-level movement probes and
+the hydration shutdown-cancellation regression against the in-memory provider.
+These commands are provider evidence for iteration, not release receipts;
+protected release jobs must emit the schema-v3 receipt bound to the tagged
+source and immutable image.
 
 ```bash
 AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \

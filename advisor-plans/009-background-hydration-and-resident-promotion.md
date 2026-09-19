@@ -1,6 +1,6 @@
 # Bounded background hydration and resident promotion
 
-Status: IN PROGRESS — bounded worker hydration, sparse/resident state, worker-job ledger admission, counted-store zero-I/O proof, and a restored sparse warm-restart promotion probe are wired; cancellation and provider-scale qualification remain
+Status: IN PROGRESS — bounded worker hydration, sparse/resident state, worker-job ledger admission, counted-store zero-I/O proof, and a restored sparse warm-restart promotion probe are wired; origin-wait shutdown cancellation and isolated RustFS source-loss/retention runs pass; provider-scale qualification remains
 Priority: P0
 Effort: L
 Risk: High

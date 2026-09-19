@@ -40,8 +40,13 @@ struct PausingStore {
     failed: AtomicBool,
     blocked: AtomicBool,
     released: AtomicBool,
+    get_armed: AtomicBool,
+    get_blocked: AtomicBool,
+    get_released: AtomicBool,
     entered: Notify,
     release: Notify,
+    get_entered: Notify,
+    get_release: Notify,
     parallel_catalog_heads: AtomicBool,
     catalog_head_barrier: tokio::sync::Barrier,
 }
@@ -55,8 +60,13 @@ impl PausingStore {
             failed: AtomicBool::new(false),
             blocked: AtomicBool::new(false),
             released: AtomicBool::new(false),
+            get_armed: AtomicBool::new(false),
+            get_blocked: AtomicBool::new(false),
+            get_released: AtomicBool::new(false),
             entered: Notify::new(),
             release: Notify::new(),
+            get_entered: Notify::new(),
+            get_release: Notify::new(),
             parallel_catalog_heads: AtomicBool::new(false),
             catalog_head_barrier: tokio::sync::Barrier::new(2),
         }
@@ -93,6 +103,21 @@ impl PausingStore {
     fn release(&self) {
         self.released.store(true, Ordering::Release);
         self.release.notify_waiters();
+    }
+
+    fn arm_gets(&self) {
+        self.get_armed.store(true, Ordering::Release);
+    }
+
+    async fn wait_until_get_blocked(&self) {
+        while !self.get_blocked.load(Ordering::Acquire) {
+            self.get_entered.notified().await;
+        }
+    }
+
+    fn release_gets(&self) {
+        self.get_released.store(true, Ordering::Release);
+        self.get_release.notify_waiters();
     }
 }
 
@@ -143,6 +168,13 @@ impl ObjectStore for PausingStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
+        if self.get_armed.load(Ordering::Acquire) && !self.get_blocked.swap(true, Ordering::AcqRel)
+        {
+            self.get_entered.notify_waiters();
+            while !self.get_released.load(Ordering::Acquire) {
+                self.get_release.notified().await;
+            }
+        }
         if self.parallel_catalog_heads.load(Ordering::Acquire)
             && location.as_ref().ends_with("/head.json")
         {
@@ -1533,6 +1565,94 @@ async fn restored_sparse_route_promotes_before_zero_origin_reads() {
 
     restored.drain().await.unwrap();
     runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_releases_a_hydration_reservation_after_an_origin_wait() {
+    let pausing = Arc::new(PausingStore::new(Arc::new(InMemory::new())));
+    let fixture = fixture_with_limits_and_store(
+        b"hydration-shutdown-cancellation",
+        Limits::default(),
+        Store::new(pausing.clone()),
+    );
+    let first_session = SessionId::from_bytes([113; 16]);
+    let first_runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        64 * 1024 * 1024,
+        first_session,
+    )
+    .unwrap();
+    let handle = bootstrap_role_on(
+        &first_runtime,
+        &fixture,
+        first_session,
+        CatalogRole::Repository,
+        |transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE payload(value BLOB NOT NULL);\
+                 WITH RECURSIVE numbers(value) AS (\
+                   SELECT 1 UNION ALL SELECT value + 1 FROM numbers WHERE value < 512\
+                 )\
+                 INSERT INTO payload(value) SELECT zeroblob(16384) FROM numbers;",
+            )?;
+            Ok(())
+        },
+    )
+    .await;
+    handle.drain().await.unwrap();
+    first_runtime.shutdown().await.unwrap();
+
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let observed = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let successor = SessionId::from_bytes([114; 16]);
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        64 * 1024 * 1024,
+        successor,
+    )
+    .unwrap();
+    let restored = runtime
+        .acquire_idle_restored(
+            proof,
+            fixture.replica.clone(),
+            authority,
+            observed,
+            fixture._directory.path().join("hydration-shutdown.sqlite"),
+            Owner {
+                session: successor,
+                endpoint: "https://hydration-shutdown.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    pausing.arm_gets();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        pausing.wait_until_get_blocked(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(runtime.stats().hydration_jobs(), 1);
+
+    let shutdown_runtime = runtime.clone();
+    let shutdown = tokio::spawn(async move { shutdown_runtime.shutdown().await });
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    pausing.release_gets();
+    shutdown.await.unwrap().unwrap();
+    assert_eq!(runtime.stats().hydration_jobs(), 0);
+    drop(restored);
 }
 
 #[tokio::test(flavor = "multi_thread")]

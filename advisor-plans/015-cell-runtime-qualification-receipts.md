@@ -160,6 +160,14 @@ points. Feed each emitted receipt back through its validator in a fresh process.
 Recompute every referenced artifact digest and compare. Release qualification
 must fail when handed a receipt from a different SHA or image digest.
 
+The latest isolated RustFS iteration on 2026-09-18 passed the canonical LTX
+round trip, Cell source-loss takeover, retention sweep, HTTP receive-fault,
+native HTTP push, and public collaboration/takeover tests. The runtime actor
+suite also passes the process-level movement probes and the hydration shutdown
+cancellation regression. These runs use a disposable local provider prefix and
+are provider evidence for iteration; they are not signed release receipts and
+do not close the protected Kubernetes or matched-hardware gates.
+
 ## Acceptance criteria
 
 - [ ] Every matrix row emits schema-valid evidence tied to exact source and

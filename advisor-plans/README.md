@@ -165,8 +165,11 @@ Local proof completed:
   `restored_sparse_route_promotes_before_zero_origin_reads` also publishes and
   drains a Cell, reacquires its exact root through a new runtime, waits for
   verified sparse hydration to promote the resident route, and observes zero
-  origin calls on the subsequent SQL read. These are repeatable local warm-path
-  proofs, not provider or release receipts.
+  origin calls on the subsequent SQL read. The
+  `shutdown_releases_a_hydration_reservation_after_an_origin_wait` regression
+  blocks an origin read after sparse activation, shuts down the runtime, and
+  verifies the hydration reservation returns to zero. These are repeatable
+  local warm-path proofs, not provider or release receipts.
 - `crab-ltx --features replica`: 45 unit tests, 79 integration test cases
   (one provider case ignored), and 5 doctests, plus the new streaming, cache
   restart, concurrent-fill, and fault-injection coverage pass; the ignored
@@ -221,7 +224,7 @@ headroom is conservatively clamped by the same runtime reservations used for
 admission. Persisted Queue/Workflow rows are
 re-inspected after durable work and an unknown result remains ineligible for
 eviction. Remaining release gates are recorded in plans 009–017:
-matched warm-latency/restart receipts, multi-GiB/RSS and provider-failure
+matched warm-latency/restart receipts, provider-failure
 matrix evidence (with one local fail-first immutable PUT proof now covered),
 complete advertised/metric parity and mixed-workload resource accounting,
 multi-process
