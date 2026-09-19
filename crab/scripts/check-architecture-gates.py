@@ -1799,7 +1799,22 @@ RETIRED_STANDALONE_LTX_SOURCE_PATHS = (
     "crates/crab-ltx/examples",
 )
 RETIRED_STANDALONE_LTX_FILENAMES = frozenset(
-    {"replica.rs", "schedule.rs", "paged_vfs.rs"}
+    {
+        "replica.rs",
+        "schedule.rs",
+        "paged_vfs.rs",
+        "replica_roundtrip.rs",
+        "paged_read.rs",
+        "sparse_writer.rs",
+        "compact_history.rs",
+        "repository_replication_lifecycle.rs",
+        "rustfs_replication_scale_load.rs",
+        "rustfs_paged_read_scale_performance.rs",
+    }
+)
+RETIRED_STANDALONE_LTX_PATHS = (
+    "crates/crab-ltx/src/replica",
+    "crates/crab-ltx/src/paged/map.rs",
 )
 RETIRED_STANDALONE_LTX_SYMBOLS = re.compile(
     r"\b(?:ReplicaHead|Replica|PagedDatabase|PagedConnection|CompactionSchedule)\b"
@@ -2436,6 +2451,9 @@ def check_cell_runtime_server_boundary(root: Path, metadata: dict) -> bool:
 def check_standalone_ltx_hard_cut(root: Path) -> bool:
     """Keep the retired epoch-head API out of callable LTX source and examples."""
     violations: list[str] = []
+    for relative_path in RETIRED_STANDALONE_LTX_PATHS:
+        if (root / relative_path).exists():
+            violations.append(f"{relative_path}: retired standalone LTX path")
     for relative_path in RETIRED_STANDALONE_LTX_SOURCE_PATHS:
         path = root / relative_path
         if not path.exists():

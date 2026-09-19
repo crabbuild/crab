@@ -275,6 +275,20 @@ class StandaloneLtxHardCutTests(unittest.TestCase):
         self.assertFalse(self.check_source("const HEAD: &str = \"head.json\";\n"))
         self.assertFalse(self.check_source("const MANIFEST: &str = \"manifest.json\";\n"))
 
+    def test_retired_directories_and_examples_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            replica = root / "crates/crab-ltx/src/replica/append.rs"
+            replica.parent.mkdir(parents=True)
+            replica.write_text("pub fn append() {}\n", encoding="utf-8")
+            example = root / "crates/crab-ltx/examples/replica_roundtrip.rs"
+            example.parent.mkdir(parents=True)
+            example.write_text("fn main() {}\n", encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
+                io.StringIO()
+            ):
+                self.assertFalse(GATES.check_standalone_ltx_hard_cut(root))
+
 
 if __name__ == "__main__":
     unittest.main()
