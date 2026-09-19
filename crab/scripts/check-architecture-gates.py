@@ -1798,8 +1798,14 @@ RETIRED_STANDALONE_LTX_SOURCE_PATHS = (
     "crates/crab-ltx/src",
     "crates/crab-ltx/examples",
 )
+RETIRED_STANDALONE_LTX_FILENAMES = frozenset(
+    {"replica.rs", "schedule.rs", "paged_vfs.rs"}
+)
 RETIRED_STANDALONE_LTX_SYMBOLS = re.compile(
     r"\b(?:ReplicaHead|Replica|PagedDatabase|PagedConnection|CompactionSchedule)\b"
+)
+RETIRED_STANDALONE_LTX_MARKERS = re.compile(
+    r"(?:ltx/<epoch>|head\.json|manifest\.json)"
 )
 CELL_RUNTIME_COORDINATION_KERNEL_PATH = "crates/crab-cell-runtime/src/coordination.rs"
 CELL_RUNTIME_COORDINATION_ACTOR_PATH = "crates/crab-cell-runtime/src/actor.rs"
@@ -2436,9 +2442,13 @@ def check_standalone_ltx_hard_cut(root: Path) -> bool:
             continue
         candidates = [path] if path.is_file() else sorted(path.rglob("*.rs"))
         for candidate in candidates:
+            if candidate.name in RETIRED_STANDALONE_LTX_FILENAMES:
+                violations.append(f"{rel(root, candidate)}: retired standalone LTX module")
             text = candidate.read_text(encoding="utf-8")
             for number, line in enumerate(text.splitlines(), start=1):
-                if RETIRED_STANDALONE_LTX_SYMBOLS.search(line):
+                if RETIRED_STANDALONE_LTX_SYMBOLS.search(line) or RETIRED_STANDALONE_LTX_MARKERS.search(
+                    line
+                ):
                     violations.append(f"{rel(root, candidate)}:{number}: {line.strip()}")
 
     if not violations:

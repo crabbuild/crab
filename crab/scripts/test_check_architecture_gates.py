@@ -260,6 +260,21 @@ class StandaloneLtxHardCutTests(unittest.TestCase):
             )
         )
 
+    def test_retired_module_and_storage_markers_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "crates/crab-ltx/src/replica.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text("pub struct HistoricalHead;\n", encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
+                io.StringIO()
+            ):
+                self.assertFalse(GATES.check_standalone_ltx_hard_cut(root))
+
+        self.assertFalse(self.check_source("const PREFIX: &str = \"ltx/<epoch>\";\n"))
+        self.assertFalse(self.check_source("const HEAD: &str = \"head.json\";\n"))
+        self.assertFalse(self.check_source("const MANIFEST: &str = \"manifest.json\";\n"))
+
 
 if __name__ == "__main__":
     unittest.main()
