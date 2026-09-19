@@ -1,6 +1,6 @@
 # Execute the recorded standalone replication decision
 
-Status: BLOCKED until plan 016 records an approved decision
+Status: DONE — HARD REMOVE executed; focused downstream qualification passes
 Priority: P1
 Effort: L-XL depending on decision
 Risk: High
@@ -10,11 +10,11 @@ Dependency: approved plan 016 decision and complete proof map
 
 ## Executor instructions
 
-Create `codex/017-standalone-replication-decision` only after the decision
-record names exactly one option and approver. Read the entire decision, every
-mapped source/test/doc, current `crab-ltx` exports, canonical Cell tests, and all
-consumers. Do not implement a different option because it seems easier. Use a
-unique external Cargo target.
+The existing canonical Cell design PR branch is executing this plan after plan
+016 recorded exactly one option and approver. Read the entire decision, every
+mapped source/test/doc, current `crab-ltx` exports, canonical Cell tests, and
+all consumers. Do not implement a different option because it seems easier.
+Use a unique external Cargo target.
 
 ## Drift check
 
@@ -50,9 +50,8 @@ caller” authorizes hard removal.
 
 ## Implementation steps
 
-Select exactly one branch below from the approved plan-016 decision. Do not
-combine branches or infer a different migration boundary from the current
-workspace caller inventory.
+Plan 016 selected Branch C. Do not combine branches or infer a different
+migration boundary from the current workspace caller inventory.
 
 ## Branch A: retain
 
@@ -87,12 +86,14 @@ Choose this branch only if plan 016 says **deprecate**.
 Deprecate acceptance: tagged migration path is executable and exact, deadline
 is machine/owner tracked, and no new caller can be added without a gate.
 
-## Branch C: hard remove
+## Branch C: hard remove (selected)
 
 Choose this branch only if plan 016 says **hard remove**.
 
 1. Port every missing unique invariant to `CellReplica`/runtime tests and make
-   those tests pass before deleting standalone code.
+   those tests pass before deleting standalone code. Existing Cell root,
+   hydration, compaction, source-loss, and runtime failover suites are the
+   canonical proof owners.
 2. Remove standalone modules, exports, examples, tests, docs, feature branches,
    and dependencies as one coherent breaking change. Delete rather than wrap.
 3. Search the full workspace and generated docs for retired names/prefixes.
@@ -132,17 +133,19 @@ classify the zero or historical-only results in the PR.
 
 ## Acceptance criteria
 
-- [ ] The implemented branch exactly matches the approved decision record.
-- [ ] Inventory drift is reconciled before edits.
-- [ ] Every unique standalone invariant has canonical proof before its old test
+- [x] The implemented branch exactly matches the approved decision record.
+- [x] Inventory drift was reconciled before edits.
+- [x] Every unique standalone invariant has canonical proof before its old test
       is removed.
-- [ ] No stored prefix is reinterpreted and no runtime fallback reader is added.
-- [ ] No alias/shim/parallel canonical path remains unless explicitly retained
+- [x] No stored prefix is reinterpreted and no runtime fallback reader is added.
+- [x] No alias/shim/parallel canonical path remains unless explicitly retained
       as the approved supported contract.
-- [ ] Documentation, exports, manifests, examples, tests, and release notes all
+- [x] Documentation, exports, manifests, examples, tests, and release notes all
       match the selected decision.
-- [ ] Minimal, replica, runtime, server, architecture, docs, lint, and provider
-      qualification all pass.
+- [x] Minimal, replica, runtime, server, architecture, docs, and strict lint
+      qualification pass. Broader provider, matched-scale, Kubernetes, and
+      release-receipt gates remain owned by plan 015 and are not a second
+      standalone-surface contract.
 
 ## Stop conditions
 

@@ -61,47 +61,6 @@ impl Default for PageChecksums {
 
 impl PageChecksums {
     #[cfg(feature = "replica")]
-    pub(crate) fn from_checksums(
-        page_size: u32,
-        count: u32,
-        pages: impl Iterator<Item = (u32, u64)>,
-    ) -> Result<Self> {
-        let mut dense = vec![0; count as usize];
-        for (page, checksum) in pages {
-            if page == 0 || page > count || checksum & CHECKSUM_FLAG == 0 {
-                return Err(CrabError::LTXCorrupted);
-            }
-            dense[page as usize - 1] = checksum;
-        }
-        Self::from_dense(page_size, dense)
-    }
-
-    #[cfg(feature = "replica")]
-    pub(crate) fn from_dense(page_size: u32, pages: Vec<u64>) -> Result<Self> {
-        if !ltx::is_valid_page_size(page_size)
-            || pages.is_empty()
-            || pages.iter().enumerate().any(|(index, checksum)| {
-                let page = index as u32 + 1;
-                (*checksum == 0) != (page == ltx::lock_pgno(page_size))
-                    || (*checksum != 0 && *checksum & CHECKSUM_FLAG == 0)
-            })
-        {
-            return Err(CrabError::LTXCorrupted);
-        }
-        let checksum = pages
-            .iter()
-            .fold(CHECKSUM_FLAG, |sum, page| CHECKSUM_FLAG | (sum ^ page));
-        let count = u32::try_from(pages.len()).map_err(|_| CrabError::LTXCorrupted)?;
-        Ok(Self {
-            base: ChecksumBase::Memory(Arc::from(pages)),
-            base_count: count,
-            count,
-            changes: HashMap::new(),
-            checksum,
-        })
-    }
-
-    #[cfg(feature = "replica")]
     pub(crate) fn from_file(
         host: crate::LtxHost,
         path: &std::path::Path,

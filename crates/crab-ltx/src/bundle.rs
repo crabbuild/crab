@@ -63,7 +63,7 @@ impl Bundle {
         for entry in entries {
             if entry.repository.is_empty()
                 || entry.repository.len() > 4096
-                || !super::replica::valid_epoch(&entry.epoch)
+                || !valid_epoch(&entry.epoch)
             {
                 return Err(CrabError::LTXCorrupted);
             }
@@ -112,7 +112,7 @@ impl Bundle {
         for row in &rows {
             if row.repository.is_empty()
                 || row.repository.len() > 4096
-                || !super::replica::valid_epoch(&row.epoch)
+                || !valid_epoch(&row.epoch)
                 || row.offset != end
                 || !identities.insert((
                     &row.repository,
@@ -177,4 +177,12 @@ fn encode_identity(bytes: &[u8]) -> String {
         encoded.push(TABLE[(byte & 0x0f) as usize] as char);
     }
     encoded
+}
+
+fn valid_epoch(epoch: &str) -> bool {
+    !epoch.is_empty()
+        && epoch.len() <= 128
+        && epoch
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }

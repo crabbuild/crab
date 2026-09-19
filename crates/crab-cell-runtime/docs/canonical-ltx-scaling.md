@@ -3,16 +3,17 @@
 Crab will finish production scaling on one canonical persistence path:
 `ManagedDb` captures SQLite, `CellReplica` prepares immutable roots,
 `CellRuntime` owns execution and durability, and `crab-http-server` composes the
-product. The older standalone `crab_ltx::Replica` epoch-head protocol receives
-no new capabilities while this work proceeds. It may be removed only after an
-explicit compatibility decision because it is present in release tag `v1.2.4`.
+product. The older standalone epoch-head, paged, and scheduler surfaces were
+present in release tag `v1.2.4` but are now hard-removed under the recorded
+compatibility decision; their stored prefixes are never interpreted as Cell
+roots.
 
 | Document intent | Value |
 | --- | --- |
 | Content type | Target design and delivery contract |
 | Audience | `crab-ltx`, `crab-cell-runtime`, and `crab-http-server` contributors |
-| Goal | Bound canonical Cell resources, qualify production scale and failover, then decide the shipped standalone replication contract |
-| Status | In progress; implementation slices are tracked in `advisor-plans/004`–`017` |
+| Goal | Bound canonical Cell resources and qualify production scale/failover on one native Rust path |
+| Status | In progress; implementation slices are tracked in `advisor-plans/004`–`017`; standalone hard removal is executed |
 | Scope | LTX preparation, authenticated metadata, resident lifecycle, resource accounting, qualification, and standalone-contract consolidation |
 
 [Back to the Cell runtime index](README.md)
@@ -103,8 +104,8 @@ cell.serving => control names this owner and exact root
    hysteresis, bounded movement, and cgroup-aware pressure shedding.
 9. Produce signed capacity receipts tied to one source revision, image, node
    profile, provider, workload, and fault scenario.
-10. Preserve every still-relevant safety test before changing or removing the
-   standalone replication contract.
+10. Preserve every still-relevant safety test while consolidating the removed
+   standalone replication contract into Cell proofs.
 
 The following are not goals:
 
@@ -113,7 +114,7 @@ The following are not goals:
 - A fallback from Cell roots to standalone epoch heads.
 - Listing local files or object prefixes to infer the latest state.
 - Reusing an old mutable SQLite file merely because it exists locally.
-- Simultaneously optimizing the canonical and standalone replication protocols.
+- Maintaining a second replication protocol beside the canonical Cell path.
 - Claiming Celld performance superiority without matched measurements.
 - Treating a route cache, placement plan, or fleet sample as ownership
   authority.
@@ -147,7 +148,8 @@ The current-code evidence map is:
 
 The standalone compatibility boundary is recorded in
 [standalone-replication-audit.md](standalone-replication-audit.md). Its
-decision is pending; no standalone surface is removed by this design.
+decision is HARD REMOVE; the public standalone surface has been deleted while
+shared authenticated mechanics remain private to Cell roots.
 
 | Surface | Current owner and behavior |
 | --- | --- |
@@ -199,8 +201,9 @@ that bound evidence. The isolated local RustFS LTX, Cell takeover/retention,
 HTTP collaboration, native-push, and receive-fault qualifications now pass;
 they are provider evidence, not release receipts. Matched warm-restart
 zero-origin latency receipts, complete advertised/metric parity, multi-process
-movement, protected Kubernetes faults, and a named standalone compatibility
-decision remain release gates. The cold-activation planner seam
+movement, and protected Kubernetes faults remain release gates. The
+standalone-surface decision is recorded and its execution is in this change.
+The cold-activation planner seam
 and its local receiver-failure rollback are implemented locally: a failed
 rooted idle acquisition or fenced-owner takeover releases the takeover through
 the canonical publisher path and leaves the exact root unowned. A pinned
@@ -216,8 +219,8 @@ root, compacted the complete range, restored the compacted root, and matched the
 source BLAKE3/length exactly. `/usr/bin/time -l` recorded 1,496.96 seconds wall
 time and 592,805,888 bytes maximum resident set size (~565 MiB); the largest
 observed compaction scratch LTX was about 5.1 GiB on the external qualification
-volume. This closes the native 5 GiB/RSS publication gate; provider matrices,
-protected fleet receipts, and standalone-surface decisions remain separate gates.
+volume. This closes the native 5 GiB/RSS publication gate; provider matrices and
+protected fleet receipts remain separate gates.
 
 The local warm-path regression
 `resident_route_reports_zero_origin_reads_and_latency_percentiles` runs 64
@@ -1064,54 +1067,19 @@ Compare architecture as well as headline throughput:
 - Record model and simulator coverage as assurance evidence, not as a runtime
   performance score.
 
-## Decide the standalone replication contract explicitly
-
-### Treat it as shipped source
+## Standalone replication contract: hard removal recorded and executed
 
 Commit `4d097cce362` introduced the standalone replication interface and is
-reachable from tag `v1.2.4`. That tag exports `Replica`, `ReplicaHead`,
-`PagedDatabase`, `PagedConnection`, and `CompactionSchedule`. The crate is
-`publish = false`, and no current production workspace caller uses those exact
-types, but tagged source, documentation, and examples make immediate deletion
-an incompatible change under Crab's repository policy.
+reachable from tag `v1.2.4`. That tag exported the epoch-head, standalone paging,
+and standalone scheduling APIs. The repository maintainer explicitly authorized
+hard removal on 2026-09-18 for the current unreleased breaking change (or the
+next breaking release if this branch is cut into a release). The full evidence
+record is [the standalone replication audit](standalone-replication-audit.md).
 
-The canonical Cell runtime commit `765b12f7b04` is not in a release tag. This
-does not weaken the Cell design; it only means the phrase "unshipped standalone
-interface" is incorrect.
-
-### Freeze before deciding
-
-Until canonical qualification completes:
-
-- Add no new standalone `Replica` capability.
-- Fix security or corruption defects in shared mechanics and both affected
-  callers.
-- Direct performance work to `CellReplica` and `CellRuntime`.
-- Keep standalone tests that are still unique safety oracles.
-- Do not write Cell fallback readers for standalone epoch heads.
-
-### Audit actual consumers
-
-The compatibility audit covers:
-
-1. Workspace production, development, example, and test consumers.
-2. Release notes and the `v1.2.4` advertised capability.
-3. GitHub issues, discussions, downstream repositories, Git dependencies, and
-   operator scripts.
-4. Stored standalone object layouts that operators may still need to inspect or
-   recover.
-5. Whether any supported workflow lacks a canonical Cell replacement.
-
-The audit produces a named maintainer decision:
-
-- **Retain:** standalone replication is a separately supported deep module with
-  its own qualification and lifecycle.
-- **Deprecate:** publish a bounded removal release and migration contract.
-- **Hard remove:** approve a breaking source and storage-layout cut with release
-  notes and an explicit offline recovery limit.
-
-If supported consumers exist, the interface is not unnecessary. Do not retain
-an indefinite internal alias merely to avoid choosing a support policy.
+The crate remains `publish = false`, but tagged source, docs, and examples were
+treated as potentially shipped. The audit found no workspace production caller;
+unknown external usage is handled by an explicit offline migration boundary,
+not by keeping a parallel runtime path.
 
 ### Preserve proof before removal
 
@@ -1128,14 +1096,13 @@ Before physical deletion, move still-relevant evidence to the canonical path:
 | Provider worker lifetime | Shared `Host` and Cell paged-I/O tests |
 | RustFS round trip | Runtime and server source-loss qualification |
 
-Index encoding, decoding, frame verification, and index validation currently
-live in the standalone paging module but are heavily used by `CellReplica`.
-Move them into a private authenticated-index implementation before deleting a
-standalone facade.
+Index encoding, decoding, frame verification, and index validation remain in the
+private authenticated-index module used by `CellReplica`. The public standalone
+facade and its page-map implementation are gone.
 
 ### Delete only standalone ownership
 
-If hard removal is approved, delete:
+The authorized hard-removal change deletes:
 
 - `Replica` and `ReplicaHead`.
 - Standalone epoch-head layout and publication.
@@ -1143,8 +1110,7 @@ If hard removal is approved, delete:
 - Standalone read-only `PagedDatabase` and `PagedConnection`.
 - Standalone-only `ManagedDb` helpers.
 - Standalone examples, documentation, and tests after evidence migration.
-- The `paged_io` standalone branch after the Cell branch is independently
-  covered.
+- The standalone branch of `paged_io`; the retained bridge has one Cell variant.
 
 Retain:
 
@@ -1156,13 +1122,12 @@ Retain:
 - Cell sparse VFS, hydration, roots, directory, compaction, and recovery overlay.
 
 The existing `replica` Cargo feature also enables required Cell remote
-mechanics. Keeping its name is the smallest contract change. Rename it only as
-part of the same explicitly approved breaking release; do not add an indefinite
-feature alias.
+mechanics, so its name remains. No feature alias is added.
 
 Old standalone object prefixes are never reinterpreted as Cell roots. If stored
-standalone data needs migration, use an explicit offline export/import tool with
-exact-root verification, not a production fallback reader.
+standalone data needs migration, an operator must use an explicit offline
+export/import tool with exact-root verification; this change does not delete
+remote data and adds no production fallback reader.
 
 ## Deliver in dependency order
 
@@ -1184,12 +1149,13 @@ Each change is independently reviewable and leaves one canonical path.
 | 12 | Add hysteretic pressure shedding and paced release/activation | 11 | Pressure and membership tests converge without unsafe movement |
 | 13 | Reconcile node-wide disk and job accounting | 7, 10, 12 | Capacity report matches measured local consumers |
 | 14 | Complete simulator, fault, capacity, latency, and balancing receipts | 3 through 13 | Signed provider/profile matrix passes |
-| 15 | Record standalone support decision | 14 | Named compatibility decision and migration limit |
+| 15 | Record standalone support decision | 14 | Named HARD REMOVE decision and offline migration limit |
 | 16 | Port unique standalone evidence | 15 | Canonical tests cover every retained invariant |
-| 17 | Remove or explicitly retain standalone module | 16 | Public surface and documentation match the decision |
+| 17 | Remove standalone module | 16 | Public surface and documentation match the decision |
 
-Do not combine streaming work and standalone deletion. Until canonical tests
-replace them, standalone tests remain useful independent oracles.
+The streaming work and standalone deletion are now separate reviewable commits;
+canonical Cell tests own the retained invariants, and no standalone test owner
+or compatibility facade remains.
 
 Slice 1 implementation evidence: `make architecture-check` now includes an
 explicit Cell composition guard. It verifies that `crab-http-server` keeps
@@ -1303,8 +1269,9 @@ The canonical scaling design is complete only when:
    resource envelope for each advertised profile and provider.
 7. Backup, retention, follower retirement, release rollout, and shutdown pass
    while load continues.
-8. The standalone contract has a recorded support decision.
-9. Any approved removal retains shared mechanics and canonical proof without an
+8. The standalone contract has a recorded HARD REMOVE decision and offline
+   migration limit.
+9. The removal retains shared mechanics and canonical proof without an
    epoch-head fallback.
 10. Documentation describes measured results rather than target capacity.
 

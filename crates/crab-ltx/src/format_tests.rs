@@ -3,7 +3,6 @@
 
 use crate::{
     CHECKSUM_FLAG, CrabError, Limits, LocalSegment, Position, SegmentInfo, VerifiedLocalPlan, ltx,
-    paged,
 };
 
 fn crc(bytes: &[u8]) -> u64 {
@@ -99,19 +98,6 @@ fn independent_crc_and_both_ltx_page_encodings_match() {
         assert_eq!(decoded, vec![(1, data.clone())]);
         assert_eq!(file.trailer.post_apply_checksum, page_sum(1, &data));
     }
-}
-
-#[test]
-fn streaming_inspection_emits_the_same_authenticated_index() {
-    let data = vec![0x39; 512];
-    let bytes = fixture(&[(1, data.clone())], 1, page_sum(1, &data), 0, false);
-    let (_, size, digest, pages) = ltx::inspect_bytes_with_index(&bytes).unwrap();
-    assert_eq!(size, bytes.len() as u64);
-    assert_eq!(digest, *blake3::hash(&bytes).as_bytes());
-    assert_eq!(
-        paged::encode_index_from_pages(&pages).unwrap(),
-        paged::encode_index(&bytes).unwrap()
-    );
 }
 
 #[test]
@@ -259,101 +245,6 @@ fn compressor_round_trips_all_sqlite_page_sizes_and_patterns() {
             let compressed = compressor.compress(&page).unwrap();
             let restored = lz4_flex::block::decompress(&compressed, size).unwrap();
             assert_eq!(restored, page);
-        }
-    }
-}
-
-#[cfg(feature = "replica")]
-#[tokio::test]
-async fn incremental_publication_rejects_bad_post_state_with_valid_file_crc() {
-    use crate::{
-        CaptureBatch, Replica,
-        bundle::{Bundle, BundleEntry},
-    };
-    use crab_storage::{Store, StoreLayout};
-    use std::sync::Arc;
-
-    let temp = tempfile::TempDir::new().unwrap();
-    let before = vec![1; 512];
-    let after = vec![2; 512];
-    let select = |name: &str, bytes: Vec<u8>| {
-        let decoded = ltx::decode_file(&bytes).unwrap();
-        let info = SegmentInfo::from_decoded(&bytes, &decoded);
-        let path = temp.path().join(name);
-        std::fs::write(&path, bytes).unwrap();
-        LocalSegment::new(path, info)
-    };
-    let first = select(
-        "first",
-        fixture(&[(1, before.clone())], 1, page_sum(1, &before), 0, false),
-    );
-    let mut bytes = fixture(&[(1, after.clone())], 1, page_sum(1, &after) ^ 1, 0, false);
-    bytes[16..24].copy_from_slice(&2u64.to_be_bytes());
-    bytes[24..32].copy_from_slice(&2u64.to_be_bytes());
-    bytes[40..48].copy_from_slice(&page_sum(1, &before).to_be_bytes());
-    let mut hashed = bytes[..110].to_vec();
-    hashed.extend_from_slice(&after);
-    hashed.extend_from_slice(&bytes[625..bytes.len() - 8]);
-    let len = bytes.len();
-    bytes[len - 8..].copy_from_slice(&(CHECKSUM_FLAG | crc(&hashed)).to_be_bytes());
-    let delta = select("delta", bytes.clone());
-    // Individual file integrity passes: only application against predecessor
-    // page state can detect the false post-apply database checksum.
-    crate::recovery::verify_segment(&bytes, delta.info(), Limits::default()).unwrap();
-    for bundled in [false, true] {
-        let remote = Replica::new(
-            StoreLayout::new(
-                Store::new(Arc::new(object_store::memory::InMemory::new())),
-                "repo".into(),
-            ),
-            "one",
-            Limits::default(),
-        )
-        .unwrap();
-        let head = remote
-            .replicate(
-                &CaptureBatch {
-                    segments: vec![first.clone()],
-                    position: first.info().position(),
-                },
-                None,
-            )
-            .await
-            .unwrap();
-        for cold in [false, true] {
-            let head = if cold {
-                remote.head().await.unwrap().unwrap()
-            } else {
-                head.clone()
-            };
-            let result = if bundled {
-                let bundle = Bundle::encode(
-                    vec![BundleEntry {
-                        repository: "repo".into(),
-                        epoch: "one".into(),
-                        bytes: bytes.clone(),
-                        info: delta.info().clone(),
-                    }],
-                    Limits::default(),
-                )
-                .unwrap();
-                remote.replicate_bundle(&bundle, Some(&head)).await
-            } else {
-                remote
-                    .replicate(
-                        &CaptureBatch {
-                            segments: vec![delta.clone()],
-                            position: delta.info().position(),
-                        },
-                        Some(&head),
-                    )
-                    .await
-            };
-            assert!(matches!(result, Err(CrabError::ChecksumMismatch)));
-            assert_eq!(
-                remote.head().await.unwrap().unwrap().manifest_digest(),
-                head.manifest_digest()
-            );
         }
     }
 }

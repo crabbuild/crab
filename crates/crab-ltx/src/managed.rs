@@ -49,11 +49,6 @@ impl ManagedDb {
     }
 
     #[cfg(feature = "replica")]
-    pub(crate) fn open_paged(database: crate::PagedDatabase, destination: &Path) -> Result<Self> {
-        Self::open_sparse(crate::paged_io::Database::Replica(database), destination)
-    }
-
-    #[cfg(feature = "replica")]
     pub(crate) fn open_cell_paged(
         database: crate::CellWritableDatabase,
         destination: &Path,
@@ -108,16 +103,6 @@ impl ManagedDb {
     #[cfg(feature = "replica")]
     pub fn take_io_error(&self) -> Option<CrabError> {
         self.paged.as_ref().and_then(|p| p.take_error())
-    }
-
-    /// Deletes only this session's exact artifacts present in a published head.
-    ///
-    /// Remote retention remains caller-owned. Prune before remote compaction:
-    /// a replacement snapshot is not proof that a particular local cut was
-    /// published. An I/O failure can leave a partially pruned set; retry safely.
-    #[cfg(feature = "replica")]
-    pub fn prune_published(&mut self, head: &crate::ReplicaHead) -> Result<usize> {
-        self.prune_retained(|segment| head.segments().any(|info| info == segment.info()))
     }
 
     /// Deletes this session's exact captured artifacts after their root publishes.
@@ -424,9 +409,8 @@ impl ManagedDb {
     /// Captures committed WAL pages and all cuts made by checkpoint maintenance.
     ///
     /// Any failure fences further use, since some local cuts may already exist.
-    /// Retain returned files until publication; `prune_captured` can release
-    /// an exact acknowledged batch and `prune_published` can reconcile a head
-    /// when the replica feature is enabled.
+    /// Retain returned files until the canonical Cell root publishes;
+    /// `prune_captured` can then release one exact acknowledged batch.
     pub fn capture(&mut self) -> Result<CaptureBatch> {
         self.ensure_active()?;
         let result = self.capture_inner();

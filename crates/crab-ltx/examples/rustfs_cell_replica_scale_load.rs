@@ -1,4 +1,3 @@
-#[expect(dead_code)]
 mod support;
 
 use crab_ltx::{CellReplica, CrabError, Limits, ManagedDb, RootRef};

@@ -39,8 +39,10 @@ recorded 1,496.96 seconds wall time and 592,805,888 bytes maximum resident set
 size (~565 MiB); the largest observed compaction scratch LTX was about 5.1 GiB
 on the external qualification volume. This qualifies the canonical native
 CellReplica publication path at the design target. It is a provider-specific
-library receipt, not evidence for the broader 1,000–10,000-database node target,
-protected Kubernetes faults, or the pending standalone API decision.
+library receipt, not evidence for the broader 1,000–10,000-database node target
+or protected Kubernetes faults. The standalone epoch-head/paged/scheduler API
+decision is recorded as HARD REMOVE and has been executed; its old object
+prefixes are outside this receipt and are not reinterpreted.
 
 At 4 KiB pages, a 5,000 MB database contains approximately 1.22 million pages.
 The current on-store index uses 60 bytes per page: about 73 MB for one full
@@ -54,18 +56,17 @@ does not imply that all of those bytes must reside on local disk.
 
 | Problem | Current mechanism | Reproducible evidence |
 | --- | --- | --- |
-| Every open paged view started a thread | One shared independent I/O worker for overlapping default views; custom executor hosts share across their clones | `host_hooks::remote::many_views_share_one_host_io_worker`: 16 simultaneous views started 16 workers before, one after; final close joins it |
+| Every open Cell paged view started a thread | One shared independent I/O worker for overlapping exact-root views; custom executor hosts share across their clones | `cell_roots::directory_nodes_are_shared_across_exact_root_views` and the `paged_io` driver lifecycle prove shared view state and joined worker shutdown |
 | Read-ahead cache multiplied with views | Shared FIFO cache capped at 8 MiB decoded payload, keyed by immutable view/page identity | `paged_io::tests::cache_bounds_payload_and_isolates_pinned_views` checks eviction, byte accounting and view isolation |
-| Small remote appends cloned/scanned all locators | Copy-on-write 256-page metadata blocks, cached block/global XOR checksums | `paged::map` tests copy one changed block out of a 4,096-page map and compare 4,000 updates/shrinks with a full-scan oracle |
 | Cell-root appends reloaded every historical index and rebuilt every locator | Authenticated radix copy-on-write reads changed leaves/ancestors, prunes truncated subtrees and reuses untouched digests | `cell_roots::changed_cut_loads_only_touched_directory_nodes` stays below 100 KiB of origin reads after changing one page in a 20 MB database; `truncate_regrow_cannot_reuse_old_locator` restores newly written bytes after shrink/regrowth |
 | Initial Cell roots materialized every final locator and encoded directory node | K-way ordered index merge with suffix truncation fences; each 256-page leaf uploads before the next and only radix summaries remain resident | `cell_replica::directory::tests::streamed_tree_matches_canonical_root_without_retaining_objects` matches the canonical 70,000-page root and `cell_roots::initial_streaming_directory_merges_truncation_and_regrowth` restores the newest bytes from a multi-cut initial root |
 | Writable Cell activation and each cut allocated/cloned/scanned one checksum per page | Authenticated directory leaves stream to a local 8-byte/page file in 64 KiB chunks; capture keeps a changed-page overlay, reduces truncated suffixes in 64 KiB reads, maintains the aggregate incrementally and persists positional updates only after sealing the LTX cut | `cell_roots::exact_cell_root_opens_sparse_writer_and_publishes_incrementally` checks the disk index and successor restore; `pages::file_backed_truncation_reduces_multiple_checksum_chunks_with_overlay_updates` covers multi-chunk shrink; `host_hooks::cell_checksum_write_failure_fences_after_sealing_the_cut` proves a partial index update cannot keep serving |
 | Managed capture and explicit snapshots retained every decoded page, encoded the complete LTX in memory, then reread it as one buffer | Capture feeds one page at a time through the encoder and spools its codec index; snapshots stream to a same-directory scratch file. Both sync, validate metadata plus BLAKE3 through bounded reads, and install atomically without replacement | `host_hooks::capture_and_inspection_bound_each_filesystem_transfer` captures and snapshots incompressible multi-megabyte data while asserting every LTX filesystem transfer stays below 128 KiB; the full capture, fault, checkpoint, restore, and publication suites exercise the canonical paths |
-| Partial compaction downloaded unrelated bodies | Verify the original indexed plan; fetch only selected bodies; authenticate regenerated indexes; compare independently reduced page bytes; verify replacement indexed state | `publication::range_compaction_does_not_download_unselected_bodies`: before, 2,026,087 downloaded bytes; after, under 100,000; restored bytes identical |
-| Long-lived Cell writers exhausted local/remote segment admission | Reverify and prune each exact local batch only after authoritative root confirmation; before later appends, schedule a bounded eight-input level promotion or a pressure-triggered full replacement through the owner CAS | `host_hooks::remote::captured_pruning_retries_after_removal_but_failed_parent_sync`, `cell_roots::scheduled_cell_compaction_promotes_fanout_and_preserves_root`, and `actor::dispatcher_compacts_before_segment_admission_is_exhausted` |
-| Independent replicas multiplied remote/recovery work | Shared I/O, CPU-job and large-recovery admission; ordered concurrent input/index reads | `replica::io` tests overlap two cohorts while enforcing one three-request ceiling and preserving input order |
-| Cancelling a waiter could release capacity before its work stopped | CPU/recovery permits travel with dispatched non-cancellable closures; network child tasks abort on cohort drop | `environment` cancellation regression and `replica::io` cancellation regression |
-| Temporary recovery capacity could become attached to returned handles | Strip dirty and recovery reservations from prepared roots, page maps, sparse writable handles and resumed writers | `cell_roots::prepared_cell_handles_release_dirty_admission` and `publication::recovery_admission_is_released_before_returning_long_lived_handles` |
+| Partial compaction downloaded unrelated bodies | Verify the original indexed plan; fetch only selected bodies; authenticate regenerated indexes; compare independently reduced page bytes; verify replacement indexed state | `cell_roots::compaction_streams_large_frames_and_cleans_scratch`: range reads stay below the full LTX body and restored bytes remain identical |
+| Long-lived Cell writers exhausted local/remote segment admission | Reverify and prune each exact local batch only after authoritative root confirmation; before later appends, schedule a bounded eight-input level promotion or a pressure-triggered full replacement through the owner CAS | `host_hooks::captured_pruning_retries_after_removal_but_failed_parent_sync`, `cell_roots::scheduled_cell_compaction_promotes_fanout_and_preserves_root`, and `actor::dispatcher_compacts_before_segment_admission_is_exhausted` |
+| Independent Cell operations multiplied remote/recovery work | Shared I/O, CPU-job and large-recovery admission; Cell directory nodes and sparse views reuse the host-scoped cache | `cell_roots::directory_nodes_are_shared_across_exact_root_views` and `environment::cancelled_waiters_do_not_release_running_job_or_recovery_admission` |
+| Cancelling a waiter could release capacity before its work stopped | CPU/recovery permits travel with dispatched non-cancellable closures; network child tasks abort on cohort drop | `environment::cancelled_waiters_do_not_release_running_job_or_recovery_admission` and `host_hooks::cancelled_cell_prepare_releases_scratch_without_publishing_a_root` |
+| Temporary recovery capacity could become attached to returned handles | Strip dirty and recovery reservations before returning prepared roots, sparse writable handles or resumed writers | `cell_roots::prepared_cell_handles_release_dirty_admission` |
 
 Earlier corrections remain covered: snapshot returns ownership of pending cuts;
 native and bundle appends verify only new LTX bodies against pinned predecessor
@@ -117,23 +118,24 @@ its separately derived dirty/recovery slots bound concurrent large operations.
    coverage. Initial construction now streams its final locator merge and radix
    uploads while retaining the already authenticated index bytes. Writable Cell
    activation streams its eight-byte-per-page checksum index to local disk and
-   capture retains only the changed-page overlay; the standalone `Replica` page
-   map remains resident. The shared verified directory-node cache
-   is bounded but has no local persistence/rebuild contract. Finish those paths before
-   claiming the 5 GB/10K target; do not add an implicit fallback reader.
+   capture retains only the changed-page overlay. The shared verified
+   directory-node cache is bounded, restart-persistent, and charged to the
+   shared disk budget; exported cache
+   hit/corruption/fill metrics and zero-origin warm-restart qualification remain.
+   Finish those release gates before claiming the 5 GB/10K target; do not add an
+   implicit fallback reader.
 2. **Streaming large-database operations.** Managed WAL capture now encodes
    directly to an atomic local file with a spooled codec index, and validates
    segment metadata and BLAKE3 without rereading the whole cut into memory;
    explicit snapshots use the same bounded page pipeline and an atomically
    installed scratch file.
    Cell capture checksum updates are incremental and disk-backed; truncation
-   reduces its removed checksum suffix through fixed 64 KiB reads. Standalone
-   recovery and
-   compaction paths can hold database-sized decoded buffers, and Cell append
-   preparation still retains each admitted capture body and sidecar; Cell
-   exact-root compaction is scratch-backed and streaming. Replace those
-   remaining resident paths, then qualify 5 GB incompressible data and low-disk
-   failures. Keep cryptographic body/index binding and exact output verification.
+   reduces its removed checksum suffix through fixed 64 KiB reads. Cell-native
+   and bundle append preparation now uses replayable scratch/range sources and
+   shared authenticated inspection; Cell recovery and compaction still require
+   qualification for database-sized decoded buffers, low-disk behavior and
+   provider failures. Keep cryptographic body/index binding and exact output
+   verification.
 3. **Resident lifecycle and SQL scheduling.** The server has bounded activation
    queues, a shared SQL executor, per-database serialization and FD/page-cache/
    native-state-derived active admission. Managed sessions own three 64 KiB-cache

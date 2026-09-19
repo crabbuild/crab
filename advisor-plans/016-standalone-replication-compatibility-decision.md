@@ -1,6 +1,6 @@
 # Standalone replication compatibility audit and decision
 
-Status: IN PROGRESS — tagged export/caller/proof audit is recorded; authorized retain/deprecate/remove decision is still pending
+Status: DONE — hard-removal decision recorded and authorized; execution is tracked by plan 017
 Priority: P1
 Effort: M
 Risk: High
@@ -10,11 +10,10 @@ Dependency: plan 015's canonical qualification receipts
 
 ## Executor instructions
 
-Implement on `codex/016-standalone-replication-decision`. This plan is an audit
-and recorded product decision. Do not delete or deprecate code here. Read all
-standalone exports, implementations, examples/tests/docs, every workspace
-caller, Git tags/releases, and available external consumer evidence. Treat
-tagged source as potentially shipped even though the crate is `publish = false`.
+This plan is the completed audit and recorded product decision. The repository
+maintainer explicitly authorized hard removal in this task on 2026-09-18. Code
+execution is tracked by plan 017. Treat tagged source as potentially shipped
+even though the crate is `publish = false`.
 
 ## Drift check
 
@@ -80,10 +79,27 @@ Unknown external usage must be recorded as unknown, not converted to “none.”
    “deprecate” requires a deadline/migration; “hard remove” requires no retained
    contract or an approved breaking release/migration boundary.
 6. Present the evidence to the named maintainer/product owner and record the
-   explicit decision. If no authorized decision is available, mark the record
-   `Decision pending` and stop; do not choose on behalf of the owner.
+   explicit decision. The recorded authorization is the hard-removal branch;
+   plan 017 implements it without retaining a compatibility reader.
 7. Link the decision from `UPSTREAM.md`, `PARITY.md`, `SCALABILITY.md`, and the
-   canonical design without changing runtime behavior.
+   canonical design.
+
+## Recorded decision
+
+**HARD REMOVE** — authorized by the repository maintainer in the current task;
+decision date 2026-09-18; target is the current unreleased breaking change (or
+the next breaking release if this branch is cut into a release).
+
+Remove the standalone `Replica`/`ReplicaHead` epoch-head operations,
+`CompactionSchedule`, public `PagedDatabase`/`PagedConnection`, and their
+feature-gated source, examples, tests, and teaching docs. Retain `CellReplica`,
+Cell paged/writable roots, `Bundle` as a Cell recovery-overlay input,
+authenticated index/frame helpers, `Hydration`, and deadline control.
+
+No runtime compatibility reader, alias, fallback, or prefix reinterpretation is
+allowed. Tagged standalone `ltx/<epoch>/...` objects remain outside the Cell
+root graph; any external consumer must use an explicit offline export/import
+before upgrading. Remote data is not deleted by this change.
 
 ## Verification
 
@@ -107,10 +123,9 @@ reviewer must be able to trace every exported symbol and unique proof to a row.
       overclaim absence.
 - [x] Every unique standalone proof maps to canonical evidence or a specific
       missing proof.
-- [ ] The record contains one explicit retain/deprecate/hard-remove decision,
-      named approver, date, target release, and migration boundary; otherwise it
-      clearly says `Decision pending` and no execution begins.
-- [x] No source/API/test deletion or behavioral deprecation occurs in this plan.
+- [x] The record contains one explicit retain/deprecate/hard-remove decision,
+      named approver, date, target release, and migration boundary.
+- [x] Plan 017 is the sole execution owner for source/API/test deletion.
 - [x] Architecture docs link one canonical decision record.
 
 ## Stop conditions

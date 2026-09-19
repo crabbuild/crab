@@ -76,8 +76,8 @@ conditions so an executor can use it without relying on conversation history.
 | [013](013-signed-placement-observations-and-planner.md) | Authenticated live observations and deterministic weighted placement | P0 | XL | 005, 012 | IN PROGRESS |
 | [014](014-pressure-shedding-and-paced-drain.md) | Hysteretic shedding and safe paced movement | P0 | XL | 013 | IN PROGRESS |
 | [015](015-cell-runtime-qualification-receipts.md) | Simulator, provider, fault, scale, latency, and primitive release evidence | P0 | XL | 006-014 | IN PROGRESS |
-| [016](016-standalone-replication-compatibility-decision.md) | Complete tagged-contract audit and named support decision | P1 | M | 015 | IN PROGRESS |
-| [017](017-execute-standalone-replication-decision.md) | Retain, deprecate, or remove exactly as approved | P1 | L-XL | 016 | BLOCKED |
+| [016](016-standalone-replication-compatibility-decision.md) | Complete tagged-contract audit and named support decision | P1 | M | 015 | DONE — HARD REMOVE |
+| [017](017-execute-standalone-replication-decision.md) | Retain, deprecate, or remove exactly as approved | P1 | L-XL | 016 | IN PROGRESS — HARD REMOVE |
 
 ### Dependency graph and execution waves
 
@@ -109,8 +109,8 @@ Recommended waves:
    after 005; 008 and 010 may also proceed in parallel in separate worktrees.
 3. **Residency and bounded storage:** 009 follows 008; 011 follows 010.
 4. **Fleet control:** 012 joins all local resource work, followed by 013 and 014.
-5. **Release proof and surface convergence:** 015, then 016. Plan 017 remains
-   blocked until the decision record identifies an option and approver.
+5. **Release proof and surface convergence:** 015, then 016, then the selected
+   hard-removal execution in 017.
 
 The design's native/bundle streaming slices are combined in plan 010 because
 both must use one verifier/uploader to avoid two memory paths. Actor lifecycle
@@ -133,8 +133,9 @@ compatibility decision.
   implicit. Each requires a named shipped contract and reviewed migration.
 - Release/scalability claims require plan 015 receipts tied to exact source,
   executable image, workload, environment, and raw artifacts.
-- Plan 017 cannot start while its decision is pending or its inventory has
-  drifted.
+- Plan 017 must follow the recorded decision and stop if its inventory drifts.
+  The current decision is hard removal; no compatibility reader or alias may
+  be introduced during execution.
 
 ### Implementation ledger — 2026-09-18
 
@@ -235,9 +236,9 @@ matched warm-latency/restart receipts, provider-failure
 matrix evidence (with one local fail-first immutable PUT proof now covered),
 protected multi-process advertised-placement convergence and mixed-workload
 resource accounting, multi-process movement/fault proof, protected Kubernetes
-receipts, and the named plan-016
-retain/deprecate/hard-remove decision. Plan 017 remains correctly blocked; no
-standalone export or stored prefix was removed.
+receipts, and the named plan-016 hard-removal decision. Plan 017 now deletes the
+unshipped standalone exports while retaining canonical Cell mechanics;
+standalone stored prefixes are not reinterpreted or deleted.
 
 The signed placement snapshot now has an end-to-end local provenance check:
 `NodePublisher` publishes while holding one runtime ledger byte/job reservation,
@@ -276,8 +277,9 @@ trailer/index: it drains the remaining authenticated metadata through a fixed
 CellReplica source/scratch/upload path at no more than the 8 MiB multipart and
 1 MiB scratch-transfer bounds. The 5 GiB native RustFS receipt now records
 592,805,888 bytes maximum RSS while restoring and compacting a 5.1 GiB scratch
-LTX; the legacy standalone Replica bundle-copy surface remains part of the
-pending Plan 016 decision.
+LTX; the legacy standalone Replica bundle-copy surface was removed under the
+authorized Plan 016 decision. Cell-scoped bundle preparation remains the only
+supported bundle path.
 
 The movement simulator now includes an explicit lost-release-response event:
 after the authoritative release, the reply can disappear without restoring the

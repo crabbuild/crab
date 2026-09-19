@@ -10,6 +10,8 @@ use crab_storage::{CellStorageLayout, Store};
 use object_store::throttle::{ThrottleConfig, ThrottledStore};
 #[cfg(feature = "replica")]
 use object_store::{memory::InMemory, path::Path as ObjectPath};
+#[cfg(feature = "replica")]
+use std::time::Duration;
 use std::{
     collections::BTreeSet,
     io,
@@ -18,7 +20,6 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::Duration,
 };
 
 #[derive(Clone, Default)]
@@ -566,154 +567,18 @@ fn unknown_sqlite_vfs_does_not_fall_back_to_the_platform_vfs() {
 }
 
 #[cfg(feature = "replica")]
-mod remote {
-    use super::*;
-    use crab_ltx::{
-        Replica,
-        environment::{Executor, Worker},
-    };
-    use crab_storage::{Store, StoreLayout};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[derive(Default)]
-    struct Jobs {
-        started: Arc<AtomicUsize>,
-        joined: Arc<AtomicUsize>,
-        dispatches: AtomicUsize,
-    }
-    struct Join {
-        thread: std::thread::JoinHandle<()>,
-        joined: Arc<AtomicUsize>,
-    }
-    impl Worker for Join {
-        fn join(self: Box<Self>) -> io::Result<()> {
-            self.thread.join().unwrap();
-            self.joined.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-    }
-    impl Executor for Jobs {
-        fn dispatch(&self, job: Box<dyn FnOnce() + Send>) -> io::Result<()> {
-            self.dispatches.fetch_add(1, Ordering::SeqCst);
-            std::thread::Builder::new().spawn(job)?;
-            Ok(())
-        }
-        fn start_worker(&self, job: Box<dyn FnOnce() + Send>) -> io::Result<Box<dyn Worker>> {
-            self.started.fetch_add(1, Ordering::SeqCst);
-            Ok(Box::new(Join {
-                thread: std::thread::Builder::new().spawn(job)?,
-                joined: self.joined.clone(),
-            }))
-        }
-    }
-
-    fn replica(host: Host) -> Replica {
-        Replica::new(
-            StoreLayout::new(
-                Store::new(Arc::new(object_store::memory::InMemory::new())),
-                "hooks".into(),
-            ),
-            "epoch",
-            Limits::default(),
-        )
-        .unwrap()
-        .with_host(host)
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn remote_restore_sparse_activation_and_worker_lifetime_use_one_host() {
-        let (directory, faults, host, mut writer) = fixture();
-        let jobs = Arc::new(Jobs::default());
-        // Selecting the named platform VFS exercises a non-default wrapper
-        // registration without assuming Unix-specific VFS names in this test.
-        let name = unsafe {
-            // SAFETY: SQLite is initialized by fixture; its default registration
-            // and NUL-terminated name live for the process lifetime.
-            std::ffi::CStr::from_ptr(
-                (*crab_ltx::rusqlite::ffi::sqlite3_vfs_find(std::ptr::null())).zName,
-            )
-            .to_str()
-            .unwrap()
-            .to_owned()
-        };
-        let replica = replica(host.with_executor(jobs.clone()).with_sqlite_vfs(&name));
-        let batch = writer.capture().unwrap();
-        let head = replica.replicate(&batch, None).await.unwrap();
-        let restored = directory.path().join("restored");
-        faults.arm(Some("persist_new"));
-        injected(replica.restore(&head, &restored).await);
-        assert!(!restored.exists());
-        faults.arm(None);
-        replica.restore(&head, &restored).await.unwrap();
-
-        for operation in ["create", "set_len", "sync_all", "sync_parent"] {
-            let paged = replica.paged(&head).await.unwrap();
-            let path = directory.path().join(operation);
-            faults.arm(Some(operation));
-            injected(paged.open_writable(&path));
-            faults.arm(None);
-        }
-        let paged = replica.paged(&head).await.unwrap();
-        let mut sparse = paged
-            .open_writable(&directory.path().join("sparse"))
-            .unwrap();
-        sparse
-            .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(9)"))
-            .unwrap();
-        while !sparse.hydrate_step(2).unwrap().complete() {}
-        let captured = sparse.checkpoint(CheckpointMode::Truncate).unwrap();
-        let head = replica.replicate(&captured, Some(&head)).await.unwrap();
-        sparse.close().unwrap();
-        let paged = replica.paged(&head).await.unwrap();
-        let view = paged.open_sqlite().unwrap();
-        let count: usize = view
-            .connection()
-            .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(count, 2);
-        drop(view);
-        assert_eq!(jobs.started.load(Ordering::SeqCst), 2);
-        assert_eq!(jobs.joined.load(Ordering::SeqCst), 2);
-        assert!(jobs.dispatches.load(Ordering::SeqCst) > 0);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn many_views_share_one_host_io_worker() {
-        let (_directory, _faults, host, mut writer) = fixture();
-        let jobs = Arc::new(Jobs::default());
-        let replica = replica(host.with_executor(jobs.clone()));
-        let head = replica
-            .replicate(&writer.capture().unwrap(), None)
-            .await
-            .unwrap();
-        let mut views = Vec::new();
-        for _ in 0..16 {
-            views.push(replica.paged(&head).await.unwrap().open_sqlite().unwrap());
-        }
-        assert_eq!(
-            jobs.started.load(Ordering::SeqCst),
-            1,
-            "view count must not multiply I/O threads"
-        );
-        drop(views);
-        drop(head);
-        drop(replica);
-        assert_eq!(jobs.joined.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn captured_pruning_retries_after_removal_but_failed_parent_sync() {
-        let (_directory, faults, _host, mut writer) = fixture();
-        let batch = writer.capture().unwrap();
-        faults.arm(Some("sync_parent"));
-        injected(writer.prune_captured(&batch));
-        assert!(!batch.segments[0].path().exists());
-        faults.arm(None);
-        assert_eq!(writer.prune_captured(&batch).unwrap(), batch.segments.len());
-        assert_eq!(writer.prune_captured(&batch).unwrap(), 0);
-        writer
-            .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(3)"))
-            .unwrap();
-        writer.capture().unwrap();
-    }
+#[test]
+fn captured_pruning_retries_after_removal_but_failed_parent_sync() {
+    let (_directory, faults, _host, mut writer) = fixture();
+    let batch = writer.capture().unwrap();
+    faults.arm(Some("sync_parent"));
+    injected(writer.prune_captured(&batch));
+    assert!(!batch.segments[0].path().exists());
+    faults.arm(None);
+    assert_eq!(writer.prune_captured(&batch).unwrap(), batch.segments.len());
+    assert_eq!(writer.prune_captured(&batch).unwrap(), 0);
+    writer
+        .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(3)"))
+        .unwrap();
+    writer.capture().unwrap();
 }
