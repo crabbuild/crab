@@ -1748,13 +1748,15 @@ mod tests {
     async fn placement_capacity_respects_runtime_reservations() {
         // Host::default shares one process-wide disk budget; this fixture must
         // not cross-charge unrelated tests that run in parallel.
+        let disk_budget = crab_ltx::DiskBudget::new(1_000);
         let runtime = crab_cell_runtime::CellRuntime::new_with_replica_host(
             crab_cell_runtime::SqlWorkerPool::new(2, 4).unwrap(),
             2_048,
             SessionId::from_bytes([21; 16]),
-            crab_ltx::Host::default().with_local_disk_budget(crab_ltx::DiskBudget::new(1_000)),
+            crab_ltx::Host::default().with_local_disk_budget(disk_budget.clone()),
         )
         .unwrap();
+        let disk = disk_budget.try_reserve(100).unwrap();
         let retained = runtime.try_reserve_node_bytes(512).unwrap();
         let job = runtime.try_reserve_worker_job().unwrap().unwrap();
         let stats = runtime.stats();
@@ -1764,8 +1766,8 @@ mod tests {
         assert_eq!(stats.placement_job_capacity(), 6);
         let mut capacity = NodeCapacity {
             free_memory_bytes: 4_096,
-            free_disk_bytes: 900,
-            follower_free_bytes: 900,
+            free_disk_bytes: 950,
+            follower_free_bytes: 950,
             job_credits: 10,
             ..NodeCapacity::default()
         };
@@ -1785,6 +1787,7 @@ mod tests {
         assert_eq!(capacity.free_disk_bytes, 900);
         assert_eq!(capacity.follower_free_bytes, 900);
         assert_eq!(capacity.job_credits, 5);
+        drop(disk);
         drop(job);
         drop(retained);
         runtime.shutdown().await.unwrap();
