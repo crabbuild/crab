@@ -216,13 +216,13 @@ the receipt records all parity checks. The raw receipt is retained on the
 external qualification volume. It strengthens local process/fault evidence but
 is not protected Kubernetes or signed release evidence.
 
-The same RustFS qualification volume ran the documented `10m`
-`rustfs_replication_scale_load` profile on the current branch: 10,000,000 rows,
-200 published segments, an 838,262,784-byte source database, exact restore of
-42,234,991,936 logical object bytes, 46,993 records/second load throughput,
-212.797 seconds wall time, and 25.619 seconds restore verification. This
-refreshes provider-scale publication/restore evidence only; it is not a peak
-RSS or multi-Pod receipt.
+The historical RustFS qualification volume also retains the pre-hard-removal
+`rustfs_replication_scale_load` 10m receipt: 10,000,000 rows, 200 published
+segments, an 838,262,784-byte source database, exact restore of 42,234,991,936
+logical object bytes, 46,993 records/second load throughput, 212.797 seconds
+wall time, and 25.619 seconds restore verification. That standalone harness is
+no longer runnable or part of the Cell architecture; the receipt is retained
+only as historical provider evidence. It is not a peak-RSS or multi-Pod receipt.
 
 The same RustFS qualification volume ran the canonical release
 `rustfs_cell_replica_scale_load` example with a 5,368,709,120-byte incompressible

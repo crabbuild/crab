@@ -114,9 +114,10 @@ git diff --check
 
 The final search must have no whole-segment hit in the canonical CellReplica
 publication call graph. Any remaining `read_to_end` must be small, statically
-bounded, and justified next to the code and in the PR evidence. The standalone
-`crab-ltx::Replica` bundle path is inventoried separately by Plan 016 until an
-authorized compatibility decision permits changing that public surface.
+bounded, and justified next to the code and in the PR evidence. The former
+standalone `crab-ltx::Replica` bundle path is now historical audit context only;
+Plan 017 hard-removed its callable surface after migrating the unique proof to
+CellReplica. Cell-scoped bundle preparation is the only supported path.
 
 The local provider-failure qualification uses a fail-first `ObjectStore` wrapper
 in `crates/crab-ltx/tests/capabilities.rs`. It rejects one immutable PUT,
@@ -124,14 +125,16 @@ verifies that no head was published, retries the same captured source, and
 restores the resulting head. This is a deterministic failure seam, not a
 substitute for the provider matrix or multi-GiB/RSS receipt.
 
-On 2026-09-18 the release `rustfs_replication_scale_load 10m` example ran
-against RustFS 1.0.0-rc.1 in a fresh isolated bucket. It published 10,000,000
-rows as 200 immutable segments, produced an 838,262,784-byte SQLite source,
-verified 42,234,991,936 logical object bytes after exact restore, and completed
-with 46,993 records/second load throughput (212.797 seconds wall time; 25.619
-seconds restore verification). This is a current provider-scale publication
-and exact-restore receipt; it does not measure peak RSS or prove the bounded
-memory acceptance item, so the multi-GiB/RSS checkbox remains open.
+Before the hard removal of the standalone replication examples, the
+`rustfs_replication_scale_load 10m` harness ran against RustFS 1.0.0-rc.1 in a
+fresh isolated bucket. It published 10,000,000 rows as 200 immutable segments,
+produced an 838,262,784-byte SQLite source, verified 42,234,991,936 logical
+object bytes after exact restore, and completed with 46,993 records/second load
+throughput (212.797 seconds wall time; 25.619 seconds restore verification).
+This retained historical receipt is not a current runnable surface; the
+CellReplica scale harness below owns new provider-scale publication evidence.
+It does not measure peak RSS or prove the bounded-memory acceptance item, so the
+multi-GiB/RSS checkbox remains open for this historical run.
 
 On 2026-09-18 the canonical release `rustfs_cell_replica_scale_load` example ran
 against RustFS 1.0.0-rc.1 with a 5,368,709,120-byte incompressible source grown
@@ -152,8 +155,8 @@ the design target; provider matrices beyond this RustFS run remain open.
       5.1 GiB compaction output).
 - [x] No full segment body is retained in `AppendInput`-like collections or
       copied from a bundle range on the canonical `CellReplica` path. The
-      legacy standalone `Replica` bundle copy remains an explicit Plan 016
-      audit surface and is not used by the cell runtime.
+      legacy standalone `Replica` bundle-copy path was removed by Plan 017 and
+      is not a runtime or qualification surface.
 - [x] Retry uses replayable verified sources and preserves exact bytes.
 - [x] Every locally injected failure/cancellation cleans owned scratch state
       and never publishes an incomplete root. Filesystem-fault coverage remains
