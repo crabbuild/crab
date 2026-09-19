@@ -5,6 +5,13 @@ use crate::{CrabError, Result};
 pub(crate) const ENTRY_BYTES: usize = 60;
 const FRAME_PREFIX: usize = crate::ltx::PAGE_HEADER_SIZE + 4;
 
+pub(crate) fn maximum_frame_bytes(page_size: u32) -> Result<u32> {
+    u32::try_from(crate::lz4_block::compress_bound(page_size as usize))
+        .ok()
+        .and_then(|bytes| bytes.checked_add(FRAME_PREFIX as u32))
+        .ok_or(CrabError::LTXCorrupted)
+}
+
 pub(crate) struct IndexEntry {
     pub page: u32,
     pub offset: u64,
@@ -57,8 +64,7 @@ impl IndexValidator {
 
     pub(crate) fn validate(&mut self, entry: IndexEntry) -> Result<IndexEntry> {
         let lock = crate::ltx::lock_pgno(self.info.page_size);
-        let max_frame = crate::lz4_block::compress_bound(self.info.page_size as usize) as u64
-            + FRAME_PREFIX as u64;
+        let max_frame = u64::from(maximum_frame_bytes(self.info.page_size)?);
         let end = entry
             .offset
             .checked_add(entry.size)

@@ -96,6 +96,13 @@ pub(super) struct DirectoryEntry {
     pub checksum: u64,
 }
 
+pub(super) struct DirectorySpan {
+    pub object: [u8; 32],
+    pub start: u64,
+    pub end: u64,
+    pub entries: Vec<DirectoryEntry>,
+}
+
 pub(super) struct DirectoryObject {
     pub digest: [u8; 32],
     pub bytes: Vec<u8>,
@@ -572,6 +579,39 @@ pub(super) async fn lookup_run(
         }
     }
     Ok(entries)
+}
+
+/// Returns every authenticated same-object span in one fixed page window.
+pub(super) async fn lookup_spans(
+    verification: Verification<'_>,
+    root: [u8; 32],
+    height: u32,
+    first: u32,
+    max_pages: u32,
+) -> Result<Vec<DirectorySpan>> {
+    let entries = lookup_run(verification, root, height, first, max_pages).await?;
+    let mut spans: Vec<DirectorySpan> = Vec::new();
+    for entry in entries {
+        let end = entry
+            .offset
+            .checked_add(u64::from(entry.length))
+            .ok_or(CrabError::LTXCorrupted)?;
+        if let Some(span) = spans.last_mut()
+            && span.object == entry.object
+            && span.end == entry.offset
+        {
+            span.end = end;
+            span.entries.push(entry);
+            continue;
+        }
+        spans.push(DirectorySpan {
+            object: entry.object,
+            start: entry.offset,
+            end,
+            entries: vec![entry],
+        });
+    }
+    Ok(spans)
 }
 
 pub(super) async fn load_checksums(

@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | In progress; timing, lookaside removal, authenticated directory runs, and file-backed bundle recovery implemented |
+| Status | In progress; timing, lookaside removal, authenticated directory spans, bounded parallel exact-root restore, and file-backed bundle recovery implemented |
 | Scope | `crab-ltx` mechanics and their `crab-cell-runtime` integration |
 | Celld reference | `denoland/celld` `12d5b6333fe52717325addcfe1e99e9fd4f77bcd`, `crates/ltx` |
 | Goal | Adopt useful Celld mechanics while keeping one exact-root Cell architecture |
@@ -45,7 +45,7 @@ identity and fencing.
 | Native compaction | Range reads, disk-spooled indexes, external merge, scratch admission, multipart file upload | Already meets the Celld delta |
 | Bundles | Exact and verified; recovery reopens from bounded file-backed storage and replica upload uses replayable staged multipart | Qualify |
 | SQLite density | Three 64 KiB page-cache targets per Cell; managed connections now disable SQLite lookaside | Qualify density and throughput |
-| Sparse reads | Authenticated radix lookup, adjacent 1 MiB runs, shared 8 MiB decoded cache, deadlines | Measure and improve |
+| Sparse reads and restore | Authenticated radix lookup, adjacent 1 MiB runs, bounded ordered cold-root and restore fetches, shared 8 MiB decoded cache, deadlines | Measure production workloads and improve |
 | Capture telemetry | `CaptureBatch` reports bounded LTX phase and byte observations; runtime aggregation is not wired | Qualify |
 | Scratch lifecycle | Named files clean up on normal drop; stale session inventory accounts process-death bytes before new admission | Qualify kill/restart fault matrix |
 
@@ -234,11 +234,23 @@ served for a page.
 **Implementation surface.** `src/cell_replica/directory.rs`, the paged read path
 in `src/cell_replica.rs`, `src/paged_io.rs`, and the existing sparse VFS tests.
 
-**Implementation status.** The first batching slice is implemented: sparse
-`read_run` requests now perform one authenticated radix walk for the requested
-window, then retain only a contiguous same-object frame prefix for the existing
-bounded range read. Predictive B-tree prefetch remains intentionally deferred
-until request-count and latency traces justify it.
+**Implementation status.** The batching and exact-restore slices are
+implemented. Sparse `read_run` requests perform one authenticated radix walk
+for the requested window, then retain only the first contiguous same-object
+span for the existing bounded range read. Restore asks the same authenticated
+directory lookup for every contiguous same-object span in a fixed 1 MiB page
+window. It fetches spans and up to eight windows concurrently through the
+existing host I/O permits, preserves window and page order, verifies every
+frame and the final whole-database checksum, and installs only a fresh synced
+destination. Window sizing uses the worst legal encoded-frame size, so at most
+eight 1 MiB encoded windows are prefetched per restore; decoding and ordered
+writing retain only one additional SQLite page.
+
+Cold exact-root opening now fetches immutable segment pages with an
+order-preserving concurrency of eight, then validates the flattened descriptor
+chain in root order. It does not list objects, read a mutable LTX head, or fall
+back to another source. Predictive B-tree prefetch remains intentionally
+deferred until request-count and latency traces justify it.
 
 The sparse hydration regression now hydrates a 320-page window, crossing the
 256-entry leaf boundary, while retaining the existing range-request bound.
@@ -261,6 +273,17 @@ The sparse hydration regression now hydrates a 320-page window, crossing the
 bytes for point lookup, range scan, index scan, and large-row overflow cases.
 Run corruption and truncation/regrowth tests, then compare cold and warm p50,
 p95, and p99 with Plan 1 telemetry.
+
+The deterministic latency suite injects 5, 20, and 100 ms per object read and
+proves lower cold-open and restore p95 than sequential service time, exact
+restored bytes, ordered publication, and range overlap. A shared three-permit
+host test runs simultaneous restores and observes no more than three object
+reads in flight. Warm point reads retain one range request and one injected
+latency interval. Short ranges, corrupted ranges, provider timeout, caller
+cancellation, local write failure, and final install failure leave no
+destination or owned scratch. The existing sparse hydration test continues to
+prove coalesced warm reads; a matched production-hardware p99 receipt remains a
+release claim gate.
 
 ## Plan 5: account for process-death scratch before admitting new work
 

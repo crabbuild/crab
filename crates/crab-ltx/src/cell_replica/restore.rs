@@ -4,8 +4,15 @@ use std::{
     sync::Arc,
 };
 
-use super::CellPagedDatabase;
+use futures_util::{StreamExt as _, stream};
+
+use super::{CellPagedDatabase, FetchedSpan, RESTORE_IN_FLIGHT_WINDOWS, RESTORE_WINDOW_BYTES};
 use crate::{CrabError, Host, Position, Result};
+
+enum DownloadedWindow {
+    Lock,
+    Remote(Vec<FetchedSpan>),
+}
 
 pub(super) async fn run(database: &CellPagedDatabase, destination: &Path) -> Result<Position> {
     let scratch_bytes =
@@ -29,44 +36,93 @@ pub(super) async fn run(database: &CellPagedDatabase, destination: &Path) -> Res
     let mut database = database.clone();
     database.replica = database.replica.with_host(host.clone());
     let lock = crate::ltx::lock_pgno(database.page_size);
-    let mut page = 1;
-    let mut checksum = crate::CHECKSUM_FLAG;
-    while page <= database.database_pages {
-        let pages = if page == lock {
-            vec![(page, vec![0; database.page_size as usize])]
+    // Worst-case frame sizing keeps every prefetched window within 1 MiB;
+    // ordered installation decodes only one additional page at a time.
+    let pages_per_window = RESTORE_WINDOW_BYTES
+        .checked_div(crate::paged::maximum_frame_bytes(database.page_size)?)
+        .filter(|pages| *pages > 0)
+        .ok_or(CrabError::LTXCorrupted)?;
+    let database_pages = database.database_pages;
+    let page_size = database.page_size;
+    let mut next_page = Some(1);
+    let windows = std::iter::from_fn(move || {
+        let first = next_page?;
+        let last = if first == lock {
+            first
         } else {
-            database.read_run(page, u32::MAX).await?
+            let mut last = first
+                .saturating_add(pages_per_window - 1)
+                .min(database_pages);
+            if first < lock {
+                last = last.min(lock - 1);
+            }
+            last
         };
-        if pages.is_empty()
-            || pages[0].0 != page
-            || pages
-                .windows(2)
-                .any(|pair| pair[0].0.checked_add(1) != Some(pair[1].0))
-        {
-            return Err(CrabError::LTXCorrupted);
-        }
-        for (number, bytes) in &pages {
-            if *number != lock {
-                checksum =
-                    (checksum ^ crate::ltx::checksum_page(*number, bytes)) | crate::CHECKSUM_FLAG;
+        next_page = if last == database_pages {
+            None
+        } else {
+            last.checked_add(1)
+        };
+        Some((first, last - first + 1))
+    });
+    let download_database = database.clone();
+    let mut downloads = stream::iter(windows.map(move |(first, count)| {
+        let database = download_database.clone();
+        async move {
+            if first == lock {
+                Ok::<_, CrabError>((first, count, DownloadedWindow::Lock))
+            } else {
+                Ok((
+                    first,
+                    count,
+                    DownloadedWindow::Remote(database.read_restore_window(first, count).await?),
+                ))
             }
         }
-        let last = pages
-            .last()
-            .map(|(number, _)| *number)
-            .ok_or(CrabError::LTXCorrupted)?;
-        file = host
+    }))
+    .buffered(RESTORE_IN_FLIGHT_WINDOWS);
+    let mut checksum = crate::CHECKSUM_FLAG;
+    let mut expected_page = 1u64;
+    while let Some(window) = downloads.next().await {
+        let (first, count, downloaded) = window?;
+        if u64::from(first) != expected_page {
+            return Err(CrabError::LTXCorrupted);
+        }
+        let (next_file, next_checksum) = host
             .run(move || {
-                for (_, bytes) in pages {
-                    file.write_all(&bytes)?;
+                let mut next = u64::from(first);
+                match downloaded {
+                    DownloadedWindow::Lock => {
+                        file.write_all(&vec![0; page_size as usize])?;
+                        next += 1;
+                    }
+                    DownloadedWindow::Remote(spans) => {
+                        for span in spans {
+                            span.try_for_each_page(page_size, |number, bytes| {
+                                if u64::from(number) != next {
+                                    return Err(CrabError::LTXCorrupted);
+                                }
+                                checksum = (checksum ^ crate::ltx::checksum_page(number, &bytes))
+                                    | crate::CHECKSUM_FLAG;
+                                file.write_all(&bytes)?;
+                                next += 1;
+                                Ok(())
+                            })?;
+                        }
+                    }
                 }
-                Ok::<_, CrabError>(file)
+                if next != u64::from(first) + u64::from(count) {
+                    return Err(CrabError::LTXCorrupted);
+                }
+                Ok::<_, CrabError>((file, checksum))
             })
             .await??;
-        if last == database.database_pages {
-            break;
-        }
-        page = last.checked_add(1).ok_or(CrabError::LTXCorrupted)?;
+        file = next_file;
+        checksum = next_checksum;
+        expected_page += u64::from(count);
+    }
+    if expected_page != u64::from(database.database_pages) + 1 {
+        return Err(CrabError::LTXCorrupted);
     }
     if checksum != database.position.checksum {
         return Err(CrabError::ChecksumMismatch);
