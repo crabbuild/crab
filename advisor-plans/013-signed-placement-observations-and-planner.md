@@ -1,6 +1,6 @@
 # Signed live placement observations and pure weighted planner
 
-Status: IN PROGRESS — versioned signed placement observations now carry measured memory/disk totals and one coherent runtime Cell/job snapshot; advertised disk capacity and free headroom are clamped by the unified runtime `DiskBudget` and reservations, with fail-closed nested Linux cgroup probes; cold activation now uses a bounded authenticated activation hint; process-wide probe parity and multi-process convergence remain the only placement release gates
+Status: IN PROGRESS — versioned signed placement observations now carry measured memory/disk totals and one coherent runtime Cell/job snapshot; advertised disk capacity and free headroom are clamped by the unified runtime `DiskBudget` and reservations, with fail-closed nested Linux cgroup probes; cold activation now uses a bounded authenticated activation hint; local three-process signed-placement parity is qualified, while protected multi-process convergence remains the placement release gate
 Priority: P0
 Effort: XL
 Risk: High
@@ -134,8 +134,13 @@ that a host-sized counter cannot wrap the bounded `u32` placement wire shape;
 large-node arithmetic fails closed by saturating at the protocol maximum.
 `local_resources_include_process_file_capacity` plus
 the nested cgroup fixture tests cover the host/cgroup probe boundary and its
-fail-closed parsing rules. The remaining process-wide probe parity and
-multi-process convergence evidence belongs to plan 015.
+fail-closed parsing rules. The local three-process Compose qualification now
+compares each node's `cells node --session SESSION --json` signed placement
+block with its live capacity report, runtime active-Cell gauge, and an
+independent filesystem `df` probe within 1 MiB. This closes local
+advertised-placement parity without treating same-host Compose as protected
+multi-Pod convergence; Kubernetes movement and partition evidence remain in
+plan 015.
 
 ## Stop conditions
 

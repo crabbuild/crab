@@ -197,10 +197,11 @@ evidence; protected three-Pod, matched-latency, and fleet gates remain open.
 The current checkout also passed the full local Compose/RustFS cluster
 qualification (version-5 receipt) with two owner losses, exact-root monotonicity,
 follower replacement, and follower-only commits under an immutable-object deny
-policy. The qualification harness now also compares each node's capacity report
-with its runtime Prometheus disk and active-Cell ceilings and an independent df
+policy. The qualification harness now compares each node's capacity report
+with its runtime Prometheus disk and active-Cell ceilings, the signed placement
+block returned by `cells node --session SESSION --json`, and an independent df
 filesystem probe (within 1 MiB) before workload; a mismatch fails the run and
-the receipt records the parity checks. The raw receipt is retained on the
+the receipt records all parity checks. The raw receipt is retained on the
 external qualification volume. It strengthens local process/fault evidence but
 is not protected Kubernetes or signed release evidence.
 
@@ -232,9 +233,9 @@ re-inspected after durable work and an unknown result remains ineligible for
 eviction. Remaining release gates are recorded in plans 009–017:
 matched warm-latency/restart receipts, provider-failure
 matrix evidence (with one local fail-first immutable PUT proof now covered),
-complete advertised-placement parity and mixed-workload resource accounting,
-multi-process
-movement/fault proof, protected Kubernetes receipts, and the named plan-016
+protected multi-process advertised-placement convergence and mixed-workload
+resource accounting, multi-process movement/fault proof, protected Kubernetes
+receipts, and the named plan-016
 retain/deprecate/hard-remove decision. Plan 017 remains correctly blocked; no
 standalone export or stored prefix was removed.
 
@@ -246,8 +247,8 @@ free headroom are clamped by the runtime-owned `DiskBudget`, so a larger
 filesystem probe cannot advertise bytes the actor cannot admit; the deliberately
 mismatched-capacity peer regression covers this case. Nested cgroup fixture
 parsing and process file-capacity checks cover the fail-closed host probe;
-advertised-placement parity and multi-process convergence remain qualification
-work.
+local signed-placement parity is now covered by the three-process Compose
+receipt, while protected multi-process convergence remains qualification work.
 
 Scheduler maintenance is also ledger-visible: migration and node-log recovery
 tasks now retain a `NodeJobReservation` until their spawned futures finish,
@@ -255,18 +256,19 @@ alongside the existing per-cell/session guards. This closes the untracked
 background-job path without adding a second capacity owner. The HTTP peer
 boundary charges authenticated protobuf verification/reply encoding and
 node-log append/tail codecs to that same primitive-job ledger; SQL codecs stay
-inside their worker-job reservation. Advertised-placement parity and measured
-mixed-workload proof are still explicit Plan 012 qualification gates. Runtime
+inside their worker-job reservation. Protected advertised-placement convergence
+and measured mixed-workload proof remain explicit Plan 012 qualification gates.
+Runtime
 Prometheus metrics now expose usage and capacity for every host-ledger class.
 The HTTP server builds those gauges through one
 `RuntimeSnapshot::with_cell_runtime` projection;
 `runtime_snapshot_projects_live_cell_ledger` installs a runtime-owned
 `DiskBudget`, reserves a nonzero disk amount through its admission hook, and
 proves live runtime reservations and capacities reach the rendered exposition
-without a second field mapping. The Compose receipt now independently measures
-each mounted Cell filesystem within the documented 1 MiB tolerance; provider-
-scale mixed-workload proof remains a qualification gate rather than being
-inferred from this unit proof.
+without a second field mapping. The Compose receipt independently measures each
+mounted Cell filesystem within the documented 1 MiB tolerance and records the
+signed placement projection; provider-scale mixed-workload proof remains a
+qualification gate rather than being inferred from this local receipt.
 
 Plan 010's canonical decoder no longer calls unbounded `read_to_end` for the
 trailer/index: it drains the remaining authenticated metadata through a fixed

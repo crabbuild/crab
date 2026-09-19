@@ -156,6 +156,56 @@ for pair in \
   test "$observed_cells" = "$expected_cells"
 done
 
+node_session() {
+  local service="$1"
+  "${compose[@]}" exec -T "$service" sh -ec '
+    for path in /var/lib/crab/cells/sessions/*; do
+      if [ -d "$path" ]; then
+        printf "%s\n" "${path##*/}"
+        exit 0
+      fi
+    done
+    exit 1
+  '
+}
+
+session_a="$(node_session server)"
+session_b="$(node_session server-b)"
+session_c="$(node_session server-c)"
+[[ "$session_a" =~ ^[0-9a-f]{32}$ ]]
+[[ "$session_b" =~ ^[0-9a-f]{32}$ ]]
+[[ "$session_c" =~ ^[0-9a-f]{32}$ ]]
+node_a="$("${compose[@]}" exec -T server crab-http-server \
+  --config /etc/crab/server.toml cells node --session "$session_a" --json)"
+node_b="$("${compose[@]}" exec -T server-b crab-http-server \
+  --config /etc/crab/server.toml cells node --session "$session_b" --json)"
+node_c="$("${compose[@]}" exec -T server-c crab-http-server \
+  --config /etc/crab/server.toml cells node --session "$session_c" --json)"
+
+assert_placement_parity() {
+  local capacity="$1"
+  local metrics="$2"
+  local node="$3"
+  local observed_active
+  observed_active="$(awk '$1 == "crab_http_server_cell_runtime_active_cells" { print $2; exit }' <<<"$metrics")"
+  test -n "$observed_active"
+  jq --exit-status \
+    --argjson expected_memory "$(jq -r '.resources.memory_bytes' <<<"$capacity")" \
+    --argjson expected_disk "$(jq -r '.admission.local_disk_bytes' <<<"$capacity")" \
+    --argjson expected_cells "$(jq -r '.admission.active_cells' <<<"$capacity")" \
+    --argjson observed_active "$observed_active" \
+    '.live == true and .advertisement.placement != null and
+     .advertisement.placement.memory_capacity_bytes == $expected_memory and
+     .advertisement.placement.disk_capacity_bytes == $expected_disk and
+     .advertisement.placement.max_active_cells == $expected_cells and
+     .advertisement.placement.active_cells == $observed_active' \
+    <<<"$node" >/dev/null
+}
+
+assert_placement_parity "$capacity_a" "$metrics_a" "$node_a"
+assert_placement_parity "$capacity_b" "$metrics_b" "$node_b"
+assert_placement_parity "$capacity_c" "$metrics_c" "$node_c"
+
 create_response=""
 for _ in $(seq 1 45); do
   candidate="$(curl --fail-with-body --silent --show-error --max-time 10 \
@@ -501,9 +551,15 @@ jq --null-input \
   --argjson disk_probe_b "$disk_probe_b" \
   --argjson disk_probe_c "$disk_probe_c" \
   --argjson disk_probe_tolerance_bytes "$disk_probe_tolerance_bytes" \
+  --arg session_a "$session_a" \
+  --arg session_b "$session_b" \
+  --arg session_c "$session_c" \
   --arg metrics_a "$metrics_a" \
   --arg metrics_b "$metrics_b" \
   --arg metrics_c "$metrics_c" \
+  --argjson node_a "$node_a" \
+  --argjson node_b "$node_b" \
+  --argjson node_c "$node_c" \
   --argjson node_before "$node_before" \
   --argjson node_fleet_only "$node_fleet_only" \
   --argjson fleet_only_response "$fleet_only_response" \
@@ -565,10 +621,19 @@ jq --null-input \
       node_c_bytes: $disk_probe_c,
       tolerance_bytes: $disk_probe_tolerance_bytes
     },
+    placement: {
+      node_a_session: $session_a,
+      node_b_session: $session_b,
+      node_c_session: $session_c,
+      node_a: $node_a,
+      node_b: $node_b,
+      node_c: $node_c
+    },
     metrics: {node_a: $metrics_a, node_b: $metrics_b, node_c: $metrics_c},
     capacity_metric_parity: {
       local_disk: true,
       active_cells: true,
-      measured_local_disk: true
+      measured_local_disk: true,
+      signed_placement: true
     }
   }'
