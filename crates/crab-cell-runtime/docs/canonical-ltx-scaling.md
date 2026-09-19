@@ -155,7 +155,7 @@ decision is pending; no standalone surface is removed by this design.
 | Metadata lookup | [`CellCatalog::lookup`](../src/catalog.rs) loads the shard head and every referenced immutable catalog page; [`CellAuthority::load`](../src/authority.rs) separately reads exact control. |
 | Local residency | [`CellRuntime::resident_handle`](../src/actor.rs) asks the actor for a fully resident owner before remote metadata; [`local_handle`](../src/actor.rs) remains the verified slow-path lookup for sparse or activation callers. Fenced, draining, and non-resident actors miss safely. |
 | Sparse hydration | [`ManagedDb::hydration` and `hydrate_step`](../../crab-ltx/src/managed.rs) are driven by the actor's bounded hydration tick through the existing SQL worker; cancellation/restart and post-promotion zero-I/O qualification remain. |
-| Fleet observation | [`NodePublisher`](../../crab-http-server/src/peer.rs) signs short-lived live capacity observations; `NodeAdvertisement` carries a versioned placement signature, advertised memory/disk/job headroom is clamped by the runtime ledger, server memory capacity resolves nested cgroup-v1/v2 membership with fail-closed root fallbacks, and cold activation sends a bounded direct-node hint before normal authority acquisition. The test-only process race covers one shared-control winner; unified process-wide probe parity and protected multi-process movement proof remain. |
+| Fleet observation | [`NodePublisher`](../../crab-http-server/src/peer.rs) signs short-lived live capacity observations; `NodeAdvertisement` carries a versioned placement signature, advertised memory/disk/job headroom and the signed disk total are clamped by the runtime ledger, server memory capacity resolves nested cgroup-v1/v2 membership with fail-closed root fallbacks, and cold activation sends a bounded direct-node hint before normal authority acquisition. The test-only process race covers one shared-control winner; unified process-wide probe parity and protected multi-process movement proof remain. |
 | Existing rendezvous | [`preferred_scanner`](../src/scheduler.rs) elects a catalog scheduler scanner. It does not rank or move Cell owners. |
 | Transition safety | [`Control`](../src/control.rs) validates named single-record transitions; [`coordination.rs`](../src/coordination.rs) allocates and retires typed per-effect intents/IDs, while the actor fences completions by activation generation and effect family, drains the kernel-owned pending-effect set before fenced deactivation, and keeps effect timing coupled to the production publisher. Background hydration, renewal, persisted-work inventory refresh, drain, and shutdown pass queue/publisher/lease observations through the same kernel schedule transition before an adapter starts work. |
 
@@ -190,8 +190,8 @@ holds those bytes in the same budget, rejecting symlinked or special layouts;
 native and bundle
 publication share the authenticated LTX inspection path with replayable scratch
 sources; placement/pressure decisions are pure fixed-point functions with
-versioned signed observations whose advertised free headroom is reconciled with
-the runtime ledger; placement's bounded `u32` wire projection saturates
+versioned signed observations whose advertised disk total and free headroom are
+reconciled with the runtime ledger; placement's bounded `u32` wire projection saturates
 host-sized counters rather than wrapping; and qualification receipts are signed, bounded,
 artifact-bound records. The `qualification_receipt` binary verifies exact
 source, image, and artifact identity, and the release workflow consumes only
