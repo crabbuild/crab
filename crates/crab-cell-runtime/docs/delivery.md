@@ -106,6 +106,29 @@ source/image identity, and BLAKE3 digest of the exact raw artifact. It does not
 turn local or in-memory evidence into provider qualification; the release
 matrix still needs the real RustFS/Kubernetes and multi-GiB runs below.
 
+Release qualification can be verified as one bounded matrix instead of a
+caller-owned loop. `QualificationMatrixManifest` requires exactly one entry for
+each of these rows: `protocol`, `storage`, `publication`, `warm-path`, `churn`,
+`fleet`, `failover`, `primitives`, `accounting`, and `compatibility`. Each entry
+binds a relative receipt path and one or more relative raw-artifact paths. The
+manifest and every receipt are canonical JSON; absolute paths, parent-directory
+components, duplicate rows, missing rows, dirty receipts, source/image drift,
+and any artifact digest mismatch fail closed.
+
+After the release job writes the ten receipts and their raw artifacts beside the
+manifest, verify the complete set in a fresh process:
+
+```bash
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
+  cargo run -p crab-cell-runtime --bin qualification_receipt --locked -- \
+  verify-matrix qualification-matrix.json "$SOURCE_SHA" "$IMAGE_DIGEST"
+```
+
+The matrix verifier recomputes every raw digest, checks the primary artifact
+digest for each receipt, and requires all rows to use the supplied source and
+image identity. It is a release-evidence check only; it does not promote local
+or in-memory runs to RustFS, Kubernetes, matched-latency, or capacity proof.
+
 The local RustFS qualification pass on 2026-09-18 used one isolated bucket and
 unique prefixes with explicit credentials (the credentials were not written to
 artifacts). It passed the LTX round trip, Cell source-loss takeover and
@@ -376,8 +399,9 @@ CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-qualification-receipts \
 ```
 
 This proves receipt encoding, signature verification, artifact binding, dirty
-source rejection, and forged-field rejection. It does not claim that a local
-receipt proves RustFS, Kubernetes, partition, or capacity behavior. Protected
+source rejection, forged-field rejection, complete matrix membership, and
+multi-artifact digest recomputation. It does not claim that a local receipt
+proves RustFS, Kubernetes, partition, or capacity behavior. Protected
 qualification jobs must attach the emitted receipt to the exact source and
 image digest and feed it through a fresh verifier before release consumes it.
 

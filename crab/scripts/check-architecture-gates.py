@@ -1794,6 +1794,33 @@ ALLOWED_SERVER_DEV_FIXTURES = {
 }
 CELL_RUNTIME_SERVER_SOURCE_PATHS = ("crates/crab-http-server/src",)
 CELL_RUNTIME_SERVER_IMPORT_PATTERN = "crab_ltx::"
+CELL_RUNTIME_COORDINATION_KERNEL_PATH = "crates/crab-cell-runtime/src/coordination.rs"
+CELL_RUNTIME_COORDINATION_ACTOR_PATH = "crates/crab-cell-runtime/src/actor.rs"
+CELL_RUNTIME_COORDINATION_REQUIRED_KERNEL_PATTERNS = (
+    "pub(crate) enum CoordinationInput",
+    "pub(crate) enum CoordinationDecision",
+    "pub(crate) struct CoordinationState",
+    "pub(crate) fn step(&mut self, input: CoordinationInput)",
+)
+CELL_RUNTIME_COORDINATION_REQUIRED_ACTOR_PATTERNS = (
+    "CoordinationState",
+    "coordination.step(CoordinationInput::",
+)
+CELL_RUNTIME_COORDINATION_FORBIDDEN_KERNEL_PATTERNS = (
+    "async fn",
+    ".await",
+    "tokio::",
+    "object_store",
+    "rusqlite",
+    "reqwest::",
+    "std::fs",
+    "std::net",
+    "std::time",
+    "rand::",
+    "getrandom",
+    "spawn_blocking",
+    "Command::new(",
+)
 WORKSPACE_DEPENDENCY_POLICY = {
     "crab-cell-runtime": {"normal": {"crab-ltx", "crab-storage"}},
     "crab-ltx": {"normal": {"crab-storage"}},
@@ -2388,6 +2415,50 @@ def check_cell_runtime_server_boundary(root: Path, metadata: dict) -> bool:
         return True
 
     print("error: crab-http-server escaped the canonical Cell runtime boundary:", file=sys.stderr)
+    for violation in violations:
+        print(f"  {violation}", file=sys.stderr)
+    return False
+
+
+def check_cell_runtime_coordination_kernel(root: Path) -> bool:
+    """Keep volatile coordination decisions pure and actor-owned in production."""
+    violations: list[str] = []
+    kernel = root / CELL_RUNTIME_COORDINATION_KERNEL_PATH
+    actor = root / CELL_RUNTIME_COORDINATION_ACTOR_PATH
+
+    if not kernel.exists():
+        violations.append(f"{CELL_RUNTIME_COORDINATION_KERNEL_PATH}: missing coordination kernel")
+    else:
+        kernel_text = kernel.read_text(encoding="utf-8")
+        for pattern in CELL_RUNTIME_COORDINATION_REQUIRED_KERNEL_PATTERNS:
+            if pattern not in kernel_text:
+                violations.append(
+                    f"{CELL_RUNTIME_COORDINATION_KERNEL_PATH}: missing {pattern!r}"
+                )
+        allowed_lines = rust_test_only_lines(kernel_text)
+        for number, line in enumerate(kernel_text.splitlines(), start=1):
+            if number in allowed_lines:
+                continue
+            for pattern in CELL_RUNTIME_COORDINATION_FORBIDDEN_KERNEL_PATTERNS:
+                if pattern in line:
+                    violations.append(
+                        f"{CELL_RUNTIME_COORDINATION_KERNEL_PATH}:{number}: "
+                        f"forbidden adapter dependency {pattern!r}"
+                    )
+
+    if not actor.exists():
+        violations.append(f"{CELL_RUNTIME_COORDINATION_ACTOR_PATH}: missing actor adapter")
+    else:
+        actor_text = actor.read_text(encoding="utf-8")
+        for pattern in CELL_RUNTIME_COORDINATION_REQUIRED_ACTOR_PATTERNS:
+            if pattern not in actor_text:
+                violations.append(f"{CELL_RUNTIME_COORDINATION_ACTOR_PATH}: missing {pattern!r}")
+
+    if not violations:
+        print("ok: Cell coordination decisions stay in the pure kernel")
+        return True
+
+    print("error: Cell coordination escaped the pure kernel boundary:", file=sys.stderr)
     for violation in violations:
         print(f"  {violation}", file=sys.stderr)
     return False
@@ -4836,6 +4907,7 @@ def main() -> int:
         check_package_release_policy(metadata),
         check_server_fixture_dependencies(metadata),
         check_cell_runtime_server_boundary(root, metadata),
+        check_cell_runtime_coordination_kernel(root),
         check_workspace_dependency_policy(metadata),
         check_workspace_dependency_sources(root, metadata),
         check_workspace_xet_dependency_sources(root, metadata),

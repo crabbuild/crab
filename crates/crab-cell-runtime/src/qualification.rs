@@ -1,3 +1,5 @@
+use std::{collections::BTreeSet, path::Path};
+
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +11,21 @@ const MAX_RECEIPT_BYTES: usize = 1 << 20;
 
 /// Current wire schema for qualification evidence.
 pub const QUALIFICATION_SCHEMA_VERSION: u32 = 3;
+/// Schema for a manifest that binds one receipt to every qualification row.
+pub const QUALIFICATION_MATRIX_SCHEMA_VERSION: u32 = 1;
+/// Required workload rows for a complete release qualification matrix.
+pub const QUALIFICATION_MATRIX_ROWS: &[&str] = &[
+    "protocol",
+    "storage",
+    "publication",
+    "warm-path",
+    "churn",
+    "fleet",
+    "failover",
+    "primitives",
+    "accounting",
+    "compatibility",
+];
 
 /// Reproducible evidence record for one canonical Cell qualification run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +98,129 @@ pub struct QualificationMetric {
     name: String,
     value: u64,
     unit: String,
+}
+
+/// One receipt/artifact pair in a qualification matrix manifest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QualificationMatrixEntry {
+    workload: String,
+    receipt: String,
+    artifacts: Vec<String>,
+}
+
+impl QualificationMatrixEntry {
+    /// Creates one manifest entry using paths relative to the manifest file.
+    pub fn new(workload: String, receipt: String, artifacts: Vec<String>) -> Result<Self> {
+        validate_label(&workload, "qualification matrix workload")?;
+        validate_path(&receipt, "qualification matrix receipt path")?;
+        if artifacts.is_empty() || artifacts.len() > MAX_METRICS {
+            return Err(Error::Control("qualification matrix artifact count"));
+        }
+        for artifact in &artifacts {
+            validate_path(artifact, "qualification matrix artifact path")?;
+        }
+        Ok(Self {
+            workload,
+            receipt,
+            artifacts,
+        })
+    }
+
+    /// Returns the required workload row name.
+    #[must_use]
+    pub fn workload(&self) -> &str {
+        &self.workload
+    }
+
+    /// Returns the receipt path relative to the manifest.
+    #[must_use]
+    pub fn receipt(&self) -> &str {
+        &self.receipt
+    }
+
+    /// Returns raw-artifact paths relative to the manifest.
+    #[must_use]
+    pub fn artifacts(&self) -> &[String] {
+        &self.artifacts
+    }
+}
+
+/// Complete, bounded manifest for release qualification evidence.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QualificationMatrixManifest {
+    schema_version: u32,
+    entries: Vec<QualificationMatrixEntry>,
+}
+
+impl QualificationMatrixManifest {
+    /// Builds and validates a complete matrix manifest.
+    pub fn new(entries: Vec<QualificationMatrixEntry>) -> Result<Self> {
+        let manifest = Self {
+            schema_version: QUALIFICATION_MATRIX_SCHEMA_VERSION,
+            entries,
+        };
+        manifest.validate_contract()?;
+        Ok(manifest)
+    }
+
+    /// Decodes canonical JSON and rejects incomplete or duplicate rows.
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() > MAX_RECEIPT_BYTES {
+            return Err(Error::Control("qualification matrix exceeds limit"));
+        }
+        let manifest: Self = serde_json::from_slice(bytes)?;
+        manifest.validate_contract()?;
+        if serde_json::to_vec(&manifest).map_err(Error::from)? != bytes {
+            return Err(Error::Control("qualification matrix is not canonical"));
+        }
+        Ok(manifest)
+    }
+
+    /// Encodes canonical JSON for a release artifact.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        self.validate_contract()?;
+        let bytes = serde_json::to_vec(self).map_err(Error::from)?;
+        if bytes.len() > MAX_RECEIPT_BYTES {
+            return Err(Error::Control("qualification matrix exceeds limit"));
+        }
+        Ok(bytes)
+    }
+
+    /// Returns the entries in their declared manifest order.
+    #[must_use]
+    pub fn entries(&self) -> &[QualificationMatrixEntry] {
+        &self.entries
+    }
+
+    fn validate_contract(&self) -> Result<()> {
+        if self.schema_version != QUALIFICATION_MATRIX_SCHEMA_VERSION
+            || self.entries.len() != QUALIFICATION_MATRIX_ROWS.len()
+        {
+            return Err(Error::Control("qualification matrix schema or row count"));
+        }
+        let expected = QUALIFICATION_MATRIX_ROWS
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let actual = self
+            .entries
+            .iter()
+            .map(QualificationMatrixEntry::workload)
+            .collect::<BTreeSet<_>>();
+        if actual.len() != self.entries.len() || actual != expected {
+            return Err(Error::Control("qualification matrix rows"));
+        }
+        for entry in &self.entries {
+            QualificationMatrixEntry::new(
+                entry.workload.clone(),
+                entry.receipt.clone(),
+                entry.artifacts.clone(),
+            )?;
+        }
+        Ok(())
+    }
 }
 
 impl QualificationMetric {
@@ -368,6 +508,16 @@ impl QualificationReceipt {
     ///
     /// Failed receipts remain retainable evidence but cannot satisfy this release gate.
     pub fn verify_for(&self, source_revision: &str, image: Digest, artifact: &[u8]) -> Result<()> {
+        self.verify_for_artifacts(source_revision, image, &[artifact])
+    }
+
+    /// Verifies every raw artifact digest listed by a passing receipt.
+    pub fn verify_for_artifacts(
+        &self,
+        source_revision: &str,
+        image: Digest,
+        artifacts: &[&[u8]],
+    ) -> Result<()> {
         if !self.passed {
             return Err(Error::Control("qualification receipt is not passed"));
         }
@@ -375,8 +525,16 @@ impl QualificationReceipt {
         if self.source_revision != source_revision || self.image() != image {
             return Err(Error::Control("qualification release identity"));
         }
-        if self.artifact_digest() != Digest::from_bytes(*blake3::hash(artifact).as_bytes()) {
-            return Err(Error::Control("qualification artifact digest"));
+        if artifacts.len() != self.raw_artifact_digests.len() || artifacts.is_empty() {
+            return Err(Error::Control("qualification artifact evidence count"));
+        }
+        for (expected, artifact) in self.raw_artifact_digests().zip(artifacts.iter().copied()) {
+            if expected != Digest::from_bytes(*blake3::hash(artifact).as_bytes()) {
+                return Err(Error::Control("qualification artifact digest"));
+            }
+        }
+        if self.artifact_digest() != Digest::from_bytes(*blake3::hash(artifacts[0]).as_bytes()) {
+            return Err(Error::Control("qualification primary artifact digest"));
         }
         let encoded = self.encode()?;
         let decoded = Self::decode(&encoded)?;
@@ -384,6 +542,35 @@ impl QualificationReceipt {
             return Err(Error::Control(
                 "qualification receipt changed during verification",
             ));
+        }
+        Ok(())
+    }
+
+    /// Verifies one complete matrix against an exact source/image identity.
+    pub fn verify_matrix(
+        source_revision: &str,
+        image: Digest,
+        evidence: &[(&str, &QualificationReceipt, &[&[u8]])],
+    ) -> Result<()> {
+        if evidence.len() != QUALIFICATION_MATRIX_ROWS.len() {
+            return Err(Error::Control("qualification matrix evidence count"));
+        }
+        let expected = QUALIFICATION_MATRIX_ROWS
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let actual = evidence
+            .iter()
+            .map(|(workload, _, _)| *workload)
+            .collect::<BTreeSet<_>>();
+        if actual != expected || actual.len() != evidence.len() {
+            return Err(Error::Control("qualification matrix evidence rows"));
+        }
+        for (workload, receipt, artifacts) in evidence {
+            if *workload != receipt.workload() {
+                return Err(Error::Control("qualification matrix receipt workload"));
+            }
+            receipt.verify_for_artifacts(source_revision, image, artifacts)?;
         }
         Ok(())
     }
@@ -567,6 +754,23 @@ fn validate_label(value: &str, field: &'static str) -> Result<()> {
     Ok(())
 }
 
+fn validate_path(value: &str, field: &'static str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > MAX_LABEL_BYTES
+        || !value.is_ascii()
+        || value.bytes().any(|byte| byte.is_ascii_control())
+        || value.contains('\\')
+        || value.contains("://")
+        || Path::new(value).is_absolute()
+        || Path::new(value)
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(Error::Control(field));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -743,6 +947,171 @@ mod tests {
             decoded
                 .raw_artifact_digests()
                 .any(|digest| { digest == Digest::from_bytes(*blake3::hash(artifact).as_bytes()) })
+        );
+    }
+
+    #[test]
+    fn matrix_manifest_requires_each_bounded_workload_once() {
+        let entries = QUALIFICATION_MATRIX_ROWS
+            .iter()
+            .map(|workload| {
+                QualificationMatrixEntry::new(
+                    (*workload).to_owned(),
+                    format!("receipts/{workload}.json"),
+                    vec![format!("artifacts/{workload}.json")],
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let manifest = QualificationMatrixManifest::new(entries).unwrap();
+        assert_eq!(
+            QualificationMatrixManifest::decode(&manifest.encode().unwrap()).unwrap(),
+            manifest
+        );
+
+        let mut incomplete = manifest.entries().to_vec();
+        incomplete.pop();
+        assert!(QualificationMatrixManifest::new(incomplete).is_err());
+
+        let mut duplicate = manifest.entries().to_vec();
+        duplicate[0] = QualificationMatrixEntry::new(
+            duplicate[1].workload().to_owned(),
+            duplicate[0].receipt().to_owned(),
+            duplicate[0].artifacts().to_vec(),
+        )
+        .unwrap();
+        assert!(QualificationMatrixManifest::new(duplicate).is_err());
+
+        assert!(
+            QualificationMatrixEntry::new(
+                "protocol".into(),
+                "../receipt.json".into(),
+                vec!["artifact.bin".into()],
+            )
+            .is_err()
+        );
+        assert!(
+            QualificationMatrixEntry::new(
+                "protocol".into(),
+                "/tmp/receipt.json".into(),
+                vec!["artifact.bin".into()],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn matrix_verifier_recomputes_every_row_artifact() {
+        let image = Digest::from_bytes([7; 32]);
+        let runner = QualificationRunner::new(SigningKey::from_bytes(&[8; 32]));
+        let mut receipts = Vec::new();
+        let mut artifacts = Vec::new();
+        for workload in QUALIFICATION_MATRIX_ROWS {
+            let artifact = format!("artifact-{workload}").into_bytes();
+            receipts.push(
+                runner
+                    .emit(
+                        "source".into(),
+                        image,
+                        "local".into(),
+                        (*workload).into(),
+                        "none".into(),
+                        Vec::new(),
+                        &artifact,
+                        true,
+                        (
+                            "rustc".into(),
+                            "test".into(),
+                            "local".into(),
+                            1,
+                            0,
+                            0,
+                            false,
+                        ),
+                    )
+                    .unwrap(),
+            );
+            artifacts.push(artifact);
+        }
+        let artifact_views = artifacts
+            .iter()
+            .map(|artifact| vec![artifact.as_slice()])
+            .collect::<Vec<_>>();
+        let evidence = QUALIFICATION_MATRIX_ROWS
+            .iter()
+            .enumerate()
+            .map(|(index, workload)| {
+                (
+                    *workload,
+                    &receipts[index],
+                    artifact_views[index].as_slice(),
+                )
+            })
+            .collect::<Vec<_>>();
+        QualificationReceipt::verify_matrix("source", image, &evidence).unwrap();
+
+        let mut forged_artifact = artifacts[0].clone();
+        forged_artifact.push(b'!');
+        let forged_views = [vec![forged_artifact.as_slice()]];
+        let forged_evidence = evidence
+            .iter()
+            .enumerate()
+            .map(|(index, (workload, receipt, row_artifacts))| {
+                if index == 0 {
+                    (*workload, *receipt, forged_views[0].as_slice())
+                } else {
+                    (*workload, *receipt, *row_artifacts)
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(QualificationReceipt::verify_matrix("source", image, &forged_evidence).is_err());
+    }
+
+    #[test]
+    fn multi_artifact_receipts_require_all_raw_bytes() {
+        let primary = b"primary";
+        let secondary = b"secondary";
+        let runner = QualificationRunner::new(SigningKey::from_bytes(&[10; 32]));
+        let receipt = runner
+            .emit_with_evidence(
+                "source".into(),
+                Digest::from_bytes([11; 32]),
+                "local".into(),
+                "storage".into(),
+                "none".into(),
+                Vec::new(),
+                primary,
+                true,
+                (
+                    "rustc".into(),
+                    "test".into(),
+                    "local".into(),
+                    0,
+                    0,
+                    0,
+                    false,
+                ),
+                1,
+                2,
+                b"none",
+                vec![
+                    Digest::from_bytes(*blake3::hash(primary).as_bytes()),
+                    Digest::from_bytes(*blake3::hash(secondary).as_bytes()),
+                ],
+                Vec::new(),
+            )
+            .unwrap();
+        receipt
+            .verify_for_artifacts(
+                "source",
+                Digest::from_bytes([11; 32]),
+                &[primary, secondary],
+            )
+            .unwrap();
+        assert!(
+            receipt
+                .verify_for("source", Digest::from_bytes([11; 32]), primary)
+                .is_err()
         );
     }
 

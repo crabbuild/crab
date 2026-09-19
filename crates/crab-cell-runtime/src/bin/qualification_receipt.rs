@@ -1,11 +1,13 @@
 use std::{
     env, fs,
+    path::{Component, Path, PathBuf},
     process::ExitCode,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use crab_cell_runtime::{
-    Digest, QualificationMetric, QualificationOwnership, QualificationReceipt, QualificationRunner,
+    Digest, QualificationMatrixManifest, QualificationMetric, QualificationOwnership,
+    QualificationReceipt, QualificationRunner,
 };
 use ed25519_dalek::SigningKey;
 use rand::Rng;
@@ -96,8 +98,83 @@ fn run() -> Result<(), String> {
                 .verify_for(&source, image, &artifact)
                 .map_err(|error| error.to_string())
         }
+        Some("verify-matrix") => verify_matrix(&mut args),
         _ => Err(usage()),
     }
+}
+
+fn verify_matrix(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
+    let manifest_path = PathBuf::from(required(args, "matrix manifest")?);
+    let source = required(args, "source revision")?;
+    let image = parse_digest(&required(args, "image digest")?)?;
+    if args.next().is_some() {
+        return Err(usage());
+    }
+    let manifest = QualificationMatrixManifest::decode(
+        &fs::read(&manifest_path).map_err(|error| format!("read matrix manifest: {error}"))?,
+    )
+    .map_err(|error| error.to_string())?;
+    let base = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut receipts = Vec::with_capacity(manifest.entries().len());
+    let mut artifacts = Vec::with_capacity(manifest.entries().len());
+    for entry in manifest.entries() {
+        let receipt_path = resolve_manifest_path(base, entry.receipt())?;
+        receipts.push(
+            QualificationReceipt::decode(
+                &fs::read(receipt_path).map_err(|error| format!("read matrix receipt: {error}"))?,
+            )
+            .map_err(|error| error.to_string())?,
+        );
+        let mut row = Vec::with_capacity(entry.artifacts().len());
+        for artifact in entry.artifacts() {
+            let artifact_path = resolve_manifest_path(base, artifact)?;
+            row.push(
+                fs::read(artifact_path)
+                    .map_err(|error| format!("read matrix artifact: {error}"))?,
+            );
+        }
+        artifacts.push(row);
+    }
+    let artifact_views = artifacts
+        .iter()
+        .map(|row| row.iter().map(Vec::as_slice).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let evidence = manifest
+        .entries()
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            (
+                entry.workload(),
+                &receipts[index],
+                artifact_views[index].as_slice(),
+            )
+        })
+        .collect::<Vec<_>>();
+    QualificationReceipt::verify_matrix(&source, image, &evidence)
+        .map_err(|error| error.to_string())?;
+    println!("qualification matrix verified");
+    Ok(())
+}
+
+fn resolve_manifest_path(base: &Path, value: &str) -> Result<PathBuf, String> {
+    let path = Path::new(value);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err("matrix paths must be relative and stay within the manifest directory".into());
+    }
+    let canonical_base = fs::canonicalize(base)
+        .map_err(|error| format!("resolve matrix manifest directory: {error}"))?;
+    let candidate = canonical_base.join(path);
+    let resolved = fs::canonicalize(&candidate)
+        .map_err(|error| format!("resolve matrix artifact path: {error}"))?;
+    if !resolved.starts_with(&canonical_base) {
+        return Err("matrix paths must stay within the manifest directory".into());
+    }
+    Ok(resolved)
 }
 
 fn required(args: &mut impl Iterator<Item = String>, name: &str) -> Result<String, String> {
@@ -135,5 +212,5 @@ fn unix_millis() -> Result<u64, String> {
 }
 
 fn usage() -> String {
-    "usage: qualification_receipt emit <output> <source> <image-digest> <artifact> [provider workload fault]\n       qualification_receipt verify <receipt> <source> <image-digest> <artifact>".into()
+    "usage: qualification_receipt emit <output> <source> <image-digest> <artifact> [provider workload fault]\n       qualification_receipt verify <receipt> <source> <image-digest> <artifact>\n       qualification_receipt verify-matrix <manifest> <source> <image-digest>".into()
 }

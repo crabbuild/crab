@@ -173,5 +173,62 @@ fn later_production_code() {}
         )
 
 
+class CellCoordinationKernelTests(unittest.TestCase):
+    def check_kernel(self, kernel, actor):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            kernel_path = root / GATES.CELL_RUNTIME_COORDINATION_KERNEL_PATH
+            actor_path = root / GATES.CELL_RUNTIME_COORDINATION_ACTOR_PATH
+            kernel_path.parent.mkdir(parents=True, exist_ok=True)
+            actor_path.parent.mkdir(parents=True, exist_ok=True)
+            kernel_path.write_text(kernel, encoding="utf-8")
+            actor_path.write_text(actor, encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                return GATES.check_cell_runtime_coordination_kernel(root)
+
+    def test_pure_kernel_and_actor_adapter_are_admitted(self):
+        kernel = """pub(crate) enum CoordinationInput {}
+pub(crate) enum CoordinationDecision {}
+pub(crate) struct CoordinationState;
+impl CoordinationState {
+    pub(crate) fn step(&mut self, input: CoordinationInput) {}
+}
+"""
+        self.assertTrue(
+            self.check_kernel(
+                kernel,
+                "use crate::coordination::CoordinationState;\n"
+                "active.coordination.step(CoordinationInput::Fence);\n",
+            )
+        )
+
+    def test_kernel_rejects_async_and_provider_adapters(self):
+        kernel = """pub(crate) enum CoordinationInput {}
+pub(crate) enum CoordinationDecision {}
+pub(crate) struct CoordinationState;
+impl CoordinationState {
+    pub(crate) fn step(&mut self, input: CoordinationInput) {}
+    async fn read() { object_store::get().await; }
+}
+"""
+        self.assertFalse(
+            self.check_kernel(
+                kernel,
+                "use crate::coordination::CoordinationState;\n"
+                "active.coordination.step(CoordinationInput::Fence);\n",
+            )
+        )
+
+    def test_actor_must_retain_the_kernel_adapter_call(self):
+        kernel = """pub(crate) enum CoordinationInput {}
+pub(crate) enum CoordinationDecision {}
+pub(crate) struct CoordinationState;
+impl CoordinationState {
+    pub(crate) fn step(&mut self, input: CoordinationInput) {}
+}
+"""
+        self.assertFalse(self.check_kernel(kernel, "fn actor() {}\n"))
+
+
 if __name__ == "__main__":
     unittest.main()

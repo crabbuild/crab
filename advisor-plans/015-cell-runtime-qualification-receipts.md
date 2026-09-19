@@ -1,6 +1,6 @@
 # Cell runtime production qualification and receipts
 
-Status: IN PROGRESS — schema-v3 receipt binding, local RustFS provider/fault evidence, and the instrumented local warm-path probe pass; scale, matched latency, Kubernetes, and release-receipt gates remain
+Status: IN PROGRESS — schema-v3 receipt binding, complete matrix verification, local RustFS provider/fault evidence, and the instrumented local warm-path probe pass; scale, matched latency, Kubernetes, and release-receipt gates remain
 Priority: P0
 Effort: XL
 Risk: Medium
@@ -114,6 +114,10 @@ three-Pod primitive-fault receipt.
 2. Define/extend the receipt schema and fail-closed validator. Add positive,
    missing-field, type/range, source mismatch, artifact digest mismatch, dirty
    source, forged signature/attestation, and secret-redaction fixtures.
+   The implementation now also provides a bounded canonical matrix manifest
+   with one required row per qualification dimension, relative-path validation,
+   duplicate/missing-row rejection, and a fresh-process `verify-matrix` command
+   that recomputes every referenced artifact digest.
 3. Add reproducible workload generators for large publication, resident reads,
    mixed primitive traffic, Cell churn, and skewed fleet demand. Seeds and
    concurrency are recorded; generators verify visible outcomes, not just HTTP
@@ -167,6 +171,13 @@ suite also passes the process-level movement probes and the hydration shutdown
 cancellation regression. These runs use a disposable local provider prefix and
 are provider evidence for iteration; they are not signed release receipts and
 do not close the protected Kubernetes or matched-hardware gates.
+
+The receipt contract now includes a canonical matrix verifier. Its ten required
+rows are protocol, storage, publication, warm-path, churn, fleet, failover,
+primitives, accounting, and compatibility. The verifier requires one signed
+passing receipt per row, checks the exact source/image identity, and hashes every
+raw artifact listed by each receipt. This closes the validator implementation
+gap; it does not claim that the protected rows have been executed.
 
 ## Acceptance criteria
 

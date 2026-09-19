@@ -1,6 +1,6 @@
 # Extract the pure Cell coordination kernel
 
-Status: IN PROGRESS — pure lifecycle state, typed kernel-owned effect intents/IDs, actor admission/drain/scheduling seams, activation-generation fencing, and in-flight completion drain are wired and tested; scheduling plus hydration, renewal, persisted-work inventory, deactivation observations, migration admission, publication admission, and simulator movement release now use kernel decisions. The actor's schedule adapter passes queue/publisher observations into one kernel transition, migration admission receives the live-publisher observation without storing a duplicate adapter flag, and work/publication/renewal/hydration completion outcomes now return explicit kernel fence decisions. Remaining release work is parity/source-audit evidence, not a second implementation
+Status: DONE — pure lifecycle state, typed kernel-owned effect intents/IDs, actor admission/drain/scheduling seams, activation-generation fencing, in-flight completion drain, and architecture drift guard pass
 Priority: P0
 Effort: XL
 Risk: High
@@ -197,6 +197,12 @@ admission transition and `FinishPublication` is the only completion transition;
 spawns the effect. Its former actor-side `fenced` guard was redundant policy and
 has been deleted, so a fenced Cell cannot reach the adapter without a kernel
 decision returning `Started`.
+
+The architecture checker now protects this seam in CI. It requires the private
+kernel state/input/decision/step types, rejects async/runtime/provider imports in
+the production portion of `coordination.rs`, and requires the actor adapter to
+call the kernel. Test-only transition fixtures remain admitted through the
+same test-region classifier used by the HTTP/LTX boundary guard.
 
 ### 6. Update documentation
 

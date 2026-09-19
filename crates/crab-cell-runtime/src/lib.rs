@@ -151,8 +151,9 @@ pub use pressure::{
 };
 pub use publication::CellPublisher;
 pub use qualification::{
-    QUALIFICATION_SCHEMA_VERSION, QualificationMetric, QualificationOwnership,
-    QualificationReceipt, QualificationRunner,
+    QUALIFICATION_MATRIX_ROWS, QUALIFICATION_MATRIX_SCHEMA_VERSION, QUALIFICATION_SCHEMA_VERSION,
+    QualificationMatrixEntry, QualificationMatrixManifest, QualificationMetric,
+    QualificationOwnership, QualificationReceipt, QualificationRunner,
 };
 pub use queue::{
     QueueClaimCommand, QueueClaimRequest, QueueControlAction, QueueControlCommand,

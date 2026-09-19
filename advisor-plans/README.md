@@ -65,7 +65,7 @@ conditions so an executor can use it without relying on conversation history.
 | Plan | Outcome | Priority | Effort | Depends on | Status |
 | --- | --- | --- | --- | --- | --- |
 | [004](004-cell-runtime-architecture-guard.md) | Enforce the canonical server -> runtime -> LTX boundary and lock current behavior | P1 | M | None | DONE |
-| [005](005-pure-cell-coordination-kernel.md) | Make protocol decisions pure while retaining one production adapter | P0 | XL | 004 | IN PROGRESS |
+| [005](005-pure-cell-coordination-kernel.md) | Make protocol decisions pure while retaining one production adapter | P0 | XL | 004 | DONE |
 | [006](006-deterministic-coordination-simulation.md) | Replayable adversarial schedules and broken-variant proof | P0 | L | 005 | IN PROGRESS |
 | [007](007-cell-coordination-tla-model.md) | Small-state formal model and code/model delta ledger | P1 | L | 005 | IN PROGRESS |
 | [008](008-resident-cell-local-routing.md) | Zero-metadata-I/O local handle acquisition for safe resident Cells | P0 | L | 004, 005 | DONE |
@@ -77,7 +77,7 @@ conditions so an executor can use it without relying on conversation history.
 | [014](014-pressure-shedding-and-paced-drain.md) | Hysteretic shedding and safe paced movement | P0 | XL | 013 | IN PROGRESS |
 | [015](015-cell-runtime-qualification-receipts.md) | Simulator, provider, fault, scale, latency, and primitive release evidence | P0 | XL | 006-014 | IN PROGRESS |
 | [016](016-standalone-replication-compatibility-decision.md) | Complete tagged-contract audit and named support decision | P1 | M | 015 | DONE — HARD REMOVE |
-| [017](017-execute-standalone-replication-decision.md) | Retain, deprecate, or remove exactly as approved | P1 | L-XL | 016 | IN PROGRESS — HARD REMOVE |
+| [017](017-execute-standalone-replication-decision.md) | Retain, deprecate, or remove exactly as approved | P1 | L-XL | 016 | DONE — HARD REMOVE |
 
 ### Dependency graph and execution waves
 
@@ -194,6 +194,14 @@ passed the LTX round-trip/parity/CAS-race, Cell source-loss takeover, retention
 graph, HTTP receive-fault, native HTTP push, and public collaboration/takeover
 cases. These are provider/fault iteration receipts, not signed release
 evidence; protected three-Pod, matched-latency, and fleet gates remain open.
+
+The qualification receipt implementation now has a canonical matrix manifest
+and fresh-process verifier. It requires exactly one row for protocol, storage,
+publication, warm path, churn, fleet, failover, primitives, accounting, and
+compatibility; rejects path traversal and duplicate/incomplete manifests; and
+recomputes every raw artifact digest before accepting a row. This closes the
+validator implementation seam while the protected provider/Kubernetes and
+release receipts remain open.
 
 The current checkout also passed the full local Compose/RustFS cluster
 qualification (version-5 receipt) with two owner losses, exact-root monotonicity,
@@ -418,6 +426,10 @@ now exclusively `CoordinationInput::BeginPublication`, completion is exclusively
 effect. This closes the last actor-side lifecycle predicate in the coordination
 path; the coordination and actor suites pass with no compatibility branch or
 feature flag selecting an alternate decision implementation.
+
+The architecture gate now protects the extracted seam as well: it requires the
+private coordination types and actor adapter call, and rejects async/runtime or
+provider dependencies in production kernel lines while admitting test fixtures.
 
 Blob upload lifetimes and Cron first-due windows are validated from the
 mutation-issued timestamp, while the serialized Cell still rejects an upload
