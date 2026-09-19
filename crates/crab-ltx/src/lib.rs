@@ -21,7 +21,10 @@ mod host;
 pub use environment::{DirectoryCacheStats, ScratchMonitor};
 pub use environment::{DiskBudget, DiskBudgetAdmission, DiskReservation, Host};
 #[cfg(feature = "replica")]
-pub use environment::{HostResourceAdmission, HostResourceKind, HostResourcePermit};
+pub use environment::{
+    HostResourceAdmission, HostResourceKind, HostResourcePermit, LtxPhase, LtxReadOrigin,
+    LtxTelemetry,
+};
 mod ltx;
 mod lz4_block;
 mod managed;
@@ -62,7 +65,7 @@ pub use error::{CrabError, QueryError, Result, TransactionError};
 pub use managed::{MANAGED_CONNECTION_PAGE_CACHE_BYTES, MANAGED_SQLITE_CONNECTIONS, ManagedDb};
 pub use recovery::{VerifiedLocalPlan, compact_exact, restore_exact};
 pub use rusqlite;
-pub use types::{CaptureBatch, Limits, LocalSegment, Position, SegmentInfo};
+pub use types::{CaptureBatch, CaptureTiming, Limits, LocalSegment, Position, SegmentInfo};
 
 use host::{HostFile, LtxHost};
 use types::{CHECKSUM_FLAG, Checksum, Pos, Txid};

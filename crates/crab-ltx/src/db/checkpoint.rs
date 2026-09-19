@@ -70,7 +70,10 @@ impl Db {
         // and re-acquires the read lock through `_litestream_seq`, and the
         // invariant is that the tables exist before any control-table
         // statement — not only before a capture.
-        self.ensure_control_tables()?;
+        self.timing_begin(TimingPhase::SchemaCheck);
+        let schema_result = self.ensure_control_tables();
+        self.timing_end(TimingPhase::SchemaCheck);
+        schema_result?;
 
         // Read the WAL header before the checkpoint to detect a restart.
         let hdr = self.wal_header_bytes()?;
@@ -116,6 +119,9 @@ impl Db {
         if hdr == other {
             self.synced_since_checkpoint = false;
             return Ok(());
+        }
+        if let Some(timing) = &mut self.timing {
+            timing.checkpoint_restart();
         }
 
         // The WAL restarted. Grab the write lock, then either copy the new WAL
@@ -236,17 +242,47 @@ impl Db {
         }
     }
 
-    pub(super) fn run_checkpoint_pragma(&self, mode: CheckpointMode) -> Result<CheckpointPragma> {
+    pub(super) fn run_checkpoint_pragma(
+        &mut self,
+        mode: CheckpointMode,
+    ) -> Result<CheckpointPragma> {
         let sql = format!("PRAGMA wal_checkpoint({mode})");
-        self.conn
-            .prepare_cached(&sql)
-            .map_err(CrabError::Sqlite)?
-            .query_row([], |row| {
-                Ok(CheckpointPragma {
-                    wal_frames: row.get::<_, i64>(1)?,
-                    backfilled: row.get::<_, i64>(2)?,
+        if let Some(timing) = &mut self.timing {
+            timing.checkpoint_run();
+        }
+        self.timing_begin(TimingPhase::Checkpoint);
+        let result = (|| -> Result<CheckpointPragma> {
+            self.conn
+                .prepare_cached(&sql)
+                .map_err(CrabError::Sqlite)?
+                .query_row([], |row| {
+                    Ok(CheckpointPragma {
+                        busy: row.get::<_, i64>(0)? != 0,
+                        wal_frames: row.get::<_, i64>(1)?,
+                        backfilled: row.get::<_, i64>(2)?,
+                    })
                 })
-            })
-            .map_err(CrabError::Sqlite)
+                .map_err(CrabError::Sqlite)
+        })();
+        self.timing_end(TimingPhase::Checkpoint);
+        match &result {
+            Ok(pragma) => {
+                if let Some(timing) = &mut self.timing {
+                    timing.checkpoint_result(pragma.busy, pragma.wal_frames, pragma.backfilled);
+                }
+            }
+            Err(CrabError::Sqlite(error))
+                if matches!(
+                    error.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                ) =>
+            {
+                if let Some(timing) = &mut self.timing {
+                    timing.checkpoint_busy_error();
+                }
+            }
+            Err(_) => {}
+        }
+        result
     }
 }

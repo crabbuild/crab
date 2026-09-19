@@ -239,6 +239,7 @@ impl CellPublisher {
         &mut self,
         cuts: &crab_ltx::CaptureBatch,
     ) -> Result<crab_ltx::PreparedRoot> {
+        self.telemetry.ltx_capture(&cuts.timing);
         if self.observed.value().root.is_some() {
             return Err(Error::Control("bootstrap control already has a root"));
         }
@@ -271,6 +272,7 @@ impl CellPublisher {
         commit_sequence: u64,
         schema: u32,
     ) -> Result<crab_ltx::PreparedRoot> {
+        self.telemetry.ltx_capture(&cuts.timing);
         let base = self.compact_before_append().await?;
         let prepared = match self
             .prepare_cuts(base.as_ref(), cuts, commit_sequence, schema)

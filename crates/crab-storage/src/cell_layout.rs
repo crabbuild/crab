@@ -112,6 +112,29 @@ impl CellStorageLayout {
         ))
     }
 
+    /// Returns a private, unreferenced staging key for an immutable Cell object.
+    ///
+    /// Staging keys are never part of a root or manifest. The digest makes
+    /// retries and failover converge on one unreferenced target for the same
+    /// immutable bytes; callers must promote the object and delete this key
+    /// before returning.
+    #[must_use]
+    pub fn incarnation_staging_path(
+        &self,
+        cell: &[u8; 32],
+        incarnation: &[u8; 16],
+        digest: &[u8; 32],
+        kind: CellObjectKind,
+    ) -> Path {
+        self.application_path(&format!(
+            "cells/{}/inc/{}/objects/.staging/{}.{}",
+            hex(cell),
+            hex(incarnation),
+            hex(digest),
+            kind.extension()
+        ))
+    }
+
     #[must_use]
     pub fn catalog_head_path(&self, shard: u8) -> Path {
         self.application_path(&format!("catalog/{shard:02x}/head.json"))
@@ -244,6 +267,17 @@ mod tests {
                 .incarnation_object_path(&[0xcd; 32], &[0xef; 16], &[1; 32], CellObjectKind::Root,)
                 .as_ref(),
             "tenant-root/cells/v1/apps/abababababababababababababababab/cells/cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd/inc/efefefefefefefefefefefefefefefef/objects/0101010101010101010101010101010101010101010101010101010101010101.root"
+        );
+        assert_eq!(
+            layout
+                .incarnation_staging_path(
+                    &[0xcd; 32],
+                    &[0xef; 16],
+                    &[7; 32],
+                    CellObjectKind::Bundle,
+                )
+                .as_ref(),
+            "tenant-root/cells/v1/apps/abababababababababababababababab/cells/cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd/inc/efefefefefefefefefefefefefefefef/objects/.staging/0707070707070707070707070707070707070707070707070707070707070707.bundle"
         );
         assert_eq!(
             layout.pin_object_path(&[2; 32]).as_ref(),

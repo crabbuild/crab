@@ -12,7 +12,7 @@ use std::{
 
 use bytes::Bytes;
 use crab_storage::{CellObjectKind, CellStorageLayout};
-use futures_util::TryStreamExt as _;
+use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 
 use crate::{CaptureBatch, CrabError, Host, Limits, Position, Result};
 
@@ -21,7 +21,7 @@ mod directory;
 mod restore;
 mod root;
 
-use directory::{DirectoryEntry, DirectoryTree, ObjectExtent};
+use directory::{DirectoryEntry, DirectorySpan, DirectoryTree, ObjectExtent};
 use root::{
     RootDocument, SegmentDescriptor, decode_root, decode_segment_page, encode_root,
     encode_segment_page,
@@ -34,6 +34,11 @@ const SEGMENTS_PER_PAGE: usize = 96;
 const MAX_SEGMENT_PAGES: usize = 64;
 const COMPACTION_FANOUT: usize = 8;
 const MAX_COMPACTION_INPUTS: usize = 128;
+// These buffers schedule immutable reads; Host I/O permits remain the shared
+// admission boundary across roots, restores, and concurrent Cells.
+const OBJECT_FETCH_CONCURRENCY: usize = 8;
+pub(super) const RESTORE_IN_FLIGHT_WINDOWS: usize = 8;
+pub(super) const RESTORE_WINDOW_BYTES: u32 = 1 << 20;
 
 /// An immutable Cell root identity suitable for publication in control state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +77,7 @@ pub struct RecoveryOverlay {
     bundle: crate::bundle::Bundle,
     final_position: Position,
     final_commit_sequence: u64,
+    _disk_reservation: Option<crate::DiskReservation>,
 }
 
 impl RecoveryOverlay {
@@ -87,7 +93,15 @@ impl RecoveryOverlay {
             bundle,
             final_position,
             final_commit_sequence,
+            _disk_reservation: None,
         }
+    }
+
+    /// Keeps temporary recovery storage admitted until this overlay is dropped.
+    #[must_use]
+    pub fn with_disk_reservation(mut self, reservation: crate::DiskReservation) -> Self {
+        self._disk_reservation = Some(reservation);
+        self
     }
 
     #[must_use]
@@ -198,6 +212,40 @@ pub struct CellPagedDatabase {
     position: Position,
 }
 
+pub(super) struct FetchedSpan {
+    span: DirectorySpan,
+    frames: Bytes,
+}
+
+impl FetchedSpan {
+    pub(super) fn try_for_each_page(
+        self,
+        page_size: u32,
+        mut operation: impl FnMut(u32, Vec<u8>) -> Result<()>,
+    ) -> Result<()> {
+        for entry in self.span.entries {
+            let offset = usize::try_from(entry.offset - self.span.start)
+                .map_err(|_| CrabError::LTXCorrupted)?;
+            let frame_end = offset
+                .checked_add(entry.length as usize)
+                .ok_or(CrabError::LTXCorrupted)?;
+            let frame = self
+                .frames
+                .get(offset..frame_end)
+                .ok_or(CrabError::LTXCorrupted)?;
+            if *blake3::hash(frame).as_bytes() != entry.frame_hash {
+                return Err(CrabError::ChecksumMismatch);
+            }
+            let bytes = crate::paged::decode_frame(frame, page_size, entry.page)?;
+            if crate::ltx::checksum_page(entry.page, &bytes) != entry.checksum {
+                return Err(CrabError::ChecksumMismatch);
+            }
+            operation(entry.page, bytes)?;
+        }
+        Ok(())
+    }
+}
+
 /// Exact immutable Cell root prepared for writable sparse activation.
 ///
 /// Preparation loads authenticated directory checksums, never LTX page bodies.
@@ -244,6 +292,7 @@ impl CellPagedDatabase {
                 database_pages: self.database_pages,
                 extents: &self.extents,
                 host: &self.replica.host,
+                origin: crate::LtxReadOrigin::Cold,
             },
             self.directory_digest,
             self.directory_height,
@@ -262,9 +311,19 @@ impl CellPagedDatabase {
 
     /// Reads one page by verifying every radix node and the selected LTX frame.
     pub async fn read_page(&self, page: u32) -> Result<Vec<u8>> {
+        self.read_page_with_origin(page, crate::LtxReadOrigin::Sparse)
+            .await
+    }
+
+    async fn read_page_with_origin(
+        &self,
+        page: u32,
+        origin: crate::LtxReadOrigin,
+    ) -> Result<Vec<u8>> {
         if page == crate::ltx::lock_pgno(self.page_size) && page <= self.database_pages {
             return Ok(vec![0; self.page_size as usize]);
         }
+        let directory_started = self.replica.host.now_monotonic();
         let entry = directory::lookup(
             directory::Verification {
                 layout: &self.replica.layout,
@@ -274,12 +333,19 @@ impl CellPagedDatabase {
                 database_pages: self.database_pages,
                 extents: &self.extents,
                 host: &self.replica.host,
+                origin,
             },
             self.directory_digest,
             self.directory_height,
             page,
         )
-        .await?;
+        .await;
+        self.replica.host.observe_ltx_phase(
+            crate::LtxPhase::Directory,
+            directory_started,
+            entry.is_ok(),
+        );
+        let entry = entry?;
         let extent = self
             .extents
             .get(&entry.object)
@@ -295,12 +361,20 @@ impl CellPagedDatabase {
             extent.kind,
         );
         let _permit = self.replica.host.io_permit().await?;
+        let fetch_started = self.replica.host.now_monotonic();
         let frame = self
             .replica
             .layout
             .store()
             .range_get(&path, entry.offset..end)
-            .await?;
+            .await;
+        self.replica.host.observe_ltx_phase(
+            crate::LtxPhase::FrameFetch,
+            fetch_started,
+            frame.is_ok(),
+        );
+        let frame = frame?;
+        self.replica.host.observe_ltx_read(origin, frame.len());
         if frame.len() != entry.length as usize
             || *blake3::hash(&frame).as_bytes() != entry.frame_hash
         {
@@ -313,100 +387,117 @@ impl CellPagedDatabase {
         Ok(bytes)
     }
 
-    async fn read_run(&self, first: u32, max_pages: u32) -> Result<Vec<(u32, Vec<u8>)>> {
+    async fn read_run(
+        &self,
+        first: u32,
+        max_pages: u32,
+        origin: crate::LtxReadOrigin,
+    ) -> Result<Vec<(u32, Vec<u8>)>> {
         if max_pages == 0 || first == 0 || first > self.database_pages {
             return Ok(Vec::new());
         }
         let lock = crate::ltx::lock_pgno(self.page_size);
         if first == lock {
-            return Ok(vec![(first, self.read_page(first).await?)]);
+            return Ok(vec![(
+                first,
+                self.read_page_with_origin(first, origin).await?,
+            )]);
         }
         let count = max_pages
-            .min((1 << 20) / self.page_size)
+            .min(RESTORE_WINDOW_BYTES / self.page_size)
             .min(self.database_pages - first + 1);
-        let verification = directory::Verification {
-            layout: &self.replica.layout,
-            cell: &self.replica.cell,
-            incarnation: &self.replica.incarnation,
-            page_size: self.page_size,
-            database_pages: self.database_pages,
-            extents: &self.extents,
-            host: &self.replica.host,
-        };
-        let first_entry = directory::lookup(
-            verification,
+        let span = self
+            .lookup_spans(first, count, origin)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or(CrabError::LTXCorrupted)?;
+        let fetched = self.fetch_span(span, origin).await?;
+        let mut output = Vec::new();
+        fetched.try_for_each_page(self.page_size, |page, bytes| {
+            output.push((page, bytes));
+            Ok(())
+        })?;
+        Ok(output)
+    }
+
+    async fn read_restore_window(&self, first: u32, count: u32) -> Result<Vec<FetchedSpan>> {
+        let spans = self
+            .lookup_spans(first, count, crate::LtxReadOrigin::Cold)
+            .await?;
+        let runs = stream::iter(
+            spans
+                .into_iter()
+                .map(|span| self.fetch_span(span, crate::LtxReadOrigin::Cold)),
+        )
+        .buffered(OBJECT_FETCH_CONCURRENCY)
+        .try_collect()
+        .await?;
+        Ok(runs)
+    }
+
+    async fn lookup_spans(
+        &self,
+        first: u32,
+        count: u32,
+        origin: crate::LtxReadOrigin,
+    ) -> Result<Vec<DirectorySpan>> {
+        let started = self.replica.host.now_monotonic();
+        let result = directory::lookup_spans(
+            directory::Verification {
+                layout: &self.replica.layout,
+                cell: &self.replica.cell,
+                incarnation: &self.replica.incarnation,
+                page_size: self.page_size,
+                database_pages: self.database_pages,
+                extents: &self.extents,
+                host: &self.replica.host,
+                origin,
+            },
             self.directory_digest,
             self.directory_height,
             first,
+            count,
         )
-        .await?;
-        let mut end = first_entry
-            .offset
-            .checked_add(u64::from(first_entry.length))
-            .ok_or(CrabError::LTXCorrupted)?;
-        let mut entries = vec![first_entry];
-        for offset in 1..count {
-            let page = first.checked_add(offset).ok_or(CrabError::LTXCorrupted)?;
-            if page == lock {
-                break;
-            }
-            let entry = directory::lookup(
-                verification,
-                self.directory_digest,
-                self.directory_height,
-                page,
-            )
-            .await?;
-            if entry.object != entries[0].object || entry.offset != end {
-                break;
-            }
-            end = entry
-                .offset
-                .checked_add(u64::from(entry.length))
-                .ok_or(CrabError::LTXCorrupted)?;
-            entries.push(entry);
-        }
+        .await;
+        self.replica
+            .host
+            .observe_ltx_phase(crate::LtxPhase::Directory, started, result.is_ok());
+        result
+    }
+
+    async fn fetch_span(
+        &self,
+        span: DirectorySpan,
+        origin: crate::LtxReadOrigin,
+    ) -> Result<FetchedSpan> {
         let extent = self
             .extents
-            .get(&entries[0].object)
+            .get(&span.object)
             .ok_or(CrabError::LTXCorrupted)?;
         let path = self.replica.layout.incarnation_object_path(
             &self.replica.cell,
             &self.replica.incarnation,
-            &entries[0].object,
+            &span.object,
             extent.kind,
         );
-        let start = entries[0].offset;
         let _permit = self.replica.host.io_permit().await?;
+        let started = self.replica.host.now_monotonic();
         let frames = self
             .replica
             .layout
             .store()
-            .range_get(&path, start..end)
-            .await?;
-        if frames.len() as u64 != end - start {
+            .range_get(&path, span.start..span.end)
+            .await;
+        self.replica
+            .host
+            .observe_ltx_phase(crate::LtxPhase::FrameFetch, started, frames.is_ok());
+        let frames = frames?;
+        self.replica.host.observe_ltx_read(origin, frames.len());
+        if frames.len() as u64 != span.end - span.start {
             return Err(CrabError::ChecksumMismatch);
         }
-        let mut output = Vec::with_capacity(entries.len());
-        for entry in entries {
-            let offset =
-                usize::try_from(entry.offset - start).map_err(|_| CrabError::LTXCorrupted)?;
-            let frame_end = offset
-                .checked_add(entry.length as usize)
-                .ok_or(CrabError::LTXCorrupted)?;
-            let frame = frames
-                .get(offset..frame_end)
-                .ok_or(CrabError::LTXCorrupted)?;
-            if *blake3::hash(frame).as_bytes() != entry.frame_hash {
-                return Err(CrabError::ChecksumMismatch);
-            }
-            let bytes = crate::paged::decode_frame(frame, self.page_size, entry.page)?;
-            if crate::ltx::checksum_page(entry.page, &bytes) != entry.checksum {
-                return Err(CrabError::ChecksumMismatch);
-            }
-            output.push((entry.page, bytes));
-        }
-        Ok(output)
+        Ok(FetchedSpan { span, frames })
     }
 }
 
@@ -438,8 +529,13 @@ impl CellWritableDatabase {
         self.database.page_count()
     }
 
-    pub(crate) async fn read_run(&self, first: u32, max_pages: u32) -> Result<Vec<(u32, Vec<u8>)>> {
-        self.database.read_run(first, max_pages).await
+    pub(crate) async fn read_run(
+        &self,
+        first: u32,
+        max_pages: u32,
+        origin: crate::LtxReadOrigin,
+    ) -> Result<Vec<(u32, Vec<u8>)>> {
+        self.database.read_run(first, max_pages, origin).await
     }
 
     /// Opens a fresh sparse SQLite file pinned to this exact Cell root.
@@ -696,7 +792,7 @@ impl CellReplica {
         schema: u32,
     ) -> Result<PreparedRoot> {
         self.validate_metadata(commit_sequence, schema)?;
-        if bundle.bytes().len() as u64 > self.limits.max_plan_bytes {
+        if bundle.len() > self.limits.max_plan_bytes {
             return Err(CrabError::Limit("Cell bundle bytes"));
         }
         let base_graph = match base {
@@ -706,7 +802,7 @@ impl CellReplica {
         self.validate_append_sequence(&base_graph, commit_sequence)?;
 
         let (repository, epoch) = crate::bundle::cell_identity(&self.cell, &self.incarnation);
-        let bundle_digest = *blake3::hash(bundle.bytes()).as_bytes();
+        let bundle_digest = bundle.digest();
         let mut inputs = Vec::new();
         let mut selected_bytes = 0_u64;
         let mut prospective = base_graph
@@ -730,8 +826,8 @@ impl CellReplica {
                 bundle_digest,
                 row.offset,
             ));
-            let bytes = bundle.segment(index)?;
-            let (file, size, digest, pages) = crate::ltx::inspect_bytes_with_index(bytes)?;
+            let bytes = bundle.read_segment(index)?;
+            let (file, size, digest, pages) = crate::ltx::inspect_bytes_with_index(&bytes)?;
             if size != row.info.size_bytes
                 || digest != row.info.blake3
                 || crate::SegmentInfo::from_inspected(&file, size, digest) != row.info
@@ -761,7 +857,7 @@ impl CellReplica {
             target,
             commit_sequence,
             schema,
-            Some(bundle.shared_bytes()),
+            Some(bundle),
         )
         .await
     }
@@ -780,12 +876,19 @@ impl CellReplica {
         level: u8,
         scratch_directory: &Path,
     ) -> Result<PreparedRoot> {
-        let mut replica = self.clone();
-        replica.host = self.host.for_recovery().await?;
-        let graph = replica.load_graph(base).await?;
-        let scratch_bytes = compaction_scratch_bytes(&graph)?;
-        replica.host = replica.host.for_scratch(scratch_bytes).await?;
-        compaction::prepare(&replica, base, graph, range, level, scratch_directory).await
+        let started = self.host.now_monotonic();
+        let result = async {
+            let mut replica = self.clone();
+            replica.host = self.host.for_recovery().await?;
+            let graph = replica.load_graph(base).await?;
+            let scratch_bytes = compaction_scratch_bytes(&graph)?;
+            replica.host = replica.host.for_scratch(scratch_bytes).await?;
+            compaction::prepare(&replica, base, graph, range, level, scratch_directory).await
+        }
+        .await;
+        self.host
+            .observe_ltx_phase(crate::LtxPhase::Compaction, started, result.is_ok());
+        result
     }
 
     /// Prepares one bounded level promotion, or an emergency full compaction.
@@ -794,6 +897,20 @@ impl CellReplica {
     /// level. A root near its segment or byte ceiling is compacted completely so
     /// the next append cannot strand an otherwise healthy writer at admission.
     pub async fn prepare_scheduled_compaction(
+        &self,
+        base: &RootRef,
+        scratch_directory: &Path,
+    ) -> Result<Option<PreparedRoot>> {
+        let started = self.host.now_monotonic();
+        let result = self
+            .prepare_scheduled_compaction_inner(base, scratch_directory)
+            .await;
+        self.host
+            .observe_ltx_phase(crate::LtxPhase::Compaction, started, result.is_ok());
+        result
+    }
+
+    async fn prepare_scheduled_compaction_inner(
         &self,
         base: &RootRef,
         scratch_directory: &Path,
@@ -842,7 +959,7 @@ impl CellReplica {
         target: Position,
         commit_sequence: u64,
         schema: u32,
-        bundle: Option<Bytes>,
+        bundle: Option<&crate::bundle::Bundle>,
     ) -> Result<PreparedRoot> {
         let prepared = inputs
             .into_iter()
@@ -874,10 +991,8 @@ impl CellReplica {
             .unwrap_or_default();
         descriptors.extend(prepared.iter().map(|segment| segment.descriptor.clone()));
         self.validate_chain(&descriptors, target)?;
-        if let Some(bytes) = bundle {
-            let digest = *blake3::hash(&bytes).as_bytes();
-            self.put_object_bytes(&digest, CellObjectKind::Bundle, bytes)
-                .await?;
+        if let Some(bundle) = bundle {
+            self.put_bundle(bundle).await?;
         }
         let mut directory_inputs = Vec::with_capacity(prepared.len());
         for segment in prepared {
@@ -946,6 +1061,7 @@ impl CellReplica {
                     database_pages: graph.document.database_pages,
                     extents: &base_extents,
                     host: &self.host,
+                    origin: crate::LtxReadOrigin::Cold,
                 },
                 graph.document.directory_digest,
                 graph.document.directory_height,
@@ -960,6 +1076,7 @@ impl CellReplica {
                     database_pages,
                     extents: &extents,
                     host: &self.host,
+                    origin: crate::LtxReadOrigin::Cold,
                 },
                 target.checksum,
             )
@@ -1102,6 +1219,7 @@ impl CellReplica {
             database_pages: graph.document.database_pages,
             extents: &extents,
             host: &self.host,
+            origin: crate::LtxReadOrigin::Cold,
         };
         let directory = directory::reachable_digests(
             verification,
@@ -1188,9 +1306,13 @@ impl CellReplica {
             return Err(CrabError::LTXCorrupted);
         }
         let mut digest = blake3::Hasher::new();
+        let mut read_bytes = 0usize;
         while let Some(chunk) = stream.try_next().await? {
             digest.update(&chunk);
+            read_bytes = read_bytes.saturating_add(chunk.len());
         }
+        self.host
+            .observe_ltx_read(crate::LtxReadOrigin::Cold, read_bytes);
         if digest.finalize().as_bytes() != &object.digest {
             return Err(CrabError::ChecksumMismatch);
         }
@@ -1198,6 +1320,14 @@ impl CellReplica {
     }
 
     async fn load_graph(&self, root: &RootRef) -> Result<LoadedGraph> {
+        let started = self.host.now_monotonic();
+        let result = self.load_graph_inner(root).await;
+        self.host
+            .observe_ltx_phase(crate::LtxPhase::RootOpen, started, result.is_ok());
+        result
+    }
+
+    async fn load_graph_inner(&self, root: &RootRef) -> Result<LoadedGraph> {
         self.check_scope(root)?;
         let bytes = self
             .read_object(&root.digest, CellObjectKind::Root, ROOT_BYTES)
@@ -1217,20 +1347,29 @@ impl CellReplica {
         if document.segment_pages.is_empty() || document.segment_pages.len() > MAX_SEGMENT_PAGES {
             return Err(CrabError::LTXCorrupted);
         }
-        let mut descriptors = Vec::new();
-        for digest in &document.segment_pages {
-            let bytes = self
-                .read_object(digest, CellObjectKind::Root, SEGMENT_PAGE_BYTES)
-                .await?;
-            if *blake3::hash(&bytes).as_bytes() != *digest {
-                return Err(CrabError::ChecksumMismatch);
-            }
-            let page = decode_segment_page(&bytes)?;
-            if page.is_empty() || page.len() > SEGMENTS_PER_PAGE {
-                return Err(CrabError::LTXCorrupted);
-            }
-            descriptors.extend(page);
-        }
+        let pages: Vec<Vec<SegmentDescriptor>> = stream::iter(
+            document
+                .segment_pages
+                .iter()
+                .copied()
+                .map(|digest| async move {
+                    let bytes = self
+                        .read_object(&digest, CellObjectKind::Root, SEGMENT_PAGE_BYTES)
+                        .await?;
+                    if *blake3::hash(&bytes).as_bytes() != digest {
+                        return Err(CrabError::ChecksumMismatch);
+                    }
+                    let page = decode_segment_page(&bytes)?;
+                    if page.is_empty() || page.len() > SEGMENTS_PER_PAGE {
+                        return Err(CrabError::LTXCorrupted);
+                    }
+                    Ok(page)
+                }),
+        )
+        .buffered(OBJECT_FETCH_CONCURRENCY)
+        .try_collect()
+        .await?;
+        let descriptors = pages.into_iter().flatten().collect::<Vec<_>>();
         self.validate_chain(&descriptors, root.position)?;
         for descriptor in &descriptors {
             descriptor.validate_published(self.limits)?;
@@ -1243,6 +1382,7 @@ impl CellReplica {
             return Err(CrabError::LTXCorrupted);
         }
         let extents = object_extents(&descriptors)?;
+        let directory_started = self.host.now_monotonic();
         let aggregate = directory::verify_root(
             directory::Verification {
                 layout: &self.layout,
@@ -1252,11 +1392,18 @@ impl CellReplica {
                 database_pages: document.database_pages,
                 extents: &extents,
                 host: &self.host,
+                origin: crate::LtxReadOrigin::Cold,
             },
             document.directory_digest,
             document.directory_height,
         )
-        .await?;
+        .await;
+        self.host.observe_ltx_phase(
+            crate::LtxPhase::Directory,
+            directory_started,
+            aggregate.is_ok(),
+        );
+        let aggregate = aggregate?;
         if aggregate.checksum != document.checksum {
             return Err(CrabError::ChecksumMismatch);
         }
@@ -1343,6 +1490,55 @@ impl CellReplica {
         Ok(())
     }
 
+    async fn put_bundle(&self, bundle: &crate::bundle::Bundle) -> Result<()> {
+        let digest = bundle.digest();
+        if bundle.len() > self.limits.max_plan_bytes {
+            return Err(CrabError::Limit("Cell bundle bytes"));
+        }
+        let path = self.layout.incarnation_object_path(
+            &self.cell,
+            &self.incarnation,
+            &digest,
+            CellObjectKind::Bundle,
+        );
+        let staged = self.layout.incarnation_staging_path(
+            &self.cell,
+            &self.incarnation,
+            &digest,
+            CellObjectKind::Bundle,
+        );
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let _permit = self.host.io_permit().await?;
+        let upload = self
+            .layout
+            .store()
+            .put_multipart_source_retry(
+                &staged,
+                bundle.upload_source(),
+                bundle.len(),
+                digest,
+                MULTIPART_BYTES,
+                &cancel,
+                None,
+            )
+            .await;
+        if let Err(error) = upload {
+            return match cleanup_staged(self.layout.store(), &staged).await {
+                Ok(()) => Err(error.into()),
+                Err(cleanup_error) => Err(cleanup_error),
+            };
+        }
+        let promotion = self
+            .layout
+            .store()
+            .promote_staged_content_addressed_object(&staged, &path, digest, bundle.len())
+            .await;
+        match cleanup_staged(self.layout.store(), &staged).await {
+            Err(error) => Err(error),
+            Ok(()) => promotion.map(|_| ()).map_err(Into::into),
+        }
+    }
+
     async fn read_object(
         &self,
         digest: &[u8; 32],
@@ -1358,6 +1554,8 @@ impl CellReplica {
             .store()
             .get_with_etag_bounded(&path, max_bytes)
             .await?;
+        self.host
+            .observe_ltx_read(crate::LtxReadOrigin::Cold, bytes.len());
         Ok(bytes.to_vec())
     }
 }
@@ -1445,6 +1643,17 @@ struct DirectoryInput {
 }
 
 const STREAM_COPY_BYTES: usize = 1 << 20;
+const MULTIPART_BYTES: usize = 8 << 20;
+
+async fn cleanup_staged(
+    store: &crab_storage::Store,
+    path: &object_store::path::Path,
+) -> Result<()> {
+    match store.delete(path).await {
+        Ok(()) | Err(crab_storage::StorageError::NotFound { .. }) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
 
 struct ScratchFile {
     filesystem: Arc<dyn crate::environment::FileSystem>,

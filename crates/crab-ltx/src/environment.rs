@@ -7,7 +7,7 @@ use std::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(feature = "replica")]
@@ -59,6 +59,50 @@ pub trait HostResourceAdmission: Send + Sync {
 /// Opaque lifetime token returned by [`HostResourceAdmission::reserve`].
 #[cfg(feature = "replica")]
 pub trait HostResourcePermit: Send + Sync {}
+
+/// Finite replica phases exposed to an embedding runtime.
+#[cfg(feature = "replica")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LtxPhase {
+    Capture,
+    Preparation,
+    SchemaCheck,
+    WalExistence,
+    PositionResolution,
+    WalRead,
+    PageCollection,
+    Verification,
+    Encode,
+    LocalWrite,
+    Fsync,
+    ParentSync,
+    Checkpoint,
+    RootOpen,
+    Directory,
+    FrameFetch,
+    RestoreWrite,
+    Compaction,
+}
+
+/// Finite origin-read classes exposed to an embedding runtime.
+#[cfg(feature = "replica")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LtxReadOrigin {
+    Cold,
+    Sparse,
+    Hydrating,
+    Resident,
+}
+
+/// Non-blocking, bounded-cardinality observations emitted by replica work.
+#[cfg(feature = "replica")]
+pub trait LtxTelemetry: Send + Sync {
+    /// Records one completed phase and whether it succeeded.
+    fn phase(&self, _phase: LtxPhase, _elapsed: Duration, _succeeded: bool) {}
+
+    /// Records provider requests and returned bytes for one read class.
+    fn origin_read(&self, _origin: LtxReadOrigin, _requests: u64, _bytes: u64) {}
+}
 
 type DiskAdmissions = Vec<Arc<dyn DiskBudgetAdmission>>;
 
@@ -837,6 +881,14 @@ impl ScratchMonitor for UnlimitedScratch {
 pub trait Clock: Send + Sync {
     fn unix_millis(&self) -> i64;
     fn file_age(&self, path: &Path) -> io::Result<Duration>;
+
+    /// Returns a monotonic instant for observational duration measurements.
+    ///
+    /// Implementors that only provide wall-clock behavior can keep this
+    /// default; tests may override it with a deterministic clock.
+    fn monotonic(&self) -> Instant {
+        Instant::now()
+    }
 }
 
 /// Blocking dispatch boundary; success means the job was accepted for execution.
@@ -899,6 +951,8 @@ pub struct Host {
     directory_cache: Option<Arc<DirectoryCache>>,
     #[cfg(feature = "replica")]
     resource_admission: Option<Arc<dyn HostResourceAdmission>>,
+    #[cfg(feature = "replica")]
+    telemetry: Option<Arc<dyn LtxTelemetry>>,
     #[cfg(feature = "replica")]
     recovery: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     #[cfg(feature = "replica")]
@@ -1001,6 +1055,32 @@ impl Host {
         self.resource_admission = Some(admission);
     }
 
+    /// Sends finite replica observations to one embedding runtime.
+    #[cfg(feature = "replica")]
+    #[must_use]
+    pub fn with_ltx_telemetry(mut self, telemetry: Arc<dyn LtxTelemetry>) -> Self {
+        self.telemetry = Some(telemetry);
+        self
+    }
+
+    #[cfg(feature = "replica")]
+    pub(crate) fn observe_ltx_phase(&self, phase: LtxPhase, started: Instant, succeeded: bool) {
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.phase(
+                phase,
+                self.now_monotonic().saturating_duration_since(started),
+                succeeded,
+            );
+        }
+    }
+
+    #[cfg(feature = "replica")]
+    pub(crate) fn observe_ltx_read(&self, origin: LtxReadOrigin, bytes: usize) {
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.origin_read(origin, 1, bytes as u64);
+        }
+    }
+
     /// Returns the currently configured object-store I/O capacity.
     #[cfg(feature = "replica")]
     #[must_use]
@@ -1048,6 +1128,12 @@ impl Host {
         self.local_disk.used()
     }
 
+    /// Returns the shared local-disk budget used by replica artifacts.
+    #[must_use]
+    pub fn local_disk_budget(&self) -> DiskBudget {
+        self.local_disk.clone()
+    }
+
     /// Returns verified directory-cache usage when the cache is enabled.
     #[cfg(feature = "replica")]
     #[must_use]
@@ -1057,6 +1143,10 @@ impl Host {
 
     pub(crate) fn reserve_local_disk(&self, bytes: u64) -> crate::Result<DiskReservation> {
         self.local_disk.try_reserve(bytes)
+    }
+
+    pub(crate) fn now_monotonic(&self) -> Instant {
+        self.clock.monotonic()
     }
 
     pub(crate) fn read(&self, path: &Path, limit: u64) -> io::Result<Vec<u8>> {
@@ -1422,6 +1512,8 @@ impl Default for Host {
             directory_cache: None,
             #[cfg(feature = "replica")]
             resource_admission: None,
+            #[cfg(feature = "replica")]
+            telemetry: None,
             #[cfg(feature = "replica")]
             recovery: None,
             #[cfg(feature = "replica")]

@@ -7,8 +7,8 @@ use std::sync::{
 
 use bytes::Bytes;
 use crab_ltx::{
-    CaptureBatch, CellReplica, DiskBudget, Host, Limits, ManagedDb, RecoveryOverlay, RootRef,
-    VerifiedLocalPlan,
+    CaptureBatch, CaptureTiming, CellReplica, DiskBudget, Host, Limits, ManagedDb, RecoveryOverlay,
+    RootRef, VerifiedLocalPlan,
     bundle::{Bundle, BundleEntry},
     restore_exact,
 };
@@ -612,7 +612,7 @@ async fn sparse_hydration_coalesces_contiguous_cell_frames() {
         let mut writer = writable.open_writable(&destination).unwrap();
         let before = writer.hydration().unwrap().unwrap();
         let requests = range_reads.load(Ordering::SeqCst);
-        let after = writer.hydrate_step(64).unwrap();
+        let after = writer.hydrate_step(320).unwrap();
         let reads = range_reads.load(Ordering::SeqCst) - requests;
         writer.close().unwrap();
         (before, after, reads)
@@ -620,7 +620,7 @@ async fn sparse_hydration_coalesces_contiguous_cell_frames() {
     .await
     .unwrap();
     let hydrated = after.resolved - before.resolved;
-    assert!(hydrated >= 32);
+    assert!(hydrated >= 256);
     assert!(reads < u64::from(hydrated));
 }
 
@@ -798,6 +798,7 @@ async fn initial_streaming_directory_merges_truncation_and_regrowth() {
     let batch = CaptureBatch {
         segments,
         position: regrown.position,
+        timing: CaptureTiming::default(),
     };
     let segment_count = batch.segments.len();
 
@@ -870,6 +871,9 @@ async fn prepare_does_not_write_mutable_keys() {
         Limits::default(),
     )
     .unwrap();
+    let bundle_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(bundle_file.path(), bundle.read_all().unwrap()).unwrap();
+    let bundle = Bundle::decode_file(bundle_file.path(), Limits::default()).unwrap();
     let store = Store::new(Arc::new(InMemory::new()));
     let replica = replica(store.clone(), cell, incarnation);
     let bundled = replica.prepare_bundle(None, &bundle, 2, 5).await.unwrap();
@@ -917,6 +921,12 @@ async fn prepare_does_not_write_mutable_keys() {
                 .iter()
                 .all(|object| object.location.as_ref().contains("/objects/")),
         "root preparation must write only immutable dependency objects"
+    );
+    assert!(
+        written
+            .iter()
+            .all(|object| !object.location.as_ref().contains("/.staging/")),
+        "bundle staging objects must not remain after preparation"
     );
     let destination = tempfile::TempDir::new().unwrap();
     let path = destination.path().join("restored.sqlite");

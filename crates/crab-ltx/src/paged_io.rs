@@ -14,6 +14,7 @@ const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
 
 thread_local! {
     static DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+    static ORIGIN: Cell<crate::LtxReadOrigin> = const { Cell::new(crate::LtxReadOrigin::Sparse) };
 }
 
 struct DeadlineGuard(Option<Instant>);
@@ -21,6 +22,14 @@ struct DeadlineGuard(Option<Instant>);
 impl Drop for DeadlineGuard {
     fn drop(&mut self) {
         DEADLINE.set(self.0);
+    }
+}
+
+struct OriginGuard(crate::LtxReadOrigin);
+
+impl Drop for OriginGuard {
+    fn drop(&mut self) {
+        ORIGIN.set(self.0);
     }
 }
 
@@ -35,6 +44,15 @@ pub fn with_paged_io_deadline<T>(deadline: Instant, operation: impl FnOnce() -> 
         previous.map_or(deadline, |current| current.min(deadline)),
     ));
     let _guard = DeadlineGuard(previous);
+    operation()
+}
+
+pub(crate) fn with_paged_io_origin<T>(
+    origin: crate::LtxReadOrigin,
+    operation: impl FnOnce() -> T,
+) -> T {
+    let previous = ORIGIN.replace(origin);
+    let _guard = OriginGuard(previous);
     operation()
 }
 
@@ -86,9 +104,14 @@ impl Database {
         }
     }
 
-    async fn read_run(&self, first: u32, max_pages: u32) -> Result<Pages> {
+    async fn read_run(
+        &self,
+        first: u32,
+        max_pages: u32,
+        origin: crate::LtxReadOrigin,
+    ) -> Result<Pages> {
         match self {
-            Self::Cell(database) => database.read_run(first, max_pages).await,
+            Self::Cell(database) => database.read_run(first, max_pages, origin).await,
         }
     }
 }
@@ -97,6 +120,7 @@ struct Request {
     database: Database,
     view: u64,
     page: u32,
+    origin: crate::LtxReadOrigin,
     deadline: Instant,
     reply: mpsc::SyncSender<Result<Vec<u8>>>,
 }
@@ -194,9 +218,12 @@ impl Driver {
 
 async fn fetch(request: &Request, cache: &Mutex<Cache>) -> Result<Vec<u8>> {
     let deadline = tokio::time::Instant::from_std(request.deadline);
-    let pages = tokio::time::timeout_at(deadline, request.database.read_run(request.page, 64))
-        .await
-        .map_err(|_| CrabError::Deadline)??;
+    let pages = tokio::time::timeout_at(
+        deadline,
+        request.database.read_run(request.page, 64, request.origin),
+    )
+    .await
+    .map_err(|_| CrabError::Deadline)??;
     let mut cache = cache
         .lock()
         .map_err(|_| CrabError::InvalidState("paged cache poisoned"))?;
@@ -270,6 +297,7 @@ impl Io {
             database: self.database.clone(),
             view: self.view,
             page,
+            origin: ORIGIN.get(),
             deadline,
             reply,
         };
@@ -320,6 +348,15 @@ mod tests {
             assert_eq!(deadline(), outer);
         });
         assert!(deadline() >= Instant::now() + Duration::from_secs(29));
+    }
+
+    #[test]
+    fn scoped_origin_restores_sparse_default() {
+        assert_eq!(ORIGIN.get(), crate::LtxReadOrigin::Sparse);
+        with_paged_io_origin(crate::LtxReadOrigin::Hydrating, || {
+            assert_eq!(ORIGIN.get(), crate::LtxReadOrigin::Hydrating);
+        });
+        assert_eq!(ORIGIN.get(), crate::LtxReadOrigin::Sparse);
     }
 
     #[test]

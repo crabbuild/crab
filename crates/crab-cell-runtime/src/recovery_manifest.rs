@@ -23,12 +23,39 @@ pub struct PinnedRecoveryCell {
 pub struct RecoveryManifestStore {
     layout: CellStorageLayout,
     limits: crab_ltx::Limits,
+    recovery_disk: crab_ltx::DiskBudget,
+    recovery_scratch: Option<std::path::PathBuf>,
 }
 
 impl RecoveryManifestStore {
     #[must_use]
     pub fn new(layout: CellStorageLayout, limits: crab_ltx::Limits) -> Self {
-        Self { layout, limits }
+        let recovery_disk = crab_ltx::DiskBudget::new(limits.max_plan_bytes);
+        Self {
+            layout,
+            limits,
+            recovery_disk,
+            recovery_scratch: None,
+        }
+    }
+
+    /// Shares byte admission with node-wide follower-tail recovery work.
+    #[must_use]
+    pub fn with_recovery_disk(mut self, recovery_disk: crab_ltx::DiskBudget) -> Self {
+        self.recovery_disk = recovery_disk;
+        self
+    }
+
+    /// Places streamed recovery bundles on the runtime-owned session volume.
+    ///
+    /// The directory must already exist, be private to this runtime session,
+    /// and remain on the same local volume accounted by its disk budget.
+    /// Library callers that do not provide one use the operating-system
+    /// temporary directory.
+    #[must_use]
+    pub fn with_recovery_scratch(mut self, directory: std::path::PathBuf) -> Self {
+        self.recovery_scratch = Some(directory);
+        self
     }
 
     /// Publishes every verified bundle before one content-addressed manifest.
@@ -46,14 +73,14 @@ impl RecoveryManifestStore {
         }
         let mut rows = Vec::with_capacity(tails.len());
         for tail in &tails {
-            let bundle = tail.overlay.bundle().bytes();
-            let bundle_digest = *blake3::hash(bundle).as_bytes();
+            let bundle = tail.overlay.bundle().read_all()?;
+            let bundle_digest = tail.overlay.bundle().digest();
             let path = self.layout.node_log_bundle_path(
                 leader_session.as_bytes(),
                 log_epoch,
                 &bundle_digest,
             );
-            publish_immutable(&self.layout, &path, bundle, self.limits.max_plan_bytes).await?;
+            publish_immutable(&self.layout, &path, &bundle, self.limits.max_plan_bytes).await?;
             let predecessor = tail.overlay.predecessor();
             rows.push(ManifestCell {
                 application: tail.application,
@@ -184,21 +211,46 @@ impl RecoveryManifestStore {
             recovery.log_epoch,
             &row.bundle_digest,
         );
-        let (bundle_bytes, _) = self
-            .layout
-            .store()
-            .get_with_etag_bounded(&bundle_path, self.limits.max_plan_bytes)
-            .await?;
-        if *blake3::hash(&bundle_bytes).as_bytes() != row.bundle_digest {
-            return Err(Error::Node("recovery bundle digest differs"));
+        let metadata = self.layout.store().head(&bundle_path).await?;
+        if metadata.size > self.limits.max_plan_bytes {
+            return Err(Error::Node("recovery bundle exceeds limit"));
         }
-        let bundle = crab_ltx::bundle::Bundle::decode(bundle_bytes.to_vec(), self.limits)?;
+        let disk_reservation = self.recovery_disk.try_reserve(metadata.size)?;
+        let temporary = match &self.recovery_scratch {
+            Some(directory) => tempfile::Builder::new()
+                .prefix(".crab-recovery-")
+                .tempfile_in(directory)?,
+            None => tempfile::NamedTempFile::new()?,
+        };
+        let temporary = temporary.into_temp_path();
+        self.layout
+            .store()
+            .download_to_path_bounded(&bundle_path, temporary.as_ref(), self.limits.max_plan_bytes)
+            .await?;
+        let limits = self.limits;
+        let decoded = tokio::task::spawn_blocking(move || {
+            crab_ltx::bundle::Bundle::decode_temp_file_with_digest(
+                temporary,
+                row.bundle_digest,
+                limits,
+            )
+        })
+        .await
+        .map_err(crab_ltx::CrabError::from)?;
+        let bundle = match decoded {
+            Ok(bundle) => bundle,
+            Err(crab_ltx::CrabError::ChecksumMismatch) => {
+                return Err(Error::Node("recovery bundle digest differs"));
+            }
+            Err(error) => return Err(error.into()),
+        };
         Ok(crab_ltx::RecoveryOverlay::new(
             row.predecessor,
             bundle,
             row.final_position,
             row.final_commit_sequence,
-        ))
+        )
+        .with_disk_reservation(disk_reservation))
     }
 }
 
@@ -576,6 +628,52 @@ mod tests {
         assert_eq!(published.state, crate::ControlState::Recovering);
         assert!(published.recovery.is_none());
         assert_eq!(published.root.unwrap().txid, fixture.final_position.txid);
+    }
+
+    #[tokio::test]
+    async fn loaded_overlay_holds_bundle_disk_reservation_until_drop() {
+        let fixture = recovery_fixture().await;
+        let scratch = tempfile::TempDir::new().unwrap();
+        let recovery = &fixture.pinned.recovery;
+        let manifest_path = fixture.layout.node_log_recovery_path(
+            recovery.leader_session.as_bytes(),
+            recovery.log_epoch,
+            recovery.manifest_digest.as_bytes(),
+        );
+        let (body, _) = fixture
+            .layout
+            .store()
+            .get_with_etag_bounded(&manifest_path, MAX_MANIFEST_BYTES)
+            .await
+            .unwrap();
+        let manifest = RecoveryManifest::decode(&body).unwrap();
+        let bundle_path = fixture.layout.node_log_bundle_path(
+            recovery.leader_session.as_bytes(),
+            recovery.log_epoch,
+            &manifest.cells[0].bundle_digest,
+        );
+        let size = fixture
+            .layout
+            .store()
+            .head(&bundle_path)
+            .await
+            .unwrap()
+            .size;
+        let budget = crab_ltx::DiskBudget::new(size);
+        let manifests =
+            RecoveryManifestStore::new(fixture.layout.clone(), crab_ltx::Limits::default())
+                .with_recovery_disk(budget.clone())
+                .with_recovery_scratch(scratch.path().to_owned());
+        let overlay = manifests
+            .load_overlay(fixture.pinned.cell, fixture.pinned.incarnation, recovery)
+            .await
+            .unwrap();
+        assert_eq!(overlay.bundle().len(), size);
+        assert_eq!(budget.used(), size);
+        assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 1);
+        drop(overlay);
+        assert_eq!(budget.used(), 0);
+        assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]

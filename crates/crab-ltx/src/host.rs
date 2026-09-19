@@ -3,7 +3,7 @@
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub(crate) struct LtxHost {
     pub facilities: crate::Host,
@@ -143,6 +143,9 @@ impl LtxHost {
     }
     pub fn now_unix_millis(&self) -> i64 {
         self.facilities.clock.unix_millis()
+    }
+    pub fn now_monotonic(&self) -> Instant {
+        self.facilities.clock.monotonic()
     }
     pub fn file_age(&self, path: &Path) -> io::Result<Duration> {
         self.facilities.clock.file_age(path)

@@ -96,6 +96,13 @@ pub(super) struct DirectoryEntry {
     pub checksum: u64,
 }
 
+pub(super) struct DirectorySpan {
+    pub object: [u8; 32],
+    pub start: u64,
+    pub end: u64,
+    pub entries: Vec<DirectoryEntry>,
+}
+
 pub(super) struct DirectoryObject {
     pub digest: [u8; 32],
     pub bytes: Vec<u8>,
@@ -308,6 +315,7 @@ pub(super) struct Verification<'a> {
     pub database_pages: u32,
     pub extents: &'a BTreeMap<[u8; 32], ObjectExtent>,
     pub host: &'a Host,
+    pub origin: crate::LtxReadOrigin,
 }
 
 #[derive(Clone)]
@@ -489,6 +497,122 @@ pub(super) async fn lookup(
         expected = Some(child.aggregate);
         height = height.checked_sub(1).ok_or(CrabError::LTXCorrupted)?;
     }
+}
+
+/// Returns one contiguous, authenticated directory run without re-walking the
+/// radix path for every page in the window.
+pub(super) async fn lookup_run(
+    verification: Verification<'_>,
+    root: [u8; 32],
+    height: u32,
+    first: u32,
+    max_pages: u32,
+) -> Result<Vec<DirectoryEntry>> {
+    if max_pages == 0 || first == 0 || first > verification.database_pages {
+        return Ok(Vec::new());
+    }
+    let lock = crate::ltx::lock_pgno(verification.page_size);
+    let requested_last = first
+        .checked_add(max_pages - 1)
+        .ok_or(CrabError::LTXCorrupted)?
+        .min(verification.database_pages);
+    let last = if (first..=requested_last).contains(&lock) {
+        lock.checked_sub(1).ok_or(CrabError::LTXCorrupted)?
+    } else {
+        requested_last
+    };
+    if last < first {
+        return Ok(Vec::new());
+    }
+
+    let mut pending = vec![(root, height, None)];
+    let mut entries = Vec::new();
+    while let Some((digest, remaining, expected)) = pending.pop() {
+        let bytes = read_node(&verification, digest).await?;
+        let header = Header::parse(&bytes)?;
+        if (remaining == 0) != (header.kind == 0) {
+            return Err(CrabError::LTXCorrupted);
+        }
+        if header.kind == 0 {
+            let (aggregate, leaf_entries) = verify_leaf(
+                &bytes,
+                &header,
+                verification.page_size,
+                verification.database_pages,
+                verification.extents,
+            )?;
+            if expected.is_some_and(|value| value != aggregate) {
+                return Err(CrabError::ChecksumMismatch);
+            }
+            entries.extend(
+                leaf_entries
+                    .into_iter()
+                    .filter(|entry| (first..=last).contains(&entry.page)),
+            );
+            continue;
+        }
+
+        let (aggregate, children) = verify_branch(&bytes, &header)?;
+        if expected.is_some_and(|value| value != aggregate) {
+            return Err(CrabError::ChecksumMismatch);
+        }
+        let next = remaining.checked_sub(1).ok_or(CrabError::LTXCorrupted)?;
+        pending.extend(
+            children
+                .into_iter()
+                .rev()
+                .filter(|child| child.aggregate.last >= first && child.aggregate.first <= last)
+                .map(|child| (child.digest, next, Some(child.aggregate))),
+        );
+    }
+
+    let expected_entries =
+        usize::try_from(last - first + 1).map_err(|_| CrabError::LTXCorrupted)?;
+    if entries.len() != expected_entries {
+        return Err(CrabError::LTXCorrupted);
+    }
+    for (index, entry) in entries.iter().enumerate() {
+        let expected_page = first
+            .checked_add(u32::try_from(index).map_err(|_| CrabError::LTXCorrupted)?)
+            .ok_or(CrabError::LTXCorrupted)?;
+        if entry.page != expected_page {
+            return Err(CrabError::LTXCorrupted);
+        }
+    }
+    Ok(entries)
+}
+
+/// Returns every authenticated same-object span in one fixed page window.
+pub(super) async fn lookup_spans(
+    verification: Verification<'_>,
+    root: [u8; 32],
+    height: u32,
+    first: u32,
+    max_pages: u32,
+) -> Result<Vec<DirectorySpan>> {
+    let entries = lookup_run(verification, root, height, first, max_pages).await?;
+    let mut spans: Vec<DirectorySpan> = Vec::new();
+    for entry in entries {
+        let end = entry
+            .offset
+            .checked_add(u64::from(entry.length))
+            .ok_or(CrabError::LTXCorrupted)?;
+        if let Some(span) = spans.last_mut()
+            && span.object == entry.object
+            && span.end == entry.offset
+        {
+            span.end = end;
+            span.entries.push(entry);
+            continue;
+        }
+        spans.push(DirectorySpan {
+            object: entry.object,
+            start: entry.offset,
+            end,
+            entries: vec![entry],
+        });
+    }
+    Ok(spans)
 }
 
 pub(super) async fn load_checksums(
@@ -706,6 +830,9 @@ async fn read_node(verification: &Verification<'_>, digest: [u8; 32]) -> Result<
         .store()
         .get_with_etag_bounded(&path, MAX_NODE_BYTES)
         .await?;
+    verification
+        .host
+        .observe_ltx_read(verification.origin, bytes.len());
     if *blake3::hash(&bytes).as_bytes() != digest {
         return Err(CrabError::ChecksumMismatch);
     }
@@ -736,6 +863,9 @@ async fn read_node_uncached(
         .store()
         .get_with_etag_bounded(&path, MAX_NODE_BYTES)
         .await?;
+    verification
+        .host
+        .observe_ltx_read(verification.origin, bytes.len());
     if *blake3::hash(&bytes).as_bytes() != digest {
         return Err(CrabError::ChecksumMismatch);
     }
@@ -1121,6 +1251,7 @@ mod tests {
                 database_pages: base_pages,
                 extents: &base_extents,
                 host: &replica.host,
+                origin: crate::LtxReadOrigin::Cold,
             },
             base_tree.root_digest(),
             base_tree.height(),
@@ -1135,6 +1266,7 @@ mod tests {
                 database_pages: final_pages,
                 extents: &final_extents,
                 host: &replica.host,
+                origin: crate::LtxReadOrigin::Cold,
             },
             final_tree.checksum(),
         )

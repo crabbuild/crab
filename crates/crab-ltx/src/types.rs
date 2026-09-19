@@ -124,6 +124,128 @@ impl LocalSegment {
 pub struct CaptureBatch {
     pub segments: Vec<LocalSegment>,
     pub position: Position,
+    pub timing: CaptureTiming,
+}
+
+/// Bounded, in-memory observations for one capture operation.
+///
+/// The ledger is not persisted and never participates in capture, checkpoint,
+/// or fencing decisions. Durations are nanoseconds from the host's monotonic
+/// clock; byte fields describe the logical work observed by the capture.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CaptureTiming {
+    /// Total elapsed time for the capture phase represented by this batch.
+    pub total_nanos: u64,
+    /// Time spent preparing the managed capture before WAL synchronization.
+    pub preparation_nanos: u64,
+    /// Time spent validating the managed control-table schema.
+    pub schema_check_nanos: u64,
+    /// Time spent confirming that the WAL contains a readable frame.
+    pub wal_existence_nanos: u64,
+    /// Time spent resolving the current checksum-linked WAL position.
+    pub position_resolution_nanos: u64,
+    /// Time spent reading and parsing the WAL image.
+    pub wal_read_nanos: u64,
+    /// Time spent collecting the committed page map from the WAL image.
+    pub page_collection_nanos: u64,
+    /// Time spent validating WAL or produced LTX data.
+    pub verification_nanos: u64,
+    /// Time spent encoding LTX bytes and page records.
+    pub encode_nanos: u64,
+    /// Time spent writing LTX and temporary index bytes locally.
+    pub local_write_nanos: u64,
+    /// Time spent syncing completed LTX file contents.
+    pub fsync_nanos: u64,
+    /// Time spent publishing the LTX name and syncing its parent directory.
+    pub parent_sync_nanos: u64,
+    /// Time spent in checkpoint maintenance associated with the capture.
+    pub checkpoint_nanos: u64,
+    /// Logical WAL bytes consumed by the capture.
+    pub wal_bytes: u64,
+    /// Database bytes represented by the captured commit.
+    pub database_bytes: u64,
+    /// LTX bytes inspected for the returned segments.
+    pub ltx_bytes: u64,
+    /// Number of segments inspected for the returned batch.
+    pub segment_count: u32,
+    /// Number of sparse WAL image reads selected.
+    pub wal_sparse_reads: u32,
+    /// Number of complete WAL image reads selected.
+    pub wal_full_reads: u32,
+    /// Number of sparse WAL reads that required a complete-image retry.
+    pub wal_fallback_reads: u32,
+    /// Peak allocated bytes in one WAL image used by this capture.
+    pub wal_image_bytes: u64,
+    /// Number of SQLite checkpoint pragmas executed.
+    pub checkpoint_runs: u32,
+    /// Number of checkpoint pragmas that reported a busy reader or writer.
+    pub checkpoint_busy: u32,
+    /// Number of checkpoint pragmas that failed with SQLITE_BUSY or SQLITE_LOCKED.
+    pub checkpoint_busy_errors: u32,
+    /// WAL frames reported by completed checkpoint pragmas.
+    pub checkpoint_frames: u64,
+    /// WAL frames backfilled by completed checkpoint pragmas.
+    pub checkpoint_backfilled: u64,
+    /// Number of checkpoints that restarted the WAL lineage.
+    pub checkpoint_restarts: u32,
+}
+
+impl CaptureTiming {
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.total_nanos = self.total_nanos.saturating_add(other.total_nanos);
+        self.preparation_nanos = self
+            .preparation_nanos
+            .saturating_add(other.preparation_nanos);
+        self.schema_check_nanos = self
+            .schema_check_nanos
+            .saturating_add(other.schema_check_nanos);
+        self.wal_existence_nanos = self
+            .wal_existence_nanos
+            .saturating_add(other.wal_existence_nanos);
+        self.position_resolution_nanos = self
+            .position_resolution_nanos
+            .saturating_add(other.position_resolution_nanos);
+        self.wal_read_nanos = self.wal_read_nanos.saturating_add(other.wal_read_nanos);
+        self.page_collection_nanos = self
+            .page_collection_nanos
+            .saturating_add(other.page_collection_nanos);
+        self.verification_nanos = self
+            .verification_nanos
+            .saturating_add(other.verification_nanos);
+        self.encode_nanos = self.encode_nanos.saturating_add(other.encode_nanos);
+        self.local_write_nanos = self
+            .local_write_nanos
+            .saturating_add(other.local_write_nanos);
+        self.fsync_nanos = self.fsync_nanos.saturating_add(other.fsync_nanos);
+        self.parent_sync_nanos = self
+            .parent_sync_nanos
+            .saturating_add(other.parent_sync_nanos);
+        self.checkpoint_nanos = self.checkpoint_nanos.saturating_add(other.checkpoint_nanos);
+        self.wal_bytes = self.wal_bytes.saturating_add(other.wal_bytes);
+        self.database_bytes = self.database_bytes.saturating_add(other.database_bytes);
+        self.ltx_bytes = self.ltx_bytes.saturating_add(other.ltx_bytes);
+        self.segment_count = self.segment_count.saturating_add(other.segment_count);
+        self.wal_sparse_reads = self.wal_sparse_reads.saturating_add(other.wal_sparse_reads);
+        self.wal_full_reads = self.wal_full_reads.saturating_add(other.wal_full_reads);
+        self.wal_fallback_reads = self
+            .wal_fallback_reads
+            .saturating_add(other.wal_fallback_reads);
+        self.wal_image_bytes = self.wal_image_bytes.max(other.wal_image_bytes);
+        self.checkpoint_runs = self.checkpoint_runs.saturating_add(other.checkpoint_runs);
+        self.checkpoint_busy = self.checkpoint_busy.saturating_add(other.checkpoint_busy);
+        self.checkpoint_busy_errors = self
+            .checkpoint_busy_errors
+            .saturating_add(other.checkpoint_busy_errors);
+        self.checkpoint_frames = self
+            .checkpoint_frames
+            .saturating_add(other.checkpoint_frames);
+        self.checkpoint_backfilled = self
+            .checkpoint_backfilled
+            .saturating_add(other.checkpoint_backfilled);
+        self.checkpoint_restarts = self
+            .checkpoint_restarts
+            .saturating_add(other.checkpoint_restarts);
+    }
 }
 
 // Derived from Celld's position types; private to the imported codec/engine.

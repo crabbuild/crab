@@ -171,6 +171,10 @@ impl RepositoryCellRouter {
         Arc::clone(&self.registry)
     }
 
+    pub(crate) fn recovery_scratch_directory(&self) -> PathBuf {
+        self.session_dir.clone()
+    }
+
     pub(crate) fn effect_peer_client(&self) -> EffectPeerClient {
         EffectPeerClient::new(
             Arc::clone(&self.peer.signer),
@@ -581,6 +585,12 @@ impl RepositoryCellRouter {
         )
         .map_err(crab_cell_runtime::Error::from)?;
         let destination = self.activation_path(&target).await?;
+        let recovery_scratch = destination
+            .parent()
+            .ok_or(crate::Error::Config(
+                "Cell activation destination has no parent",
+            ))?
+            .to_owned();
         let handle = match observed.value().state {
             ControlState::Idle => {
                 self.runtime
@@ -606,7 +616,9 @@ impl RepositoryCellRouter {
                             crab_cell_runtime::RecoveryManifestStore::new(
                                 self.layout.clone(),
                                 repository_replica_limits(),
-                            ),
+                            )
+                            .with_recovery_disk(self.runtime.local_disk_budget())
+                            .with_recovery_scratch(recovery_scratch.clone()),
                             destination,
                             self.peer.owner.clone(),
                         )
@@ -621,7 +633,9 @@ impl RepositoryCellRouter {
                             crab_cell_runtime::RecoveryManifestStore::new(
                                 self.layout.clone(),
                                 repository_replica_limits(),
-                            ),
+                            )
+                            .with_recovery_disk(self.runtime.local_disk_budget())
+                            .with_recovery_scratch(recovery_scratch),
                             destination,
                         )
                         .await?

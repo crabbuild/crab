@@ -161,6 +161,37 @@ shared authenticated mechanics remain private to Cell roots.
 | Existing rendezvous | [`preferred_scanner`](../src/scheduler.rs) elects a catalog scheduler scanner. It does not rank or move Cell owners. |
 | Transition safety | [`Control`](../src/control.rs) validates named single-record transitions; [`coordination.rs`](../src/coordination.rs) allocates and retires typed per-effect intents/IDs, while the actor fences completions by activation generation and effect family, drains the kernel-owned pending-effect set before fenced deactivation, and keeps effect timing coupled to the production publisher. Background hydration, renewal, persisted-work inventory refresh, drain, and shutdown pass queue/publisher/lease observations through the same kernel schedule transition before an adapter starts work. |
 
+### Closed-book LTX telemetry and the prefetch gate
+
+Capture telemetry is a fixed-size per-batch ledger. It attributes schema checks,
+WAL existence and position resolution, WAL reads and page collection, encoding,
+local writes, file sync, parent sync, verification, and checkpoint time. The
+same ledger records finite WAL strategy counters and checkpoint runs, busy
+outcomes, frames, backfill, and restarts. None of these observations is
+persisted or participates in authority, checkpoint, or recovery decisions.
+
+Replica telemetry crosses into `crab-cell-runtime` only as the closed enums
+`LtxPhase` and `LtxReadOrigin`. The runtime exports phase result/duration and
+origin request/byte counters for cold, sparse, hydrating, and resident reads.
+Cell IDs, paths, object keys, digests, and arbitrary caller strings cannot be
+labels. Root-open, authenticated-directory, frame-fetch, ordered restore-write,
+and compaction paths report success and failure through the same host hook.
+
+B-tree-guided speculative prefetch remains disabled until traces collected by
+these counters demonstrate a scan workload whose p95 improves without
+regressing the existing point-read contract. The current baseline already
+coalesces one authenticated 64-page window: `cold_open_and_restore_improve_p95_under_object_latency`
+proves one body request for a point fault under injected latency, and
+`sparse_hydration_coalesces_contiguous_cell_frames` proves fewer range requests
+than hydrated pages. A future predictor is acceptable only when all of the
+following are verified:
+
+- malformed SQLite pages produce no prediction;
+- prediction changes fetch timing only, never exact-root authority checks;
+- point reads issue no additional provider request;
+- speculative workers, bytes, and cache residency use existing host admission;
+- scan p95 improves on recorded workloads at 5/20/100 ms provider latency.
+
 ### Implementation evidence and remaining qualification
 
 The first implementation slices now have one code path each: the architecture
@@ -674,16 +705,28 @@ silently drops the primitive's durable obligation.
 
 ### Describe the current allocation
 
-`CellReplica::prepare_captured` currently reads every admitted local segment
-into an owned byte vector. `prepare_append` verifies every body, creates every
-authenticated index, retains both, then uploads them. Bundle preparation also
-copies selected rows and the complete bundle before publication.
+Native capture preparation copies each admitted segment into an owned scratch
+file and reopens it through the bounded authenticated inspector. Bundle
+preparation now has the same source shape: `Bundle::decode_file` and recovery
+manifest reopen retain a verified file path plus row metadata, while selected
+rows are read by exact extent and uploaded through a replayable multipart
+source. The bundle is first written to a deterministic digest-scoped staging
+key and promoted through the content-addressed CAS before the staging key is
+removed.
 
 Admission bounds the total bytes, but admission is not the same as bounded
-resident memory. Concurrent legal captures must not retain their complete
-bodies and indexes on the heap merely because their aggregate bytes were
-admitted. A 5 GiB Cell is built from bounded cuts; its size must not increase
-the memory used by any later incremental append.
+resident memory. The remote recovery path no longer retains a complete bundle
+body: it streams the provider response to a runtime-owned session/cell scratch
+file, checks the outer digest before CRB1 parsing, reserves the exact remote
+size in the shared recovery `DiskBudget`, and performs structural/LTX
+verification on a blocking worker. The reservation travels with the returned
+overlay until its temporary file is dropped. The node restart inventory counts
+regular files left in stale session directories—including compaction and
+recovery scratch—before admitting new work; it rejects symlinked or special
+entries. Newly encoded node-log overlays still begin in memory and remain a
+separate peak-residency qualification item. A 5 GiB Cell is built from bounded
+cuts; its size must not increase the memory used by any later incremental
+append.
 
 ### Replace body ownership with admitted sources
 
@@ -733,6 +776,15 @@ Streaming must preserve the current verification contract:
 
 No error may cause a retry to reinterpret bytes through a less strict reader.
 
+The file-backed bundle contract is deliberately fail-closed. A provider read,
+digest, footer, row, LTX, or multipart error is returned to the caller; it does
+not fall back to object listing, a native row, or an alternate bundle source.
+Temporary files are owned by the bundle and are removed when the overlay is
+dropped or decoding fails. Remote staging keys are deterministic for the
+content digest, so a retry or failover converges on one unreferenced upload
+target rather than creating a fresh key for every attempt. A process death can
+still leave that one private staging key; remote staging scavenging remains a
+provider-retention qualification and is never used as a recovery reader.
 ### Bound transfers
 
 The implementation uses existing configured facilities rather than new
@@ -1142,7 +1194,7 @@ Each change is independently reviewable and leaves one canonical path.
 | 5 | Add actor-owned resident lookup before remote metadata | 2 | Local route has zero catalog/control object reads and fences exactly |
 | 6 | Wire bounded background hydration and resident promotion | 5 | Qualified resident reads perform zero object-store calls |
 | 7 | Stream native captured-segment verification and upload | 2 | Large native append has bounded RSS and exact recovery |
-| 8 | Stream bundle ranges and remove complete-body copies | 7 | Follower recovery remains exact with bounded copies |
+| 8 | Stream bundle ranges and remove complete-body copies | 7 | Implemented file-backed reopen, exact row reads, staged CAS upload, and recovery tests; 5 GiB RSS/low-disk qualification remains |
 | 9 | Persist verified directory-node acceleration | 7 | Cache corruption/eviction tests and bounded residency |
 | 10 | Add actor-owned quiescing, idle eviction, and full resource summaries | 5, 6, 9 | Churn test preserves every acknowledged root |
 | 11 | Add signed live placement observations and the pure weighted planner | 2, 10 | Mixed-version gate and deterministic plan tests pass |

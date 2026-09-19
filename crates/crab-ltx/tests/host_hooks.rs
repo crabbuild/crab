@@ -246,7 +246,7 @@ async fn cell_prepare_bounds_source_and_scratch_transfers() {
 
 #[cfg(feature = "replica")]
 #[tokio::test(flavor = "multi_thread")]
-async fn cell_restore_install_failure_cleans_owned_scratch() {
+async fn cell_restore_write_and_install_failures_clean_owned_scratch() {
     let (directory, faults, host, mut writer) = fixture();
     let replica = CellReplica::new(
         CellStorageLayout::new(
@@ -268,6 +268,17 @@ async fn cell_restore_install_failure_cleans_owned_scratch() {
     writer.close().unwrap();
     let verified = replica.open_root(&root).await.unwrap();
     let destination = directory.path().join("cell-restored.sqlite");
+
+    faults.arm(Some("write_all"));
+    injected(verified.restore(&destination).await);
+    assert!(!destination.exists());
+    assert!(!std::fs::read_dir(directory.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".crab-restore-")
+    }));
 
     faults.arm(Some("persist_file_new"));
     injected(verified.restore(&destination).await);
@@ -507,6 +518,9 @@ fn exact_local_resume_and_all_checkpoints_preserve_the_injected_plan() {
             .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(1)"))
             .unwrap();
         let batch = writer.checkpoint(mode).unwrap();
+        assert_eq!(batch.timing.checkpoint_runs, 1);
+        assert!(batch.timing.checkpoint_frames >= batch.timing.checkpoint_backfilled);
+        assert_eq!(batch.timing.checkpoint_busy_errors, 0);
         segments.extend(batch.segments);
         let plan = host
             .verify(&segments, batch.position, Limits::default())

@@ -31,7 +31,7 @@ futures-util = { workspace = true, optional = true }
 
 [dev-dependencies]
 object_store = { workspace = true, features = ["fs"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 
 [[example]]
 name = "rustfs_cell_replica_scale_load"
