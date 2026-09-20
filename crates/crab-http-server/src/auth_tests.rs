@@ -59,6 +59,16 @@ async fn metadata(State(provider): State<Arc<Provider>>) -> Json<Value> {
 }
 
 async fn keys(State(provider): State<Arc<Provider>>) -> Json<Value> {
+    if provider.mode.lock().await.as_str() == "wrong-logout-key-operation" {
+        let mut key = serde_json::to_value(provider.signing_key().as_verification_key()).unwrap();
+        key["key_ops"] = json!(["encrypt"]);
+        return Json(json!({"keys":[key]}));
+    }
+    if provider.mode.lock().await.as_str() == "ambiguous-logout-key" {
+        return Json(
+            json!({"keys":[provider.signing_key().as_verification_key(),provider.signing_key().as_verification_key()]}),
+        );
+    }
     Json(json!({"keys":[provider.signing_key().as_verification_key()]}))
 }
 
@@ -187,23 +197,27 @@ impl Harness {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let origin = format!("http://{address}");
-        let auth = Authentication::new(crate::OidcConfig {
-            issuer: openidconnect::IssuerUrl::new(provider.issuer.clone()).unwrap(),
-            public_url: Url::parse(&origin).unwrap(),
-            client_id: "crab-browser".into(),
-            client_secret_file: secret_file.as_ref().map(|file| file.path().to_owned()),
-            state_key_file: None,
-        })
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let root = crate::storage_root::StorageRoot::memory(store.clone(), "");
+        let auth = Authentication::new_durable(
+            crate::OidcConfig {
+                issuer: openidconnect::IssuerUrl::new(provider.issuer.clone()).unwrap(),
+                public_url: Url::parse(&origin).unwrap(),
+                client_id: "crab-browser".into(),
+                client_secret_file: secret_file.as_ref().map(|file| file.path().to_owned()),
+                state_key_file: None,
+            },
+            &root,
+        )
         .await
         .unwrap();
-        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
         let protected_branches = vec![crate::BranchProtection {
             branch: "main".into(),
             required_approvals: 1,
             required_checks: vec!["ci/test".into()],
         }];
         let admission_store = store.clone();
-        let repository = Repository {
+        let mut repository = Repository {
             id: uuid::Uuid::from_bytes([1; 16]),
             config: RepositoryConfig {
                 owner: "team".into(),
@@ -239,6 +253,18 @@ impl Harness {
         )
         .await
         .unwrap();
+        let catalog = CatalogStore::new(root);
+        let record = catalog
+            .adopt_repository(
+                "team".into(),
+                "private".into(),
+                "test".into(),
+                "Private project".into(),
+                repository.config.members.clone(),
+            )
+            .await
+            .unwrap();
+        repository.id = record.id;
         let cell_identity = crab_cell_runtime::ApplicationIdentity::new(
             crab_cell_runtime::TenantId::from_bytes([2; 16]),
             crab_cell_runtime::ApplicationId::from_bytes([3; 16]),
@@ -324,7 +350,7 @@ impl Harness {
             cancellation: CancellationToken::new(),
             receives: tokio_util::task::TaskTracker::new(),
             auth: Some(auth),
-            catalog: None,
+            catalog: Some(catalog),
             catalog_healthy: AtomicBool::new(false),
             node_healthy: AtomicBool::new(false),
             scheduler_status: crate::cells::SchedulerStatus::new(
@@ -755,6 +781,12 @@ mod branches;
 
 #[path = "auth_tests/git_tokens.rs"]
 mod git_tokens;
+
+#[path = "auth_tests/members.rs"]
+mod members;
+
+#[path = "auth_tests/backchannel_logout.rs"]
+mod backchannel_logout;
 
 #[path = "auth_tests/pulls.rs"]
 mod pulls;

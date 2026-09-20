@@ -27,6 +27,7 @@ crab-remote = { workspace = true, features = ["publication"] }
 base64 = "0.22"
 futures-util = { workspace = true }
 fs4 = "0.13.1"
+jsonwebtoken.workspace = true
 flate2 = { workspace = true }
 http-body = "1"
 crab-remote-git = { workspace = true }

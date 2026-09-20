@@ -81,7 +81,25 @@ impl Authentication {
             access: record.access,
             revoked: AtomicBool::new(false),
         });
-        token.active().then_some(token)
+        if !token.active() {
+            return None;
+        }
+        let mut tokens = self.git_tokens.lock().await;
+        tokens.retain(|_, token| token.active());
+        if let Some(cached) = tokens.get(&token_key) {
+            if Arc::ptr_eq(&cached.session, &token.session)
+                && cached.owner == token.owner
+                && cached.repository == token.repository
+                && cached.access == token.access
+            {
+                return Some(Arc::clone(cached));
+            }
+            cached.revoked.store(true, Ordering::Release);
+        }
+        if tokens.len() < 4096 {
+            tokens.insert(token_key, Arc::clone(&token));
+        }
+        Some(token)
     }
 
     pub(super) async fn store_git_token(
@@ -216,7 +234,7 @@ impl Authentication {
             }
         }
         self.git_tokens.lock().await.retain(|_, token| {
-            if Arc::ptr_eq(&token.session, session) {
+            if token.session.session_key == session.session_key {
                 token.revoked.store(true, Ordering::Release);
                 false
             } else {

@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::{BranchProtection, RepositoryConfig, RepositoryMember, storage_root::StorageRoot};
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 const MAX_CATALOG_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_REPOSITORIES: usize = 10_000;
 const MAX_CAS_ATTEMPTS: usize = 8;
@@ -62,6 +62,38 @@ pub struct CatalogDocument {
     pub schema_version: u32,
     pub version: u64,
     pub repositories: Vec<CatalogRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub membership_audit_head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_membership_audit: Option<MembershipAuditEvent>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MembershipActor {
+    pub issuer: String,
+    pub subject: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MembershipSnapshot {
+    pub revision: u64,
+    pub members: Vec<RepositoryMember>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MembershipAuditEvent {
+    pub id: Uuid,
+    pub repository_id: Uuid,
+    pub actor: MembershipActor,
+    pub previous_members_digest: String,
+    pub new_members_digest: String,
+    pub repository_version: u64,
+    pub occurred_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -75,16 +107,56 @@ impl Default for CatalogDocument {
             schema_version: SCHEMA_VERSION,
             version: 0,
             repositories: Vec::new(),
+            membership_audit_head: None,
+            pending_membership_audit: None,
         }
     }
 }
 
 impl CatalogDocument {
     fn validate(&self, root: &StorageRoot) -> Result<(), CatalogError> {
-        if self.schema_version != SCHEMA_VERSION || self.repositories.len() > MAX_REPOSITORIES {
+        if !matches!(self.schema_version, 2 | SCHEMA_VERSION)
+            || self.repositories.len() > MAX_REPOSITORIES
+        {
             return Err(CatalogError::Invalid(
                 "unsupported schema or repository count",
             ));
+        }
+        if let Some(event) = &self.pending_membership_audit {
+            if event.repository_version != self.version
+                || !valid_actor(&event.actor)
+                || event.occurred_at == 0
+                || event.id.is_nil()
+                || !self
+                    .repositories
+                    .iter()
+                    .any(|record| record.id == event.repository_id)
+                || event.previous != self.membership_audit_head
+                || !valid_digest(&event.previous_members_digest)
+                || !valid_digest(&event.new_members_digest)
+            {
+                return Err(CatalogError::Invalid("membership audit event is invalid"));
+            }
+            let record = self
+                .repositories
+                .iter()
+                .find(|record| record.id == event.repository_id)
+                .ok_or(CatalogError::Invalid("audit repository is missing"))?;
+            if membership_digest(&record.members)? != event.new_members_digest {
+                return Err(CatalogError::Invalid(
+                    "membership audit digest does not match",
+                ));
+            }
+        }
+        if self
+            .membership_audit_head
+            .as_ref()
+            .is_some_and(|path| !valid_audit_path(root, path))
+            || (self.schema_version == 2
+                && (self.membership_audit_head.is_some()
+                    || self.pending_membership_audit.is_some()))
+        {
+            return Err(CatalogError::Invalid("membership audit chain is invalid"));
         }
         let mut ids = HashSet::new();
         let mut names = HashSet::new();
@@ -112,6 +184,43 @@ impl CatalogDocument {
                 .cmp(&(right.owner.to_lowercase(), right.name.to_lowercase()))
         });
     }
+}
+
+fn valid_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn valid_actor(actor: &MembershipActor) -> bool {
+    [&actor.issuer, &actor.subject].iter().all(|value| {
+        !value.is_empty() && value.chars().count() <= 512 && !value.chars().any(char::is_control)
+    })
+}
+
+fn valid_audit_path(root: &StorageRoot, path: &str) -> bool {
+    let prefix = format!("{}/", root.path(".crab/http-server/v1/audit/membership"));
+    let Some(file) = path
+        .strip_prefix(&prefix)
+        .and_then(|file| file.strip_suffix(".json"))
+    else {
+        return false;
+    };
+    let Some((version, id)) = file.split_once('-') else {
+        return false;
+    };
+    version.parse::<u64>().is_ok_and(|value| value > 0) && Uuid::parse_str(id).is_ok()
+}
+
+fn membership_digest(members: &[RepositoryMember]) -> Result<String, CatalogError> {
+    let mut canonical = members.to_vec();
+    canonical.sort_by(|a, b| (&a.subject, &a.name, a.access).cmp(&(&b.subject, &b.name, b.access)));
+    let bytes = serde_json::to_vec(&canonical)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"crab membership digest v1");
+    hasher.update(&bytes);
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 impl CatalogRecord {
@@ -176,12 +285,32 @@ impl CatalogStore {
             Err(error) => return Err(error.into()),
         };
         let schema: CatalogSchema = serde_json::from_slice(&body)?;
-        if schema.schema_version != SCHEMA_VERSION {
+        if !matches!(schema.schema_version, 2 | SCHEMA_VERSION) {
             return Err(CatalogError::Invalid("unsupported catalog schema"));
         }
         let document: CatalogDocument = serde_json::from_slice(&body)?;
+        // Version 2 had no audit fields. It remains readable until its next write.
         document.validate(&self.root)?;
         Ok((document, Some(etag)))
+    }
+
+    pub async fn membership(
+        &self,
+        owner: &str,
+        name: &str,
+    ) -> Result<MembershipSnapshot, CatalogError> {
+        let (document, _) = self.load().await?;
+        let record = document
+            .repositories
+            .iter()
+            .find(|record| {
+                record.owner.eq_ignore_ascii_case(owner) && record.name.eq_ignore_ascii_case(name)
+            })
+            .ok_or(CatalogError::NotFound)?;
+        Ok(MembershipSnapshot {
+            revision: document.version,
+            members: record.members.clone(),
+        })
     }
 
     pub async fn create_repository(
@@ -262,16 +391,59 @@ impl CatalogStore {
         owner: &str,
         name: &str,
         members: Vec<RepositoryMember>,
+        require_administrator: bool,
     ) -> Result<CatalogRecord, CatalogError> {
-        let (mut document, etag) = self.load().await?;
+        let snapshot = self.membership(owner, name).await?;
+        self.replace_members(
+            owner,
+            name,
+            snapshot.revision,
+            members,
+            MembershipActor {
+                issuer: "urn:crab:local".into(),
+                subject: "operator".into(),
+            },
+            require_administrator,
+        )
+        .await
+    }
+
+    pub async fn replace_members(
+        &self,
+        owner: &str,
+        name: &str,
+        expected_revision: u64,
+        members: Vec<RepositoryMember>,
+        actor: MembershipActor,
+        require_administrator: bool,
+    ) -> Result<CatalogRecord, CatalogError> {
+        let (mut document, etag) = self.load_for_mutation().await?;
+        if document.version != expected_revision {
+            return Err(CatalogError::Conflict);
+        }
         let Some(record) = document.repositories.iter_mut().find(|record| {
             record.owner.eq_ignore_ascii_case(owner) && record.name.eq_ignore_ascii_case(name)
         }) else {
             return Err(CatalogError::NotFound);
         };
+        let mut candidate = record.clone();
+        candidate.members = members.clone();
+        crate::config::validate_repository(&candidate.runtime_config(&self.root, "main")?)
+            .map_err(|_| CatalogError::Invalid("repository record failed validation"))?;
+        if require_administrator
+            && !members
+                .iter()
+                .any(|member| member.access == crate::RepositoryAccess::Admin)
+        {
+            return Err(CatalogError::Invalid(
+                "at least one administrator is required",
+            ));
+        }
         if record.members == members {
             return Ok(record.clone());
         }
+        let previous_digest = membership_digest(&record.members)?;
+        let new_digest = membership_digest(&members)?;
         record.members = members;
         let updated = record.clone();
         document.version = document
@@ -279,12 +451,74 @@ impl CatalogStore {
             .checked_add(1)
             .ok_or(CatalogError::Invalid("catalog version overflowed"))?;
         document.schema_version = SCHEMA_VERSION;
+        document.pending_membership_audit = Some(MembershipAuditEvent {
+            id: Uuid::now_v7(),
+            repository_id: updated.id,
+            actor,
+            previous_members_digest: previous_digest,
+            new_members_digest: new_digest,
+            repository_version: document.version,
+            occurred_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| CatalogError::Invalid("system clock is before epoch"))?
+                .as_secs(),
+            previous: document.membership_audit_head.clone(),
+        });
         document.validate(&self.root)?;
         if self.write_document(&document, etag).await? {
+            let _ = self.flush_membership_audit().await;
             Ok(updated)
         } else {
             Err(CatalogError::Conflict)
         }
+    }
+
+    pub async fn flush_membership_audit(&self) -> Result<(), CatalogError> {
+        let (mut document, etag) = self.load().await?;
+        let Some(event) = document.pending_membership_audit.clone() else {
+            return Ok(());
+        };
+        let path = self.root.path(&format!(
+            ".crab/http-server/v1/audit/membership/{}-{}.json",
+            event.repository_version, event.id
+        ));
+        match self
+            .root
+            .store
+            .create_strict(&path, Bytes::from(serde_json::to_vec(&event)?))
+            .await
+        {
+            Ok(()) => {}
+            Err(StorageError::StateConflict { .. }) => {
+                let (body, _) = self
+                    .root
+                    .store
+                    .get_with_etag_bounded(&path, MAX_CATALOG_BYTES)
+                    .await?;
+                if serde_json::from_slice::<MembershipAuditEvent>(&body)? != event {
+                    return Err(CatalogError::Invalid("immutable membership audit differs"));
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+        document.membership_audit_head = Some(path.to_string());
+        document.pending_membership_audit = None;
+        document.validate(&self.root)?;
+        let _ = self.write_document(&document, etag).await?;
+        Ok(())
+    }
+
+    async fn load_for_mutation(&self) -> Result<(CatalogDocument, Option<ETag>), CatalogError> {
+        for _ in 0..MAX_CAS_ATTEMPTS {
+            let loaded = self.load().await?;
+            if loaded.0.pending_membership_audit.is_none() {
+                return Ok(loaded);
+            }
+            // Never overwrite the single audit outbox: its event committed with the
+            // previous membership and must become the chain head before another write.
+            self.flush_membership_audit().await?;
+        }
+        Err(CatalogError::Conflict)
     }
 
     pub(crate) async fn mark_cell_ready(
@@ -292,7 +526,7 @@ impl CatalogStore {
         repository: Uuid,
     ) -> Result<CatalogRecord, CatalogError> {
         for _ in 0..MAX_CAS_ATTEMPTS {
-            let (mut document, etag) = self.load().await?;
+            let (mut document, etag) = self.load_for_mutation().await?;
             let record = document
                 .repositories
                 .iter_mut()
@@ -318,7 +552,7 @@ impl CatalogStore {
 
     async fn insert(&self, record: CatalogRecord) -> Result<CatalogRecord, CatalogError> {
         for _ in 0..MAX_CAS_ATTEMPTS {
-            let (mut document, etag) = self.load().await?;
+            let (mut document, etag) = self.load_for_mutation().await?;
             if let Some(existing) = document.repositories.iter().find(|existing| {
                 existing.owner.eq_ignore_ascii_case(&record.owner)
                     && existing.name.eq_ignore_ascii_case(&record.name)
@@ -343,8 +577,27 @@ impl CatalogStore {
             document.schema_version = SCHEMA_VERSION;
             document.repositories.push(record.clone());
             document.normalize();
+            if !record.members.is_empty() {
+                document.pending_membership_audit = Some(MembershipAuditEvent {
+                    id: Uuid::now_v7(),
+                    repository_id: record.id,
+                    actor: MembershipActor {
+                        issuer: "urn:crab:local".into(),
+                        subject: "operator".into(),
+                    },
+                    previous_members_digest: membership_digest(&[])?,
+                    new_members_digest: membership_digest(&record.members)?,
+                    repository_version: document.version,
+                    occurred_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_err(|_| CatalogError::Invalid("system clock is before epoch"))?
+                        .as_secs(),
+                    previous: document.membership_audit_head.clone(),
+                });
+            }
             document.validate(&self.root)?;
             if self.write_document(&document, etag).await? {
+                let _ = self.flush_membership_audit().await;
                 return Ok(record);
             }
         }
@@ -388,6 +641,187 @@ mod tests {
     fn catalog() -> CatalogStore {
         let store = crab_storage::Store::new(Arc::new(InMemory::new()));
         CatalogStore::new(StorageRoot::memory(store, "repositories"))
+    }
+
+    fn actor() -> MembershipActor {
+        MembershipActor {
+            issuer: "https://issuer.example".into(),
+            subject: "alice-id".into(),
+        }
+    }
+
+    fn admin() -> RepositoryMember {
+        RepositoryMember {
+            subject: "alice-id".into(),
+            name: "Alice".into(),
+            access: crate::RepositoryAccess::Admin,
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_first_membership_write_migrates_and_preserves_repository() {
+        let catalog = catalog();
+        let original = catalog
+            .create_repository(
+                "team".into(),
+                "project".into(),
+                "team/project".into(),
+                "main".into(),
+                "description".into(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let (mut document, _) = catalog.load().await.unwrap();
+        document.schema_version = 2;
+        catalog
+            .root
+            .store
+            .put_overwrite(
+                &catalog.path,
+                Bytes::from(serde_json::to_vec(&document).unwrap()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(catalog.load().await.unwrap().0, document);
+        let changed = catalog
+            .replace_members(
+                "team",
+                "project",
+                document.version,
+                vec![admin()],
+                actor(),
+                true,
+            )
+            .await
+            .unwrap();
+        let (after, _) = catalog.load().await.unwrap();
+        assert_eq!(after.schema_version, 3);
+        assert_eq!(
+            changed,
+            CatalogRecord {
+                members: vec![admin()],
+                ..original
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn membership_requires_current_revision_and_final_admin_without_writes() {
+        let catalog = catalog();
+        catalog
+            .create_repository(
+                "team".into(),
+                "project".into(),
+                "team/project".into(),
+                "main".into(),
+                String::new(),
+                vec![admin()],
+            )
+            .await
+            .unwrap();
+        let (before, etag) = catalog.load().await.unwrap();
+        assert!(matches!(
+            catalog
+                .replace_members(
+                    "team",
+                    "project",
+                    before.version - 1,
+                    vec![admin()],
+                    actor(),
+                    true
+                )
+                .await,
+            Err(CatalogError::Conflict)
+        ));
+        assert!(matches!(
+            catalog
+                .replace_members("team", "project", before.version, vec![], actor(), true)
+                .await,
+            Err(CatalogError::Invalid(
+                "at least one administrator is required"
+            ))
+        ));
+        assert_eq!(catalog.load().await.unwrap(), (before, etag));
+    }
+
+    #[tokio::test]
+    async fn pending_audit_survives_crash_and_later_mutation_keeps_chain() {
+        let catalog = catalog();
+        let record = catalog
+            .create_repository(
+                "team".into(),
+                "project".into(),
+                "team/project".into(),
+                "main".into(),
+                String::new(),
+                vec![admin()],
+            )
+            .await
+            .unwrap();
+        let (mut document, etag) = catalog.load().await.unwrap();
+        let head = document.membership_audit_head.clone().unwrap();
+        let (body, _) = catalog
+            .root
+            .store
+            .get_with_etag_bounded(&head.clone().into(), 8192)
+            .await
+            .unwrap();
+        let event: MembershipAuditEvent = serde_json::from_slice(&body).unwrap();
+        // Recreate the committed outbox state immediately before its flush.
+        catalog.root.store.delete(&head.into()).await.unwrap();
+        document.membership_audit_head = None;
+        document.pending_membership_audit = Some(event.clone());
+        assert!(catalog.write_document(&document, etag).await.unwrap());
+        let mut member = admin();
+        member.name = "Alice renamed".into();
+        catalog
+            .replace_members(
+                "team",
+                "project",
+                document.version,
+                vec![member],
+                actor(),
+                true,
+            )
+            .await
+            .unwrap();
+        catalog.flush_membership_audit().await.unwrap();
+        let (after, etag) = catalog.load().await.unwrap();
+        catalog.flush_membership_audit().await.unwrap();
+        assert_eq!(catalog.load().await.unwrap(), (after.clone(), etag));
+        let (body, _) = catalog
+            .root
+            .store
+            .get_with_etag_bounded(&after.membership_audit_head.unwrap().into(), 8192)
+            .await
+            .unwrap();
+        let current: MembershipAuditEvent = serde_json::from_slice(&body).unwrap();
+        assert_eq!(current.repository_id, record.id);
+        let (body, _) = catalog
+            .root
+            .store
+            .get_with_etag_bounded(&current.previous.unwrap().into(), 8192)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<MembershipAuditEvent>(&body).unwrap(),
+            event
+        );
+    }
+
+    #[test]
+    fn membership_digest_is_independent_of_presentation_order() {
+        let first = admin();
+        let second = RepositoryMember {
+            subject: "bob-id".into(),
+            name: "Bob".into(),
+            access: crate::RepositoryAccess::Read,
+        };
+        assert_eq!(
+            membership_digest(&[first.clone(), second.clone()]).unwrap(),
+            membership_digest(&[second, first]).unwrap()
+        );
     }
 
     #[tokio::test]
@@ -543,12 +977,12 @@ mod tests {
         }];
 
         let updated = catalog
-            .set_members("TEAM", "PROJECT", members.clone())
+            .set_members("TEAM", "PROJECT", members.clone(), true)
             .await
             .unwrap();
         let (after_update, _) = catalog.load().await.unwrap();
         let repeated = catalog
-            .set_members("team", "project", members)
+            .set_members("team", "project", members, true)
             .await
             .unwrap();
         let (after_repeat, _) = catalog.load().await.unwrap();
@@ -560,7 +994,9 @@ mod tests {
 
     #[tokio::test]
     async fn membership_replacement_requires_a_cataloged_repository() {
-        let result = catalog().set_members("team", "missing", vec![]).await;
+        let result = catalog()
+            .set_members("team", "missing", vec![], false)
+            .await;
 
         assert!(matches!(result, Err(CatalogError::NotFound)));
     }
@@ -597,6 +1033,7 @@ mod tests {
                         ..member
                     },
                 ],
+                true,
             )
             .await;
         let (after, _) = catalog.load().await.unwrap();

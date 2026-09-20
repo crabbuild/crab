@@ -18,6 +18,7 @@ mod labels;
 mod lfs;
 mod local_disk;
 mod maintenance;
+mod members;
 mod metrics;
 mod peer;
 mod peer_tls;

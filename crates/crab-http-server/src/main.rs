@@ -563,7 +563,12 @@ async fn repository(
             )?;
             let catalog = CatalogStore::from_config(config)?;
             let record = catalog
-                .set_members(&arguments.owner, &arguments.name, members)
+                .set_members(
+                    &arguments.owner,
+                    &arguments.name,
+                    members,
+                    config.auth.is_some(),
+                )
                 .await?;
             println!("{}", serde_json::to_string_pretty(&record)?);
         }

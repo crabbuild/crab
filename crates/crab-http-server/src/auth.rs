@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+mod backchannel_logout;
 mod git_tokens;
+pub(crate) use backchannel_logout::backchannel_logout;
 pub(crate) use git_tokens::{issue_git_token, revoke_git_tokens};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -13,6 +15,7 @@ use axum::{
 };
 use bytes::Bytes;
 use crab_storage::{StorageError, Store};
+use futures_util::StreamExt;
 use object_store::path::Path as ObjectPath;
 use openidconnect::{
     AccessTokenHash, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointMaybeSet,
@@ -103,7 +106,7 @@ impl IntoResponse for AuthError {
     }
 }
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub(crate) struct Identity {
     pub issuer: String,
     pub subject: String,
@@ -242,6 +245,25 @@ struct StoredSession {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+struct IdentitySessionMarker {
+    schema_version: u32,
+    issuer: String,
+    subject: String,
+    session_key: Key,
+    expires_at: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    git_tokens: Vec<Key>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct IdentityIndexMigration {
+    started_at: u64,
+    complete_after: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct StoredGitToken {
     session_key: Key,
     owner: String,
@@ -261,16 +283,12 @@ pub(crate) struct Authentication {
     state: Option<AuthState>,
     cursor_key: [u8; 32],
     admission: Semaphore,
+    logout_admission: Semaphore,
 }
 
 impl Authentication {
     pub(crate) fn peer_issuer(&self) -> String {
         self.config.issuer.url().as_str().to_owned()
-    }
-
-    #[cfg(test)]
-    pub async fn new(config: OidcConfig) -> Result<Self, AuthError> {
-        Self::build(config, None).await
     }
 
     pub(crate) async fn new_durable(
@@ -319,6 +337,9 @@ impl Authentication {
             .build()
             .map_err(AuthError::provider)?;
         let client = discover(&config, secret.clone(), &http).await?;
+        if let Some(state) = &state {
+            state.migration_active().await?;
+        }
         Ok(Self {
             config,
             secret,
@@ -330,6 +351,7 @@ impl Authentication {
             state,
             cursor_key,
             admission: Semaphore::new(8),
+            logout_admission: Semaphore::new(4),
         })
     }
 
@@ -487,13 +509,57 @@ impl Authentication {
             expires_at: session.expires_at,
             git_tokens: Vec::new(),
         };
+        let marker_path = state.identity_session_path(
+            &session.identity.issuer,
+            &session.identity.subject,
+            &session.session_key,
+        );
+        let marker = IdentitySessionMarker {
+            schema_version: 1,
+            issuer: session.identity.issuer.clone(),
+            subject: session.identity.subject.clone(),
+            session_key: session.session_key,
+            expires_at: session.expires_at,
+            git_tokens: Vec::new(),
+        };
         state
+            .store
+            .create_strict(&marker_path, Bytes::from(serde_json::to_vec(&marker)?))
+            .await?;
+        if let Err(error) = state
             .store
             .create_strict(
                 &state.path("sessions", &session.session_key),
                 Bytes::from(serde_json::to_vec(&record)?),
             )
-            .await?;
+            .await
+        {
+            let _ = state.store.delete(&marker_path).await;
+            return Err(error.into());
+        }
+        // Revocation fences the marker before removing the parent. Recheck after
+        // creation so a login racing that removal cannot publish an unindexed session.
+        let verified = async {
+            let (body, _) = state
+                .store
+                .get_with_etag_bounded(&marker_path, 8 * 1024)
+                .await?;
+            let current: IdentitySessionMarker = serde_json::from_slice(&body)?;
+            if current.schema_version != 1
+                || current.issuer != marker.issuer
+                || current.subject != marker.subject
+                || current.session_key != marker.session_key
+                || current.expires_at != marker.expires_at
+            {
+                return Err(AuthError::Invalid);
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = verified {
+            let _ = self.remove_session(session.session_key).await;
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -510,6 +576,53 @@ impl Authentication {
             .ok()?
             .0;
         let record: StoredSession = serde_json::from_slice(&body).ok()?;
+        let marker_path = state.identity_session_path(
+            &record.identity.issuer,
+            &record.identity.subject,
+            &session_key,
+        );
+        let marker = match state
+            .store
+            .get_with_etag_bounded(&marker_path, 8 * 1024)
+            .await
+        {
+            Ok((body, _)) => serde_json::from_slice::<IdentitySessionMarker>(&body).ok()?,
+            Err(StorageError::NotFound { .. }) if state.migration_active().await.ok()? => {
+                let marker = IdentitySessionMarker {
+                    schema_version: 1,
+                    issuer: record.identity.issuer.clone(),
+                    subject: record.identity.subject.clone(),
+                    session_key,
+                    expires_at: record.expires_at,
+                    git_tokens: Vec::new(),
+                };
+                match state
+                    .store
+                    .create_strict(&marker_path, Bytes::from(serde_json::to_vec(&marker).ok()?))
+                    .await
+                {
+                    Ok(()) => marker,
+                    Err(StorageError::StateConflict { .. }) => {
+                        let (body, _) = state
+                            .store
+                            .get_with_etag_bounded(&marker_path, 8 * 1024)
+                            .await
+                            .ok()?;
+                        serde_json::from_slice::<IdentitySessionMarker>(&body).ok()?
+                    }
+                    Err(_) => return None,
+                }
+            }
+            Err(_) => return None,
+        };
+        if marker.schema_version != 1
+            || marker.session_key != session_key
+            || marker.issuer != record.identity.issuer
+            || marker.subject != record.identity.subject
+            || marker.expires_at != record.expires_at
+        {
+            return None;
+        }
         let session = Arc::new(Session {
             identity: record.identity,
             csrf: record.csrf,
@@ -518,38 +631,289 @@ impl Authentication {
             revoked: AtomicBool::new(false),
         });
         if session.active() {
+            let mut sessions = self.sessions.lock().await;
+            sessions.retain(|_, session| session.active());
+            if let Some(cached) = sessions.get(&session_key) {
+                if cached.identity == session.identity
+                    && cached.csrf == session.csrf
+                    && cached.expires_at == session.expires_at
+                {
+                    return Some(Arc::clone(cached));
+                }
+                cached.revoked.store(true, Ordering::Release);
+            }
+            if sessions.len() < 4096 {
+                sessions.insert(session_key, Arc::clone(&session));
+            }
             Some(session)
         } else {
-            let _ = state
-                .store
-                .delete(&state.path("sessions", &session_key))
-                .await;
+            let _ = self.remove_session(session_key).await;
             None
         }
     }
 
     async fn remove_session(&self, session_key: Key) -> Result<(), AuthError> {
         if let Some(state) = &self.state {
-            match state
-                .store
-                .delete(&state.path("sessions", &session_key))
-                .await
-            {
-                Ok(()) | Err(StorageError::NotFound { .. }) => {}
-                Err(error) => return Err(error.into()),
+            let path = state.path("sessions", &session_key);
+            let mut stored = None;
+            for attempt in 0..STATE_CAS_ATTEMPTS {
+                let (body, etag) = match state.store.get_with_etag_bounded(&path, 64 * 1024).await {
+                    Ok(value) => value,
+                    Err(StorageError::NotFound { .. }) => break,
+                    Err(error) => return Err(error.into()),
+                };
+                let mut record: StoredSession = serde_json::from_slice(&body)?;
+                // Fence token attachment before taking the cleanup inventory. The
+                // durable expired parent rejects new credentials during a retry.
+                record.expires_at = 0;
+                match state
+                    .store
+                    .update(&path, Bytes::from(serde_json::to_vec(&record)?), etag)
+                    .await
+                {
+                    Ok(_) => {
+                        stored = Some(record);
+                        break;
+                    }
+                    Err(StorageError::StateConflict { .. }) if attempt + 1 < STATE_CAS_ATTEMPTS => {
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            if let Some(stored) = stored {
+                let marker = IdentitySessionMarker {
+                    schema_version: 1,
+                    issuer: stored.identity.issuer,
+                    subject: stored.identity.subject,
+                    session_key,
+                    expires_at: 0,
+                    git_tokens: stored.git_tokens,
+                };
+                let marker_path =
+                    state.identity_session_path(&marker.issuer, &marker.subject, &session_key);
+                // Keep the bounded token cleanup inventory after deleting the parent,
+                // so a failed deletion can resume through the identity marker.
+                state
+                    .store
+                    .put_overwrite(&marker_path, Bytes::from(serde_json::to_vec(&marker)?))
+                    .await?;
+                state.delete_if_present(&path).await?;
+                state.cleanup_marker(&marker, &marker_path).await?;
             }
         }
         if let Some(session) = self.sessions.lock().await.remove(&session_key) {
             session.revoked.store(true, Ordering::Release);
         }
+        self.git_tokens.lock().await.retain(|_, token| {
+            if token.session.session_key == session_key {
+                token.revoked.store(true, Ordering::Release);
+                token.session.revoked.store(true, Ordering::Release);
+                false
+            } else {
+                true
+            }
+        });
         Ok(())
+    }
+
+    pub(crate) async fn revoke_identity(
+        &self,
+        issuer: &str,
+        subject: &str,
+    ) -> Result<u64, AuthError> {
+        let Some(state) = &self.state else {
+            let keys = self
+                .sessions
+                .lock()
+                .await
+                .iter()
+                .filter_map(|(key, session)| {
+                    (session.identity.issuer == issuer && session.identity.subject == subject)
+                        .then_some(*key)
+                })
+                .collect::<Vec<_>>();
+            for key in &keys {
+                self.remove_session(*key).await?;
+            }
+            return Ok(keys.len() as u64);
+        };
+        let prefix = state.identity_sessions_prefix(issuer, subject);
+        let mut stream = state.store.list_stream(&prefix);
+        let mut revoked = 0;
+        while let Some(meta) = stream.next().await {
+            let meta = meta?;
+            let (body, etag) = match state
+                .store
+                .get_with_etag_bounded(&meta.location, 8 * 1024)
+                .await
+            {
+                Ok(value) => value,
+                Err(StorageError::NotFound { .. }) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let mut marker: IdentitySessionMarker = serde_json::from_slice(&body)?;
+            if marker.schema_version != 1
+                || marker.issuer != issuer
+                || marker.subject != subject
+                || meta.location
+                    != state.identity_session_path(issuer, subject, &marker.session_key)
+            {
+                return Err(AuthError::Invalid);
+            }
+            // Fence in-progress creation before inspecting the parent: otherwise
+            // removing a stale-looking marker can race the session's first write.
+            marker.expires_at = 0;
+            state
+                .store
+                .update(
+                    &meta.location,
+                    Bytes::from(serde_json::to_vec(&marker)?),
+                    etag,
+                )
+                .await?;
+            let parent_path = state.path("sessions", &marker.session_key);
+            match state
+                .store
+                .get_with_etag_bounded(&parent_path, 64 * 1024)
+                .await
+            {
+                Ok((body, _)) => {
+                    let parent: StoredSession = serde_json::from_slice(&body)?;
+                    if parent.identity.issuer != issuer || parent.identity.subject != subject {
+                        return Err(AuthError::Invalid);
+                    }
+                }
+                Err(StorageError::NotFound { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+            self.remove_session(marker.session_key).await?;
+            state.cleanup_marker(&marker, &meta.location).await?;
+            revoked += 1;
+        }
+        // Pre-index binaries can leave live sessions without markers for one
+        // maximum session lifetime. Stream only during this durable rollout window.
+        if state.migration_active().await? {
+            let prefix = ObjectPath::from(format!("{}/sessions/", state.prefix));
+            let mut sessions = state.store.list_stream(&prefix);
+            while let Some(meta) = sessions.next().await {
+                let meta = meta?;
+                let (body, _) = match state
+                    .store
+                    .get_with_etag_bounded(&meta.location, 64 * 1024)
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(StorageError::NotFound { .. }) => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                let record: StoredSession = serde_json::from_slice(&body)?;
+                if record.identity.issuer == issuer && record.identity.subject == subject {
+                    let Some(encoded) = meta.location.as_ref().rsplit('/').next() else {
+                        return Err(AuthError::Invalid);
+                    };
+                    let key = parse_key(encoded).ok_or(AuthError::Invalid)?;
+                    self.remove_session(key).await?;
+                    revoked += 1;
+                }
+            }
+        }
+        Ok(revoked)
     }
 }
 
 impl AuthState {
+    async fn cleanup_marker(
+        &self,
+        marker: &IdentitySessionMarker,
+        path: &ObjectPath,
+    ) -> Result<(), AuthError> {
+        for key in &marker.git_tokens {
+            self.delete_if_present(&self.path("git-tokens", key))
+                .await?;
+        }
+        self.delete_if_present(path).await
+    }
+    async fn delete_if_present(&self, path: &ObjectPath) -> Result<(), AuthError> {
+        match self.store.delete(path).await {
+            Ok(()) | Err(StorageError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn migration_active(&self) -> Result<bool, AuthError> {
+        // Auth objects expire by bucket lifecycle after 24 hours. The migration
+        // cutoff must survive that collection or legacy scanning restarts forever.
+        let root = self
+            .prefix
+            .strip_suffix("/auth")
+            .ok_or(AuthError::Invalid)?;
+        let path = ObjectPath::from(format!("{root}/identity-index-migration.json"));
+        let now = now_epoch()?;
+        let (body, _) = match self.store.get_with_etag_bounded(&path, 1024).await {
+            Ok(value) => value,
+            Err(StorageError::NotFound { .. }) => {
+                let migration = IdentityIndexMigration {
+                    started_at: now,
+                    complete_after: now + SESSION_LIFETIME.as_secs(),
+                };
+                match self
+                    .store
+                    .create_strict(&path, Bytes::from(serde_json::to_vec(&migration)?))
+                    .await
+                {
+                    Ok(()) => return Ok(true),
+                    Err(StorageError::StateConflict { .. }) => {
+                        self.store.get_with_etag_bounded(&path, 1024).await?
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let migration: IdentityIndexMigration = serde_json::from_slice(&body)?;
+        if migration.started_at.checked_add(SESSION_LIFETIME.as_secs())
+            != Some(migration.complete_after)
+        {
+            return Err(AuthError::Invalid);
+        }
+        Ok(now < migration.complete_after)
+    }
     fn path(&self, kind: &str, key: &Key) -> ObjectPath {
         ObjectPath::from(format!("{}/{kind}/{}", self.prefix, hex_key(key)))
     }
+
+    fn identity_sessions_prefix(&self, issuer: &str, subject: &str) -> ObjectPath {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"crab identity sessions v1\0");
+        hasher.update(issuer.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(subject.as_bytes());
+        ObjectPath::from(format!(
+            "{}/identity-sessions/{}/",
+            self.prefix,
+            hasher.finalize().to_hex()
+        ))
+    }
+
+    fn identity_session_path(&self, issuer: &str, subject: &str, key: &Key) -> ObjectPath {
+        ObjectPath::from(format!(
+            "{}/{}.json",
+            self.identity_sessions_prefix(issuer, subject),
+            hex_key(key)
+        ))
+    }
+}
+
+fn parse_key(value: &str) -> Option<Key> {
+    if value.len() != 64 {
+        return None;
+    }
+    let mut key = [0; 32];
+    for (slot, pair) in key.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+        *slot = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(key)
 }
 
 fn hex_key(key: &Key) -> String {
@@ -940,6 +1304,7 @@ mod tests {
             state: None,
             cursor_key: [0; 32],
             admission: Semaphore::new(1),
+            logout_admission: Semaphore::new(1),
         };
         let cookie = auth.cookie(false, "test-token", SESSION_LIFETIME).unwrap();
         assert_eq!(
@@ -1018,6 +1383,7 @@ mod tests {
             }),
             cursor_key: [7; 32],
             admission: Semaphore::new(1),
+            logout_admission: Semaphore::new(1),
         }
     }
 
@@ -1081,5 +1447,273 @@ mod tests {
             first.take_flow(flow_key).await,
             Err(AuthError::Invalid)
         ));
+    }
+
+    #[tokio::test]
+    async fn identity_revocation_crosses_replicas_and_deletes_derived_tokens() {
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let first = shared_auth(store.clone());
+        let second = shared_auth(store.clone());
+        for (name, issuer) in [
+            ("one", "https://id.example"),
+            ("two", "https://id.example"),
+            ("other", "https://other.example"),
+        ] {
+            let session = Arc::new(Session {
+                identity: Identity {
+                    issuer: issuer.into(),
+                    subject: "alice".into(),
+                    name: "Alice".into(),
+                },
+                csrf: "csrf".into(),
+                expires_at: now_epoch().unwrap() + 600,
+                session_key: key(name),
+                revoked: AtomicBool::new(false),
+            });
+            first.store_session(Arc::clone(&session)).await.unwrap();
+            first
+                .store_git_token(
+                    key(&format!("git-{name}")),
+                    Arc::new(GitToken {
+                        session,
+                        owner: "team".into(),
+                        repository: "private".into(),
+                        access: RepositoryAccess::Read,
+                        revoked: AtomicBool::new(false),
+                    }),
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            second
+                .revoke_identity("https://id.example", "alice")
+                .await
+                .unwrap(),
+            2
+        );
+        assert!(first.load_session(key("one")).await.is_none());
+        assert!(first.load_session(key("two")).await.is_none());
+        assert!(first.load_session(key("other")).await.is_some());
+        for name in ["one", "two"] {
+            let path = first
+                .state
+                .as_ref()
+                .unwrap()
+                .path("git-tokens", &key(&format!("git-{name}")));
+            assert!(matches!(
+                store.get_with_etag_bounded(&path, 8192).await,
+                Err(StorageError::NotFound { .. })
+            ));
+        }
+        assert_eq!(
+            second
+                .revoke_identity("https://id.example", "alice")
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_sessions_self_heal_and_revocation_migration_has_a_durable_cutoff() {
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let auth = shared_auth(store.clone());
+        let state = auth.state.as_ref().unwrap();
+        state.migration_active().await.unwrap();
+        let record = StoredSession {
+            identity: Identity {
+                issuer: "https://id.example".into(),
+                subject: "alice".into(),
+                name: "Alice".into(),
+            },
+            csrf: "csrf".into(),
+            expires_at: now_epoch().unwrap() + 600,
+            git_tokens: vec![],
+        };
+        for name in ["heal", "legacy"] {
+            store
+                .create_strict(
+                    &state.path("sessions", &key(name)),
+                    Bytes::from(serde_json::to_vec(&record).unwrap()),
+                )
+                .await
+                .unwrap();
+        }
+        assert!(auth.load_session(key("heal")).await.is_some());
+        assert_eq!(
+            auth.revoke_identity("https://id.example", "alice")
+                .await
+                .unwrap(),
+            2
+        );
+        let now = now_epoch().unwrap();
+        let migration = IdentityIndexMigration {
+            started_at: now - SESSION_LIFETIME.as_secs(),
+            complete_after: now,
+        };
+        store
+            .put_overwrite(
+                &ObjectPath::from("root/.crab/http-server/v1/identity-index-migration.json"),
+                Bytes::from(serde_json::to_vec(&migration).unwrap()),
+            )
+            .await
+            .unwrap();
+        store
+            .create_strict(
+                &state.path("sessions", &key("late-legacy")),
+                Bytes::from(serde_json::to_vec(&record).unwrap()),
+            )
+            .await
+            .unwrap();
+        assert!(auth.load_session(key("late-legacy")).await.is_none());
+        assert_eq!(
+            auth.revoke_identity("https://id.example", "alice")
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_session_creation_removes_its_marker_and_stale_markers_are_collected() {
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let auth = shared_auth(store.clone());
+        let state = auth.state.as_ref().unwrap();
+        let session = Arc::new(Session {
+            identity: Identity {
+                issuer: "https://id.example".into(),
+                subject: "alice".into(),
+                name: "Alice".into(),
+            },
+            csrf: "csrf".into(),
+            expires_at: now_epoch().unwrap() + 600,
+            session_key: key("duplicate"),
+            revoked: AtomicBool::new(false),
+        });
+        let record = StoredSession {
+            identity: session.identity.clone(),
+            csrf: session.csrf.clone(),
+            expires_at: session.expires_at,
+            git_tokens: vec![],
+        };
+        store
+            .create_strict(
+                &state.path("sessions", &session.session_key),
+                Bytes::from(serde_json::to_vec(&record).unwrap()),
+            )
+            .await
+            .unwrap();
+        assert!(auth.store_session(Arc::clone(&session)).await.is_err());
+        let marker_path = state.identity_session_path(
+            &session.identity.issuer,
+            &session.identity.subject,
+            &session.session_key,
+        );
+        assert!(matches!(
+            store.get_with_etag_bounded(&marker_path, 8192).await,
+            Err(StorageError::NotFound { .. })
+        ));
+        store
+            .delete(&state.path("sessions", &session.session_key))
+            .await
+            .unwrap();
+        auth.store_session(Arc::clone(&session)).await.unwrap();
+        store
+            .delete(&state.path("sessions", &session.session_key))
+            .await
+            .unwrap();
+        auth.revoke_identity(&session.identity.issuer, &session.identity.subject)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.get_with_etag_bounded(&marker_path, 8192).await,
+            Err(StorageError::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn token_attachment_racing_revocation_cannot_leave_a_usable_credential() {
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let auth = shared_auth(store.clone());
+        for index in 0..8 {
+            let session = Arc::new(Session {
+                identity: Identity {
+                    issuer: "https://id.example".into(),
+                    subject: "alice".into(),
+                    name: "Alice".into(),
+                },
+                csrf: "csrf".into(),
+                expires_at: now_epoch().unwrap() + 600,
+                session_key: key(&format!("race-{index}")),
+                revoked: AtomicBool::new(false),
+            });
+            auth.store_session(Arc::clone(&session)).await.unwrap();
+            let token_key = key(&format!("race-token-{index}"));
+            let token = Arc::new(GitToken {
+                session: Arc::clone(&session),
+                owner: "team".into(),
+                repository: "private".into(),
+                access: RepositoryAccess::Read,
+                revoked: AtomicBool::new(false),
+            });
+            let (_, removed) = tokio::join!(
+                auth.store_git_token(token_key, token),
+                auth.remove_session(session.session_key)
+            );
+            removed.unwrap();
+            assert!(auth.load_git_token(token_key).await.is_none());
+            assert!(matches!(
+                store
+                    .get_with_etag_bounded(
+                        &auth.state.as_ref().unwrap().path("git-tokens", &token_key),
+                        8192
+                    )
+                    .await,
+                Err(StorageError::NotFound { .. })
+            ));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session_creation_racing_logout_never_leaves_an_unindexed_parent() {
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let auth = shared_auth(store.clone());
+        let state = auth.state.as_ref().unwrap();
+        for index in 0..16 {
+            let session = Arc::new(Session {
+                identity: Identity {
+                    issuer: "https://id.example".into(),
+                    subject: "alice".into(),
+                    name: "Alice".into(),
+                },
+                csrf: "csrf".into(),
+                expires_at: now_epoch().unwrap() + 600,
+                session_key: key(&format!("login-race-{index}")),
+                revoked: AtomicBool::new(false),
+            });
+            let (_created, _revoked) = tokio::join!(
+                auth.store_session(Arc::clone(&session)),
+                auth.revoke_identity("https://id.example", "alice")
+            );
+            let parent = state
+                .store
+                .get_with_etag_bounded(&state.path("sessions", &session.session_key), 64 * 1024)
+                .await;
+            if parent.is_ok() {
+                let marker_path = state.identity_session_path(
+                    "https://id.example",
+                    "alice",
+                    &session.session_key,
+                );
+                let (body, _) = store
+                    .get_with_etag_bounded(&marker_path, 8192)
+                    .await
+                    .unwrap();
+                let marker: IdentitySessionMarker = serde_json::from_slice(&body).unwrap();
+                assert_eq!(marker.session_key, session.session_key);
+            }
+            auth.remove_session(session.session_key).await.unwrap();
+        }
     }
 }
