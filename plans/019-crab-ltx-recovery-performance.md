@@ -735,12 +735,22 @@ pinned Celld runner. Crab's end-to-end median was 1.83x faster for 32 × 1 KiB,
 were 2.10x, 1.90x, and 1.69x respectively. Every round retained one invariant
 segment/TXID/size tuple and passed row-count plus SQLite integrity checks.
 
+Those numbers use one durability barrier after the complete workload. They
+measure grouped throughput and batch completion latency, not independently
+durable acknowledgement latency for each capture. In the corresponding
+15-round synchronous matrix, where every Crab capture also synced its parent
+directory, Crab's median total was 194 ms versus Celld's 99 ms, 717 ms versus
+396 ms, and 2,964 ms versus 1,504 ms. The default path was therefore about
+1.8x–2.0x slower; its stronger directory-durability contract was unchanged by
+the grouped optimization.
+
 This satisfies the grouped capture end-to-end target without changing the
-synchronous default. It does not satisfy the original recovery-only gate:
-Crab's explicit plan and compacted-output verification still make the recovery
-subtotal slower than Celld's less strict measured path. The plan therefore
-remains in progress rather than converting the end-to-end capture win into a
-recovery claim.
+synchronous default. It does not establish that Crab is generally faster than
+Celld, and it does not satisfy the original recovery-only gate: Crab's explicit
+plan and compacted-output verification still make the recovery subtotal slower
+than Celld's less strict measured path. The plan therefore remains in progress
+rather than converting the grouped-throughput win into a general performance
+claim.
 
 ## Maintenance notes
 

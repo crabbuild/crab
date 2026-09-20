@@ -109,6 +109,12 @@ Celld path fsyncs the file but uses a plain rename without a parent-directory
 sync. Do not treat the capture-only gap as a portable performance win without
 making that durability choice explicit.
 
+The grouped Crab mode measures batch completion: all captures remain
+unacknowledged until the final file-and-directory barrier succeeds. It is a
+throughput comparison, not a measurement of independently durable
+per-transaction acknowledgement latency. Compare Crab's default `capture()`
+path when every capture must cross its own durability boundary.
+
 ## Scope
 
 This is a local mechanics benchmark, not a claim about the complete durability
@@ -117,6 +123,12 @@ authority/owner-head CAS, acknowledgement ordering, retention, scheduled
 multi-level compaction, or either implementation's paged VFS. Those paths have
 different contracts and need a second harness with the same object-store and
 authority model before they can be compared fairly.
+
+The runners also use the implementations' pinned bundled SQLite versions:
+Crab currently links SQLite 3.49.1 while the pinned Celld revision links SQLite
+3.45.0. `workload_write_us` and therefore `total_us` include that difference;
+use the capture and recovery subtotals when attributing work specifically to
+the LTX implementations.
 
 Run each workload matrix on the same machine, filesystem, SQLite page size,
 build profile, and power state. Use the median as a compact summary, but retain
