@@ -5,9 +5,9 @@ use std::{
     time::Duration,
 };
 
-use crab_cell_runtime::CellStorageLayout;
 use crab_cell_app::{ApplicationBuilder, CellApplication, CellType, CompiledApplication};
 use crab_cell_host::CellNodeBuilder;
+use crab_cell_runtime::CellStorageLayout;
 use crab_cell_runtime::{
     ApplicationId, ApplicationIdentity, ApplicationIdentityStore, BackupPin, BackupPinStore,
     BackupRestore, BuildDescriptor, CatalogRole, CellAuthority, CellCatalog, CellGarbageCollector,

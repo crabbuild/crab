@@ -5,9 +5,9 @@ use crab_cell_runtime::{
     ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome, ApplicationId,
     BlobCondition, BlobModule, BlobMutation, BlobMutationOutcome, BlobQuery, BlobQueryResult,
     BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellClient, CellHandle, CellModule,
-    CellRuntime, CellTarget, CronModule, CronMutation, CronQueryResult, CronTarget, Digest,
-    EffectClaimRequest, EffectLeaseOutcome, EffectModule, Error, IncarnationId, KvAtomicRequest,
-    KvModule, KvMutation, MaintenanceModule, ModuleDescriptor, MutationIdentity,
+    CellRuntime, CellStorageLayout, CellTarget, CronModule, CronMutation, CronQueryResult,
+    CronTarget, Digest, EffectClaimRequest, EffectLeaseOutcome, EffectModule, Error, IncarnationId,
+    KvAtomicRequest, KvModule, KvMutation, MaintenanceModule, ModuleDescriptor, MutationIdentity,
     NamespaceDescriptor, NamespaceId, OperationDescriptor, Owner, QualificationExecution,
     QualificationOperation, QualificationOperationExecutor, QualificationProfile,
     QualificationWorkload, QueueClaimRequest, QueueDeadLetterTarget, QueueLeaseOutcome,
@@ -20,7 +20,7 @@ use crab_cell_runtime::{
     register_queue, register_sql, register_workflow, register_workflow_activities,
 };
 use crab_ltx::{CellReplica, Limits};
-use crab_storage::{CellStorageLayout, Store};
+use crab_storage::Store;
 use object_store::memory::InMemory;
 
 const SQL_NAMESPACE: NamespaceId = NamespaceId::from_bytes([1; 16]);

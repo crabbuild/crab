@@ -1,8 +1,8 @@
 use std::{path::Path, sync::Arc};
 
-use crab_cell_runtime::CellStorageLayout;
 use crab_cell_app::CompiledApplication;
 use crab_cell_host::CellNodeBuilder;
+use crab_cell_runtime::CellStorageLayout;
 use crab_cell_runtime::{
     ApplicationIdentity, CatalogEntry, CatalogProof, CatalogRole, CellAuthority, CellCatalog,
     CellHandle, CellModule, CellReplica, CellTarget, ControlState, IncarnationId, Owner, Registry,
