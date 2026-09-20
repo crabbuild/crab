@@ -646,6 +646,18 @@ result: Crab won medium and large recovery plus grouped total latency, while
 Celld still won small recovery. The plan remains `IN PROGRESS`; it does not
 claim that Crab is universally faster.
 
+The next small-path probe found a fixed durability cost in
+`DirectFileSystem::persist_file_new`: the same-directory no-clobber install
+hard-linked the synced scratch file, synced the directory, unlinked the scratch
+name, and synced the same directory again. Link creation and unlink now precede
+one shared parent-directory barrier. Success still proves both the destination
+name and scratch cleanup durable; a barrier error remains explicitly ambiguous.
+In a 12-pair overloaded-host A/B, median compact time fell by about 1.6 ms and
+the paired recovery delta improved by about 2.4 ms. A subsequent 15-pair direct
+small-workload run put Crab's recovery median below pinned Celld's, but host
+load and tail variance were high, so this remains directional rather than a
+release-performance claim.
+
 ## Test plan
 
 - `crates/crab-ltx/perf/crab/src/main.rs`

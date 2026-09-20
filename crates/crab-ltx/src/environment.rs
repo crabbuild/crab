@@ -1751,7 +1751,9 @@ impl FileSystem for DirectFileSystem {
             ));
         }
         std::fs::hard_link(source, destination)?;
-        self.sync_parent(destination)?;
+        // Both names share one directory, so one barrier after link + unlink
+        // makes the no-clobber install and scratch cleanup durable together.
+        // A barrier error is ambiguous because the destination may now exist.
         std::fs::remove_file(source)?;
         self.sync_parent(destination)
     }
