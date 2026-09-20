@@ -1282,7 +1282,7 @@ fn operation_from_state(index: u64, state: u64, cells: u64) -> QualificationOper
         nonce: state,
         retry_hint: state & 0x1f == 0,
         rejection_hint: state & 0x3ff == 0,
-        ambiguous_hint: state & 0x3ff != 0 && state & 0x7ff == 0,
+        ambiguous_hint: state & 0x7ff == 0x200,
     }
 }
 
@@ -2519,6 +2519,31 @@ mod tests {
         workload.primitives[0].acknowledged = u64::MAX;
         workload.primitives[0].rejected = u64::MAX;
         assert!(workload.encode().is_err());
+    }
+
+    #[test]
+    fn qualification_schedule_reaches_each_outcome_hint() {
+        let profile = QualificationProfile::new("hint-run".into(), 1, 8, 1, 1_000).unwrap();
+        let workload =
+            QualificationWorkload::generate_with_size(&profile, 41, 1, 2_048, 1).unwrap();
+        let operations = workload.iter_operations().collect::<Vec<_>>();
+        assert!(operations.iter().any(|operation| operation.retry_hint()));
+        assert!(
+            operations
+                .iter()
+                .any(|operation| operation.rejection_hint())
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|operation| operation.ambiguous_hint())
+        );
+        assert!(
+            operations
+                .iter()
+                .filter(|operation| operation.ambiguous_hint())
+                .all(|operation| !operation.rejection_hint())
+        );
     }
 
     struct ContractExecutor {

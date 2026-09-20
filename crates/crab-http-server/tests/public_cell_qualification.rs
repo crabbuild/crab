@@ -57,6 +57,20 @@ impl QualificationOperationExecutor for PublicHostQualificationExecutor {
         Box::pin(async move {
             let mutation_index = operation.index().saturating_mul(100);
             let mutation = identity(mutation_index, now_ms);
+            if operation.rejection_hint() {
+                let wrong_target = CellTarget::new(
+                    tenant,
+                    application,
+                    fixture::KV_NAMESPACE,
+                    &partition_for_shard(0),
+                )?;
+                if handle.sql::<fixture::ReferenceSql>(wrong_target).is_ok() {
+                    return Err(Error::Control(
+                        "public qualification rejection was accepted",
+                    ));
+                }
+                return Ok(QualificationExecution::rejected());
+            }
             match operation.primitive() {
                 "sql" => {
                     let target = CellTarget::new(
@@ -376,7 +390,12 @@ impl QualificationOperationExecutor for PublicHostQualificationExecutor {
                 }
             }
             tokio::time::sleep(Duration::from_millis(80)).await;
-            Ok(QualificationExecution::acknowledged(true))
+            if operation.ambiguous_hint() {
+                Ok(QualificationExecution::ambiguous(1))
+            } else {
+                Ok(QualificationExecution::acknowledged(true)
+                    .with_retries(u64::from(operation.retry_hint())))
+            }
         })
     }
 }
@@ -528,7 +547,7 @@ async fn public_cell_node_runs_typed_primitive_workload() {
     )
     .expect("current epoch fits mutation identity");
     let profile = QualificationProfile::pr_contract();
-    let workload = QualificationWorkload::generate_with_size(&profile, 91, 1, 16, 1)
+    let workload = QualificationWorkload::generate_with_size(&profile, 41, 1, 64, 1)
         .expect("qualification workload");
     let mut executor = PublicHostQualificationExecutor {
         handle: typed.clone(),
@@ -537,10 +556,22 @@ async fn public_cell_node_runs_typed_primitive_workload() {
         now_ms,
     };
     let summary = workload.run(&mut executor).await.expect("typed workload");
-    assert_eq!(summary.operations(), 16);
+    assert_eq!(summary.operations(), 64);
     assert!(summary.primitive_counts().iter().all(|counts| {
         counts.attempted() > 0 && counts.acknowledged() > 0 && counts.verified() > 0
     }));
+    assert!(
+        summary
+            .primitive_counts()
+            .iter()
+            .any(|counts| counts.retried() > 0)
+    );
+    assert!(
+        summary
+            .primitive_counts()
+            .iter()
+            .any(|counts| counts.rejected() > 0)
+    );
     let artifact = summary.artifact(&workload).expect("run artifact");
     artifact
         .verify_for_profile(&profile)
