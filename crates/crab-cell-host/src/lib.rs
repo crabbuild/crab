@@ -262,13 +262,13 @@ impl CellNode {
             .facilities
             .lock()
             .map_err(|_| Error::Control("CellNode facility lock poisoned"))?;
+        if !matches!(self.state(), NodeState::Starting | NodeState::Ready) {
+            return Err(Error::CellDraining);
+        }
         if facilities.len() >= MAX_NODE_FACILITIES {
             return Err(Error::Capacity("CellNode facility limit reached"));
         }
-        match self.state() {
-            NodeState::Starting | NodeState::Ready => facilities.push(facility),
-            NodeState::Draining | NodeState::Stopped => return Err(Error::CellDraining),
-        }
+        facilities.push(facility);
         Ok(())
     }
 
@@ -571,5 +571,29 @@ mod tests {
         assert!(completed.load(Ordering::Acquire));
         assert!(node.is_shutting_down());
         assert_eq!(node.state(), NodeState::Draining);
+    }
+
+    #[tokio::test]
+    async fn facility_registration_is_bounded_and_rejected_after_drain() {
+        let node = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([18; 16]))
+            .build()
+            .unwrap();
+        assert!(CellNodeFacility::new("", || async { Ok(()) }).is_err());
+        for _ in 0..MAX_NODE_FACILITIES {
+            node.install_facility(CellNodeFacility::new("facility", || async { Ok(()) }).unwrap())
+                .unwrap();
+        }
+        assert!(matches!(
+            node.install_facility(CellNodeFacility::new("overflow", || async { Ok(()) }).unwrap()),
+            Err(Error::Capacity(_))
+        ));
+        node.shutdown().await.unwrap();
+        assert!(matches!(
+            node.install_facility(CellNodeFacility::new("late", || async { Ok(()) }).unwrap()),
+            Err(Error::CellDraining)
+        ));
     }
 }
