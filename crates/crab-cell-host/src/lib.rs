@@ -99,6 +99,11 @@ impl Drop for CellNodeTaskGroup {
 }
 
 impl CellNodeTaskGroup {
+    fn cancel(&self) {
+        self.cancellation.cancel();
+        self.node_shutdown.cancel();
+    }
+
     /// Creates a task group whose cancellation tokens are controlled by the product host.
     #[must_use]
     pub fn new(cancellation: CancellationToken, node_shutdown: CancellationToken) -> Self {
@@ -137,8 +142,7 @@ impl CellNodeTaskGroup {
 
     /// Cancels admission and joins tasks until an optional absolute deadline.
     pub async fn drain_until(&self, deadline: Option<Instant>) -> FacilityResult {
-        self.cancellation.cancel();
-        self.node_shutdown.cancel();
+        self.cancel();
         let tasks = match self.tasks.lock() {
             Ok(mut tasks) => std::mem::take(&mut *tasks),
             Err(poisoned) => {
@@ -610,6 +614,11 @@ impl CellNode {
             }
             *state = NodeState::Draining;
         }
+        let task_group = self
+            .task_group
+            .lock()
+            .map(|task_group| task_group.clone())
+            .map_err(|_| Error::Control("CellNode task group lock poisoned"));
         let facilities = self
             .facilities
             .lock()
@@ -622,8 +631,14 @@ impl CellNode {
             })
             .map_err(|_| Error::Control("CellNode facility lock poisoned"));
         let mut first_error = None;
-        match facilities {
+        match task_group {
             Err(error) => first_error = Some(error),
+            Ok(Some(task_group)) => task_group.cancel(),
+            Ok(None) => {}
+        }
+        match facilities {
+            Err(error) if first_error.is_none() => first_error = Some(error),
+            Err(_) => {}
             Ok(facilities) => {
                 for (name, drain) in facilities {
                     let result = match deadline {
@@ -1012,6 +1027,40 @@ mod tests {
         assert!(cancellation.is_cancelled());
         assert!(node_shutdown.is_cancelled());
         assert!(finished.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn node_cancels_admission_before_draining_provider_facilities() {
+        let node = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([27; 16]))
+            .build()
+            .unwrap();
+        let cancellation = CancellationToken::new();
+        node.install_task_group(cancellation.clone(), CancellationToken::new())
+            .unwrap();
+        let observed = Arc::new(AtomicBool::new(false));
+        let facility_observed = Arc::clone(&observed);
+        node.install_facility(
+            CellNodeFacility::new("provider", move || {
+                let cancellation = cancellation.clone();
+                let facility_observed = facility_observed.clone();
+                async move {
+                    cancellation.cancelled().await;
+                    facility_observed.store(true, Ordering::Release);
+                    Ok(())
+                }
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        node.shutdown_until(Instant::now() + std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        assert!(observed.load(Ordering::Acquire));
     }
 
     #[tokio::test]
