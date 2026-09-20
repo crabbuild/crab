@@ -742,6 +742,21 @@ struct CellTaskFacility {
     tasks: SyncMutex<Vec<JoinHandle<FacilityResult>>>,
 }
 
+struct TaskBatch {
+    tasks: Vec<JoinHandle<FacilityResult>>,
+    abort_on_drop: bool,
+}
+
+impl Drop for TaskBatch {
+    fn drop(&mut self) {
+        if self.abort_on_drop {
+            for task in &self.tasks {
+                task.abort();
+            }
+        }
+    }
+}
+
 impl CellTaskFacility {
     fn new(cancellation: CancellationToken, node_shutdown: CancellationToken) -> Self {
         Self {
@@ -777,9 +792,15 @@ impl CellTaskFacility {
                 Box::new(io::Error::other("Cell task facility lock poisoned"))
                     as Box<dyn std::error::Error + Send + Sync>
             })?;
+        let mut tasks = TaskBatch {
+            tasks,
+            abort_on_drop: true,
+        };
         let mut first_error = None;
-        for task in tasks {
-            match task.await {
+        while let Some(index) = tasks.tasks.len().checked_sub(1) {
+            let result = (&mut tasks.tasks[index]).await;
+            tasks.tasks.pop();
+            match result {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) if first_error.is_none() => first_error = Some(error),
                 Ok(Err(_)) => {}
@@ -789,6 +810,7 @@ impl CellTaskFacility {
                 Err(_) => {}
             }
         }
+        tasks.abort_on_drop = false;
         first_error.map_or(Ok(()), Err)
     }
 }
