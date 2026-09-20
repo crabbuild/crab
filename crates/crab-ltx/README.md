@@ -61,7 +61,7 @@ lineage and the exact compatibility boundary.
 
 For reproducible local capture, compaction, and restore measurements against
 the pinned Celld implementation, see the
-[comparison harness](perf/compare/README.md).
+[performance harness](perf/README.md).
 
 ## Lifecycle
 

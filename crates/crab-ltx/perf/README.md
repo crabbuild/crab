@@ -7,7 +7,7 @@ uses `rusqlite` 0.31, and Cargo cannot link two `libsqlite3-sys` versions in
 one process. Each runner is therefore its own package and emits JSON.
 
 The Celld runner is pinned to the revision documented in
-[`UPSTREAM.md`](../../UPSTREAM.md):
+[`UPSTREAM.md`](../UPSTREAM.md):
 
 `10cb1303dac710dcb3b557e318e08c855261f68b`
 
@@ -18,7 +18,7 @@ default. It stores build output under the mounted workspace volume when
 `CARGO_TARGET_DIR` is not supplied.
 
 ```bash
-crates/crab-ltx/perf/compare/run.sh
+crates/crab-ltx/perf/run.sh
 ```
 
 Override the workload without editing the harness:
@@ -28,7 +28,7 @@ LTX_TRANSACTIONS=512 \
 LTX_PAYLOAD_BYTES=16384 \
 LTX_ROUNDS=7 \
 LTX_WARMUP=2 \
-crates/crab-ltx/perf/compare/run.sh
+crates/crab-ltx/perf/run.sh
 ```
 
 The binaries also run directly when a single side is useful:
@@ -36,7 +36,7 @@ The binaries also run directly when a single side is useful:
 ```bash
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-ltx-perf" \
   cargo run --release \
-  --manifest-path crates/crab-ltx/perf/compare/crab/Cargo.toml -- \
+  --manifest-path crates/crab-ltx/perf/crab/Cargo.toml -- \
   --transactions 128 --payload-bytes 4096 --rounds 5 --warmup 1
 ```
 
