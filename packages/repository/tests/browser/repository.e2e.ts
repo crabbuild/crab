@@ -1141,9 +1141,11 @@ test("code palette persists and follows light and dark appearance", async ({
   const highlighted = page.locator(".markdown-code-block");
   await expect(highlighted).toContainText('const project: string = "Crab";');
 
-  await page
-    .getByRole("combobox", { name: "Code theme" })
-    .selectOption("vscode");
+  await page.getByRole("button", { name: "Code theme: GitHub" }).click();
+  await page.getByRole("menuitemradio", { name: /^VS Code/ }).click();
+  await expect(
+    page.getByRole("button", { name: "Code theme: VS Code" }),
+  ).toBeVisible();
   await expect(page.locator("html")).toHaveAttribute(
     "data-code-theme",
     "vscode",
@@ -1166,9 +1168,9 @@ test("code palette persists and follows light and dark appearance", async ({
   await expect.poll(codeColors).not.toEqual(lightColors);
 
   await page.reload();
-  await expect(page.getByRole("combobox", { name: "Code theme" })).toHaveValue(
-    "vscode",
-  );
+  await expect(
+    page.getByRole("button", { name: "Code theme: VS Code" }),
+  ).toBeVisible();
   await expect(page.locator("html")).toHaveAttribute(
     "data-code-theme",
     "vscode",

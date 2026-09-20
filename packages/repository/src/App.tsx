@@ -155,6 +155,16 @@ export function App() {
       }),
     );
   }, [codeTheme]);
+  const selectCodeTheme = (next: CodeTheme) => {
+    void import("@pierre/diffs")
+      .then(({ preloadHighlighter }) =>
+        preloadHighlighter({
+          themes: codeThemeNamesFor(next),
+          langs: ["text"],
+        }),
+      )
+      .then(() => setCodeTheme(next));
+  };
   const resolved = theme === "auto" ? (systemDark ? "dark" : "light") : theme;
   useLayoutEffect(() => {
     const root = document.documentElement;
@@ -259,7 +269,7 @@ export function App() {
             theme={theme}
             setTheme={setTheme}
             codeTheme={codeTheme}
-            setCodeTheme={setCodeTheme}
+            setCodeTheme={selectCodeTheme}
           />
         </header>
         <main id="main" tabIndex={-1}>
