@@ -53,7 +53,7 @@ pub(crate) struct PeerReceiver {
     session: SessionId,
     directory: NodeDirectory,
     registry: Arc<Registry>,
-    releases: ReleaseStore,
+    releases: Arc<ReleaseStore>,
     resolver: LocalCellResolver,
     round_trip: Arc<dyn PeerRoundTrip>,
 }
@@ -64,7 +64,7 @@ impl PeerReceiver {
         session: SessionId,
         directory: NodeDirectory,
         registry: Arc<Registry>,
-        releases: ReleaseStore,
+        releases: Arc<ReleaseStore>,
         resolver: LocalCellResolver,
         round_trip: Arc<dyn PeerRoundTrip>,
     ) -> Self {

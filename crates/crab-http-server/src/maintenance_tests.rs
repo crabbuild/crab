@@ -269,7 +269,7 @@ fn enable_catalog_readiness(server: &mut Arc<Server>) {
             registry.release_digest(),
         ),
         registry,
-        releases,
+        Arc::new(releases),
         resolver,
         Arc::new(UnavailableRoundTrip),
     ));

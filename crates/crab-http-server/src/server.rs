@@ -80,6 +80,8 @@ const CELL_COMPONENT_NODE_LOG_TRANSPORT: &str = "node-log-transport";
 const CELL_COMPONENT_NODE_PUBLISHER: &str = "node-publisher";
 const CELL_COMPONENT_CATALOG: &str = "repository-catalog";
 const CELL_COMPONENT_SCHEDULER_STATUS: &str = "scheduler-status";
+const CELL_COMPONENT_RELEASE_STORE: &str = "release-store";
+const CELL_COMPONENT_CAPACITY: &str = "capacity-report";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CellRuntimeBudget {
@@ -361,7 +363,7 @@ fn release_admits_process(
 }
 
 async fn watch_release(
-    releases: ReleaseStore,
+    releases: Arc<ReleaseStore>,
     compiled: Digest,
     cancellation: CancellationToken,
 ) -> Result<()> {
@@ -743,7 +745,8 @@ pub(crate) struct Server {
     pub(crate) node_healthy: AtomicBool,
     #[cfg(test)]
     pub(crate) scheduler_status: crate::cells::SchedulerStatus,
-    cell_capacity: CellCapacityReport,
+    #[cfg(test)]
+    pub(crate) cell_capacity: CellCapacityReport,
     pub(crate) metrics: crate::metrics::Metrics,
 }
 
@@ -857,6 +860,21 @@ impl Server {
                 #[cfg(test)]
                 {
                     Some(self.scheduler_status.clone())
+                }
+                #[cfg(not(test))]
+                {
+                    None
+                }
+            })
+    }
+
+    fn cell_capacity(&self) -> Option<CellCapacityReport> {
+        self.node_component::<CellCapacityReport>(CELL_COMPONENT_CAPACITY)
+            .map(|capacity| capacity.as_ref().clone())
+            .or({
+                #[cfg(test)]
+                {
+                    Some(self.cell_capacity.clone())
                 }
                 #[cfg(not(test))]
                 {
@@ -1085,13 +1103,13 @@ pub async fn serve(config: Config) -> Result<()> {
         crate::cells::repository_replica_limits(),
         local_disk.clone(),
     )?);
-    let release_store = ReleaseStore::new(startup.layout.clone(), startup.identity)?;
+    let release_store = Arc::new(ReleaseStore::new(startup.layout.clone(), startup.identity)?);
     let peer_receiver = crate::peer::PeerReceiver::new(
         node,
         session,
         directory.clone(),
         Arc::clone(&registry),
-        release_store.clone(),
+        Arc::clone(&release_store),
         cell_resolver,
         Arc::clone(&peer_round_trip),
     );
@@ -1151,6 +1169,8 @@ pub async fn serve(config: Config) -> Result<()> {
         CELL_COMPONENT_SCHEDULER_STATUS,
         Arc::new(scheduler_status.clone()),
     )?;
+    cell_node.install_owned_component(CELL_COMPONENT_RELEASE_STORE, Arc::clone(&release_store))?;
+    cell_node.install_owned_component(CELL_COMPONENT_CAPACITY, Arc::new(cell_capacity.clone()))?;
     let durability_application = startup.identity.application();
     let server = Arc::new(Server {
         repositories: repositories.into(),
@@ -1189,6 +1209,7 @@ pub async fn serve(config: Config) -> Result<()> {
         node_healthy: AtomicBool::new(false),
         #[cfg(test)]
         scheduler_status,
+        #[cfg(test)]
         cell_capacity,
         metrics,
     });
@@ -1973,9 +1994,12 @@ async fn application_peer_admission(
 }
 
 async fn render_capacity(State(server): State<Arc<Server>>) -> Response {
+    let Some(capacity) = server.cell_capacity() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
     (
         [(axum::http::header::CACHE_CONTROL, "no-store")],
-        Json(server.cell_capacity.clone()),
+        Json(capacity),
     )
         .into_response()
 }

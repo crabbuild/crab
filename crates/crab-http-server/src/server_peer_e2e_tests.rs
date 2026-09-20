@@ -250,7 +250,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             owner_session,
             directory.clone(),
             Arc::clone(&registry),
-            crab_cell_runtime::ReleaseStore::new(cell_layout.clone(), identity).unwrap(),
+            Arc::new(crab_cell_runtime::ReleaseStore::new(cell_layout.clone(), identity).unwrap()),
             LocalCellResolver::new(cell_layout.clone(), identity, owner_runtime.clone()),
             Arc::new(UnavailablePeer),
         )),

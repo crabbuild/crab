@@ -171,6 +171,7 @@ fn later_production_code() {}
             "cell_runtime",
             "catalog",
             "scheduler_status",
+            "cell_capacity",
             "repository_cells",
             "peer_receiver",
             "follower_store",
