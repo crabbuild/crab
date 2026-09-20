@@ -59,7 +59,8 @@ impl CellNodeFacility {
         })
     }
 
-    fn owned<T, F, Fut>(
+    /// Creates one named node-owned component with an idempotent drain callback.
+    pub fn owned<T, F, Fut>(
         name: &'static str,
         owner: Arc<T>,
         drain: F,
@@ -653,6 +654,24 @@ impl CellNode {
 
     /// Attaches one provider-owned lifecycle component before node shutdown.
     pub fn install_facility(&self, facility: CellNodeFacility) -> crab_cell_runtime::Result<()> {
+        self.install_facilities(std::iter::once(facility))
+    }
+
+    /// Atomically attaches a bounded batch of provider-owned facilities.
+    ///
+    /// All names and capacity are validated before any facility is retained, so
+    /// a failed composition cannot leave the node with a partial owner set.
+    pub fn install_facilities(
+        &self,
+        facilities: impl IntoIterator<Item = CellNodeFacility>,
+    ) -> crab_cell_runtime::Result<()> {
+        let mut additions = Vec::new();
+        for facility in facilities {
+            if additions.len() >= MAX_NODE_FACILITIES {
+                return Err(Error::Capacity("CellNode facility limit reached"));
+            }
+            additions.push(facility);
+        }
         let state = self
             .state
             .lock()
@@ -664,16 +683,20 @@ impl CellNode {
             .facilities
             .lock()
             .map_err(|_| Error::Control("CellNode facility lock poisoned"))?;
-        if facilities.len() >= MAX_NODE_FACILITIES {
+        if facilities.len().saturating_add(additions.len()) > MAX_NODE_FACILITIES {
             return Err(Error::Capacity("CellNode facility limit reached"));
         }
-        if facilities
+        let mut names = facilities
             .iter()
-            .any(|existing| existing.name == facility.name)
+            .map(|facility| facility.name)
+            .collect::<HashSet<_>>();
+        if additions
+            .iter()
+            .any(|facility| !names.insert(facility.name))
         {
             return Err(Error::Control("CellNode facility name already installed"));
         }
-        facilities.push(facility);
+        facilities.extend(additions);
         Ok(())
     }
 
@@ -1262,6 +1285,26 @@ mod tests {
         );
         node.shutdown().await.unwrap();
         assert!(weak.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn facility_batch_installation_is_atomic_on_name_conflict() {
+        let node = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([30; 16]))
+            .build()
+            .unwrap();
+        node.install_owned_component("existing", Arc::new(1_u64))
+            .unwrap();
+        let first = CellNodeFacility::owned("first", Arc::new(2_u64), || async { Ok(()) }).unwrap();
+        let duplicate =
+            CellNodeFacility::owned("existing", Arc::new(3_u64), || async { Ok(()) }).unwrap();
+
+        assert!(node.install_facilities([first, duplicate]).is_err());
+        assert!(node.owned_component::<u64>("first").is_none());
+        assert_eq!(node.owned_component::<u64>("existing").as_deref(), Some(&1));
+        node.shutdown().await.unwrap();
     }
 
     #[tokio::test]

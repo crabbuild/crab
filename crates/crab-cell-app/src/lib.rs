@@ -260,6 +260,26 @@ impl CompiledApplication {
     pub fn cell_types(&self) -> &[CellType] {
         &self.cell_types
     }
+
+    fn validate_module(&self, namespace: NamespaceId, module: &'static str) -> Result<()> {
+        let Some(cell_type) = self
+            .cell_types
+            .iter()
+            .find(|cell_type| cell_type.namespace == namespace)
+        else {
+            return Err(Error::Registry("namespace is not declared by application"));
+        };
+        let Some((registered_module, _)) = self.registry.namespace_contract(namespace) else {
+            return Err(Error::Registry("namespace contract is missing"));
+        };
+        if registered_module != module {
+            return Err(Error::Registry("namespace module differs from capability"));
+        }
+        if cell_type.module != module {
+            return Err(Error::Registry("Cell type module differs from capability"));
+        }
+        Ok(())
+    }
 }
 
 /// Trait implemented by a statically linked application root.
@@ -328,7 +348,7 @@ impl<A> ApplicationHandle<A> {
         identity: crab_cell_runtime::MutationIdentity,
         input: C::Input,
     ) -> std::result::Result<Committed<C::Output>, InvocationError<C::Output>> {
-        if let Err(error) = self.validate_target(target) {
+        if let Err(error) = self.validate_target_module(target, C::MODULE) {
             return Err(InvocationError::NotStarted(error));
         }
         self.client.command::<C>(target, identity, input).await
@@ -341,7 +361,7 @@ impl<A> ApplicationHandle<A> {
         minimum: Option<crab_cell_runtime::Receipt>,
         input: Q::Input,
     ) -> std::result::Result<Observed<Q::Output>, InvocationError<Q::Output>> {
-        if let Err(error) = self.validate_target(target) {
+        if let Err(error) = self.validate_target_module(target, Q::MODULE) {
             return Err(InvocationError::NotStarted(error));
         }
         self.client.query::<Q>(target, minimum, input).await
@@ -402,7 +422,8 @@ impl<A> ApplicationHandle<A> {
     /// ledger. The destination still owns external idempotency.
     pub fn effects<M: EffectModule>(&self, target: CellTarget) -> Result<EffectSource<M>> {
         self.validate_target(&target)?;
-        self.validate_module(target.namespace(), M::MODULE)?;
+        self.compiled
+            .validate_module(target.namespace(), M::MODULE)?;
         self.client.effect_source::<M>(target)
     }
 
@@ -411,6 +432,11 @@ impl<A> ApplicationHandle<A> {
             return Err(Error::Identity("Cell target is outside application scope"));
         }
         Ok(())
+    }
+
+    fn validate_target_module(&self, target: &CellTarget, module: &'static str) -> Result<()> {
+        self.validate_target(target)?;
+        self.compiled.validate_module(target.namespace(), module)
     }
 
     fn validate_namespace(
@@ -430,34 +456,12 @@ impl<A> ApplicationHandle<A> {
         if cell_type.role != role {
             return Err(Error::Registry("namespace role differs from capability"));
         }
-        self.validate_module(namespace, module)?;
+        self.compiled.validate_module(namespace, module)?;
         let Some((_, contract)) = self.compiled.registry.namespace_contract(namespace) else {
             return Err(Error::Registry("namespace contract is missing"));
         };
         if contract.role != role {
             return Err(Error::Registry("namespace module differs from capability"));
-        }
-        Ok(())
-    }
-
-    fn validate_module(&self, namespace: NamespaceId, module: &'static str) -> Result<()> {
-        let Some(cell_type) = self
-            .compiled
-            .cell_types
-            .iter()
-            .find(|cell_type| cell_type.namespace == namespace)
-        else {
-            return Err(Error::Registry("namespace is not declared by application"));
-        };
-        let Some((registered_module, _)) = self.compiled.registry.namespace_contract(namespace)
-        else {
-            return Err(Error::Registry("namespace contract is missing"));
-        };
-        if registered_module != module {
-            return Err(Error::Registry("namespace module differs from capability"));
-        }
-        if cell_type.module != module {
-            return Err(Error::Registry("Cell type module differs from capability"));
         }
         Ok(())
     }
@@ -622,6 +626,28 @@ mod tests {
         assert_eq!(
             first.registry().release_digest(),
             first.registry().release_digest()
+        );
+    }
+
+    #[test]
+    fn compiled_application_rejects_cross_module_invocation_targets() {
+        let application = build(false);
+        let sql_namespace = NamespaceId::from_bytes([2; 16]);
+
+        assert!(
+            application
+                .validate_module(sql_namespace, "app-sql")
+                .is_ok()
+        );
+        assert!(
+            application
+                .validate_module(sql_namespace, "unrelated-module")
+                .is_err()
+        );
+        assert!(
+            application
+                .validate_module(NamespaceId::from_bytes([99; 16]), "app-sql")
+                .is_err()
         );
     }
 

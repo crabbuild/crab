@@ -16,7 +16,7 @@ use axum::{
     routing::{get, post},
 };
 use bytes::Bytes;
-use crab_cell_host::{CellNode, CellNodeBuilder, FOLLOWER_STORE_COMPONENT};
+use crab_cell_host::{CellNode, CellNodeBuilder, CellNodeFacility, FOLLOWER_STORE_COMPONENT};
 use crab_cell_runtime::{
     ACTIVE_CELL_FILE_DESCRIPTORS, ACTIVE_CELL_NATIVE_BYTES, ACTIVE_CELL_PAGE_CACHE_BYTES,
     ApplicationIdentityStore, CellRuntime, Digest, NodeDirectory, Owner, PeerRoundTrip, PeerSigner,
@@ -1158,27 +1158,48 @@ pub async fn serve(config: Config) -> Result<()> {
     .with_node(node)
     .with_node_recovery_disk(local_disk.clone())
     .with_metrics(metrics.clone());
-    cell_node.install_owned_component(
-        CELL_COMPONENT_REPOSITORY_ROUTER,
-        Arc::new(repository_cells.clone()),
-    )?;
-    cell_node.install_owned_component(
-        CELL_COMPONENT_PEER_RECEIVER,
-        Arc::new(peer_receiver.clone()),
-    )?;
-    cell_node.install_owned_component(
-        CELL_COMPONENT_NODE_LOG_TRANSPORT,
-        Arc::new(node_log_transport.clone()),
-    )?;
-    cell_node
-        .install_owned_component(CELL_COMPONENT_NODE_PUBLISHER, Arc::clone(&node_publisher))?;
-    cell_node.install_owned_component(CELL_COMPONENT_CATALOG, Arc::new(catalog.clone()))?;
-    cell_node.install_owned_component(
-        CELL_COMPONENT_SCHEDULER_STATUS,
-        Arc::new(scheduler_status.clone()),
-    )?;
-    cell_node.install_owned_component(CELL_COMPONENT_RELEASE_STORE, Arc::clone(&release_store))?;
-    cell_node.install_owned_component(CELL_COMPONENT_CAPACITY, Arc::new(cell_capacity.clone()))?;
+    cell_node.install_facilities([
+        CellNodeFacility::owned(
+            CELL_COMPONENT_REPOSITORY_ROUTER,
+            Arc::new(repository_cells.clone()),
+            || async { Ok(()) },
+        )?,
+        CellNodeFacility::owned(
+            CELL_COMPONENT_PEER_RECEIVER,
+            Arc::new(peer_receiver.clone()),
+            || async { Ok(()) },
+        )?,
+        CellNodeFacility::owned(
+            CELL_COMPONENT_NODE_LOG_TRANSPORT,
+            Arc::new(node_log_transport.clone()),
+            || async { Ok(()) },
+        )?,
+        CellNodeFacility::owned(
+            CELL_COMPONENT_NODE_PUBLISHER,
+            Arc::clone(&node_publisher),
+            || async { Ok(()) },
+        )?,
+        CellNodeFacility::owned(
+            CELL_COMPONENT_CATALOG,
+            Arc::new(catalog.clone()),
+            || async { Ok(()) },
+        )?,
+        CellNodeFacility::owned(
+            CELL_COMPONENT_SCHEDULER_STATUS,
+            Arc::new(scheduler_status.clone()),
+            || async { Ok(()) },
+        )?,
+        CellNodeFacility::owned(
+            CELL_COMPONENT_RELEASE_STORE,
+            Arc::clone(&release_store),
+            || async { Ok(()) },
+        )?,
+        CellNodeFacility::owned(
+            CELL_COMPONENT_CAPACITY,
+            Arc::new(cell_capacity.clone()),
+            || async { Ok(()) },
+        )?,
+    ])?;
     let durability_application = startup.identity.application();
     let server = Arc::new(Server {
         repositories: repositories.into(),

@@ -7,13 +7,14 @@ use crab_cell_runtime::{
     BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellClient, CellHandle, CellModule,
     CellRuntime, CellStorageLayout, CellTarget, CronModule, CronMutation, CronQueryResult,
     CronTarget, Digest, EffectClaimRequest, EffectLeaseOutcome, EffectModule, Error,
-    FencedNodeSession, IncarnationId, KvAtomicRequest, KvModule, KvMutation, MaintenanceModule,
-    ModuleDescriptor, MutationIdentity, NamespaceDescriptor, NamespaceId, NodeAdvertisement,
-    NodeCapacity, NodeDirectory, NodeFailureDomain, NodeId, OperationDescriptor, Owner,
-    QualificationExecution, QualificationOperation, QualificationOperationExecutor,
-    QualificationProfile, QualificationWorkload, QueueClaimRequest, QueueDeadLetterTarget,
-    QueueLeaseOutcome, QueueModule, QueueSendRequest, Registry, RegistryBuilder, RequestId, Result,
-    SqlBatch, SqlModule, SqlStatement, SqlValue, SqlWorkerPool, TenantId, WorkflowAction,
+    FencedNodeSession, IncarnationId, InvocationError, KvAtomicCommand, KvAtomicRequest,
+    KvGetQuery, KvGetRequest, KvModule, KvMutation, MaintenanceModule, ModuleDescriptor,
+    MutationIdentity, NamespaceDescriptor, NamespaceId, NodeAdvertisement, NodeCapacity,
+    NodeDirectory, NodeFailureDomain, NodeId, OperationDescriptor, Owner, QualificationExecution,
+    QualificationOperation, QualificationOperationExecutor, QualificationProfile,
+    QualificationWorkload, QueueClaimRequest, QueueDeadLetterTarget, QueueLeaseOutcome,
+    QueueModule, QueueSendRequest, Registry, RegistryBuilder, RequestId, Result, SqlBatch,
+    SqlModule, SqlStatement, SqlValue, SqlWorkerPool, TenantId, WorkflowAction,
     WorkflowActivityModule, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowModule,
     WorkflowStatus, install_blob_schema, install_cron_schema, install_kv_schema,
     install_queue_schema, install_workflow_schema, partition_for_shard, register_activity,
@@ -1156,6 +1157,39 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
         &partition_for_shard(0),
     )
     .unwrap();
+    let wrong_command = typed
+        .command::<KvAtomicCommand<ReferenceKv>>(
+            &sql_target,
+            reference_identity(49, now_ms),
+            KvAtomicRequest {
+                scope: b"wrong-module".to_vec(),
+                checks: Vec::new(),
+                mutations: Vec::new(),
+            },
+        )
+        .await;
+    assert!(matches!(
+        wrong_command,
+        Err(InvocationError::NotStarted(Error::Registry(
+            "namespace module differs from capability"
+        )))
+    ));
+    let wrong_query = typed
+        .query::<KvGetQuery<ReferenceKv>>(
+            &sql_target,
+            None,
+            KvGetRequest {
+                scope: b"wrong-module".to_vec(),
+                key: b"key".to_vec(),
+            },
+        )
+        .await;
+    assert!(matches!(
+        wrong_query,
+        Err(InvocationError::NotStarted(Error::Registry(
+            "namespace module differs from capability"
+        )))
+    ));
     assert!(typed.sql::<ReferenceSql>(queue_target).is_err());
     assert!(typed.kv::<ReferenceKv>(SQL_NAMESPACE).is_err());
     assert!(
