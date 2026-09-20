@@ -8,7 +8,7 @@ use std::sync::{
 use bytes::Bytes;
 use crab_ltx::{
     CaptureBatch, CaptureTiming, CellReplica, DiskBudget, Host, Limits, ManagedDb, RecoveryOverlay,
-    RootRef, VerifiedLocalPlan,
+    RootRef, VerifiedPlan,
     bundle::{Bundle, BundleEntry},
     restore_exact,
 };
@@ -112,7 +112,7 @@ async fn prepared_root_reopens_without_a_mutable_head() {
         .chain(&second.segments)
         .cloned()
         .collect::<Vec<_>>();
-    let plan = VerifiedLocalPlan::new(&segments, second.position, Limits::default()).unwrap();
+    let plan = VerifiedPlan::new(&segments, second.position, Limits::default()).unwrap();
     restore_exact(&plan, &expected_path).unwrap();
     let expected = std::fs::read(expected_path).unwrap();
     writer.close().unwrap();

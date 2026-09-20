@@ -48,7 +48,7 @@ implementations, and the official
 | Remote state | `ReplicaClient` lists LTX levels and selects ranges for restore | `CellReplica` opens an exact `RootRef`; it never discovers truth by listing objects |
 | Durability boundary | A successful replica sync advances Litestream's replica position | Uploaded immutable objects are only a proposal; the host must publish the root with Cell authority before acknowledging |
 | Storage providers | Litestream owns its CLI/config provider integrations | The host supplies an existing `crab-storage` `Store` and `CellStorageLayout` |
-| Restore selection | Latest, TXID, or timestamp is resolved from replica LTX files | The caller supplies a verified local plan or an authority-pinned Cell root |
+| Restore selection | Latest, TXID, or timestamp is resolved from replica LTX files | The caller supplies a verified plan or an authority-pinned Cell root |
 | Retention | Built-in snapshot and LTX retention monitors | Remote pinning, retention, and garbage collection are host policy |
 | Format | Uses `superfly/ltx` v0.5.2 | Writes checksum-bearing LTX v3 files using the v0.5.2 sized-block layout and reads that layout plus older checksummed LZ4-frame files |
 
@@ -94,7 +94,7 @@ The following example is compiled as a Rust doc test. Both destination
 directories exist, and the restored database path does not.
 
 ```rust,no_run
-use crab_ltx::{Limits, ManagedDb, VerifiedLocalPlan, restore_exact};
+use crab_ltx::{Limits, ManagedDb, VerifiedPlan, restore_exact};
 
 fn main() -> crab_ltx::Result<()> {
     let source = tempfile::tempdir()?;
@@ -116,7 +116,7 @@ fn main() -> crab_ltx::Result<()> {
     })?;
 
     let captured = database.capture()?;
-    let plan = VerifiedLocalPlan::new(
+    let plan = VerifiedPlan::new(
         &captured.segments,
         captured.position,
         limits,
@@ -131,7 +131,7 @@ fn main() -> crab_ltx::Result<()> {
 ```
 
 `LocalSegment::new` only describes a selected file and its expected metadata.
-It is not trusted until `VerifiedLocalPlan::new` has read the bytes, checked the
+It is not trusted until `VerifiedPlan::new` has read the bytes, checked the
 BLAKE3 digest and LTX structure, verified the complete checksum-linked chain,
 and reconstructed the requested endpoint.
 
@@ -195,7 +195,7 @@ bucket.
 | `ManagedDb::capture` | Returns every new ordered cut plus its exact TXID/checksum endpoint |
 | `ManagedDb::checkpoint` | Captures a barrier, runs the selected SQLite checkpoint, and returns every generated cut |
 | `ManagedDb::snapshot` | Returns an independent full snapshot plus any pending captured cuts |
-| `VerifiedLocalPlan::new` | Owns and verifies the complete selected snapshot-plus-delta chain |
+| `VerifiedPlan::new` | Owns and verifies the complete selected snapshot-plus-delta chain |
 | `restore_exact` | Installs a fresh database at exactly the verified endpoint; never overwrites |
 | `compact_exact` | Produces a verified full snapshot without deleting its inputs |
 | `ManagedDb::resume` | Restores a verified plan into a fresh session and continues its TXID/checksum lineage |
@@ -218,7 +218,7 @@ bucket.
 
 `crab-ltx` fails closed around state selection and reconstruction:
 
-- The first local plan segment must be a full snapshot. Later segments must be
+- The first plan segment must be a full snapshot. Later segments must be
   contiguous, checksum-linked, ordered, and consistent in page size.
 - Every segment's declared size, BLAKE3 digest, LTX checksum, page ordering,
   page coverage, and pre/post database checksum is verified.

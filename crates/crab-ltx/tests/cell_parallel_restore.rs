@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use crab_ltx::{
     CaptureBatch, CaptureTiming, CellReplica, Host, Limits, LtxPhase, LtxReadOrigin,
-    LtxRequestOutcome, LtxTelemetry, ManagedDb, RootRef, VerifiedLocalPlan, restore_exact,
+    LtxRequestOutcome, LtxTelemetry, ManagedDb, RootRef, VerifiedPlan, restore_exact,
 };
 use crab_storage::{CellStorageLayout, Store};
 use futures_util::{StreamExt as _, stream::BoxStream};
@@ -307,7 +307,7 @@ async fn fixture(extra_segments: usize) -> Fixture {
     };
 
     let expected_path = directory.path().join("expected.sqlite");
-    let plan = VerifiedLocalPlan::new(&batch.segments, batch.position, Limits::default()).unwrap();
+    let plan = VerifiedPlan::new(&batch.segments, batch.position, Limits::default()).unwrap();
     restore_exact(&plan, &expected_path).unwrap();
     let expected = std::fs::read(expected_path).unwrap();
 

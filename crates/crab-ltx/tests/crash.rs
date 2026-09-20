@@ -1,4 +1,4 @@
-use crab_ltx::{Limits, LocalSegment, ManagedDb, SegmentInfo, VerifiedLocalPlan, restore_exact};
+use crab_ltx::{Limits, LocalSegment, ManagedDb, SegmentInfo, VerifiedPlan, restore_exact};
 use std::io::{BufRead, Read, Write};
 use std::process::{Command, Stdio};
 
@@ -102,7 +102,7 @@ fn captured_sql_survives_process_kill_and_source_directory_loss() {
     std::fs::copy(source.path().join("captured.ltx"), &path).unwrap();
     source.close().unwrap();
     let position = info.position();
-    let plan = VerifiedLocalPlan::new(
+    let plan = VerifiedPlan::new(
         &[LocalSegment::new(path, info)],
         position,
         Limits::default(),

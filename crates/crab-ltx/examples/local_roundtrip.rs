@@ -1,4 +1,4 @@
-use crab_ltx::{Limits, LocalSegment, ManagedDb, VerifiedLocalPlan, restore_exact};
+use crab_ltx::{Limits, LocalSegment, ManagedDb, VerifiedPlan, restore_exact};
 
 fn main() -> crab_ltx::Result<()> {
     let source = tempfile::tempdir()?;
@@ -31,7 +31,7 @@ fn main() -> crab_ltx::Result<()> {
     }
     db.close()?;
     source.close()?;
-    let plan = VerifiedLocalPlan::new(&files, batch.position, limits)?;
+    let plan = VerifiedPlan::new(&files, batch.position, limits)?;
     let path = restored.path().join("repository.sqlite");
     restore_exact(&plan, &path)?;
     let conn = crab_ltx::rusqlite::Connection::open(path)?;

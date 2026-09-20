@@ -20,13 +20,13 @@ pub(crate) fn full_job_scratch_bytes(page_size: u32, database_pages: u32) -> Res
 /// Construction reads only named files and owns their bytes, preventing later
 /// path replacement from changing the plan. A remote manifest's authenticity,
 /// repository identity, epoch, and object selection remain the caller's job.
-pub struct VerifiedLocalPlan {
+pub struct VerifiedPlan {
     pub(crate) inputs: Vec<Vec<u8>>,
     position: Position,
     limits: Limits,
 }
 
-impl VerifiedLocalPlan {
+impl VerifiedPlan {
     /// Verifies expected sizes/digests, headers, page ordering, checksums, and continuity.
     ///
     /// The first file must be a full snapshot. Subsequent files must start at
@@ -155,7 +155,7 @@ pub(crate) fn verify_segment(bytes: &[u8], info: &SegmentInfo, limits: Limits) -
 ///
 /// Never overwrites a destination; no WAL, local database, or bucket listing is
 /// consulted. Caller must prevent concurrent use of the destination and sidecars.
-pub fn restore_exact(plan: &VerifiedLocalPlan, destination: &Path) -> Result<Position> {
+pub fn restore_exact(plan: &VerifiedPlan, destination: &Path) -> Result<Position> {
     crate::Host::default().restore(plan, destination)
 }
 
@@ -163,11 +163,11 @@ pub fn restore_exact(plan: &VerifiedLocalPlan, destination: &Path) -> Result<Pos
 ///
 /// Output is checked against the original target before installation. Input
 /// deletion, remote publication, retention, and partial-range compaction are not performed.
-pub fn compact_exact(plan: &VerifiedLocalPlan, destination: &Path) -> Result<LocalSegment> {
+pub fn compact_exact(plan: &VerifiedPlan, destination: &Path) -> Result<LocalSegment> {
     crate::Host::default().compact(plan, destination)
 }
 
-pub(crate) fn compact_bytes(plan: &VerifiedLocalPlan) -> Result<(Vec<u8>, SegmentInfo)> {
+pub(crate) fn compact_bytes(plan: &VerifiedPlan) -> Result<(Vec<u8>, SegmentInfo)> {
     let infos = plan
         .inputs
         .iter()
@@ -176,7 +176,7 @@ pub(crate) fn compact_bytes(plan: &VerifiedLocalPlan) -> Result<(Vec<u8>, Segmen
     compact_inputs(&plan.inputs, &infos, plan.limits)
 }
 
-pub(crate) fn continuation(plan: &VerifiedLocalPlan) -> Result<(PageChecksums, u32, u32)> {
+pub(crate) fn continuation(plan: &VerifiedPlan) -> Result<(PageChecksums, u32, u32)> {
     let image = plan.image()?;
     let header = ltx::Header::parse(&plan.inputs[0])?;
     let page_size = header.page_size;
