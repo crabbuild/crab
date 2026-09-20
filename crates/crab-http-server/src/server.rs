@@ -78,6 +78,7 @@ const CELL_COMPONENT_PEER_RECEIVER: &str = "peer-receiver";
 const CELL_COMPONENT_FOLLOWER_STORE: &str = "follower-store";
 const CELL_COMPONENT_NODE_LOG_TRANSPORT: &str = "node-log-transport";
 const CELL_COMPONENT_NODE_PUBLISHER: &str = "node-publisher";
+const CELL_COMPONENT_CATALOG: &str = "repository-catalog";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CellRuntimeBudget {
@@ -735,6 +736,7 @@ pub(crate) struct Server {
     pub receives: tokio_util::task::TaskTracker,
     pub auth: Option<Authentication>,
     pub(crate) git_import: Option<git_import::ImportContext>,
+    #[cfg(test)]
     pub(crate) catalog: Option<CatalogStore>,
     catalog_healthy: AtomicBool,
     pub(crate) node_healthy: AtomicBool,
@@ -829,6 +831,21 @@ impl Server {
                 None
             }
         })
+    }
+
+    fn catalog(&self) -> Option<CatalogStore> {
+        self.node_component::<CatalogStore>(CELL_COMPONENT_CATALOG)
+            .map(|catalog| catalog.as_ref().clone())
+            .or_else(|| {
+                #[cfg(test)]
+                {
+                    self.catalog.clone()
+                }
+                #[cfg(not(test))]
+                {
+                    None
+                }
+            })
     }
 
     pub(crate) fn accepts_application_peers(&self) -> bool {
@@ -1112,6 +1129,7 @@ pub async fn serve(config: Config) -> Result<()> {
     )?;
     cell_node
         .install_owned_component(CELL_COMPONENT_NODE_PUBLISHER, Arc::clone(&node_publisher))?;
+    cell_node.install_owned_component(CELL_COMPONENT_CATALOG, Arc::new(catalog.clone()))?;
     let durability_application = startup.identity.application();
     let server = Arc::new(Server {
         repositories: repositories.into(),
@@ -1144,7 +1162,8 @@ pub async fn serve(config: Config) -> Result<()> {
             config.clone(),
             public_address,
         )),
-        catalog: Some(catalog.clone()),
+        #[cfg(test)]
+        catalog: None,
         catalog_healthy: AtomicBool::new(true),
         node_healthy: AtomicBool::new(false),
         scheduler_status,
@@ -1591,7 +1610,7 @@ pub(crate) async fn materialize_catalog(
 }
 
 async fn refresh_catalog(server: Arc<Server>, mut version: u64) {
-    let Some(catalog) = server.catalog.clone() else {
+    let Some(catalog) = server.catalog() else {
         return;
     };
     loop {
@@ -2011,7 +2030,7 @@ async fn check_readiness(server: &Server) -> Result<()> {
     if server.cell_runtime()?.is_shutting_down() {
         return Err(crate::Error::Config("embedded Cell runtime is draining"));
     }
-    if server.catalog.is_some() && server.peer_receiver().is_none() {
+    if server.catalog().is_some() && server.peer_receiver().is_none() {
         return Err(crate::Error::Config("Cell peer receiver is unavailable"));
     }
     if !server.accepts_application_peers() {
@@ -2027,8 +2046,7 @@ async fn check_readiness(server: &Server) -> Result<()> {
         return Err(crate::Error::Config("catalog refresh is unhealthy"));
     }
     let catalog = server
-        .catalog
-        .as_ref()
+        .catalog()
         .ok_or(crate::Error::Config("catalog is unavailable"))?;
     catalog.load().await?;
     for repository in server.repositories.values() {

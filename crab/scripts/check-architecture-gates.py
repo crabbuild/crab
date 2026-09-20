@@ -1804,6 +1804,7 @@ CELL_RUNTIME_SERVER_CONSTRUCTOR_PATTERNS = (
 CELL_RUNTIME_SERVER_COMPONENT_FIELDS = frozenset(
     {
         "cell_runtime",
+        "catalog",
         "repository_cells",
         "peer_receiver",
         "follower_store",

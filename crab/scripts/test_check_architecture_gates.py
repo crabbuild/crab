@@ -169,6 +169,7 @@ fn later_production_code() {}
     def test_production_server_component_fields_are_rejected(self):
         for field in (
             "cell_runtime",
+            "catalog",
             "repository_cells",
             "peer_receiver",
             "follower_store",
