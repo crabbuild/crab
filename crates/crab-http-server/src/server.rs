@@ -77,6 +77,7 @@ const CELL_COMPONENT_REPOSITORY_ROUTER: &str = "repository-cell-router";
 const CELL_COMPONENT_PEER_RECEIVER: &str = "peer-receiver";
 const CELL_COMPONENT_FOLLOWER_STORE: &str = "follower-store";
 const CELL_COMPONENT_NODE_LOG_TRANSPORT: &str = "node-log-transport";
+const CELL_COMPONENT_NODE_PUBLISHER: &str = "node-publisher";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CellRuntimeBudget {
@@ -1091,6 +1092,8 @@ pub async fn serve(config: Config) -> Result<()> {
         CELL_COMPONENT_NODE_LOG_TRANSPORT,
         Arc::new(node_log_transport.clone()),
     )?;
+    cell_node
+        .install_owned_component(CELL_COMPONENT_NODE_PUBLISHER, Arc::clone(&node_publisher))?;
     let durability_application = startup.identity.application();
     let server = Arc::new(Server {
         repositories: repositories.into(),
