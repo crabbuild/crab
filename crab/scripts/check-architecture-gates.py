@@ -1800,7 +1800,6 @@ RETIRED_STANDALONE_LTX_SOURCE_PATHS = (
 )
 RETIRED_STANDALONE_LTX_FILENAMES = frozenset(
     {
-        "replica.rs",
         "schedule.rs",
         "paged_vfs.rs",
         "replica_roundtrip.rs",
@@ -1813,7 +1812,6 @@ RETIRED_STANDALONE_LTX_FILENAMES = frozenset(
     }
 )
 RETIRED_STANDALONE_LTX_PATHS = (
-    "crates/crab-ltx/src/replica",
     "crates/crab-ltx/src/paged/map.rs",
 )
 RETIRED_STANDALONE_LTX_SYMBOLS = re.compile(
