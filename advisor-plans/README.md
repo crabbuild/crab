@@ -578,11 +578,12 @@ Current boundary: 018–021 are implemented and verified. 022–023 now provide 
 handwritten full-primitive author contract plus fail-closed serving/maintenance
 host `start`/`status`, readiness, bounded ownership of the long-lived server
 coordination loops and the production router/peer/follower/transport
-components, and deadline-aware drain, and 024 provides deterministic
-streaming execution, measured run artifacts, preflight guards, pinned-signer
-validation, and fail-closed release packaging. These rows remain partial until
-full operator-facility ownership and protected provider/Kubernetes/scale
-receipts exist.
+components, admission-before-facility-drain ordering, and deadline-aware drain.
+024 provides bounded profile constructors, deterministic streaming execution,
+per-primitive verified-progress validation, measured run artifacts, preflight
+guards, pinned-signer validation, and fail-closed release packaging. These rows
+remain partial until full operator-facility ownership and protected
+provider/Kubernetes/scale receipts exist.
 
 ### Shared release rule
 
