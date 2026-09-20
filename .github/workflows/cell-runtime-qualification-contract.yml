@@ -6,6 +6,9 @@ on:
       - "crates/crab-cell-runtime/**"
       - "crates/crab-ltx/**"
       - "crab/scripts/check-architecture-gates.py"
+      - "crates/crab-http-server/tests/qualify_compose_cluster.sh"
+      - ".github/workflows/http-server-container.yml"
+      - ".github/workflows/http-server-release.yml"
       - ".github/workflows/cell-runtime-qualification-contract.yml"
   push:
     branches: [main]
@@ -13,6 +16,9 @@ on:
       - "crates/crab-cell-runtime/**"
       - "crates/crab-ltx/**"
       - "crab/scripts/check-architecture-gates.py"
+      - "crates/crab-http-server/tests/qualify_compose_cluster.sh"
+      - ".github/workflows/http-server-container.yml"
+      - ".github/workflows/http-server-release.yml"
       - ".github/workflows/cell-runtime-qualification-contract.yml"
 
 jobs:
@@ -47,6 +53,25 @@ jobs:
             .github/workflows/http-server-container.yml | sort -u)"
           test -n "$harness_version"
           test "$gate_versions" = "$harness_version"
+      - name: Keep release qualification bound to the promoted image
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'image_ref:' .github/workflows/http-server-container.yml
+          grep -F 'image_digest:' .github/workflows/http-server-container.yml
+          grep -F 'docker pull "$INPUT_IMAGE_REF"' .github/workflows/http-server-container.yml
+          grep -F 'needs.candidate.outputs.image_ref' \
+            .github/workflows/http-server-release.yml
+          grep -F 'needs.candidate.outputs.image_digest' \
+            .github/workflows/http-server-release.yml
+          grep -F 'needs: [prepare, candidate]' .github/workflows/http-server-release.yml
+          grep -F 'docker buildx imagetools create' .github/workflows/http-server-release.yml
+          grep -F 'test "$(cat "$evidence_dir/image-digest")" = "$IMAGE_DIGEST"' \
+            .github/workflows/http-server-release.yml
+          if grep -F 'Build and publish the image' .github/workflows/http-server-release.yml; then
+            echo "release workflow must not rebuild after qualification" >&2
+            exit 1
+          fi
       - name: Verify receipt, placement, pressure, and resource contracts
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target

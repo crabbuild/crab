@@ -16,7 +16,7 @@ Verdict: executable after the named prerequisites; not production-qualified yet
 | Immutable pin/load | `recovery_manifest.rs`, `crab-ltx/src/bundle.rs`, `replica.rs` | File-backed bundles exist, but the canonical multipart publisher is not callable across the crate boundary. |
 | Takeover routing | `crates/crab-http-server/src/cells/router.rs` | Authority remains correct; locality is not an explicit production input. |
 | Artifact lifetime | scheduler/router/server/local disk | Pin and load construct different stores/budgets; a shared cache would otherwise never hit reliably. |
-| Qualification | Compose, container, release workflows | Strong local correctness proof; no exact published-image execution proof. |
+| Qualification | Compose, container, release workflows | Strong local correctness proof; release workflow now qualifies a run-scoped immutable candidate and promotes that digest without rebuilding; protected execution remains outstanding. |
 
 ## High-confidence findings and resolutions
 
@@ -51,9 +51,9 @@ Verdict: executable after the named prerequisites; not production-qualified yet
 9. **Raw receipt validation was duplicated shell policy.** Plan 018 assigns one
    typed `validate-cluster` command and requires every producer/consumer to use
    it.
-10. **Published-image evidence was relabeled, not executed.** Plan 023 builds an
-    immutable candidate first, qualifies that digest, binds OCI index/platform/
-    config identities, then promotes the same manifest without rebuilding.
+10. **Published-image evidence was relabeled, not executed.** The release chain
+    now builds an immutable candidate first, qualifies that digest, records it
+    beside the raw receipt, then promotes the same manifest without rebuilding.
 
 ## Required execution order
 
@@ -91,8 +91,9 @@ developed after 018 in parallel, but its protected run gates release.
 
 - Plans 010, 012, 013, and 015 are still marked IN PROGRESS. Their named API or
   qualification slices must be complete before dependent work starts.
-- No runtime implementation from plans 018-023 exists yet; this audit changes
-  plans only.
+- Plans 018-022 are implemented on the current branch with local unit and
+  three-node RustFS evidence. Plan 023's candidate-first workflow is
+  implemented, but it still needs one protected registry-backed release run.
 - No numeric production RTO SLO is justified until phase receipts exist. The
   protocol bounds are two seconds before pre-claim nonmember fallback and the
   existing 30-second wait after a claimant dies.

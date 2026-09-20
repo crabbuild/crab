@@ -1,6 +1,6 @@
 # Qualify and promote the exact published server image
 
-Status: PROPOSED
+Status: IMPLEMENTED — protected release run pending
 Priority: P0 release gate
 Effort: L
 Risk: High
@@ -136,7 +136,11 @@ candidate digest, raw version-6 receipts, signed matrix, and promoted references
 
 ## Done criteria
 
-- [ ] Only **Files in scope** changed.
+- [x] Only **Files in scope** changed.
+- [x] The reusable qualifier accepts an immutable digest and records it beside
+      the raw cluster receipt.
+- [x] The release workflow builds a run-scoped candidate before qualification
+      and promotes that same digest without rebuilding.
 - [ ] Positive and relabeling-negative workflow/receipt fixtures pass.
 - [ ] One protected dry run qualifies a candidate and promotes that digest.
 - [ ] `git diff --name-only c86dd43423ae...HEAD` contains no unplanned path.

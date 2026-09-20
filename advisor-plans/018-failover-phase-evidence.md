@@ -1,6 +1,6 @@
 # Failover phase telemetry and qualification baseline
 
-Status: PROPOSED
+Status: PARTIAL — phase evidence and typed identity binding implemented; timestamp/work extensions and protected runs pending
 Priority: P0
 Effort: M
 Risk: Medium
@@ -41,7 +41,7 @@ expiry and restored data but records no recovery phase boundaries. Optimization
 cannot be ranked or regression-gated from that evidence.
 
 The deployment guide also says follower proof/recovery/placement are disabled,
-while the implementation and version-5 Compose receipt exercise them. That
+while the implementation and version-6 Compose receipt exercise them. That
 stale operator contract must be corrected before hardening claims are added.
 
 Current timing ownership in `crates/crab-http-server/src/cells/scheduler.rs` is

@@ -13,6 +13,7 @@ mod backup;
 mod blob;
 mod catalog;
 mod client;
+mod cluster_qualification;
 mod codec;
 mod control;
 mod coordination;
@@ -74,6 +75,7 @@ pub use client::{
     CellClient, CellDescription, CellStateStream, Committed, InvocationError, Observed,
     PendingMutation, Receipt, StateStreamCancellation, command_operation_digest,
 };
+pub use cluster_qualification::validate_cluster_receipt;
 pub use codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 pub use control::{Control, ControlState, Owner, RecoveryOverlayRef, RootRef, Transition};
 pub use crab_ltx::{

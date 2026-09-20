@@ -7,7 +7,7 @@ use std::{
 
 use crab_cell_runtime::{
     Digest, QualificationMatrixManifest, QualificationMetric, QualificationOwnership,
-    QualificationReceipt, QualificationRunner,
+    QualificationReceipt, QualificationRunner, validate_cluster_receipt,
 };
 use ed25519_dalek::SigningKey;
 use rand::Rng;
@@ -99,8 +99,23 @@ fn run() -> Result<(), String> {
                 .map_err(|error| error.to_string())
         }
         Some("verify-matrix") => verify_matrix(&mut args),
+        Some("validate-cluster") => validate_cluster(&mut args),
         _ => Err(usage()),
     }
+}
+
+fn validate_cluster(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
+    let receipt_path = required(args, "cluster receipt")?;
+    let source = required(args, "source revision")?;
+    let image = parse_digest(&required(args, "image digest")?)?;
+    let mode = args.next().unwrap_or_else(|| "source-only".into());
+    if args.next().is_some() || !matches!(mode.as_str(), "release" | "source-only") {
+        return Err(usage());
+    }
+    let receipt =
+        fs::read(receipt_path).map_err(|error| format!("read cluster receipt: {error}"))?;
+    validate_cluster_receipt(&receipt, &source, image, mode == "release")
+        .map_err(|error| error.to_string())
 }
 
 fn verify_matrix(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
@@ -218,7 +233,7 @@ fn unix_millis() -> Result<u64, String> {
 }
 
 fn usage() -> String {
-    "usage: qualification_receipt emit <output> <source> <image-digest> <artifact> [provider workload fault]\n       qualification_receipt verify <receipt> <source> <image-digest> <artifact>\n       qualification_receipt verify-matrix <manifest> <source> <image-digest>".into()
+    "usage: qualification_receipt emit <output> <source> <image-digest> <artifact> [provider workload fault]\n       qualification_receipt verify <receipt> <source> <image-digest> <artifact>\n       qualification_receipt verify-matrix <manifest> <source> <image-digest>\n       qualification_receipt validate-cluster <receipt> <source> <image-digest> [release|source-only]".into()
 }
 
 #[cfg(test)]

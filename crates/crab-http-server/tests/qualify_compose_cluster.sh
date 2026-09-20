@@ -4,6 +4,7 @@ set +x
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 crate_dir="$(cd "${script_dir}/.." && pwd)"
+repo_root="$(cd "${crate_dir}/../.." && pwd)"
 compose_file="${crate_dir}/deploy/compose.yaml"
 cluster_file="${crate_dir}/deploy/compose.cluster.yaml"
 project="${CRAB_HTTP_CLUSTER_PROJECT:-crab-http-cluster-qualification-$$}"
@@ -48,6 +49,15 @@ node_b_origin="http://127.0.0.1:${CRAB_HTTP_NODE_B_PORT}"
 node_c_origin="http://127.0.0.1:${CRAB_HTTP_NODE_C_PORT}"
 repository_path="api/repos/demo/hello"
 failed=false
+source_revision="$(git -C "$repo_root" rev-parse --verify HEAD)"
+qualified_image_ref="${CRAB_HTTP_QUALIFIED_IMAGE_REF:-source-only}"
+qualified_image_digest="${CRAB_HTTP_QUALIFIED_IMAGE_DIGEST:-$(docker image inspect \
+  "${CRAB_HTTP_SERVER_IMAGE:-crab-http-server:local}" --format '{{.Id}}')}"
+if [[ ! "$source_revision" =~ ^[0-9a-f]{40}$ ]] ||
+  [[ ! "$qualified_image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "qualification requires a Git source revision and image digest." >&2
+  exit 2
+fi
 
 cleanup() {
   result=$?
@@ -596,6 +606,9 @@ root_after_second_loss="$(jq --compact-output '.root' \
   <<<"$control_after_second_loss")"
 jq --null-input \
   --arg project "$project" \
+  --arg source_revision "$source_revision" \
+  --arg qualified_image_ref "$qualified_image_ref" \
+  --arg qualified_image_digest "$qualified_image_digest" \
   --arg session_before "$session_before" \
   --arg session_after "$session_after" \
   --argjson root_before "$root_before_state" \
@@ -636,7 +649,12 @@ jq --null-input \
   --argjson root_before_second_loss "$root_before_second_loss" \
   --argjson root_after_second_loss "$root_after_second_loss" \
   '{
-    version: 5,
+    version: 6,
+    source_revision: $source_revision,
+    image: {
+      reference: $qualified_image_ref,
+      digest: $qualified_image_digest
+    },
     project: $project,
     owner_loss: {
       session_before: $session_before,
