@@ -861,6 +861,11 @@ impl QualificationRunArtifact {
                 .find(|expected| expected.primitive == counts.primitive)
                 .ok_or(Error::Control("qualification run primitive identity"))?;
             if counts.attempted != expected.attempted
+                || counts.acknowledged < expected.acknowledged
+                || counts.rejected < expected.rejected
+                || counts.ambiguous < expected.ambiguous
+                || counts.retried < expected.retried
+                || counts.verified < expected.verified
                 || !valid_primitive_counts(counts)
                 || counts.verified == 0
             {
@@ -2624,6 +2629,21 @@ mod tests {
             artifact
         );
         artifact.verify_for_profile(&profile).unwrap();
+
+        let mut missing_scheduled_retry = artifact.clone();
+        let retrying = missing_scheduled_retry
+            .primitive_counts
+            .iter_mut()
+            .find(|counts| counts.retried > 0)
+            .unwrap();
+        retrying.retried -= 1;
+        missing_scheduled_retry.outcome_digest = *qualification_run_outcome_digest(
+            &missing_scheduled_retry.workload,
+            &missing_scheduled_retry.primitive_counts,
+        )
+        .unwrap()
+        .as_bytes();
+        assert!(missing_scheduled_retry.encode().is_err());
 
         let mut throughput_profile =
             QualificationProfile::new("throughput-run".into(), 1, 8, 1, 1_000).unwrap();
