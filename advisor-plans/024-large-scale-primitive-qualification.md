@@ -18,7 +18,7 @@
 - **Depends on**: plans 018–023 and plan 015 qualification infrastructure
 - **Category**: tests / performance / operations / release
 - **Planned at**: commit `892720ce6a6`, 2026-09-19
-- **Implementation status**: versioned profiles with constructor bounds, deterministic streaming workload execution, measured run artifacts that require independently verified progress for every primitive, preflight guards, pinned-signer validation, receipt-to-workload seed binding, a local typed all-primitive smoke driver, and release packaging of the verified protected evidence bundle are implemented; protected provider/Kubernetes/scale receipts remain open
+- **Implementation status**: versioned profiles with constructor bounds, deterministic streaming workload execution, measured run artifacts that require independently verified progress for every primitive and bind each primitive's attempted count to the canonical workload, preflight guards, pinned-signer validation, receipt-to-workload seed binding, a local typed all-primitive smoke driver, and release packaging of the verified protected evidence bundle are implemented; protected provider/Kubernetes/scale receipts remain open
 
 ## Why this matters
 

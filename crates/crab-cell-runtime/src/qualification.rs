@@ -689,16 +689,28 @@ impl QualificationRunArtifact {
             .iter()
             .map(QualificationPrimitiveCounts::primitive)
             .collect::<BTreeSet<_>>();
-        if actual_primitives != expected_primitives
-            || self
-                .primitive_counts
+        if actual_primitives != expected_primitives {
+            return Err(Error::Control("qualification run counters"));
+        }
+        for counts in &self.primitive_counts {
+            let expected = self
+                .workload
+                .primitives
                 .iter()
-                .any(|counts| !valid_primitive_counts(counts) || counts.verified == 0)
-            || self
-                .primitive_counts
-                .iter()
-                .try_fold(0_u64, |total, counts| total.checked_add(counts.attempted()))
-                != Some(self.operations)
+                .find(|expected| expected.primitive == counts.primitive)
+                .ok_or(Error::Control("qualification run primitive identity"))?;
+            if counts.attempted != expected.attempted
+                || !valid_primitive_counts(counts)
+                || counts.verified == 0
+            {
+                return Err(Error::Control("qualification run counters"));
+            }
+        }
+        if self
+            .primitive_counts
+            .iter()
+            .try_fold(0_u64, |total, counts| total.checked_add(counts.attempted))
+            != Some(self.operations)
         {
             return Err(Error::Control("qualification run counters"));
         }
@@ -2319,7 +2331,7 @@ mod tests {
     #[test]
     fn measured_run_artifact_binds_the_canonical_workload_and_thresholds() {
         let profile = QualificationProfile::pr_contract();
-        let workload = QualificationWorkload::generate(&profile, 19).unwrap();
+        let workload = QualificationWorkload::generate_with_size(&profile, 19, 1, 64, 1).unwrap();
         let artifact = QualificationRunArtifact {
             schema_version: QUALIFICATION_RUN_ARTIFACT_SCHEMA_VERSION,
             workload: workload.clone(),
@@ -2349,6 +2361,25 @@ mod tests {
         let mut unverified = artifact.clone();
         unverified.primitive_counts[0].verified = 0;
         assert!(unverified.encode().is_err());
+
+        let mut redistributed = artifact.clone();
+        let donor = redistributed
+            .primitive_counts
+            .iter()
+            .position(|counts| counts.acknowledged >= 2)
+            .unwrap();
+        let recipient = redistributed
+            .primitive_counts
+            .iter()
+            .position(|counts| counts.primitive != redistributed.primitive_counts[donor].primitive)
+            .unwrap();
+        redistributed.primitive_counts[donor].attempted -= 1;
+        redistributed.primitive_counts[donor].acknowledged -= 1;
+        redistributed.primitive_counts[donor].verified -= 1;
+        redistributed.primitive_counts[recipient].attempted += 1;
+        redistributed.primitive_counts[recipient].acknowledged += 1;
+        redistributed.primitive_counts[recipient].verified += 1;
+        assert!(redistributed.encode().is_err());
     }
 
     #[test]

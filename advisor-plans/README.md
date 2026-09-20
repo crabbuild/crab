@@ -582,8 +582,9 @@ ownership of the long-lived server coordination loops and the production
 router/peer/follower/transport components, required component slots,
 admission-before-facility-drain ordering, and deadline-aware drain. 024
 provides bounded profile constructors, deterministic streaming execution,
-per-primitive verified-progress validation, measured run artifacts, preflight
-guards, pinned-signer validation, and fail-closed release packaging. These rows
+per-primitive verified-progress validation with canonical attempted-count
+binding, measured run artifacts, preflight guards, pinned-signer validation,
+and fail-closed release packaging. These rows
 remain partial until full operator-facility construction ownership and
 protected provider/Kubernetes/scale receipts exist.
 
