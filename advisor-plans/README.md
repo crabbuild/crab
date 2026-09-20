@@ -550,6 +550,7 @@ infrastructure; it does not create a second receipt format or scheduler.
 | [022](022-freeze-cell-application-contract.md) | The supported author/operator API and scale envelope are executable contracts | P0 | L | 018–021 | PARTIAL |
 | [023](023-production-cell-node-host.md) | One host facade owns runtime composition and a full-primitive application path | P0 | XL | 022 | PARTIAL |
 | [024](024-large-scale-primitive-qualification.md) | Release qualification proves every primitive, mixed load, faults, and resource bounds | P0 | XL | 018–023, 015 infrastructure | PARTIAL |
+| [025](025-cell-runtime-production-readiness-execution.md) | Close host-ownership and protected qualification gates for named production profiles | P0 | XL | 022–024 | TODO |
 
 ### Execution waves
 
