@@ -8,6 +8,7 @@ use std::{
     any::Any,
     collections::HashSet,
     future::Future,
+    path::PathBuf,
     pin::Pin,
     sync::{
         Arc, Mutex,
@@ -18,14 +19,17 @@ use std::{
 
 use crab_cell_app::{ApplicationHandle, CellApplication, CompiledApplication};
 use crab_cell_runtime::{
-    ApplicationId, CellClient, CellRuntime, CellRuntimeStats, Error, ReplicaHost, SessionId,
-    SqlWorkerPool, TenantId,
+    ApplicationId, CellClient, CellRuntime, CellRuntimeStats, DiskBudget, Error, FollowerStore,
+    ReplicaHost, ReplicaLimits, SessionId, SqlWorkerPool, TenantId,
 };
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 const MAX_NODE_FACILITIES: usize = 64;
 const MAX_NODE_TASKS: usize = 256;
+
+/// Stable host-owned component name for the follower store.
+pub const FOLLOWER_STORE_COMPONENT: &str = "follower-store";
 
 /// Error returned by a provider-owned node facility during drain.
 pub type FacilityResult = std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -259,6 +263,7 @@ pub struct CellNodeBuilder {
     session: Option<SessionId>,
     node_retained_bytes: Option<usize>,
     required_components: Vec<&'static str>,
+    follower_store: Option<(PathBuf, ReplicaLimits, DiskBudget)>,
 }
 
 struct CellNodeParts {
@@ -268,6 +273,7 @@ struct CellNodeParts {
     session: SessionId,
     node_retained_bytes: usize,
     required_components: Vec<&'static str>,
+    follower_store: Option<(PathBuf, ReplicaLimits, DiskBudget)>,
 }
 
 impl CellNodeBuilder {
@@ -281,6 +287,7 @@ impl CellNodeBuilder {
             session: None,
             node_retained_bytes: None,
             required_components: Vec::new(),
+            follower_store: None,
         }
     }
 
@@ -315,6 +322,18 @@ impl CellNodeBuilder {
         Ok(self)
     }
 
+    /// Supplies the durable follower store that the node must retain.
+    #[must_use]
+    pub fn with_follower_store(
+        mut self,
+        root: PathBuf,
+        limits: ReplicaLimits,
+        disk: DiskBudget,
+    ) -> Self {
+        self.follower_store = Some((root, limits, disk));
+        self
+    }
+
     /// Validates all required inputs before starting any background runtime task.
     pub fn build(self) -> crab_cell_runtime::Result<CellNode> {
         let CellNodeParts {
@@ -324,6 +343,7 @@ impl CellNodeBuilder {
             session,
             node_retained_bytes,
             required_components,
+            follower_store,
         } = self.required_parts()?;
         let runtime = CellRuntime::new_with_replica_host_requiring_node_lease(
             pool,
@@ -331,7 +351,7 @@ impl CellNodeBuilder {
             session,
             replica_host,
         )?;
-        Ok(CellNode {
+        let node = CellNode {
             application,
             runtime,
             state: Arc::new(Mutex::new(NodeState::Starting)),
@@ -340,7 +360,9 @@ impl CellNodeBuilder {
             facilities: Arc::new(Mutex::new(Vec::new())),
             required_components: Arc::new(Mutex::new(required_components)),
             task_group: Arc::new(Mutex::new(None)),
-        })
+        };
+        node.install_follower_store(follower_store)?;
+        Ok(node)
     }
 
     /// Builds an unadvertised host for bounded offline maintenance.
@@ -355,10 +377,11 @@ impl CellNodeBuilder {
             session,
             node_retained_bytes,
             required_components,
+            follower_store,
         } = self.required_parts()?;
         let runtime =
             CellRuntime::new_with_replica_host(pool, node_retained_bytes, session, replica_host)?;
-        Ok(CellNode {
+        let node = CellNode {
             application,
             runtime,
             state: Arc::new(Mutex::new(NodeState::Starting)),
@@ -367,7 +390,9 @@ impl CellNodeBuilder {
             facilities: Arc::new(Mutex::new(Vec::new())),
             required_components: Arc::new(Mutex::new(required_components)),
             task_group: Arc::new(Mutex::new(None)),
-        })
+        };
+        node.install_follower_store(follower_store)?;
+        Ok(node)
     }
 
     fn required_parts(self) -> crab_cell_runtime::Result<CellNodeParts> {
@@ -394,6 +419,7 @@ impl CellNodeBuilder {
             session,
             node_retained_bytes,
             required_components: self.required_components,
+            follower_store: self.follower_store,
         })
     }
 }
@@ -682,6 +708,17 @@ impl CellNode {
         self.install_facility(CellNodeFacility::owned(name, component, drain)?)
     }
 
+    fn install_follower_store(
+        &self,
+        configuration: Option<(PathBuf, ReplicaLimits, DiskBudget)>,
+    ) -> crab_cell_runtime::Result<()> {
+        let Some((root, limits, disk)) = configuration else {
+            return Ok(());
+        };
+        let store = FollowerStore::open(root, limits, disk)?;
+        self.install_owned_component(FOLLOWER_STORE_COMPONENT, Arc::new(store))
+    }
+
     /// Looks up one node-owned component for a product adapter.
     #[must_use]
     pub fn owned_component<T>(&self, name: &str) -> Option<Arc<T>>
@@ -914,6 +951,27 @@ mod tests {
             Err(error) => error,
         };
         assert!(matches!(error, Error::Control(_)));
+    }
+
+    #[tokio::test]
+    async fn builder_retains_configured_follower_store_as_an_owned_component() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let node = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([3; 16]))
+            .with_follower_store(
+                data_dir.path().join("followers"),
+                ReplicaLimits::default(),
+                DiskBudget::new(1 << 20),
+            )
+            .build()
+            .unwrap();
+
+        assert!(
+            node.owned_component::<FollowerStore>(FOLLOWER_STORE_COMPONENT)
+                .is_some()
+        );
     }
 
     #[tokio::test]

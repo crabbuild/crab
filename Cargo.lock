@@ -2205,6 +2205,7 @@ version = "0.1.0"
 dependencies = [
  "crab-cell-app",
  "crab-cell-runtime",
+ "tempfile",
  "tokio",
  "tokio-util",
 ]

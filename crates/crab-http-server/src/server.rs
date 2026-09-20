@@ -16,7 +16,7 @@ use axum::{
     routing::{get, post},
 };
 use bytes::Bytes;
-use crab_cell_host::{CellNode, CellNodeBuilder};
+use crab_cell_host::{CellNode, CellNodeBuilder, FOLLOWER_STORE_COMPONENT};
 use crab_cell_runtime::{
     ACTIVE_CELL_FILE_DESCRIPTORS, ACTIVE_CELL_NATIVE_BYTES, ACTIVE_CELL_PAGE_CACHE_BYTES,
     ApplicationIdentityStore, CellRuntime, Digest, NodeDirectory, Owner, PeerRoundTrip, PeerSigner,
@@ -75,7 +75,6 @@ const PROJECTION_RETRY_BASE: Duration = Duration::from_secs(10);
 const PROJECTION_RETRY_MAX: Duration = Duration::from_secs(5 * 60);
 const CELL_COMPONENT_REPOSITORY_ROUTER: &str = "repository-cell-router";
 const CELL_COMPONENT_PEER_RECEIVER: &str = "peer-receiver";
-const CELL_COMPONENT_FOLLOWER_STORE: &str = "follower-store";
 const CELL_COMPONENT_NODE_LOG_TRANSPORT: &str = "node-log-transport";
 const CELL_COMPONENT_NODE_PUBLISHER: &str = "node-publisher";
 const CELL_COMPONENT_CATALOG: &str = "repository-catalog";
@@ -806,17 +805,16 @@ impl Server {
     }
 
     pub(crate) fn follower_store(&self) -> Option<Arc<crab_cell_runtime::FollowerStore>> {
-        self.node_component(CELL_COMPONENT_FOLLOWER_STORE)
-            .or_else(|| {
-                #[cfg(test)]
-                {
-                    self.follower_store.clone().map(Arc::new)
-                }
-                #[cfg(not(test))]
-                {
-                    None
-                }
-            })
+        self.node_component(FOLLOWER_STORE_COMPONENT).or_else(|| {
+            #[cfg(test)]
+            {
+                self.follower_store.clone().map(Arc::new)
+            }
+            #[cfg(not(test))]
+            {
+                None
+            }
+        })
     }
 
     pub(crate) fn node_log_transport(
@@ -1055,10 +1053,15 @@ pub async fn serve(config: Config) -> Result<()> {
             )
             .with_replica_host(cell_budget.replica_host(local_disk.clone(), session_dir.clone()))
             .with_session(session)
+            .with_follower_store(
+                config.cells.data_dir.clone(),
+                crate::cells::repository_replica_limits(),
+                local_disk.clone(),
+            )
             .with_required_owned_components([
                 CELL_COMPONENT_REPOSITORY_ROUTER,
                 CELL_COMPONENT_PEER_RECEIVER,
-                CELL_COMPONENT_FOLLOWER_STORE,
+                FOLLOWER_STORE_COMPONENT,
                 CELL_COMPONENT_NODE_LOG_TRANSPORT,
                 CELL_COMPONENT_NODE_PUBLISHER,
                 CELL_COMPONENT_CATALOG,
@@ -1071,11 +1074,9 @@ pub async fn serve(config: Config) -> Result<()> {
     let cell_tasks = cell_node.install_task_group(cancellation.clone(), node_shutdown.clone())?;
     cell_node.install_telemetry(Arc::new(metrics.clone()))?;
     let cell_runtime = cell_node.runtime();
-    let follower_store = crab_cell_runtime::FollowerStore::open(
-        config.cells.data_dir.clone(),
-        crate::cells::repository_replica_limits(),
-        local_disk.clone(),
-    )?;
+    let follower_store = cell_node
+        .owned_component::<crab_cell_runtime::FollowerStore>(FOLLOWER_STORE_COMPONENT)
+        .ok_or(crate::Error::Config("follower store is unavailable"))?;
     if follower_store.quarantined_entries() != 0 {
         tracing::warn!(
             entries = follower_store.quarantined_entries(),
@@ -1084,7 +1085,7 @@ pub async fn serve(config: Config) -> Result<()> {
     }
     let node_publisher = Arc::new(
         node_publisher
-            .with_follower_store(follower_store.clone())
+            .with_follower_store((*follower_store).clone())
             .with_runtime(cell_runtime.clone())
             .with_telemetry(cell_runtime.telemetry_handle())
             .with_metrics(metrics.clone()),
@@ -1164,10 +1165,6 @@ pub async fn serve(config: Config) -> Result<()> {
     cell_node.install_owned_component(
         CELL_COMPONENT_PEER_RECEIVER,
         Arc::new(peer_receiver.clone()),
-    )?;
-    cell_node.install_owned_component(
-        CELL_COMPONENT_FOLLOWER_STORE,
-        Arc::new(follower_store.clone()),
     )?;
     cell_node.install_owned_component(
         CELL_COMPONENT_NODE_LOG_TRANSPORT,
@@ -1329,7 +1326,7 @@ pub async fn serve(config: Config) -> Result<()> {
         )
         .await
     })?;
-    let follower_collection_store = follower_store;
+    let follower_collection_store = (*follower_store).clone();
     let follower_collection_directory = directory.clone();
     let follower_collection_cancellation = cancellation.clone();
     cell_tasks.spawn(async move {
