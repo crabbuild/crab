@@ -136,9 +136,11 @@ impl CellApplication for Commerce {
 }
 ```
 
-`CellApplicationBuilder::finish` produces the existing canonical runtime
-registry plus an application topology descriptor. Registration order does not
-change either digest.
+The implemented `crab-cell-app::ApplicationBuilder::finish` produces the
+existing canonical runtime registry plus an application topology descriptor.
+Registration order does not change either digest, and every namespace in the
+compiled registry must have exactly one matching `CellType` declaration;
+undeclared runtime namespaces fail closed before the descriptor is emitted.
 
 Every namespace declaration contains:
 

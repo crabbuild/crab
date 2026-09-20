@@ -17,4 +17,6 @@ The PR profile is a correctness gate. `local-provider-v1`, `fault-v1`,
 `provider-v1`, `compatibility-v1`, and `scale-v1` are release-candidate inputs
 only; they do not claim provider or Kubernetes qualification until a protected
 run records matching receipts and artifacts signed by the pinned qualification
-attestation key.
+attestation key. Profile verification also rejects those non-PR profiles when
+the receipt is local, has no measured object-store/RSS counters, or has no
+ownership watermark proof.

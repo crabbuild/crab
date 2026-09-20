@@ -140,6 +140,13 @@ impl QualificationProfile {
         self.maximum_p99_latency_ms
     }
 
+    /// Returns whether this profile represents release evidence rather than a
+    /// local contract check.
+    #[must_use]
+    pub fn requires_protected_evidence(&self) -> bool {
+        self != &Self::pr_contract()
+    }
+
     /// Encodes the canonical threshold profile.
     pub fn encode(&self) -> Result<Vec<u8>> {
         self.validate()?;
@@ -1597,6 +1604,7 @@ impl QualificationReceipt {
         if self.profile != profile.name || self.profile_digest() != profile.digest()? {
             return Err(Error::Control("qualification profile identity"));
         }
+        self.verify_execution_environment(profile)?;
         self.verify_for_artifacts(source_revision, image, artifacts)
     }
 
@@ -1893,6 +1901,23 @@ impl QualificationReceipt {
         if matching.next().is_some() || self.workload_seed != run.workload().seed() {
             return Err(Error::Control(
                 "qualification receipt does not bind the measured workload seed",
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_execution_environment(&self, profile: &QualificationProfile) -> Result<()> {
+        if !profile.requires_protected_evidence() {
+            return Ok(());
+        }
+        if self.topology == "local"
+            || self.toolchain == "unknown"
+            || self.bucket_calls == 0
+            || self.peak_rss_bytes == 0
+            || self.ownership.is_empty()
+        {
+            return Err(Error::Control(
+                "protected qualification evidence lacks measured environment proof",
             ));
         }
         Ok(())
@@ -2523,6 +2548,104 @@ mod tests {
         let mut below_threshold = receipt.clone();
         below_threshold.metrics[1].value = 0;
         assert!(below_threshold.verify_profile_thresholds(&profile).is_err());
+    }
+
+    #[test]
+    fn protected_profiles_require_measured_nonlocal_environment() {
+        let profile = QualificationProfile::scale();
+        assert!(profile.requires_protected_evidence());
+        let renamed_profile =
+            QualificationProfile::new("pr-contract-v1".into(), 2, 1, 1, 5_000).unwrap();
+        assert!(renamed_profile.requires_protected_evidence());
+        let image = Digest::from_bytes([31; 32]);
+        let key = SigningKey::from_bytes(&[32; 32]);
+        let artifact = b"scale-evidence";
+        let artifact_digest = Digest::from_bytes(*blake3::hash(artifact).as_bytes());
+        let metrics = vec![
+            QualificationMetric::new("cells".into(), 10_000, "cells".into()).unwrap(),
+            QualificationMetric::new("operations".into(), 10_000_000, "operations".into()).unwrap(),
+            QualificationMetric::new("duration_secs".into(), 3_600, "seconds".into()).unwrap(),
+            QualificationMetric::new("p99_latency_ms".into(), 500, "ms".into()).unwrap(),
+        ];
+        let local = QualificationRunner::new(key.clone())
+            .emit_with_profile_and_evidence(
+                &profile,
+                "source".into(),
+                image,
+                "rustfs".into(),
+                "storage".into(),
+                "none".into(),
+                metrics.clone(),
+                artifact,
+                true,
+                (
+                    "rustc".into(),
+                    "release".into(),
+                    "local".into(),
+                    7,
+                    1,
+                    1,
+                    false,
+                ),
+                1,
+                2,
+                b"none",
+                vec![artifact_digest],
+                Vec::new(),
+            )
+            .unwrap();
+        assert!(
+            local
+                .verify_for_profile_with_signer(
+                    "source",
+                    image,
+                    &profile,
+                    &[artifact],
+                    key.verifying_key().to_bytes(),
+                )
+                .is_err()
+        );
+
+        let protected = QualificationRunner::new(key.clone())
+            .emit_with_profile_and_evidence(
+                &profile,
+                "source".into(),
+                image,
+                "rustfs".into(),
+                "storage".into(),
+                "none".into(),
+                metrics,
+                artifact,
+                true,
+                (
+                    "rustc".into(),
+                    "release".into(),
+                    "three-node".into(),
+                    7,
+                    1,
+                    1,
+                    false,
+                ),
+                1,
+                2,
+                b"none",
+                vec![artifact_digest],
+                vec![QualificationOwnership::new(
+                    2,
+                    3,
+                    Digest::from_bytes([33; 32]),
+                )],
+            )
+            .unwrap();
+        protected
+            .verify_for_profile_with_signer(
+                "source",
+                image,
+                &profile,
+                &[artifact],
+                key.verifying_key().to_bytes(),
+            )
+            .unwrap();
     }
 
     #[test]

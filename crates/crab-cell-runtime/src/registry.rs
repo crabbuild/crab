@@ -1332,6 +1332,12 @@ impl Registry {
         self.namespace_modules.get(&namespace).copied()
     }
 
+    /// Returns the number of namespaces compiled into this release.
+    #[must_use]
+    pub fn namespace_count(&self) -> usize {
+        self.namespace_modules.len()
+    }
+
     pub(crate) fn command_contract<C: Command>(
         &self,
         namespace: NamespaceId,

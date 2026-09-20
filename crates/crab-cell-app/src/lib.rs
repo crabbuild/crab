@@ -178,6 +178,11 @@ impl ApplicationBuilder {
         self.cell_types
             .sort_by_key(|cell_type| *cell_type.namespace.as_bytes());
         let registry = Arc::new(self.registry.finish()?);
+        if registry.namespace_count() != self.cell_types.len() {
+            return Err(Error::Registry(
+                "application topology does not declare every registry namespace",
+            ));
+        }
         for cell_type in &self.cell_types {
             let Some((module, namespace)) = registry.namespace_contract(cell_type.namespace) else {
                 return Err(Error::Registry("Cell type namespace is not registered"));
@@ -648,6 +653,33 @@ mod tests {
             .unwrap();
         wrong.register(SqlModule).unwrap();
         assert!(wrong.finish().is_err());
+    }
+
+    #[test]
+    fn every_registered_namespace_requires_a_cell_type() {
+        let mut builder = ApplicationBuilder::new(
+            "app",
+            BuildDescriptor {
+                source_revision: "source".into(),
+                cargo_lock_digest: Digest::from_bytes([9; 32]),
+            },
+        )
+        .unwrap();
+        builder.register(SqlModule).unwrap();
+        builder
+            .cell_type(
+                CellType::new(
+                    "app-sql",
+                    "orders",
+                    NamespaceId::from_bytes([2; 16]),
+                    CatalogRole::Sql,
+                    1,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        assert!(builder.finish().is_err());
     }
 
     #[test]
