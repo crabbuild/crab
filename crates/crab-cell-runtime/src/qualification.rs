@@ -691,7 +691,7 @@ impl QualificationRunArtifact {
             || self
                 .primitive_counts
                 .iter()
-                .any(|counts| !valid_primitive_counts(counts))
+                .any(|counts| !valid_primitive_counts(counts) || counts.verified == 0)
             || self
                 .primitive_counts
                 .iter()
@@ -2309,6 +2309,10 @@ mod tests {
         let mut forged = artifact.clone();
         forged.seed = forged.seed.saturating_add(1);
         assert!(forged.verify_for_profile(&profile).is_err());
+
+        let mut unverified = artifact.clone();
+        unverified.primitive_counts[0].verified = 0;
+        assert!(unverified.encode().is_err());
     }
 
     #[test]
