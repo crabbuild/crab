@@ -106,6 +106,10 @@ This command verifies pinned attestation, canonical encoding, passed threshold
 metrics, source/image identity, and BLAKE3 digests of every raw artifact. It
 does not turn local or in-memory evidence into provider qualification; the
 release matrix still needs the real RustFS/Kubernetes and multi-GiB runs below.
+When a threshold profile other than `pr-contract-v1` is supplied, the CLI
+requires the pinned signer argument and applies the protected freshness and
+clock-skew gate. The profile-less form below is retained only for generic
+historical receipt inspection and is not a release decision.
 
 Release qualification can be verified as one bounded matrix instead of a
 caller-owned loop. `QualificationMatrixManifest` requires exactly one entry for

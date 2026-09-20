@@ -195,6 +195,10 @@ fn run() -> Result<(), String> {
             if args.next().is_some() {
                 return Err(usage());
             }
+            let requires_freshness = profile
+                .as_ref()
+                .is_some_and(QualificationProfile::requires_protected_evidence);
+            require_trusted_signer(profile.as_ref(), trusted_signer.as_ref())?;
             let receipt = QualificationReceipt::decode(
                 &fs::read(receipt_path).map_err(|error| format!("read receipt: {error}"))?,
             )
@@ -203,9 +207,6 @@ fn run() -> Result<(), String> {
                 return Err("qualification receipt is not passed".into());
             }
             let artifact = fs::read(artifact).map_err(|error| format!("read artifact: {error}"))?;
-            let requires_freshness = profile
-                .as_ref()
-                .is_some_and(QualificationProfile::requires_protected_evidence);
             let result = match profile {
                 Some(profile) => match trusted_signer {
                     Some(trusted_signer) => receipt
@@ -289,6 +290,7 @@ fn verify_matrix(args: &mut impl Iterator<Item = String>) -> Result<(), String> 
     if args.next().is_some() {
         return Err(usage());
     }
+    require_trusted_signer(profile.as_ref(), trusted_signer.as_ref())?;
     let manifest = QualificationMatrixManifest::decode(
         &fs::read(&manifest_path).map_err(|error| format!("read matrix manifest: {error}"))?,
     )
@@ -387,6 +389,18 @@ fn resolve_manifest_path(base: &Path, value: &str) -> Result<PathBuf, String> {
     Ok(resolved)
 }
 
+fn require_trusted_signer(
+    profile: Option<&QualificationProfile>,
+    trusted_signer: Option<&[u8; 32]>,
+) -> Result<(), String> {
+    if profile.is_some_and(QualificationProfile::requires_protected_evidence)
+        && trusted_signer.is_none()
+    {
+        return Err("protected qualification profiles require a trusted signer".into());
+    }
+    Ok(())
+}
+
 fn manifest_base(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -453,7 +467,8 @@ fn usage() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::manifest_base;
+    use super::{manifest_base, require_trusted_signer};
+    use crab_cell_runtime::QualificationProfile;
     use std::path::Path;
 
     #[test]
@@ -470,5 +485,13 @@ mod tests {
             manifest_base(Path::new("evidence/qualification-matrix.json")),
             Path::new("evidence")
         );
+    }
+
+    #[test]
+    fn protected_profiles_require_a_pinned_signer() {
+        let protected = QualificationProfile::scale();
+        assert!(require_trusted_signer(Some(&protected), None).is_err());
+        assert!(require_trusted_signer(Some(&QualificationProfile::pr_contract()), None).is_ok());
+        assert!(require_trusted_signer(None, None).is_ok());
     }
 }
