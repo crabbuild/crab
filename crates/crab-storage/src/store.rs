@@ -533,7 +533,10 @@ impl Store {
         &self.inner
     }
 
-    pub(crate) const fn immutable_cache_identity(&self) -> u64 {
+    /// Returns the process-local identity used to isolate immutable read caches.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn immutable_cache_identity(&self) -> u64 {
         self.immutable_cache_identity
     }
 

@@ -11,8 +11,9 @@ use crab_cell_runtime::{
     TenantId, install_kv_schema, install_runtime_schema, kv_atomic, kv_cleanup_expired, kv_get,
     kv_list, register_kv,
 };
+use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits};
-use crab_storage::{CellStorageLayout, Store};
+use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path};
 
 const KV_MODULE: &str = "kv-test";

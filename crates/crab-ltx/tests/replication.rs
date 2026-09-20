@@ -1,6 +1,6 @@
 use crab_ltx::rusqlite::Connection;
 use crab_ltx::{
-    CrabError, Limits, LocalSegment, ManagedDb, VerifiedLocalPlan, compact_exact, restore_exact,
+    CrabError, Limits, LocalSegment, ManagedDb, VerifiedPlan, compact_exact, restore_exact,
 };
 use tempfile::TempDir;
 
@@ -57,11 +57,11 @@ fn committed_sql_survives_cold_restore_and_compaction() {
     }
     db.close().unwrap();
     source.close().unwrap();
-    let plan = VerifiedLocalPlan::new(&files, position, limits).unwrap();
+    let plan = VerifiedPlan::new(&files, position, limits).unwrap();
     let direct = restore.path().join("direct.sqlite");
     restore_exact(&plan, &direct).unwrap();
     let compacted = compact_exact(&plan, &remote.path().join("snapshot.ltx")).unwrap();
-    let compact_plan = VerifiedLocalPlan::new(&[compacted], position, limits).unwrap();
+    let compact_plan = VerifiedPlan::new(&[compacted], position, limits).unwrap();
     let compact_db = restore.path().join("compact.sqlite");
     restore_exact(&compact_plan, &compact_db).unwrap();
     assert_eq!(
@@ -82,9 +82,8 @@ fn snapshot_matches_delta_restore_byte_for_byte() {
     batch.segments.extend(next.segments);
     let (snapshot, _) = db.snapshot(&temp.path().join("snapshot.ltx")).unwrap();
     assert_eq!(snapshot.info().position(), next.position);
-    let plan = VerifiedLocalPlan::new(&batch.segments, next.position, Limits::default()).unwrap();
-    let snapshot_plan =
-        VerifiedLocalPlan::new(&[snapshot], next.position, Limits::default()).unwrap();
+    let plan = VerifiedPlan::new(&batch.segments, next.position, Limits::default()).unwrap();
+    let snapshot_plan = VerifiedPlan::new(&[snapshot], next.position, Limits::default()).unwrap();
     let a = temp.path().join("a.sqlite");
     let b = temp.path().join("b.sqlite");
     restore_exact(&plan, &a).unwrap();
@@ -103,7 +102,7 @@ fn rolled_back_sql_is_not_restored() {
     });
     assert!(result.is_err());
     let batch = db.capture().unwrap();
-    let plan = VerifiedLocalPlan::new(&batch.segments, batch.position, Limits::default()).unwrap();
+    let plan = VerifiedPlan::new(&batch.segments, batch.position, Limits::default()).unwrap();
     let path = temp.path().join("restored.sqlite");
     restore_exact(&plan, &path).unwrap();
     assert_eq!(rows(&path), ["keep"]);
@@ -134,7 +133,7 @@ fn checkpoint_threshold_captures_every_cut_and_growth_page() {
         segments.extend(batch.segments);
         target = batch.position;
     }
-    let plan = VerifiedLocalPlan::new(&segments, target, Limits::default()).unwrap();
+    let plan = VerifiedPlan::new(&segments, target, Limits::default()).unwrap();
     let path = temp.path().join("restored.sqlite");
     restore_exact(&plan, &path).unwrap();
     let conn = Connection::open(path).unwrap();
@@ -163,22 +162,22 @@ fn exact_plan_rejects_gap_overlap_wrong_target_and_manifest_mutation() {
     }
     let mut gap = segments.clone();
     gap.remove(1);
-    assert!(VerifiedLocalPlan::new(&gap, target, limits).is_err());
+    assert!(VerifiedPlan::new(&gap, target, limits).is_err());
     let mut overlap = segments.clone();
     overlap.insert(1, segments[0].clone());
-    assert!(VerifiedLocalPlan::new(&overlap, target, limits).is_err());
+    assert!(VerifiedPlan::new(&overlap, target, limits).is_err());
     let mut wrong_target = target;
     wrong_target.txid += 1;
-    assert!(VerifiedLocalPlan::new(&segments, wrong_target, limits).is_err());
+    assert!(VerifiedPlan::new(&segments, wrong_target, limits).is_err());
     let mut info = segments[0].info().clone();
     info.post_checksum ^= 1;
     let mut wrong_info = segments.clone();
     wrong_info[0] = LocalSegment::new(segments[0].path().to_owned(), info);
-    assert!(VerifiedLocalPlan::new(&wrong_info, target, limits).is_err());
+    assert!(VerifiedPlan::new(&wrong_info, target, limits).is_err());
     let mut corrupted = std::fs::read(segments[0].path()).unwrap();
     corrupted[120] ^= 1;
     std::fs::write(segments[0].path(), corrupted).unwrap();
-    assert!(VerifiedLocalPlan::new(&segments, target, limits).is_err());
+    assert!(VerifiedPlan::new(&segments, target, limits).is_err());
 }
 
 #[test]
@@ -187,7 +186,7 @@ fn verified_plan_owns_bytes_and_never_overwrites_destination() {
     let mut db = ManagedDb::open(&temp.path().join("repo.sqlite"), Limits::default()).unwrap();
     insert(&mut db, "retained");
     let batch = db.capture().unwrap();
-    let plan = VerifiedLocalPlan::new(&batch.segments, batch.position, Limits::default()).unwrap();
+    let plan = VerifiedPlan::new(&batch.segments, batch.position, Limits::default()).unwrap();
     for file in batch.segments {
         std::fs::remove_file(file.path()).unwrap();
     }
@@ -232,14 +231,14 @@ fn restore_admission_rejects_database_and_chain_byte_limits() {
         max_database_bytes: 512,
         ..Limits::default()
     };
-    assert!(VerifiedLocalPlan::new(&batch.segments, batch.position, small).is_err());
+    assert!(VerifiedPlan::new(&batch.segments, batch.position, small).is_err());
     let small = Limits {
         max_capture_bytes: 128,
         max_file_bytes: 128,
         max_plan_bytes: 128,
         ..Limits::default()
     };
-    assert!(VerifiedLocalPlan::new(&batch.segments, batch.position, small).is_err());
+    assert!(VerifiedPlan::new(&batch.segments, batch.position, small).is_err());
 }
 
 #[test]
@@ -276,7 +275,7 @@ fn recovered_database_starts_a_new_epoch_and_can_capture_again() {
     let mut db = ManagedDb::open(&temp.path().join("old.sqlite"), Limits::default()).unwrap();
     insert(&mut db, "before takeover");
     let batch = db.capture().unwrap();
-    let plan = VerifiedLocalPlan::new(&batch.segments, batch.position, Limits::default()).unwrap();
+    let plan = VerifiedPlan::new(&batch.segments, batch.position, Limits::default()).unwrap();
     db.close().unwrap();
     let path = temp.path().join("new.sqlite");
     restore_exact(&plan, &path).unwrap();
@@ -284,7 +283,7 @@ fn recovered_database_starts_a_new_epoch_and_can_capture_again() {
     insert(&mut new, "after takeover");
     let batch = new.capture().unwrap();
     assert_eq!(batch.segments[0].info().min_txid, 1);
-    let plan = VerifiedLocalPlan::new(&batch.segments, batch.position, Limits::default()).unwrap();
+    let plan = VerifiedPlan::new(&batch.segments, batch.position, Limits::default()).unwrap();
     let path = temp.path().join("restored.sqlite");
     restore_exact(&plan, &path).unwrap();
     assert_eq!(rows(&path), ["before takeover", "after takeover"]);
@@ -296,7 +295,7 @@ fn sqlite_sidecars_prevent_restore() {
     let mut db = ManagedDb::open(&temp.path().join("repo.sqlite"), Limits::default()).unwrap();
     insert(&mut db, "safe");
     let batch = db.capture().unwrap();
-    let plan = VerifiedLocalPlan::new(&batch.segments, batch.position, Limits::default()).unwrap();
+    let plan = VerifiedPlan::new(&batch.segments, batch.position, Limits::default()).unwrap();
     let path = temp.path().join("restored.sqlite");
     std::fs::write(temp.path().join("restored.sqlite-wal"), b"stale").unwrap();
     assert!(restore_exact(&plan, &path).is_err());

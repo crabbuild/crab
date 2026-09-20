@@ -10,8 +10,8 @@ use std::{
     },
 };
 
+use crate::{CellObjectKind, CellStorageLayout};
 use bytes::Bytes;
-use crab_storage::{CellObjectKind, CellStorageLayout};
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 
 use crate::{CaptureBatch, CrabError, Host, Limits, Position, Result};
@@ -52,7 +52,7 @@ pub struct RootRef {
 
 /// One immutable object authenticated as part of an exact Cell root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct CellObjectRef {
+pub struct RootObjectRef {
     pub digest: [u8; 32],
     pub kind: CellObjectKind,
 }
@@ -1230,7 +1230,7 @@ impl CellReplica {
     ///
     /// Callers may use this bounded inventory for backup pinning and reachability
     /// collection. A missing or corrupt dependency fails the traversal closed.
-    pub async fn reachable_objects(&self, root: &RootRef) -> Result<Vec<CellObjectRef>> {
+    pub async fn reachable_objects(&self, root: &RootRef) -> Result<Vec<RootObjectRef>> {
         let graph = self.load_graph(root).await?;
         let extents = object_extents(&graph.descriptors)?;
         let verification = directory::Verification {
@@ -1253,7 +1253,7 @@ impl CellReplica {
 
         let mut objects = std::collections::BTreeSet::new();
         let mut streamed = std::collections::BTreeMap::new();
-        objects.insert(CellObjectRef {
+        objects.insert(RootObjectRef {
             digest: root.digest,
             kind: CellObjectKind::Root,
         });
@@ -1262,13 +1262,13 @@ impl CellReplica {
                 .document
                 .segment_pages
                 .iter()
-                .map(|digest| CellObjectRef {
+                .map(|digest| RootObjectRef {
                     digest: *digest,
                     kind: CellObjectKind::Root,
                 }),
         );
         for descriptor in &graph.descriptors {
-            let body = CellObjectRef {
+            let body = RootObjectRef {
                 digest: descriptor.object_digest(),
                 kind: descriptor.object_kind(),
             };
@@ -1285,7 +1285,7 @@ impl CellReplica {
             {
                 return Err(CrabError::LTXCorrupted);
             }
-            let index = CellObjectRef {
+            let index = RootObjectRef {
                 digest: descriptor.index_digest,
                 kind: CellObjectKind::Index,
             };
@@ -1303,7 +1303,7 @@ impl CellReplica {
             self.verify_remote_object(*object, *limit, *length).await?;
         }
         objects.extend(streamed.into_keys());
-        objects.extend(directory.into_iter().map(|digest| CellObjectRef {
+        objects.extend(directory.into_iter().map(|digest| RootObjectRef {
             digest,
             kind: CellObjectKind::Directory,
         }));
@@ -1312,7 +1312,7 @@ impl CellReplica {
 
     async fn verify_remote_object(
         &self,
-        object: CellObjectRef,
+        object: RootObjectRef,
         max_bytes: u64,
         expected_bytes: Option<u64>,
     ) -> Result<()> {

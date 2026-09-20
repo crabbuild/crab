@@ -1,8 +1,6 @@
 use std::{cmp::Reverse, collections::BinaryHeap};
 
-use crab_storage::CellObjectKind;
-
-use crate::{CrabError, Result};
+use crate::{CellObjectKind, CrabError, Result};
 
 use super::super::{CellReplica, DirectoryInput};
 use super::{DirectoryEntry, DirectoryTree, FANOUT, Node, encode_branch, encode_leaf};

@@ -1,7 +1,8 @@
 use std::path::Path as FilePath;
 use std::sync::{Arc, Mutex};
 
-use crab_storage::{CellStorageLayout, StorageError};
+use crab_ltx::CellStorageLayout;
+use crab_storage::StorageError;
 use futures_util::StreamExt as _;
 use object_store::{ObjectMeta, path::Path};
 use rusqlite::{Connection, OptionalExtension, params};

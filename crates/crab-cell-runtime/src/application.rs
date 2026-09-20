@@ -1,5 +1,6 @@
 use bytes::Bytes;
-use crab_storage::{CellStorageLayout, StorageError, Store};
+use crab_ltx::CellStorageLayout;
+use crab_storage::{StorageError, Store};
 use object_store::path::Path;
 use serde::{Deserialize, Serialize};
 

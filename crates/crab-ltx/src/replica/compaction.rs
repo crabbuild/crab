@@ -6,12 +6,10 @@ use std::{
     path::Path,
 };
 
-use crab_storage::CellObjectKind;
-
 use super::{
     CellReplica, DirectoryEntry, LoadedGraph, PreparedRoot, RootRef, SegmentDescriptor, directory,
 };
-use crate::{CrabError, Result, SegmentInfo, Txid, environment::FileIo};
+use crate::{CellObjectKind, CrabError, Result, SegmentInfo, Txid, environment::FileIo};
 
 pub(super) mod scratch;
 use scratch::ScratchFiles;

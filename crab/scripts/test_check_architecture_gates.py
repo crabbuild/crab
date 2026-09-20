@@ -260,16 +260,16 @@ class StandaloneLtxHardCutTests(unittest.TestCase):
             )
         )
 
-    def test_retired_module_and_storage_markers_are_rejected(self):
+    def test_canonical_replica_module_is_admitted_but_storage_markers_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "crates/crab-ltx/src/replica.rs"
             source.parent.mkdir(parents=True)
-            source.write_text("pub struct HistoricalHead;\n", encoding="utf-8")
+            source.write_text("pub struct CellReplica;\n", encoding="utf-8")
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
                 io.StringIO()
             ):
-                self.assertFalse(GATES.check_standalone_ltx_hard_cut(root))
+                self.assertTrue(GATES.check_standalone_ltx_hard_cut(root))
 
         self.assertFalse(self.check_source("const PREFIX: &str = \"ltx/<epoch>\";\n"))
         self.assertFalse(self.check_source("const HEAD: &str = \"head.json\";\n"))
@@ -278,9 +278,9 @@ class StandaloneLtxHardCutTests(unittest.TestCase):
     def test_retired_directories_and_examples_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            replica = root / "crates/crab-ltx/src/replica/append.rs"
-            replica.parent.mkdir(parents=True)
-            replica.write_text("pub fn append() {}\n", encoding="utf-8")
+            paged_map = root / "crates/crab-ltx/src/paged/map.rs"
+            paged_map.parent.mkdir(parents=True)
+            paged_map.write_text("pub fn page_map() {}\n", encoding="utf-8")
             example = root / "crates/crab-ltx/examples/replica_roundtrip.rs"
             example.parent.mkdir(parents=True)
             example.write_text("fn main() {}\n", encoding="utf-8")

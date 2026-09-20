@@ -27,7 +27,7 @@ crab-http-server RepositoryCellRouter
   -> crab-cell-runtime CellRuntime
     -> CellExecutor + CellPublisher + CellAuthority
       -> crab-ltx ManagedDb + CellReplica
-        -> crab-storage CellStorageLayout
+        -> crab-ltx CellStorageLayout
 ```
 
 Each module has one responsibility:

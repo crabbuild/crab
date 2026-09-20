@@ -15,8 +15,9 @@ use crab_cell_runtime::{
     VerifiedPeerRequest, WireValue, command_operation_digest, effect_id, effect_operation_digest,
     peer_wire as wire, register_effect_delivery,
 };
+use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits};
-use crab_storage::{CellStorageLayout, Store};
+use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path};
 
 const MODULE: &str = "repository";

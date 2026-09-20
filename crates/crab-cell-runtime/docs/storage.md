@@ -51,7 +51,7 @@ Shard counts are powers of two from 1 through 4,096. An existing namespace canno
 
 ## Keep object paths typed
 
-`crab-storage::CellStorageLayout` constructs every path. Callers never concatenate untrusted path fragments.
+`crab-ltx::CellStorageLayout` constructs every path. Callers never concatenate untrusted path fragments.
 
 ```text
 cells/v1/identity.json

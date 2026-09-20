@@ -143,7 +143,7 @@ fixture qualification:
 The following are Crab-specific and must not be inferred from Litestream or
 Celld compatibility:
 
-- `SegmentInfo` BLAKE3 expectations and verified local plans;
+- `SegmentInfo` BLAKE3 expectations and verified plans;
 - Cell object paths, root JSON, descriptor pages, and authenticated radix
   directories;
 - CRB1 bundle routing and recovery overlays;

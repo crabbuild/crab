@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use crab_storage::{CellStorageLayout, Store};
+use crab_ltx::CellStorageLayout;
+use crab_storage::Store;
 use ed25519_dalek::SigningKey;
 use futures_util::future::BoxFuture;
 use object_store::{memory::InMemory, path::Path};

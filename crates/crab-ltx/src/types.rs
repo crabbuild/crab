@@ -26,7 +26,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_database_bytes: 256 << 20,
+            max_database_bytes: 512 << 20,
             max_capture_bytes: 64 << 20,
             max_file_bytes: 512 << 20,
             max_plan_bytes: 1 << 30,

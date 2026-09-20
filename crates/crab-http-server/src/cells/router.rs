@@ -1,5 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
+use crab_cell_runtime::CellStorageLayout;
 use crab_cell_runtime::{
     ApplicationIdentity, CatalogProof, CatalogRole, CellAuthority, CellCatalog, CellClient,
     CellDescription, CellHandle, CellReplica, CellRuntime, CellTarget, ControlState,
@@ -8,7 +9,6 @@ use crab_cell_runtime::{
     PeerSigner, PersistedWorkInventory, PlacementPlanner, Registry, ReleaseState, ReleaseStore,
     VersionedControl, peer_wire,
 };
-use crab_storage::CellStorageLayout;
 use tokio::sync::{Mutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use uuid::Uuid;
 

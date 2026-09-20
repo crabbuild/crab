@@ -11,8 +11,9 @@ use crab_cell_runtime::{
     workflow_complete_activity, workflow_extend_activity, workflow_fire_timer, workflow_signal,
     workflow_start, workflow_validate_activity_claim,
 };
+use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits};
-use crab_storage::{CellStorageLayout, Store};
+use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path};
 use prost::Message;
 

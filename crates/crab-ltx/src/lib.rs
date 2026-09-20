@@ -10,6 +10,8 @@
 
 #![doc = include_str!("../README.md")]
 
+#[cfg(feature = "replica")]
+mod cell_layout;
 mod codec;
 mod commit;
 mod compactor;
@@ -17,6 +19,8 @@ mod db;
 pub mod environment;
 mod error;
 mod host;
+#[cfg(feature = "replica")]
+pub use cell_layout::{CellObjectKind, CellStorageLayout};
 #[cfg(feature = "replica")]
 pub use environment::{DirectoryCacheStats, ScratchMonitor};
 pub use environment::{DiskBudget, DiskBudgetAdmission, DiskReservation, Host};
@@ -51,8 +55,8 @@ mod writable_vfs;
 pub use node_frame::{NodeFrameScope, VerifiedNodeFrame, encode_node_frame, inspect_node_frame};
 #[cfg(feature = "replica")]
 pub use replica::{
-    CellObjectRef, CellPagedDatabase, CellReplica, CellWritableDatabase, PreparedRoot,
-    RecoveryOverlay, RootRef, VerifiedRoot,
+    CellPagedDatabase, CellReplica, CellWritableDatabase, PreparedRoot, RecoveryOverlay,
+    RootObjectRef, RootRef, VerifiedRoot,
 };
 #[cfg(feature = "replica")]
 pub use writable_vfs::Hydration;
@@ -63,7 +67,7 @@ mod format_tests;
 pub use db::CheckpointMode;
 pub use error::{CrabError, QueryError, Result, TransactionError};
 pub use managed::{MANAGED_CONNECTION_PAGE_CACHE_BYTES, MANAGED_SQLITE_CONNECTIONS, ManagedDb};
-pub use recovery::{VerifiedLocalPlan, compact_exact, restore_exact};
+pub use recovery::{VerifiedPlan, compact_exact, restore_exact};
 pub use rusqlite;
 pub use types::{CaptureBatch, CaptureTiming, Limits, LocalSegment, Position, SegmentInfo};
 

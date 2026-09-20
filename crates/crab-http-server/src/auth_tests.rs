@@ -243,7 +243,7 @@ impl Harness {
             crab_cell_runtime::TenantId::from_bytes([2; 16]),
             crab_cell_runtime::ApplicationId::from_bytes([3; 16]),
         );
-        let cell_layout = crab_storage::CellStorageLayout::new(
+        let cell_layout = crab_cell_runtime::CellStorageLayout::new(
             admission_store.clone(),
             object_store::path::Path::from("test-cells"),
             *cell_identity.application().as_bytes(),

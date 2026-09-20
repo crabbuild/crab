@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+use crab_cell_runtime::CellStorageLayout;
 use crab_cell_runtime::{
     ActivityRunOutcome, ApplicationIdentity, BlockingActivityPool, BlockingActivityReservation,
     CatalogProof, CatalogShardScan, CellAuthority, CellCatalog, CellId, CellTarget, ControlState,
@@ -17,7 +18,6 @@ use crab_cell_runtime::{
     RecoveryManifestStore, Registry, ReleaseState, ReleaseStore, RequestId, SchedulerFleet,
     SessionId, preferred_scanner, recoverable_cells,
 };
-use crab_storage::CellStorageLayout;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 

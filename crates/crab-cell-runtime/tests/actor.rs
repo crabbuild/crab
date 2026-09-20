@@ -21,10 +21,9 @@ use crab_cell_runtime::{
     Resolution, RetireRequest, SealRequest, SessionId, SqlWorkerPool, StoredOutcome, TailRequest,
     TenantId, Transition, install_queue_schema, install_workflow_schema,
 };
+use crab_ltx::{CellObjectKind, CellStorageLayout};
 use crab_ltx::{CellReplica, Limits};
-use crab_storage::{
-    CellObjectKind, CellStorageLayout, ObjectStoreCredentials, Store, build_explicit_store,
-};
+use crab_storage::{ObjectStoreCredentials, Store, build_explicit_store};
 use futures_util::stream::BoxStream;
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,

@@ -100,7 +100,7 @@ pub(super) async fn fixture() -> Arc<Server> {
         crab_cell_runtime::TenantId::from_bytes([31; 16]),
         crab_cell_runtime::ApplicationId::from_bytes([32; 16]),
     );
-    let layout = crab_storage::CellStorageLayout::new(
+    let layout = crab_cell_runtime::CellStorageLayout::new(
         repository.store.clone(),
         object_store::path::Path::from("maintenance-test-cells"),
         *identity.application().as_bytes(),
@@ -246,7 +246,7 @@ fn enable_catalog_readiness(server: &mut Arc<Server>) {
         crab_cell_runtime::TenantId::from_bytes([1; 16]),
         crab_cell_runtime::ApplicationId::from_bytes([2; 16]),
     );
-    let layout = crab_storage::CellStorageLayout::new(
+    let layout = crab_cell_runtime::CellStorageLayout::new(
         store,
         object_store::path::Path::from("catalog"),
         *identity.application().as_bytes(),

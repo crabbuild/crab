@@ -8,8 +8,9 @@ use crab_cell_runtime::{
     SqlCell, SqlModule, SqlResultSet, SqlStatement, SqlValue, SqlWorkerPool, TenantId,
     install_runtime_schema, register_sql, sql_batch, sql_query_batch,
 };
+use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits, rusqlite::Connection};
-use crab_storage::{CellStorageLayout, Store};
+use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path};
 
 const SQL_MODULE: &str = "sql-test";

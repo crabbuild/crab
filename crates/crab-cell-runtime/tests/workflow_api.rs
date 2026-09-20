@@ -24,8 +24,9 @@ use crab_cell_runtime::{
     register_blocking_activity, register_maintenance, register_workflow,
     register_workflow_activities,
 };
+use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits};
-use crab_storage::{CellStorageLayout, Store};
+use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path};
 
 async fn fence_session(

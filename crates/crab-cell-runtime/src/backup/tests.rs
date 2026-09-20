@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use crab_storage::{CellObjectKind, CellStorageLayout, Store};
+use crab_ltx::{CellObjectKind, CellStorageLayout};
+use crab_storage::Store;
 use object_store::{ObjectStoreExt as _, memory::InMemory, path::Path};
 
 use super::*;

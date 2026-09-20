@@ -1,11 +1,11 @@
 #[cfg(feature = "replica")]
-use crab_ltx::CellReplica;
+use crab_ltx::{CellReplica, CellStorageLayout};
 use crab_ltx::{
     CheckpointMode, CrabError, Host, Limits, ManagedDb,
     environment::{DirectFileSystem, FileIo, FileSystem},
 };
 #[cfg(feature = "replica")]
-use crab_storage::{CellStorageLayout, Store};
+use crab_storage::Store;
 #[cfg(feature = "replica")]
 use object_store::throttle::{ThrottleConfig, ThrottledStore};
 #[cfg(feature = "replica")]

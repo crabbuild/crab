@@ -158,17 +158,13 @@ impl ManagedDb {
     ///
     /// Local leftovers are never used to infer acknowledged state. Any prior
     /// unacknowledged session remains quarantined for explicit reconciliation.
-    pub fn resume(
-        plan: &crate::VerifiedLocalPlan,
-        destination: &Path,
-        limits: Limits,
-    ) -> Result<Self> {
+    pub fn resume(plan: &crate::VerifiedPlan, destination: &Path, limits: Limits) -> Result<Self> {
         Self::resume_with_host(plan, destination, limits, crate::Host::default())
     }
 
-    /// Resumes an exact local plan using the same host for installation and capture.
+    /// Resumes an exact verified plan using the same host for installation and capture.
     pub fn resume_with_host(
-        plan: &crate::VerifiedLocalPlan,
+        plan: &crate::VerifiedPlan,
         destination: &Path,
         limits: Limits,
         host: crate::Host,
@@ -999,7 +995,7 @@ mod tests {
             })
             .unwrap();
         let batch = source.capture().unwrap();
-        let plan = crate::VerifiedLocalPlan::new(&batch.segments, batch.position, limits).unwrap();
+        let plan = crate::VerifiedPlan::new(&batch.segments, batch.position, limits).unwrap();
         source.close().unwrap();
         let database_bytes = u64::from(batch.segments[0].info().database_pages)
             * u64::from(batch.segments[0].info().page_size);
@@ -1114,8 +1110,8 @@ mod tests {
                 last_pages = segment.info().database_pages;
             }
             segments.extend(batch.segments);
-            let plan = crate::VerifiedLocalPlan::new(&segments, batch.position, Limits::default())
-                .unwrap();
+            let plan =
+                crate::VerifiedPlan::new(&segments, batch.position, Limits::default()).unwrap();
             let restored = temp.path().join(format!("restored-{round}.sqlite"));
             crate::restore_exact(&plan, &restored).unwrap();
             let conn = Connection::open(&restored).unwrap();

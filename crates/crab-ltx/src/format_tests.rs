@@ -2,7 +2,7 @@
 //! call the imported compressor, encoder, or crc-fast implementation.
 
 use crate::{
-    CHECKSUM_FLAG, CrabError, Limits, LocalSegment, Position, SegmentInfo, VerifiedLocalPlan, ltx,
+    CHECKSUM_FLAG, CrabError, Limits, LocalSegment, Position, SegmentInfo, VerifiedPlan, ltx,
 };
 
 fn crc(bytes: &[u8]) -> u64 {
@@ -143,7 +143,7 @@ fn exact_restore_rejects_checksum_disabled_file() {
     let info = SegmentInfo::from_decoded(&bytes, &file);
     let path = temp.path().join("unchecked.ltx");
     std::fs::write(&path, bytes).unwrap();
-    let result = VerifiedLocalPlan::new(
+    let result = VerifiedPlan::new(
         &[LocalSegment::new(path, info)],
         Position {
             txid: 1,
@@ -173,7 +173,7 @@ fn captured_positions_match_full_database_crc_oracle() {
         .unwrap();
         let batch = db.capture().unwrap();
         segments.extend(batch.segments);
-        let plan = VerifiedLocalPlan::new(&segments, batch.position, Limits::default()).unwrap();
+        let plan = VerifiedPlan::new(&segments, batch.position, Limits::default()).unwrap();
         let path = temp.path().join(format!("restored-{round}.sqlite"));
         crate::restore_exact(&plan, &path).unwrap();
         let image = std::fs::read(path).unwrap();
@@ -217,7 +217,7 @@ fn altered_delta_predecessor_or_post_state_is_rejected_with_valid_file_crc() {
         bytes[len - 8..].copy_from_slice(&(CHECKSUM_FLAG | crc(&hashed)).to_be_bytes());
         let delta = select(&format!("delta-{i}.ltx"), bytes);
         let target = delta.info().position();
-        let result = VerifiedLocalPlan::new(&[first.clone(), delta], target, Limits::default());
+        let result = VerifiedPlan::new(&[first.clone(), delta], target, Limits::default());
         assert!(matches!(result, Err(CrabError::ChecksumMismatch)));
     }
 }

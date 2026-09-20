@@ -1002,14 +1002,14 @@ impl Host {
         segments: &[crate::LocalSegment],
         target: crate::Position,
         limits: crate::Limits,
-    ) -> crate::Result<crate::VerifiedLocalPlan> {
-        crate::VerifiedLocalPlan::with_host(segments, target, limits, self)
+    ) -> crate::Result<crate::VerifiedPlan> {
+        crate::VerifiedPlan::with_host(segments, target, limits, self)
     }
 
     /// Restores a verified cut through this host's atomic new-file installation.
     pub fn restore(
         &self,
-        plan: &crate::VerifiedLocalPlan,
+        plan: &crate::VerifiedPlan,
         destination: &Path,
     ) -> crate::Result<crate::Position> {
         crate::recovery::reject_sidecars(destination, self)?;
@@ -1020,7 +1020,7 @@ impl Host {
     /// Installs a verified full-chain compaction through this host's filesystem.
     pub fn compact(
         &self,
-        plan: &crate::VerifiedLocalPlan,
+        plan: &crate::VerifiedPlan,
         destination: &Path,
     ) -> crate::Result<crate::LocalSegment> {
         let (bytes, info) = crate::recovery::compact_bytes(plan)?;

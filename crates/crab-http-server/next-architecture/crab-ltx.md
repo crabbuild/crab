@@ -348,12 +348,12 @@ impl ManagedDb {
     fn close(self) -> Result<()>;
 }
 
-impl VerifiedLocalPlan {
+impl VerifiedPlan {
     fn new(files: &[LocalSegment], target: Position, limits: Limits) -> Result<Self>;
 }
 
-fn restore_exact(plan: &VerifiedLocalPlan, destination: &Path) -> Result<Position>;
-fn compact_exact(plan: &VerifiedLocalPlan, destination: &Path) -> Result<LocalSegment>;
+fn restore_exact(plan: &VerifiedPlan, destination: &Path) -> Result<Position>;
+fn compact_exact(plan: &VerifiedPlan, destination: &Path) -> Result<LocalSegment>;
 ```
 
 `CaptureBatch` contains ordered segments and the final `Position`.
@@ -363,7 +363,7 @@ dropping a descriptor never deletes an artifact. The server must protect the
 session directory until publication and cleanup are resolved.
 
 `LocalSegment::new` constructs an unverified selection from a local path and
-manifest expectations. `VerifiedLocalPlan::new` verifies those inputs, exact
+manifest expectations. `VerifiedPlan::new` verifies those inputs, exact
 endpoint and each intermediate database checksum, then owns the input bytes.
 It has no bucket URL, epoch inference, local-database fallback or latest option.
 Only a full snapshot followed by contiguous, non-overlapping ranges is accepted.
@@ -424,7 +424,7 @@ codec with the following server/library division:
 1. Server acquires a recovering activation and reads the inherited manifest.
 2. Server validates repository/generation scope, pins that root and fetches only
    the named objects through the origin store, under shared request/byte budgets.
-3. Library validates the explicit local plan, including object digests, format,
+3. Library validates the explicit verified plan, including object digests, format,
    page size/count, exact endpoint and allowed contiguous coverage.
 4. Library applies snapshot/deltas to isolated scratch, verifies each cut's
    checksum, truncates to the committed page count and installs atomically with
@@ -448,7 +448,7 @@ Upstream snapshots and full restore buffer substantial data; writing to a
 downloaded files and reconstructs a database image in memory. Initially impose
 admission limits for compressed inputs, decoded pages, image buffers and scratch,
 plus a node-wide concurrency budget. The implemented `Limits` defaults are
-256 MiB per database, 512 MiB per local file including WAL, 1 GiB aggregate
+512 MiB per database, 512 MiB per local file including WAL, 1 GiB aggregate
 plan/retained artifacts and 1,024 segments. `Host::with_local_disk_budget`
 adds a shared byte-precise disk gate: managed writes reserve WAL plus LTX peak
 space before BEGIN, reconcile to exact database/WAL/retained bytes, and sparse VFS faults
