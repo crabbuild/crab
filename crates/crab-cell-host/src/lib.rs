@@ -641,12 +641,11 @@ impl CellNode {
         if facilities.len() >= MAX_NODE_FACILITIES {
             return Err(Error::Capacity("CellNode facility limit reached"));
         }
-        if facility.owner.is_some()
-            && facilities
-                .iter()
-                .any(|existing| existing.owner.is_some() && existing.name == facility.name)
+        if facilities
+            .iter()
+            .any(|existing| existing.name == facility.name)
         {
-            return Err(Error::Control("CellNode component name already installed"));
+            return Err(Error::Control("CellNode facility name already installed"));
         }
         facilities.push(facility);
         Ok(())
@@ -1186,6 +1185,12 @@ mod tests {
             .unwrap();
         let component = Arc::new(7_u64);
         let weak = Arc::downgrade(&component);
+        node.install_facility(CellNodeFacility::new("unowned", || async { Ok(()) }).unwrap())
+            .unwrap();
+        assert!(
+            node.install_owned_component("unowned", Arc::new(6_u64))
+                .is_err()
+        );
         node.install_owned_component("fixture-component", Arc::clone(&component))
             .unwrap();
         drop(component);
@@ -1400,8 +1405,9 @@ mod tests {
             .build()
             .unwrap();
         assert!(CellNodeFacility::new("", || async { Ok(()) }).is_err());
-        for _ in 0..MAX_NODE_FACILITIES {
-            node.install_facility(CellNodeFacility::new("facility", || async { Ok(()) }).unwrap())
+        for index in 0..MAX_NODE_FACILITIES {
+            let name = Box::leak(format!("facility-{index}").into_boxed_str());
+            node.install_facility(CellNodeFacility::new(name, || async { Ok(()) }).unwrap())
                 .unwrap();
         }
         assert!(matches!(
