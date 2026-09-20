@@ -40,6 +40,7 @@ pub(crate) struct MaterializedPlan {
 #[derive(Default)]
 struct MaterializationState {
     image: Vec<u8>,
+    page: Vec<u8>,
     checksums: PageChecksums,
     position: Position,
     page_size: u32,
@@ -85,16 +86,16 @@ impl MaterializationState {
             header.commit,
             limits.max_database_bytes,
         )?;
-        let mut data = vec![0; header.page_size as usize];
-        while let Some(page) = decoder.decode_page(&mut data)? {
-            checksums.page(page.pgno, &data)?;
+        self.page.resize(header.page_size as usize, 0);
+        while let Some(page) = decoder.decode_page(&mut self.page)? {
+            checksums.page(page.pgno, &self.page)?;
             let offset = (page.pgno as usize - 1)
                 .checked_mul(header.page_size as usize)
                 .ok_or(CrabError::Limit("database bytes"))?;
             let end = offset
                 .checked_add(header.page_size as usize)
                 .ok_or(CrabError::Limit("database bytes"))?;
-            self.image[offset..end].copy_from_slice(&data);
+            self.image[offset..end].copy_from_slice(&self.page);
         }
         checksums.finish()?;
         decoder.close()?;

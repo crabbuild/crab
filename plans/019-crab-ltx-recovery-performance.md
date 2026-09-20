@@ -669,6 +669,17 @@ writes, 145.6 ms to 140.8 ms for capture, and 193.1 ms to 180.4 ms total. The
 filesystem barriers still dominate, so these are directional CPU/I/O-call
 results rather than a 1.5x end-to-end claim.
 
+Decoder allocation profiling found two shorter-lived buffers on the verified
+recovery path: compressed page storage was allocated for every decoded page,
+and the destination page buffer was allocated for every input segment. The
+decoder now reuses compressed storage for its lifetime, while plan
+materialization reuses one page buffer across the complete chain. Alternating
+A/B runs reduced paired median recovery by about 0.4 ms for 32 × 1 KiB, 7.4 ms
+for 128 × 4 KiB, and 13.3 ms for 512 × 16 KiB. Medium raw verification medians
+moved from 16.2 ms to 8.3 ms. These runs were still host-contended; the change
+is accepted because it removes allocator work without changing parsing,
+checksums, or output bytes, not because the raw totals are release-grade.
+
 A fresh 15-pair synchronous small-workload comparison is the current honesty
 gate. Crab recovery was 13.8 ms versus Celld's 15.8 ms, but Crab capture was
 172.5 ms versus 94.9 ms and total latency was 202.2 ms versus 123.2 ms. Crab's

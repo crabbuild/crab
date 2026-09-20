@@ -23,6 +23,7 @@ enum DecoderState {
 pub(crate) struct Decoder<R> {
     reader: CountingReader<R>,
     index: Vec<(u32, u64, u64)>,
+    compressed: Vec<u8>,
     state: DecoderState,
     pub(crate) header: Header,
     pub(crate) trailer: Trailer,
@@ -41,6 +42,7 @@ impl<R: Read> Decoder<R> {
                 digest: blake3::Hasher::new(),
             },
             index: Vec::new(),
+            compressed: Vec::new(),
             state: DecoderState::Header,
             header: Header::default(),
             trailer: Trailer::default(),
@@ -104,13 +106,13 @@ impl<R: Read> Decoder<R> {
             if compressed_size > crate::lz4_block::compress_bound(data.len()) {
                 return Err(CrabError::LTXCorrupted);
             }
-            let mut compressed = vec![0; compressed_size];
-            self.reader.read_exact(&mut compressed)?;
+            self.compressed.resize(compressed_size, 0);
+            self.reader.read_exact(&mut self.compressed)?;
             let mut frame_hash = blake3::Hasher::new();
             frame_hash.update(&header_bytes);
             frame_hash.update(&size_bytes);
-            frame_hash.update(&compressed);
-            let n = lz4_flex::block::decompress_into(&compressed, data)
+            frame_hash.update(&self.compressed);
+            let n = lz4_flex::block::decompress_into(&self.compressed, data)
                 .map_err(|error| CrabError::Other(Box::new(error)))?;
             if n != data.len() {
                 return Err(CrabError::LTXCorrupted);
