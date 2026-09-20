@@ -1,7 +1,6 @@
 mod support;
 
-use crab_ltx::{CellReplica, CrabError, Limits, ManagedDb, RootRef};
-use crab_storage::CellStorageLayout;
+use crab_ltx::{CellReplica, CellStorageLayout, CrabError, Limits, ManagedDb, RootRef};
 use object_store::path::Path as ObjectPath;
 use std::{
     fs::{self, File},

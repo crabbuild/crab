@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
-use crab_storage::{CellStorageLayout, StorageError};
+use crab_ltx::CellStorageLayout;
+use crab_storage::StorageError;
 use object_store::path::Path;
 
 use super::{

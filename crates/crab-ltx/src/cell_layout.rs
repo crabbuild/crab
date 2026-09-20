@@ -1,6 +1,6 @@
 use object_store::path::Path;
 
-use crate::Store;
+use crab_storage::Store;
 
 /// Typed physical paths for one application's SQLite Cell objects.
 #[derive(Clone)]

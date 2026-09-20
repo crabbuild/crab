@@ -19,7 +19,7 @@ The `crab-ltx` `replica` feature exposes these standalone surfaces:
 | `bundle::{Bundle, BundleEntry, BundleRow}` | `src/bundle.rs` | CRB1 envelope retained as a Cell recovery-overlay input; rows are scoped by `BundleEntry::for_cell` |
 | `with_paged_io_deadline` | `src/paged_io.rs` | Process-local deadline scope for sparse faults |
 | `Hydration` | `src/writable_vfs.rs` | Local writable sparse state and owner-driven hydration |
-| `CellReplica`, `PreparedRoot`, `RootRef`, `RecoveryOverlay`, `CellObjectRef` | `src/replica.rs`, `src/replica/` | Canonical Cell immutable root graph and exact object extents; mutable authority remains `CellAuthority` |
+| `CellReplica`, `PreparedRoot`, `RootRef`, `RecoveryOverlay`, `RootObjectRef` | `src/replica.rs`, `src/replica/` | Canonical Cell immutable root graph and exact object extents; mutable authority remains `CellAuthority` |
 
 The final rows are the retained canonical path. The retired epoch-head records
 must not be interpreted as Cell roots.

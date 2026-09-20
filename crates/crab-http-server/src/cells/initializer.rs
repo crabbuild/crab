@@ -1,11 +1,11 @@
 use std::path::Path;
 
+use crab_cell_runtime::CellStorageLayout;
 use crab_cell_runtime::{
     ApplicationIdentity, CatalogEntry, CatalogProof, CatalogRole, CellAuthority, CellCatalog,
     CellHandle, CellModule, CellReplica, CellRuntime, CellTarget, ControlState, IncarnationId,
     Owner, Registry, ReleaseState, ReleaseStore, SessionId, SqlWorkerPool,
 };
-use crab_storage::CellStorageLayout;
 use uuid::Uuid;
 
 use super::{

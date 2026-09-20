@@ -3,9 +3,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-use crab_storage::{CellObjectKind, CellStorageLayout};
-
-use crate::{CrabError, Host, Result};
+use crate::{CellObjectKind, CellStorageLayout, CrabError, Host, Result};
 
 mod initial;
 mod update;
@@ -1091,7 +1089,7 @@ mod tests {
     use std::sync::Arc;
 
     use bytes::Bytes;
-    use crab_storage::{CellObjectKind, Store};
+    use crab_storage::Store;
     use object_store::{memory::InMemory, path::Path};
 
     use super::*;

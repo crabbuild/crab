@@ -14,6 +14,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
+use crab_cell_runtime::CellStorageLayout;
 use crab_cell_runtime::{
     ApplicationIdentity, CellAuthority, CellCatalog, CellHandle, CellRuntime, CellTarget, Digest,
     Error as CellError, NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain, NodeId,
@@ -21,7 +22,6 @@ use crab_cell_runtime::{
     PeerRoundTrip, Registry, ReleaseState, ReleaseStore, SessionId, VerifiedPeerRequest,
     VersionedNodeAdvertisement, encode_peer_reply, peer_wire,
 };
-use crab_storage::CellStorageLayout;
 use ed25519_dalek::SigningKey;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -1624,10 +1624,11 @@ const fn denied() -> CellError {
 
 #[cfg(test)]
 mod tests {
+    use crab_cell_runtime::CellStorageLayout;
     use crab_cell_runtime::{
         PeerOperation, PeerPrincipal, PeerSigner, PeerVerifier, RequestId, SessionId,
     };
-    use crab_storage::{CellStorageLayout, Store};
+    use crab_storage::Store;
     use ed25519_dalek::SigningKey;
     use object_store::{memory::InMemory, path::Path as ObjectPath};
     use tempfile::TempDir;

@@ -86,15 +86,15 @@ impl SegmentDescriptor {
         self.length
     }
 
-    pub(super) fn object_kind(&self) -> crab_storage::CellObjectKind {
+    pub(super) fn object_kind(&self) -> crate::CellObjectKind {
         if self.object_digest == self.info.blake3 {
-            crab_storage::CellObjectKind::Ltx
+            crate::CellObjectKind::Ltx
         } else {
-            crab_storage::CellObjectKind::Bundle
+            crate::CellObjectKind::Bundle
         }
     }
 
-    pub(super) fn object_extent(&self) -> ([u8; 32], u64, u64, crab_storage::CellObjectKind) {
+    pub(super) fn object_extent(&self) -> ([u8; 32], u64, u64, crate::CellObjectKind) {
         (
             self.object_digest,
             self.offset,
@@ -116,7 +116,7 @@ impl SegmentDescriptor {
             || self.index_length > u64::from(info.database_pages) * 60
             || self.length != info.size_bytes
             || self.offset.checked_add(self.length).is_none()
-            || (self.object_kind() == crab_storage::CellObjectKind::Ltx && self.offset != 0)
+            || (self.object_kind() == crate::CellObjectKind::Ltx && self.offset != 0)
             || self
                 .offset
                 .checked_add(self.length)
@@ -426,7 +426,7 @@ mod tests {
         let descriptor = SegmentDescriptor::bundled(info, [2; 32], 60, [3; 32], 4096);
         let decoded = decode_segment_page(&encode_segment_page(&[descriptor]).unwrap()).unwrap();
         let decoded = decoded.first().unwrap();
-        assert_eq!(decoded.object_kind(), crab_storage::CellObjectKind::Bundle);
+        assert_eq!(decoded.object_kind(), crate::CellObjectKind::Bundle);
         assert_eq!(decoded.object_digest(), [3; 32]);
         assert_eq!(decoded.offset(), 4096);
         assert_eq!(decoded.length(), 1024);

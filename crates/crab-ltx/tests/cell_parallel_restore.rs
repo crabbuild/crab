@@ -11,11 +11,12 @@ use std::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use crab_ltx::CellStorageLayout;
 use crab_ltx::{
     CaptureBatch, CaptureTiming, CellReplica, Host, Limits, LtxPhase, LtxReadOrigin,
     LtxRequestOutcome, LtxTelemetry, ManagedDb, RootRef, VerifiedPlan, restore_exact,
 };
-use crab_storage::{CellStorageLayout, Store};
+use crab_storage::Store;
 use futures_util::{StreamExt as _, stream::BoxStream};
 use object_store::{
     GetOptions, GetRange, GetResult, GetResultPayload, ListResult, MultipartUpload, ObjectMeta,

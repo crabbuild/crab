@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
-use crab_storage::{CellStorageLayout, StorageError};
+use crab_ltx::CellStorageLayout;
+use crab_storage::StorageError;
 use serde::{Deserialize, Serialize};
 
 use crate::identity::{decode_hex, encode_hex};

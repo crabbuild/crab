@@ -6,12 +6,13 @@ use axum::{
     routing::post,
 };
 use bytes::Bytes;
+use crab_cell_runtime::CellStorageLayout;
 use crab_cell_runtime::{
     ApplicationId, ApplicationIdentity, CellAuthority, CellTarget, Control, Digest, IncarnationId,
     NamespaceId, NodeAdvertisement, NodeCapacity, NodeDirectory, Owner, PeerRoundTrip, SessionId,
     TenantId, peer_wire,
 };
-use crab_storage::{CellStorageLayout, Store};
+use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path as ObjectPath};
 
 use super::{PROTOBUF_MEDIA_TYPE, PeerHttpRoundTrip};

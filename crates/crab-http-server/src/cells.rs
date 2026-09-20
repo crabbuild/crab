@@ -5,6 +5,7 @@ use std::{
     time::Duration,
 };
 
+use crab_cell_runtime::CellStorageLayout;
 use crab_cell_runtime::{
     ApplicationId, ApplicationIdentity, ApplicationIdentityStore, BackupPin, BackupPinStore,
     BackupRestore, BuildDescriptor, CatalogRole, CellAuthority, CellCatalog, CellGarbageCollector,
@@ -16,7 +17,6 @@ use crab_cell_runtime::{
     ReleaseState, ReleaseStore, ReplicaHost, ReplicaLimits, RequestId, SessionId, SqlWorkerPool,
     TenantId, VersionedNodeAdvertisement, register_effect_delivery, register_maintenance,
 };
-use crab_storage::CellStorageLayout;
 use ed25519_dalek::SigningKey;
 use object_store::path::Path;
 use serde::Serialize;
@@ -1979,6 +1979,7 @@ mod tests {
     };
 
     use bytes::Bytes;
+    use crab_cell_runtime::CellStorageLayout;
     use crab_cell_runtime::{
         ApplicationIdentity, BuildDescriptor, CatalogEntry, CellAuthority, CellClient, CellModule,
         CellReplica, CellRuntime, CellTarget, IncarnationId, InvocationError, MigrationDescriptor,
@@ -1986,7 +1987,7 @@ mod tests {
         Owner, PeerCellResolver, RegistryBuilder, ReplicaHost, ReplicaLimits,
         RetainedCodeDescriptor, SessionId, SqlWorkerPool,
     };
-    use crab_storage::{CellStorageLayout, StorageError, Store};
+    use crab_storage::{StorageError, Store};
     use ed25519_dalek::SigningKey;
     use object_store::memory::InMemory;
     use serde_json::Value;

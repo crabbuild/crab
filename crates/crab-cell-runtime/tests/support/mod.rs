@@ -2,7 +2,7 @@ use crab_cell_runtime::{
     Digest, FencedNodeSession, NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain,
     NodeId, SessionId,
 };
-use crab_storage::CellStorageLayout;
+use crab_ltx::CellStorageLayout;
 
 pub async fn fence_session(
     layout: &CellStorageLayout,

@@ -2,10 +2,11 @@
 
 use super::*;
 
+use crab_cell_runtime::CellStorageLayout;
 use crab_cell_runtime::{
     ApplicationId, ApplicationIdentity, CellAuthority, Digest, NodeDirectory, SessionId, TenantId,
 };
-use crab_storage::{CellStorageLayout, ObjectStoreCredentials, build_explicit_store};
+use crab_storage::{ObjectStoreCredentials, build_explicit_store};
 use object_store::{memory::InMemory, path::Path as ObjectPath};
 use serde_json::Value;
 

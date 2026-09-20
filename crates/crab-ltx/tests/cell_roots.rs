@@ -7,12 +7,12 @@ use std::sync::{
 
 use bytes::Bytes;
 use crab_ltx::{
-    CaptureBatch, CaptureTiming, CellReplica, DiskBudget, Host, Limits, ManagedDb, RecoveryOverlay,
-    RootRef, VerifiedPlan,
+    CaptureBatch, CaptureTiming, CellObjectKind, CellReplica, CellStorageLayout, DiskBudget, Host,
+    Limits, ManagedDb, RecoveryOverlay, RootRef, VerifiedPlan,
     bundle::{Bundle, BundleEntry},
     restore_exact,
 };
-use crab_storage::{CellObjectKind, CellStorageLayout, StorageReadKind, Store};
+use crab_storage::{StorageReadKind, Store};
 use object_store::{ObjectStoreExt as _, memory::InMemory, path::Path};
 
 fn checksum_path(database: &std::path::Path) -> std::path::PathBuf {
@@ -1124,12 +1124,8 @@ async fn compaction_rejects_selected_body_corruption_outside_page_frames() {
     let replica = CellReplica::new(layout.clone(), cell, incarnation, Limits::default()).unwrap();
     let root = replica.prepare(None, &batch, 1, 1).await.unwrap().root();
     writer.close().unwrap();
-    let object = layout.incarnation_object_path(
-        &cell,
-        &incarnation,
-        &info.blake3,
-        crab_storage::CellObjectKind::Ltx,
-    );
+    let object =
+        layout.incarnation_object_path(&cell, &incarnation, &info.blake3, CellObjectKind::Ltx);
     inner
         .put(&object, Bytes::from(corrupted).into())
         .await

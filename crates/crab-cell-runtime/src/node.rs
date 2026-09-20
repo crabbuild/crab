@@ -1,5 +1,6 @@
 use bytes::Bytes;
-use crab_storage::{CellStorageLayout, ETag, StorageError, map_object_store_error};
+use crab_ltx::CellStorageLayout;
+use crab_storage::{ETag, StorageError, map_object_store_error};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};

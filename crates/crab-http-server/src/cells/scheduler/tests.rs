@@ -9,6 +9,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use crab_cell_runtime::CellStorageLayout;
 use crab_cell_runtime::{
     ActivityContext, ActivityExecution, ApplicationId, BlockingActivityHandler, BuildDescriptor,
     CellAuthority, CellCatalog, CellModule, CellReplica, CellRuntime, CellTarget, Digest,
@@ -20,7 +21,7 @@ use crab_cell_runtime::{
     install_workflow_schema, register_blocking_activity, register_maintenance, register_workflow,
     register_workflow_activities,
 };
-use crab_storage::{CellStorageLayout, Store};
+use crab_storage::Store;
 use ed25519_dalek::SigningKey;
 use futures_util::stream::BoxStream;
 use object_store::{

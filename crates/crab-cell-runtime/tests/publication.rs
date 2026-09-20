@@ -12,8 +12,9 @@ use crab_cell_runtime::{
     Digest, HandlerOutcome, IncarnationId, MutationIdentity, Owner, RequestId, SessionId,
     StoredOutcome, Transition, VersionedControl, install_runtime_schema,
 };
+use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits, ManagedDb};
-use crab_storage::{CellStorageLayout, Store};
+use crab_storage::Store;
 use futures_util::stream::BoxStream;
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,

@@ -4,8 +4,9 @@ use crab_cell_runtime::{
     CellExecutor, CellId, Digest, Error, HandlerOutcome, IncarnationId, MutationIdentity,
     RequestId, SqlWorkerPool, StoredOutcome, WorkerExecution, install_runtime_schema,
 };
+use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits, ManagedDb};
-use crab_storage::{CellStorageLayout, Store};
+use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path};
 
 const RESULT_LIMIT: usize = 1 << 20;

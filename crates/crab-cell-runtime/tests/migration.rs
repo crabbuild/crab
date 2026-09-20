@@ -18,8 +18,9 @@ use crab_cell_runtime::{
     Registry, RegistryBuilder, RetainedCodeDescriptor, SessionId, SqlWorkerPool, TenantId,
     VerifiedPeerRequest,
 };
+use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits};
-use crab_storage::{CellStorageLayout, Store};
+use crab_storage::Store;
 use futures_util::stream::BoxStream;
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,

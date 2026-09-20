@@ -12,8 +12,9 @@ use crab_cell_runtime::{
     SqlWorkerPool, TenantId, install_queue_schema, install_runtime_schema, queue_apply_lease,
     queue_claim, queue_cleanup_expired, queue_send, queue_validate_claim, register_queue,
 };
+use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits};
-use crab_storage::{CellStorageLayout, Store};
+use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path};
 
 const QUEUE_MODULE: &str = "queue-test";

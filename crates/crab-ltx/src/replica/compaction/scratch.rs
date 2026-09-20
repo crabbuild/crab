@@ -1,10 +1,10 @@
 use std::{io, path::Path, path::PathBuf, sync::Arc};
 
 use bytes::Bytes;
-use crab_storage::{CellObjectKind, MultipartUploadSource, StorageError};
+use crab_storage::{MultipartUploadSource, StorageError};
 
 use super::CellReplica;
-use crate::{CrabError, Host, Result};
+use crate::{CellObjectKind, CrabError, Host, Result};
 
 const MULTIPART_BYTES: usize = 8 << 20;
 

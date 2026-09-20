@@ -12,8 +12,9 @@ use crab_cell_runtime::{
     ApplicationId, CellAuthority, CellCatalog, CellRuntime, CellTarget, IncarnationId, NamespaceId,
     Owner, SessionId, SqlWorkerPool, TenantId,
 };
+use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits};
-use crab_storage::{CellStorageLayout, Store};
+use crab_storage::Store;
 use object_store::path::Path;
 
 #[tokio::main]

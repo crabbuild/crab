@@ -12,8 +12,9 @@ use crab_cell_runtime::{
     NamespaceDescriptor, NamespaceId, OperationDescriptor, Owner, RegistryBuilder, RequestId,
     SessionId, SqlWorkerPool, TenantId, register_blob, register_cron,
 };
+use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits};
-use crab_storage::{CellStorageLayout, Store};
+use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path};
 
 const BLOB_MODULE: &str = "blob-test";

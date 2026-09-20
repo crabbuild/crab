@@ -1,7 +1,8 @@
 use std::{sync::Arc, time::UNIX_EPOCH};
 
 use bytes::Bytes;
-use crab_storage::{CellObjectKind, ObjectStoreCredentials, Store, build_explicit_store};
+use crab_ltx::CellObjectKind;
+use crab_storage::{ObjectStoreCredentials, Store, build_explicit_store};
 use object_store::{memory::InMemory, path::Path};
 
 use super::*;

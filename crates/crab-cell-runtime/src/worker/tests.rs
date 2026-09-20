@@ -1,6 +1,7 @@
 use super::*;
+use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits};
-use crab_storage::{CellStorageLayout, Store};
+use crab_storage::Store;
 use object_store::{
     memory::InMemory,
     path::Path,

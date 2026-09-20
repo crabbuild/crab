@@ -47,7 +47,7 @@ implementations, and the official
 | Progress | Background monitor loops sync WAL, upload LTX, compact levels, create snapshots, and enforce retention | The host explicitly calls `capture`, `checkpoint`, `prepare`, compaction, and pruning |
 | Remote state | `ReplicaClient` lists LTX levels and selects ranges for restore | `CellReplica` opens an exact `RootRef`; it never discovers truth by listing objects |
 | Durability boundary | A successful replica sync advances Litestream's replica position | Uploaded immutable objects are only a proposal; the host must publish the root with Cell authority before acknowledging |
-| Storage providers | Litestream owns its CLI/config provider integrations | The host supplies an existing `crab-storage` `Store` and `CellStorageLayout` |
+| Storage providers | Litestream owns its CLI/config provider integrations | The host supplies a `crab-storage` `Store`; `crab-ltx` binds it to Cell paths with `CellStorageLayout` |
 | Restore selection | Latest, TXID, or timestamp is resolved from replica LTX files | The caller supplies a verified plan or an authority-pinned Cell root |
 | Retention | Built-in snapshot and LTX retention monitors | Remote pinning, retention, and garbage collection are host policy |
 | Format | Uses `superfly/ltx` v0.5.2 | Writes checksum-bearing LTX v3 files using the v0.5.2 sized-block layout and reads that layout plus older checksummed LZ4-frame files |
@@ -146,14 +146,133 @@ It writes to real SQLite, copies the resulting LTX artifacts across the
 transport boundary, deletes the source directory, restores the database, and
 queries the recovered row.
 
+## Preserve application errors
+
+Use `transaction_with` when the callback can reject a mutation for an
+application reason. `TransactionError::Operation` means the callback failed and
+the SQLite transaction was rolled back; commit ambiguity or capture failures
+use different variants and may fence the session.
+
+```rust,no_run
+use std::io;
+
+use crab_ltx::{ManagedDb, TransactionError};
+
+fn rename_issue(
+    database: &mut ManagedDb,
+    number: i64,
+    title: &str,
+) -> Result<(), TransactionError<io::Error>> {
+    database.transaction_with(|transaction| {
+        if title.trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "an issue title cannot be empty",
+            ));
+        }
+
+        transaction
+            .execute(
+                "UPDATE issues SET title = ?1 WHERE number = ?2",
+                (title, number),
+            )
+            .map_err(io::Error::other)?;
+        Ok(())
+    })
+}
+```
+
+A successful transaction is still only a local SQLite commit. Capture and
+publication remain separate durability steps.
+
+## Checkpoint without losing capture boundaries
+
+Call `checkpoint` instead of issuing SQLite checkpoint pragmas directly. The
+returned batch includes the pending write cut and any additional cut created by
+checkpoint maintenance; publish the whole batch before acknowledging it.
+
+```rust,no_run
+use crab_ltx::{CaptureBatch, CheckpointMode, ManagedDb};
+
+fn capture_and_truncate_wal(database: &mut ManagedDb) -> crab_ltx::Result<CaptureBatch> {
+    database.checkpoint(CheckpointMode::Truncate)
+}
+```
+
+`CheckpointMode::Passive` avoids waiting for other readers. `Truncate` is the
+stronger maintenance operation and should run only when the host has budgeted
+for it.
+
+## Resume a verified lineage
+
+`ManagedDb::resume` installs a verified plan into a fresh path and seeds the
+next capture with the plan's exact TXID and rolling checksum. It never infers
+acknowledged state from an abandoned database directory.
+
+```rust,no_run
+use crab_ltx::{Limits, ManagedDb, VerifiedPlan};
+
+fn main() -> crab_ltx::Result<()> {
+    let source = tempfile::tempdir()?;
+    let destination = tempfile::tempdir()?;
+    let limits = Limits::default();
+
+    let mut original = ManagedDb::open(&source.path().join("state.sqlite"), limits)?;
+    original.transaction(|transaction| {
+        transaction.execute("CREATE TABLE events (value TEXT NOT NULL)", [])?;
+        transaction.execute("INSERT INTO events VALUES ('first')", [])?;
+        Ok(())
+    })?;
+    let captured = original.capture()?;
+    let plan = VerifiedPlan::new(&captured.segments, captured.position, limits)?;
+    original.close()?;
+
+    let mut resumed = ManagedDb::resume(
+        &plan,
+        &destination.path().join("state.sqlite"),
+        limits,
+    )?;
+    resumed.transaction(|transaction| {
+        transaction.execute("INSERT INTO events VALUES ('second')", [])?;
+        Ok(())
+    })?;
+    let continuation = resumed.capture()?;
+
+    assert!(continuation.position.txid > plan.position().txid);
+    resumed.close()?;
+    Ok(())
+}
+```
+
 ## Preparing a Cell root
 
-Enable `replica` and construct `CellReplica` with the application's existing
-`crab_storage::Store` and `CellStorageLayout`. Provider credentials, retries,
-leases, and authority stay outside this crate.
+Enable `replica`, construct a `CellStorageLayout` from the application's
+existing `crab_storage::Store`, then bind `CellReplica` to exactly one Cell and
+incarnation. Provider credentials, leases, and authority stay outside this
+crate.
 
 ```rust,ignore
-use crab_ltx::{CellReplica, ManagedDb, PreparedRoot, RootRef};
+use crab_ltx::{CellReplica, CellStorageLayout, Limits};
+use crab_storage::Store;
+use object_store::path::Path;
+
+fn bind_replica(store: Store) -> crab_ltx::Result<CellReplica> {
+    let layout = CellStorageLayout::new(
+        store,
+        Path::from("tenant-a"),
+        [0x11; 16], // application ID
+    );
+    CellReplica::new(
+        layout,
+        [0x22; 32], // Cell ID
+        [0x33; 16], // incarnation ID
+        Limits::default(),
+    )
+}
+```
+
+```rust,ignore
+use crab_ltx::{CaptureBatch, CellReplica, ManagedDb, PreparedRoot, RootRef};
 
 async fn prepare_root(
     database: &mut ManagedDb,
@@ -161,7 +280,7 @@ async fn prepare_root(
     previous: Option<&RootRef>,
     commit_sequence: u64,
     schema: u32,
-) -> crab_ltx::Result<PreparedRoot> {
+) -> crab_ltx::Result<(PreparedRoot, CaptureBatch)> {
     let captured = database.capture()?;
     let prepared = replica
         .prepare(previous, &captured, commit_sequence, schema)
@@ -170,7 +289,7 @@ async fn prepare_root(
     // `prepared.root()` is a proposal. The embedding runtime must publish it
     // with its owner/head CAS before acknowledging the mutation or pruning
     // `captured`.
-    Ok(prepared)
+    Ok((prepared, captured))
 }
 ```
 
@@ -183,6 +302,77 @@ The live RustFS example exercises Cell publication, sparse activation,
 compaction, source deletion, and exact recovery. See the
 [examples guide](examples/README.md) before running it against a disposable
 bucket.
+
+## Reopen and restore an exact root
+
+The caller obtains `RootRef` from authenticated authority state. `open_root`
+does not list storage or choose “latest”; it verifies the named root and its
+complete metadata graph. `restore` then authenticates every page while writing
+a fresh destination.
+
+```rust,ignore
+use std::path::Path;
+
+use crab_ltx::{CellReplica, RootRef};
+
+async fn restore_published_root(
+    replica: &CellReplica,
+    published: &RootRef,
+    destination: &Path,
+) -> crab_ltx::Result<()> {
+    let verified = replica.open_root(published).await?;
+    let restored = verified.restore(destination).await?;
+    assert_eq!(restored, published.position);
+    Ok(())
+}
+```
+
+For backup pinning or garbage-collection marking, traverse the same verified
+graph instead of reconstructing object names. The result uses `RootObjectRef`
+because each entry is authenticated as a dependency of that exact root.
+
+```rust,ignore
+use crab_ltx::{CellReplica, RootObjectRef, RootRef};
+
+async fn objects_to_pin(
+    replica: &CellReplica,
+    published: &RootRef,
+) -> crab_ltx::Result<Vec<RootObjectRef>> {
+    replica.reachable_objects(published).await
+}
+```
+
+## Activate sparse writable SQL
+
+A verified root can become writable without first downloading every page.
+`prepare_writable` fetches the authenticated checksum directory asynchronously;
+`open_writable` must then run on the Cell's dedicated SQLite worker. Page faults
+fetch and verify missing pages, while `hydrate_step` resolves a bounded amount
+of remaining work proactively.
+
+```rust,ignore
+use std::path::Path;
+
+use crab_ltx::{CellReplica, Hydration, ManagedDb, RootRef};
+
+async fn activate_sparse(
+    replica: &CellReplica,
+    published: &RootRef,
+    destination: &Path,
+) -> crab_ltx::Result<ManagedDb> {
+    let verified = replica.open_root(published).await?;
+    let writable = verified.paged().prepare_writable(destination).await?;
+    let mut database = writable.open_writable(destination)?;
+
+    let Hydration { resolved, total, .. } = database.hydrate_step(128)?;
+    assert!(resolved <= total);
+    Ok(database)
+}
+```
+
+The sparse database remains pinned to the selected root. New writes still use
+`ManagedDb::transaction`, `capture`, immutable preparation, and authority CAS
+in that order.
 
 ## Core API
 
@@ -212,7 +402,7 @@ bucket.
 | `VerifiedRoot::paged` | Opens authenticated page and page-run reads |
 | `CellPagedDatabase::prepare_writable` | Seeds a fresh sparse writable activation at the root's exact position |
 | `ManagedDb::hydrate_step` | Resolves a bounded number of missing sparse pages on the owner-controlled database worker |
-| `CellReplica::reachable_objects` | Returns the verified immutable dependency set for pinning and collection |
+| `CellReplica::reachable_objects` | Returns `RootObjectRef` values for the verified immutable dependency set |
 
 ## Safety model
 
@@ -262,7 +452,7 @@ recover the authoritative plan or Cell root into a fresh directory instead.
 
 ## Resource limits
 
-`Limits::default()` admits a 256 MiB database, 64 MiB per capture, 512 MiB per
+`Limits::default()` admits a 512 MiB database, 64 MiB per capture, 512 MiB per
 input/output file, 1 GiB across a plan or retained captures, and 1,024 segments.
 These are per-operation correctness bounds, not an RSS quota.
 

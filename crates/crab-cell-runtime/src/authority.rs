@@ -1,5 +1,6 @@
 use bytes::Bytes;
-use crab_storage::{CellStorageLayout, ETag, StorageError};
+use crab_ltx::CellStorageLayout;
+use crab_storage::{ETag, StorageError};
 
 use crate::{CatalogProof, CellId, Control, Error, IncarnationId, Owner, Result, Transition};
 

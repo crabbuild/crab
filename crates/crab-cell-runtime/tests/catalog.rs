@@ -5,7 +5,8 @@ use crab_cell_runtime::{
     ApplicationId, CatalogEntry, CatalogRole, CellAuthority, CellCatalog, CellTarget, Digest,
     IncarnationId, NamespaceId, Owner, SessionId, TenantId,
 };
-use crab_storage::{CellStorageLayout, Store};
+use crab_ltx::CellStorageLayout;
+use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path};
 
 fn fixture() -> (CellStorageLayout, CellCatalog, CellTarget) {
