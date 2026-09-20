@@ -22,9 +22,9 @@
 - **Implementation status**: local runtime, typed application, public host typed
   lifecycle smoke,
   provider-neutral durability construction/recruitment/rotation, deterministic
-  workload, public receipt/matrix validation, and release negative gates are
-  implemented and tested; protected provider/Kubernetes/scale receipts remain
-  open
+  workload, public receipt/matrix validation, protected-profile/run-artifact
+  verifier coverage, and release negative gates are implemented and tested;
+  protected provider/Kubernetes/scale receipts remain open
 
 ## Decision boundary
 

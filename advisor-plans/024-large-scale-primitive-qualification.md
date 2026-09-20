@@ -18,7 +18,7 @@
 - **Depends on**: plans 018–023 and plan 015 qualification infrastructure
 - **Category**: tests / performance / operations / release
 - **Planned at**: commit `892720ce6a6`, 2026-09-19
-- **Implementation status**: schema-2 versioned profiles now bind provider/topology identity, throughput, RSS, local-disk, file-descriptor, and object-store-call envelopes; matrix verification fails closed on missing or over-limit measurements, and measured run artifacts enforce their throughput envelope in addition to per-primitive progress and p99/duration checks. Deterministic streaming workload execution, preflight guards, public black-box receipt/matrix mismatch coverage, pinned-signer validation, receipt-to-workload seed binding, a local typed all-primitive smoke driver, and release packaging of the verified protected evidence bundle are implemented; protected provider/Kubernetes/scale receipts remain open
+- **Implementation status**: schema-2 versioned profiles now bind provider/topology identity, throughput, RSS, local-disk, file-descriptor, and object-store-call envelopes; matrix verification fails closed on missing or over-limit measurements, and measured run artifacts enforce their throughput envelope in addition to per-primitive progress and p99/duration checks. Deterministic streaming workload execution, preflight guards, public black-box receipt/matrix mismatch coverage, public protected-profile/run-artifact matrix coverage, pinned-signer validation, receipt-to-workload seed binding, a local typed all-primitive smoke driver, and release packaging of the verified protected evidence bundle are implemented; protected provider/Kubernetes/scale receipts remain open
 
 ## Why this matters
 

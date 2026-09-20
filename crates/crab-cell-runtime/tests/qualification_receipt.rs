@@ -1,5 +1,9 @@
+use std::{future::Future, pin::Pin, time::Duration};
+
 use crab_cell_runtime::{
-    Digest, QualificationProfile, QualificationReceipt, QualificationRunner, QualificationWorkload,
+    Digest, QualificationExecution, QualificationOperation, QualificationOperationExecutor,
+    QualificationOwnership, QualificationProfile, QualificationReceipt, QualificationRunner,
+    QualificationWorkload, Result,
 };
 use ed25519_dalek::SigningKey;
 
@@ -41,6 +45,19 @@ fn receipt(workload: &str, artifact: &[u8]) -> QualificationReceipt {
             ),
         )
         .expect("fixture receipt")
+}
+
+struct MeasuredExecutor;
+
+impl QualificationOperationExecutor for MeasuredExecutor {
+    type Future<'a> = Pin<Box<dyn Future<Output = Result<QualificationExecution>> + Send + 'a>>;
+
+    fn execute<'a>(&'a mut self, _operation: QualificationOperation) -> Self::Future<'a> {
+        Box::pin(async {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            Ok(QualificationExecution::acknowledged(true))
+        })
+    }
 }
 
 #[test]
@@ -125,5 +142,138 @@ fn public_receipt_verifier_binds_source_image_and_artifact() {
         receipt
             .verify_for_trusted_signer(SOURCE, IMAGE, artifact, [12; 32])
             .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn public_protected_matrix_binds_run_artifact_profile_and_signer() {
+    let profile = QualificationProfile::new("protected-contract".into(), 1, 8, 1, 5_000)
+        .expect("protected profile");
+    let workload = QualificationWorkload::generate_with_size(&profile, 91, 1, 8, 1)
+        .expect("protected workload");
+    let mut executor = MeasuredExecutor;
+    let summary = workload
+        .run(&mut executor)
+        .await
+        .expect("measured workload");
+    let run = summary.artifact(&workload).expect("run artifact");
+    let workload_bytes = workload.encode().expect("workload encoding");
+    let run_bytes = run.encode().expect("run encoding");
+    run.verify_for_profile(&profile)
+        .expect("measured run thresholds");
+
+    let signing_key = SigningKey::from_bytes(&[12; 32]);
+    let trusted_signer = signing_key.verifying_key().to_bytes();
+    let image = Digest::from_bytes([13; 32]);
+    let mut receipts = Vec::with_capacity(MATRIX_ROWS.len());
+    let mut artifacts = Vec::with_capacity(MATRIX_ROWS.len());
+    for workload_name in MATRIX_ROWS {
+        let row_artifacts = if workload_name == "primitives" {
+            vec![workload_bytes.clone(), run_bytes.clone()]
+        } else {
+            vec![format!("protected-{workload_name}").into_bytes()]
+        };
+        let metrics = if workload_name == "primitives" {
+            summary.metrics().expect("run metrics")
+        } else {
+            vec![
+                crab_cell_runtime::QualificationMetric::new("cells".into(), 1, "cells".into())
+                    .expect("cell metric"),
+                crab_cell_runtime::QualificationMetric::new(
+                    "operations".into(),
+                    8,
+                    "operations".into(),
+                )
+                .expect("operation metric"),
+                crab_cell_runtime::QualificationMetric::new(
+                    "duration_secs".into(),
+                    1,
+                    "seconds".into(),
+                )
+                .expect("duration metric"),
+                crab_cell_runtime::QualificationMetric::new(
+                    "p99_latency_ms".into(),
+                    1,
+                    "ms".into(),
+                )
+                .expect("latency metric"),
+            ]
+        };
+        let primary = row_artifacts[0].clone();
+        let raw_digests = row_artifacts
+            .iter()
+            .map(|artifact| Digest::from_bytes(*blake3::hash(artifact).as_bytes()))
+            .collect();
+        let receipt = QualificationRunner::new(signing_key.clone())
+            .emit_with_profile_and_evidence(
+                &profile,
+                "protected-source".into(),
+                image,
+                "protected-provider".into(),
+                workload_name.into(),
+                "none".into(),
+                metrics,
+                &primary,
+                true,
+                (
+                    "rustc".into(),
+                    "release".into(),
+                    "protected-topology".into(),
+                    if workload_name == "primitives" {
+                        workload.seed()
+                    } else {
+                        0
+                    },
+                    1,
+                    1,
+                    false,
+                ),
+                1,
+                2,
+                b"none",
+                raw_digests,
+                vec![QualificationOwnership::new(
+                    1,
+                    1,
+                    Digest::from_bytes([14; 32]),
+                )],
+            )
+            .expect("protected receipt");
+        receipts.push(receipt);
+        artifacts.push(row_artifacts);
+    }
+
+    let artifact_views = artifacts
+        .iter()
+        .map(|row| row.iter().map(Vec::as_slice).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let evidence = MATRIX_ROWS
+        .iter()
+        .enumerate()
+        .map(|(index, workload_name)| {
+            (
+                *workload_name,
+                &receipts[index],
+                artifact_views[index].as_slice(),
+            )
+        })
+        .collect::<Vec<_>>();
+    QualificationReceipt::verify_matrix_for_profile_with_signer(
+        "protected-source",
+        image,
+        &profile,
+        &evidence,
+        trusted_signer,
+    )
+    .expect("complete protected matrix");
+    assert!(
+        QualificationReceipt::verify_matrix_for_profile_with_signer(
+            "protected-source",
+            image,
+            &profile,
+            &evidence,
+            [15; 32],
+        )
+        .is_err()
     );
 }
