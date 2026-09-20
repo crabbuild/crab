@@ -807,4 +807,43 @@ mod tests {
         builder.cell_type(first).unwrap();
         assert!(builder.cell_type(second).is_err());
     }
+
+    #[test]
+    fn cell_type_limits_and_partition_bounds_fail_closed() {
+        for shards in [0, 3, 8_192] {
+            assert!(
+                CellType::new(
+                    "app-sql",
+                    "orders",
+                    NamespaceId::from_bytes([2; 16]),
+                    CatalogRole::Sql,
+                    shards,
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            CellType::new(
+                "app-sql",
+                "orders",
+                NamespaceId::from_bytes([0; 16]),
+                CatalogRole::Sql,
+                1,
+            )
+            .is_err()
+        );
+
+        let cell_type = CellType::new(
+            "app-sql",
+            "orders",
+            NamespaceId::from_bytes([2; 16]),
+            CatalogRole::Sql,
+            1,
+        )
+        .unwrap();
+        assert!(cell_type.with_limits(0, 1).is_err());
+        assert!(cell_type.with_limits(1, 0).is_err());
+        assert!(cell_type.with_schema_range(0, 1).is_err());
+        assert!(cell_type.with_schema_range(2, 1).is_err());
+    }
 }
