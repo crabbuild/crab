@@ -2481,6 +2481,8 @@ mod tests {
             reserve_bytes: available,
         };
 
+        // Request the measured free-space sample itself so unrelated cleanup
+        // cannot make this capacity proof pass or fail by a one-byte race.
         assert!(matches!(
             monitor.ensure_available(available),
             Err(error) if error.kind() == io::ErrorKind::StorageFull
