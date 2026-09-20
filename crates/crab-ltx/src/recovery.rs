@@ -1,4 +1,4 @@
-use std::io::{BufReader, BufWriter, Cursor, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -18,14 +18,13 @@ pub(crate) fn full_job_scratch_bytes(page_size: u32, database_pages: u32) -> Res
 
 /// A fully verified, explicit snapshot-plus-deltas plan ending at an exact position.
 ///
-/// Construction reads only named files and owns their bytes, preventing later
-/// path replacement from changing the plan. A remote manifest's authenticity,
-/// repository identity, epoch, and object selection remain the caller's job.
+/// Construction reads only named files and owns their exact verified database
+/// image, preventing later path replacement from changing the plan. A remote
+/// manifest's authenticity, repository identity, epoch, and object selection
+/// remain the caller's job.
 pub struct VerifiedPlan {
-    pub(crate) inputs: Vec<Vec<u8>>,
     pub(crate) infos: Vec<SegmentInfo>,
-    image_digest: [u8; 32],
-    position: Position,
+    materialized: MaterializedPlan,
     limits: Limits,
 }
 
@@ -35,6 +34,7 @@ pub(crate) struct MaterializedPlan {
     pub(crate) page_size: u32,
     pub(crate) database_pages: u32,
     pub(crate) position: Position,
+    timestamp: i64,
 }
 
 #[derive(Default)]
@@ -43,27 +43,18 @@ struct MaterializationState {
     checksums: PageChecksums,
     position: Position,
     page_size: u32,
+    timestamp: i64,
 }
 
 impl MaterializationState {
-    fn apply(
-        &mut self,
-        bytes: &[u8],
-        info: &SegmentInfo,
-        limits: Limits,
-        verify_identity: bool,
-    ) -> Result<()> {
+    fn apply(&mut self, bytes: &[u8], info: &SegmentInfo, limits: Limits) -> Result<()> {
         if bytes.len() as u64 > limits.max_file_bytes {
             return Err(CrabError::Limit("LTX bytes"));
         }
         if bytes.len() as u64 != info.size_bytes {
             return Err(CrabError::ChecksumMismatch);
         }
-        let digest = verify_identity.then(|| *blake3::hash(bytes).as_bytes());
-        if digest.is_some_and(|digest| digest != info.blake3) {
-            return Err(CrabError::ChecksumMismatch);
-        }
-        let mut decoder = crate::codec::Decoder::new(Cursor::new(bytes));
+        let mut decoder = crate::codec::Decoder::new(bytes);
         decoder.decode_header()?;
         let header = decoder.header;
         validate_header(&header, limits)?;
@@ -83,6 +74,7 @@ impl MaterializationState {
             return Err(CrabError::LTXCorrupted);
         }
         self.page_size = header.page_size;
+        self.timestamp = header.timestamp;
         let image_len = usize::try_from(header.commit)
             .ok()
             .and_then(|pages| pages.checked_mul(header.page_size as usize))
@@ -106,6 +98,7 @@ impl MaterializationState {
         }
         checksums.finish()?;
         decoder.close()?;
+        let (size, digest) = decoder.artifact()?;
         let file = ltx::DecodedFile {
             header,
             trailer: decoder.trailer,
@@ -113,9 +106,7 @@ impl MaterializationState {
         if self.checksums.checksum() != file.trailer.post_apply_checksum {
             return Err(CrabError::ChecksumMismatch);
         }
-        if digest.is_some_and(|digest| {
-            SegmentInfo::from_inspected(&file, bytes.len() as u64, digest) != *info
-        }) {
+        if size != bytes.len() as u64 || SegmentInfo::from_inspected(&file, size, digest) != *info {
             return Err(CrabError::ChecksumMismatch);
         }
         self.position = Position {
@@ -137,6 +128,7 @@ impl MaterializationState {
             page_size: self.page_size,
             database_pages,
             position: self.position,
+            timestamp: self.timestamp,
         })
     }
 }
@@ -164,7 +156,6 @@ impl VerifiedPlan {
         if segments.len() > limits.max_segments {
             return Err(CrabError::Limit("plan segments"));
         }
-        let mut inputs = Vec::new();
         let mut infos = Vec::with_capacity(segments.len());
         let mut materialization = MaterializationState::default();
         let mut total = 0u64;
@@ -176,39 +167,24 @@ impl VerifiedPlan {
                 return Err(CrabError::Limit("plan bytes"));
             }
             let bytes = host.read(segment.path(), segment.info().size_bytes)?;
-            materialization.apply(&bytes, segment.info(), limits, true)?;
+            materialization.apply(&bytes, segment.info(), limits)?;
             infos.push(segment.info().clone());
-            inputs.push(bytes);
         }
         let materialized = materialization.finish(target)?;
-        let image_digest = *blake3::hash(&materialized.image).as_bytes();
         Ok(Self {
-            inputs,
             infos,
-            image_digest,
-            position: target,
+            materialized,
             limits,
         })
     }
 
     #[must_use]
     pub fn position(&self) -> Position {
-        self.position
+        self.materialized.position
     }
 
-    pub(crate) fn materialize(&self) -> Result<MaterializedPlan> {
-        if self.inputs.len() != self.infos.len() || self.inputs.len() > self.limits.max_segments {
-            return Err(CrabError::Limit("plan segments"));
-        }
-        let mut materialization = MaterializationState::default();
-        for (bytes, info) in self.inputs.iter().zip(&self.infos) {
-            materialization.apply(bytes, info, self.limits, false)?;
-        }
-        let materialized = materialization.finish(self.position)?;
-        if *blake3::hash(&materialized.image).as_bytes() != self.image_digest {
-            return Err(CrabError::ChecksumMismatch);
-        }
-        Ok(materialized)
+    pub(crate) fn materialize(&self) -> &MaterializedPlan {
+        &self.materialized
     }
 }
 
@@ -259,32 +235,67 @@ pub(crate) fn compact_to_file(
     plan: &VerifiedPlan,
     destination: &Path,
 ) -> Result<LocalSegment> {
-    // The plan owns bytes that were already fully verified. Re-decoding every
-    // input here is required for the merge, but no compacted body is retained
-    // in memory. The compactor returns a proof for the streamed output.
     let first = plan.infos.first().ok_or(CrabError::TxNotAvailable)?;
     let last = plan.infos.last().ok_or(CrabError::TxNotAvailable)?;
-    if plan.inputs.len() != plan.infos.len() || plan.inputs.len() > plan.limits.max_segments {
+    if plan.infos.len() > plan.limits.max_segments {
         return Err(CrabError::Limit("compaction inputs"));
     }
-    let readers = plan
-        .inputs
-        .iter()
-        .map(|bytes| Cursor::new(bytes.as_slice()))
-        .collect::<Vec<_>>();
+    let materialized = plan.materialize();
+    if materialized.checksums.checksum() != materialized.position.checksum {
+        return Err(CrabError::ChecksumMismatch);
+    }
     let (mut scratch, file) = CompactionScratch::create(host, destination)?;
     let writer = BoundedFileWriter {
         file,
         limit: plan.limits.max_file_bytes,
         written: 0,
+        digest: blake3::Hasher::new(),
     };
-    let mut compactor =
-        crate::compactor::Compactor::new(BufWriter::with_capacity(1 << 20, writer), readers);
-    let proof = compactor.compact()?;
-    let writer = compactor.into_writer();
-    let mut writer = writer.into_inner().map_err(|error| error.into_error())?;
-    writer.sync_all()?;
-    drop(writer);
+    let mut encoder = crate::codec::Encoder::new_block(BufWriter::with_capacity(1 << 20, writer));
+    encoder.encode_header(ltx::Header {
+        version: ltx::VERSION,
+        page_size: materialized.page_size,
+        commit: materialized.database_pages,
+        min_txid: crate::Txid(first.min_txid),
+        max_txid: crate::Txid(last.max_txid),
+        timestamp: materialized.timestamp,
+        pre_apply_checksum: first.pre_checksum,
+        ..ltx::Header::default()
+    })?;
+    let page_size = materialized.page_size as usize;
+    let lock_page = ltx::lock_pgno(materialized.page_size);
+    for page in 1..=materialized.database_pages {
+        if page == lock_page {
+            continue;
+        }
+        let start = (page as usize - 1)
+            .checked_mul(page_size)
+            .ok_or(CrabError::Limit("database bytes"))?;
+        let end = start
+            .checked_add(page_size)
+            .ok_or(CrabError::Limit("database bytes"))?;
+        let data = materialized
+            .image
+            .get(start..end)
+            .ok_or(CrabError::LTXCorrupted)?;
+        encoder.encode_page(
+            ltx::PageHeader {
+                pgno: page,
+                flags: 0,
+            },
+            data,
+        )?;
+    }
+    encoder.close(materialized.position.checksum)?;
+    let encoded = ltx::DecodedFile {
+        header: encoder.header,
+        trailer: encoder.trailer,
+    };
+    let writer = encoder.into_writer();
+    let writer = writer.into_inner().map_err(|error| error.into_error())?;
+    let (mut file, size, digest) = writer.finish();
+    file.sync_all()?;
+    drop(file);
 
     let ltx_host = crate::LtxHost {
         facilities: host.clone(),
@@ -292,17 +303,17 @@ pub(crate) fn compact_to_file(
         max_file_bytes: plan.limits.max_file_bytes,
     };
     let output = BufReader::with_capacity(1 << 20, ltx_host.open(&scratch.path)?);
-    let (decoded, size, digest) = ltx::inspect_reader(output)?;
-    let info = SegmentInfo::from_inspected(&decoded, size, digest);
-    if proof.header != decoded.header
-        || proof.post_apply_checksum != decoded.trailer.post_apply_checksum
-        || info.min_txid != first.min_txid
+    let (stored_size, stored_digest) = digest_reader(output)?;
+    if stored_size != size || stored_digest != digest {
+        return Err(CrabError::ChecksumMismatch);
+    }
+    let info = SegmentInfo::from_inspected(&encoded, size, digest);
+    if info.min_txid != first.min_txid
         || info.max_txid != last.max_txid
         || info.pre_checksum != first.pre_checksum
-        || info.position() != plan.position
+        || info.position() != materialized.position
         || info.database_pages != last.database_pages
         || info.page_size != first.page_size
-        || proof.image_digest != plan.image_digest
     {
         return Err(CrabError::ChecksumMismatch);
     }
@@ -316,12 +327,7 @@ struct BoundedFileWriter {
     file: Box<dyn crate::environment::FileIo>,
     limit: u64,
     written: u64,
-}
-
-impl BoundedFileWriter {
-    fn sync_all(&mut self) -> std::io::Result<()> {
-        self.file.sync_all()
-    }
+    digest: blake3::Hasher,
 }
 
 impl Write for BoundedFileWriter {
@@ -334,12 +340,36 @@ impl Write for BoundedFileWriter {
             return Err(std::io::Error::other("compacted file byte limit exceeded"));
         }
         self.file.write_all(bytes)?;
+        self.digest.update(bytes);
         self.written = end;
         Ok(bytes.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+}
+
+impl BoundedFileWriter {
+    fn finish(self) -> (Box<dyn crate::environment::FileIo>, u64, [u8; 32]) {
+        (self.file, self.written, *self.digest.finalize().as_bytes())
+    }
+}
+
+fn digest_reader(mut reader: impl Read) -> Result<(u64, [u8; 32])> {
+    let mut digest = blake3::Hasher::new();
+    let mut size = 0u64;
+    let mut buffer = [0; 64 << 10];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        size = size
+            .checked_add(read as u64)
+            .ok_or(CrabError::Limit("LTX bytes"))?;
+        digest.update(&buffer[..read]);
+    }
+    Ok((size, *digest.finalize().as_bytes()))
 }
 
 struct CompactionScratch {

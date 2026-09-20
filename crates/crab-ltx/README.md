@@ -163,7 +163,9 @@ fn main() -> crab_ltx::Result<()> {
 `LocalSegment::new` only describes a selected file and its expected metadata.
 It is not trusted until `VerifiedPlan::new` has read the bytes, checked the
 BLAKE3 digest and LTX structure, verified the complete checksum-linked chain,
-and reconstructed the requested endpoint.
+and reconstructed the requested endpoint. The plan owns that verified database
+image, so source files may be removed or replaced afterward without changing
+what restore, resume, or compaction consumes.
 
 Run the complete local demonstration from the repository root:
 
@@ -445,7 +447,7 @@ in that order.
 | `Db::durability_barrier` | Flushes deferred files concurrently, then syncs each parent directory once; failure fences the session |
 | `Db::checkpoint` | Captures a barrier, runs the selected SQLite checkpoint, and returns every generated cut |
 | `Db::snapshot` | Returns an independent full snapshot plus any pending captured cuts |
-| `VerifiedPlan::new` | Owns and verifies the complete selected snapshot-plus-delta chain |
+| `VerifiedPlan::new` | Verifies the complete selected snapshot-plus-delta chain and owns its exact reconstructed image |
 | `restore_exact` | Installs a fresh database at exactly the verified endpoint; never overwrites |
 | `compact_exact` | Produces a verified full snapshot without deleting its inputs |
 | `Db::resume` | Restores a verified plan into a fresh session and continues its TXID/checksum lineage |
@@ -515,6 +517,12 @@ recover the authoritative plan or Cell root into a fresh directory instead.
 `Limits::default()` admits a 512 MiB database, 64 MiB per capture, 512 MiB per
 input/output file, 1 GiB across a plan or retained captures, and 1,024 segments.
 These are per-operation correctness bounds, not an RSS quota.
+
+Each live `VerifiedPlan` retains one reconstructed database image, bounded by
+`max_database_bytes`, plus its checksum state and segment metadata. Drop plans
+after restore, resume, or compaction; services that build several plans at once
+must admit their combined decoded size rather than only their compressed LTX
+input size.
 
 Each open `Db` retains three SQLite connections with a 64 KiB page-cache
 target per connection. `Host` can share disk, I/O, blocking-job, recovery,

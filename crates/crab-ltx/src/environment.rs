@@ -1034,8 +1034,7 @@ impl Host {
         plan: &crate::VerifiedPlan,
         destination: &Path,
     ) -> crate::Result<crate::Position> {
-        let materialized = plan.materialize()?;
-        self.restore_materialized(&materialized, destination)
+        self.restore_materialized(plan.materialize(), destination)
     }
 
     pub(crate) fn restore_materialized(

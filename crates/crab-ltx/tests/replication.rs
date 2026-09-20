@@ -179,7 +179,7 @@ fn exact_plan_rejects_gap_overlap_wrong_target_and_manifest_mutation() {
 }
 
 #[test]
-fn verified_plan_owns_bytes_and_never_overwrites_destination() {
+fn verified_plan_owns_image_and_never_overwrites_destination() {
     let temp = TempDir::new().unwrap();
     let mut db = Db::open(&temp.path().join("repo.sqlite"), Limits::default()).unwrap();
     insert(&mut db, "retained");
@@ -188,10 +188,15 @@ fn verified_plan_owns_bytes_and_never_overwrites_destination() {
     for file in batch.segments {
         std::fs::remove_file(file.path()).unwrap();
     }
+    let compacted = compact_exact(&plan, &temp.path().join("compacted.ltx")).unwrap();
+    let compact_plan = VerifiedPlan::new(&[compacted], plan.position(), Limits::default()).unwrap();
     let destination = temp.path().join("restore.sqlite");
     restore_exact(&plan, &destination).unwrap();
     assert!(restore_exact(&plan, &destination).is_err());
     assert_eq!(rows(&destination), ["retained"]);
+    let compact_destination = temp.path().join("compact-restore.sqlite");
+    restore_exact(&compact_plan, &compact_destination).unwrap();
+    assert_eq!(rows(&compact_destination), ["retained"]);
 }
 
 #[test]

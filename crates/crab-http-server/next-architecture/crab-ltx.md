@@ -18,7 +18,7 @@ performance and process/network fault qualification remain delivery work.
 | SQLite lifecycle | `Db` owns three connections and a serialized transaction callback; WAL read-lock and managed checkpoints retained |
 | Capture | Checksum-bearing sized-block LTX, all cuts returned; SQLite WAL-hook frame boundary checked before checkpointing |
 | Snapshot | Full local snapshot plus ownership of every newly generated capture cut |
-| Restore | Explicit snapshot-plus-deltas plan; exact ranges/digests/checksums; owned verified bytes; new-file installation |
+| Restore | Explicit snapshot-plus-deltas plan; exact ranges/digests/checksums; owned verified image; new-file installation |
 | Compaction | Full snapshots and selected-body delta ranges; exact reduced bytes and replacement indexed state verified; bounded eight-input Cell level scheduling plus pressure-triggered full replacement |
 | Cell root transport (`replica` feature) | Existing `crab-storage` transport; immutable Cell/incarnation-scoped LTX/index/directory/root objects; publication remains authority CAS |
 | Cell recovery/compaction | Pinned exact `RootRef` recovery, bundle overlays, and compaction guarded by Cell authority CAS |
@@ -187,7 +187,7 @@ All paths are relative to the pinned Celld repository.
 | `crates/ltx/src/wal.rs`: WAL reader | Reuse frame parsing, commit cuts, salts and continuity checks |
 | `crates/ltx/src/ltx.rs`, `codec.rs`, `lz4_block.rs` | Reuse format validation, CRC, frame/block codecs and page checksums; qualify checksum-bearing capture |
 | `Db::snapshot_to_writer` | Reuse full-snapshot encoding; enforce frozen input and memory admission |
-| `crates/ltx/src/compactor.rs`: `Compactor` | Reuse page merge and encoding against an explicit validated input set |
+| `crates/ltx/src/compactor.rs`: `Compactor` | Initially adapted for local merge; later removed after verified plans began owning the final image and encoding it directly |
 | `replica.rs`: `restore_from_plan_with_download_slots` and local apply helpers | Reference only; Crab implements local apply/install in `recovery.rs`, without copying discovery or transport |
 | `host.rs`: `LtxHost`, `FileSystem` | Preserve useful filesystem/fault seams; connect blocking work to Crab's bounded executor |
 | `replica.rs`: upstream sync/position helpers | Adapted behind `CellReplica` for verified chains and immutable Cell roots; not HTTP publication authority |
@@ -364,7 +364,8 @@ session directory until publication and cleanup are resolved.
 
 `LocalSegment::new` constructs an unverified selection from a local path and
 manifest expectations. `VerifiedPlan::new` verifies those inputs, exact
-endpoint and each intermediate database checksum, then owns the input bytes.
+endpoint and each intermediate database checksum, then owns the reconstructed
+database image.
 It has no bucket URL, epoch inference, local-database fallback or latest option.
 Only a full snapshot followed by contiguous, non-overlapping ranges is accepted.
 
@@ -457,8 +458,10 @@ did not start and lets the runtime return capacity without fencing. These are
 not RSS quotas;
 `Host::with_scratch_monitor` also lets the server remeasure actual free space
 after weighted full-job admission and before remote body downloads.
-Local plan verification retains input buffers, while Cell compaction uses bounded
-memory plus local scratch. Aggregate capture accounting
+Each local verified plan retains one reconstructed image bounded by
+`max_database_bytes`, while Cell compaction uses bounded memory plus local
+scratch. Embedders must admit concurrent local plans by decoded image size,
+not compressed input size. Aggregate capture accounting
 can fail after local files have been installed. Reserve headroom.
 The Cell checksum index is disk-backed and its ordinary capture path is
 O(changed pages); truncation must additionally read the removed checksum suffix.

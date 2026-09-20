@@ -191,38 +191,36 @@ and a true full-round total separately.
 
 The implementation keeps the public embedded API centered on `Db`. `Db` owns
 the SQLite writer and private `CaptureEngine`; `Host` owns injectable local
-filesystem/VFS policy; and `VerifiedPlan` owns the selected LTX bytes and
-manifest metadata. `CellReplica` remains an optional object-store adapter that
-prepares immutable root proposals; Cell authority, acknowledgement, retention,
-and publication CAS remain outside `crab-ltx`.
+filesystem/VFS policy; and `VerifiedPlan` owns the exact verified database
+image plus the selected segment metadata. `CellReplica` remains an optional
+object-store adapter that prepares immutable root proposals; Cell authority,
+acknowledgement, retention, and publication CAS remain outside `crab-ltx`.
 
-Plan construction uses one page-decoding pass per named input. It verifies the
-file identity and checksum-linked lineage while building a temporary image and
-`PageChecksums`, computes the final image digest, then drops that temporary
-image before returning `VerifiedPlan`. A later private `materialize` pass is
-used when a caller needs restore bytes and continuation state; it returns one
-`MaterializedPlan` containing the image, checksums, page size, page count, and
-position. `Host::restore` and `Db::resume_with_host` consume that one result
-without a duplicate continuation reconstruction.
+Plan construction uses one page-decoding pass per named input. In that pass it
+verifies the encoded byte identity, LTX structure, checksum-linked lineage, and
+every intermediate database checksum while constructing the final image and
+`PageChecksums`. The encoded inputs are then dropped. Restore, resume, and
+compaction borrow the same private `MaterializedPlan`, avoiding a second decode
+without exposing mutable image bytes through the public API.
 
-Local compaction now streams the generic `Compactor` into an exclusively
-created, same-directory scratch file through the host `FileSystem`. A bounded
-writer enforces `max_file_bytes`; the file is synced, reopened through the host,
-and checked with `ltx::inspect_reader`. The compactor's private proof carries
-the output header, post-apply checksum, and canonical final-image digest.
-Only after those proofs agree with the plan does `persist_file_new` install the
-file. The scratch guard removes owned files on pre-install errors and never
-replaces an existing destination.
+Local compaction writes a full snapshot directly from the verified image into
+an exclusively created, same-directory scratch file through the host
+`FileSystem`. The encoder establishes the header, ordered page stream, index,
+file checksum, and trailer. A bounded digesting writer enforces
+`max_file_bytes`; after sync, a streaming readback must reproduce the exact
+encoded length and BLAKE3 digest before `persist_file_new` installs the file.
+The scratch guard removes owned files on pre-install errors and never replaces
+an existing destination.
 
 ### Contracts that must not change
 
-1. `VerifiedPlan` owns the exact named input bytes; later path replacement or
-   bucket listing cannot alter the selected plan.
+1. `VerifiedPlan` owns the exact reconstructed database image; later input
+   removal, path replacement, or bucket listing cannot alter the selected plan.
 2. The first segment is a full snapshot; subsequent TXID ranges and
    pre/post-checksums are contiguous and end at the caller-selected `Position`.
 3. Compaction output preserves the first minimum TXID/pre-checksum, last
-   maximum TXID/post-checksum, page size, database page count, and canonical
-   final-image BLAKE3 digest.
+   maximum TXID/post-checksum, page size, database page count, and verified
+   final database checksum.
 4. Restore and compaction never replace an existing destination.
 5. A compacted scratch file is fully synced before installation; installation
    syncs the destination parent. Errors before installation remove owned
@@ -232,9 +230,9 @@ replaces an existing destination.
    directory before returning. This plan must not change capture
    acknowledgement or publication timing.
 7. Default `Limits` remain 512 MiB database, 64 MiB capture, 512 MiB file,
-   1 GiB plan, and 1,024 segments. Do not retain a complete materialized image
-   inside `VerifiedPlan`; that would extend peak memory for the plan's entire
-   lifetime.
+   1 GiB encoded plan input, and 1,024 segments. Each live `VerifiedPlan`
+   retains at most `max_database_bytes` of image data plus checksum and segment
+   metadata; multi-plan callers must admit decoded image memory explicitly.
 
 ## Commands you will need
 
@@ -378,7 +376,7 @@ rg -n "end_to_end_us" crates/crab-ltx/perf
 
 Expected: both test commands exit 0; `rg` returns no matches.
 
-### Step 2: Build and reuse one private materialization per recovery operation
+### Step 2: Build and retain one private verified materialization per plan
 
 Refactor `crates/crab-ltx/src/recovery.rs` around a private materialization
 result. A suggested shape is:
@@ -404,24 +402,22 @@ Implement these rules:
    pre-apply checksum, page-size continuity, per-state page checksum, final
    selected position, and plan limits.
 2. Build the canonical image and `PageChecksums` while processing those
-   decoded pages. Compute `image_digest` from that image, then drop the image;
-   retain only owned input bytes, `SegmentInfo` values, digest, position, and
-   limits in `VerifiedPlan`.
+   decoded pages. Retain the private materialization, `SegmentInfo` values, and
+   limits in `VerifiedPlan`; drop the larger of the encoded chain or decoded
+   image instead of retaining both.
 3. Keep `verify_segment` with its present signature and behavior for bundle,
    node-frame, and retained-file callers. Add a private decode-with-pages
    helper for plan construction rather than making unrelated callers retain
    page bodies.
-4. Replace `VerifiedPlan::image()` with one private materialization method
-   that reconstructs the already-owned, already-selected inputs and returns
-   image plus continuation metadata in one pass. It must still validate the
-   LTX stream and checksum-linked lineage; it may rely on the plan's private
-   expected metadata instead of hashing an external path again.
-5. Change `Host::restore` to materialize once and atomically install that
-   image through the existing `persist_new` contract.
-6. Change `Db::resume_with_host` to materialize once, use the same
-   image for installation, and seed the returned checksum/page-size/page-count
-   state. Do not call a continuation helper and then call public `Host::restore`
-   if that reconstructs the plan a second time.
+4. Expose the cached result only through one crate-private immutable accessor.
+   Public callers may select, restore, resume, and compact a plan but cannot
+   read or mutate its backing image.
+5. Change `Host::restore` to atomically install that image through the existing
+   `persist_new` contract without another LTX decode.
+6. Change `Db::resume_with_host` to use the same image for installation and
+   seed the returned checksum/page-size/page-count state. Do not call a
+   continuation helper and then public `Host::restore` if that copies or
+   reconstructs the plan a second time.
 7. Delete or narrow `recovery::continuation` after its last duplicate caller
    is gone. Do not construct a `Vec<(u32, Vec<u8>)>` for every page merely to
    rebuild checksums already computed during materialization.
@@ -452,21 +448,14 @@ CARGO_TARGET_DIR="$CRAB_LTX_TARGET" cargo test -p crab-ltx --locked \
 
 Expected: all selected tests pass; no public API or feature-gate changes.
 
-### Step 3: Stream local compaction into a synced same-directory scratch file
+### Step 3: Encode local compaction from the verified image
 
-Remove the full-output `BoundedWriter<Vec<u8>>` path. Keep the existing
-`Compactor<W, R>` generic writer boundary and make the compactor return a
-private proof describing what it selected:
-
-- output header identity;
-- recomputed post-apply checksum;
-- canonical final-image BLAKE3 digest.
-
-Compute the image digest inside `Compactor` while pages are selected newest
-first. Feed zero pages into the digest for every gap, including the SQLite lock
-page, exactly as the current post-compaction decode loop does. Finish trailing
-zero pages through `header.commit`. Do not trust a source trailer as proof of
-the merged result.
+Remove the full-output `BoundedWriter<Vec<u8>>` path and the second k-way merge
+over encoded inputs. Encode a new full snapshot directly from the immutable
+image and database checksum already proven during plan construction. Skip the
+SQLite lock page exactly as the snapshot codec requires. Preserve the first
+input's minimum TXID and pre-apply checksum, and the last input's maximum TXID,
+timestamp, and page count.
 
 Implement local installation as follows:
 
@@ -475,17 +464,17 @@ Implement local installation as follows:
 2. Create it exclusively through `FileSystem::create`; a collision retries
    with a new nonce. Do not use `std::fs` or `tempfile` behind the host's
    injectable filesystem boundary.
-3. Wrap the resulting host file handle in a private bounded digest/counting writer
-   and stream `Compactor` output into it. Enforce `max_file_bytes` while
+3. Wrap the resulting host file handle in a private bounded digest/counting
+   writer and stream `Encoder` output into it. Enforce `max_file_bytes` while
    writing.
 4. Sync the completed scratch file and drop the write handle.
-5. Reopen the scratch file through the host and call the streaming
-   `ltx::inspect_reader` path. This must validate the encoded header, ordered
-   pages, file checksum, trailer, byte length, and BLAKE3 without retaining the
-   full body.
-6. Build `SegmentInfo` from the inspected artifact and compare its complete
-   identity plus the compactor's canonical image digest against the plan's
-   first/last metadata, exact selected position, and stored `image_digest`.
+5. Reopen the scratch file through the host and stream it through a digesting
+   reader. Its byte length and BLAKE3 must exactly match the bytes accepted by
+   the encoder's writer; this detects short, altered, or replaced scratch
+   output without decoding it again.
+6. Build `SegmentInfo` from the encoder's closed header/trailer plus the exact
+   stored length and digest. Compare its range, pre-checksum, selected position,
+   page count, and page size against the plan before installation.
 7. Install the already-synced same-directory scratch through
    `FileSystem::persist_file_new`. Return `LocalSegment` only after that call
    succeeds.
@@ -494,8 +483,8 @@ Implement local installation as follows:
    a destination after an ambiguous installation error.
 9. Keep `FileSystem` unchanged. Its existing `create`, `open`,
    `remove_file`, and `persist_file_new` operations are sufficient.
-10. Delete `BoundedWriter` and `compact_bytes` after all callers use the
-    streamed path.
+10. Delete the now-redundant local `Compactor`, `BoundedWriter`, and
+    `compact_bytes` paths after all callers use the canonical image encoder.
 
 Extend `crates/crab-ltx/tests/host_hooks.rs` using its existing `Faults`
 filesystem:
@@ -630,6 +619,33 @@ compaction improvement, but the full recovery/total gate is not yet satisfied;
 this iteration makes no release-performance claim and leaves the plan
 `IN PROGRESS`.
 
+## Follow-up iteration: retain the verified image and encode once
+
+Profiling showed that the bounded k-way merge still repeated work already
+completed by `VerifiedPlan::new`: it decoded the full input chain again, and
+restore decoded the compacted snapshot yet again. `VerifiedPlan` now keeps the
+immutable materialized image and continuation checksum state produced by its
+verification pass. Local restore copies that image once; resume reuses the same
+state; local compaction encodes a snapshot directly from it. The old local
+`Compactor` is deleted, leaving one canonical reconstruction path.
+
+This trades longer-lived decoded memory for fewer decodes. The default bounds
+make one plan retain at most a 512 MiB image instead of up to 1 GiB of encoded
+inputs, but a highly compressible plan can use more memory than its input
+files. The plan is caller-owned and not retained by `crab-cell-runtime` today;
+multi-plan embedders must still use an external decoded-memory admission gate.
+This is a documented resource tradeoff, not a zero-cost optimization.
+
+An alternating nine-sample comparison against the exact pre-iteration commit
+reduced median recovery time by 13.7% for 128 × 4 KiB and 2.14x for
+512 × 16 KiB. A one-round large-workload process measurement increased maximum
+RSS from about 27.6 MiB to 32.9 MiB. The host was heavily contended, so these
+figures establish direction and the memory cost, not release-grade absolute
+latency. A later order-balanced Crab/Celld run retained the same qualitative
+result: Crab won medium and large recovery plus grouped total latency, while
+Celld still won small recovery. The plan remains `IN PROGRESS`; it does not
+claim that Crab is universally faster.
+
 ## Test plan
 
 - `crates/crab-ltx/perf/crab/src/main.rs`
@@ -663,12 +679,14 @@ All boxes must be checked:
       construction; it does not call `verify_segment` followed by `image()`.
 - [x] One private materialization supplies both restore bytes and continuation
       metadata during `Db::resume_with_host`.
-- [x] `VerifiedPlan` does not retain a complete database image after
-      construction.
+- [x] `VerifiedPlan` retains one immutable database image and drops encoded
+      input bodies, so restore, resume, and compaction do not decode the chain
+      again.
 - [x] Local compaction no longer stores its complete output in `Vec<u8>` and no
       longer calls `persist_new`.
-- [x] Streamed compact output is synced, reopened, inspected, exact-image
-      checked, and installed with `persist_file_new`.
+- [x] Streamed compact output is synced, reopened, matched byte-for-byte by
+      length/BLAKE3 against the encoder stream, metadata-checked, and installed
+      with `persist_file_new`.
 - [x] Scratch files are removed on every tested pre-install failure;
       destinations are never overwritten.
 - [x] Deferred captures keep files unacknowledged until a grouped file and
@@ -703,8 +721,8 @@ Stop and report; do not improvise if:
   fully synced file;
 - a failure path can install or overwrite a destination and then return an
   ordinary unambiguous error;
-- the implementation needs a persistent cached full database image inside
-  `VerifiedPlan` to achieve the speedup;
+- retaining the verified image exceeds `max_database_bytes`, keeps both the
+  encoded chain and decoded image, or leaks mutable image access publicly;
 - a direct `crab-cell-runtime` or `crab-http-server` consumer requires a public
   compatibility alias or second recovery path;
 - any verification command fails twice after a reasonable source fix;
@@ -760,9 +778,10 @@ claim.
 - Keep `verify_segment` as the reusable single-segment verifier. The one-pass
   plan builder is an optimization for a complete explicit chain, not a new
   trust boundary for bundles or node frames.
-- If future work wants cached materialization, it must add explicit memory
-  admission for up to `max_database_bytes`; this plan deliberately avoids
-  extending that memory lifetime.
+- A local `VerifiedPlan` retains up to `max_database_bytes`; services that keep
+  concurrent plans must add decoded-memory admission around construction and
+  plan lifetime. The library limit is a correctness bound, not a process RSS
+  governor.
 - The grouped durability API is intentionally opt-in. Do not make
   `capture()` asynchronous or silently defer its parent barrier; doing so would
   change the acknowledgement contract.

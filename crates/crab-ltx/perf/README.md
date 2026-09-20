@@ -98,10 +98,12 @@ it does not include those checks in the reported restore timer.
 
 For a phase comparison, use `recovery_us` rather than comparing `compact_us`
 alone. Crab intentionally verifies and owns every input before the merge; the
-compacted output also recomputes its page checksum while merging and is decoded
-once before installation. Celld's pinned `ReplicaCompactor` validates the range
-shape and destination continuity but does not expose the same input-plan
-verification phase. Use `total_us` as the only full local-round headline.
+verified image is then encoded as a snapshot, synced, and read back to match its
+exact length and BLAKE3 digest before installation. `compact_verify_us` builds
+the explicit plan required by Crab's restore API and independently decodes that
+snapshot. Celld's pinned `ReplicaCompactor` validates the range shape and
+destination continuity but does not expose equivalent input-plan or compacted-
+plan verification phases. Use `total_us` as the only full local-round headline.
 
 The implementations do not have identical durability costs. Crab fsyncs the
 LTX file and its parent directory before returning a capture batch. The pinned

@@ -172,7 +172,7 @@ impl Db {
         limits: Limits,
         host: crate::Host,
     ) -> Result<Self> {
-        let materialized = plan.materialize()?;
+        let materialized = plan.materialize();
         let limits = limits.validate()?;
         if u64::from(materialized.database_pages) * u64::from(materialized.page_size)
             > limits.max_database_bytes
@@ -182,7 +182,7 @@ impl Db {
         let database_bytes =
             u64::from(materialized.database_pages) * u64::from(materialized.page_size);
         let local_disk = host.reserve_local_disk(database_bytes)?;
-        host.restore_materialized(&materialized, destination)?;
+        host.restore_materialized(materialized, destination)?;
         let vfs = host.sqlite_vfs.clone();
         let mut db = Self::open_inner(
             destination,
