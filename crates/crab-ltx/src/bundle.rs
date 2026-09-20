@@ -14,6 +14,9 @@ use std::{
 };
 use tempfile::TempPath;
 
+/// Keeps a server-owned verified bundle artifact alive while an overlay uses it.
+pub trait BundleLease: Send + Sync {}
+
 /// One immutable segment and its repository/epoch identity, before bundling.
 pub struct BundleEntry {
     pub repository: String,
@@ -321,6 +324,23 @@ impl Bundle {
             digest,
             length,
         })
+    }
+
+    /// Detaches a uniquely owned temporary bundle file from this bundle.
+    ///
+    /// The caller assumes responsibility for the returned path. Memory-backed
+    /// bundles and bundles still referenced by an upload source cannot detach.
+    pub fn detach_file(self) -> Result<PathBuf> {
+        let Bundle { body, .. } = self;
+        let BundleBody::File(file) = body else {
+            return Err(CrabError::InvalidState(
+                "memory-backed bundle has no detachable file",
+            ));
+        };
+        let mut file = Arc::try_unwrap(file)
+            .map_err(|_| CrabError::InvalidState("bundle file is still referenced"))?;
+        file.remove_on_drop = false;
+        Ok(std::mem::take(&mut file.path))
     }
 
     #[must_use]

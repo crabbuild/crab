@@ -28,6 +28,7 @@ pub(crate) struct RepositoryCellRouter {
     peer: RepositoryCellPeer,
     placement: PlacementPlanner,
     session_dir: PathBuf,
+    recovery_artifacts: Option<Arc<super::RecoveryArtifactRegistry>>,
     activation: Arc<[Mutex<()>]>,
     operation: Arc<[Arc<RwLock<()>>]>,
 }
@@ -85,6 +86,7 @@ impl RepositoryCellRouter {
             peer,
             placement: PlacementPlanner::default(),
             session_dir,
+            recovery_artifacts: None,
             activation: (0..ACTIVATION_SHARDS)
                 .map(|_| Mutex::new(()))
                 .collect::<Vec<_>>()
@@ -196,6 +198,39 @@ impl RepositoryCellRouter {
 
     pub(crate) fn recovery_scratch_directory(&self) -> PathBuf {
         self.session_dir.clone()
+    }
+
+    pub(crate) fn with_recovery_artifacts(
+        mut self,
+        registry: Arc<super::RecoveryArtifactRegistry>,
+    ) -> Self {
+        self.recovery_artifacts = Some(registry);
+        self
+    }
+
+    pub(crate) fn recovery_artifacts(&self) -> Option<Arc<super::RecoveryArtifactRegistry>> {
+        self.recovery_artifacts.clone()
+    }
+
+    pub(crate) fn recovery_disk_budget(&self) -> crab_cell_runtime::DiskBudget {
+        self.runtime.local_disk_budget()
+    }
+
+    fn recovery_manifest_store(
+        &self,
+        scratch: PathBuf,
+    ) -> crab_cell_runtime::RecoveryManifestStore {
+        let store = crab_cell_runtime::RecoveryManifestStore::new(
+            self.layout.clone(),
+            repository_replica_limits(),
+        )
+        .with_recovery_disk(self.runtime.local_disk_budget())
+        .with_recovery_scratch(scratch);
+        self.recovery_artifacts
+            .as_ref()
+            .map_or(store.clone(), |artifacts| {
+                store.with_recovery_artifacts(artifacts.clone())
+            })
     }
 
     pub(crate) fn effect_peer_client(&self) -> EffectPeerClient {
@@ -665,12 +700,7 @@ impl RepositoryCellRouter {
                             self.authority.clone(),
                             observed,
                             takeover,
-                            crab_cell_runtime::RecoveryManifestStore::new(
-                                self.layout.clone(),
-                                repository_replica_limits(),
-                            )
-                            .with_recovery_disk(self.runtime.local_disk_budget())
-                            .with_recovery_scratch(recovery_scratch.clone()),
+                            self.recovery_manifest_store(recovery_scratch.clone()),
                             destination,
                             self.peer.owner.clone(),
                         )
@@ -682,12 +712,7 @@ impl RepositoryCellRouter {
                             replica,
                             self.authority.clone(),
                             observed,
-                            crab_cell_runtime::RecoveryManifestStore::new(
-                                self.layout.clone(),
-                                repository_replica_limits(),
-                            )
-                            .with_recovery_disk(self.runtime.local_disk_budget())
-                            .with_recovery_scratch(recovery_scratch),
+                            self.recovery_manifest_store(recovery_scratch),
                             destination,
                         )
                         .await?

@@ -926,6 +926,11 @@ pub async fn serve(config: Config) -> Result<()> {
         )
         .with_local_follower(node, follower_store.clone()),
     );
+    let recovery_artifacts = Arc::new(crate::cells::RecoveryArtifactRegistry::new(
+        session_dir.join("recovery-artifacts"),
+        crate::cells::repository_replica_limits(),
+        local_disk.clone(),
+    )?);
     let release_store = ReleaseStore::new(startup.layout.clone(), startup.identity)?;
     let peer_receiver = crate::peer::PeerReceiver::new(
         node,
@@ -955,7 +960,8 @@ pub async fn serve(config: Config) -> Result<()> {
             },
         ),
         session_dir,
-    )?;
+    )?
+    .with_recovery_artifacts(Arc::clone(&recovery_artifacts));
     let cell_scheduler = crate::cells::RepositoryCellScheduler::new(
         startup.identity,
         startup.layout,

@@ -166,7 +166,10 @@ pub use queue::{
     install_queue_schema, queue_apply_lease, queue_claim, queue_cleanup_expired, queue_control,
     queue_info, queue_send, queue_validate_claim, register_queue,
 };
-pub use recovery_manifest::{PinnedRecoveryCell, RecoveryManifestStore};
+pub use recovery_manifest::{
+    PinnedRecoveryCell, RecoveryArtifact, RecoveryArtifactKey, RecoveryArtifactStore,
+    RecoveryManifestStore,
+};
 pub use registry::{
     BuildDescriptor, CellModule, Command, CommandContext, CommandInvocation, CommandResult,
     MigrationDescriptor, MigrationPlan, ModuleDescriptor, NamespaceDescriptor, OperationDescriptor,

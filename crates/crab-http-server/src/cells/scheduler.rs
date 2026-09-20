@@ -135,12 +135,19 @@ impl RepositoryCellScheduler {
             .has_blocking_activities()
             .then(BlockingActivityPool::for_system)
             .transpose()?;
-        let recovery_disk = crab_cell_runtime::DiskBudget::new(512 << 20);
+        let recovery_disk = router.recovery_disk_budget();
         let recovery_scratch = router.recovery_scratch_directory();
-        let recovery_manifests =
-            RecoveryManifestStore::new(layout.clone(), super::repository_replica_limits())
-                .with_recovery_disk(recovery_disk.clone())
-                .with_recovery_scratch(recovery_scratch);
+        let recovery_manifests = {
+            let store =
+                RecoveryManifestStore::new(layout.clone(), super::repository_replica_limits())
+                    .with_recovery_disk(recovery_disk.clone())
+                    .with_recovery_scratch(recovery_scratch);
+            router
+                .recovery_artifacts()
+                .map_or(store.clone(), |artifacts| {
+                    store.with_recovery_artifacts(artifacts)
+                })
+        };
         Ok(Self {
             identity,
             catalog: CellCatalog::new(layout.clone(), identity.tenant()),
