@@ -70,14 +70,16 @@ impl QualificationProfile {
         {
             return Err(Error::Control("qualification profile threshold is zero"));
         }
-        Ok(Self {
+        let profile = Self {
             schema_version: QUALIFICATION_PROFILE_SCHEMA_VERSION,
             name,
             minimum_cells,
             minimum_operations,
             minimum_duration_secs,
             maximum_p99_latency_ms,
-        })
+        };
+        profile.validate()?;
+        Ok(profile)
     }
 
     /// Returns the deterministic local correctness profile.
@@ -2173,6 +2175,40 @@ mod tests {
         assert_eq!(
             QualificationProfile::decode(&contract.encode().unwrap()).unwrap(),
             contract
+        );
+    }
+
+    #[test]
+    fn threshold_profile_constructor_rejects_unbounded_workloads() {
+        assert!(
+            QualificationProfile::new(
+                "too-many-cells".into(),
+                MAX_QUALIFICATION_CELLS + 1,
+                1,
+                1,
+                1,
+            )
+            .is_err()
+        );
+        assert!(
+            QualificationProfile::new(
+                "too-many-operations".into(),
+                1,
+                MAX_QUALIFICATION_OPERATIONS + 1,
+                1,
+                1,
+            )
+            .is_err()
+        );
+        assert!(
+            QualificationProfile::new(
+                "too-long".into(),
+                1,
+                1,
+                MAX_QUALIFICATION_DURATION_SECS + 1,
+                1,
+            )
+            .is_err()
         );
     }
 
