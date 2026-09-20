@@ -12,6 +12,7 @@ use crab_cell_runtime::{
     Error, InvocationError, KvModule, KvNamespace, NamespaceId, Observed, Query, QueueModule,
     QueueNamespace, Registry, RegistryBuilder, Result, SqlCell, SqlModule, TenantId,
     WorkflowActivities, WorkflowActivityModule, WorkflowModule, WorkflowNamespace,
+    partition_for_shard,
 };
 
 const DESCRIPTOR_MAGIC: &[u8] = b"crab.application.v1\0";
@@ -412,6 +413,9 @@ impl<A> ApplicationHandle<A> {
     /// Returns the native activity capability for one compiled Workflow module.
     pub fn activities<M: WorkflowActivityModule>(&self) -> Result<WorkflowActivities<M>> {
         self.validate_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Workflow)?;
+        if !self.compiled.registry.has_activity_runner(M::NAMESPACE) {
+            return Err(Error::Registry("activity runner is not registered"));
+        }
         WorkflowActivities::new(self.client.clone(), self.tenant, self.application)
     }
 
@@ -424,12 +428,34 @@ impl<A> ApplicationHandle<A> {
         self.validate_target(&target)?;
         self.compiled
             .validate_module(target.namespace(), M::MODULE)?;
+        if !self.compiled.registry.has_effect_runner(target.namespace()) {
+            return Err(Error::Registry("effect runner is not registered"));
+        }
         self.client.effect_source::<M>(target)
     }
 
     fn validate_target(&self, target: &CellTarget) -> Result<()> {
         if target.tenant() != self.tenant || target.application() != self.application {
             return Err(Error::Identity("Cell target is outside application scope"));
+        }
+        let Some(cell_type) = self
+            .compiled
+            .cell_types
+            .iter()
+            .find(|cell_type| cell_type.namespace == target.namespace())
+        else {
+            return Err(Error::Registry("namespace is not declared by application"));
+        };
+        let shard = target
+            .partition()
+            .try_into()
+            .map(u32::from_be_bytes)
+            .map_err(|_| Error::Identity("Cell target partition is not canonical"))?;
+        if shard >= cell_type.shards || partition_for_shard(shard).as_slice() != target.partition()
+        {
+            return Err(Error::Identity(
+                "Cell target partition is outside the declared shard range",
+            ));
         }
         Ok(())
     }

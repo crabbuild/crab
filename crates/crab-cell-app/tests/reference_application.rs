@@ -157,6 +157,14 @@ impl KvModule for ReferenceKv {
     const GET_QUERY_ID: u32 = 2;
     const LIST_QUERY_ID: u32 = 3;
 }
+
+struct UnregisteredEffects;
+impl EffectModule for UnregisteredEffects {
+    const MODULE: &'static str = KV_MODULE;
+    const CLAIM_COMMAND_ID: u32 = 20;
+    const LEASE_COMMAND_ID: u32 = 21;
+    const VALIDATE_QUERY_ID: u32 = 22;
+}
 impl CellModule for ReferenceKv {
     const NAME: &'static str = KV_MODULE;
     fn descriptor(&self) -> &'static ModuleDescriptor {
@@ -1205,6 +1213,22 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
     )
     .unwrap();
     assert!(typed.sql::<ReferenceSql>(foreign_target).is_err());
+    let invalid_partition = CellTarget::new(
+        tenant,
+        application_id,
+        SQL_NAMESPACE,
+        &partition_for_shard(1),
+    )
+    .unwrap();
+    assert!(typed.sql::<ReferenceSql>(invalid_partition).is_err());
+    let kv_target = CellTarget::new(
+        tenant,
+        application_id,
+        KV_NAMESPACE,
+        &partition_for_shard(0),
+    )
+    .unwrap();
+    assert!(typed.effects::<UnregisteredEffects>(kv_target).is_err());
     let sql = typed.sql::<ReferenceSql>(sql_target.clone()).unwrap();
     let sql_result = sql
         .batch(
