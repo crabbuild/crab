@@ -713,6 +713,32 @@ a 1.5x–2x engine win. The large total-latency headline still belongs to the
 explicit grouped durability protocol, where one barrier covers many complete
 captures.
 
+A bounded-group follow-up replaced the benchmark's all-captures-at-once switch
+with `--durability-batch N`. Batch 1 uses ordinary synchronous `capture()`;
+larger values call `capture_deferred()` and cross a file-and-parent durability
+barrier after at most `N` captures. Order-balanced runs against shipped Celld
+produced these total medians:
+
+| Workload | Samples | Celld | Crab batch 1 | Crab batch 8 | Crab batch 16 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 32 × 1 KiB | 12 pairs | 127.7 ms | 214.8 ms (0.59x) | 83.8 ms (1.52x) | 72.9 ms (1.75x) |
+| 128 × 4 KiB | 10 pairs | 584.3 ms | 884.4 ms (0.66x) | 325.7 ms (1.79x) | 268.6 ms (2.17x) |
+| 512 × 16 KiB | 8 pairs | 2,119.9 ms | 3,529.9 ms (0.60x) | 1,213.3 ms (1.75x) | 970.9 ms (2.18x) |
+
+Batch 1 lost every paired total sample. Batch 8 won all 12 small, 10 medium,
+and 8 large pairs, and is the smallest tested bound that cleared 1.5x for all
+three workloads. The host was heavily loaded, so the absolute times are not
+release-grade; the alternating order and unanimous paired direction make the
+contract boundary more reliable than the raw latency figures.
+
+Batch 8 does not prove lower independently durable acknowledgement latency.
+The first capture in a group can wait for seven later captures before the host
+may acknowledge it. It proves higher bounded-group throughput and lower batch
+completion time. The production `crab-cell-runtime` call sites still use
+synchronous `capture()`, so the current product does not receive this grouped
+win until its output gate deliberately adopts and proves the deferred-barrier
+contract.
+
 ## Test plan
 
 - `crates/crab-ltx/perf/crab/src/main.rs`
@@ -831,11 +857,10 @@ the grouped optimization.
 
 This satisfies the grouped capture end-to-end target without changing the
 synchronous default. It does not establish that Crab is generally faster than
-Celld, and it does not satisfy the original recovery-only gate: Crab's explicit
-plan and compacted-output verification still make the recovery subtotal slower
-than Celld's less strict measured path. The plan therefore remains in progress
-rather than converting the grouped-throughput win into a general performance
-claim.
+Celld. Later recovery optimizations made Crab faster on the medium and large
+recovery workloads, while Celld still won the small recovery workload. The
+plan therefore remains in progress rather than converting workload-specific
+recovery and grouped-throughput wins into a general performance claim.
 
 ## Maintenance notes
 

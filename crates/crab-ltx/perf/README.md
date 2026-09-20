@@ -32,17 +32,21 @@ crates/crab-ltx/perf/run.sh
 ```
 
 To measure the opt-in grouped durability path on the Crab runner, invoke it
-directly with `--defer-durability`. It completes and renames each LTX file,
+directly with `--durability-batch N`. It completes and renames each LTX file,
 then uses a bounded parallel file flush followed by one shared parent-directory
-sync before the round is acknowledged:
+sync whenever `N` captures are ready. The final partial batch is also flushed:
 
 ```bash
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-ltx-perf" \
   cargo run --release \
   --manifest-path crates/crab-ltx/perf/crab/Cargo.toml -- \
   --transactions 128 --payload-bytes 4096 --rounds 5 --warmup 1 \
-  --defer-durability
+  --durability-batch 8
 ```
+
+`--durability-batch 1` is the default synchronous path. Values greater than
+one bound each durability group to at most `N` captures; they do not make an
+individual capture durable before that group's barrier succeeds.
 
 The binaries also run directly when a single side is useful:
 

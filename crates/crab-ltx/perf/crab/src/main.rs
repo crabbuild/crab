@@ -1,6 +1,4 @@
-use crab_ltx::{
-    CaptureTiming, Limits, Db, Position, VerifiedPlan, compact_exact, restore_exact,
-};
+use crab_ltx::{CaptureTiming, Db, Limits, Position, VerifiedPlan, compact_exact, restore_exact};
 use serde::Serialize;
 use std::error::Error;
 use std::path::Path;
@@ -14,7 +12,7 @@ struct Config {
     payload_bytes: usize,
     rounds: usize,
     warmup: usize,
-    defer_durability: bool,
+    durability_batch: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -59,7 +57,7 @@ struct ConfigOutput {
     payload_bytes: usize,
     measured_rounds: usize,
     warmup_rounds: usize,
-    defer_durability: bool,
+    durability_batch: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -106,7 +104,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             payload_bytes: config.payload_bytes,
             measured_rounds: config.rounds,
             warmup_rounds: config.warmup,
-            defer_durability: config.defer_durability,
+            durability_batch: config.durability_batch,
         },
         median: Summary::from_samples(&samples),
         samples,
@@ -125,16 +123,18 @@ impl Config {
         let payload_bytes = option(&args, "--payload-bytes")?.unwrap_or(4096);
         let rounds = option(&args, "--rounds")?.unwrap_or(5);
         let warmup = option(&args, "--warmup")?.unwrap_or(1);
-        let defer_durability = args.iter().any(|arg| arg == "--defer-durability");
-        if transactions == 0 || payload_bytes == 0 || rounds == 0 {
-            return Err("transactions, payload-bytes, and rounds must be positive".into());
+        let durability_batch = option(&args, "--durability-batch")?.unwrap_or(1);
+        if transactions == 0 || payload_bytes == 0 || rounds == 0 || durability_batch == 0 {
+            return Err(
+                "transactions, payload-bytes, rounds, and durability-batch must be positive".into(),
+            );
         }
         Ok(Self {
             transactions,
             payload_bytes,
             rounds,
             warmup,
-            defer_durability,
+            durability_batch,
         })
     }
 }
@@ -159,6 +159,7 @@ fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error>> {
     let mut position = Position::default();
     let mut capture_phases = CapturePhases::default();
     let mut capture_barrier_us = 0;
+    let mut pending_captures = 0;
     let mut workload_write_us = 0;
     let mut capture_us = 0;
 
@@ -174,7 +175,9 @@ fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error>> {
         &mut segments,
         &mut position,
         &mut capture_phases,
-        config.defer_durability,
+        config.durability_batch,
+        &mut pending_captures,
+        &mut capture_barrier_us,
     )?;
     capture_us += elapsed_us(started);
 
@@ -196,16 +199,19 @@ fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error>> {
             &mut segments,
             &mut position,
             &mut capture_phases,
-            config.defer_durability,
+            config.durability_batch,
+            &mut pending_captures,
+            &mut capture_barrier_us,
         )?;
         capture_us += elapsed_us(started);
     }
 
-    if config.defer_durability {
+    if pending_captures > 0 {
         let started = Instant::now();
         database.durability_barrier()?;
-        capture_barrier_us = elapsed_us(started);
-        capture_us = capture_us.saturating_add(capture_barrier_us);
+        let elapsed = elapsed_us(started);
+        capture_barrier_us = capture_barrier_us.saturating_add(elapsed);
+        capture_us = capture_us.saturating_add(elapsed);
     }
 
     database.close()?;
@@ -269,9 +275,11 @@ fn append_capture(
     segments: &mut Vec<crab_ltx::LocalSegment>,
     position: &mut Position,
     phases: &mut CapturePhases,
-    defer_durability: bool,
+    durability_batch: usize,
+    pending_captures: &mut usize,
+    capture_barrier_us: &mut u64,
 ) -> crab_ltx::Result<()> {
-    let batch = if defer_durability {
+    let batch = if durability_batch > 1 {
         database.capture_deferred()?
     } else {
         database.capture()?
@@ -279,6 +287,15 @@ fn append_capture(
     *position = batch.position;
     phases.add(batch.timing);
     segments.extend(batch.segments);
+    if durability_batch > 1 {
+        *pending_captures = pending_captures.saturating_add(1);
+        if *pending_captures == durability_batch {
+            let started = Instant::now();
+            database.durability_barrier()?;
+            *capture_barrier_us = capture_barrier_us.saturating_add(elapsed_us(started));
+            *pending_captures = 0;
+        }
+    }
     Ok(())
 }
 
@@ -438,7 +455,21 @@ fn median(values: impl Iterator<Item = u64>) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{recovery_us, total_us};
+    use super::{Config, recovery_us, total_us};
+
+    #[test]
+    fn durability_batch_defaults_to_synchronous_capture() {
+        let config = Config::from_args(Vec::new()).unwrap();
+
+        assert_eq!(config.durability_batch, 1);
+    }
+
+    #[test]
+    fn durability_batch_must_be_positive() {
+        let error = Config::from_args(["--durability-batch".into(), "0".into()]).unwrap_err();
+
+        assert!(error.to_string().contains("durability-batch"));
+    }
 
     #[test]
     fn recovery_subtotal_includes_each_phase_once() {
