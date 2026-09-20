@@ -37,7 +37,8 @@ use crate::catalog::CatalogStore;
 use crate::{
     Config, RepositoryConfig, Result, api, app, archive, assets, assignees,
     auth::{self, Authentication, Principal},
-    branches, checks, contents, git, issues, labels, lfs, maintenance, pulls, receive, releases,
+    branches, checks, contents, git, git_import, issues, labels, lfs, maintenance, pulls, receive,
+    releases,
     repository_settings::{self, BranchProtections, RepositoryLifecycle},
     statuses,
     transfer_admission::TransferAdmission,
@@ -496,7 +497,7 @@ impl RepositorySet {
             .len()
     }
 
-    fn replace(&self, next: BTreeMap<(String, String), Arc<Repository>>) {
+    pub(crate) fn replace(&self, next: BTreeMap<(String, String), Arc<Repository>>) {
         *self
             .current
             .write()
@@ -730,6 +731,7 @@ pub(crate) struct Server {
     pub cancellation: CancellationToken,
     pub receives: tokio_util::task::TaskTracker,
     pub auth: Option<Authentication>,
+    pub(crate) git_import: Option<git_import::ImportContext>,
     pub(crate) catalog: Option<CatalogStore>,
     catalog_healthy: AtomicBool,
     pub(crate) node_healthy: AtomicBool,
@@ -876,6 +878,7 @@ pub async fn serve(config: Config) -> Result<()> {
         source: Box::new(source),
     })?;
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
+    let public_address = listener.local_addr()?;
     let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
     let metrics = crate::metrics::Metrics::new()?;
     let cell_runtime = start_cell_runtime(
@@ -984,6 +987,10 @@ pub async fn serve(config: Config) -> Result<()> {
         app_admission: Semaphore::new(APP_ADMISSION_CAPACITY),
         maintenance_admission: Arc::new(Semaphore::new(MAINTENANCE_ADMISSION_CAPACITY)),
         auth,
+        git_import: Some(git_import::ImportContext::new(
+            config.clone(),
+            public_address,
+        )),
         catalog: Some(catalog.clone()),
         catalog_healthy: AtomicBool::new(true),
         node_healthy: AtomicBool::new(false),
@@ -1420,7 +1427,7 @@ pub async fn probe_storage(config: &Config) -> Result<()> {
     probe_storage_contract(&catalog, &transfer_admission(&catalog)).await
 }
 
-async fn materialize_catalog(
+pub(crate) async fn materialize_catalog(
     catalog: &CatalogStore,
     document: crate::catalog::CatalogDocument,
 ) -> Result<BTreeMap<(String, String), Arc<Repository>>> {
@@ -1692,6 +1699,7 @@ pub(crate) fn router(server: Arc<Server>) -> Router {
         .merge(releases::routes(Arc::clone(&server)))
         .merge(pulls::routes(Arc::clone(&server)))
         .merge(statuses::routes(Arc::clone(&server)))
+        .merge(git_import::routes(Arc::clone(&server)))
         .route(
             "/git/{owner}/{name}/info/lfs/objects/batch",
             post(lfs::batch).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
@@ -1985,10 +1993,15 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
         .get("host")
         .and_then(|value| value.to_str().ok());
     let local_host = is_local_host(host);
+    let internal_import = server
+        .git_import
+        .as_ref()
+        .is_some_and(|context| context.authorizes_git(&request));
     let management_probe = matches!(request.uri().path(), "/healthz" | "/readyz");
     let load_balancer_probe = request.uri().path() == "/livez";
     let valid_host = load_balancer_probe
         || (management_probe && local_host)
+        || internal_import
         || server
             .auth
             .as_ref()
@@ -2000,10 +2013,16 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
     let git_request = request.uri().path().starts_with("/git/");
     let integration_request = integration_api_path(request.uri().path());
     let token_request = integration_request && request.headers().contains_key("authorization");
-    let principal = match &server.auth {
-        Some(auth) if git_request || token_request => auth.git_principal(request.headers()).await,
-        Some(auth) => auth.principal(request.headers()).await,
-        None => Principal::Local,
+    let principal = if internal_import {
+        Principal::Local
+    } else {
+        match &server.auth {
+            Some(auth) if git_request || token_request => {
+                auth.git_principal(request.headers()).await
+            }
+            Some(auth) => auth.principal(request.headers()).await,
+            None => Principal::Local,
+        }
     };
     let protected =
         request.uri().path().starts_with("/api/") && request.uri().path() != "/api/session";
@@ -2470,6 +2489,7 @@ mod tests {
             cancellation: CancellationToken::new(),
             receives: tokio_util::task::TaskTracker::new(),
             auth: None,
+            git_import: None,
             catalog: None,
             catalog_healthy: AtomicBool::new(false),
             node_healthy: AtomicBool::new(false),

@@ -322,6 +322,49 @@ impl CatalogStore {
         description: String,
         members: Vec<RepositoryMember>,
     ) -> Result<CatalogRecord, CatalogError> {
+        self.create_repository_with_mode(
+            owner,
+            name,
+            prefix,
+            default_branch,
+            description,
+            members,
+            true,
+        )
+        .await
+    }
+
+    pub(crate) async fn create_repository_exclusive(
+        &self,
+        owner: String,
+        name: String,
+        prefix: String,
+        default_branch: String,
+        description: String,
+        members: Vec<RepositoryMember>,
+    ) -> Result<CatalogRecord, CatalogError> {
+        self.create_repository_with_mode(
+            owner,
+            name,
+            prefix,
+            default_branch,
+            description,
+            members,
+            false,
+        )
+        .await
+    }
+
+    async fn create_repository_with_mode(
+        &self,
+        owner: String,
+        name: String,
+        prefix: String,
+        default_branch: String,
+        description: String,
+        members: Vec<RepositoryMember>,
+        allow_existing: bool,
+    ) -> Result<CatalogRecord, CatalogError> {
         let record = CatalogRecord {
             id: Uuid::now_v7(),
             owner,
@@ -345,7 +388,7 @@ impl CatalogStore {
         .await?;
         read_canonical_layout(&self.root.store, &layout).await?;
         read_manifest(&self.root.store, &layout).await?;
-        self.insert(record).await
+        self.insert_with_mode(record, allow_existing).await
     }
 
     pub async fn adopt_repository(
@@ -551,13 +594,21 @@ impl CatalogStore {
     }
 
     async fn insert(&self, record: CatalogRecord) -> Result<CatalogRecord, CatalogError> {
+        self.insert_with_mode(record, true).await
+    }
+
+    async fn insert_with_mode(
+        &self,
+        record: CatalogRecord,
+        allow_existing: bool,
+    ) -> Result<CatalogRecord, CatalogError> {
         for _ in 0..MAX_CAS_ATTEMPTS {
             let (mut document, etag) = self.load_for_mutation().await?;
             if let Some(existing) = document.repositories.iter().find(|existing| {
                 existing.owner.eq_ignore_ascii_case(&record.owner)
                     && existing.name.eq_ignore_ascii_case(&record.name)
             }) {
-                return if existing.prefix == record.prefix {
+                return if allow_existing && existing.prefix == record.prefix {
                     Ok(existing.clone())
                 } else {
                     Err(CatalogError::Conflict)
@@ -954,6 +1005,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(first, second);
+    }
+
+    #[tokio::test]
+    async fn exclusive_create_rejects_an_existing_repository() {
+        let catalog = catalog();
+        catalog
+            .create_repository(
+                "team".into(),
+                "project".into(),
+                "team/project".into(),
+                "main".into(),
+                String::new(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let result = catalog
+            .create_repository_exclusive(
+                "team".into(),
+                "project".into(),
+                "team/project".into(),
+                "main".into(),
+                String::new(),
+                vec![],
+            )
+            .await;
+        assert!(matches!(result, Err(CatalogError::Conflict)));
     }
 
     #[tokio::test]

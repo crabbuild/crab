@@ -48,6 +48,12 @@ Caddy, and requires the reconstructed file to match byte-for-byte.
 It also drives the stock Git LFS client through lock creation, listing,
 verify-on-push, and unlock against durable RustFS lock records.
 
+The server image also includes the system `git` executable for the browser's
+Git import workflow. That workflow copies Git history and refs only; it does
+not include Git LFS payload migration. Configure `[import].allowed_hosts` and
+allow the server workload outbound HTTPS/SSH to those hosts (or through the
+configured proxy) when this workflow is enabled.
+
 Server release tags have their own contract, independent of the Crab CLI. An
 annotated `crab-http-server-vX.Y.Z` tag matching the server crate publishes a
 qualified AMD64/ARM64 image to GHCR with immutable version and source-commit

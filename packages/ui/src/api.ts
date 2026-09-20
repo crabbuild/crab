@@ -7,6 +7,24 @@ export interface Session {
   csrf: string | null;
 }
 
+export interface GitImportInput {
+  source: string;
+  owner: string;
+  name: string;
+  description?: string;
+  token?: string;
+}
+
+export interface GitImportJob {
+  id: string;
+  source: string;
+  owner: string;
+  name: string;
+  state: "queued" | "running" | "succeeded" | "failed";
+  message: string;
+  repository?: { owner: string; name: string };
+}
+
 export interface Repository {
   owner: string;
   name: string;
@@ -143,6 +161,17 @@ export async function request<T>(
     signal,
     headers: { Accept: "application/json" },
   });
+  const body = await parseResponse<T>(response);
+  return {
+    data: body as T,
+    timing: {
+      roundtrip: performance.now() - start,
+      server: response.headers.get("server-timing"),
+    },
+  };
+}
+
+async function parseResponse<T>(response: Response): Promise<T> {
   if (response.status === 401)
     window.dispatchEvent(new Event("crab-session-expired"));
   const text = await response.text();
@@ -162,13 +191,36 @@ export async function request<T>(
       failure.error?.message ?? `Request failed (${response.status})`,
     );
   }
-  return {
-    data: body as T,
-    timing: {
-      roundtrip: performance.now() - start,
-      server: response.headers.get("server-timing"),
+  return body as T;
+}
+
+export async function startGitImport(
+  input: GitImportInput,
+  csrf: string,
+  signal?: AbortSignal,
+): Promise<GitImportJob> {
+  const response = await fetch("/api/imports/git", {
+    method: "POST",
+    signal,
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "X-CSRF-Token": csrf,
     },
-  };
+    body: JSON.stringify(input),
+  });
+  return parseResponse<GitImportJob>(response);
+}
+
+export async function gitImportStatus(
+  id: string,
+  signal: AbortSignal,
+): Promise<GitImportJob> {
+  const result = await request<GitImportJob>(
+    `/api/imports/git/${encodeURIComponent(id)}`,
+    signal,
+  );
+  return result.data;
 }
 
 export function useRequest<T>(

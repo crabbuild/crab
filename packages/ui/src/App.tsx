@@ -52,6 +52,8 @@ import {
 } from "./api";
 import { Link, Result, date, short } from "./ui";
 import { GitAccess } from "./git-access";
+import { GitImport } from "./git-import";
+import { gitOwnerSuggestion } from "./git-import-source";
 import { FileBreadcrumb, FileNavigation } from "./file-navigation";
 import { PaneResizer } from "./pane-resizer";
 import {
@@ -197,6 +199,10 @@ export function App() {
   const catalog = useRequest<{ repositories: Repository[] }>(
     session.data?.authenticated ? "/api/repos" : null,
   );
+  const [importedRepository, setImportedRepository] = useState<{
+    owner: string;
+    name: string;
+  }>();
   async function signOut() {
     setSigningOut(true);
     setSessionError(undefined);
@@ -225,6 +231,21 @@ export function App() {
       ? `${repo.owner}/${repo.name} · Crab`
       : "Repositories · Crab";
   }, [repo]);
+  useEffect(() => {
+    if (!importedRepository || !catalog.data) return;
+    if (
+      catalog.data.repositories.some(
+        (candidate) =>
+          candidate.owner === importedRepository.owner &&
+          candidate.name === importedRepository.name,
+      )
+    ) {
+      navigate(
+        `/${encodeURIComponent(importedRepository.owner)}/${encodeURIComponent(importedRepository.name)}`,
+      );
+      setImportedRepository(undefined);
+    }
+  }, [catalog.data, importedRepository]);
   return (
     <ThemeProvider colorMode={resolved} dayScheme="light" nightScheme="dark">
       <BaseStyles className="app-shell">
@@ -321,8 +342,20 @@ export function App() {
                 url.pathname === "/" ? (
                   <div className="catalog">
                     <div className="section-heading">
-                      <h1>Your repositories</h1>
-                      <Label>{data.repositories.length}</Label>
+                      <div className="catalog-heading-title">
+                        <h1>Your repositories</h1>
+                        <Label>{data.repositories.length}</Label>
+                      </div>
+                      <GitImport
+                        csrf={session.data?.csrf ?? ""}
+                        defaultOwner={gitOwnerSuggestion(
+                          session.data?.user?.name,
+                        )}
+                        onImported={(repository) => {
+                          setImportedRepository(repository);
+                          catalog.retry();
+                        }}
+                      />
                     </div>
                     <p className="muted">Your code, in your storage.</p>
                     {data.repositories.length === 0 && (

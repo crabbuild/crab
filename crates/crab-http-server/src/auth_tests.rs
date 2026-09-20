@@ -415,6 +415,7 @@ impl Harness {
             receives: tokio_util::task::TaskTracker::new(),
             auth: Some(auth),
             catalog: Some(catalog),
+            git_import: None,
             catalog_healthy: AtomicBool::new(false),
             node_healthy: AtomicBool::new(false),
             scheduler_status: crate::cells::SchedulerStatus::new(
