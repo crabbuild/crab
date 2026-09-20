@@ -237,6 +237,7 @@ pub(crate) struct CaptureEngine {
     l0_dir_ready: bool,
     wal_file: Option<crate::HostFile>,
     timing: Option<TimingRecorder>,
+    defer_parent_sync: bool,
 }
 
 const CONTROL_TABLES_DDL: &str = "CREATE TABLE IF NOT EXISTS _litestream_seq (id INTEGER PRIMARY KEY, seq INTEGER);\
@@ -323,6 +324,7 @@ impl CaptureEngine {
             l0_dir_ready: false,
             wal_file: None,
             timing: None,
+            defer_parent_sync: false,
         };
 
         // Start the long-running read transaction (db.go:867-871).
@@ -641,6 +643,18 @@ impl CaptureEngine {
     }
 
     pub fn sync(&mut self, required: Option<crate::commit::WalCut>) -> Result<()> {
+        self.sync_impl(required)
+    }
+
+    pub(crate) fn sync_deferred(&mut self, required: Option<crate::commit::WalCut>) -> Result<()> {
+        let previous = self.defer_parent_sync;
+        self.defer_parent_sync = true;
+        let result = self.sync(required);
+        self.defer_parent_sync = previous;
+        result
+    }
+
+    fn sync_impl(&mut self, required: Option<crate::commit::WalCut>) -> Result<()> {
         // Self-heal: recreate the control tables if something swept them out
         // of `sqlite_schema` from under the replicator — without them every
         // capture fails until the database is reopened. A no-op when the

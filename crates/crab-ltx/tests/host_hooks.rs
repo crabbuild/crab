@@ -28,6 +28,7 @@ struct Faults {
     calls: Arc<Mutex<BTreeSet<&'static str>>>,
     largest_read: Arc<AtomicUsize>,
     largest_write: Arc<AtomicUsize>,
+    parent_syncs: Arc<AtomicUsize>,
     track_all: Arc<AtomicBool>,
 }
 
@@ -139,7 +140,15 @@ impl FileSystem for Faults {
     filesystem_operation!(create_dir_all(path: &Path) -> ());
     filesystem_operation!(remove_file(path: &Path) -> ());
     filesystem_operation!(rename(from: &Path, to: &Path) -> ());
-    filesystem_operation!(sync_parent(path: &Path) -> ());
+    fn rename_uncommitted(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.check("rename_uncommitted")?;
+        DirectFileSystem.rename_uncommitted(from, to)
+    }
+    fn sync_parent(&self, path: &Path) -> io::Result<()> {
+        self.check("sync_parent")?;
+        self.parent_syncs.fetch_add(1, Ordering::Relaxed);
+        DirectFileSystem.sync_parent(path)
+    }
     filesystem_operation!(persist_new(path: &Path, bytes: &[u8]) -> ());
     filesystem_operation!(persist_file_new(source: &Path, destination: &Path) -> ());
 }
@@ -199,6 +208,61 @@ fn capture_and_inspection_bound_each_filesystem_transfer() {
     assert!(snapshot.info().size_bytes > 1_000_000);
     assert!(faults.largest_write.load(Ordering::Relaxed) < 128 * 1024);
     assert!(faults.largest_read.load(Ordering::Relaxed) < 128 * 1024);
+}
+
+#[test]
+fn deferred_captures_share_one_directory_barrier() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let faults = Arc::new(Faults::default());
+    let host = Host::default().with_filesystem(faults.clone());
+    let mut writer = Db::open_with_host(
+        &directory.path().join("deferred.sqlite"),
+        Limits::default(),
+        host,
+    )
+    .unwrap();
+
+    writer
+        .transaction(|tx| tx.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES(1)"))
+        .unwrap();
+    let first = writer.capture_deferred().unwrap();
+    writer
+        .transaction(|tx| tx.execute("INSERT INTO t VALUES(2)", []))
+        .unwrap();
+    let second = writer.capture_deferred().unwrap();
+
+    assert_eq!(faults.parent_syncs.load(Ordering::Relaxed), 0);
+    assert!(!first.segments.is_empty());
+    assert!(!second.segments.is_empty());
+
+    writer.durability_barrier().unwrap();
+    assert_eq!(faults.parent_syncs.load(Ordering::Relaxed), 1);
+    writer.close().unwrap();
+}
+
+#[test]
+fn failed_deferred_barrier_fences_before_acknowledgement() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let faults = Arc::new(Faults::default());
+    let host = Host::default().with_filesystem(faults.clone());
+    let mut writer = Db::open_with_host(
+        &directory.path().join("deferred-failure.sqlite"),
+        Limits::default(),
+        host,
+    )
+    .unwrap();
+    writer
+        .transaction(|tx| tx.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES(1)"))
+        .unwrap();
+    let captured = writer.capture_deferred().unwrap();
+
+    faults.arm(Some("sync_parent"));
+    assert!(matches!(
+        writer.durability_barrier(),
+        Err(CrabError::Io(error)) if error.kind() == io::ErrorKind::StorageFull
+    ));
+    assert!(matches!(writer.capture(), Err(CrabError::Fenced)));
+    assert!(!captured.segments.is_empty());
 }
 
 #[cfg(feature = "replica")]
@@ -552,13 +616,36 @@ fn snapshot_and_compaction_installation_are_injectable_and_never_clobber() {
         .verify(&batch.segments, batch.position, Limits::default())
         .unwrap();
     let destination = directory.path().join("snapshot.ltx");
-    faults.arm(Some("persist_new"));
-    injected(host.compact(&plan, &destination));
+    for operation in [
+        "create",
+        "write_all",
+        "sync_all",
+        "open",
+        "persist_file_new",
+    ] {
+        faults.arm(Some(operation));
+        injected(host.compact(&plan, &destination));
+        assert!(!destination.exists(), "{operation}");
+        assert!(
+            std::fs::read_dir(directory.path())
+                .unwrap()
+                .flatten()
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".tmp-crab-ltx-compaction-")),
+            "{operation} left compaction scratch"
+        );
+    }
     faults.arm(Some("persist_file_new"));
     injected(writer.snapshot(&destination));
     assert!(!destination.exists());
     faults.arm(None);
+    faults.track_all.store(true, Ordering::Relaxed);
+    faults.largest_write.store(0, Ordering::Relaxed);
     host.compact(&plan, &destination).unwrap();
+    assert!(faults.largest_write.load(Ordering::Relaxed) < 128 * 1024);
+    assert!(!faults.calls.lock().unwrap().contains("persist_new"));
     let before = std::fs::read(&destination).unwrap();
     assert!(host.compact(&plan, &destination).is_err());
     assert_eq!(std::fs::read(destination).unwrap(), before);

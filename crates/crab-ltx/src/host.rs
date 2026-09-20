@@ -141,6 +141,9 @@ impl LtxHost {
         // A fresh session owns this directory. Directory fsync seals the new name.
         self.facilities.filesystem.rename(from, to)
     }
+    pub fn rename_uncommitted(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.facilities.filesystem.rename_uncommitted(from, to)
+    }
     pub fn now_unix_millis(&self) -> i64 {
         self.facilities.clock.unix_millis()
     }

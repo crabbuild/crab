@@ -75,6 +75,7 @@ impl SegmentInfo {
         }
     }
 
+    #[cfg_attr(not(feature = "replica"), expect(dead_code))]
     pub(crate) fn from_decoded(bytes: &[u8], file: &crate::ltx::DecodedFile) -> Self {
         Self::from_inspected(file, bytes.len() as u64, *blake3::hash(bytes).as_bytes())
     }
@@ -156,7 +157,8 @@ pub struct CaptureTiming {
     pub local_write_nanos: u64,
     /// Time spent syncing completed LTX file contents.
     pub fsync_nanos: u64,
-    /// Time spent publishing the LTX name and syncing its parent directory.
+    /// Time spent publishing the LTX name and, for immediate captures, syncing
+    /// its parent directory.
     pub parent_sync_nanos: u64,
     /// Time spent in checkpoint maintenance associated with the capture.
     pub checkpoint_nanos: u64,

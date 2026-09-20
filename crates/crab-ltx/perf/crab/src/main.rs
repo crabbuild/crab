@@ -14,6 +14,7 @@ struct Config {
     payload_bytes: usize,
     rounds: usize,
     warmup: usize,
+    defer_parent_sync: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -29,11 +30,13 @@ struct Sample {
     capture_local_write_us: u64,
     capture_fsync_us: u64,
     capture_parent_sync_us: u64,
+    capture_barrier_us: u64,
     verify_us: u64,
     compact_us: u64,
     compact_verify_us: u64,
     restore_us: u64,
-    end_to_end_us: u64,
+    recovery_us: u64,
+    total_us: u64,
     segments: usize,
     input_ltx_bytes: u64,
     compacted_ltx_bytes: u64,
@@ -56,6 +59,7 @@ struct ConfigOutput {
     payload_bytes: usize,
     measured_rounds: usize,
     warmup_rounds: usize,
+    defer_parent_sync: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,11 +74,13 @@ struct Summary {
     capture_local_write_us: u64,
     capture_fsync_us: u64,
     capture_parent_sync_us: u64,
+    capture_barrier_us: u64,
     verify_us: u64,
     compact_us: u64,
     compact_verify_us: u64,
     restore_us: u64,
-    end_to_end_us: u64,
+    recovery_us: u64,
+    total_us: u64,
     segments: usize,
     input_ltx_bytes: u64,
     compacted_ltx_bytes: u64,
@@ -100,6 +106,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             payload_bytes: config.payload_bytes,
             measured_rounds: config.rounds,
             warmup_rounds: config.warmup,
+            defer_parent_sync: config.defer_parent_sync,
         },
         median: Summary::from_samples(&samples),
         samples,
@@ -118,6 +125,7 @@ impl Config {
         let payload_bytes = option(&args, "--payload-bytes")?.unwrap_or(4096);
         let rounds = option(&args, "--rounds")?.unwrap_or(5);
         let warmup = option(&args, "--warmup")?.unwrap_or(1);
+        let defer_parent_sync = args.iter().any(|arg| arg == "--defer-parent-sync");
         if transactions == 0 || payload_bytes == 0 || rounds == 0 {
             return Err("transactions, payload-bytes, and rounds must be positive".into());
         }
@@ -126,6 +134,7 @@ impl Config {
             payload_bytes,
             rounds,
             warmup,
+            defer_parent_sync,
         })
     }
 }
@@ -149,6 +158,7 @@ fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error>> {
     let mut segments = Vec::new();
     let mut position = Position::default();
     let mut capture_phases = CapturePhases::default();
+    let mut capture_barrier_us = 0;
     let mut workload_write_us = 0;
     let mut capture_us = 0;
 
@@ -164,6 +174,7 @@ fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error>> {
         &mut segments,
         &mut position,
         &mut capture_phases,
+        config.defer_parent_sync,
     )?;
     capture_us += elapsed_us(started);
 
@@ -185,8 +196,16 @@ fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error>> {
             &mut segments,
             &mut position,
             &mut capture_phases,
+            config.defer_parent_sync,
         )?;
         capture_us += elapsed_us(started);
+    }
+
+    if config.defer_parent_sync {
+        let started = Instant::now();
+        database.durability_barrier()?;
+        capture_barrier_us = elapsed_us(started);
+        capture_us = capture_us.saturating_add(capture_barrier_us);
     }
 
     database.close()?;
@@ -212,6 +231,9 @@ fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error>> {
     let restore_us = elapsed_us(started);
     validate_restore(&restored, config.transactions)?;
 
+    let recovery_us = recovery_us(verify_us, compact_us, compact_verify_us, restore_us);
+    let total_us = total_us(workload_write_us, capture_us, recovery_us);
+
     Ok(Sample {
         round,
         workload_write_us,
@@ -224,11 +246,13 @@ fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error>> {
         capture_local_write_us: capture_phases.local_write_us(),
         capture_fsync_us: capture_phases.fsync_us(),
         capture_parent_sync_us: capture_phases.parent_sync_us(),
+        capture_barrier_us,
         verify_us,
         compact_us,
         compact_verify_us,
         restore_us,
-        end_to_end_us: verify_us + compact_us + compact_verify_us + restore_us,
+        recovery_us,
+        total_us,
         segments: segments.len(),
         input_ltx_bytes: segments
             .iter()
@@ -245,8 +269,13 @@ fn append_capture(
     segments: &mut Vec<crab_ltx::LocalSegment>,
     position: &mut Position,
     phases: &mut CapturePhases,
+    defer_parent_sync: bool,
 ) -> crab_ltx::Result<()> {
-    let batch = database.capture()?;
+    let batch = if defer_parent_sync {
+        database.capture_deferred()?
+    } else {
+        database.capture()?
+    };
     *position = batch.position;
     phases.add(batch.timing);
     segments.extend(batch.segments);
@@ -370,11 +399,13 @@ impl Summary {
             capture_parent_sync_us: median(
                 samples.iter().map(|sample| sample.capture_parent_sync_us),
             ),
+            capture_barrier_us: median(samples.iter().map(|sample| sample.capture_barrier_us)),
             verify_us: median(samples.iter().map(|sample| sample.verify_us)),
             compact_us: median(samples.iter().map(|sample| sample.compact_us)),
             compact_verify_us: median(samples.iter().map(|sample| sample.compact_verify_us)),
             restore_us: median(samples.iter().map(|sample| sample.restore_us)),
-            end_to_end_us: median(samples.iter().map(|sample| sample.end_to_end_us)),
+            recovery_us: median(samples.iter().map(|sample| sample.recovery_us)),
+            total_us: median(samples.iter().map(|sample| sample.total_us)),
             segments: median(samples.iter().map(|sample| sample.segments as u64)) as usize,
             input_ltx_bytes: median(samples.iter().map(|sample| sample.input_ltx_bytes)),
             compacted_ltx_bytes: median(samples.iter().map(|sample| sample.compacted_ltx_bytes)),
@@ -386,8 +417,36 @@ impl Summary {
     }
 }
 
+fn recovery_us(verify_us: u64, compact_us: u64, compact_verify_us: u64, restore_us: u64) -> u64 {
+    verify_us
+        .saturating_add(compact_us)
+        .saturating_add(compact_verify_us)
+        .saturating_add(restore_us)
+}
+
+fn total_us(workload_write_us: u64, capture_us: u64, recovery_us: u64) -> u64 {
+    workload_write_us
+        .saturating_add(capture_us)
+        .saturating_add(recovery_us)
+}
+
 fn median(values: impl Iterator<Item = u64>) -> u64 {
     let mut values = values.collect::<Vec<_>>();
     values.sort_unstable();
     values[values.len() / 2]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{recovery_us, total_us};
+
+    #[test]
+    fn recovery_subtotal_includes_each_phase_once() {
+        assert_eq!(recovery_us(11, 13, 17, 19), 60);
+    }
+
+    #[test]
+    fn total_includes_workload_capture_and_recovery_once() {
+        assert_eq!(total_us(23, 29, 31), 83);
+    }
 }

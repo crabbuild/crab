@@ -31,6 +31,18 @@ LTX_WARMUP=2 \
 crates/crab-ltx/perf/run.sh
 ```
 
+To measure the opt-in grouped durability path on the Crab runner, invoke it
+directly with `--defer-parent-sync`. It captures and fsyncs each LTX file, then
+syncs the shared parent directory once before the round is acknowledged:
+
+```bash
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-ltx-perf" \
+  cargo run --release \
+  --manifest-path crates/crab-ltx/perf/crab/Cargo.toml -- \
+  --transactions 128 --payload-bytes 4096 --rounds 5 --warmup 1 \
+  --defer-parent-sync
+```
+
 The binaries also run directly when a single side is useful:
 
 ```bash
@@ -62,6 +74,8 @@ important fields are:
   file sync; `capture_parent_sync_us` is the directory-entry sync that makes
   the atomic rename durable. The other fields split position resolution, WAL
   reads, page collection, encoding, and local writes.
+- `capture_barrier_us`: only populated for the Crab deferred mode; it is the
+  final grouped parent-directory barrier and is included in `capture_us`.
 - `verify_us`: Crab's explicit owned-input plan verification. Celld reports
   zero because its compactor does not expose an equivalent call.
 - `compact_us`: local LTX compaction, including source listing, reads, merge,
@@ -70,20 +84,22 @@ important fields are:
   destination-level continuity check is included in `compact_us`.
 - `restore_us`: end-to-end restore wall time. Celld additionally reports its
   plan, download, and apply sub-timings.
+- `recovery_us`: the recovery subtotal. Crab defines it as
+  `verify_us + compact_us + compact_verify_us + restore_us`. Celld uses the
+  same formula, with its explicit verification fields set to zero.
+- `total_us`: the full local-round headline:
+  `workload_write_us + capture_us + recovery_us`.
 - `input_ltx_bytes` and `compacted_ltx_bytes`: storage amplification evidence.
 
 The harness checks the restored row count and SQLite integrity in every round;
 it does not include those checks in the reported restore timer.
 
-For a phase comparison, add Crab's `verify_us` to its `compact_us` (and, when
-you want the fully checked path, `compact_verify_us`) before comparing it with
-Celld's `compact_us`. Crab intentionally verifies and owns every input before
-the merge; the compacted output also recomputes its page checksum while merging
-and is decoded once before installation. Celld's pinned `ReplicaCompactor`
-validates the range shape and destination continuity but does not expose the
-same input-plan verification phase. The `end_to_end_us` field already includes
-all reported phases for each implementation, so it is the safer headline
-number.
+For a phase comparison, use `recovery_us` rather than comparing `compact_us`
+alone. Crab intentionally verifies and owns every input before the merge; the
+compacted output also recomputes its page checksum while merging and is decoded
+once before installation. Celld's pinned `ReplicaCompactor` validates the range
+shape and destination continuity but does not expose the same input-plan
+verification phase. Use `total_us` as the only full local-round headline.
 
 The implementations do not have identical durability costs. Crab fsyncs the
 LTX file and its parent directory before returning a capture batch. The pinned

@@ -385,8 +385,9 @@ pub trait FileIo: Send {
 /// Local filesystem boundary; SQLite pager I/O remains under its selected VFS.
 ///
 /// `create` must exclusively create a new file. `open_rw` must not create.
-/// `rename` must sync the destination parent before succeeding. Implementations
-/// must preserve underlying I/O errors.
+/// `rename` must sync the destination parent before succeeding. The opt-in
+/// `rename_uncommitted` variant may defer that parent sync until the caller
+/// invokes `sync_parent`; implementations must preserve underlying I/O errors.
 /// `exists` must detect dangling symlinks. `create_dir` is an exclusive claim.
 /// `persist_new` atomically installs fully synced bytes without replacing any
 /// destination and syncs its parent; `persist_file_new` does the same for an
@@ -399,6 +400,14 @@ pub trait FileSystem: Send + Sync {
     fn file_len(&self, path: &Path) -> io::Result<u64>;
     fn create_dir_all(&self, path: &Path) -> io::Result<()>;
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
+
+    /// Atomically renames a file without requiring the destination directory
+    /// to be durable yet. The default preserves the synchronous `rename`
+    /// contract for host filesystems that do not support batching.
+    fn rename_uncommitted(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.rename(from, to)
+    }
+
     fn remove_file(&self, path: &Path) -> io::Result<()>;
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
     fn exists(&self, path: &Path) -> io::Result<bool>;
@@ -1012,9 +1021,19 @@ impl Host {
         plan: &crate::VerifiedPlan,
         destination: &Path,
     ) -> crate::Result<crate::Position> {
+        let materialized = plan.materialize()?;
+        self.restore_materialized(&materialized, destination)
+    }
+
+    pub(crate) fn restore_materialized(
+        &self,
+        materialized: &crate::recovery::MaterializedPlan,
+        destination: &Path,
+    ) -> crate::Result<crate::Position> {
         crate::recovery::reject_sidecars(destination, self)?;
-        self.filesystem.persist_new(destination, &plan.image()?)?;
-        Ok(plan.position())
+        self.filesystem
+            .persist_new(destination, &materialized.image)?;
+        Ok(materialized.position)
     }
 
     /// Installs a verified full-chain compaction through this host's filesystem.
@@ -1023,9 +1042,7 @@ impl Host {
         plan: &crate::VerifiedPlan,
         destination: &Path,
     ) -> crate::Result<crate::LocalSegment> {
-        let (bytes, info) = crate::recovery::compact_bytes(plan)?;
-        self.filesystem.persist_new(destination, &bytes)?;
-        Ok(crate::LocalSegment::new(destination.to_owned(), info))
+        crate::recovery::compact_to_file(self, plan, destination)
     }
 
     /// Selects an already registered SQLite VFS for local and sparse databases.
@@ -1631,6 +1648,9 @@ impl FileSystem for DirectFileSystem {
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         std::fs::rename(from, to)?;
         crate::host::sync_parent(to)
+    }
+    fn rename_uncommitted(&self, from: &Path, to: &Path) -> io::Result<()> {
+        std::fs::rename(from, to)
     }
     fn remove_file(&self, path: &Path) -> io::Result<()> {
         std::fs::remove_file(path)

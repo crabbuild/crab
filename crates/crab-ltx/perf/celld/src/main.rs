@@ -29,7 +29,8 @@ struct Sample {
     restore_plan_us: u64,
     restore_download_us: u64,
     restore_apply_us: u64,
-    end_to_end_us: u64,
+    recovery_us: u64,
+    total_us: u64,
     segments: usize,
     input_ltx_bytes: u64,
     compacted_ltx_bytes: u64,
@@ -65,7 +66,8 @@ struct Summary {
     restore_plan_us: u64,
     restore_download_us: u64,
     restore_apply_us: u64,
-    end_to_end_us: u64,
+    recovery_us: u64,
+    total_us: u64,
     segments: usize,
     input_ltx_bytes: u64,
     compacted_ltx_bytes: u64,
@@ -201,6 +203,9 @@ async fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error
     let restore_us = elapsed_us(started);
     validate_restore(&restored, config.transactions)?;
 
+    let recovery_us = recovery_us(0, compact_us, 0, restore_us);
+    let total_us = total_us(workload_write_us, capture_us, recovery_us);
+
     Ok(Sample {
         round,
         workload_write_us,
@@ -212,7 +217,8 @@ async fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error
         restore_plan_us: timing.plan_us,
         restore_download_us: timing.download_us,
         restore_apply_us: timing.apply_us,
-        end_to_end_us: compact_us + restore_us,
+        recovery_us,
+        total_us,
         segments,
         input_ltx_bytes,
         compacted_ltx_bytes,
@@ -273,7 +279,8 @@ impl Summary {
             restore_plan_us: median(samples.iter().map(|sample| sample.restore_plan_us)),
             restore_download_us: median(samples.iter().map(|sample| sample.restore_download_us)),
             restore_apply_us: median(samples.iter().map(|sample| sample.restore_apply_us)),
-            end_to_end_us: median(samples.iter().map(|sample| sample.end_to_end_us)),
+            recovery_us: median(samples.iter().map(|sample| sample.recovery_us)),
+            total_us: median(samples.iter().map(|sample| sample.total_us)),
             segments: median(samples.iter().map(|sample| sample.segments as u64)) as usize,
             input_ltx_bytes: median(samples.iter().map(|sample| sample.input_ltx_bytes)),
             compacted_ltx_bytes: median(samples.iter().map(|sample| sample.compacted_ltx_bytes)),
@@ -285,8 +292,36 @@ impl Summary {
     }
 }
 
+fn recovery_us(verify_us: u64, compact_us: u64, compact_verify_us: u64, restore_us: u64) -> u64 {
+    verify_us
+        .saturating_add(compact_us)
+        .saturating_add(compact_verify_us)
+        .saturating_add(restore_us)
+}
+
+fn total_us(workload_write_us: u64, capture_us: u64, recovery_us: u64) -> u64 {
+    workload_write_us
+        .saturating_add(capture_us)
+        .saturating_add(recovery_us)
+}
+
 fn median(values: impl Iterator<Item = u64>) -> u64 {
     let mut values = values.collect::<Vec<_>>();
     values.sort_unstable();
     values[values.len() / 2]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{recovery_us, total_us};
+
+    #[test]
+    fn recovery_subtotal_includes_each_phase_once() {
+        assert_eq!(recovery_us(11, 13, 17, 19), 60);
+    }
+
+    #[test]
+    fn total_includes_workload_capture_and_recovery_once() {
+        assert_eq!(total_us(23, 29, 31), 83);
+    }
 }

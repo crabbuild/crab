@@ -338,6 +338,7 @@ impl CaptureEngine {
             info.snapshotting,
             info.prev_commit,
             commit,
+            !self.defer_parent_sync,
         );
         let (mut checksums, size_bytes, digest) = match write_result {
             Err(CrabError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -354,6 +355,7 @@ impl CaptureEngine {
                     info.snapshotting,
                     info.prev_commit,
                     commit,
+                    !self.defer_parent_sync,
                 )?
             }
             other => other?,
@@ -426,6 +428,7 @@ impl CaptureEngine {
         snapshotting: bool,
         prev_commit: u32,
         commit: u32,
+        sync_parent: bool,
     ) -> Result<(crate::pages::PageChecksums, u64, [u8; 32])> {
         let result = (|| -> Result<(crate::pages::PageChecksums, u64, [u8; 32])> {
             let output = self.host.create(Path::new(tmp_filename))?;
@@ -521,8 +524,13 @@ impl CaptureEngine {
                 self.host.remove_file(Path::new(index_filename))?;
             }
             self.timing_begin(crate::capture::TimingPhase::ParentSync);
-            self.host
-                .rename(Path::new(tmp_filename), Path::new(filename))?;
+            if sync_parent {
+                self.host
+                    .rename(Path::new(tmp_filename), Path::new(filename))?;
+            } else {
+                self.host
+                    .rename_uncommitted(Path::new(tmp_filename), Path::new(filename))?;
+            }
             self.timing_end(crate::capture::TimingPhase::ParentSync);
             Ok((checksums, size_bytes, digest))
         })();

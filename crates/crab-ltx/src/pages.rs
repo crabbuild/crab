@@ -47,6 +47,16 @@ pub(crate) struct PageChecksums {
     checksum: u64,
 }
 
+pub(crate) struct PageChecksumApply<'a> {
+    target: &'a mut PageChecksums,
+    page_size: u32,
+    commit: u32,
+    previous_count: u32,
+    previous: u32,
+    next_required: u32,
+    base_file: Option<crate::HostFile>,
+}
+
 impl Default for PageChecksums {
     fn default() -> Self {
         Self {
@@ -87,6 +97,7 @@ impl PageChecksums {
         })
     }
 
+    #[cfg_attr(any(not(test), all(test, not(feature = "replica"))), expect(dead_code))]
     pub fn apply(
         &mut self,
         page_size: u32,
@@ -104,6 +115,20 @@ impl PageChecksums {
         pages: impl Iterator<Item = Result<(u32, Vec<u8>)>>,
         limit: u64,
     ) -> Result<()> {
+        let mut apply = self.begin_apply(page_size, commit, limit)?;
+        for page in pages {
+            let (pgno, data) = page?;
+            apply.page(pgno, &data)?;
+        }
+        apply.finish()
+    }
+
+    pub(crate) fn begin_apply(
+        &mut self,
+        page_size: u32,
+        commit: u32,
+        limit: u64,
+    ) -> Result<PageChecksumApply<'_>> {
         if !ltx::is_valid_page_size(page_size) || commit == 0 {
             return Err(CrabError::LTXCorrupted);
         }
@@ -112,13 +137,19 @@ impl PageChecksums {
         }
 
         let previous_count = self.count;
-        #[cfg(feature = "replica")]
-        let mut base_file = match &self.base {
-            ChecksumBase::File(base) => Some(base.open()?),
-            ChecksumBase::Memory(_) => None,
+        let mut base_file = {
+            #[cfg(feature = "replica")]
+            {
+                match &self.base {
+                    ChecksumBase::File(base) => Some(base.open()?),
+                    ChecksumBase::Memory(_) => None,
+                }
+            }
+            #[cfg(not(feature = "replica"))]
+            {
+                None
+            }
         };
-        #[cfg(not(feature = "replica"))]
-        let mut base_file = None;
         if commit < previous_count {
             #[cfg(feature = "replica")]
             if matches!(self.base, ChecksumBase::File(_)) {
@@ -137,48 +168,15 @@ impl PageChecksums {
             self.changes.retain(|page, _| *page <= commit);
         }
 
-        let lock = ltx::lock_pgno(page_size);
-        let mut previous = 0;
-        let mut next_required = previous_count.saturating_add(1);
-        for page in pages {
-            let (pgno, data) = page?;
-            if pgno <= previous || pgno > commit || pgno == lock || data.len() != page_size as usize
-            {
-                return Err(CrabError::LTXCorrupted);
-            }
-            while next_required == lock {
-                next_required = next_required
-                    .checked_add(1)
-                    .ok_or(CrabError::LTXCorrupted)?;
-            }
-            if pgno > previous_count {
-                if pgno != next_required {
-                    return Err(CrabError::LTXCorrupted);
-                }
-                next_required = next_required
-                    .checked_add(1)
-                    .ok_or(CrabError::LTXCorrupted)?;
-            }
-            let old = if pgno <= previous_count {
-                self.value(pgno, base_file.as_mut())?
-            } else {
-                0
-            };
-            let checksum = ltx::checksum_page(pgno, &data);
-            self.checksum = CHECKSUM_FLAG | (self.checksum ^ old ^ checksum);
-            self.changes.insert(pgno, checksum);
-            previous = pgno;
-        }
-        while next_required == lock {
-            next_required = next_required
-                .checked_add(1)
-                .ok_or(CrabError::LTXCorrupted)?;
-        }
-        if commit > previous_count && next_required <= commit {
-            return Err(CrabError::LTXCorrupted);
-        }
-        self.count = commit;
-        Ok(())
+        Ok(PageChecksumApply {
+            target: self,
+            page_size,
+            commit,
+            previous_count,
+            previous: 0,
+            next_required: previous_count.saturating_add(1),
+            base_file,
+        })
     }
 
     /// Persists a successful candidate after its LTX cut is durably sealed.
@@ -283,6 +281,59 @@ impl PageChecksums {
             return Err(CrabError::LTXCorrupted);
         }
         Ok(checksum)
+    }
+}
+
+impl PageChecksumApply<'_> {
+    pub(crate) fn page(&mut self, pgno: u32, data: &[u8]) -> Result<()> {
+        let lock = ltx::lock_pgno(self.page_size);
+        if pgno <= self.previous
+            || pgno > self.commit
+            || pgno == lock
+            || data.len() != self.page_size as usize
+        {
+            return Err(CrabError::LTXCorrupted);
+        }
+        while self.next_required == lock {
+            self.next_required = self
+                .next_required
+                .checked_add(1)
+                .ok_or(CrabError::LTXCorrupted)?;
+        }
+        if pgno > self.previous_count {
+            if pgno != self.next_required {
+                return Err(CrabError::LTXCorrupted);
+            }
+            self.next_required = self
+                .next_required
+                .checked_add(1)
+                .ok_or(CrabError::LTXCorrupted)?;
+        }
+        let old = if pgno <= self.previous_count {
+            self.target.value(pgno, self.base_file.as_mut())?
+        } else {
+            0
+        };
+        let checksum = ltx::checksum_page(pgno, data);
+        self.target.checksum = CHECKSUM_FLAG | (self.target.checksum ^ old ^ checksum);
+        self.target.changes.insert(pgno, checksum);
+        self.previous = pgno;
+        Ok(())
+    }
+
+    pub(crate) fn finish(mut self) -> Result<()> {
+        let lock = ltx::lock_pgno(self.page_size);
+        while self.next_required == lock {
+            self.next_required = self
+                .next_required
+                .checked_add(1)
+                .ok_or(CrabError::LTXCorrupted)?;
+        }
+        if self.commit > self.previous_count && self.next_required <= self.commit {
+            return Err(CrabError::LTXCorrupted);
+        }
+        self.target.count = self.commit;
+        Ok(())
     }
 }
 
