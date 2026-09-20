@@ -240,10 +240,10 @@ the new host must delete comparable manual composition complexity from server.
 ## Done criteria
 
 - [ ] One `CellNode` owns every listed production runtime facility and task.
-- [ ] Server readiness occurs only after complete host validation/startup.
-- [ ] Server drain/shutdown awaits work and returns resource ledgers to baseline.
+- [x] Server readiness occurs only after complete host validation/startup.
+- [x] Server drain/shutdown awaits work and returns resource ledgers to baseline.
 - [ ] Full-primitive application provisions and survives owner/source loss through public APIs.
-- [ ] `crab-http-server` contains no parallel production composition path.
+- [x] `crab-http-server` contains no parallel production composition path.
 - [ ] Existing repository HTTP/auth/provider behavior remains unchanged.
 - [ ] Host, runtime, LTX, server, architecture, Clippy, format, and cleanup gates pass.
 

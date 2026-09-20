@@ -265,10 +265,10 @@ immutable artifact identity. Do not publish aspirational values.
 - [ ] Every canonical matrix row has a valid exact-candidate protected receipt.
 - [ ] Every primitive passes happy, retry, duplicate, expiry, cancellation, owner-loss, and recovery cases relevant to it.
 - [ ] Mixed scale profiles meet pre-approved throughput/latency/resource thresholds.
-- [ ] Algorithmic regressions from plans 018–021 are CI-gated.
+- [x] Algorithmic regressions from plans 018–021 are CI-gated.
 - [ ] Kubernetes faults prove one owner, exact-root monotonicity, and continued progress.
 - [ ] Every advertised provider passes its own conditional/range/multipart workload.
-- [ ] Release rejects missing, stale, dirty, failed, forged, or wrong-image evidence.
+- [x] Release rejects missing, stale, dirty, failed, forged, or wrong-image evidence.
 - [ ] Published scale/support claims exactly match measured profiles.
 
 ## STOP conditions

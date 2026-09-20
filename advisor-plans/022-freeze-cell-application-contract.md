@@ -205,8 +205,8 @@ unapproved dependency was added.
 
 ## Done criteria
 
-- [ ] An application compiles to deterministic registry and topology bytes independent of registration order.
-- [ ] Stable IDs, migrations, operation limits, effect targets, definitions, and activities fail closed on mismatch.
+- [x] An application compiles to deterministic registry and topology bytes independent of registration order.
+- [x] Stable IDs, migrations, operation limits, effect targets, definitions, and activities fail closed on mismatch.
 - [x] Typed handles expose every primitive without exposing runtime internals.
 - [x] The reference application registers and invokes all primitives through public author APIs.
 - [x] Semantic exclusions and bounded limits are executable tests, not prose-only claims.
