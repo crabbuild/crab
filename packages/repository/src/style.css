@@ -113,17 +113,7 @@ main {
   white-space: nowrap;
 }
 .code-theme-control {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--fgColor-muted);
-  font-size: 12px;
-  font-weight: 600;
-}
-.code-theme-control select {
-  min-height: 32px;
-  padding: 4px 28px 4px 10px;
-  font-size: 12px;
+  flex-shrink: 0;
 }
 .repo-header {
   background: var(--page-header-bgColor);
@@ -5447,14 +5437,6 @@ main {
 @media (max-width: 640px) {
   .global-header {
     padding: 10px 16px;
-  }
-  .code-theme-control > span {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
   }
   .brand-mark {
     width: 28px;
