@@ -16,7 +16,7 @@ use axum::{
     routing::{get, post},
 };
 use bytes::Bytes;
-use crab_cell_host::{CellNode, CellNodeBuilder, CellNodeFacility, CellNodeTaskGroup};
+use crab_cell_host::{CellNode, CellNodeBuilder};
 use crab_cell_runtime::{
     ACTIVE_CELL_FILE_DESCRIPTORS, ACTIVE_CELL_NATIVE_BYTES, ACTIVE_CELL_PAGE_CACHE_BYTES,
     ApplicationIdentityStore, CellRuntime, Digest, NodeDirectory, Owner, PeerRoundTrip, PeerSigner,
@@ -893,10 +893,6 @@ pub async fn serve(config: Config) -> Result<()> {
     let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
     let metrics = crate::metrics::Metrics::new()?;
     let node_shutdown = CancellationToken::new();
-    let cell_tasks = Arc::new(CellNodeTaskGroup::new(
-        cancellation.clone(),
-        node_shutdown.clone(),
-    ));
     let cell_node = Arc::new(
         CellNodeBuilder::new(crate::cells::compiled_application()?)
             .with_runtime(
@@ -907,13 +903,7 @@ pub async fn serve(config: Config) -> Result<()> {
             .with_session(session)
             .build()?,
     );
-    cell_node.install_facility(CellNodeFacility::new("cell-coordination-tasks", {
-        let cell_tasks = Arc::clone(&cell_tasks);
-        move || {
-            let cell_tasks = Arc::clone(&cell_tasks);
-            async move { cell_tasks.drain().await }
-        }
-    })?)?;
+    let cell_tasks = cell_node.install_task_group(cancellation.clone(), node_shutdown.clone())?;
     cell_node.install_telemetry(Arc::new(metrics.clone()))?;
     let cell_runtime = cell_node.runtime();
     let follower_store = crab_cell_runtime::FollowerStore::open(
@@ -2204,6 +2194,7 @@ mod peer_e2e_tests;
 mod tests {
     use super::*;
     use axum::body::Body;
+    use crab_cell_host::CellNodeTaskGroup;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 

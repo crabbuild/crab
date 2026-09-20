@@ -215,6 +215,7 @@ impl CellNodeBuilder {
             lease_installed: AtomicBool::new(false),
             shutdown_lock: Arc::new(tokio::sync::Mutex::new(())),
             facilities: Arc::new(Mutex::new(Vec::new())),
+            task_group: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -232,6 +233,7 @@ impl CellNodeBuilder {
             lease_installed: AtomicBool::new(false),
             shutdown_lock: Arc::new(tokio::sync::Mutex::new(())),
             facilities: Arc::new(Mutex::new(Vec::new())),
+            task_group: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -272,6 +274,7 @@ pub struct CellNode {
     lease_installed: AtomicBool,
     shutdown_lock: Arc<tokio::sync::Mutex<()>>,
     facilities: Arc<Mutex<Vec<CellNodeFacility>>>,
+    task_group: Arc<Mutex<Option<Arc<CellNodeTaskGroup>>>>,
 }
 
 impl CellNode {
@@ -336,6 +339,30 @@ impl CellNode {
         self.runtime.install_node_lease(lease)?;
         self.lease_installed.store(true, Ordering::Release);
         Ok(())
+    }
+
+    /// Creates and retains the bounded coordination task group for this node.
+    pub fn install_task_group(
+        &self,
+        cancellation: CancellationToken,
+        node_shutdown: CancellationToken,
+    ) -> crab_cell_runtime::Result<Arc<CellNodeTaskGroup>> {
+        let task_group = Arc::new(CellNodeTaskGroup::new(cancellation, node_shutdown));
+        let mut installed = self
+            .task_group
+            .lock()
+            .map_err(|_| Error::Control("CellNode task group lock poisoned"))?;
+        if installed.is_some() {
+            return Err(Error::Control("CellNode task group already installed"));
+        }
+        let drain_group = Arc::clone(&task_group);
+        let facility = CellNodeFacility::new("cell-coordination-tasks", move || {
+            let drain_group = Arc::clone(&drain_group);
+            async move { drain_group.drain().await }
+        })?;
+        self.install_facility(facility)?;
+        *installed = Some(Arc::clone(&task_group));
+        Ok(task_group)
     }
 
     /// Marks the node ready after all product startup probes have completed.
@@ -608,6 +635,41 @@ mod tests {
             .unwrap();
 
         tasks.drain().await.unwrap();
+
+        assert!(cancellation.is_cancelled());
+        assert!(node_shutdown.is_cancelled());
+        assert!(finished.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn node_owns_one_task_group_and_drains_it() {
+        let node = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([20; 16]))
+            .build()
+            .unwrap();
+        let cancellation = CancellationToken::new();
+        let node_shutdown = CancellationToken::new();
+        let tasks = node
+            .install_task_group(cancellation.clone(), node_shutdown.clone())
+            .unwrap();
+        assert!(
+            node.install_task_group(CancellationToken::new(), CancellationToken::new())
+                .is_err()
+        );
+        let finished = Arc::new(AtomicBool::new(false));
+        let task_finished = Arc::clone(&finished);
+        let task_shutdown = node_shutdown.clone();
+        tasks
+            .spawn(async move {
+                task_shutdown.cancelled().await;
+                task_finished.store(true, Ordering::Release);
+                Ok::<(), Error>(())
+            })
+            .unwrap();
+
+        node.shutdown().await.unwrap();
 
         assert!(cancellation.is_cancelled());
         assert!(node_shutdown.is_cancelled());
