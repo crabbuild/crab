@@ -4,9 +4,13 @@
 //! product server supplies providers, authentication and network transports;
 //! it must not construct another runtime alongside this host.
 
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use crab_cell_app::{ApplicationHandle, CellApplication, CompiledApplication};
@@ -14,6 +18,34 @@ use crab_cell_runtime::{
     ApplicationId, CellClient, CellRuntime, CellRuntimeStats, Error, ReplicaHost, SessionId,
     SqlWorkerPool, TenantId,
 };
+
+const MAX_NODE_FACILITIES: usize = 64;
+
+/// Error returned by a provider-owned node facility during drain.
+pub type FacilityResult = std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+/// One provider-owned lifecycle component attached to a [`CellNode`].
+pub struct CellNodeFacility {
+    name: &'static str,
+    drain: Arc<dyn Fn() -> Pin<Box<dyn Future<Output = FacilityResult> + Send>> + Send + Sync>,
+}
+
+impl CellNodeFacility {
+    /// Creates one named drain callback. The callback must be idempotent.
+    pub fn new<F, Fut>(name: &'static str, drain: F) -> crab_cell_runtime::Result<Self>
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = FacilityResult> + Send + 'static,
+    {
+        if name.is_empty() {
+            return Err(Error::Control("CellNodeFacility name is empty"));
+        }
+        Ok(Self {
+            name,
+            drain: Arc::new(move || Box::pin(drain())),
+        })
+    }
+}
 
 /// Node lifecycle state visible to readiness and shutdown adapters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +115,7 @@ impl CellNodeBuilder {
             state: Arc::new(Mutex::new(NodeState::Starting)),
             lease_installed: AtomicBool::new(false),
             shutdown_lock: Arc::new(tokio::sync::Mutex::new(())),
+            facilities: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -99,6 +132,7 @@ impl CellNodeBuilder {
             state: Arc::new(Mutex::new(NodeState::Starting)),
             lease_installed: AtomicBool::new(false),
             shutdown_lock: Arc::new(tokio::sync::Mutex::new(())),
+            facilities: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -138,6 +172,7 @@ pub struct CellNode {
     state: Arc<Mutex<NodeState>>,
     lease_installed: AtomicBool,
     shutdown_lock: Arc<tokio::sync::Mutex<()>>,
+    facilities: Arc<Mutex<Vec<CellNodeFacility>>>,
 }
 
 impl CellNode {
@@ -221,6 +256,22 @@ impl CellNode {
         self.runtime.is_shutting_down()
     }
 
+    /// Attaches one provider-owned lifecycle component before node shutdown.
+    pub fn install_facility(&self, facility: CellNodeFacility) -> crab_cell_runtime::Result<()> {
+        let mut facilities = self
+            .facilities
+            .lock()
+            .map_err(|_| Error::Control("CellNode facility lock poisoned"))?;
+        if facilities.len() >= MAX_NODE_FACILITIES {
+            return Err(Error::Capacity("CellNode facility limit reached"));
+        }
+        match self.state() {
+            NodeState::Starting | NodeState::Ready => facilities.push(facility),
+            NodeState::Draining | NodeState::Stopped => return Err(Error::CellDraining),
+        }
+        Ok(())
+    }
+
     /// Binds a product-created typed client to this application's tenant scope.
     pub fn application_handle<A: CellApplication>(
         &self,
@@ -244,7 +295,38 @@ impl CellNode {
             }
             *state = NodeState::Draining;
         }
-        let result = self.runtime.shutdown().await;
+        let facilities = self
+            .facilities
+            .lock()
+            .map(|facilities| {
+                facilities
+                    .iter()
+                    .rev()
+                    .map(|facility| (facility.name, Arc::clone(&facility.drain)))
+                    .collect::<Vec<_>>()
+            })
+            .map_err(|_| Error::Control("CellNode facility lock poisoned"));
+        let mut first_error = None;
+        match facilities {
+            Err(error) => first_error = Some(error),
+            Ok(facilities) => {
+                for (name, drain) in facilities {
+                    if let Err(source) = drain().await
+                        && first_error.is_none()
+                    {
+                        first_error = Some(Error::Facility { name, source });
+                    }
+                }
+            }
+        }
+        let runtime_result = self.runtime.shutdown().await;
+        if first_error.is_none() {
+            first_error = runtime_result.err();
+        }
+        let result = match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        };
         if result.is_ok()
             && let Ok(mut state) = self.state.lock()
         {
@@ -415,5 +497,79 @@ mod tests {
             assert_eq!(node.state(), NodeState::Stopped);
             assert!(node.is_shutting_down());
         }
+    }
+
+    #[tokio::test]
+    async fn facilities_drain_in_reverse_registration_order() {
+        let node = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([16; 16]))
+            .build()
+            .unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        for name in ["storage", "transport", "scheduler"] {
+            let events = Arc::clone(&events);
+            node.install_facility(
+                CellNodeFacility::new(name, move || {
+                    let events = Arc::clone(&events);
+                    async move {
+                        events
+                            .lock()
+                            .map_err(|_| {
+                                Box::new(std::io::Error::other("event lock poisoned"))
+                                    as Box<dyn std::error::Error + Send + Sync>
+                            })?
+                            .push(name);
+                        Ok(())
+                    }
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        node.shutdown().await.unwrap();
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["scheduler", "transport", "storage"]
+        );
+    }
+
+    #[tokio::test]
+    async fn facility_failure_is_reported_after_all_facilities_attempt_and_runtime_drains() {
+        let node = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([17; 16]))
+            .build()
+            .unwrap();
+        let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let completed_clone = Arc::clone(&completed);
+        node.install_facility(
+            CellNodeFacility::new("healthy", move || {
+                let completed = Arc::clone(&completed_clone);
+                async move {
+                    completed.store(true, Ordering::Release);
+                    Ok(())
+                }
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        node.install_facility(
+            CellNodeFacility::new("broken", || async {
+                Err(Box::new(std::io::Error::other("drain failed"))
+                    as Box<dyn std::error::Error + Send + Sync>)
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let error = node.shutdown().await.unwrap_err();
+        assert!(matches!(error, Error::Facility { name: "broken", .. }));
+        assert!(completed.load(Ordering::Acquire));
+        assert!(node.is_shutting_down());
+        assert_eq!(node.state(), NodeState::Draining);
     }
 }

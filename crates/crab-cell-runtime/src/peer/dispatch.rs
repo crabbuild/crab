@@ -720,6 +720,7 @@ fn error_reply(error: Error) -> wire::PeerReply {
         | Error::ActivityPanic
         | Error::NativePanic
         | Error::RuntimeStart(_)
+        | Error::Facility { .. }
         | Error::CellAlreadyActive => (
             wire::error::Code::Internal,
             wire::error::Outcome::Unknown,

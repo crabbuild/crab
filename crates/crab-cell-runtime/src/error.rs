@@ -120,4 +120,10 @@ pub enum Error {
     ActivityPanic,
     #[error("Cell runtime requires an active Tokio runtime")]
     RuntimeStart(#[source] tokio::runtime::TryCurrentError),
+    #[error("Cell node facility failed: {name}")]
+    Facility {
+        name: &'static str,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
