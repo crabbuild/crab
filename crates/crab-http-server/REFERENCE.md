@@ -545,13 +545,16 @@ and `directory_oid`; the browser also compares every entry path and object ID
 before adding `last_commit`. A moving branch or navigation race therefore cannot
 attach metadata from a different snapshot.
 
-When generation-bound attribution has not been published, `tree-attribution`
-returns HTTP 202 with `state: "indexing"`, `retry_after_ms`, and `Retry-After`.
-The browser retains the already rendered tree and retries. Corrupt published
-metadata returns HTTP 503 and starts a CAS-fenced rebuild. Neither case falls
-back to an interactive history scan. Large initial builds checkpoint verified
-prefixes every 32 commits; exhausting one bounded maintenance pass remains a
-202 indexing state and the next pass resumes that exact Git generation.
+When canonical generation-bound path state is ready but its SQLite projection
+is still catching up, `tree-attribution` reads the exact requested paths from
+that persistent index while the recurring background projection continues.
+When path state itself has not been published, the endpoint returns HTTP 202
+with `state: "indexing"`, `retry_after_ms`, and `Retry-After`; the browser keeps
+the rendered tree and retries. Corrupt published metadata returns HTTP 503 and
+starts a CAS-fenced rebuild. No case falls back to an interactive history scan.
+Large initial builds checkpoint verified prefixes every 32 commits; exhausting
+one bounded maintenance pass remains a 202 indexing state and the next pass
+resumes that exact Git generation.
 
 Root commits compare against an empty tree. Path history follows the exact first-parent path. Commit history with `base` instead returns commits reachable from `rev` but not from `base`, across every parent.
 

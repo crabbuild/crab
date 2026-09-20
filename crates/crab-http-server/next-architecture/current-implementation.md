@@ -79,15 +79,20 @@ schedules a CAS-fenced rebuild. There is no production fallback to the removed
 raw-history directory walker. The browser merges results only when generation,
 commit, directory object ID, path and entry object ID still match.
 
-The server also runs a bounded catalog anti-entropy sweep. It probes a rotating
-batch of object-store snapshots, schedules only changed or due repositories,
-applies exponential retry backoff, and acquires maintenance capacity before
-spawning work. This catches direct `crab`/Git pushes when notifications and the
-HTTP fleet were absent. Projection probe/build/batch/supersede/origin-read
-metrics are exported with the existing server metrics endpoint. Promotion
-checks ordinal continuity and attribution reachability; collection keeps the
-current, previous-ready, and in-progress epochs while deleting immutable rows
-in bounded batches.
+If the matching SQLite projection has not reached ready state, the HTTP path
+continues to serve exact attribution from the same generation-bound persistent
+path-state index while recurring background reconciliation catches up. Only an
+absent path-state index returns the retryable indexing response.
+
+The server also runs a bounded catalog anti-entropy sweep. It probes a fairly
+rotating batch of object-store snapshots, schedules only changed or due
+repositories, applies exponential retry backoff after admitted work, and
+retries capacity deferrals on the next sweep without growing that backoff. This
+catches direct `crab`/Git pushes when notifications and the HTTP fleet were
+absent. Projection probe/build/batch/supersede/origin-read metrics are exported
+with the existing server metrics endpoint. Promotion checks ordinal continuity
+and attribution reachability; collection keeps the current, previous-ready,
+and in-progress epochs while deleting immutable rows in bounded batches.
 
 ### Replication crate now available
 
