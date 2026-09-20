@@ -35,6 +35,15 @@ LTX root. No serving route reads or writes the retired collaboration object
 trees. The server uses writable temporary space for pack/index preparation; it
 creates no Git checkout or local Git object database.
 
+Authenticated repository administrators manage the complete member list in
+**Settings → Members** or through the conditional CLI replacement command.
+Both paths commit the same catalog revision and durable membership audit event.
+OIDC providers can also revoke an identity's Crab browser sessions and derived
+Git tokens through the documented back-channel logout endpoint. GitHub OAuth
+uses the same server-side browser session contract but does not provide signed
+OIDC logout tokens. The exact API, catalog migration, and rollout contracts are in
+[Team sign-in](REFERENCE.md#team-sign-in).
+
 ## Build and run
 
 For the fastest local start, use Docker Engine with Compose v2:
@@ -131,7 +140,7 @@ The bucket or container must already exist. `repository adopt` can publish an
 existing canonical repository; it does not convert arbitrary objects into a
 Crab repository. Every replica discovers catalog changes without a restart.
 Without authentication, the server accepts only loopback listeners and trusts
-the local operator. Team deployments need [OIDC configuration](REFERENCE.md#team-sign-in)
+the local operator. Team deployments need [OIDC or GitHub OAuth configuration](REFERENCE.md#team-sign-in)
 and a canonical HTTPS origin. For container deployment, use the
 [deployment profiles](deploy/README.md),
 [container instructions](REFERENCE.md#run-the-container), and

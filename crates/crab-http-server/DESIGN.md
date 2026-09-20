@@ -105,8 +105,10 @@ rules.
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "version": 42,
+  "membership_audit_head": ".crab/http-server/v1/audit/membership/42-event.json",
+  "pending_membership_audit": null,
   "repositories": [
     {
       "id": "01991c9d-77c0-7d67-bf60-aef10eb9f081",
@@ -123,12 +125,25 @@ rules.
 }
 ```
 
-Every mutation reads the document with its provider CAS token, validates the
-whole next document, sorts it deterministically, increments `version`, and uses
-conditional create or update. A state conflict restarts the bounded loop. Names
-are unique ignoring case; prefixes and IDs are exactly unique. Version 2 is
-mandatory and accepts only `empty_cell_pending` or `cell_ready`; version 1 is
-rejected at the forward-only hard cut instead of being upgraded or imported.
+Every logical mutation reads the document with its provider CAS token, validates
+the whole next document, sorts it deterministically, increments `version`, and
+uses conditional create or update. A state conflict restarts the bounded loop.
+Names are unique ignoring case; prefixes and IDs are exactly unique. Version 2
+remains read-compatible; the first successful mutation writes version 3. Version
+1 and future schemas are rejected at the forward-only hard cut instead of being
+upgraded or imported. Do not roll a catalog back to an older binary after a v3
+write.
+
+Membership replacement is a logical catalog mutation. It retains the caller's
+complete presentation-order array, requires an administrator in authenticated
+deployments, and records a chain-linked event in the same CAS commit. The event
+contains the actor's stable issuer and subject, canonical membership digests,
+catalog revision, timestamp, and prior event pointer; it never contains browser,
+Git, CSRF, or provider tokens. A single pending outbox event is flushed to the
+immutable `.crab/http-server/v1/audit/membership/` prefix and then becomes the
+catalog head without incrementing the logical revision. A crash leaves the
+committed pending event retryable before another mutation, never silently
+unaudited.
 
 ### Create and adopt without scanning
 
@@ -210,12 +225,25 @@ creation response.
 
 Logout deletes the durable parent session. Subsequent browser and Git-token
 requests therefore fail on every replica even when token objects remain for
-bounded lifecycle collection. A per-session CAS index makes token issuance and
-revocation constant-sized without scanning the auth namespace. The process
+bounded lifecycle collection. A hashed `(issuer, subject)` reverse index points
+to each durable session, so identity revocation does not expose identities in
+object names or scan the whole auth namespace. During the explicit eight-hour
+rollout window, revocation also streams legacy session records; deployments
+must finish the binary rollout inside that maximum session lifetime. The process
 does not interrupt a request that already passed authorization; every later
 request resolves the durable parent again and observes revocation. A 24-hour
 object lifecycle on the auth prefix safely collects all state because its
 maximum active lifetime is eight hours.
+The migration cutoff at `.crab/http-server/v1/identity-index-migration.json`
+and replay records at `.crab/http-server/v1/logout-replays/` are deliberately
+outside that lifecycle prefix; replay cleanup must be expiry-aware and
+operator-controlled.
+
+The provider callback at `/auth/backchannel-logout` accepts a signed OIDC
+Back-Channel Logout Token and revokes only its exact issuer/subject identity.
+Replay records make retransmission safe. It is deliberately the sole unsafe
+public route exempt from browser Origin and CSRF checks; the signed token is its
+authentication. Subject-scoped tokens are supported; a `sid`-only token is not.
 
 Shared state is not an excuse to broaden credentials. The workload identity
 may access the configured root and nothing else. The OIDC client secret and

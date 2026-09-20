@@ -172,6 +172,27 @@ docker run --detach --name "$restore_server" \
   --volume "${work_dir}/restore.server.toml:/etc/crab/server.toml:ro" \
   --volume "${peer_identity_volume}:/run/secrets/crab-peer:ro" \
   "$server_image" >/dev/null
+
+restore_server_running=false
+for _attempt in $(seq 1 30); do
+  restore_state="$(docker inspect --format '{{.State.Status}}' "$restore_server" 2>/dev/null || true)"
+  if [ "$restore_state" = running ]; then
+    restore_server_running=true
+    break
+  fi
+  if [ "$restore_state" = exited ] || [ "$restore_state" = dead ]; then
+    docker logs "$restore_server" >&2 || true
+    echo "The isolated restored server exited before its proxy could start." >&2
+    exit 1
+  fi
+  sleep 1
+done
+if ! $restore_server_running; then
+  docker logs "$restore_server" >&2 || true
+  echo "The isolated restored server did not start within thirty seconds." >&2
+  exit 1
+fi
+
 docker run --detach --name "$restore_proxy" \
   --network "container:${restore_server}" \
   --user 65534:65534 \

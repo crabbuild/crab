@@ -16,7 +16,7 @@ Use this map to enter the reference without reading it in order.
 | Build and operate the container | [Run the container](#run-the-container) |
 | Understand the process and storage boundaries | [Understand the runtime architecture](#understand-the-runtime-architecture) |
 | Call repository browser APIs | [Repository browser and application APIs](#repository-browser-and-application-apis) |
-| Configure OpenID Connect (OIDC) | [Team sign-in](#team-sign-in) |
+| Configure browser sign-in (OIDC or GitHub OAuth) | [Team sign-in](#team-sign-in) |
 | Clone or fetch with native Git | [Git HTTP reads](#git-http-reads) |
 | Transfer LFS objects | [Git LFS transfers](#git-lfs-transfers) |
 | Push branches and tags | [Native Git push](#native-git-push) |
@@ -36,7 +36,7 @@ flowchart LR
     Git[Native Git client]
     CI[CI integration]
     Server[crab-http-server]
-    Auth[OIDC provider]
+    Auth[OIDC or GitHub provider]
     Temp[Temporary pack and index files]
     Store[(S3, GCS, or Azure Blob root)]
 
@@ -294,7 +294,7 @@ seconds without a restart.
 
 ### Understand local trust mode
 
-Without OIDC, the server accepts loopback listeners only. This mode trusts one
+Without browser authentication, the server accepts loopback listeners only. This mode trusts one
 local operator and exposes every cataloged repository to that principal.
 
 The public listener exposes `GET /livez` as a storage-independent load-balancer
@@ -369,7 +369,7 @@ Replace its identity and storage-root values.
 
 Keep these inputs separate:
 
-- `server.toml`: listeners, storage root, and OIDC configuration
+- `server.toml`: listeners, storage root, and browser authentication configuration
 - `crab-storage.env`: private storage credentials
 - `oidc-client-secret`: optional confidential-client secret
 - `state-key`: at least 32 random bytes, stable across every replica and rollout
@@ -699,7 +699,12 @@ Catalog maintenance also repairs a missing standard Git pack sidecar. It downloa
 
 ## Team sign-in
 
-Team deployments use an OIDC authorization-code client with Proof Key for Code Exchange (PKCE) and the S256 challenge method. The server discovers provider metadata and signing keys; it stores no passwords and never uses email as the authorization identifier.
+Team deployments use a provider-neutral authorization-code client with Proof Key
+for Code Exchange (PKCE) and the S256 challenge method. The default `oidc`
+provider discovers metadata and signing keys; the `github` provider uses
+GitHub's OAuth endpoints and performs the code exchange and user lookup on the
+server. The browser only receives the Crab session cookie. Neither mode stores
+passwords or uses email as the authorization identifier.
 
 ### Configure the identity provider
 
@@ -730,6 +735,7 @@ peer_ca = "/run/secrets/crab-peer/ca.crt"
 url = "s3://your-bucket/repositories"
 
 [auth]
+provider = "oidc"
 issuer = "https://identity.example.com/realms/team"
 client_id = "crab-browser"
 public_url = "https://git.example.com"
@@ -739,14 +745,36 @@ state_key_file = "/run/secrets/crab-state-key"
 
 Omit `client_secret_file` for a public PKCE client. A secret file can end with one newline; other whitespace remains part of the secret.
 
+To use a GitHub OAuth App directly, set `provider = "github"`, use
+`https://github.com` as the identity namespace, and keep the same callback URI:
+
+```toml
+[auth]
+provider = "github"
+issuer = "https://github.com"
+client_id = "1234567890abcdef"
+public_url = "https://git.example.com"
+client_secret_file = "/run/secrets/crab-github-client-secret"
+state_key_file = "/run/secrets/crab-state-key"
+```
+
+GitHub OAuth requires a confidential client secret. The default endpoints are
+`https://github.com/login/oauth/authorize`,
+`https://github.com/login/oauth/access_token`, and `https://api.github.com/`.
+An optional `[auth.github]` table can override all three for a provider proxy or
+a loopback test service; `api_url` must end with `/`. The server sends the
+short-lived GitHub access token only to GitHub's `/user` endpoint, never stores
+it, and uses the stable numeric GitHub user ID as the repository membership
+subject. No GitHub repository scopes are requested.
+
 Terminate Transport Layer Security (TLS) at a reverse proxy and forward the original canonical `Host` to the private loopback listener. Forwarded headers cannot replace the configured origin.
 
 HTTP identity endpoints are allowed only when the issuer, public URL, and listener are loopback addresses. Production identity endpoints require HTTPS.
 
 ### Define repository membership
 
-Each catalog member record binds the provider's stable `sub` claim to a display
-name and explicit grant. Supply records through `--members-file` when creating
+Each catalog member record binds the provider's stable subject (`sub` for OIDC,
+the numeric user ID for GitHub) to a display name and explicit grant. Supply records through `--members-file` when creating
 or adopting a repository. Use `--members-file -` to read the document from
 standard input, including through `kubectl exec --stdin`:
 
@@ -765,7 +793,7 @@ kubectl --namespace crab exec --stdin deployment/crab-http-server -- \
 
 Subjects can contain at most 512 characters. Names can contain at most 160 characters. Subjects and case-insensitive names must be unique within a repository.
 
-When OIDC is configured, the repository administration CLI requires at least
+When browser authentication is configured, the repository administration CLI requires at least
 one `admin` member. It rejects an empty or read/write-only membership before
 touching repository storage, preventing creation of a repository that no
 authenticated operator can administer. Unauthenticated loopback deployments
@@ -778,6 +806,41 @@ command again. Every healthy replica observes the change on its next
 five-second catalog poll and swaps routing only after materialization succeeds.
 Requests already holding the previous repository handle finish against that
 snapshot.
+
+Administrators can make the same full replacement in **Settings → Members**.
+The browser loads membership only when that section opens, presents stable
+subject, display name, and `read`/`write`/`admin` access, and sends the session
+CSRF token with a single revision-guarded replacement. Add, edit, and remove
+are staged locally; removal requires an explicit confirmation. A conflict keeps
+the unsaved draft and requires **Reload members** before another save; it never
+replays a stale array. If an OIDC administrator removes their own admin grant,
+the browser confirms the accepted update and returns to the repository root.
+
+`GET /api/repos/{owner}/{repo}/members` returns:
+
+```json
+{
+  "revision": 42,
+  "members": [{"subject":"alice-id","name":"Alice","access":"admin"}]
+}
+```
+
+`PUT` accepts the same array with `expected_revision` and returns the accepted
+replacement with its next revision. It is limited to 256 KiB and rejects
+unknown fields. Missing repositories and non-administrators both receive `404`
+`repository_not_found`; a stale revision or catalog ETag race is `409`
+`membership_changed`; invalid fields are `422` `invalid_membership`; removing
+the final administrator is `422` `administrator_required`; unavailable catalog
+or audit storage is `503` `membership_unavailable`. The server does not return
+the competing array on a conflict. Browser requests inherit the canonical Origin
+and CSRF checks used by every other unsafe repository API.
+
+Each changed CLI or browser replacement writes a catalog v3 membership audit
+event in the same commit. Version 2 catalogs remain readable, but the first
+write becomes v3; rolling back to a pre-v3 server afterward is unsupported.
+The bounded pending outbox flushes to
+`.crab/http-server/v1/audit/membership/` and is retried after interruption.
+There is no browser audit-history API yet.
 
 An authenticated account without membership sees an empty catalog. Unauthorized
 and absent repositories both return HTTP 404 after authentication. Catalog
@@ -811,7 +874,7 @@ at 1 MiB. Login transactions expire after 10 minutes. Each process admits eight
 simultaneous callbacks. Sessions and Git-token records use the shared storage
 root rather than pod memory.
 
-Session cookies use `HttpOnly` and `SameSite=Lax`. HTTPS deployments also use `Secure` and the `__Host-` prefix. Sessions expire at the earlier of ID-token expiry or eight hours. The server does not retain refresh tokens.
+Session cookies use `HttpOnly` and `SameSite=Lax`. HTTPS deployments also use `Secure` and the `__Host-` prefix. OIDC sessions expire at the earlier of ID-token expiry or eight hours; GitHub sessions expire after eight hours. The server does not retain refresh tokens or GitHub access tokens.
 
 Restarting or replacing a replica preserves sessions and Git tokens. Logout
 requires the canonical `Origin` and the session's cross-site request forgery
@@ -821,9 +884,40 @@ out of the identity provider. Configure an object-store lifecycle rule that
 deletes objects below `.crab/http-server/v1/auth/` after 24 hours. Active state
 expires within eight hours; the rule only collects consumed flows, expired
 sessions, and token records left after session invalidation.
+The identity-index migration cutoff at
+`.crab/http-server/v1/identity-index-migration.json` and Logout Token replay
+records under `.crab/http-server/v1/logout-replays/` intentionally live outside
+that lifecycle prefix. Keep the cutoff until rollout completes and retain replay
+records at least through their signed token expiry; clean them with an
+operator-controlled, expiry-aware job rather than applying the 24-hour auth
+rule to these coordination records.
 
-Provider-side account revocation does not invalidate an issued Crab session
-before expiry. Back-channel logout remains unimplemented.
+Register the provider's Back-Channel Logout URI as
+`https://git.example.com/auth/backchannel-logout` with
+`backchannel_logout_session_required=false`. The endpoint accepts a form-encoded
+signed Logout Token, rediscovering provider metadata and keys so normal signing
+key rotation needs no restart. It returns `200` after a valid first delivery or
+safe replay and `400 {"error":"invalid_request"}` for malformed, invalid, or
+conflicting tokens. It validates issuer, audience, expiry, issuance time, `jti`,
+the back-channel event, and a non-empty `sub`; it rejects `nonce` and
+`sid`-only tokens. The raw token is never logged or stored.
+
+Valid delivery revokes every durable browser session and derived Git token for
+the exact `(issuer, subject)` across replicas. The hashed identity-session index
+has an eight-hour compatibility window that also scans pre-index sessions; roll
+out all replicas inside that maximum session lifetime. Verify delivery by
+checking that both a browser request and a Git credential fail on their next
+request. Without a delivered Logout Token, arbitrary provider-side revocation
+still does not invalidate an issued Crab session before expiry.
+
+The back-channel endpoint is enabled only for `provider = "oidc"`. GitHub's
+OAuth flow does not issue signed OIDC Logout Tokens, so a GitHub provider-side
+revocation does not immediately terminate a Crab session; use Crab logout or
+wait for the eight-hour session limit.
+
+If GitHub sign-in must retain signed back-channel logout, configure GitHub in
+an OIDC broker and point Crab at the broker with `provider = "oidc"`; the UI and
+membership subjects then remain provider-neutral.
 
 `GET /api/session` returns the current account and CSRF token to the same-origin frontend. Anonymous repository APIs return HTTP 401. No cloud credential reaches the browser.
 
@@ -1411,13 +1505,13 @@ connection destination.
 | Contract | Primary source | Executable evidence |
 | --- | --- | --- |
 | Route composition, Host checks, request correlation, readiness, metrics, and shutdown | `src/server.rs`, `src/metrics.rs` | Server, metrics, authentication, and maintenance tests |
-| OIDC, membership, sessions, tokens, and CSRF | `src/auth.rs` | `src/auth_tests.rs` and `src/auth_tests/git_tokens.rs` |
+| OIDC, membership, sessions, tokens, CSRF, and back-channel logout | `src/auth.rs`, `src/members.rs` | `src/auth_tests.rs`, `src/auth_tests/members.rs`, `src/auth_tests/backchannel_logout.rs`, and `src/auth_tests/git_tokens.rs` |
 | Repository reads and raw paths | `src/api.rs` | `tests/verify_live.py` and frontend navigation tests |
 | HTTP capacity and overload behavior | server admission and public routes | `examples/qualify_http_load.rs`, its self-hosted tests, and retained JSON receipts |
 | Git protocol version 2 fetch | `src/git.rs` | `tests/verify_git_transport.py` and protocol CI |
 | Native receive, changed-path validation, and recovery | `src/receive.rs`, `src/receive/publish.rs`, `crab-git::receive_plan` | `src/receive_tests.rs` and `src/receive_fault_tests.rs` |
 | LFS transfer, range-resume, file-lock, and authoritative receive contracts | `src/lfs.rs`, `src/receive/publish.rs` | `src/lfs_tests.rs`, `src/receive_tests.rs`, `src/auth_tests/git_tokens.rs`, `tests/qualify_lfs_range_resume.sh`, and `tests/qualify_lfs_locking.sh` |
-| Browser Git writes and settings | `src/contents.rs`, `src/branches.rs` | `src/auth_tests/branches.rs` |
+| Browser Git writes and settings | `src/contents.rs`, `src/branches.rs`, `src/members.rs` | `src/auth_tests/branches.rs`, membership API tests, and browser settings tests |
 | Issues, labels, and assignees | `src/issues.rs`, `src/cells/repository.rs`, `src/cells/router.rs`, `src/labels.rs`, `src/assignees.rs` | Scoped authenticated Cell publication and source-loss tests |
 | Pulls, reviews, checks, and merge | `src/pulls/`, `src/statuses.rs`, `src/checks.rs` | `src/pulls_tests.rs` and `src/auth_tests/pulls.rs` |
 | Releases and assets | `src/releases.rs` | `src/auth_tests/releases.rs` |
@@ -1430,7 +1524,7 @@ Current local and CI evidence includes:
 - Kubernetes-scale protocol version 2 discovery, partial clone, deepening, large request batches, path search, history, diff, and deep blame
 - Exact commit, tree, blob, archive, LFS, branch, tag, release, pull, merge, status, and check data compared with independent Git clients
 - Native initial pushes, fast-forward updates, branch and tag lifecycle, atomic rejection, fault injection, response loss, cooperative restart recovery, and container `SIGKILL` during an in-flight push
-- OIDC redirects and signed-token validation, key rotation, membership isolation, token scope, revocation, Origin checks, and CSRF rejection
+- OIDC redirects and signed-token validation, key rotation, membership isolation, token scope, identity revocation, Origin checks, CSRF rejection, and back-channel logout validation
 - Browser light, dark, desktop, narrow-screen, keyboard, conflict, and automated Web Content Accessibility Guidelines (WCAG) A/AA checks
 - Container build, non-root identity, stop signal, health command, storage-aware repository readiness, private metrics scrape, Prometheus-validated baseline alerts, runtime inspection, strict Helm lint, and Kubernetes schema validation
 - Complete-root RustFS cold copy into an isolated prefix, exact key/size comparison, byte hashing of every object, and independent restored Git, issue, and LFS reads
@@ -1477,7 +1571,7 @@ The server is complete only when a real account can perform the workflow and obs
 | Repository browsing | Refs, byte-preserving paths, history, files, blame, downloads, freshness, and empty/error states against real repositories | In progress |
 | Diff and tree interface | Pierre Trees and Diffs, correct modes and binary handling, bounded large-repository behavior, and keyboard navigation | In progress |
 | GitHub-quality design | Themes, responsive layouts, accessible controls, navigation, and loading/error behavior across workflows | In progress |
-| Team identity and authorization | OIDC, sessions, membership, permissions, isolation, revocation, CSRF, and administration | In progress; operator membership replacement exists, while browser administration and provider revocation remain |
+| Team identity and authorization | OIDC, sessions, membership, permissions, isolation, revocation, CSRF, and administration | In progress; browser and CLI membership replacement are audited, and back-channel logout revokes delivered exact-identity sessions |
 | Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; additional crash phases and coexistence qualification remain |
 | Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; activity, moderation, history, and notifications remain |
 | Repository management | CLI create/adopt/list, archive, settings, search, import, and audited administration | In progress; browser creation/import and audit history remain |
@@ -1492,7 +1586,7 @@ The remaining production gaps include:
 - Journal or visibility-receipt reconstruction when verified evidence is missing; missing standard Git `.idx` and `.rev` sidecars are repaired from the verified canonical pack during catalog maintenance
 - Protected-view writer coexistence with shared namespace guarantees
 - Production throughput and provider-level admission qualification
-- Browser membership administration, membership audit history, provider back-channel logout, and immediate provider revocation
+- Membership audit history and immediate arbitrary provider revocation when no Logout Token is delivered
 - Repository creation and adoption exist in the CLI; browser import remains
 - Version-selected complete product-root restore qualification for Git, shared identity state, Cell pins, immutable LTX graphs, and release assets across providers
 - Manual assistive-technology audits and broader workflow coverage

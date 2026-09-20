@@ -292,7 +292,9 @@ export function App() {
             <div className="notice sign-in">
               <h1>Sign in to Crab</h1>
               <p>
-                Use your team's identity provider to access your repositories.
+                {session.data.mode === "github"
+                  ? "Use GitHub to access your repositories."
+                  : "Use your team's identity provider to access your repositories."}
               </p>
               {url.searchParams.has("auth_error") && (
                 <p className="error" role="alert">
@@ -308,7 +310,9 @@ export function App() {
                   )
                 }
               >
-                Continue to sign in
+                {session.data.mode === "github"
+                  ? "Continue with GitHub"
+                  : "Continue to sign in"}
               </Button>
             </div>
           ) : (
@@ -367,6 +371,7 @@ export function App() {
                     theme={resolved}
                     codeThemes={codeThemeChoices[codeTheme].themes}
                     csrf={session.data?.csrf ?? ""}
+                    identity={session.data?.user ?? null}
                     onRepositoryChanged={catalog.retry}
                   />
                 ) : (
@@ -476,6 +481,7 @@ function RepositoryPage({
   theme,
   codeThemes,
   csrf,
+  identity,
   onRepositoryChanged,
 }: {
   repo: Repository;
@@ -483,6 +489,7 @@ function RepositoryPage({
   theme: "light" | "dark";
   codeThemes: CodeThemes;
   csrf: string;
+  identity: Session["user"];
   onRepositoryChanged: () => void;
 }) {
   const view = url.searchParams.get("view") ?? "code";
@@ -755,8 +762,11 @@ function RepositoryPage({
                     section={
                       url.searchParams.get("section") === "branches"
                         ? "branches"
-                        : "general"
+                        : url.searchParams.get("section") === "members"
+                          ? "members"
+                          : "general"
                     }
+                    identity={identity}
                     onDefaultChanged={refs.retry}
                     onRepositoryChanged={onRepositoryChanged}
                   />

@@ -730,7 +730,7 @@ pub(crate) struct Server {
     pub cancellation: CancellationToken,
     pub receives: tokio_util::task::TaskTracker,
     pub auth: Option<Authentication>,
-    catalog: Option<CatalogStore>,
+    pub(crate) catalog: Option<CatalogStore>,
     catalog_healthy: AtomicBool,
     pub(crate) node_healthy: AtomicBool,
     scheduler_status: crate::cells::SchedulerStatus,
@@ -789,6 +789,7 @@ impl Server {
 pub async fn serve(config: Config) -> Result<()> {
     config.validate()?;
     let catalog = CatalogStore::from_config(&config)?;
+    catalog.flush_membership_audit().await?;
     let (document, _) = catalog.load().await?;
     let auth = match config.auth.clone() {
         Some(config) => Some(
@@ -1481,6 +1482,9 @@ async fn refresh_catalog(server: Arc<Server>, mut version: u64) {
                 continue;
             }
         };
+        if let Err(error) = catalog.flush_membership_audit().await {
+            tracing::warn!(error = ?error, "membership audit flush failed");
+        }
         if document.version < version {
             server.catalog_healthy.store(false, Ordering::Release);
             server.metrics.record_catalog_refresh_failure();
@@ -1678,6 +1682,7 @@ async fn shutdown_signal() {
 
 pub(crate) fn router(server: Arc<Server>) -> Router {
     Router::new()
+        .merge(crate::members::routes())
         .merge(assignees::routes(Arc::clone(&server)))
         .merge(branches::routes())
         .merge(checks::routes(Arc::clone(&server)))
@@ -1728,6 +1733,10 @@ pub(crate) fn router(server: Arc<Server>) -> Router {
         .route("/auth/login", get(auth::login))
         .route("/auth/callback", get(auth::callback))
         .route("/auth/logout", post(auth::logout))
+        .route(
+            "/auth/backchannel-logout",
+            post(auth::backchannel_logout).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
+        )
         .route("/livez", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/api/repos", get(catalog))
         .route("/api/repos/{owner}/{name}/archive", get(archive::download))
@@ -1998,12 +2007,35 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
     };
     let protected =
         request.uri().path().starts_with("/api/") && request.uri().path() != "/api/session";
-    let denied = (protected || git_request) && !principal.authenticated();
+    // Membership's handler hides absent and non-admin repositories uniformly.
+    // Only anonymous callers bypass generic login/CSRF responses; signed-in
+    // mutations retain the normal Origin and session-CSRF requirements.
+    let anonymous_membership = matches!(principal, Principal::Anonymous)
+        && matches!(
+            *request.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::PUT
+        )
+        && request
+            .uri()
+            .path()
+            .strip_prefix("/api/repos/")
+            .is_some_and(|path| {
+                let mut segments = path.split('/');
+                matches!(
+                    (segments.next(), segments.next(), segments.next(), segments.next()),
+                    (Some(owner), Some(name), Some("members"), None)
+                        if !owner.is_empty() && !name.is_empty()
+                )
+            });
+    let denied = (protected || git_request) && !principal.authenticated() && !anonymous_membership;
     let unsafe_method = !matches!(
         *request.method(),
         axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
     );
-    let rejected_mutation = !git_request
+    let backchannel_logout = request.uri().path() == "/auth/backchannel-logout";
+    let rejected_mutation = !backchannel_logout
+        && !anonymous_membership
+        && !git_request
         && unsafe_method
         && !matches!(principal, Principal::Git(_))
         && server
@@ -2074,7 +2106,12 @@ async fn archived_mutation_response(
     let mut segments = path.strip_prefix("/api/repos/")?.split('/');
     let owner = segments.next()?;
     let name = segments.next()?;
-    segments.next()?;
+    let action = segments.next()?;
+    // Membership belongs to the catalog, including archived repositories. Its
+    // handler must authorize against that revision before any Cell response.
+    if action == "members" && segments.next().is_none() {
+        return None;
+    }
     if owner.is_empty()
         || name.is_empty()
         || path == format!("/api/repos/{owner}/{name}/settings/archive")

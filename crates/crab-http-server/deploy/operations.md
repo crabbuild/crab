@@ -188,11 +188,42 @@ kubectl --namespace crab exec --stdin deployment/crab-http-server -- \
 Authenticated deployments require the replacement to retain at least one
 administrator. The command makes one conditional catalog update. If another
 operator changed the catalog concurrently, inspect `repository list`, reconcile
-the full intended membership, and retry. Healthy replicas enforce the new
-membership after their next five-second catalog poll and successful
-materialization; already admitted requests retain their prior repository
-snapshot. This operator command does not provide an audit history, so record
-the reviewed input and command outcome in the team's change system.
+the full intended membership, and retry. Settings → Members uses the same
+complete replacement, catalog revision, and browser CSRF protection; a browser
+conflict preserves its draft until an administrator explicitly reloads. Healthy
+replicas enforce the new membership after their next five-second catalog poll
+and successful materialization; already admitted requests retain their prior
+repository snapshot.
+
+Every accepted change from the CLI or browser commits a membership audit event
+with its actor, digests, revision, timestamp, and prior-chain pointer. The
+catalog's single pending outbox flushes the immutable event under
+`.crab/http-server/v1/audit/membership/`; a flush warning is retryable and does
+not make an accepted change unaudited. The catalog reads v2 but writes v3 on its
+first mutation. Treat that as a rollback boundary: do not return this storage
+root to a pre-v3 binary.
+
+## Register and verify back-channel logout
+
+Register `https://git.example.com/auth/backchannel-logout` at the OIDC provider
+with `backchannel_logout_session_required=false`. Crab accepts signed,
+subject-scoped Logout Tokens only; report provider incompatibility rather than
+mapping a `sid`-only token to a user. Provider signing-key rotation is
+rediscovered on delivery. A successful or repeated delivery returns HTTP 200;
+invalid input returns HTTP 400 without revocation.
+
+Deploy the identity-session index to every replica within eight hours, the
+maximum browser-session lifetime. During that one compatibility window identity
+revocation also streams legacy session records; after it expires, only the
+hashed index is used. Test the provider integration with a dedicated account:
+sign in twice, issue a scoped Git token, deliver logout, then verify that both
+browser sessions and the Git credential fail on their next request. Request logs
+retain normal request IDs and outcomes; never collect or paste a raw Logout
+Token into logs, tickets, or commands.
+The identity-index cutoff at `.crab/http-server/v1/identity-index-migration.json`
+and replay records under `.crab/http-server/v1/logout-replays/` are outside the
+24-hour `.crab/http-server/v1/auth/` lifecycle rule. Retain replay records until
+their signed expiry and remove them only with an expiry-aware operator job.
 
 ## Observe requests and capacity
 
@@ -260,7 +291,7 @@ helm --namespace crab rollback crab-http-server previous_revision_here \
 
 Replace `previous_revision_here` with a known-good Helm revision. Don’t roll back the storage root or catalog automatically: a newer process may have committed durable writes before rollback.
 
-After rollback, verify repository listing, fetch, and one dedicated test-repository push. Inspect an uncertain push before repeating a destructive ref update.
+After rollback, verify repository listing, fetch, and one dedicated test-repository push. Inspect an uncertain push before repeating a destructive ref update. A catalog that has received its first v3 membership write cannot roll back to a pre-v3 binary; use a compatible forward fix instead.
 
 ## Rotate secrets
 
@@ -303,6 +334,7 @@ Use this triage map:
 | Readiness returns 503 | Catalog access, provider credentials, invalid catalog, or repository read-index maintenance | Inspect readiness warnings, workload identity events, and maintenance logs |
 | Public requests return 403 | Canonical host mismatch | Compare the ingress host with `config.auth.publicUrl` and the preserved `Host` header |
 | Browser requests return 401 | OIDC session or membership | Verify issuer, clock, shared state key, and stable provider subject |
+| Back-channel logout returns 400 | Provider token or registration | Verify the exact URI, signed subject-scoped token, issuer/audience, `jti`, event claim, and clock; do not log the token |
 | Git push disconnects | Ingress timeout, pod termination, or publication failure | Find the request ID, inspect logs, then compare the remote ref before retrying |
 | Pod is evicted | Scratch or node pressure | Preserve object storage, increase scratch or node capacity, and requalify concurrency |
 | New repository stays absent | Catalog refresh failure | Run `repository list`, inspect refresh warnings, and restart only after storage access works |

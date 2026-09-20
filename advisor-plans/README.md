@@ -19,6 +19,18 @@ validation for every crate before marking it DONE. No dependency on GC plans.
 across all 21 crates. It tracks source fixes, documentation corrections,
 regression evidence, and the remaining qualification work.
 
+## HTTP identity and repository administration
+
+| Plan | Outcome | Priority | Effort | Depends on | Status |
+| --- | --- | --- | --- | --- | --- |
+| [018](018-auditable-membership-and-backchannel-logout.md) | Auditable browser membership administration and OIDC back-channel session revocation | P1 | XL | None | DONE |
+
+Plan 018 is an independent security and administration track. Its catalog/API,
+UI, back-channel logout, and operations-docs surfaces are implemented in the
+reviewable commits recorded in the plan. The catalog v3 write and the eight-hour
+session-index migration are deployment boundaries; read the plan's rollout
+notes before promotion.
+
 ## Agent-guide scope decisions
 
 - Selected by the user: agent guides across all 21 crates.

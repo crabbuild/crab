@@ -18,6 +18,7 @@ mod labels;
 mod lfs;
 mod local_disk;
 mod maintenance;
+mod members;
 mod metrics;
 mod peer;
 mod peer_tls;
@@ -33,8 +34,8 @@ mod storage_root;
 mod transfer_admission;
 
 pub use config::{
-    BranchProtection, CellsConfig, Config, OidcConfig, RepositoryAccess, RepositoryConfig,
-    RepositoryMember, StorageConfig,
+    AuthProvider, BranchProtection, CellsConfig, Config, GitHubConfig, OidcConfig,
+    RepositoryAccess, RepositoryConfig, RepositoryMember, StorageConfig,
 };
 pub use server::{probe_storage, serve};
 pub use state_stream::state_observing_body;

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
 export interface Session {
   authenticated: boolean;
-  mode: "local" | "oidc";
+  mode: "local" | "oidc" | "github";
   user: { issuer: string; subject: string; name: string } | null;
   csrf: string | null;
 }
@@ -21,6 +21,15 @@ export interface Repository {
     required_approvals: number;
     required_checks: string[];
   }>;
+}
+export interface RepositoryMember {
+  subject: string;
+  name: string;
+  access: "read" | "write" | "admin";
+}
+export interface MembershipState {
+  revision: number;
+  members: RepositoryMember[];
 }
 export interface RepositoryLabel {
   id: number;
