@@ -1748,6 +1748,8 @@ DELETED_WORKFLOW_REEXPORT_ADAPTER_FORBIDDEN_PATTERNS = {
     "pub use yaml::",
 }
 PRIVATE_INTERNAL_PACKAGES = {
+    "crab-cell-app",
+    "crab-cell-host",
     "crab-cell-runtime",
     "crab-http-server",
     "crab-ltx",
@@ -1794,6 +1796,11 @@ ALLOWED_SERVER_DEV_FIXTURES = {
 }
 CELL_RUNTIME_SERVER_SOURCE_PATHS = ("crates/crab-http-server/src",)
 CELL_RUNTIME_SERVER_IMPORT_PATTERN = "crab_ltx::"
+CELL_RUNTIME_SERVER_CONSTRUCTOR_PATTERNS = (
+    "CellRuntime::new(",
+    "CellRuntime::new_with_replica_host(",
+    "CellRuntime::new_with_replica_host_requiring_node_lease(",
+)
 RETIRED_STANDALONE_LTX_SOURCE_PATHS = (
     "crates/crab-ltx/src",
     "crates/crab-ltx/examples",
@@ -1848,6 +1855,11 @@ CELL_RUNTIME_COORDINATION_FORBIDDEN_KERNEL_PATTERNS = (
     "Command::new(",
 )
 WORKSPACE_DEPENDENCY_POLICY = {
+    "crab-cell-app": {
+        "normal": {"crab-cell-runtime"},
+        "dev": {"crab-ltx", "crab-storage"},
+    },
+    "crab-cell-host": {"normal": {"crab-cell-app", "crab-cell-runtime"}},
     "crab-cell-runtime": {"normal": {"crab-ltx", "crab-storage"}},
     "crab-ltx": {"normal": {"crab-storage"}},
     "crab-remote": {
@@ -1862,6 +1874,8 @@ WORKSPACE_DEPENDENCY_POLICY = {
     # metadata, write, coordination, LFS, and remote-read behavior.
     "crab-http-server": {
         "normal": {
+            "crab-cell-app",
+            "crab-cell-host",
             "crab-coordination",
             "crab-cell-runtime",
             "crab-git",
@@ -1992,6 +2006,8 @@ WORKSPACE_DEPENDENCY_POLICY = {
     "crab-xet": {},
 }
 WORKSPACE_DEPENDENCY_PATHS = {
+    "crab-cell-app": "crates/crab-cell-app",
+    "crab-cell-host": "crates/crab-cell-host",
     "crab-cell-runtime": "crates/crab-cell-runtime",
     "crab-ltx": "crates/crab-ltx",
     "crab-write": "crates/crab-write",
@@ -2430,11 +2446,22 @@ def check_cell_runtime_server_boundary(root: Path, metadata: dict) -> bool:
             relative = rel(root, candidate)
             text = candidate.read_text(encoding="utf-8")
             allowed_lines = rust_test_only_lines(text)
-            if candidate.name == "tests.rs" or "tests" in candidate.parts:
+            if (
+                candidate.name == "tests.rs"
+                or candidate.name.endswith("_tests.rs")
+                or "tests" in candidate.parts
+            ):
                 allowed_lines.update(range(1, len(text.splitlines()) + 1))
             for number, line in enumerate(text.splitlines(), start=1):
                 if CELL_RUNTIME_SERVER_IMPORT_PATTERN in line and number not in allowed_lines:
                     violations.append(f"{relative}:{number}: {line.strip()}")
+                if (
+                    any(pattern in line for pattern in CELL_RUNTIME_SERVER_CONSTRUCTOR_PATTERNS)
+                    and number not in allowed_lines
+                ):
+                    violations.append(
+                        f"{relative}:{number}: direct CellRuntime construction must use CellNodeBuilder"
+                    )
 
     if not violations:
         print("ok: crab-http-server production Cell ownership stays behind crab-cell-runtime")

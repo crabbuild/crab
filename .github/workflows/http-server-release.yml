@@ -363,6 +363,36 @@ jobs:
             -- verify "$release_dir/cell-runtime-qualification.json" \
             "$SOURCE_SHA" "$IMAGE_DIGEST" "$evidence_dir/cluster-receipt.json"
 
+      - name: Require protected Cell runtime qualification matrix
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ steps.promote.outputs.digest }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          QUALIFICATION_SIGNER: ${{ vars.CRAB_CELL_RUNTIME_QUALIFICATION_SIGNER }}
+        run: |
+          set -euo pipefail
+
+          evidence_dir="${RUNNER_TEMP}/crab-cell-runtime-qualification"
+          protected_dir="$evidence_dir/protected"
+          matrix="$protected_dir/qualification-matrix.json"
+          profile="$protected_dir/scale-v1.json"
+          test -s "$matrix" || {
+            echo "::error::Protected Cell runtime matrix is required at $matrix; fixture receipts cannot qualify a release."
+            exit 1
+          }
+          test -s "$profile" || {
+            echo "::error::The exact tracked scale-v1 qualification profile is required."
+            exit 1
+          }
+          if [[ ! "$QUALIFICATION_SIGNER" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::CRAB_CELL_RUNTIME_QUALIFICATION_SIGNER must be a pinned 32-byte lowercase Ed25519 public key."
+            exit 1
+          fi
+          export CARGO_TARGET_DIR="${RUNNER_TEMP}/crab-cell-runtime-target"
+          cargo run --locked --quiet -p crab-cell-runtime --bin qualification_receipt \
+            -- verify-matrix "$matrix" \
+            "$SOURCE_SHA" "$IMAGE_DIGEST" "$profile" "$QUALIFICATION_SIGNER"
+
       - name: Publish and verify the Helm chart
         id: chart
         shell: bash

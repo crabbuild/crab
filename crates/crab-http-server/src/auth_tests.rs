@@ -348,10 +348,12 @@ impl Harness {
         .await
         .unwrap();
         let cell_dir = tempfile::TempDir::new().unwrap();
+        let application = crate::cells::compiled_application().unwrap();
         crate::cells::initialize_repository_at(
             &cell_layout,
             cell_identity,
             &registry,
+            &application,
             cell_dir.path(),
             32 * 1024 * 1024 * 1024,
             "https://initializer.test:8081".into(),
@@ -396,6 +398,7 @@ impl Harness {
             repositories: BTreeMap::from([(("team".into(), "private".into()), repository)]).into(),
             runtime: Arc::new(RemoteGitRuntime::default()),
             cell_runtime,
+            cell_node: None,
             repository_cells: Some(repository_cells),
             peer_receiver: None,
             follower_store: None,

@@ -4,7 +4,11 @@ on:
   pull_request:
     paths:
       - "crates/crab-cell-runtime/**"
+      - "crates/crab-cell-app/**"
+      - "crates/crab-cell-host/**"
       - "crates/crab-ltx/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "crab/scripts/check-architecture-gates.py"
       - "crates/crab-http-server/tests/qualify_compose_cluster.sh"
       - ".github/workflows/http-server-container.yml"
@@ -14,7 +18,11 @@ on:
     branches: [main]
     paths:
       - "crates/crab-cell-runtime/**"
+      - "crates/crab-cell-app/**"
+      - "crates/crab-cell-host/**"
       - "crates/crab-ltx/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "crab/scripts/check-architecture-gates.py"
       - "crates/crab-http-server/tests/qualify_compose_cluster.sh"
       - ".github/workflows/http-server-container.yml"
@@ -41,6 +49,14 @@ jobs:
         run: python3 crab/scripts/check-architecture-gates.py
       - name: Validate executable design contracts
         run: node crates/crab-cell-runtime/docs/validate.mjs
+      - name: Run production hot-path preflight guards
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
+        run: cargo test -p crab-cell-runtime --test qualification_preflight --locked
+      - name: Verify application and host boundaries
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
+        run: cargo test -p crab-cell-app -p crab-cell-host --locked
       - name: Keep Compose receipt schema gate synchronized
         shell: bash
         run: |
@@ -94,15 +110,27 @@ jobs:
           source_revision=0123456789abcdef0123456789abcdef01234567
           image_digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
           fixture="$root/fixture.json"
+          profile="$root/pr-contract-profile.json"
           jq -cn '{schema: 1, kind: "qualification-matrix-contract-fixture"}' > "$fixture"
+          cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
+            profile "$profile" pr-contract
+          canonical_workload="$root/pr-contract-workload.json"
+          cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
+            workload "$canonical_workload" "$profile" 7
+          cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
+            verify-workload "$canonical_workload" "$profile"
           entries='[]'
           for workload in protocol storage publication warm-path churn fleet failover primitives accounting compatibility; do
             artifact="$root/artifacts/${workload}.json"
             receipt="$root/receipts/${workload}.json"
-            cp "$fixture" "$artifact"
+            if [ "$workload" = primitives ]; then
+              cp "$canonical_workload" "$artifact"
+            else
+              cp "$fixture" "$artifact"
+            fi
             cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
               emit "$receipt" "$source_revision" "$image_digest" "$artifact" \
-              github-actions "$workload" none
+              github-actions "$workload" none "$profile"
             entries="$(jq -c \
               --arg workload "$workload" \
               --arg receipt "receipts/${workload}.json" \
@@ -116,5 +144,6 @@ jobs:
             cd "$root"
             cargo run --quiet --locked --manifest-path "${GITHUB_WORKSPACE}/Cargo.toml" \
               -p crab-cell-runtime --bin qualification_receipt -- \
-              verify-matrix qualification-matrix.json "$source_revision" "$image_digest"
+              verify-matrix qualification-matrix.json "$source_revision" "$image_digest" \
+              pr-contract-profile.json
           )

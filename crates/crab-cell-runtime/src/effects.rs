@@ -92,6 +92,7 @@ pub struct EffectBatch {
     sequence: u64,
     now_ms: i64,
     next_ordinal: u32,
+    operation_bytes: usize,
 }
 
 impl EffectBatch {
@@ -141,6 +142,7 @@ impl EffectBatch {
             sequence,
             now_ms,
             next_ordinal: 0,
+            operation_bytes: 0,
         })
     }
 
@@ -185,7 +187,15 @@ impl EffectBatch {
             )),
         }
         .encode_to_vec();
-        effect_insert(
+        let operation_len = operation.len();
+        let prospective = self
+            .operation_bytes
+            .checked_add(operation_len)
+            .ok_or(Error::Command("effect byte count overflow"))?;
+        if prospective > MAX_EFFECT_BYTES {
+            return Err(Error::Command("command effects exceed limits"));
+        }
+        let id = effect_insert(
             transaction,
             self.source.cell_id(),
             self.incarnation,
@@ -197,7 +207,9 @@ impl EffectBatch {
                 operation,
                 expires_at_ms: intent.expires_at_ms,
             },
-        )
+        )?;
+        self.operation_bytes = prospective;
+        Ok(id)
     }
 
     pub(crate) const fn source_incarnation(&self) -> IncarnationId {
@@ -209,6 +221,9 @@ impl EffectBatch {
     }
 
     fn take_ordinal(&mut self) -> Result<u32> {
+        if self.next_ordinal as usize >= MAX_EFFECTS_PER_COMMAND {
+            return Err(Error::Command("command effects exceed limits"));
+        }
         let ordinal = self.next_ordinal;
         self.next_ordinal = self
             .next_ordinal
@@ -338,18 +353,6 @@ fn effect_insert(
         return Err(Error::Command(
             "effect ordinal was reused for different bytes",
         ));
-    }
-    let (count, bytes): (i64, i64) = transaction.query_row(
-        "SELECT count(*), COALESCE(sum(length(operation)), 0) FROM sys_effects WHERE created_sequence = ?1",
-        [sequence as i64],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    let prospective = usize::try_from(bytes)
-        .ok()
-        .and_then(|bytes| bytes.checked_add(intent.operation.len()))
-        .ok_or(Error::Command("effect byte count overflow"))?;
-    if count < 0 || count as usize >= MAX_EFFECTS_PER_COMMAND || prospective > MAX_EFFECT_BYTES {
-        return Err(Error::Command("command effects exceed limits"));
     }
     transaction.execute(
         "INSERT INTO sys_effects(effect_id, destination, operation, state, attempt, due_at_ms, expires_at_ms, token, lease_until_ms, created_sequence, result) VALUES (?1, ?2, ?3, 0, 0, ?4, ?5, NULL, NULL, ?6, NULL)",

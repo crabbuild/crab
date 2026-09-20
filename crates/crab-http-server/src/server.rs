@@ -16,6 +16,7 @@ use axum::{
     routing::{get, post},
 };
 use bytes::Bytes;
+use crab_cell_host::{CellNode, CellNodeBuilder};
 use crab_cell_runtime::{
     ACTIVE_CELL_FILE_DESCRIPTORS, ACTIVE_CELL_NATIVE_BYTES, ACTIVE_CELL_PAGE_CACHE_BYTES,
     ApplicationIdentityStore, CellRuntime, Digest, NodeDirectory, Owner, PeerRoundTrip, PeerSigner,
@@ -326,21 +327,6 @@ fn transfer_admission(catalog: &CatalogStore) -> TransferAdmission {
             .to_string(),
         GIT_ADMISSION_CAPACITY,
     )
-}
-
-fn start_cell_runtime(
-    session: SessionId,
-    budget: CellRuntimeBudget,
-    local_disk: crab_cell_runtime::DiskBudget,
-    scratch_root: PathBuf,
-) -> Result<CellRuntime> {
-    crate::cells::compiled_registry()?;
-    Ok(CellRuntime::new_with_replica_host_requiring_node_lease(
-        SqlWorkerPool::for_system(budget.max_active_cells)?,
-        budget.node_retained_bytes,
-        session,
-        budget.replica_host(local_disk, scratch_root),
-    )?)
 }
 
 async fn before_shutdown_deadline<T>(
@@ -725,6 +711,7 @@ pub(crate) struct Server {
     pub repositories: RepositorySet,
     pub runtime: Arc<RemoteGitRuntime>,
     pub cell_runtime: CellRuntime,
+    pub(crate) cell_node: Option<Arc<CellNode>>,
     pub(crate) repository_cells: Option<crate::cells::RepositoryCellRouter>,
     pub(crate) peer_receiver: Option<crate::peer::PeerReceiver>,
     pub(crate) follower_store: Option<crab_cell_runtime::FollowerStore>,
@@ -789,7 +776,10 @@ impl Server {
     }
 
     async fn shutdown_runtimes(&self) -> Result<()> {
-        let cells = self.cell_runtime.shutdown().await;
+        let cells = match self.cell_node.as_ref() {
+            Some(node) => node.shutdown().await,
+            None => self.cell_runtime.shutdown().await,
+        };
         self.runtime.shutdown().await;
         cells.map_err(Into::into)
     }
@@ -902,13 +892,18 @@ pub async fn serve(config: Config) -> Result<()> {
     let public_address = listener.local_addr()?;
     let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
     let metrics = crate::metrics::Metrics::new()?;
-    let cell_runtime = start_cell_runtime(
-        session,
-        cell_budget,
-        local_disk.clone(),
-        session_dir.clone(),
-    )?;
-    cell_runtime.install_telemetry(Arc::new(metrics.clone()))?;
+    let cell_node = Arc::new(
+        CellNodeBuilder::new(crate::cells::compiled_application()?)
+            .with_runtime(
+                SqlWorkerPool::for_system(cell_budget.max_active_cells)?,
+                cell_budget.node_retained_bytes,
+            )
+            .with_replica_host(cell_budget.replica_host(local_disk.clone(), session_dir.clone()))
+            .with_session(session)
+            .build()?,
+    );
+    cell_node.install_telemetry(Arc::new(metrics.clone()))?;
+    let cell_runtime = cell_node.runtime();
     let follower_store = crab_cell_runtime::FollowerStore::open(
         config.cells.data_dir.clone(),
         crate::cells::repository_replica_limits(),
@@ -1000,6 +995,7 @@ pub async fn serve(config: Config) -> Result<()> {
         repositories: repositories.into(),
         runtime: Arc::clone(&runtime),
         cell_runtime,
+        cell_node: Some(Arc::clone(&cell_node)),
         repository_cells: Some(repository_cells),
         peer_receiver: Some(peer_receiver),
         follower_store: Some(follower_store.clone()),
@@ -1047,7 +1043,7 @@ pub async fn serve(config: Config) -> Result<()> {
             probe_storage_contract(&catalog, &server.transfer_admission).await?;
             node_publisher.publish_initial().await?;
             let node_lease = node_publisher.lease_guard()?;
-            server.cell_runtime.install_node_lease(node_lease.clone())?;
+            cell_node.install_node_lease(node_lease.clone())?;
             Ok::<_, crate::Error>(node_lease)
         };
         tokio::pin!(startup);
@@ -2506,6 +2502,7 @@ mod tests {
             repositories: RepositorySet::from(BTreeMap::<(String, String), Repository>::new()),
             runtime: Arc::clone(&runtime),
             cell_runtime: start_test_cell_runtime(),
+            cell_node: None,
             repository_cells: None,
             peer_receiver: None,
             follower_store: None,

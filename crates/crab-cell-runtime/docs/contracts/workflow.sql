@@ -20,6 +20,28 @@ CREATE TABLE workflow_events (
     UNIQUE (run_id, event_id)
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE workflow_control (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    event_count INTEGER NOT NULL CHECK (event_count >= 0)
+) STRICT;
+INSERT INTO workflow_control(singleton, event_count) VALUES (1, 0);
+
+CREATE TRIGGER workflow_events_count_insert
+AFTER INSERT ON workflow_events
+BEGIN
+    UPDATE workflow_control
+    SET event_count = event_count + 1
+    WHERE singleton = 1;
+END;
+
+CREATE TRIGGER workflow_events_count_delete
+AFTER DELETE ON workflow_events
+BEGIN
+    UPDATE workflow_control
+    SET event_count = event_count - 1
+    WHERE singleton = 1;
+END;
+
 CREATE TABLE workflow_activities (
     run_id BLOB NOT NULL REFERENCES workflow_runs(run_id),
     activity_id BLOB NOT NULL CHECK (length(activity_id) = 16),

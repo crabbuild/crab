@@ -1,0 +1,1 @@
+{"schema_version":1,"name":"provider-v1","minimum_cells":256,"minimum_operations":1000000,"minimum_duration_secs":60,"maximum_p99_latency_ms":1000}

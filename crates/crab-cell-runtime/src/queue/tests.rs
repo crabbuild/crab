@@ -167,6 +167,48 @@ fn dead_payload_is_retained_until_its_effect_is_terminal() {
 }
 
 #[test]
+fn queue_state_counters_follow_insert_update_delete_and_report_drift() {
+    let mut connection = connection();
+    let transaction = connection.transaction().unwrap();
+    for id in [1_u8, 2] {
+        transaction
+            .execute(
+                "INSERT INTO queue_messages(message_id, payload, state, attempt, due_at_ms, expires_at_ms, token, lease_until_ms, result_code) VALUES (?1, X'01', 0, 0, 0, 100, NULL, NULL, NULL)",
+                [vec![id; 16]],
+            )
+            .unwrap();
+    }
+    assert_eq!(queue_info(&transaction).unwrap().ready, 2);
+    transaction
+        .execute(
+            "UPDATE queue_messages SET state = 1, token = zeroblob(16), lease_until_ms = 10 WHERE message_id = ?1",
+            [vec![1_u8; 16]],
+        )
+        .unwrap();
+    transaction
+        .execute(
+            "UPDATE queue_messages SET state = 2, token = NULL, lease_until_ms = NULL WHERE message_id = ?1",
+            [vec![1_u8; 16]],
+        )
+        .unwrap();
+    transaction
+        .execute(
+            "DELETE FROM queue_messages WHERE message_id = ?1",
+            [vec![2_u8; 16]],
+        )
+        .unwrap();
+    verify_queue_counts(&transaction).unwrap();
+    assert_eq!(queue_info(&transaction).unwrap().acked, 1);
+    transaction
+        .execute(
+            "UPDATE queue_control SET ready_count = ready_count + 1 WHERE singleton = 1",
+            [],
+        )
+        .unwrap();
+    assert!(verify_queue_counts(&transaction).is_err());
+}
+
+#[test]
 fn repeated_ready_expiry_does_not_duplicate_dead_letter() {
     let mut connection = connection();
     let transaction = connection.transaction().unwrap();

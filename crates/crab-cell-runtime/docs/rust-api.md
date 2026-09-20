@@ -136,7 +136,7 @@ Decoding rejects trailing bytes, invalid tags, noncanonical floating-point value
 | `sequence()` | Allocate stable transition-local identities |
 | `now_ms()` | Use the runtime-sampled logical timestamp |
 | `sql()` | Execute an authorized bounded SQL batch |
-| `effect_batch()` | Create typed cross-Cell intentions |
+| `emit_effect(&EffectCommandIntent)` | Append one typed cross-Cell intention to the command ledger |
 
 `QueryContext` exposes the Cell ID, commit sequence, logical timestamp, and bounded read-only SQL.
 

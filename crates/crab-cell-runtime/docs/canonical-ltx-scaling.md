@@ -1256,10 +1256,10 @@ have pure resource, eviction, placement, pressure, and movement-budget
 contracts, with the runtime/SQL/hydration/primitive-job ledger, stale-session
 restart inventory, actor-owned movement seam, and bounded transport-codec
 admission wired; complete advertised/metric parity, cold-placement execution,
-and multi-process qualification remain open. The version-3 receipt
-type is versioned and size-bounded, with signing, artifact binding,
-fault/artifact/ownership evidence, runner emission, and exact source/image
-release binding implemented.
+    and multi-process qualification remain open. The version-4 receipt matrix
+    is versioned and size-bounded, with signing, profile/threshold binding,
+    artifact binding, fault/artifact/ownership evidence, runner emission, and
+    exact source/image release binding implemented.
 
 ## Verify every slice
 

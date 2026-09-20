@@ -489,3 +489,48 @@ fn summary_covers_all_installed_primitive_deadline_classes() {
         .unwrap();
     assert_eq!(scheduler_next_due_ms(&transaction, 10).unwrap(), Some(60));
 }
+
+#[test]
+fn summary_ignores_ready_queue_available_time() {
+    let mut connection = connection();
+    let transaction = connection.transaction().unwrap();
+    install_queue_schema(&transaction).unwrap();
+    transaction
+        .execute(
+            "INSERT INTO queue_messages VALUES (X'01010101010101010101010101010101', X'04', 0, 0, 10, 100, NULL, NULL, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+
+    assert_eq!(scheduler_next_due_ms(&transaction, 10).unwrap(), Some(100));
+}
+
+#[test]
+fn summary_wakes_immediately_for_exhausted_ready_queue_work() {
+    let mut connection = connection();
+    let transaction = connection.transaction().unwrap();
+    install_queue_schema(&transaction).unwrap();
+    transaction
+        .execute(
+            "INSERT INTO queue_messages VALUES (X'02020202020202020202020202020202', X'04', 0, 20, 100, 1000, NULL, NULL, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+
+    assert_eq!(scheduler_next_due_ms(&transaction, 10).unwrap(), Some(10));
+}
+
+#[test]
+fn summary_uses_queue_lease_deadline_not_ready_available_time() {
+    let mut connection = connection();
+    let transaction = connection.transaction().unwrap();
+    install_queue_schema(&transaction).unwrap();
+    transaction
+        .execute(
+            "INSERT INTO queue_messages VALUES (X'03030303030303030303030303030303', X'04', 1, 1, 10, 1000, zeroblob(16), 80, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+
+    assert_eq!(scheduler_next_due_ms(&transaction, 10).unwrap(), Some(80));
+}

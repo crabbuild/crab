@@ -14,11 +14,11 @@ use crate::{
     ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome, ActivitySupervisor,
     ActivitySupervisorError, ActivitySupport, ApplicationId, BlockingActivityHandler,
     BlockingActivityReservation, CatalogRole, CellClient, CellId, CellTarget, Committed, Digest,
-    EffectModule, EffectPeerClient, EffectRunOutcome, EffectSupervisor, EffectSupervisorError,
-    Error, HandlerOutcome, InvocationError, MaintenanceModule, MaintenanceTickCommand,
-    MaintenanceTickOutcome, MaintenanceTickRequest, MutationIdentity, NamespaceId, Result,
-    SqlBatch, SqlResultSet, TenantId, WireValue, WorkflowActivities, WorkflowActivityModule,
-    WorkflowDefinition,
+    EffectBatch, EffectCommandIntent, EffectModule, EffectPeerClient, EffectRunOutcome,
+    EffectSupervisor, EffectSupervisorError, Error, HandlerOutcome, InvocationError,
+    MaintenanceModule, MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest,
+    MutationIdentity, NamespaceId, Result, SqlBatch, SqlResultSet, TenantId, WireValue,
+    WorkflowActivities, WorkflowActivityModule, WorkflowDefinition,
     codec::{decode_wire, encode_wire},
     sql_batch, sql_query_batch,
 };
@@ -165,6 +165,7 @@ pub struct CommandContext<'borrow, 'connection> {
     issued_at_ms: i64,
     input_limit: u32,
     output_limit: u32,
+    effects: Option<EffectBatch>,
 }
 
 impl CommandContext<'_, '_> {
@@ -198,9 +199,38 @@ impl CommandContext<'_, '_> {
         self.issued_at_ms
     }
 
-    /// Creates the one command-scoped effect identity allocator.
-    pub fn effect_batch(&self) -> Result<crate::EffectBatch> {
-        crate::EffectBatch::new(self.transaction, &self.target, self.sequence, self.now_ms)
+    /// Emits one durable cross-Cell command with this command's allocator.
+    pub fn emit_effect(&mut self, intent: &EffectCommandIntent) -> Result<[u8; 32]> {
+        self.ensure_effects()?;
+        let transaction = self.transaction;
+        self.effects
+            .as_mut()
+            .ok_or(Error::Command("effect ledger was not initialized"))?
+            .insert_command(transaction, intent)
+    }
+
+    pub(crate) fn primitive_effects(&mut self) -> Result<(&Transaction<'_>, &mut EffectBatch)> {
+        self.ensure_effects()?;
+        let transaction = self.transaction;
+        let effects = self
+            .effects
+            .as_mut()
+            .ok_or(Error::Command("effect ledger was not initialized"))?;
+        Ok((transaction, effects))
+    }
+
+    fn ensure_effects(&mut self) -> Result<&mut EffectBatch> {
+        if self.effects.is_none() {
+            self.effects = Some(EffectBatch::new(
+                self.transaction,
+                &self.target,
+                self.sequence,
+                self.now_ms,
+            )?);
+        }
+        self.effects
+            .as_mut()
+            .ok_or(Error::Command("effect ledger was not initialized"))
     }
 
     /// Executes bounded application SQL under the runtime authorizer.
@@ -877,6 +907,7 @@ struct PrimitiveBinding {
 }
 
 /// Immutable compiled registry shared by runtime and release inspection.
+#[derive(Clone)]
 pub struct Registry {
     release_bytes: Vec<u8>,
     release_digest: Digest,
@@ -1293,7 +1324,8 @@ impl Registry {
         None
     }
 
-    pub(crate) fn namespace_contract(
+    /// Returns the compiled owner and descriptor for one namespace.
+    pub fn namespace_contract(
         &self,
         namespace: NamespaceId,
     ) -> Option<(&'static str, NamespaceDescriptor)> {
@@ -1440,12 +1472,13 @@ impl Registry {
             .ok_or(Error::Registry("command binding is unavailable"))?;
         let mut context = CommandContext {
             transaction,
-            target: invocation.target,
+            target: invocation.target.clone(),
             sequence: invocation.sequence,
             now_ms: invocation.now_ms,
             issued_at_ms,
             input_limit: operation.input_limit,
             output_limit: operation.output_limit,
+            effects: None,
         };
         let outcome = handler(&mut context, invocation.input)?;
         let output = match &outcome {

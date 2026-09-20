@@ -2186,6 +2186,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "crab-cell-app"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "crab-cell-runtime",
+ "crab-ltx",
+ "crab-storage",
+ "object_store",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "crab-cell-host"
+version = "0.1.0"
+dependencies = [
+ "crab-cell-app",
+ "crab-cell-runtime",
+ "tokio",
+]
+
+[[package]]
 name = "crab-cell-runtime"
 version = "0.1.0"
 dependencies = [
@@ -2293,6 +2315,8 @@ dependencies = [
  "blake3",
  "bytes",
  "clap",
+ "crab-cell-app",
+ "crab-cell-host",
  "crab-cell-runtime",
  "crab-coordination",
  "crab-git",

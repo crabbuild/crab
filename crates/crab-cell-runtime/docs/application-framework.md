@@ -9,17 +9,18 @@ distributed relational database.
 
 | Document intent | Value |
 | --- | --- |
-| Content type | Target design |
+| Content type | Target design with implemented boundary slice |
 | Audience | Application framework, runtime, and product contributors |
 | Goal | Define the application-owner programming model and the platform API needed to host it |
-| Status | Proposed; API names and generated artifacts in this document are not implemented |
+| Status | Boundary slice implemented: `crab-cell-app` supplies deterministic author compilation and a handwritten all-primitive reference application; `crab-cell-host` supplies the provider-neutral lifecycle shell and `crab-http-server` uses it for serving and offline maintenance. Code generation, full operator ownership, and protected qualification remain open |
 
 [Back to the Cell runtime index](README.md)
 
-The [complete Commerce example](application-framework-example.md) shows the
-proposed framework using custom SQL Cells, KV, Blob, Queue, Cron, Workflow,
-effects, activities, generated clients, node composition, HTTP adaptation, and
-owner-loss qualification in one application.
+The [complete Commerce example](application-framework-example.md) remains the
+target qualification shape for custom SQL Cells, KV, Blob, Queue, Cron,
+Workflow, effects, activities, generated clients, node composition, HTTP
+adaptation, and owner-loss qualification. It is not a production evidence
+claim until the full-primitive workload and protected provider gates pass.
 
 ## Design for application owners
 
@@ -222,8 +223,7 @@ impl Command for PlaceOrder {
         }
 
         insert_order(context, &input)?;
-        let mut effects = context.effect_batch()?;
-        effects.command(Inventory::reserve(input.inventory_request())?)?;
+        context.emit_effect(&Inventory::reserve_effect(input.inventory_request())?)?;
 
         Ok(CommandResult::Success(PlaceOrderOutcome::Placed))
     }

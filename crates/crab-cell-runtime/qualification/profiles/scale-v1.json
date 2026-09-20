@@ -1,0 +1,1 @@
+{"schema_version":1,"name":"scale-v1","minimum_cells":10000,"minimum_operations":10000000,"minimum_duration_secs":3600,"maximum_p99_latency_ms":500}

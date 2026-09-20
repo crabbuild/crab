@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, HashMap, btree_map::Entry};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -17,6 +19,40 @@ const MAX_RETIRED_LANES: usize = 1_024;
 const FOLLOWER_QUARANTINE: &str = "followers-quarantine";
 const INDEX_BYTES_PER_RECORD: u64 = 128;
 const MAX_FOLLOWER_INDEX_BYTES: u64 = 256 << 20;
+
+#[cfg(test)]
+type ScanCounter = Arc<AtomicUsize>;
+#[cfg(not(test))]
+#[derive(Clone, Copy)]
+struct ScanCounter;
+
+#[cfg(test)]
+fn new_scan_counter() -> ScanCounter {
+    Arc::new(AtomicUsize::new(0))
+}
+
+#[cfg(not(test))]
+const fn new_scan_counter() -> ScanCounter {
+    ScanCounter
+}
+
+#[cfg(test)]
+fn clone_scan_counter(counter: &ScanCounter) -> ScanCounter {
+    Arc::clone(counter)
+}
+
+#[cfg(not(test))]
+const fn clone_scan_counter(counter: &ScanCounter) -> ScanCounter {
+    *counter
+}
+
+#[cfg(test)]
+fn count_scan(counter: &ScanCounter) {
+    counter.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(not(test))]
+const fn count_scan(_: &ScanCounter) {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Lane {
@@ -84,6 +120,7 @@ pub struct FollowerStore {
     retained: Arc<Mutex<crab_ltx::DiskReservation>>,
     index_used: Arc<Mutex<u64>>,
     quarantined_entries: usize,
+    scan_counter: ScanCounter,
 }
 
 impl FollowerStore {
@@ -113,7 +150,13 @@ impl FollowerStore {
             retained: Arc::new(Mutex::new(retained)),
             index_used: Arc::new(Mutex::new(0)),
             quarantined_entries,
+            scan_counter: new_scan_counter(),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scan_count(&self) -> usize {
+        self.scan_counter.load(Ordering::Relaxed)
     }
 
     #[must_use]
@@ -159,6 +202,7 @@ impl FollowerStore {
         let limits = self.limits;
         let retained = Arc::clone(&self.retained);
         let index_used = Arc::clone(&self.index_used);
+        let scan_counter = clone_scan_counter(&self.scan_counter);
         let growth = encoded_bytes
             .and_then(|bytes| bytes.checked_add((frames.len() * RECORD_HEADER_BYTES) as u64))
             .ok_or(Error::Node("follower append byte count overflow"))?;
@@ -178,6 +222,7 @@ impl FollowerStore {
                 limits,
                 &index_used,
                 &mut state,
+                &scan_counter,
             );
             let resize =
                 follower_bytes(&root).and_then(|bytes| retained.resize(bytes).map_err(Error::from));
@@ -198,6 +243,7 @@ impl FollowerStore {
         let limits = self.limits;
         let retained = Arc::clone(&self.retained);
         let index_used = Arc::clone(&self.index_used);
+        let scan_counter = clone_scan_counter(&self.scan_counter);
         tokio::task::spawn_blocking(move || {
             let retained = retained
                 .lock()
@@ -209,7 +255,14 @@ impl FollowerStore {
             if !directory.join("sealed").exists() && !directory.join("retired").exists() {
                 retained.try_grow(8)?;
             }
-            let result = seal_sync(&root, lane, limits, &index_used, &mut state);
+            let result = seal_sync(
+                &root,
+                lane,
+                limits,
+                &index_used,
+                &mut state,
+                &scan_counter,
+            );
             let resize =
                 follower_bytes(&root).and_then(|bytes| retained.resize(bytes).map_err(Error::from));
             if result.is_err() {
@@ -233,6 +286,7 @@ impl FollowerStore {
         let root = self.root.clone();
         let limits = self.limits;
         let retained = Arc::clone(&self.retained);
+        let scan_counter = clone_scan_counter(&self.scan_counter);
         tokio::task::spawn_blocking(move || {
             let retained = retained
                 .lock()
@@ -243,7 +297,7 @@ impl FollowerStore {
             if !lane_directory(&root, lane).join("retired").exists() {
                 retained.try_grow(8)?;
             }
-            let result = retire_sync(&root, lane, covered_through, limits);
+            let result = retire_sync(&root, lane, covered_through, limits, &scan_counter);
             let resize =
                 follower_bytes(&root).and_then(|bytes| retained.resize(bytes).map_err(Error::from));
             *state = None;
@@ -265,6 +319,7 @@ impl FollowerStore {
         let root = self.root.clone();
         let limits = self.limits;
         let index_used = Arc::clone(&self.index_used);
+        let scan_counter = clone_scan_counter(&self.scan_counter);
         tokio::task::spawn_blocking(move || {
             let mut state = lock
                 .lock()
@@ -278,6 +333,7 @@ impl FollowerStore {
                 &mut state,
                 usize::MAX,
                 usize::MAX,
+                &scan_counter,
             )
             .map(|page| page.frames);
             if result.is_err() {
@@ -304,6 +360,7 @@ impl FollowerStore {
         let root = self.root.clone();
         let limits = self.limits;
         let index_used = Arc::clone(&self.index_used);
+        let scan_counter = clone_scan_counter(&self.scan_counter);
         tokio::task::spawn_blocking(move || {
             let mut state = lock
                 .lock()
@@ -317,6 +374,7 @@ impl FollowerStore {
                 &mut state,
                 MAX_TAIL_PAGE_BYTES,
                 MAX_TAIL_PAGE_FRAMES,
+                &scan_counter,
             );
             if result.is_err() {
                 *state = None;
@@ -714,6 +772,7 @@ fn append_sync(
     limits: crab_ltx::Limits,
     index_used: &Arc<Mutex<u64>>,
     state: &mut Option<LaneMemory>,
+    scan_counter: &ScanCounter,
 ) -> Result<FollowerReceipt> {
     validate_lane(lane)?;
     let directory = lane_directory(root, lane);
@@ -726,7 +785,7 @@ fn append_sync(
         return Err(Error::Node("follower lane is sealed"));
     }
     if state.is_none() {
-        let retained = scan_lane(&chunks, lane, limits)?;
+        let retained = scan_lane_counted(&chunks, lane, limits, scan_counter)?;
         let open_records = scan_chunk(&chunks.join("open.log"), lane, limits, true)?;
         *state = Some(lane_memory(retained, &open_records, index_used)?);
     }
@@ -735,7 +794,7 @@ fn append_sync(
         .as_mut()
         .ok_or(Error::Node("follower lane state did not initialize"))?;
     if pruned_through.is_some() {
-        let records = scan_lane(&chunks, lane, limits)?;
+        let records = scan_lane_counted(&chunks, lane, limits, scan_counter)?;
         let index_bytes = u64::try_from(records.len())
             .map_err(|_| Error::Capacity("follower lane index"))?
             .checked_mul(INDEX_BYTES_PER_RECORD)
@@ -867,6 +926,7 @@ fn seal_sync(
     limits: crab_ltx::Limits,
     index_used: &Arc<Mutex<u64>>,
     state: &mut Option<LaneMemory>,
+    scan_counter: &ScanCounter,
 ) -> Result<FollowerReceipt> {
     validate_lane(lane)?;
     let directory = lane_directory(root, lane);
@@ -880,7 +940,7 @@ fn seal_sync(
         });
     }
     if state.is_none() {
-        let retained = scan_lane(&chunks, lane, limits)?;
+        let retained = scan_lane_counted(&chunks, lane, limits, scan_counter)?;
         *state = Some(lane_memory(retained, &[], index_used)?);
     }
     let state = state
@@ -914,12 +974,13 @@ fn retire_sync(
     lane: Lane,
     covered_through: u64,
     limits: crab_ltx::Limits,
+    scan_counter: &ScanCounter,
 ) -> Result<FollowerReceipt> {
     validate_lane(lane)?;
     ensure_lane_directories(root, lane)?;
     let directory = lane_directory(root, lane);
     let chunks = directory.join("chunks");
-    let retained = scan_lane(&chunks, lane, limits)?;
+    let retained = scan_lane_counted(&chunks, lane, limits, scan_counter)?;
     let durable_through = retained.keys().next_back().copied().unwrap_or(0);
     if durable_through > covered_through {
         return Err(Error::Node("follower lane has uncovered records"));
@@ -961,6 +1022,7 @@ fn read_tail_sync(
     state: &mut Option<LaneMemory>,
     max_bytes: usize,
     max_frames: usize,
+    scan_counter: &ScanCounter,
 ) -> Result<FollowerTailPage> {
     validate_lane(lane)?;
     let directory = lane_directory(root, lane);
@@ -969,7 +1031,8 @@ fn read_tail_sync(
         return Err(Error::Node("follower lane is not sealed"));
     }
     if state.is_none() {
-        let retained = scan_lane(&directory.join("chunks"), lane, limits)?;
+        let retained =
+            scan_lane_counted(&directory.join("chunks"), lane, limits, scan_counter)?;
         let open_records = scan_chunk(&directory.join("chunks/open.log"), lane, limits, true)?;
         let scan_only = retained.clone();
         match lane_memory(retained, &open_records, index_used) {
@@ -1249,6 +1312,16 @@ fn scan_lane(
         return Err(Error::Node("stored follower lane has a sequence gap"));
     }
     Ok(records)
+}
+
+fn scan_lane_counted(
+    chunks: &Path,
+    lane: Lane,
+    limits: crab_ltx::Limits,
+    counter: &ScanCounter,
+) -> Result<BTreeMap<u64, StoredRecord>> {
+    count_scan(counter);
+    scan_lane(chunks, lane, limits)
 }
 
 fn read_watermark(path: &Path, invalid: &'static str) -> Result<u64> {

@@ -7,7 +7,8 @@ use std::{
 
 use crab_cell_runtime::{
     Digest, QualificationMatrixManifest, QualificationMetric, QualificationOwnership,
-    QualificationReceipt, QualificationRunner, validate_cluster_receipt,
+    QualificationProfile, QualificationReceipt, QualificationRunArtifact, QualificationRunner,
+    QualificationWorkload, validate_cluster_receipt,
 };
 use ed25519_dalek::SigningKey;
 use rand::Rng;
@@ -33,16 +34,29 @@ fn run() -> Result<(), String> {
             let provider = args.next().unwrap_or_else(|| "github-actions".into());
             let workload = args.next().unwrap_or_else(|| "cell-runtime-release".into());
             let fault = args.next().unwrap_or_else(|| "none".into());
+            let profile = match args.next() {
+                Some(path) => QualificationProfile::decode(
+                    &fs::read(path).map_err(|error| format!("read profile: {error}"))?,
+                )
+                .map_err(|error| error.to_string())?,
+                None => QualificationProfile::pr_contract(),
+            };
             if args.next().is_some() {
                 return Err(usage());
             }
             let artifact =
                 fs::read(&artifact).map_err(|error| format!("read artifact: {error}"))?;
+            let workload_seed = if workload == "primitives" {
+                primitive_workload_seed(&artifact, &profile)?
+            } else {
+                0
+            };
             let now = unix_millis()?;
             let mut key_bytes = [0_u8; 32];
             rand::rng().fill(&mut key_bytes);
             let receipt = QualificationRunner::new(SigningKey::from_bytes(&key_bytes))
-                .emit_with_evidence(
+                .emit_with_profile_and_evidence(
+                    &profile,
                     source,
                     image,
                     provider,
@@ -62,7 +76,7 @@ fn run() -> Result<(), String> {
                         "rustc".into(),
                         "release".into(),
                         "published-image".into(),
-                        0,
+                        workload_seed,
                         0,
                         0,
                         false,
@@ -78,11 +92,92 @@ fn run() -> Result<(), String> {
             fs::write(output, encoded).map_err(|error| format!("write receipt: {error}"))?;
             Ok(())
         }
+        Some("profile") => {
+            let output = required(&mut args, "output")?;
+            let tier = args.next().unwrap_or_else(|| "pr-contract".into());
+            if args.next().is_some() {
+                return Err(usage());
+            }
+            let profile = match tier.as_str() {
+                "pr-contract" => QualificationProfile::pr_contract(),
+                "local-provider" => QualificationProfile::local_provider(),
+                "scale" => QualificationProfile::scale(),
+                "fault" => QualificationProfile::fault(),
+                "provider" => QualificationProfile::provider(),
+                "compatibility" => QualificationProfile::compatibility(),
+                _ => {
+                    return Err(
+                        "profile must be pr-contract, local-provider, scale, fault, provider, or compatibility"
+                            .into(),
+                    );
+                }
+            };
+            fs::write(output, profile.encode().map_err(|error| error.to_string())?)
+                .map_err(|error| format!("write profile: {error}"))?;
+            Ok(())
+        }
+        Some("workload") => {
+            let output = required(&mut args, "output")?;
+            let profile_path = required(&mut args, "profile")?;
+            let seed = parse_u64(&required(&mut args, "seed")?, "seed")?;
+            let profile = QualificationProfile::decode(
+                &fs::read(profile_path).map_err(|error| format!("read profile: {error}"))?,
+            )
+            .map_err(|error| error.to_string())?;
+            let workload = match (args.next(), args.next(), args.next()) {
+                (None, None, None) => QualificationWorkload::generate(&profile, seed),
+                (Some(cells), Some(operations), Some(duration_secs)) => {
+                    QualificationWorkload::generate_with_size(
+                        &profile,
+                        seed,
+                        parse_u64(&cells, "cells")?,
+                        parse_u64(&operations, "operations")?,
+                        parse_u64(&duration_secs, "duration_secs")?,
+                    )
+                }
+                _ => return Err(usage()),
+            }
+            .map_err(|error| error.to_string())?;
+            fs::write(
+                output,
+                workload.encode().map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| format!("write workload: {error}"))?;
+            Ok(())
+        }
+        Some("verify-workload") => {
+            let workload_path = required(&mut args, "workload")?;
+            let profile_path = required(&mut args, "profile")?;
+            if args.next().is_some() {
+                return Err(usage());
+            }
+            let workload = QualificationWorkload::decode(
+                &fs::read(workload_path).map_err(|error| format!("read workload: {error}"))?,
+            )
+            .map_err(|error| error.to_string())?;
+            let profile = QualificationProfile::decode(
+                &fs::read(profile_path).map_err(|error| format!("read profile: {error}"))?,
+            )
+            .map_err(|error| error.to_string())?;
+            workload
+                .verify_for_profile(&profile)
+                .map_err(|error| error.to_string())
+        }
         Some("verify") => {
             let receipt_path = required(&mut args, "receipt")?;
             let source = required(&mut args, "source revision")?;
             let image = parse_digest(&required(&mut args, "image digest")?)?;
             let artifact = required(&mut args, "artifact")?;
+            let profile = match args.next() {
+                Some(path) => Some(
+                    QualificationProfile::decode(
+                        &fs::read(path).map_err(|error| format!("read profile: {error}"))?,
+                    )
+                    .map_err(|error| error.to_string())?,
+                ),
+                None => None,
+            };
+            let trusted_signer = args.next().map(|value| parse_signer(&value)).transpose()?;
             if args.next().is_some() {
                 return Err(usage());
             }
@@ -94,14 +189,49 @@ fn run() -> Result<(), String> {
                 return Err("qualification receipt is not passed".into());
             }
             let artifact = fs::read(artifact).map_err(|error| format!("read artifact: {error}"))?;
-            receipt
-                .verify_for(&source, image, &artifact)
-                .map_err(|error| error.to_string())
+            match profile {
+                Some(profile) => match trusted_signer {
+                    Some(trusted_signer) => receipt
+                        .verify_for_profile_with_signer(
+                            &source,
+                            image,
+                            &profile,
+                            &[&artifact],
+                            trusted_signer,
+                        )
+                        .map_err(|error| error.to_string()),
+                    None => receipt
+                        .verify_for_profile(&source, image, &profile, &[&artifact])
+                        .map_err(|error| error.to_string()),
+                },
+                None => match trusted_signer {
+                    Some(trusted_signer) => receipt
+                        .verify_for_trusted_signer(&source, image, &artifact, trusted_signer)
+                        .map_err(|error| error.to_string()),
+                    None => receipt
+                        .verify_for(&source, image, &artifact)
+                        .map_err(|error| error.to_string()),
+                },
+            }
         }
         Some("verify-matrix") => verify_matrix(&mut args),
         Some("validate-cluster") => validate_cluster(&mut args),
         _ => Err(usage()),
     }
+}
+
+fn primitive_workload_seed(artifact: &[u8], profile: &QualificationProfile) -> Result<u64, String> {
+    if let Ok(workload) = QualificationWorkload::decode(artifact) {
+        workload
+            .verify_for_profile(profile)
+            .map_err(|error| format!("verify primitive workload: {error}"))?;
+        return Ok(workload.seed());
+    }
+    let run = QualificationRunArtifact::decode(artifact)
+        .map_err(|error| format!("decode primitive workload or run artifact: {error}"))?;
+    run.verify_for_profile(profile)
+        .map_err(|error| format!("verify primitive run artifact: {error}"))?;
+    Ok(run.workload().seed())
 }
 
 fn validate_cluster(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
@@ -122,6 +252,16 @@ fn verify_matrix(args: &mut impl Iterator<Item = String>) -> Result<(), String> 
     let manifest_path = PathBuf::from(required(args, "matrix manifest")?);
     let source = required(args, "source revision")?;
     let image = parse_digest(&required(args, "image digest")?)?;
+    let profile = match args.next() {
+        Some(path) => Some(
+            QualificationProfile::decode(
+                &fs::read(path).map_err(|error| format!("read profile: {error}"))?,
+            )
+            .map_err(|error| error.to_string())?,
+        ),
+        None => None,
+    };
+    let trusted_signer = args.next().map(|value| parse_signer(&value)).transpose()?;
     if args.next().is_some() {
         return Err(usage());
     }
@@ -166,8 +306,27 @@ fn verify_matrix(args: &mut impl Iterator<Item = String>) -> Result<(), String> 
             )
         })
         .collect::<Vec<_>>();
-    QualificationReceipt::verify_matrix(&source, image, &evidence)
-        .map_err(|error| error.to_string())?;
+    match (profile, trusted_signer) {
+        (Some(profile), Some(trusted_signer)) => {
+            QualificationReceipt::verify_matrix_for_profile_with_signer(
+                &source,
+                image,
+                &profile,
+                &evidence,
+                trusted_signer,
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        (Some(profile), None) => {
+            QualificationReceipt::verify_matrix_for_profile(&source, image, &profile, &evidence)
+                .map_err(|error| error.to_string())?;
+        }
+        (None, Some(_)) => return Err("a trusted signer requires a profile".into()),
+        (None, None) => {
+            QualificationReceipt::verify_matrix(&source, image, &evidence)
+                .map_err(|error| error.to_string())?;
+        }
+    }
     println!("qualification matrix verified");
     Ok(())
 }
@@ -215,6 +374,26 @@ fn parse_digest(value: &str) -> Result<Digest, String> {
     Ok(Digest::from_bytes(bytes))
 }
 
+fn parse_u64(value: &str, name: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .map_err(|_| format!("{name} must be an unsigned integer"))
+}
+
+fn parse_signer(value: &str) -> Result<[u8; 32], String> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("trusted signer must be 64 lowercase hexadecimal characters".into());
+    }
+    let mut bytes = [0_u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        bytes[index] = (hex(pair[0])? << 4) | hex(pair[1])?;
+    }
+    if bytes.iter().all(|byte| *byte == 0) {
+        return Err("trusted signer must not be zero".into());
+    }
+    Ok(bytes)
+}
+
 fn hex(value: u8) -> Result<u8, String> {
     match value {
         b'0'..=b'9' => Ok(value - b'0'),
@@ -233,7 +412,7 @@ fn unix_millis() -> Result<u64, String> {
 }
 
 fn usage() -> String {
-    "usage: qualification_receipt emit <output> <source> <image-digest> <artifact> [provider workload fault]\n       qualification_receipt verify <receipt> <source> <image-digest> <artifact>\n       qualification_receipt verify-matrix <manifest> <source> <image-digest>\n       qualification_receipt validate-cluster <receipt> <source> <image-digest> [release|source-only]".into()
+    "usage: qualification_receipt profile <output> [pr-contract|local-provider|scale|fault|provider|compatibility]\n       qualification_receipt workload <output> <profile.json> <seed> [cells operations duration_secs]\n       qualification_receipt verify-workload <workload.json> <profile.json>\n       qualification_receipt emit <output> <source> <image-digest> <artifact> [provider workload fault profile.json]\n       qualification_receipt verify <receipt> <source> <image-digest> <artifact> [profile.json [trusted-signer-hex]]\n       qualification_receipt verify-matrix <manifest> <source> <image-digest> [profile.json [trusted-signer-hex]]\n       qualification_receipt validate-cluster <receipt> <source> <image-digest> [release|source-only]".into()
 }
 
 #[cfg(test)]

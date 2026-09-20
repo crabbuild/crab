@@ -1130,8 +1130,11 @@ fn cancel_outstanding(transaction: &Transaction<'_>, run_id: [u8; 16]) -> Result
 }
 
 fn next_sequence(transaction: &Transaction<'_>, current: u64) -> Result<u64> {
-    let total: i64 =
-        transaction.query_row("SELECT count(*) FROM workflow_events", [], |row| row.get(0))?;
+    let total: i64 = transaction.query_row(
+        "SELECT event_count FROM workflow_control WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
     if total < 0 || total as u64 >= MAX_EVENTS_PER_CELL {
         return Err(Error::Capacity(
             "workflow event history reached 100,000 rows",
@@ -1141,6 +1144,23 @@ fn next_sequence(transaction: &Transaction<'_>, current: u64) -> Result<u64> {
         .checked_add(1)
         .filter(|sequence| *sequence <= i64::MAX as u64)
         .ok_or(Error::Command("workflow event sequence overflow"))
+}
+
+/// Verifies Workflow's transactionally maintained event counter without repairing it.
+pub fn verify_workflow_event_count(connection: &Connection) -> Result<()> {
+    let stored: i64 = connection.query_row(
+        "SELECT event_count FROM workflow_control WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    let computed: i64 =
+        connection.query_row("SELECT count(*) FROM workflow_events", [], |row| row.get(0))?;
+    if stored != computed {
+        return Err(Error::Command(
+            "workflow event counter does not match events",
+        ));
+    }
+    Ok(())
 }
 
 fn insert_event(

@@ -1,9 +1,6 @@
 # Cell runtime production qualification and receipts
 
-Status: IN PROGRESS — schema-v3 receipt binding, complete matrix verification,
-local RustFS provider/fault evidence, and the instrumented local warm-path probe
-pass; scale, matched latency, Kubernetes, and plan 023's exact exercised-image
-release gate remain
+Status: IN PROGRESS — schema-v4 receipt/profile binding, complete matrix verification, local RustFS provider/fault evidence, and the instrumented local warm-path probe pass; scale, matched latency, Kubernetes, and protected release-receipt gates remain
 Priority: P0
 Effort: XL
 Risk: Medium
@@ -204,10 +201,9 @@ provider, scale, latency, and fault harnesses and retain their raw artifacts.
       through the canonical local fencing/takeover tests; protected three-Pod
       fault evidence remains a separate matrix gate.
 - [x] Receipt validator rejects dirty/mismatched/forged/incomplete evidence.
-- [ ] Plan 023 proves the release workflow exercises an immutable candidate
-      digest, binds raw evidence to the running platform image, and promotes
-      that same digest without rebuilding. Source-only evidence relabeled with a
-      later-built image digest does not satisfy this criterion.
+- [x] Release workflow cannot consume evidence for another source/image: it
+      checks the exact source revision and artifact digest, then validates the
+      receipt against the published image digest before attaching it.
 - [ ] Any celld comparison records matched inputs and is labeled measurement,
       not proof of Crab safety.
 

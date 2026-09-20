@@ -87,37 +87,25 @@ CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-b347-clippy \
 
 Use the checkout's actual stable target suffix when it differs from `b347`.
 
-Release jobs build a run-scoped immutable image candidate, qualify that exact
-manifest digest, and promote the same digest only after the raw cluster
-receipt passes the crate-owned validator. The schema-v3 signed receipt binds
-the exact tagged source, published image manifest, and raw cluster evidence;
-the release job fails before publishing if either identity changes. The
-short-lived Ed25519 key in this step authenticates the canonical receipt bytes;
+Release jobs bind a schema-v4 qualification matrix and threshold-profile digest
+to the exact tagged source, published image manifest, and raw cluster evidence.
+The crate-owned validator requires a pinned Ed25519 qualification public key,
+canonical receipts, passing thresholds, exact source/image identity, and every
+matrix row; fixture or self-signed evidence cannot satisfy the release gate.
 GitHub's workflow attestation remains the trust anchor for the release job and
 source identity.
 
-The raw three-node receipt is validated first with the fail-closed v6 command:
-
 ```bash
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
   cargo run -p crab-cell-runtime --bin qualification_receipt --locked -- \
-  validate-cluster cluster-receipt.json "$SOURCE_SHA" "$IMAGE_DIGEST" release
+  verify-matrix qualification-matrix.json "$SOURCE_SHA" "$IMAGE_DIGEST" \
+    scale-v1.json "$QUALIFICATION_SIGNER"
 ```
 
-Local source-only receipts use `source-only` instead of `release`; release
-receipts must carry a `ghcr.io/...@sha256:<digest>` reference matching the
-candidate manifest.
-
-```bash
-CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
-  cargo run -p crab-cell-runtime --bin qualification_receipt --locked -- \
-  verify receipt.json "$SOURCE_SHA" "$IMAGE_DIGEST" cluster-receipt.json
-```
-
-This command verifies the receipt signature, canonical encoding, passed status,
-source/image identity, and BLAKE3 digest of the exact raw artifact. It does not
-turn local or in-memory evidence into provider qualification; the release
-matrix still needs the real RustFS/Kubernetes and multi-GiB runs below.
+This command verifies pinned attestation, canonical encoding, passed threshold
+metrics, source/image identity, and BLAKE3 digests of every raw artifact. It
+does not turn local or in-memory evidence into provider qualification; the
+release matrix still needs the real RustFS/Kubernetes and multi-GiB runs below.
 
 Release qualification can be verified as one bounded matrix instead of a
 caller-owned loop. `QualificationMatrixManifest` requires exactly one entry for
@@ -153,8 +141,9 @@ The provider-backed
 passed Queue/Workflow retained-work protection, exact-root restore, and
 capacity reuse against its isolated prefix.
 These commands are provider evidence for iteration, not release receipts;
-protected release jobs must emit the schema-v3 receipt bound to the tagged
-source and immutable image.
+protected release jobs must consume a schema-v4 matrix signed by the pinned
+qualification key and bound to the tagged source, immutable image, profile,
+and every raw artifact.
 
 ```bash
 AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \

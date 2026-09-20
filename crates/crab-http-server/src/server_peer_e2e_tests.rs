@@ -114,10 +114,12 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     .await
     .unwrap();
     let initialize_dir = tempfile::TempDir::new().unwrap();
+    let application = crate::cells::compiled_application().unwrap();
     crate::cells::initialize_repository_at(
         &cell_layout,
         identity,
         &registry,
+        &application,
         initialize_dir.path(),
         32 * 1024 * 1024 * 1024,
         "https://localhost:1".into(),
@@ -827,6 +829,7 @@ fn server(
         repositories: BTreeMap::from([(("team".into(), "repo".into()), repository)]).into(),
         runtime: Arc::new(RemoteGitRuntime::default()),
         cell_runtime,
+        cell_node: None,
         repository_cells,
         peer_receiver,
         follower_store: None,
