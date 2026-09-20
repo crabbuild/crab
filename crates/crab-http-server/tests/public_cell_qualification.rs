@@ -8,11 +8,13 @@ use std::{
 use crab_cell_app::ApplicationHandle;
 use crab_cell_host::CellNodeBuilder;
 use crab_cell_runtime::{
-    ActivitySupervisor, ApplicationId, CatalogRole, CellClient, CellStorageLayout, CellTarget,
-    Digest, EffectClaimRequest, Error, MutationIdentity, NodeLeaseGuard, QualificationExecution,
+    ActivitySupervisor, ApplicationId, BlobCondition, BlobMutation, BlobQuery, CatalogRole,
+    CellClient, CellStorageLayout, CellTarget, CronMutation, Digest, EffectClaimRequest, Error,
+    KvAtomicRequest, KvMutation, MutationIdentity, NodeLeaseGuard, QualificationExecution,
     QualificationOperation, QualificationOperationExecutor, QualificationProfile,
-    QualificationRunner, QualificationWorkload, RequestId, Result, SqlBatch, SqlStatement,
-    SqlValue, SqlWorkerPool, TenantId, install_blob_schema, install_cron_schema, install_kv_schema,
+    QualificationRunner, QualificationWorkload, QueueClaimRequest, QueueSendRequest, RequestId,
+    Result, SqlBatch, SqlStatement, SqlValue, SqlWorkerPool, TenantId, WorkflowOutcome,
+    WorkflowSignal, install_blob_schema, install_cron_schema, install_kv_schema,
     install_queue_schema, install_workflow_schema, partition_for_shard,
 };
 use crab_storage::Store;
@@ -24,13 +26,17 @@ use tokio_util::sync::CancellationToken;
 mod fixture;
 
 fn identity(index: u64, now_ms: i64) -> MutationIdentity {
-    let mut request_id = [0; 16];
-    request_id[..8].copy_from_slice(&index.to_be_bytes());
     MutationIdentity {
-        request_id: RequestId::from_bytes(request_id),
+        request_id: RequestId::from_bytes(fixed_id(index)),
         issued_at_ms: now_ms,
         expires_at_ms: now_ms + 60_000,
     }
+}
+
+fn fixed_id(index: u64) -> [u8; 16] {
+    let mut id = [0; 16];
+    id[..8].copy_from_slice(&index.to_be_bytes());
+    id
 }
 
 struct PublicHostQualificationExecutor {
@@ -49,7 +55,8 @@ impl QualificationOperationExecutor for PublicHostQualificationExecutor {
         let application = self.application;
         let now_ms = self.now_ms;
         Box::pin(async move {
-            let mutation = identity(operation.index(), now_ms);
+            let mutation_index = operation.index().saturating_mul(100);
+            let mutation = identity(mutation_index, now_ms);
             match operation.primitive() {
                 "sql" => {
                     let target = CellTarget::new(
@@ -75,60 +82,244 @@ impl QualificationOperationExecutor for PublicHostQualificationExecutor {
                         })?;
                 }
                 "kv" => {
-                    handle
-                        .kv::<fixture::ReferenceKv>(fixture::KV_NAMESPACE)?
-                        .atomic(
+                    let kv = handle.kv::<fixture::ReferenceKv>(fixture::KV_NAMESPACE)?;
+                    let scope = b"public-qualification".to_vec();
+                    let key = operation.index().to_be_bytes().to_vec();
+                    let request = KvAtomicRequest {
+                        scope: scope.clone(),
+                        checks: Vec::new(),
+                        mutations: vec![KvMutation::Put {
+                            key: key.clone(),
+                            value: operation.nonce().to_be_bytes().to_vec(),
+                            expires_at_ms: None,
+                        }],
+                    };
+                    kv.atomic(mutation, request.clone())
+                        .await
+                        .map_err(|_| Error::Control("public qualification KV invocation failed"))?;
+                    kv.atomic(mutation, request)
+                        .await
+                        .map_err(|_| Error::Control("public qualification KV duplicate failed"))?;
+                    let expires_at_ms = i64::try_from(
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map_err(|_| Error::Control("public qualification clock failed"))?
+                            .as_millis(),
+                    )
+                    .map_err(|_| Error::Control("public qualification clock overflow"))?
+                    .saturating_add(20);
+                    let expired_key = fixed_id(operation.index()).to_vec();
+                    kv.atomic(
+                        identity(mutation_index.saturating_add(1), now_ms),
+                        KvAtomicRequest {
+                            scope: scope.clone(),
+                            checks: Vec::new(),
+                            mutations: vec![KvMutation::Put {
+                                key: expired_key.clone(),
+                                value: b"expired".to_vec(),
+                                expires_at_ms: Some(expires_at_ms),
+                            }],
+                        },
+                    )
+                    .await
+                    .map_err(|_| Error::Control("public qualification KV expiry failed"))?;
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    let expired = kv.get(scope, expired_key, None).await.map_err(|_| {
+                        Error::Control("public qualification KV verification failed")
+                    })?;
+                    if expired.output.is_some() {
+                        return Err(Error::Control("public qualification KV expiry visible"));
+                    }
+                }
+                "blob" => {
+                    let blob = handle.blob::<fixture::ReferenceBlob>()?;
+                    let key = format!("public-qualification/{}", operation.index()).into_bytes();
+                    let upload_id = fixed_id(operation.index());
+                    blob.mutate(
+                        mutation,
+                        BlobMutation::Begin {
+                            key: key.clone(),
+                            upload_id,
+                            condition: BlobCondition::Missing,
+                            content_type: None,
+                            metadata: Vec::new(),
+                            expires_at_ms: now_ms + 60_000,
+                        },
+                    )
+                    .await
+                    .map_err(|_| Error::Control("public qualification Blob begin failed"))?;
+                    blob.mutate(
+                        identity(mutation_index.saturating_add(1), now_ms),
+                        BlobMutation::PutPart {
+                            key: key.clone(),
+                            upload_id,
+                            part_number: 1,
+                            payload: operation.nonce().to_be_bytes().to_vec(),
+                        },
+                    )
+                    .await
+                    .map_err(|_| Error::Control("public qualification Blob part failed"))?;
+                    blob.mutate(
+                        identity(mutation_index.saturating_add(2), now_ms),
+                        BlobMutation::Complete {
+                            key: key.clone(),
+                            upload_id,
+                            part_count: 1,
+                        },
+                    )
+                    .await
+                    .map_err(|_| Error::Control("public qualification Blob complete failed"))?;
+                    blob.query(
+                        BlobQuery::Read {
+                            key,
+                            offset: 0,
+                            limit: 128,
+                        },
+                        None,
+                    )
+                    .await
+                    .map_err(|_| Error::Control("public qualification Blob verification failed"))?;
+                }
+                "queue" => {
+                    let queue = handle.queue::<fixture::ReferenceQueue>()?;
+                    let producer_id = fixed_id(operation.index());
+                    queue
+                        .send(
                             mutation,
-                            crab_cell_runtime::KvAtomicRequest {
-                                scope: b"public-qualification".to_vec(),
-                                checks: Vec::new(),
-                                mutations: vec![crab_cell_runtime::KvMutation::Put {
-                                    key: operation.index().to_be_bytes().to_vec(),
-                                    value: operation.nonce().to_be_bytes().to_vec(),
-                                    expires_at_ms: None,
-                                }],
+                            QueueSendRequest {
+                                producer_id,
+                                payload: operation.nonce().to_be_bytes().to_vec(),
+                                available_at_ms: now_ms,
                             },
                         )
                         .await
-                        .map_err(|_| Error::Control("public qualification KV invocation failed"))?;
-                }
-                "blob" => {
-                    handle
-                        .blob::<fixture::ReferenceBlob>()?
-                        .list_shard(0, Vec::new(), None, 1, None)
+                        .map_err(|_| Error::Control("public qualification Queue send failed"))?;
+                    let claimed = queue
+                        .claim(
+                            identity(mutation_index.saturating_add(1), now_ms),
+                            0,
+                            QueueClaimRequest {
+                                limit: 1,
+                                lease_ms: 5_000,
+                            },
+                        )
                         .await
-                        .map_err(|_| {
-                            Error::Control("public qualification Blob invocation failed")
-                        })?;
-                }
-                "queue" => {
-                    handle
-                        .queue::<fixture::ReferenceQueue>()?
-                        .info(0, None)
+                        .map_err(|_| Error::Control("public qualification Queue claim failed"))?;
+                    let message = claimed
+                        .output
+                        .first()
+                        .cloned()
+                        .ok_or(Error::Control("public qualification Queue claim empty"))?;
+                    queue
+                        .retry(
+                            identity(mutation_index.saturating_add(2), now_ms),
+                            0,
+                            message.message_id,
+                            message.token,
+                            0,
+                        )
                         .await
-                        .map_err(|_| {
-                            Error::Control("public qualification Queue invocation failed")
-                        })?;
+                        .map_err(|_| Error::Control("public qualification Queue retry failed"))?;
+                    let retried = queue
+                        .claim(
+                            identity(mutation_index.saturating_add(3), now_ms),
+                            0,
+                            QueueClaimRequest {
+                                limit: 1,
+                                lease_ms: 5_000,
+                            },
+                        )
+                        .await
+                        .map_err(|_| Error::Control("public qualification Queue reclaim failed"))?;
+                    let retried_message = retried
+                        .output
+                        .first()
+                        .cloned()
+                        .ok_or(Error::Control("public qualification Queue reclaim empty"))?;
+                    queue
+                        .ack(
+                            identity(mutation_index.saturating_add(4), now_ms),
+                            0,
+                            retried_message.message_id,
+                            retried_message.token,
+                        )
+                        .await
+                        .map_err(|_| Error::Control("public qualification Queue ack failed"))?;
                 }
                 "cron" => {
-                    handle
-                        .cron::<fixture::ReferenceCron>()?
-                        .get([58; 16], None)
-                        .await
-                        .map_err(|_| {
-                            Error::Control("public qualification Cron invocation failed")
-                        })?;
+                    let cron = handle.cron::<fixture::ReferenceCron>()?;
+                    let schedule_id = fixed_id(operation.index());
+                    cron.mutate(
+                        mutation,
+                        CronMutation::Upsert {
+                            schedule_id,
+                            target_index: 0,
+                            target_partition: partition_for_shard(0).to_vec(),
+                            payload: operation.nonce().to_be_bytes().to_vec(),
+                            interval_ms: 1_000,
+                            next_due_ms: now_ms + 1_000,
+                        },
+                    )
+                    .await
+                    .map_err(|_| Error::Control("public qualification Cron upsert failed"))?;
+                    cron.mutate(
+                        identity(mutation_index.saturating_add(1), now_ms),
+                        CronMutation::Pause { schedule_id },
+                    )
+                    .await
+                    .map_err(|_| Error::Control("public qualification Cron pause failed"))?;
+                    cron.mutate(
+                        identity(mutation_index.saturating_add(2), now_ms),
+                        CronMutation::Resume {
+                            schedule_id,
+                            next_due_ms: now_ms + 1_000,
+                        },
+                    )
+                    .await
+                    .map_err(|_| Error::Control("public qualification Cron resume failed"))?;
+                    cron.get(schedule_id, None).await.map_err(|_| {
+                        Error::Control("public qualification Cron verification failed")
+                    })?;
                 }
                 "workflow" => {
-                    handle
-                        .workflow::<fixture::ReferenceWorkflow>()?
-                        .state(b"public-qualification".to_vec(), None)
+                    let workflow = handle.workflow::<fixture::ReferenceWorkflow>()?;
+                    let workflow_id = format!("public-workflow-{}", operation.index()).into_bytes();
+                    let started = workflow
+                        .start(mutation, workflow_id.clone(), b"activity".to_vec())
                         .await
                         .map_err(|_| {
-                            Error::Control("public qualification Workflow invocation failed")
+                            Error::Control("public qualification Workflow start failed")
                         })?;
+                    let WorkflowOutcome::Applied { run_id, .. } = started.output else {
+                        return Err(Error::Control("public qualification Workflow not applied"));
+                    };
+                    workflow
+                        .cancel(
+                            identity(mutation_index.saturating_add(1), now_ms),
+                            WorkflowSignal {
+                                workflow_id: workflow_id.clone(),
+                                run_id,
+                                signal_id: fixed_id(operation.index()),
+                                event: b"cancel".to_vec(),
+                            },
+                        )
+                        .await
+                        .map_err(|_| {
+                            Error::Control("public qualification Workflow cancel failed")
+                        })?;
+                    workflow.state(workflow_id, None).await.map_err(|_| {
+                        Error::Control("public qualification Workflow verification failed")
+                    })?;
                 }
                 "activity" => {
+                    let workflow = handle.workflow::<fixture::ReferenceWorkflow>()?;
+                    let workflow_id = format!("public-activity-{}", operation.index()).into_bytes();
+                    workflow
+                        .start(mutation, workflow_id.clone(), b"activity".to_vec())
+                        .await
+                        .map_err(|_| {
+                            Error::Control("public qualification Activity start failed")
+                        })?;
                     let supervisor = ActivitySupervisor::new(
                         handle.activities::<fixture::ReferenceWorkflow>()?,
                         5_000,
@@ -136,27 +327,47 @@ impl QualificationOperationExecutor for PublicHostQualificationExecutor {
                     supervisor.run_once(0, None).await.map_err(|_| {
                         Error::Control("public qualification Activity invocation failed")
                     })?;
+                    workflow.state(workflow_id, None).await.map_err(|_| {
+                        Error::Control("public qualification Activity verification failed")
+                    })?;
                 }
                 "effects" => {
+                    let workflow = handle.workflow::<fixture::ReferenceWorkflow>()?;
+                    let workflow_id = format!("public-effect-{}", operation.index()).into_bytes();
+                    workflow
+                        .start(mutation, workflow_id, b"effect".to_vec())
+                        .await
+                        .map_err(|_| Error::Control("public qualification Effect start failed"))?;
                     let target = CellTarget::new(
                         tenant,
                         application,
                         fixture::WORKFLOW_NAMESPACE,
                         &partition_for_shard(0),
                     )?;
-                    handle
-                        .effects::<fixture::ReferenceWorkflow>(target)?
+                    let effects = handle.effects::<fixture::ReferenceWorkflow>(target)?;
+                    let claims = effects
                         .claim(
-                            mutation,
+                            identity(mutation_index.saturating_add(1), now_ms),
                             EffectClaimRequest {
                                 limit: 1,
                                 lease_ms: 5_000,
                             },
                         )
                         .await
-                        .map_err(|_| {
-                            Error::Control("public qualification Effects invocation failed")
-                        })?;
+                        .map_err(|_| Error::Control("public qualification Effects claim failed"))?;
+                    let claim = claims
+                        .output
+                        .first()
+                        .cloned()
+                        .ok_or(Error::Control("public qualification Effects claim empty"))?;
+                    effects
+                        .ack(
+                            identity(mutation_index.saturating_add(2), now_ms),
+                            claim,
+                            b"public-effect-result".to_vec(),
+                        )
+                        .await
+                        .map_err(|_| Error::Control("public qualification Effects ack failed"))?;
                 }
                 _ => {
                     return Err(Error::Control(
