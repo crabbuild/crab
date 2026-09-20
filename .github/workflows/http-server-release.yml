@@ -384,6 +384,19 @@ jobs:
             echo "::error::The exact tracked scale-v1 qualification profile is required."
             exit 1
           }
+          tracked_profile="crates/crab-cell-runtime/qualification/profiles/scale-v1.json"
+          test -f "$tracked_profile" || {
+            echo "::error::The checked-out source is missing the tracked scale-v1 profile."
+            exit 1
+          }
+          test ! -L "$profile" || {
+            echo "::error::Protected qualification profiles must not be symlinks."
+            exit 1
+          }
+          cmp -- "$profile" "$tracked_profile" || {
+            echo "::error::Protected scale-v1 profile does not match the exact tagged source."
+            exit 1
+          }
           if [[ ! "$QUALIFICATION_SIGNER" =~ ^[0-9a-f]{64}$ ]]; then
             echo "::error::CRAB_CELL_RUNTIME_QUALIFICATION_SIGNER must be a pinned 32-byte lowercase Ed25519 public key."
             exit 1

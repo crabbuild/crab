@@ -92,6 +92,8 @@ to the exact tagged source, published image manifest, and raw cluster evidence.
 The crate-owned validator requires a pinned Ed25519 qualification public key,
 canonical receipts, passing thresholds, exact source/image identity, and every
 matrix row; fixture or self-signed evidence cannot satisfy the release gate.
+The release job also compares the supplied protected profile byte-for-byte with
+the checked-in profile from the tagged source before invoking the validator.
 GitHub's workflow attestation remains the trust anchor for the release job and
 source identity.
 
