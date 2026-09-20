@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, Transaction};
 
 use crate::{CaptureBatch, CrabError, Limits, LocalSegment, Position, Result, SegmentInfo};
-use crate::{db::Db as CaptureDb, host::LtxHost, ltx, types::Txid};
+use crate::{db::CaptureEngine, host::LtxHost, ltx, types::Txid};
 
 /// Number of SQLite connections retained by one open managed database.
 pub const MANAGED_SQLITE_CONNECTIONS: u64 = 3;
@@ -20,7 +20,7 @@ const MANAGED_CONNECTION_PAGE_CACHE_KIB: i64 = 64;
 /// claims a fresh metadata directory; reactivation requires exact restore into
 /// a fresh directory, not reusing potentially unpublished local state.
 pub struct Db {
-    db: CaptureDb,
+    capture: CaptureEngine,
     writer: Connection,
     observer: crate::commit::CommitObserver,
     required_cut: Option<crate::commit::WalCut>,
@@ -74,7 +74,7 @@ impl Db {
             None,
         )
         .map_err(|error| registration.take_error().unwrap_or(error))?;
-        db.db
+        db.capture
             .seed_continuation(position, checksums, page_size, count)?;
         db.paged = Some(registration);
         Ok(db)
@@ -186,7 +186,7 @@ impl Db {
             false,
             Some(local_disk),
         )?;
-        db.db
+        db.capture
             .seed_continuation(plan.position(), checksums, page_size, count)?;
         Ok(db)
     }
@@ -266,8 +266,8 @@ impl Db {
         // Never unlink it on close: an old open file must not acquire a new epoch.
         facilities
             .filesystem
-            .create_dir(&CaptureDb::meta_path_for(path))?;
-        let db = CaptureDb::open_with_host(path, host, vfs)?;
+            .create_dir(&CaptureEngine::meta_path_for(path))?;
+        let capture = CaptureEngine::open_with_host(path, host, vfs)?;
         let writer = open_connection(path, vfs)?;
         writer.busy_timeout(std::time::Duration::from_secs(1))?;
         writer.pragma_update(None, "wal_autocheckpoint", 0)?;
@@ -281,7 +281,7 @@ impl Db {
         writer.pragma_update(None, "max_page_count", max_pages)?;
         let observer = crate::commit::CommitObserver::install(&writer);
         Ok(Self {
-            db,
+            capture,
             writer,
             observer,
             required_cut: None,
@@ -428,29 +428,30 @@ impl Db {
     }
 
     fn capture_inner(&mut self) -> (Result<CaptureBatch>, crate::CaptureTiming) {
-        self.db.start_timing(self.host.now_monotonic());
-        self.db.timing_begin(crate::db::TimingPhase::Preparation);
+        self.capture.start_timing(self.host.now_monotonic());
+        self.capture
+            .timing_begin(crate::db::TimingPhase::Preparation);
         let result = (|| {
             self.ensure_capacity()?;
-            self.db.timing_end(crate::db::TimingPhase::Preparation);
-            let before = self.db.pos();
-            self.db.sync(self.required_cut)?;
+            self.capture.timing_end(crate::db::TimingPhase::Preparation);
+            let before = self.capture.pos();
+            self.capture.sync(self.required_cut)?;
             self.required_cut = None;
             let batch = self.collect_cuts(before)?;
             self.reconcile_local_disk()?;
             Ok(batch)
         })();
-        let timing = self.db.finish_timing(self.host.now_monotonic());
+        let timing = self.capture.finish_timing(self.host.now_monotonic());
         (result, timing)
     }
 
     fn collect_cuts(&mut self, before: crate::Pos) -> Result<CaptureBatch> {
-        let after = self.db.pos();
+        let after = self.capture.pos();
         let mut segments = Vec::new();
         if after.txid.0 > before.txid.0 {
             for txid in before.txid.0 + 1..=after.txid.0 {
-                let path = PathBuf::from(self.db.ltx_path(0, Txid(txid), Txid(txid)));
-                let info = if let Some(info) = self.db.sealed_l0_segment(Txid(txid)) {
+                let path = PathBuf::from(self.capture.ltx_path(0, Txid(txid), Txid(txid)));
+                let info = if let Some(info) = self.capture.sealed_l0_segment(Txid(txid)) {
                     info
                 } else {
                     let file = crate::LtxHost {
@@ -459,14 +460,16 @@ impl Db {
                         max_file_bytes: self.limits.max_capture_bytes,
                     }
                     .open(&path)?;
-                    self.db.timing_begin(crate::db::TimingPhase::Verification);
+                    self.capture
+                        .timing_begin(crate::db::TimingPhase::Verification);
                     let inspected = ltx::inspect_reader(file);
-                    self.db.timing_end(crate::db::TimingPhase::Verification);
+                    self.capture
+                        .timing_end(crate::db::TimingPhase::Verification);
                     let (decoded, size, digest) = inspected?;
                     SegmentInfo::from_inspected(&decoded, size, digest)
                 };
-                self.db.timing_add_ltx_bytes(info.size_bytes);
-                self.db.timing_add_segment();
+                self.capture.timing_add_ltx_bytes(info.size_bytes);
+                self.capture.timing_add_segment();
                 self.account_capture(&info)?;
                 let segment = LocalSegment::new(path, info);
                 #[cfg(feature = "replica")]
@@ -496,11 +499,11 @@ impl Db {
                     .checked_mul(2)
                     .ok_or(CrabError::Limit("local disk bytes"))?,
             )?;
-            let before = self.db.pos();
-            self.db.start_timing(self.host.now_monotonic());
-            let checkpoint_result = self.db.checkpoint(mode);
+            let before = self.capture.pos();
+            self.capture.start_timing(self.host.now_monotonic());
+            let checkpoint_result = self.capture.checkpoint(mode);
             let extra_result = checkpoint_result.and_then(|()| self.collect_cuts(before));
-            let checkpoint_timing = self.db.finish_timing(self.host.now_monotonic());
+            let checkpoint_timing = self.capture.finish_timing(self.host.now_monotonic());
             timing.merge(checkpoint_timing);
             let extra = extra_result?;
             batch.timing = timing;
@@ -520,7 +523,7 @@ impl Db {
     /// Returns the last sealed local position, not a remote durability receipt.
     #[must_use]
     pub fn position(&self) -> Position {
-        self.db.pos().into()
+        self.capture.pos().into()
     }
 
     /// Captures pending commits, then writes a full checksum-bearing snapshot.
@@ -546,7 +549,7 @@ impl Db {
         self.local_disk.try_grow(self.limits.max_file_bytes)?;
         let (mut scratch, mut output) =
             SnapshotScratch::create(&self.host, destination, self.limits.max_file_bytes)?;
-        let pos: Position = self.db.snapshot_to_writer(&mut output)?.into();
+        let pos: Position = self.capture.snapshot_to_writer(&mut output)?.into();
         if pos != batch.position {
             return Err(CrabError::ChecksumMismatch);
         }
@@ -581,7 +584,7 @@ impl Db {
     /// Releases the writer and checkpoint read lock without claiming publication.
     pub fn close(self) -> Result<()> {
         drop(self.writer);
-        self.db.close()
+        self.capture.close()
     }
 
     fn ensure_active(&self) -> Result<()> {
@@ -634,7 +637,7 @@ impl Db {
         } else {
             self.host.filesystem.file_len(&self.path)?
         };
-        let wal_bytes = match self.host.filesystem.file_len(&self.db.wal_path()) {
+        let wal_bytes = match self.host.filesystem.file_len(&self.capture.wal_path()) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
             Err(error) => return Err(error.into()),
@@ -996,7 +999,7 @@ mod tests {
         let result = Db::open_with_host(&path, Limits::default(), host);
 
         assert!(matches!(result, Err(CrabError::Limit("local disk bytes"))));
-        assert!(!CaptureDb::meta_path_for(&path).exists());
+        assert!(!CaptureEngine::meta_path_for(&path).exists());
     }
 
     #[test]
@@ -1100,8 +1103,8 @@ mod tests {
             .unwrap();
         drop(initial);
         let mut db = Db::open(&path, Limits::default()).unwrap();
-        db.db.truncate_page_n = 20;
-        db.db.min_checkpoint_page_n = 10;
+        db.capture.truncate_page_n = 20;
+        db.capture.min_checkpoint_page_n = 10;
         let mut segments = Vec::new();
         let mut last_pages = 0;
         let mut shrank = false;

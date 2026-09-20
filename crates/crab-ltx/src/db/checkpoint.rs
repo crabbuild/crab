@@ -4,7 +4,7 @@
 
 use super::*;
 
-impl Db {
+impl CaptureEngine {
     pub(super) fn checkpoint_if_needed(
         &mut self,
         orig_wal_size: i64,

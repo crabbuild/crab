@@ -92,7 +92,7 @@ fn add_elapsed(total: &AtomicU64, started: Instant, finished: Instant) {
     });
 }
 
-impl Db {
+impl CaptureEngine {
     pub(super) fn read_valid_wal_image(
         &mut self,
         info: &SyncInfo,

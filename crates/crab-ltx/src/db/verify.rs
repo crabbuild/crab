@@ -4,7 +4,7 @@
 
 use super::*;
 
-impl Db {
+impl CaptureEngine {
     pub(super) fn verify(&mut self) -> Result<SyncInfo> {
         let frame_size = self.page_size as i64 + WAL_FRAME_HEADER_SIZE as i64;
         let mut info = SyncInfo {

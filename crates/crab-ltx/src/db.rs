@@ -209,7 +209,7 @@ fn nanos(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
-pub struct Db {
+pub(crate) struct CaptureEngine {
     checksums: crate::pages::PageChecksums,
     host: crate::LtxHost,
     path: PathBuf,
@@ -242,7 +242,7 @@ pub struct Db {
 const CONTROL_TABLES_DDL: &str = "CREATE TABLE IF NOT EXISTS _litestream_seq (id INTEGER PRIMARY KEY, seq INTEGER);\
      CREATE TABLE IF NOT EXISTS _litestream_lock (id INTEGER);";
 
-impl Db {
+impl CaptureEngine {
     pub const DEFAULT_MIN_CHECKPOINT_PAGE_N: u32 = 1000;
     pub const DEFAULT_TRUNCATE_PAGE_N: u32 = 121_359;
 
@@ -253,7 +253,7 @@ impl Db {
         path: impl AsRef<Path>,
         host: crate::LtxHost,
         vfs: Option<&str>,
-    ) -> Result<Db> {
+    ) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let meta_path = Self::meta_path_for(&path);
 
@@ -299,7 +299,7 @@ impl Db {
             .pragma_update(None, "foreign_keys", true)
             .map_err(CrabError::Sqlite)?;
 
-        let mut db = Db {
+        let mut db = Self {
             checksums: crate::pages::PageChecksums::default(),
             host,
             path,
