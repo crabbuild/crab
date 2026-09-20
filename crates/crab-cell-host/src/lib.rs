@@ -11,6 +11,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
 use crab_cell_app::{ApplicationHandle, CellApplication, CompiledApplication};
@@ -74,27 +75,28 @@ impl CellNodeTaskGroup {
         F: Future<Output = std::result::Result<(), E>> + Send + 'static,
         E: std::error::Error + Send + Sync + 'static,
     {
+        let mut tasks = match self.tasks.lock() {
+            Ok(tasks) => tasks,
+            Err(_) => return Err(Error::Control("CellNode task group lock poisoned")),
+        };
+        if tasks.len() >= MAX_NODE_TASKS {
+            return Err(Error::Capacity("CellNode task limit reached"));
+        }
         let handle = tokio::spawn(async move {
             task.await
                 .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
         });
-        let mut tasks = match self.tasks.lock() {
-            Ok(tasks) => tasks,
-            Err(_) => {
-                handle.abort();
-                return Err(Error::Control("CellNode task group lock poisoned"));
-            }
-        };
-        if tasks.len() >= MAX_NODE_TASKS {
-            handle.abort();
-            return Err(Error::Capacity("CellNode task limit reached"));
-        }
         tasks.push(handle);
         Ok(())
     }
 
     /// Cancels admission and joins tasks in reverse registration order.
     pub async fn drain(&self) -> FacilityResult {
+        self.drain_until(None).await
+    }
+
+    /// Cancels admission and joins tasks until an optional absolute deadline.
+    pub async fn drain_until(&self, deadline: Option<Instant>) -> FacilityResult {
         self.cancellation.cancel();
         self.node_shutdown.cancel();
         let tasks = match self.tasks.lock() {
@@ -114,7 +116,24 @@ impl CellNodeTaskGroup {
         };
         let mut first_error = None;
         while let Some(index) = tasks.tasks.len().checked_sub(1) {
-            let result = (&mut tasks.tasks[index]).await;
+            let result = match deadline {
+                Some(deadline) => {
+                    match tokio::time::timeout_at(deadline.into(), &mut tasks.tasks[index]).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            first_error.get_or_insert_with(|| {
+                                Box::new(std::io::Error::new(
+                                    std::io::ErrorKind::TimedOut,
+                                    "CellNode task group drain deadline exceeded",
+                                ))
+                                    as Box<dyn std::error::Error + Send + Sync>
+                            });
+                            break;
+                        }
+                    }
+                }
+                None => (&mut tasks.tasks[index]).await,
+            };
             tasks.tasks.pop();
             match result {
                 Ok(Ok(())) => {}
@@ -422,6 +441,11 @@ impl CellNode {
 
     /// Stops admission, drains the runtime, and waits for its dispatcher.
     pub async fn drain(&self) -> crab_cell_runtime::Result<()> {
+        self.drain_until(None).await
+    }
+
+    /// Stops admission and completes every owned drain phase by `deadline`.
+    pub async fn drain_until(&self, deadline: Option<Instant>) -> crab_cell_runtime::Result<()> {
         let _shutdown = self.shutdown_lock.lock().await;
         {
             let mut state = self
@@ -449,7 +473,20 @@ impl CellNode {
             Err(error) => first_error = Some(error),
             Ok(facilities) => {
                 for (name, drain) in facilities {
-                    if let Err(source) = drain().await
+                    let result = match deadline {
+                        Some(deadline) => {
+                            match tokio::time::timeout_at(deadline.into(), drain()).await {
+                                Ok(result) => result,
+                                Err(_) => Err(Box::new(std::io::Error::new(
+                                    std::io::ErrorKind::TimedOut,
+                                    "CellNode facility drain deadline exceeded",
+                                ))
+                                    as Box<dyn std::error::Error + Send + Sync>),
+                            }
+                        }
+                        None => drain().await,
+                    };
+                    if let Err(source) = result
                         && first_error.is_none()
                     {
                         first_error = Some(Error::Facility { name, source });
@@ -457,7 +494,15 @@ impl CellNode {
                 }
             }
         }
-        let runtime_result = self.runtime.shutdown().await;
+        let runtime_result = match deadline {
+            Some(deadline) => {
+                match tokio::time::timeout_at(deadline.into(), self.runtime.shutdown()).await {
+                    Ok(result) => result,
+                    Err(_) => Err(Error::Control("CellNode runtime drain deadline exceeded")),
+                }
+            }
+            None => self.runtime.shutdown().await,
+        };
         if first_error.is_none() {
             first_error = runtime_result.err();
         }
@@ -476,6 +521,11 @@ impl CellNode {
     /// Idempotent alias for graceful drain used by process shutdown hooks.
     pub async fn shutdown(&self) -> crab_cell_runtime::Result<()> {
         self.drain().await
+    }
+
+    /// Deadline-aware alias for graceful shutdown hooks.
+    pub async fn shutdown_until(&self, deadline: Instant) -> crab_cell_runtime::Result<()> {
+        self.drain_until(Some(deadline)).await
     }
 }
 
@@ -639,6 +689,23 @@ mod tests {
         assert!(cancellation.is_cancelled());
         assert!(node_shutdown.is_cancelled());
         assert!(finished.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn task_group_deadline_aborts_unfinished_tasks() {
+        let tasks = CellNodeTaskGroup::new(CancellationToken::new(), CancellationToken::new());
+        tasks
+            .spawn(async {
+                std::future::pending::<()>().await;
+                Ok::<(), Error>(())
+            })
+            .unwrap();
+
+        let result = tasks
+            .drain_until(Some(Instant::now() + std::time::Duration::from_millis(10)))
+            .await;
+
+        assert!(result.is_err());
     }
 
     #[tokio::test]

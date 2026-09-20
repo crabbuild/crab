@@ -776,8 +776,15 @@ impl Server {
     }
 
     async fn shutdown_runtimes(&self) -> Result<()> {
+        self.shutdown_runtimes_until(None).await
+    }
+
+    async fn shutdown_runtimes_until(&self, deadline: Option<Instant>) -> Result<()> {
         let cells = match self.cell_node.as_ref() {
-            Some(node) => node.shutdown().await,
+            Some(node) => match deadline {
+                Some(deadline) => node.shutdown_until(deadline).await,
+                None => node.shutdown().await,
+            },
             None => self.cell_runtime.shutdown().await,
         };
         self.runtime.shutdown().await;
@@ -1239,7 +1246,9 @@ pub async fn serve(config: Config) -> Result<()> {
         server.transfer_admission.close();
         server.transfer_admission.wait().await;
         let maintenance = server.finish_maintenance().await;
-        let runtimes = server.shutdown_runtimes().await;
+        let runtimes = server
+            .shutdown_runtimes_until(Some(shutdown_deadline))
+            .await;
         recovery_shutdown.cancel();
         let management = match management_result {
             Some(result) => result,
