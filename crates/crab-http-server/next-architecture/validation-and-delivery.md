@@ -211,7 +211,7 @@ Expected changes by owner:
 - `crab-ltx`: capture, encoding, exact local/remote recovery, epoch inheritance/publication, bundles, range compaction, paged/sparse SQL and hydration; not HTTP ownership authority.
 - `crab-storage`: only necessary reusable provider/path/conditional contracts.
 - Shared Git crates: only evidence-backed publication recovery APIs, if needed.
-- `packages/repository`: explicitly required retry/error/cursor contract changes.
+- `packages/ui`: explicitly required retry/error/cursor contract changes.
 - Helm/deployment docs: peer identity, security and phased drain.
 - `REFERENCE.md`: implemented state and qualification evidence updated as phases land.
 

@@ -24,7 +24,7 @@ CrabBuild/
 ├── crab/              Rust CLI, remote helper, and product/server composition
 ├── crates/            Shared Rust contracts, data plane, storage, and orchestration
 ├── packages/web/      Next.js marketing site and Fumadocs documentation
-├── packages/repository/ React repository application served by crab-http-server
+├── packages/ui/      React repository application served by crab-http-server
 ├── diagram/           Architecture diagrams and rendered assets
 ├── .github/workflows/ CI, release, service, and evidence workflows
 ├── .agent/            Repository-local agent workflows

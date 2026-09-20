@@ -3,12 +3,12 @@
 FROM node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS frontend
 
 WORKDIR /build
-COPY packages/repository/.npmrc packages/repository/package.json packages/repository/package-lock.json packages/repository/
-RUN npm ci --prefix packages/repository
-COPY packages/repository/index.html packages/repository/tsconfig.json packages/repository/vite.config.ts packages/repository/
+COPY packages/ui/.npmrc packages/ui/package.json packages/ui/package-lock.json packages/ui/
+RUN npm ci --prefix packages/ui
+COPY packages/ui/index.html packages/ui/tsconfig.json packages/ui/vite.config.ts packages/ui/
 COPY packages/web/crab.optimized.svg packages/web/crab.optimized.svg
-COPY packages/repository/src/ packages/repository/src/
-RUN npm run build --prefix packages/repository
+COPY packages/ui/src/ packages/ui/src/
+RUN npm run build --prefix packages/ui
 
 FROM rust:1.97-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS builder
 
@@ -16,7 +16,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crab/ crab/
 COPY crates/ crates/
-COPY --from=frontend /build/packages/repository/dist/ packages/repository/dist/
+COPY --from=frontend /build/packages/ui/dist/ packages/ui/dist/
 RUN cargo build --release --locked -p crab-http-server
 
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171

@@ -69,7 +69,7 @@ jobs:
             local repo_docs=false
             while IFS= read -r file; do
               case "${file}" in
-                Cargo.toml|Cargo.lock|crates/*|packages/repository/*|.github/workflows/*) rust=true ;;
+                Cargo.toml|Cargo.lock|crates/*|packages/ui/*|.github/workflows/*) rust=true ;;
                 crab/docs/*) repo_docs=true ;;
                 crab/*) rust=true ;;
                 packages/web/content/*) docs=true ;;
@@ -98,7 +98,7 @@ jobs:
           assert_classification 'crab/src/main.rs' 'true false false false'
           assert_classification 'packages/web/content/docs/index.mdx' 'false false true false'
           assert_classification 'packages/web/app/page.tsx' 'false true false false'
-          assert_classification 'packages/repository/src/App.tsx' 'true false false false'
+          assert_classification 'packages/ui/src/App.tsx' 'true false false false'
           assert_classification $'crab/docs/design/layout.md\ncrab/src/main.rs' 'true false false true'
           assert_classification 'README.md' 'true false false false'
 
@@ -150,14 +150,14 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: packages/repository/package-lock.json
+          cache-dependency-path: packages/ui/package-lock.json
 
       - name: Build and verify embedded repository frontend
         run: |
-          npm ci --prefix packages/repository
-          npm run format:check --prefix packages/repository
-          npm test --prefix packages/repository
-          npm run build --prefix packages/repository
+          npm ci --prefix packages/ui
+          npm run format:check --prefix packages/ui
+          npm test --prefix packages/ui
+          npm run build --prefix packages/ui
 
       - name: Check HTTP server and local LTX engine
         run: |
@@ -220,14 +220,14 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     defaults:
       run:
-        working-directory: packages/repository
+        working-directory: packages/ui
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: packages/repository/package-lock.json
+          cache-dependency-path: packages/ui/package-lock.json
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run typecheck
@@ -237,7 +237,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: repository-browser-failures
-          path: packages/repository/node_modules/.cache/browser-tests
+          path: packages/ui/node_modules/.cache/browser-tests
           include-hidden-files: true
 
   web:

@@ -15,7 +15,7 @@ on:
       - "Cargo.toml"
       - "crab/**"
       - "crates/**"
-      - "packages/repository/**"
+      - "packages/ui/**"
   workflow_dispatch:
 
 permissions:
