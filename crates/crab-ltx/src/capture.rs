@@ -237,7 +237,7 @@ pub(crate) struct CaptureEngine {
     l0_dir_ready: bool,
     wal_file: Option<crate::HostFile>,
     timing: Option<TimingRecorder>,
-    defer_parent_sync: bool,
+    defer_durability: bool,
 }
 
 const CONTROL_TABLES_DDL: &str = "CREATE TABLE IF NOT EXISTS _litestream_seq (id INTEGER PRIMARY KEY, seq INTEGER);\
@@ -324,7 +324,7 @@ impl CaptureEngine {
             l0_dir_ready: false,
             wal_file: None,
             timing: None,
-            defer_parent_sync: false,
+            defer_durability: false,
         };
 
         // Start the long-running read transaction (db.go:867-871).
@@ -647,10 +647,10 @@ impl CaptureEngine {
     }
 
     pub(crate) fn sync_deferred(&mut self, required: Option<crate::commit::WalCut>) -> Result<()> {
-        let previous = self.defer_parent_sync;
-        self.defer_parent_sync = true;
+        let previous = self.defer_durability;
+        self.defer_durability = true;
         let result = self.sync(required);
-        self.defer_parent_sync = previous;
+        self.defer_durability = previous;
         result
     }
 

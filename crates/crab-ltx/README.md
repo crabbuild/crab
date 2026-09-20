@@ -215,12 +215,12 @@ fn rename_issue(
 A successful transaction is still only a local SQLite commit. Capture and
 publication remain separate durability steps.
 
-### Grouping capture directory barriers
+### Grouping capture durability barriers
 
 `capture()` is the synchronous convenience path: it syncs the LTX file and
 its published name before returning. A host that already has a higher-level
 acknowledgement barrier can capture several batches with
-`capture_deferred()`, then make all of their LTX names durable with one
+`capture_deferred()`, then make all of their LTX files durable with one
 `durability_barrier()` call:
 
 ```rust,no_run
@@ -230,8 +230,8 @@ fn capture_group(database: &mut Db) -> crab_ltx::Result<()> {
     let first = database.capture_deferred()?;
     let second = database.capture_deferred()?;
 
-    // Do not acknowledge, publish-and-prune, or close the session before this
-    // succeeds. File contents were synced by each capture; this seals names.
+    // Do not acknowledge, prune, or close the session before this succeeds.
+    // It flushes every completed file, then seals their directory entries.
     database.durability_barrier()?;
 
     assert!(second.position.txid >= first.position.txid);
@@ -241,7 +241,7 @@ fn capture_group(database: &mut Db) -> crab_ltx::Result<()> {
 
 The default `capture()` contract is unchanged. A failed barrier fences the
 session, so the host must not acknowledge either batch. Checkpoint and snapshot
-operations flush pending deferred names before changing the WAL lifecycle.
+operations flush pending deferred files before changing the WAL lifecycle.
 
 ## Checkpoint without losing capture boundaries
 
@@ -441,8 +441,8 @@ in that order.
 | `Db::open` | Claims a fresh exclusive session and owns the writer, control, and read-lock SQLite connections |
 | `Db::transaction` | Commits one local SQL transaction; does not claim remote durability |
 | `Db::capture` | Returns every new ordered cut plus its exact TXID/checksum endpoint |
-| `Db::capture_deferred` | Returns synced LTX files while deferring one or more parent-directory barriers |
-| `Db::durability_barrier` | Makes all deferred capture names durable; failure fences the session |
+| `Db::capture_deferred` | Returns complete, readable LTX files whose durability remains pending |
+| `Db::durability_barrier` | Flushes deferred files concurrently, then syncs each parent directory once; failure fences the session |
 | `Db::checkpoint` | Captures a barrier, runs the selected SQLite checkpoint, and returns every generated cut |
 | `Db::snapshot` | Returns an independent full snapshot plus any pending captured cuts |
 | `VerifiedPlan::new` | Owns and verifies the complete selected snapshot-plus-delta chain |

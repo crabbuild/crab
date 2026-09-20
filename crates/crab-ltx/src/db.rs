@@ -35,7 +35,7 @@ pub struct Db {
     retained: Vec<LocalSegment>,
     path: PathBuf,
     host: crate::Host,
-    pending_parent_syncs: Vec<PathBuf>,
+    pending_durability: Vec<PathBuf>,
     #[cfg(feature = "replica")]
     paged: Option<crate::writable_vfs::Registration>,
 }
@@ -305,7 +305,7 @@ impl Db {
             retained: Vec::new(),
             path: path.to_owned(),
             host: facilities,
-            pending_parent_syncs: Vec::new(),
+            pending_durability: Vec::new(),
             #[cfg(feature = "replica")]
             paged: None,
         })
@@ -439,11 +439,11 @@ impl Db {
         result
     }
 
-    /// Captures committed WAL pages while deferring the directory barrier.
+    /// Captures committed WAL pages while deferring their durability barrier.
     ///
-    /// The LTX file contents are synced before this returns, but their names
-    /// are not made durable until [`Self::durability_barrier`] succeeds. This
-    /// permits a host to group several captures behind one directory sync;
+    /// LTX files are complete and readable when this returns, but their contents
+    /// and names are not durable until [`Self::durability_barrier`] succeeds.
+    /// This permits a host to group several captures behind one storage flush;
     /// callers must complete the barrier before acknowledging or pruning any
     /// returned batch. A failed barrier fences the session.
     pub fn capture_deferred(&mut self) -> Result<CaptureBatch> {
@@ -453,7 +453,7 @@ impl Db {
         self.host.observe_ltx_capture(&timing, result.is_ok());
         let result = result.map(|mut batch| {
             batch.timing = timing;
-            self.pending_parent_syncs.extend(
+            self.pending_durability.extend(
                 batch
                     .segments
                     .iter()
@@ -467,22 +467,22 @@ impl Db {
         result
     }
 
-    /// Makes all names published by deferred captures durable as one barrier.
+    /// Makes all files published by deferred captures durable as one barrier.
     ///
-    /// File contents are already individually synced by capture. If the
-    /// directory barrier fails, the session is fenced and pending paths remain
-    /// tracked for diagnostics; no caller may acknowledge those captures.
+    /// The barrier syncs each completed file before syncing each destination
+    /// directory once. If either step fails, the session is fenced and pending
+    /// paths remain tracked for diagnostics; no caller may acknowledge them.
     pub fn durability_barrier(&mut self) -> Result<()> {
         self.ensure_active()?;
         self.flush_pending_durability()
     }
 
     fn flush_pending_durability(&mut self) -> Result<()> {
-        if self.pending_parent_syncs.is_empty() {
+        if self.pending_durability.is_empty() {
             return Ok(());
         }
         let mut parents = BTreeMap::new();
-        for path in &self.pending_parent_syncs {
+        for path in &self.pending_durability {
             let parent = path
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
@@ -490,14 +490,16 @@ impl Db {
                 .to_owned();
             parents.entry(parent).or_insert_with(|| path.clone());
         }
-        let result = parents.values().try_for_each(|path| {
-            self.host
-                .filesystem
-                .sync_parent(path)
-                .map_err(CrabError::from)
-        });
+        let result = (|| {
+            self.host.filesystem.sync_files(&self.pending_durability)?;
+            parents
+                .values()
+                .try_for_each(|path| self.host.filesystem.sync_parent(path))?;
+            Ok::<(), std::io::Error>(())
+        })()
+        .map_err(CrabError::from);
         if result.is_ok() {
-            self.pending_parent_syncs.clear();
+            self.pending_durability.clear();
         } else {
             self.fenced = true;
         }
@@ -506,7 +508,7 @@ impl Db {
 
     fn capture_inner(
         &mut self,
-        defer_parent_sync: bool,
+        defer_durability: bool,
     ) -> (Result<CaptureBatch>, crate::CaptureTiming) {
         self.capture.start_timing(self.host.now_monotonic());
         self.capture
@@ -516,7 +518,7 @@ impl Db {
             self.capture
                 .timing_end(crate::capture::TimingPhase::Preparation);
             let before = self.capture.pos();
-            if defer_parent_sync {
+            if defer_durability {
                 self.capture.sync_deferred(self.required_cut)?;
             } else {
                 self.capture.sync(self.required_cut)?;

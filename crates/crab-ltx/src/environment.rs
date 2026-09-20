@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -386,8 +386,9 @@ pub trait FileIo: Send {
 ///
 /// `create` must exclusively create a new file. `open_rw` must not create.
 /// `rename` must sync the destination parent before succeeding. The opt-in
-/// `rename_uncommitted` variant may defer that parent sync until the caller
-/// invokes `sync_parent`; implementations must preserve underlying I/O errors.
+/// `rename_uncommitted` variant may install a file before its contents or name
+/// are durable; the caller must sync the file and then its parent directory.
+/// Implementations must preserve underlying I/O errors.
 /// `exists` must detect dangling symlinks. `create_dir` is an exclusive claim.
 /// `persist_new` atomically installs fully synced bytes without replacing any
 /// destination and syncs its parent; `persist_file_new` does the same for an
@@ -412,6 +413,18 @@ pub trait FileSystem: Send + Sync {
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
     fn exists(&self, path: &Path) -> io::Result<bool>;
     fn create_dir(&self, path: &Path) -> io::Result<()>;
+
+    /// Syncs every named file before a shared directory barrier.
+    ///
+    /// Hosts may coalesce or parallelize these independent flushes. Success
+    /// must still mean that every file's contents are durable.
+    fn sync_files(&self, paths: &[PathBuf]) -> io::Result<()> {
+        for path in paths {
+            self.open_rw(path)?.sync_all()?;
+        }
+        Ok(())
+    }
+
     fn sync_parent(&self, path: &Path) -> io::Result<()>;
     fn persist_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
     fn persist_file_new(&self, source: &Path, destination: &Path) -> io::Result<()>;
@@ -1667,6 +1680,55 @@ impl FileSystem for DirectFileSystem {
     }
     fn create_dir(&self, path: &Path) -> io::Result<()> {
         std::fs::create_dir(path)
+    }
+    fn sync_files(&self, paths: &[PathBuf]) -> io::Result<()> {
+        let workers = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(paths.len());
+        if workers <= 1 {
+            for path in paths {
+                self.open_rw(path)?.sync_all()?;
+            }
+            return Ok(());
+        }
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let handles = (0..workers)
+                .map(|_| {
+                    let next = &next;
+                    scope.spawn(move || {
+                        loop {
+                            let index = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(path) = paths.get(index) else {
+                                break;
+                            };
+                            std::fs::OpenOptions::new()
+                                .read(true)
+                                .write(true)
+                                .open(path)?
+                                .sync_all()?;
+                        }
+                        Ok::<(), io::Error>(())
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut first_error = None;
+            for handle in handles {
+                let result = handle
+                    .join()
+                    .map_err(|_| io::Error::other("file sync worker panicked"))
+                    .and_then(|result| result);
+                if let Err(error) = result
+                    && first_error.is_none()
+                {
+                    first_error = Some(error);
+                }
+            }
+            if let Some(error) = first_error {
+                return Err(error);
+            }
+            Ok(())
+        })
     }
     fn sync_parent(&self, path: &Path) -> io::Result<()> {
         crate::host::sync_parent(path)

@@ -481,7 +481,7 @@ ordering.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |---|---|---|---|---|---|
-| [019](019-crab-ltx-recovery-performance.md) | Make `crab-ltx` recovery single-pass and stream local compaction | P1 | L | — | IN PROGRESS (implementation and correctness proof green; timing gate not met) |
+| [019](019-crab-ltx-recovery-performance.md) | Make `crab-ltx` recovery single-pass and stream local compaction | P1 | L | — | IN PROGRESS (grouped end-to-end target met; recovery-only timing gate not met) |
 
 Plan 019 first repairs benchmark accounting, then removes repeated recovery
 materialization and the full in-memory compacted output. The execution gate

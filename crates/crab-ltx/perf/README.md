@@ -32,15 +32,16 @@ crates/crab-ltx/perf/run.sh
 ```
 
 To measure the opt-in grouped durability path on the Crab runner, invoke it
-directly with `--defer-parent-sync`. It captures and fsyncs each LTX file, then
-syncs the shared parent directory once before the round is acknowledged:
+directly with `--defer-durability`. It completes and renames each LTX file,
+then uses a bounded parallel file flush followed by one shared parent-directory
+sync before the round is acknowledged:
 
 ```bash
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-ltx-perf" \
   cargo run --release \
   --manifest-path crates/crab-ltx/perf/crab/Cargo.toml -- \
   --transactions 128 --payload-bytes 4096 --rounds 5 --warmup 1 \
-  --defer-parent-sync
+  --defer-durability
 ```
 
 The binaries also run directly when a single side is useful:
@@ -74,8 +75,9 @@ important fields are:
   file sync; `capture_parent_sync_us` is the directory-entry sync that makes
   the atomic rename durable. The other fields split position resolution, WAL
   reads, page collection, encoding, and local writes.
-- `capture_barrier_us`: only populated for the Crab deferred mode; it is the
-  final grouped parent-directory barrier and is included in `capture_us`.
+- `capture_barrier_us`: only populated for the Crab deferred mode; it includes
+  the grouped file flush and final parent-directory barrier and is included in
+  `capture_us`.
 - `verify_us`: Crab's explicit owned-input plan verification. Celld reports
   zero because its compactor does not expose an equivalent call.
 - `compact_us`: local LTX compaction, including source listing, reads, merge,

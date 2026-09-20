@@ -591,8 +591,9 @@ thresholds until the result looks favorable.
 Implemented source changes are in the in-scope `crab-ltx` recovery, compactor,
 capture, host, database, benchmark, and host-hook test files. In addition to
 the single-pass recovery work, the library now exposes an opt-in deferred
-capture path: LTX file contents are synced per capture, while parent-directory
-barriers can be coalesced with `Db::durability_barrier()`. The default
+capture path: complete LTX files are renamed without claiming durability, then
+their independent file flushes are bounded and parallelized before one shared
+parent-directory barrier in `Db::durability_barrier()`. The default
 `Db::capture()` path remains synchronous. The following proof passed:
 
 - `cargo fmt --all -- --check`;
@@ -611,7 +612,8 @@ all three workloads, and capture/total medians were noisy and above the stated
 limits in medium/large runs. The raw external evidence is retained under
 `$HOME/Workspace/CrabBuild/crab-ltx-plan019.6zxpQu` and is intentionally not
 committed. The plan therefore remains `IN PROGRESS`; no performance win is
-claimed, and further tuning would need a new measured iteration.
+claimed for recovery itself. That result motivated the separately measured
+grouped-durability follow-up below.
 
 ## Follow-up iteration: bounded k-way compaction merge
 
@@ -669,9 +671,9 @@ All boxes must be checked:
       checked, and installed with `persist_file_new`.
 - [x] Scratch files are removed on every tested pre-install failure;
       destinations are never overwritten.
-- [x] Deferred captures keep file contents synced, coalesce one parent barrier,
-      and fence the session when that barrier fails; default capture remains
-      synchronous.
+- [x] Deferred captures keep files unacknowledged until a grouped file and
+      parent-directory barrier succeeds, and fence the session when either
+      phase fails; default capture remains synchronous.
 - [x] Minimal, replica, doctest, host-hook, replication, runtime-consumer, HTTP
       consumer, formatting, and Clippy commands all exit 0.
 - [ ] The three-workload candidate satisfies the Step 4 performance and
@@ -713,17 +715,32 @@ Stop and report; do not improvise if:
 
 ## Follow-up iteration: grouped capture durability
 
-`Db::capture_deferred()` now uses an internal uncommitted rename after syncing
-each LTX file. `Db::durability_barrier()` deduplicates the affected LTX parent
+`Db::capture_deferred()` now uses an internal uncommitted rename for each
+complete LTX file. `Db::durability_barrier()` uses the host filesystem's
+bounded batch-sync boundary, then deduplicates the affected LTX parent
 directories and syncs each once before the host can acknowledge or prune the
-returned batches. Checkpoint, snapshot, ordinary capture, and close flush any
-pending barrier first. A barrier failure fences the session and retains the
-pending paths for diagnostics.
+returned batches. The direct filesystem parallelizes independent file flushes;
+custom filesystems retain a safe sequential default. Checkpoint, snapshot,
+ordinary capture, and close flush any pending barrier first. A file or parent
+barrier failure fences the session and retains pending paths for diagnostics.
 
 This is a protocol-aware optimization, not a replacement for the synchronous
 default. The host must keep the returned batches unacknowledged until the
 barrier succeeds. Benchmark the grouped mode separately from the default mode;
 the Celld comparison remains intentionally durability-explicit.
+
+The final 15-round/3-warmup local matrix compared this grouped mode with the
+pinned Celld runner. Crab's end-to-end median was 1.83x faster for 32 × 1 KiB,
+2.05x faster for 128 × 4 KiB, and 1.98x faster for 512 × 16 KiB. P95 speedups
+were 2.10x, 1.90x, and 1.69x respectively. Every round retained one invariant
+segment/TXID/size tuple and passed row-count plus SQLite integrity checks.
+
+This satisfies the grouped capture end-to-end target without changing the
+synchronous default. It does not satisfy the original recovery-only gate:
+Crab's explicit plan and compacted-output verification still make the recovery
+subtotal slower than Celld's less strict measured path. The plan therefore
+remains in progress rather than converting the end-to-end capture win into a
+recovery claim.
 
 ## Maintenance notes
 

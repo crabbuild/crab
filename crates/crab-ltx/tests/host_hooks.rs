@@ -28,6 +28,7 @@ struct Faults {
     calls: Arc<Mutex<BTreeSet<&'static str>>>,
     largest_read: Arc<AtomicUsize>,
     largest_write: Arc<AtomicUsize>,
+    file_syncs: Arc<AtomicUsize>,
     parent_syncs: Arc<AtomicUsize>,
     track_all: Arc<AtomicBool>,
 }
@@ -85,6 +86,7 @@ impl FileIo for File {
     }
     fn sync_all(&mut self) -> io::Result<()> {
         self.faults.check("sync_all")?;
+        self.faults.file_syncs.fetch_add(1, Ordering::Relaxed);
         self.inner.sync_all()
     }
     fn file_len(&self) -> io::Result<u64> {
@@ -231,38 +233,45 @@ fn deferred_captures_share_one_directory_barrier() {
         .unwrap();
     let second = writer.capture_deferred().unwrap();
 
+    assert_eq!(faults.file_syncs.load(Ordering::Relaxed), 0);
     assert_eq!(faults.parent_syncs.load(Ordering::Relaxed), 0);
     assert!(!first.segments.is_empty());
     assert!(!second.segments.is_empty());
 
     writer.durability_barrier().unwrap();
+    assert_eq!(
+        faults.file_syncs.load(Ordering::Relaxed),
+        first.segments.len() + second.segments.len()
+    );
     assert_eq!(faults.parent_syncs.load(Ordering::Relaxed), 1);
     writer.close().unwrap();
 }
 
 #[test]
 fn failed_deferred_barrier_fences_before_acknowledgement() {
-    let directory = tempfile::TempDir::new().unwrap();
-    let faults = Arc::new(Faults::default());
-    let host = Host::default().with_filesystem(faults.clone());
-    let mut writer = Db::open_with_host(
-        &directory.path().join("deferred-failure.sqlite"),
-        Limits::default(),
-        host,
-    )
-    .unwrap();
-    writer
-        .transaction(|tx| tx.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES(1)"))
+    for operation in ["sync_all", "sync_parent"] {
+        let directory = tempfile::TempDir::new().unwrap();
+        let faults = Arc::new(Faults::default());
+        let host = Host::default().with_filesystem(faults.clone());
+        let mut writer = Db::open_with_host(
+            &directory.path().join("deferred-failure.sqlite"),
+            Limits::default(),
+            host,
+        )
         .unwrap();
-    let captured = writer.capture_deferred().unwrap();
+        writer
+            .transaction(|tx| tx.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES(1)"))
+            .unwrap();
+        let captured = writer.capture_deferred().unwrap();
 
-    faults.arm(Some("sync_parent"));
-    assert!(matches!(
-        writer.durability_barrier(),
-        Err(CrabError::Io(error)) if error.kind() == io::ErrorKind::StorageFull
-    ));
-    assert!(matches!(writer.capture(), Err(CrabError::Fenced)));
-    assert!(!captured.segments.is_empty());
+        faults.arm(Some(operation));
+        assert!(matches!(
+            writer.durability_barrier(),
+            Err(CrabError::Io(error)) if error.kind() == io::ErrorKind::StorageFull
+        ));
+        assert!(matches!(writer.capture(), Err(CrabError::Fenced)));
+        assert!(!captured.segments.is_empty());
+    }
 }
 
 #[cfg(feature = "replica")]

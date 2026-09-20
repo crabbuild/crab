@@ -14,7 +14,7 @@ struct Config {
     payload_bytes: usize,
     rounds: usize,
     warmup: usize,
-    defer_parent_sync: bool,
+    defer_durability: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -59,7 +59,7 @@ struct ConfigOutput {
     payload_bytes: usize,
     measured_rounds: usize,
     warmup_rounds: usize,
-    defer_parent_sync: bool,
+    defer_durability: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -106,7 +106,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             payload_bytes: config.payload_bytes,
             measured_rounds: config.rounds,
             warmup_rounds: config.warmup,
-            defer_parent_sync: config.defer_parent_sync,
+            defer_durability: config.defer_durability,
         },
         median: Summary::from_samples(&samples),
         samples,
@@ -125,7 +125,7 @@ impl Config {
         let payload_bytes = option(&args, "--payload-bytes")?.unwrap_or(4096);
         let rounds = option(&args, "--rounds")?.unwrap_or(5);
         let warmup = option(&args, "--warmup")?.unwrap_or(1);
-        let defer_parent_sync = args.iter().any(|arg| arg == "--defer-parent-sync");
+        let defer_durability = args.iter().any(|arg| arg == "--defer-durability");
         if transactions == 0 || payload_bytes == 0 || rounds == 0 {
             return Err("transactions, payload-bytes, and rounds must be positive".into());
         }
@@ -134,7 +134,7 @@ impl Config {
             payload_bytes,
             rounds,
             warmup,
-            defer_parent_sync,
+            defer_durability,
         })
     }
 }
@@ -174,7 +174,7 @@ fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error>> {
         &mut segments,
         &mut position,
         &mut capture_phases,
-        config.defer_parent_sync,
+        config.defer_durability,
     )?;
     capture_us += elapsed_us(started);
 
@@ -196,12 +196,12 @@ fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error>> {
             &mut segments,
             &mut position,
             &mut capture_phases,
-            config.defer_parent_sync,
+            config.defer_durability,
         )?;
         capture_us += elapsed_us(started);
     }
 
-    if config.defer_parent_sync {
+    if config.defer_durability {
         let started = Instant::now();
         database.durability_barrier()?;
         capture_barrier_us = elapsed_us(started);
@@ -269,9 +269,9 @@ fn append_capture(
     segments: &mut Vec<crab_ltx::LocalSegment>,
     position: &mut Position,
     phases: &mut CapturePhases,
-    defer_parent_sync: bool,
+    defer_durability: bool,
 ) -> crab_ltx::Result<()> {
-    let batch = if defer_parent_sync {
+    let batch = if defer_durability {
         database.capture_deferred()?
     } else {
         database.capture()?

@@ -338,7 +338,7 @@ impl CaptureEngine {
             info.snapshotting,
             info.prev_commit,
             commit,
-            !self.defer_parent_sync,
+            !self.defer_durability,
         );
         let (mut checksums, size_bytes, digest) = match write_result {
             Err(CrabError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -355,7 +355,7 @@ impl CaptureEngine {
                     info.snapshotting,
                     info.prev_commit,
                     commit,
-                    !self.defer_parent_sync,
+                    !self.defer_durability,
                 )?
             }
             other => other?,
@@ -428,7 +428,7 @@ impl CaptureEngine {
         snapshotting: bool,
         prev_commit: u32,
         commit: u32,
-        sync_parent: bool,
+        durable: bool,
     ) -> Result<(crate::pages::PageChecksums, u64, [u8; 32])> {
         let result = (|| -> Result<(crate::pages::PageChecksums, u64, [u8; 32])> {
             let output = self.host.create(Path::new(tmp_filename))?;
@@ -516,15 +516,17 @@ impl CaptureEngine {
             );
             self.timing_add_phase_nanos(crate::capture::TimingPhase::LocalWrite, local_write_nanos);
             let (mut output, size_bytes, digest) = encoder.into_writer().finish();
-            self.timing_begin(crate::capture::TimingPhase::Fsync);
-            output.sync_all()?;
-            self.timing_end(crate::capture::TimingPhase::Fsync);
+            if durable {
+                self.timing_begin(crate::capture::TimingPhase::Fsync);
+                output.sync_all()?;
+                self.timing_end(crate::capture::TimingPhase::Fsync);
+            }
             drop(output);
             if spool_index {
                 self.host.remove_file(Path::new(index_filename))?;
             }
             self.timing_begin(crate::capture::TimingPhase::ParentSync);
-            if sync_parent {
+            if durable {
                 self.host
                     .rename(Path::new(tmp_filename), Path::new(filename))?;
             } else {
