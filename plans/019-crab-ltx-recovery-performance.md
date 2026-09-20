@@ -691,14 +691,16 @@ improved capture in 9 pairs with a paired median reduction of 7.3 ms. One-round
 synchronous samples remained barrier-noisy, so the result is attributed to
 fewer write syscalls rather than to any fsync or acknowledgement change.
 
-A fresh 15-pair synchronous small-workload comparison is the current honesty
-gate. Crab recovery was 13.8 ms versus Celld's 15.8 ms, but Crab capture was
-172.5 ms versus 94.9 ms and total latency was 202.2 ms versus 123.2 ms. Crab's
-capture ledger attributed medians of 74.6 ms to file fsync and 84.0 ms to the
-parent-directory sync. The latter is absent from the pinned Celld return path.
-Therefore Crab does not currently beat Celld for independently durable
-per-capture latency; grouped throughput and verified recovery are the measured
-wins, and the contracts must not be collapsed into one headline.
+The final candidate's order-balanced grouped matrix measured total-median
+speedups of 1.90x for 32 × 1 KiB, 2.25x for 128 × 4 KiB, and 2.33x for
+512 × 16 KiB. Crab recovery was faster for medium and large, but Celld won the
+small recovery subtotal in that run (10.1 ms versus Crab's 13.6 ms). The final
+15-pair synchronous small comparison measured Crab at 181.0 ms capture and
+207.4 ms total versus Celld at 96.3 ms and 117.0 ms; Crab lost every paired
+capture and total sample. Therefore Crab does not beat Celld for independently
+durable per-capture latency. Grouped throughput is the verified 1.5x–2x-plus
+win, while recovery remains workload-dependent, and the contracts must not be
+collapsed into one headline.
 
 ## Test plan
 
