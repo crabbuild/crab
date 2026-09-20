@@ -258,6 +258,16 @@ pub struct CellNodeBuilder {
     replica_host: Option<ReplicaHost>,
     session: Option<SessionId>,
     node_retained_bytes: Option<usize>,
+    required_components: Vec<&'static str>,
+}
+
+struct CellNodeParts {
+    application: Arc<CompiledApplication>,
+    pool: SqlWorkerPool,
+    replica_host: ReplicaHost,
+    session: SessionId,
+    node_retained_bytes: usize,
+    required_components: Vec<&'static str>,
 }
 
 impl CellNodeBuilder {
@@ -270,6 +280,7 @@ impl CellNodeBuilder {
             replica_host: None,
             session: None,
             node_retained_bytes: None,
+            required_components: Vec::new(),
         }
     }
 
@@ -295,14 +306,30 @@ impl CellNodeBuilder {
         self
     }
 
+    /// Declares the owned production components required before readiness.
+    pub fn with_required_owned_components(
+        mut self,
+        names: impl IntoIterator<Item = &'static str>,
+    ) -> crab_cell_runtime::Result<Self> {
+        append_required_components(&mut self.required_components, names)?;
+        Ok(self)
+    }
+
     /// Validates all required inputs before starting any background runtime task.
     pub fn build(self) -> crab_cell_runtime::Result<CellNode> {
-        let (application, pool, host, session, node_retained_bytes) = self.required_parts()?;
+        let CellNodeParts {
+            application,
+            pool,
+            replica_host,
+            session,
+            node_retained_bytes,
+            required_components,
+        } = self.required_parts()?;
         let runtime = CellRuntime::new_with_replica_host_requiring_node_lease(
             pool,
             node_retained_bytes,
             session,
-            host,
+            replica_host,
         )?;
         Ok(CellNode {
             application,
@@ -311,7 +338,7 @@ impl CellNodeBuilder {
             lease_installed: AtomicBool::new(false),
             shutdown_lock: Arc::new(tokio::sync::Mutex::new(())),
             facilities: Arc::new(Mutex::new(Vec::new())),
-            required_components: Arc::new(Mutex::new(Vec::new())),
+            required_components: Arc::new(Mutex::new(required_components)),
             task_group: Arc::new(Mutex::new(None)),
         })
     }
@@ -321,8 +348,16 @@ impl CellNodeBuilder {
     /// This path intentionally uses object-only runtime admission: the caller
     /// must keep the host private and may not expose serving readiness.
     pub fn build_unleased_for_maintenance(self) -> crab_cell_runtime::Result<CellNode> {
-        let (application, pool, host, session, node_retained_bytes) = self.required_parts()?;
-        let runtime = CellRuntime::new_with_replica_host(pool, node_retained_bytes, session, host)?;
+        let CellNodeParts {
+            application,
+            pool,
+            replica_host,
+            session,
+            node_retained_bytes,
+            required_components,
+        } = self.required_parts()?;
+        let runtime =
+            CellRuntime::new_with_replica_host(pool, node_retained_bytes, session, replica_host)?;
         Ok(CellNode {
             application,
             runtime,
@@ -330,20 +365,12 @@ impl CellNodeBuilder {
             lease_installed: AtomicBool::new(false),
             shutdown_lock: Arc::new(tokio::sync::Mutex::new(())),
             facilities: Arc::new(Mutex::new(Vec::new())),
-            required_components: Arc::new(Mutex::new(Vec::new())),
+            required_components: Arc::new(Mutex::new(required_components)),
             task_group: Arc::new(Mutex::new(None)),
         })
     }
 
-    fn required_parts(
-        self,
-    ) -> crab_cell_runtime::Result<(
-        Arc<CompiledApplication>,
-        SqlWorkerPool,
-        ReplicaHost,
-        SessionId,
-        usize,
-    )> {
+    fn required_parts(self) -> crab_cell_runtime::Result<CellNodeParts> {
         let pool = self
             .pool
             .ok_or(Error::Control("CellNode requires a SQL worker pool"))?;
@@ -360,8 +387,41 @@ impl CellNodeBuilder {
             .node_retained_bytes
             .filter(|bytes| *bytes != 0)
             .ok_or(Error::Control("CellNode retained-byte ceiling is missing"))?;
-        Ok((self.application, pool, host, session, node_retained_bytes))
+        Ok(CellNodeParts {
+            application: self.application,
+            pool,
+            replica_host: host,
+            session,
+            node_retained_bytes,
+            required_components: self.required_components,
+        })
     }
+}
+
+fn append_required_components(
+    required: &mut Vec<&'static str>,
+    names: impl IntoIterator<Item = &'static str>,
+) -> crab_cell_runtime::Result<()> {
+    let names = names.into_iter().collect::<Vec<_>>();
+    if names.is_empty() || names.len() > MAX_NODE_FACILITIES {
+        return Err(Error::Control(
+            "CellNode required component count is out of bounds",
+        ));
+    }
+    let mut seen = HashSet::with_capacity(names.len());
+    if names
+        .iter()
+        .any(|name| name.is_empty() || required.contains(name) || !seen.insert(*name))
+    {
+        return Err(Error::Control(
+            "CellNode required component names must be unique and non-empty",
+        ));
+    }
+    if required.len().saturating_add(names.len()) > MAX_NODE_FACILITIES {
+        return Err(Error::Capacity("CellNode required component limit reached"));
+    }
+    required.extend(names);
+    Ok(())
 }
 
 /// One started application host with an ordered drain/shutdown boundary.
@@ -460,23 +520,7 @@ impl CellNode {
             .required_components
             .lock()
             .map_err(|_| Error::Control("CellNode required-component lock poisoned"))?;
-        let names = names.into_iter().collect::<Vec<_>>();
-        if names.is_empty() || names.len() > MAX_NODE_FACILITIES {
-            return Err(Error::Control(
-                "CellNode required component count is out of bounds",
-            ));
-        }
-        let mut seen = HashSet::with_capacity(names.len());
-        if names
-            .iter()
-            .any(|name| name.is_empty() || required.contains(name) || !seen.insert(*name))
-        {
-            return Err(Error::Control(
-                "CellNode required component names must be unique and non-empty",
-            ));
-        }
-        required.extend(names);
-        Ok(())
+        append_required_components(&mut required, names)
     }
 
     /// Creates and retains the bounded coordination task group for this node.
@@ -1160,6 +1204,8 @@ mod tests {
     #[tokio::test]
     async fn readiness_requires_declared_owned_components() {
         let node = CellNodeBuilder::new(application())
+            .with_required_owned_components(["catalog", "router"])
+            .unwrap()
             .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
             .with_replica_host(ReplicaHost::default())
             .with_session(SessionId::from_bytes([28; 16]))
@@ -1168,8 +1214,6 @@ mod tests {
         node.install_task_group(CancellationToken::new(), CancellationToken::new())
             .unwrap();
         node.install_node_lease_for_startup(NodeLeaseGuard::new(0, 60_000).unwrap())
-            .unwrap();
-        node.require_owned_components(["catalog", "router"])
             .unwrap();
         node.install_owned_component("catalog", Arc::new(1_u64))
             .unwrap();
@@ -1184,6 +1228,11 @@ mod tests {
 
     #[tokio::test]
     async fn required_component_declaration_rejects_duplicates_and_late_changes() {
+        assert!(
+            CellNodeBuilder::new(application())
+                .with_required_owned_components(["catalog", "catalog"])
+                .is_err()
+        );
         let node = CellNodeBuilder::new(application())
             .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
             .with_replica_host(ReplicaHost::default())
