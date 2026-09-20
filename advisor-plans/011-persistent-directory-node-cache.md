@@ -20,7 +20,7 @@ or a fallback that hides origin corruption. Use a unique external Cargo target.
 ```bash
 git fetch origin main
 git diff --stat 4a77b6f1252a..origin/main -- \
-  crates/crab-ltx/src/cell_replica/directory.rs \
+  crates/crab-ltx/src/replica/directory.rs \
   crates/crab-ltx/src/paged* \
   crates/crab-cell-runtime/src \
   crates/crab-http-server/src/server.rs
@@ -31,7 +31,7 @@ server no longer owns local runtime directories.
 
 ## Why this plan exists
 
-`cell_replica/directory.rs` uses a process-local mutex cache with an 8 MiB
+`replica/directory.rs` uses a process-local mutex cache with an 8 MiB
 budget. Restart loses it, unrelated Cells contend on one lock, and warm open
 must refetch immutable directory nodes. Immutable digest-addressed nodes are
 safe to persist locally when every hit is verified.

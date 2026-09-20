@@ -115,7 +115,8 @@ application sequence, schema, scheduler deadline and exact endpoint. Published
 bootstrap, command and migration batches are reverified and pruned from the
 local managed session before success escapes.
 It does not introduce a second SQLite library. See the
-[parity matrix](../../crab-ltx/PARITY.md) for API and qualification boundaries.
+[crab-ltx safety model](../../crab-ltx/README.md#safety-model) for API and
+qualification boundaries.
 
 Local tests cover commit/rollback, checkpoint/shrink/regrowth, source-directory
 loss, process kill, independent CRC/format vectors and byte-identical

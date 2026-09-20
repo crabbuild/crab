@@ -45,14 +45,14 @@ impl<'a> IndexCursor<'a> {
     }
 }
 
-pub(in crate::cell_replica) struct Entries<'a> {
+pub(in crate::replica) struct Entries<'a> {
     cursors: Vec<IndexCursor<'a>>,
     heap: BinaryHeap<Reverse<(u32, usize)>>,
     valid_through: Vec<u32>,
     failed: bool,
 }
 
-pub(in crate::cell_replica) fn entries(inputs: &[DirectoryInput]) -> Result<Entries<'_>> {
+pub(in crate::replica) fn entries(inputs: &[DirectoryInput]) -> Result<Entries<'_>> {
     if inputs.is_empty() {
         return Err(CrabError::LTXCorrupted);
     }
@@ -138,7 +138,7 @@ impl Iterator for Entries<'_> {
     }
 }
 
-pub(in crate::cell_replica) async fn build_and_upload(
+pub(in crate::replica) async fn build_and_upload(
     entries: impl Iterator<Item = Result<DirectoryEntry>>,
     page_size: u32,
     database_pages: u32,

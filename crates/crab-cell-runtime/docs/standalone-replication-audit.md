@@ -19,7 +19,7 @@ The `crab-ltx` `replica` feature exposes these standalone surfaces:
 | `bundle::{Bundle, BundleEntry, BundleRow}` | `src/bundle.rs` | CRB1 envelope retained as a Cell recovery-overlay input; rows are scoped by `BundleEntry::for_cell` |
 | `with_paged_io_deadline` | `src/paged_io.rs` | Process-local deadline scope for sparse faults |
 | `Hydration` | `src/writable_vfs.rs` | Local writable sparse state and owner-driven hydration |
-| `CellReplica`, `PreparedRoot`, `RootRef`, `RecoveryOverlay`, `CellObjectRef` | `src/cell_replica/` | Canonical Cell immutable root graph and exact object extents; mutable authority remains `CellAuthority` |
+| `CellReplica`, `PreparedRoot`, `RootRef`, `RecoveryOverlay`, `CellObjectRef` | `src/replica.rs`, `src/replica/` | Canonical Cell immutable root graph and exact object extents; mutable authority remains `CellAuthority` |
 
 The final rows are the retained canonical path. The retired epoch-head records
 must not be interpreted as Cell roots.
@@ -36,7 +36,7 @@ surfaces removed by plan 017 were:
 - the standalone replication, paging, sparse-writer, compaction, and RustFS
   scale examples;
 - standalone remote/publication/capability tests;
-- `crates/crab-ltx/PARITY.md`, `SCALABILITY.md`, and `UPSTREAM.md`.
+- the former `crates/crab-ltx` parity/scalability notes and `UPSTREAM.md`.
 
 Cargo metadata confirms the crate is `publish = false`, but that fact is not
 treated as evidence of non-shipment. The release tag `v1.2.4` contains the
@@ -90,8 +90,7 @@ cargo metadata --format-version 1 --locked
 git tag --contains 4d097cce362048b843d557394827847e03102eab
 ```
 
-Related architecture records: [UPSTREAM.md](../../crab-ltx/UPSTREAM.md),
-[PARITY.md](../../crab-ltx/PARITY.md),
-[SCALABILITY.md](../../crab-ltx/SCALABILITY.md),
+Related architecture records: [crab-ltx README](../../crab-ltx/README.md),
+[UPSTREAM.md](../../crab-ltx/UPSTREAM.md),
 the [canonical LTX scaling design](canonical-ltx-scaling.md), and
 [execution plan 017](../../../advisor-plans/017-execute-standalone-replication-decision.md).

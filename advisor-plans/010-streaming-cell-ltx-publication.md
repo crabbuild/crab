@@ -10,8 +10,8 @@ Dependency: plan 005's coordination kernel; independent of routing plans
 
 ## Executor instructions
 
-Implement on `codex/010-streaming-cell-ltx`. Read all of `cell_replica.rs`,
-`cell_replica/`, the host/storage traits and implementations, bundle decoder,
+Implement on `codex/010-streaming-cell-ltx`. Read all of `replica.rs`,
+`replica/`, the host/storage traits and implementations, bundle decoder,
 publication caller, examples, and LTX tests before editing. Verify locked
 `object_store` streaming/multipart contracts from source; do not guess their
 buffering or retry behavior. Keep APIs narrow and delete replaced whole-buffer
@@ -22,8 +22,8 @@ paths.
 ```bash
 git fetch origin main
 git diff --stat 4a77b6f1252a..origin/main -- \
-  crates/crab-ltx/src/cell_replica.rs \
-  crates/crab-ltx/src/cell_replica \
+  crates/crab-ltx/src/replica.rs \
+  crates/crab-ltx/src/replica \
   crates/crab-ltx/src/bundle* \
   crates/crab-ltx/tests \
   crates/crab-cell-runtime/src/publication.rs
@@ -91,8 +91,9 @@ admission.
    sufficiently large sparse/generated segment to prove peak working memory is
    bounded independently of body size; dedicated qualification publishes and
    restores a multi-GiB transaction/bundle.
-8. Update `SCALABILITY.md` with measured command, body size, concurrency,
-   allocator/RSS method, and result. Do not claim a bound from code inspection.
+8. Update the `crab-ltx` README's resource-limit and verification sections with
+   the measured command, body size, concurrency, allocator/RSS method, and
+   result. Do not claim a bound from code inspection.
 
 ## Verification
 

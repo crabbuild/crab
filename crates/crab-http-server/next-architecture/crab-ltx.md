@@ -60,9 +60,10 @@ Foreground faults and owner-driven hydration share write/truncate bookkeeping;
 capture/snapshot reads also use the VFS. Each frame is BLAKE3/CRC verified.
 The existing full-restore server activation protocol remains a valid initial
 policy; selecting sparse activation still requires HTTP admission/output-gate wiring.
-See the [Cell API, layout and limits](../../crab-ltx/README.md#object-store-cell-roots-and-sparse-sql).
-The [functional parity matrix](../../crab-ltx/PARITY.md) records the latest
-capabilities and intentional deviations from the pinned Celld implementation.
+See the [Cell API and limits](../../crab-ltx/README.md#core-api).
+The [Litestream comparison](../../crab-ltx/README.md#litestream-comparison) and
+[upstream record](../../crab-ltx/UPSTREAM.md) describe the capabilities and
+intentional deviations from Litestream and the pinned Celld implementation.
 
 The server can now supply one `Host` throughout local resume, Cell recovery,
 and sparse activation. Its filesystem and SQLite base VFS must share a namespace;
@@ -77,9 +78,9 @@ timers, distributed fencing or a deterministic cluster simulator.
 
 The requested capacity is 1K–10K active databases per node, 100–5,000 MB each,
 with 1,000 TPS aggregate per node. This is a target, not current qualification.
-The [scalability assessment](../../crab-ltx/SCALABILITY.md) records measured
-regressions, current resource bounds and the required metadata, HTTP streaming,
-and node-level qualification work. Raising `Limits` alone is insufficient.
+The [resource limits](../../crab-ltx/README.md#resource-limits) and
+[verification](../../crab-ltx/README.md#verification) sections record current
+bounds and remaining qualification work. Raising `Limits` alone is insufficient.
 
 The [Celld comparison](celld-and-rust.md) explains the system-level differences.
 This document owns the reusable crate boundary and the changes needed to meet
