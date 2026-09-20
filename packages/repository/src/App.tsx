@@ -8,8 +8,11 @@ import {
   type CSSProperties,
 } from "react";
 import {
+  ActionList,
+  ActionMenu,
   BaseStyles,
   Button,
+  IconButton,
   Label,
   SegmentedControl,
   Spinner,
@@ -54,7 +57,7 @@ import { PaneResizer } from "./pane-resizer";
 import {
   codeThemeChoices,
   codeThemeFrom,
-  codeThemeNames,
+  codeThemeNamesFor,
   type CodeTheme,
   type CodeThemes,
 } from "./code-theme";
@@ -146,9 +149,12 @@ export function App() {
   }, [codeTheme]);
   useEffect(() => {
     void import("@pierre/diffs").then(({ preloadHighlighter }) =>
-      preloadHighlighter({ themes: codeThemeNames, langs: ["text"] }),
+      preloadHighlighter({
+        themes: codeThemeNamesFor(codeTheme),
+        langs: ["text"],
+      }),
     );
-  }, []);
+  }, [codeTheme]);
   const resolved = theme === "auto" ? (systemDark ? "dark" : "light") : theme;
   useLayoutEffect(() => {
     const root = document.documentElement;
@@ -393,6 +399,11 @@ function ThemeControl({
   codeTheme: CodeTheme;
   setCodeTheme: (theme: CodeTheme) => void;
 }) {
+  const themeEntries = Object.entries(codeThemeChoices) as [
+    CodeTheme,
+    (typeof codeThemeChoices)[CodeTheme],
+  ][];
+  const selectedCodeTheme = codeThemeChoices[codeTheme];
   const choices = [
     { value: "auto", label: "System", icon: DeviceDesktopIcon },
     { value: "light", label: "Light", icon: SunIcon },
@@ -400,21 +411,33 @@ function ThemeControl({
   ] as const;
   return (
     <div className="theme-control">
-      <label className="code-theme-control">
-        <PaintbrushIcon aria-hidden="true" />
-        <span>Code theme</span>
-        <select
-          aria-label="Code theme"
-          value={codeTheme}
-          onChange={(event) => setCodeTheme(codeThemeFrom(event.target.value))}
-        >
-          {Object.entries(codeThemeChoices).map(([value, choice]) => (
-            <option key={value} value={value}>
-              {choice.label}
-            </option>
-          ))}
-        </select>
-      </label>
+      <ActionMenu>
+        <ActionMenu.Anchor>
+          <IconButton
+            className="code-theme-control"
+            icon={PaintbrushIcon}
+            aria-label={`Code theme: ${selectedCodeTheme.label}`}
+            title={`Code theme: ${selectedCodeTheme.label}`}
+            size="small"
+          />
+        </ActionMenu.Anchor>
+        <ActionMenu.Overlay width="small">
+          <ActionList selectionVariant="single">
+            {themeEntries.map(([value, choice]) => (
+              <ActionList.Item
+                key={value}
+                selected={codeTheme === value}
+                onSelect={() => setCodeTheme(codeThemeFrom(value))}
+              >
+                {choice.label}
+                <ActionList.Description variant="block">
+                  {choice.description}
+                </ActionList.Description>
+              </ActionList.Item>
+            ))}
+          </ActionList>
+        </ActionMenu.Overlay>
+      </ActionMenu>
       <SegmentedControl
         aria-label="Appearance"
         size="small"
