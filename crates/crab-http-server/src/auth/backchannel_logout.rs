@@ -15,7 +15,9 @@ use openidconnect::core::CoreProviderMetadata;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{AuthError, Authentication, Server, StorageError, bounded_http, now_epoch};
+use super::{
+    AuthError, AuthProvider, Authentication, Server, StorageError, bounded_http, now_epoch,
+};
 
 const BACKCHANNEL_EVENT: &str = "http://schemas.openid.net/event/backchannel-logout";
 
@@ -77,6 +79,9 @@ pub(crate) async fn backchannel_logout(
     let Some(auth) = server.auth.as_ref() else {
         return invalid();
     };
+    if auth.config.provider != AuthProvider::Oidc {
+        return invalid();
+    }
     let Ok(_permit) = auth.logout_admission.try_acquire() else {
         return invalid();
     };

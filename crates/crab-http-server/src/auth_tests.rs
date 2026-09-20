@@ -153,6 +153,43 @@ async fn token(
     )
 }
 
+async fn github_authorize(
+    State(provider): State<Arc<Provider>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Redirect {
+    assert_eq!(params["response_type"], "code");
+    assert_eq!(params["client_id"], "crab-browser");
+    assert_eq!(params["scope"], "read:user");
+    assert_eq!(params["code_challenge_method"], "S256");
+    let code = openidconnect::CsrfToken::new_random().secret().clone();
+    let mut target = Url::parse(&params["redirect_uri"]).unwrap();
+    target
+        .query_pairs_mut()
+        .append_pair("code", &code)
+        .append_pair("state", &params["state"]);
+    provider.codes.lock().await.insert(code, params);
+    Redirect::to(target.as_str())
+}
+
+async fn github_token(State(provider): State<Arc<Provider>>, body: String) -> Json<Value> {
+    let params: HashMap<String, String> = url::form_urlencoded::parse(body.as_bytes())
+        .into_owned()
+        .collect();
+    let flow = provider.codes.lock().await.remove(&params["code"]).unwrap();
+    assert_eq!(params["client_id"], "crab-browser");
+    assert_eq!(params["redirect_uri"], flow["redirect_uri"]);
+    let challenge = PkceCodeChallenge::from_code_verifier_sha256(&PkceCodeVerifier::new(
+        params["code_verifier"].clone(),
+    ));
+    assert_eq!(challenge.as_str(), flow["code_challenge"]);
+    Json(json!({"access_token":"github-access-token","token_type":"bearer"}))
+}
+
+async fn github_user(headers: axum::http::HeaderMap) -> Json<Value> {
+    assert_eq!(headers[header::AUTHORIZATION], "Bearer github-access-token");
+    Json(json!({"id":4242,"login":"octocat","name":"Octo Cat"}))
+}
+
 async fn start_provider(port: u16) -> (Arc<Provider>, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
         .await
@@ -169,6 +206,9 @@ async fn start_provider(port: u16) -> (Arc<Provider>, tokio::task::JoinHandle<()
         .route("/jwks", get(keys))
         .route("/authorize", get(authorize))
         .route("/token", post(token))
+        .route("/github/authorize", get(github_authorize))
+        .route("/github/token", post(github_token))
+        .route("/github/user", get(github_user))
         .with_state(Arc::clone(&provider));
     let task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -187,6 +227,14 @@ struct Harness {
 
 impl Harness {
     async fn new(confidential: bool) -> Self {
+        Self::new_with_auth(confidential, false).await
+    }
+
+    async fn new_github() -> Self {
+        Self::new_with_auth(true, true).await
+    }
+
+    async fn new_with_auth(confidential: bool, github: bool) -> Self {
         let (provider, provider_task) = start_provider(0).await;
         provider.confidential.store(confidential, Ordering::SeqCst);
         let secret_file = confidential.then(|| {
@@ -199,18 +247,34 @@ impl Harness {
         let origin = format!("http://{address}");
         let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
         let root = crate::storage_root::StorageRoot::memory(store.clone(), "");
-        let auth = Authentication::new_durable(
+        let auth_config = if github {
             crate::OidcConfig {
+                provider: crate::AuthProvider::GitHub,
                 issuer: openidconnect::IssuerUrl::new(provider.issuer.clone()).unwrap(),
                 public_url: Url::parse(&origin).unwrap(),
                 client_id: "crab-browser".into(),
                 client_secret_file: secret_file.as_ref().map(|file| file.path().to_owned()),
                 state_key_file: None,
-            },
-            &root,
-        )
-        .await
-        .unwrap();
+                github: Some(crate::GitHubConfig {
+                    authorize_url: format!("{}/github/authorize", provider.issuer),
+                    token_url: format!("{}/github/token", provider.issuer),
+                    api_url: format!("{}/github/", provider.issuer),
+                }),
+            }
+        } else {
+            crate::OidcConfig {
+                provider: crate::AuthProvider::Oidc,
+                issuer: openidconnect::IssuerUrl::new(provider.issuer.clone()).unwrap(),
+                public_url: Url::parse(&origin).unwrap(),
+                client_id: "crab-browser".into(),
+                client_secret_file: secret_file.as_ref().map(|file| file.path().to_owned()),
+                state_key_file: None,
+                github: None,
+            }
+        };
+        let auth = Authentication::new_durable(auth_config, &root)
+            .await
+            .unwrap();
         let protected_branches = vec![crate::BranchProtection {
             branch: "main".into(),
             required_approvals: 1,
@@ -543,6 +607,19 @@ async fn browser_sign_in_enforces_membership_csrf_logout_and_rotated_signing_key
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{action}");
     }
+    h.close().await;
+}
+
+#[tokio::test]
+async fn github_sign_in_uses_pkce_and_a_stable_provider_subject() {
+    let h = Harness::new_github().await;
+    let cookie = h.login().await;
+    let session = h.json("/api/session", &cookie).await;
+    assert_eq!(session["authenticated"], true);
+    assert_eq!(session["mode"], "github");
+    assert_eq!(session["user"]["issuer"], h.provider.issuer.as_str());
+    assert_eq!(session["user"]["subject"], "4242");
+    assert_eq!(session["user"]["name"], "Octo Cat");
     h.close().await;
 }
 

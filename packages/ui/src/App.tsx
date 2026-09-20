@@ -292,7 +292,9 @@ export function App() {
             <div className="notice sign-in">
               <h1>Sign in to Crab</h1>
               <p>
-                Use your team's identity provider to access your repositories.
+                {session.data.mode === "github"
+                  ? "Use GitHub to access your repositories."
+                  : "Use your team's identity provider to access your repositories."}
               </p>
               {url.searchParams.has("auth_error") && (
                 <p className="error" role="alert">
@@ -308,7 +310,9 @@ export function App() {
                   )
                 }
               >
-                Continue to sign in
+                {session.data.mode === "github"
+                  ? "Continue with GitHub"
+                  : "Continue to sign in"}
               </Button>
             </div>
           ) : (

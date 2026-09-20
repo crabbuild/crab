@@ -153,8 +153,32 @@ impl Config {
                 || auth.client_id.is_empty()
             {
                 return Err(Error::Config(
-                    "OIDC requires a client ID, an issuer without query parameters, and a public URL without a path or query",
+                    "browser authentication requires a client ID, an issuer without query parameters, and a public URL without a path or query",
                 ));
+            }
+            if auth.provider == AuthProvider::GitHub {
+                if auth.client_secret_file.is_none() {
+                    return Err(Error::Config(
+                        "GitHub OAuth requires auth.client_secret_file",
+                    ));
+                }
+                let github = auth.github.clone().unwrap_or_default();
+                for endpoint in [
+                    github.authorize_url.as_str(),
+                    github.token_url.as_str(),
+                    github.api_url.as_str(),
+                ] {
+                    let endpoint = Url::parse(endpoint).map_err(|_| {
+                        Error::Config("GitHub OAuth endpoints must be valid identity URLs")
+                    })?;
+                    validate_identity_url(&endpoint, auth.public_url.scheme() == "http")?;
+                }
+                let api_url = Url::parse(&github.api_url).map_err(|_| {
+                    Error::Config("GitHub OAuth endpoints must be valid identity URLs")
+                })?;
+                if !api_url.path().ends_with('/') {
+                    return Err(Error::Config("GitHub OAuth api_url must end with a slash"));
+                }
             }
             if auth.public_url.scheme() == "http" && !self.listen.ip().is_loopback() {
                 return Err(Error::Config(
@@ -163,12 +187,12 @@ impl Config {
             }
             if !self.listen.ip().is_loopback() && auth.state_key_file.is_none() {
                 return Err(Error::Config(
-                    "OIDC deployments beyond loopback require auth.state_key_file",
+                    "browser authentication beyond loopback requires auth.state_key_file",
                 ));
             }
         } else if !self.listen.ip().is_loopback() {
             return Err(Error::Config(
-                "OIDC authentication is required beyond loopback",
+                "browser authentication is required beyond loopback",
             ));
         }
         Ok(())
@@ -311,11 +335,60 @@ fn default_repository_branch() -> String {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OidcConfig {
+    #[serde(default)]
+    pub provider: AuthProvider,
     pub issuer: IssuerUrl,
     pub client_id: String,
     pub public_url: Url,
     pub client_secret_file: Option<PathBuf>,
     pub state_key_file: Option<PathBuf>,
+    #[serde(default)]
+    pub github: Option<GitHubConfig>,
+}
+
+/// Browser authentication protocol selected for the configured identity client.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthProvider {
+    #[default]
+    Oidc,
+    #[serde(rename = "github")]
+    GitHub,
+}
+
+/// GitHub OAuth endpoints. Defaults target github.com; loopback endpoints are
+/// useful for deterministic integration tests and local provider proxies.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubConfig {
+    #[serde(default = "default_github_authorize_url")]
+    pub authorize_url: String,
+    #[serde(default = "default_github_token_url")]
+    pub token_url: String,
+    #[serde(default = "default_github_api_url")]
+    pub api_url: String,
+}
+
+impl Default for GitHubConfig {
+    fn default() -> Self {
+        Self {
+            authorize_url: default_github_authorize_url(),
+            token_url: default_github_token_url(),
+            api_url: default_github_api_url(),
+        }
+    }
+}
+
+fn default_github_authorize_url() -> String {
+    "https://github.com/login/oauth/authorize".to_owned()
+}
+
+fn default_github_token_url() -> String {
+    "https://github.com/login/oauth/access_token".to_owned()
+}
+
+fn default_github_api_url() -> String {
+    "https://api.github.com/".to_owned()
 }
 
 pub(crate) fn validate_identity_url(url: &Url, allow_loopback_http: bool) -> Result<()> {
@@ -407,6 +480,39 @@ mod tests {
         ] {
             assert!(local_config(url).validate().is_err(), "{url}");
         }
+    }
+
+    #[test]
+    fn github_authentication_requires_a_secret_and_bounded_endpoints() {
+        let mut config = local_config("s3://bucket/repositories");
+        config.auth = Some(OidcConfig {
+            provider: AuthProvider::GitHub,
+            issuer: IssuerUrl::new("https://github.com".into()).unwrap(),
+            client_id: "github-client".into(),
+            public_url: Url::parse("http://127.0.0.1:8788").unwrap(),
+            client_secret_file: Some("/run/secrets/github-client".into()),
+            state_key_file: None,
+            github: None,
+        });
+        assert!(config.validate().is_ok());
+
+        config.auth.as_mut().unwrap().client_secret_file = None;
+        assert!(config.validate().is_err());
+
+        let mut config = local_config("s3://bucket/repositories");
+        config.auth = Some(OidcConfig {
+            provider: AuthProvider::GitHub,
+            issuer: IssuerUrl::new("https://github.com".into()).unwrap(),
+            client_id: "github-client".into(),
+            public_url: Url::parse("http://127.0.0.1:8788").unwrap(),
+            client_secret_file: Some("/run/secrets/github-client".into()),
+            state_key_file: None,
+            github: Some(GitHubConfig {
+                api_url: "https://api.github.com/api".into(),
+                ..GitHubConfig::default()
+            }),
+        });
+        assert!(config.validate().is_err());
     }
 
     #[test]

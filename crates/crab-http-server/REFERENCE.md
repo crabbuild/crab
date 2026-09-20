@@ -16,7 +16,7 @@ Use this map to enter the reference without reading it in order.
 | Build and operate the container | [Run the container](#run-the-container) |
 | Understand the process and storage boundaries | [Understand the runtime architecture](#understand-the-runtime-architecture) |
 | Call repository browser APIs | [Repository browser and application APIs](#repository-browser-and-application-apis) |
-| Configure OpenID Connect (OIDC) | [Team sign-in](#team-sign-in) |
+| Configure browser sign-in (OIDC or GitHub OAuth) | [Team sign-in](#team-sign-in) |
 | Clone or fetch with native Git | [Git HTTP reads](#git-http-reads) |
 | Transfer LFS objects | [Git LFS transfers](#git-lfs-transfers) |
 | Push branches and tags | [Native Git push](#native-git-push) |
@@ -36,7 +36,7 @@ flowchart LR
     Git[Native Git client]
     CI[CI integration]
     Server[crab-http-server]
-    Auth[OIDC provider]
+    Auth[OIDC or GitHub provider]
     Temp[Temporary pack and index files]
     Store[(S3, GCS, or Azure Blob root)]
 
@@ -294,7 +294,7 @@ seconds without a restart.
 
 ### Understand local trust mode
 
-Without OIDC, the server accepts loopback listeners only. This mode trusts one
+Without browser authentication, the server accepts loopback listeners only. This mode trusts one
 local operator and exposes every cataloged repository to that principal.
 
 The public listener exposes `GET /livez` as a storage-independent load-balancer
@@ -369,7 +369,7 @@ Replace its identity and storage-root values.
 
 Keep these inputs separate:
 
-- `server.toml`: listeners, storage root, and OIDC configuration
+- `server.toml`: listeners, storage root, and browser authentication configuration
 - `crab-storage.env`: private storage credentials
 - `oidc-client-secret`: optional confidential-client secret
 - `state-key`: at least 32 random bytes, stable across every replica and rollout
@@ -699,7 +699,12 @@ Catalog maintenance also repairs a missing standard Git pack sidecar. It downloa
 
 ## Team sign-in
 
-Team deployments use an OIDC authorization-code client with Proof Key for Code Exchange (PKCE) and the S256 challenge method. The server discovers provider metadata and signing keys; it stores no passwords and never uses email as the authorization identifier.
+Team deployments use a provider-neutral authorization-code client with Proof Key
+for Code Exchange (PKCE) and the S256 challenge method. The default `oidc`
+provider discovers metadata and signing keys; the `github` provider uses
+GitHub's OAuth endpoints and performs the code exchange and user lookup on the
+server. The browser only receives the Crab session cookie. Neither mode stores
+passwords or uses email as the authorization identifier.
 
 ### Configure the identity provider
 
@@ -730,6 +735,7 @@ peer_ca = "/run/secrets/crab-peer/ca.crt"
 url = "s3://your-bucket/repositories"
 
 [auth]
+provider = "oidc"
 issuer = "https://identity.example.com/realms/team"
 client_id = "crab-browser"
 public_url = "https://git.example.com"
@@ -739,14 +745,36 @@ state_key_file = "/run/secrets/crab-state-key"
 
 Omit `client_secret_file` for a public PKCE client. A secret file can end with one newline; other whitespace remains part of the secret.
 
+To use a GitHub OAuth App directly, set `provider = "github"`, use
+`https://github.com` as the identity namespace, and keep the same callback URI:
+
+```toml
+[auth]
+provider = "github"
+issuer = "https://github.com"
+client_id = "1234567890abcdef"
+public_url = "https://git.example.com"
+client_secret_file = "/run/secrets/crab-github-client-secret"
+state_key_file = "/run/secrets/crab-state-key"
+```
+
+GitHub OAuth requires a confidential client secret. The default endpoints are
+`https://github.com/login/oauth/authorize`,
+`https://github.com/login/oauth/access_token`, and `https://api.github.com/`.
+An optional `[auth.github]` table can override all three for a provider proxy or
+a loopback test service; `api_url` must end with `/`. The server sends the
+short-lived GitHub access token only to GitHub's `/user` endpoint, never stores
+it, and uses the stable numeric GitHub user ID as the repository membership
+subject. No GitHub repository scopes are requested.
+
 Terminate Transport Layer Security (TLS) at a reverse proxy and forward the original canonical `Host` to the private loopback listener. Forwarded headers cannot replace the configured origin.
 
 HTTP identity endpoints are allowed only when the issuer, public URL, and listener are loopback addresses. Production identity endpoints require HTTPS.
 
 ### Define repository membership
 
-Each catalog member record binds the provider's stable `sub` claim to a display
-name and explicit grant. Supply records through `--members-file` when creating
+Each catalog member record binds the provider's stable subject (`sub` for OIDC,
+the numeric user ID for GitHub) to a display name and explicit grant. Supply records through `--members-file` when creating
 or adopting a repository. Use `--members-file -` to read the document from
 standard input, including through `kubectl exec --stdin`:
 
@@ -765,7 +793,7 @@ kubectl --namespace crab exec --stdin deployment/crab-http-server -- \
 
 Subjects can contain at most 512 characters. Names can contain at most 160 characters. Subjects and case-insensitive names must be unique within a repository.
 
-When OIDC is configured, the repository administration CLI requires at least
+When browser authentication is configured, the repository administration CLI requires at least
 one `admin` member. It rejects an empty or read/write-only membership before
 touching repository storage, preventing creation of a repository that no
 authenticated operator can administer. Unauthenticated loopback deployments
@@ -846,7 +874,7 @@ at 1 MiB. Login transactions expire after 10 minutes. Each process admits eight
 simultaneous callbacks. Sessions and Git-token records use the shared storage
 root rather than pod memory.
 
-Session cookies use `HttpOnly` and `SameSite=Lax`. HTTPS deployments also use `Secure` and the `__Host-` prefix. Sessions expire at the earlier of ID-token expiry or eight hours. The server does not retain refresh tokens.
+Session cookies use `HttpOnly` and `SameSite=Lax`. HTTPS deployments also use `Secure` and the `__Host-` prefix. OIDC sessions expire at the earlier of ID-token expiry or eight hours; GitHub sessions expire after eight hours. The server does not retain refresh tokens or GitHub access tokens.
 
 Restarting or replacing a replica preserves sessions and Git tokens. Logout
 requires the canonical `Origin` and the session's cross-site request forgery
@@ -881,6 +909,15 @@ out all replicas inside that maximum session lifetime. Verify delivery by
 checking that both a browser request and a Git credential fail on their next
 request. Without a delivered Logout Token, arbitrary provider-side revocation
 still does not invalidate an issued Crab session before expiry.
+
+The back-channel endpoint is enabled only for `provider = "oidc"`. GitHub's
+OAuth flow does not issue signed OIDC Logout Tokens, so a GitHub provider-side
+revocation does not immediately terminate a Crab session; use Crab logout or
+wait for the eight-hour session limit.
+
+If GitHub sign-in must retain signed back-channel logout, configure GitHub in
+an OIDC broker and point Crab at the broker with `provider = "oidc"`; the UI and
+membership subjects then remain provider-neutral.
 
 `GET /api/session` returns the current account and CSRF token to the same-origin frontend. Anonymous repository APIs return HTTP 401. No cloud credential reaches the browser.
 

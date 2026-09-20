@@ -23,13 +23,14 @@ use openidconnect::{
     RedirectUrl, Scope, TokenResponse,
     core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 use tokio::sync::{Mutex, Semaphore};
 use url::Url;
 
 use crate::{
-    OidcConfig, RepositoryAccess, RepositoryConfig, config::validate_identity_url, server::Server,
+    AuthProvider, OidcConfig, RepositoryAccess, RepositoryConfig, config::validate_identity_url,
+    server::Server,
 };
 
 type Client = CoreClient<
@@ -211,6 +212,7 @@ impl Principal {
 }
 
 struct Flow {
+    provider: AuthProvider,
     nonce: Nonce,
     verifier: PkceCodeVerifier,
     return_to: String,
@@ -226,6 +228,8 @@ struct AuthState {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct StoredFlow {
+    #[serde(default)]
+    provider: AuthProvider,
     nonce: String,
     verifier: String,
     return_to: String,
@@ -276,7 +280,7 @@ pub(crate) struct Authentication {
     config: OidcConfig,
     secret: Option<ClientSecret>,
     http: reqwest::Client,
-    client: Client,
+    client: Option<Client>,
     flows: Mutex<HashMap<Key, Flow>>,
     sessions: Mutex<HashMap<Key, Arc<Session>>>,
     git_tokens: Mutex<HashMap<Key, Arc<GitToken>>>,
@@ -336,7 +340,10 @@ impl Authentication {
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(AuthError::provider)?;
-        let client = discover(&config, secret.clone(), &http).await?;
+        let client = match config.provider {
+            AuthProvider::Oidc => Some(discover(&config, secret.clone(), &http).await?),
+            AuthProvider::GitHub => None,
+        };
         if let Some(state) = &state {
             state.migration_active().await?;
         }
@@ -436,6 +443,7 @@ impl Authentication {
             return Ok(());
         };
         let record = StoredFlow {
+            provider: flow.provider,
             nonce: flow.nonce.secret().clone(),
             verifier: flow.verifier.secret().clone(),
             return_to: flow.return_to,
@@ -486,6 +494,7 @@ impl Authentication {
                 other => AuthError::Storage(other),
             })?;
         Ok(Flow {
+            provider: record.provider,
             nonce: Nonce::new(record.nonce),
             verifier: PkceCodeVerifier::new(record.verifier),
             return_to: record.return_to,
@@ -999,6 +1008,14 @@ pub(crate) async fn login(
 ) -> Result<Response, AuthError> {
     let auth = server.auth.as_ref().ok_or(AuthError::Invalid)?;
     let return_to = query.return_to.unwrap_or_else(|| "/".into());
+    validate_return_to(auth, &return_to)?;
+    match auth.config.provider {
+        AuthProvider::Oidc => login_oidc(auth, return_to).await,
+        AuthProvider::GitHub => login_github(auth, return_to).await,
+    }
+}
+
+fn validate_return_to(auth: &Authentication, return_to: &str) -> Result<(), AuthError> {
     if !return_to.starts_with('/')
         || return_to.starts_with("//")
         || return_to.contains('\\')
@@ -1009,16 +1026,20 @@ pub(crate) async fn login(
     let destination = auth
         .config
         .public_url
-        .join(&return_to)
+        .join(return_to)
         .map_err(AuthError::provider)?;
     if destination.origin() != auth.config.public_url.origin()
         || destination.path().starts_with("/auth/")
     {
         return Err(AuthError::Invalid);
     }
+    Ok(())
+}
+
+async fn login_oidc(auth: &Authentication, return_to: String) -> Result<Response, AuthError> {
+    let client = auth.client.as_ref().ok_or(AuthError::Invalid)?;
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
-    let (url, state, nonce) = auth
-        .client
+    let (url, state, nonce) = client
         .authorize_url(
             CoreAuthenticationFlow::AuthorizationCode,
             CsrfToken::new_random,
@@ -1030,6 +1051,53 @@ pub(crate) async fn login(
     auth.store_flow(
         key(state.secret()),
         Flow {
+            provider: AuthProvider::Oidc,
+            nonce,
+            verifier,
+            return_to,
+            expires_at: now_epoch()? + FLOW_LIFETIME.as_secs(),
+        },
+    )
+    .await?;
+    Ok((
+        [(
+            header::SET_COOKIE,
+            auth.cookie(true, state.secret(), FLOW_LIFETIME)?,
+        )],
+        Redirect::to(url.as_str()),
+    )
+        .into_response())
+}
+
+async fn login_github(auth: &Authentication, return_to: String) -> Result<Response, AuthError> {
+    let github = auth.config.github.clone().unwrap_or_default();
+    let authorize_url = Url::parse(&github.authorize_url).map_err(AuthError::provider)?;
+    validate_identity_url(&authorize_url, auth.config.public_url.scheme() == "http")
+        .map_err(AuthError::provider)?;
+    let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
+    let state = CsrfToken::new_random();
+    let nonce = Nonce::new_random();
+    let redirect = auth
+        .config
+        .public_url
+        .join("auth/callback")
+        .map_err(AuthError::provider)?;
+    let mut url = authorize_url;
+    {
+        let mut query = url.query_pairs_mut();
+        query
+            .append_pair("client_id", &auth.config.client_id)
+            .append_pair("redirect_uri", redirect.as_str())
+            .append_pair("response_type", "code")
+            .append_pair("scope", "read:user")
+            .append_pair("state", state.secret())
+            .append_pair("code_challenge", challenge.as_str())
+            .append_pair("code_challenge_method", "S256");
+    }
+    auth.store_flow(
+        key(state.secret()),
+        Flow {
+            provider: AuthProvider::GitHub,
             nonce,
             verifier,
             return_to,
@@ -1058,7 +1126,12 @@ pub(crate) async fn callback(
     headers: HeaderMap,
     Query(query): Query<CallbackQuery>,
 ) -> Response {
-    match finish_login(&server, headers, query).await {
+    let result = match server.auth.as_ref().map(|auth| auth.config.provider) {
+        Some(AuthProvider::Oidc) => finish_login(&server, headers, query).await,
+        Some(AuthProvider::GitHub) => finish_github_login(&server, headers, query).await,
+        None => Err(AuthError::Invalid),
+    };
+    match result {
         Ok(response) => response,
         Err(_) => Redirect::to("/?auth_error=sign_in_failed").into_response(),
     }
@@ -1078,6 +1151,9 @@ async fn finish_login(
     }
     // Consume only after binding the state to this browser. Replays cannot exchange a code.
     let flow = auth.take_flow(key(&state)).await?;
+    if flow.provider != AuthProvider::Oidc {
+        return Err(AuthError::Invalid);
+    }
     let code = query.code.ok_or(AuthError::Invalid)?;
     // Discover fresh signing keys at every callback so provider rotation does not require a restart.
     let client = discover(&auth.config, auth.secret.clone(), &auth.http).await?;
@@ -1145,14 +1221,32 @@ async fn finish_login(
         .map(|name| name.as_str())
         .unwrap_or(&subject)
         .to_owned();
-    let token = CsrfToken::new_random_len(32);
-    let session_key = key(token.secret());
-    let session = Arc::new(Session {
-        identity: Identity {
+    establish_session(
+        auth,
+        &headers,
+        flow.return_to,
+        Identity {
             issuer: auth.config.issuer.as_str().to_owned(),
             subject,
             name,
         },
+        lifetime,
+    )
+    .await
+}
+
+async fn establish_session(
+    auth: &Authentication,
+    headers: &HeaderMap,
+    return_to: String,
+    identity: Identity,
+    lifetime: Duration,
+) -> Result<Response, AuthError> {
+    let now = now_epoch()?;
+    let token = CsrfToken::new_random_len(32);
+    let session_key = key(token.secret());
+    let session = Arc::new(Session {
+        identity,
         csrf: CsrfToken::new_random_len(32).secret().clone(),
         expires_at: now
             .checked_add(lifetime.as_secs())
@@ -1160,11 +1254,11 @@ async fn finish_login(
         session_key,
         revoked: AtomicBool::new(false),
     });
-    if let Some(old) = cookie_value(&headers, auth.cookie_name(false)) {
+    if let Some(old) = cookie_value(headers, auth.cookie_name(false)) {
         auth.remove_session(key(old)).await?;
     }
     auth.store_session(session).await?;
-    let mut response = Redirect::to(&flow.return_to).into_response();
+    let mut response = Redirect::to(&return_to).into_response();
     // Axum's tuple header arrays replace duplicate names; both cookies must reach the browser.
     response.headers_mut().append(
         header::SET_COOKIE,
@@ -1176,14 +1270,157 @@ async fn finish_login(
     Ok(response)
 }
 
-pub(crate) async fn session(Extension(principal): Extension<Principal>) -> Json<serde_json::Value> {
+#[derive(Deserialize)]
+struct GitHubTokenResponse {
+    access_token: String,
+}
+
+#[derive(Deserialize)]
+struct GitHubUserResponse {
+    id: u64,
+    login: String,
+    name: Option<String>,
+}
+
+fn github_endpoints(auth: &Authentication) -> Result<(Url, Url, Url), AuthError> {
+    let github = auth.config.github.clone().unwrap_or_default();
+    let authorize = Url::parse(&github.authorize_url).map_err(AuthError::provider)?;
+    let token = Url::parse(&github.token_url).map_err(AuthError::provider)?;
+    let api = Url::parse(&github.api_url).map_err(AuthError::provider)?;
+    let allow_http = auth.config.public_url.scheme() == "http";
+    for endpoint in [&authorize, &token, &api] {
+        validate_identity_url(endpoint, allow_http).map_err(AuthError::provider)?;
+    }
+    if !api.path().ends_with('/') {
+        return Err(AuthError::Invalid);
+    }
+    Ok((authorize, token, api))
+}
+
+async fn bounded_json<T: DeserializeOwned>(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<T, AuthError> {
+    if !response.status().is_success() {
+        return Err(AuthError::provider(std::io::Error::other(
+            "GitHub endpoint returned an unsuccessful response",
+        )));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(AuthError::provider)? {
+        if body.len() + chunk.len() > limit {
+            return Err(AuthError::Invalid);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).map_err(AuthError::provider)
+}
+
+async fn finish_github_login(
+    server: &Server,
+    headers: HeaderMap,
+    query: CallbackQuery,
+) -> Result<Response, AuthError> {
+    let auth = server.auth.as_ref().ok_or(AuthError::Invalid)?;
+    let _permit = auth.admission.try_acquire().map_err(|_| AuthError::Busy)?;
+    let state = query.state.ok_or(AuthError::Invalid)?;
+    let cookie = cookie_value(&headers, auth.cookie_name(true)).ok_or(AuthError::Invalid)?;
+    if blake3::hash(state.as_bytes()) != blake3::hash(cookie.as_bytes()) {
+        return Err(AuthError::Invalid);
+    }
+    let flow = auth.take_flow(key(&state)).await?;
+    if flow.provider != AuthProvider::GitHub {
+        return Err(AuthError::Invalid);
+    }
+    let code = query.code.ok_or(AuthError::Invalid)?;
+    let secret = auth.secret.as_ref().ok_or(AuthError::Invalid)?;
+    let (_, token_url, api_url) = github_endpoints(auth)?;
+    let redirect = auth
+        .config
+        .public_url
+        .join("auth/callback")
+        .map_err(AuthError::provider)?;
+    let client_secret = secret.secret().as_str();
+    let form = [
+        ("client_id", auth.config.client_id.as_str()),
+        ("client_secret", client_secret),
+        ("code", code.as_str()),
+        ("redirect_uri", redirect.as_str()),
+        ("code_verifier", flow.verifier.secret().as_str()),
+    ];
+    let token_response = auth
+        .http
+        .post(token_url)
+        .header(header::ACCEPT, "application/json")
+        .header(header::USER_AGENT, "crab-http-server")
+        .form(&form)
+        .send()
+        .await
+        .map_err(AuthError::provider)?;
+    let token: GitHubTokenResponse = bounded_json(token_response, 64 * 1024).await?;
+    if token.access_token.is_empty() || token.access_token.len() > 16 * 1024 {
+        return Err(AuthError::Invalid);
+    }
+    let user_url = api_url.join("user").map_err(AuthError::provider)?;
+    let user_response = auth
+        .http
+        .get(user_url)
+        .header(header::ACCEPT, "application/vnd.github+json")
+        .header(header::USER_AGENT, "crab-http-server")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .bearer_auth(&token.access_token)
+        .send()
+        .await
+        .map_err(AuthError::provider)?;
+    let user: GitHubUserResponse = bounded_json(user_response, 64 * 1024).await?;
+    drop(token);
+    if user.id == 0
+        || user.login.is_empty()
+        || user.login.chars().any(char::is_control)
+        || user.login.chars().count() > 160
+    {
+        return Err(AuthError::Invalid);
+    }
+    let name = user
+        .name
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(user.login);
+    if name.chars().any(char::is_control) || name.chars().count() > 160 {
+        return Err(AuthError::Invalid);
+    }
+    establish_session(
+        auth,
+        &headers,
+        flow.return_to,
+        Identity {
+            issuer: auth.config.issuer.as_str().to_owned(),
+            subject: user.id.to_string(),
+            name,
+        },
+        SESSION_LIFETIME,
+    )
+    .await
+}
+
+pub(crate) async fn session(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+) -> Json<serde_json::Value> {
+    let mode = server
+        .auth
+        .as_ref()
+        .map(|auth| match auth.config.provider {
+            AuthProvider::Oidc => "oidc",
+            AuthProvider::GitHub => "github",
+        })
+        .unwrap_or("local");
     Json(match principal {
         Principal::Local => json!({"authenticated":true,"mode":"local","user":null,"csrf":null}),
         Principal::Anonymous | Principal::Git(_) => {
-            json!({"authenticated":false,"mode":"oidc","user":null,"csrf":null})
+            json!({"authenticated":false,"mode":mode,"user":null,"csrf":null})
         }
         Principal::User(session) => {
-            json!({"authenticated":true,"mode":"oidc","user":session.identity,"csrf":session.csrf})
+            json!({"authenticated":true,"mode":mode,"user":session.identity,"csrf":session.csrf})
         }
     })
 }
@@ -1285,22 +1522,24 @@ mod tests {
     #[tokio::test]
     async fn expired_sessions_are_rejected_and_https_cookies_cannot_be_shadowed() {
         let config = OidcConfig {
+            provider: AuthProvider::Oidc,
             issuer: openidconnect::IssuerUrl::new("https://id.example".into()).unwrap(),
             public_url: Url::parse("https://git.example").unwrap(),
             client_id: "crab".into(),
             client_secret_file: None,
             state_key_file: None,
+            github: None,
         };
         let metadata: CoreProviderMetadata = serde_json::from_value(json!({"issuer":"https://id.example","authorization_endpoint":"https://id.example/auth","jwks_uri":"https://id.example/keys","response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]})).unwrap();
         let auth = Authentication {
             config,
             secret: None,
             http: reqwest::Client::new(),
-            client: CoreClient::from_provider_metadata(
+            client: Some(CoreClient::from_provider_metadata(
                 metadata,
                 ClientId::new("crab".into()),
                 None,
-            ),
+            )),
             flows: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             git_tokens: Mutex::new(HashMap::new()),
@@ -1353,11 +1592,13 @@ mod tests {
 
     fn shared_auth(store: Store) -> Authentication {
         let config = OidcConfig {
+            provider: AuthProvider::Oidc,
             issuer: openidconnect::IssuerUrl::new("https://id.example".into()).unwrap(),
             public_url: Url::parse("https://git.example").unwrap(),
             client_id: "crab".into(),
             client_secret_file: None,
             state_key_file: None,
+            github: None,
         };
         let metadata: CoreProviderMetadata = serde_json::from_value(json!({
             "issuer":"https://id.example",
@@ -1372,11 +1613,11 @@ mod tests {
             config,
             secret: None,
             http: reqwest::Client::new(),
-            client: CoreClient::from_provider_metadata(
+            client: Some(CoreClient::from_provider_metadata(
                 metadata,
                 ClientId::new("crab".into()),
                 None,
-            ),
+            )),
             flows: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             git_tokens: Mutex::new(HashMap::new()),
@@ -1434,6 +1675,7 @@ mod tests {
             .store_flow(
                 flow_key,
                 Flow {
+                    provider: AuthProvider::Oidc,
                     nonce: Nonce::new("nonce".into()),
                     verifier: PkceCodeVerifier::new("v".repeat(43)),
                     return_to: "/team/private".into(),

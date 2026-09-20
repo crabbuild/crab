@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
 export interface Session {
   authenticated: boolean;
-  mode: "local" | "oidc";
+  mode: "local" | "oidc" | "github";
   user: { issuer: string; subject: string; name: string } | null;
   csrf: string | null;
 }
