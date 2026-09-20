@@ -9,13 +9,14 @@ use crab_cell_app::ApplicationHandle;
 use crab_cell_host::CellNodeBuilder;
 use crab_cell_runtime::{
     ActivitySupervisor, ApplicationId, CatalogRole, CellClient, CellStorageLayout, CellTarget,
-    EffectClaimRequest, Error, MutationIdentity, NodeLeaseGuard, QualificationExecution,
+    Digest, EffectClaimRequest, Error, MutationIdentity, NodeLeaseGuard, QualificationExecution,
     QualificationOperation, QualificationOperationExecutor, QualificationProfile,
-    QualificationWorkload, RequestId, Result, SqlBatch, SqlStatement, SqlValue, SqlWorkerPool,
-    TenantId, install_blob_schema, install_cron_schema, install_kv_schema, install_queue_schema,
-    install_workflow_schema, partition_for_shard,
+    QualificationRunner, QualificationWorkload, RequestId, Result, SqlBatch, SqlStatement,
+    SqlValue, SqlWorkerPool, TenantId, install_blob_schema, install_cron_schema, install_kv_schema,
+    install_queue_schema, install_workflow_schema, partition_for_shard,
 };
 use crab_storage::Store;
+use ed25519_dalek::SigningKey;
 use object_store::{memory::InMemory, path::Path};
 use tokio_util::sync::CancellationToken;
 
@@ -315,8 +316,7 @@ async fn public_cell_node_runs_typed_primitive_workload() {
             .as_millis(),
     )
     .expect("current epoch fits mutation identity");
-    let profile = QualificationProfile::new("public-host-primitives".into(), 1, 16, 1, 5_000)
-        .expect("qualification profile");
+    let profile = QualificationProfile::pr_contract();
     let workload = QualificationWorkload::generate_with_size(&profile, 91, 1, 16, 1)
         .expect("qualification workload");
     let mut executor = PublicHostQualificationExecutor {
@@ -334,7 +334,48 @@ async fn public_cell_node_runs_typed_primitive_workload() {
     artifact
         .verify_for_profile(&profile)
         .expect("run artifact profile");
-    assert!(!artifact.encode().expect("run artifact encoding").is_empty());
+    let artifact_bytes = artifact.encode().expect("run artifact encoding");
+    let signing_key = SigningKey::from_bytes(&[75; 32]);
+    let trusted_signer = signing_key.verifying_key().to_bytes();
+    let image = Digest::from_bytes([73; 32]);
+    let receipt = QualificationRunner::new(signing_key)
+        .emit_with_profile_and_evidence(
+            &profile,
+            "public-host-source".into(),
+            image,
+            "local".into(),
+            "primitives".into(),
+            "none".into(),
+            summary.metrics().expect("receipt metrics"),
+            &artifact_bytes,
+            true,
+            (
+                "rustc".into(),
+                "debug".into(),
+                "local".into(),
+                workload.seed(),
+                0,
+                0,
+                false,
+            ),
+            1,
+            2,
+            b"public-host",
+            vec![Digest::from_bytes(
+                *blake3::hash(&artifact_bytes).as_bytes(),
+            )],
+            Vec::new(),
+        )
+        .expect("qualification receipt");
+    receipt
+        .verify_for_profile_with_signer(
+            "public-host-source",
+            image,
+            &profile,
+            &[&artifact_bytes],
+            trusted_signer,
+        )
+        .expect("qualification receipt verification");
 
     drop(typed);
     node.shutdown().await.expect("qualification shutdown");
