@@ -987,6 +987,28 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
         &partition_for_shard(0),
     )
     .unwrap();
+    let queue_target = CellTarget::new(
+        tenant,
+        application_id,
+        QUEUE_NAMESPACE,
+        &partition_for_shard(0),
+    )
+    .unwrap();
+    assert!(typed.sql::<ReferenceSql>(queue_target).is_err());
+    assert!(typed.kv::<ReferenceKv>(SQL_NAMESPACE).is_err());
+    assert!(
+        typed
+            .effects::<ReferenceWorkflow>(sql_target.clone())
+            .is_err()
+    );
+    let foreign_target = CellTarget::new(
+        TenantId::from_bytes([99; 16]),
+        application_id,
+        SQL_NAMESPACE,
+        &partition_for_shard(0),
+    )
+    .unwrap();
+    assert!(typed.sql::<ReferenceSql>(foreign_target).is_err());
     let sql = typed.sql::<ReferenceSql>(sql_target.clone()).unwrap();
     let sql_result = sql
         .batch(

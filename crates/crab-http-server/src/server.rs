@@ -2512,6 +2512,23 @@ mod tests {
         assert!(dropped.load(Ordering::Acquire));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cell_task_facility_aborts_unfinished_tasks_when_deadline_expires() {
+        let facility = CellTaskFacility::new(CancellationToken::new(), CancellationToken::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let signal = DropSignal(Arc::clone(&dropped));
+        facility.spawn(async move {
+            let _signal = signal;
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+
+        let result = tokio::time::timeout(Duration::from_millis(10), facility.drain()).await;
+        assert!(result.is_err());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(dropped.load(Ordering::Acquire));
+    }
+
     #[tokio::test]
     async fn storage_preflight_leaves_no_live_probe_object() {
         let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
