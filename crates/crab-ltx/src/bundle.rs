@@ -7,8 +7,8 @@ use crab_storage::{MultipartUploadSource, StorageError};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
-    fs::File,
-    io::{Read, Seek, SeekFrom},
+    fs::{File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -86,6 +86,109 @@ pub struct Bundle {
     rows: Vec<BundleRow>,
     digest: [u8; 32],
     length: u64,
+}
+
+/// File-backed builder for a verified bundle.
+///
+/// Segment bodies are written as they arrive; only the bounded row table is
+/// retained in memory. `finish` seals the footer and revalidates the complete
+/// envelope before returning the owned temporary bundle.
+pub struct BundleBuilder {
+    path: TempPath,
+    rows: Vec<BundleRow>,
+    identities: BTreeSet<(String, String, u64, u64)>,
+    payload_len: u64,
+    limits: Limits,
+    poisoned: bool,
+}
+
+impl BundleBuilder {
+    /// Creates a private temporary bundle in an existing runtime scratch dir.
+    pub fn new_temp(directory: &Path, limits: Limits) -> Result<Self> {
+        let limits = limits.validate()?;
+        let file = tempfile::Builder::new()
+            .prefix(".crab-bundle-")
+            .tempfile_in(directory)?;
+        Ok(Self {
+            path: file.into_temp_path(),
+            rows: Vec::new(),
+            identities: BTreeSet::new(),
+            payload_len: 0,
+            limits,
+            poisoned: false,
+        })
+    }
+
+    /// Appends one fully verified segment without retaining its body.
+    pub fn push(&mut self, entry: BundleEntry) -> Result<()> {
+        if self.poisoned {
+            return Err(CrabError::InvalidState("bundle builder is poisoned"));
+        }
+        if self.rows.len() >= self.limits.max_segments
+            || entry.repository.is_empty()
+            || entry.repository.len() > 4096
+            || !valid_epoch(&entry.epoch)
+        {
+            return Err(CrabError::Limit("bundle entries"));
+        }
+        crate::recovery::verify_segment(&entry.bytes, &entry.info, self.limits)?;
+        let identity = (
+            entry.repository.clone(),
+            entry.epoch.clone(),
+            entry.info.min_txid,
+            entry.info.max_txid,
+        );
+        if !self.identities.insert(identity) {
+            return Err(CrabError::LTXCorrupted);
+        }
+        let next_len = self
+            .payload_len
+            .checked_add(entry.info.size_bytes)
+            .ok_or(CrabError::Limit("bundle bytes"))?;
+        if next_len > self.limits.max_plan_bytes {
+            return Err(CrabError::Limit("bundle bytes"));
+        }
+        let write_result = OpenOptions::new()
+            .append(true)
+            .open(&self.path)
+            .and_then(|mut file| file.write_all(&entry.bytes));
+        if let Err(error) = write_result {
+            self.poisoned = true;
+            return Err(error.into());
+        }
+        self.rows.push(BundleRow {
+            repository: entry.repository,
+            epoch: entry.epoch,
+            info: entry.info,
+            offset: self.payload_len,
+        });
+        self.payload_len = next_len;
+        Ok(())
+    }
+
+    /// Seals, syncs, validates, and transfers ownership of the bundle file.
+    pub fn finish(self) -> Result<Bundle> {
+        if self.poisoned || self.rows.is_empty() {
+            return Err(CrabError::InvalidState("bundle builder has no valid rows"));
+        }
+        let footer = serde_json::to_vec(&self.rows)?;
+        let footer_len =
+            u32::try_from(footer.len()).map_err(|_| CrabError::Limit("bundle footer"))?;
+        let total = self
+            .payload_len
+            .checked_add(footer.len() as u64)
+            .and_then(|length| length.checked_add(8))
+            .ok_or(CrabError::Limit("bundle bytes"))?;
+        if total > self.limits.max_plan_bytes {
+            return Err(CrabError::Limit("bundle bytes"));
+        }
+        let mut file = OpenOptions::new().append(true).open(&self.path)?;
+        file.write_all(&footer)?;
+        file.write_all(&footer_len.to_le_bytes())?;
+        file.write_all(b"CRB1")?;
+        file.sync_all()?;
+        Bundle::decode_temp_file(self.path, self.limits)
+    }
 }
 
 impl Bundle {
@@ -261,7 +364,8 @@ impl Bundle {
         self.read_all()
     }
 
-    pub(crate) fn upload_source(&self) -> Arc<dyn MultipartUploadSource> {
+    /// Returns a re-openable multipart source for the verified envelope.
+    pub fn upload_source(&self) -> Arc<dyn MultipartUploadSource> {
         Arc::new(BundleUploadSource {
             body: self.body.clone(),
             length: self.length,

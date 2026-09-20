@@ -9,6 +9,7 @@ use crate::{
 };
 
 const MAX_MANIFEST_BYTES: u64 = 2 << 20;
+const MULTIPART_BYTES: usize = 8 << 20;
 
 /// One control-ready pointer returned after bundle and manifest publication.
 pub struct PinnedRecoveryCell {
@@ -59,6 +60,12 @@ impl RecoveryManifestStore {
         self
     }
 
+    pub(crate) fn recovery_scratch_directory(&self) -> std::path::PathBuf {
+        self.recovery_scratch
+            .clone()
+            .unwrap_or_else(std::env::temp_dir)
+    }
+
     /// Publishes every verified bundle before one content-addressed manifest.
     pub async fn pin(
         &self,
@@ -74,14 +81,13 @@ impl RecoveryManifestStore {
         }
         let mut rows = Vec::with_capacity(tails.len());
         for tail in &tails {
-            let bundle = tail.overlay.bundle().read_all()?;
             let bundle_digest = tail.overlay.bundle().digest();
             let path = self.layout.node_log_bundle_path(
                 leader_session.as_bytes(),
                 log_epoch,
                 &bundle_digest,
             );
-            publish_immutable(&self.layout, &path, &bundle, self.limits.max_plan_bytes).await?;
+            publish_bundle_immutable(&self.layout, &path, tail.overlay.bundle()).await?;
             let predecessor = tail.overlay.predecessor();
             rows.push(ManifestCell {
                 application: tail.application,
@@ -434,6 +440,61 @@ async fn publish_immutable(
             Err(StorageError::NotFound { .. }) => Err(create_error.into()),
             Err(error) => Err(error.into()),
         },
+    }
+}
+
+async fn publish_bundle_immutable(
+    layout: &CellStorageLayout,
+    path: &object_store::path::Path,
+    bundle: &crab_ltx::bundle::Bundle,
+) -> Result<()> {
+    let store = layout.store();
+    let digest = bundle.digest();
+    let size = bundle.len();
+    match store.verify_size_and_hash(path, size, &digest).await {
+        Ok(()) => return Ok(()),
+        Err(StorageError::NotFound { .. }) => {}
+        Err(StorageError::CorruptObject { .. }) => {
+            return Err(Error::Node("recovery bundle path contains different bytes"));
+        }
+        Err(error) => return Err(error.into()),
+    }
+
+    let staged = object_store::path::Path::from(format!("{path}.staging"));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let upload = store
+        .put_multipart_source_retry(
+            &staged,
+            bundle.upload_source(),
+            size,
+            digest,
+            MULTIPART_BYTES,
+            &cancel,
+            None,
+        )
+        .await;
+    if let Err(error) = upload {
+        return match cleanup_staged(store, &staged).await {
+            Ok(()) => Err(error.into()),
+            Err(cleanup_error) => Err(cleanup_error),
+        };
+    }
+    let promotion = store
+        .promote_staged_content_addressed_object(&staged, path, digest, size)
+        .await;
+    match cleanup_staged(store, &staged).await {
+        Err(error) => Err(error),
+        Ok(()) => promotion.map(|_| ()).map_err(Into::into),
+    }
+}
+
+async fn cleanup_staged(
+    store: &crab_storage::Store,
+    path: &object_store::path::Path,
+) -> Result<()> {
+    match store.delete(path).await {
+        Ok(()) | Err(StorageError::NotFound { .. }) => Ok(()),
+        Err(error) => Err(error.into()),
     }
 }
 

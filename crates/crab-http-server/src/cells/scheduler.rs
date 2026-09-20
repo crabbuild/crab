@@ -16,7 +16,7 @@ use crab_cell_runtime::{
     MaintenanceTickRequest, MigrationFailure, MigrationProgressAttempt, MigrationProgressStore,
     MutationIdentity, NodeDirectory, NodeId, NodeLogRecovery, NodeLogTransport,
     RecoveryCoordinator, RecoveryManifestStore, Registry, ReleaseState, ReleaseStore, RequestId,
-    SchedulerFleet, SessionId, preferred_scanner, recoverable_cells_from_frames,
+    SchedulerFleet, SessionId, preferred_scanner, recoverable_cells_from_scopes,
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -725,6 +725,7 @@ impl RepositoryCellScheduler {
                 manifests: self.recovery_manifests.clone(),
                 transport: Arc::clone(transport),
                 recovery_disk: self.recovery_disk.clone(),
+                recovery_scratch: self.router.recovery_scratch_directory(),
                 metrics: self.metrics.clone(),
             };
             let claimant = self.session;
@@ -906,6 +907,7 @@ struct RecoveryContext {
     manifests: RecoveryManifestStore,
     transport: Arc<dyn NodeLogTransport>,
     recovery_disk: crab_cell_runtime::DiskBudget,
+    recovery_scratch: std::path::PathBuf,
     metrics: Option<crate::metrics::Metrics>,
 }
 
@@ -921,6 +923,7 @@ async fn recover_node_session(
         manifests,
         transport,
         recovery_disk,
+        recovery_scratch,
         metrics,
     } = context;
     let phase_started = std::time::Instant::now();
@@ -957,7 +960,9 @@ async fn recover_node_session(
         &fenced,
         super::repository_replica_limits(),
         recovery_disk,
-    ) {
+    )
+    .map(|recovery| recovery.with_recovery_scratch(recovery_scratch))
+    {
         Ok(recovery) => recovery,
         Err(error) => {
             if let Some(metrics) = &metrics {
@@ -970,7 +975,9 @@ async fn recover_node_session(
         }
     };
     let sealed =
-        match await_with_claim_heartbeat(&directory, &mut fenced, recovery.ensure_sealed()).await {
+        match await_with_claim_heartbeat(&directory, &mut fenced, recovery.ensure_sealed_bounded())
+            .await
+        {
             Ok(sealed) => sealed,
             Err(error) => {
                 if let Some(metrics) = &metrics {
@@ -992,18 +999,30 @@ async fn recover_node_session(
         ?session,
         ?claimant,
         durable_through = sealed.durable_through,
-        frames = sealed.frames.len(),
+        frames = sealed.frame_count(),
         "sealed node-log witnesses"
     );
     let phase_started = std::time::Instant::now();
+    let scopes = match sealed.scopes(super::repository_replica_limits()) {
+        Ok(scopes) => scopes,
+        Err(error) => {
+            if let Some(metrics) = &metrics {
+                metrics.record_recovery_phase(
+                    crate::metrics::RecoveryPhase::ScopeValidation,
+                    phase_started.elapsed(),
+                );
+            }
+            return Err(error.into());
+        }
+    };
     let cells = match await_with_claim_heartbeat(
         &directory,
         &mut fenced,
-        recoverable_cells_from_frames(
+        recoverable_cells_from_scopes(
             &catalog,
             &authority,
             session,
-            &sealed.frames,
+            &scopes,
             MAX_NODE_RECOVERY_CELLS,
         ),
     )

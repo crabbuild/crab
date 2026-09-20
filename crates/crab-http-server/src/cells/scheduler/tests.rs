@@ -412,6 +412,7 @@ async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
             ),
             transport,
             recovery_disk: crab_ltx::DiskBudget::new(512 << 20),
+            recovery_scratch: std::env::temp_dir(),
             metrics: None,
         },
         leader,

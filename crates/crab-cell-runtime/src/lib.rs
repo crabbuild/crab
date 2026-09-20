@@ -124,12 +124,13 @@ pub use node_durability::{NodeDurability, NodeLogAuthority};
 pub use node_lease::NodeLeaseGuard;
 pub use node_log::{
     CommitTicket, DurabilityGate, DurabilityProof, DurabilitySource, NodeLogRotationBarrier,
-    RecoveredCellTail, RecoveryBase, RotatedNodeLog, build_recovery_overlays, close_node_log,
-    rotate_node_log,
+    RecoveredCellTail, RecoveryBase, RotatedNodeLog, build_recovery_overlays,
+    build_recovery_overlays_file_backed, build_recovery_overlays_file_backed_stream,
+    close_node_log, rotate_node_log,
 };
 pub use node_log_recovery::{
     CompletedNodeRecovery, NodeLogRecovery, RecoveryCell, RecoveryCoordinator, SealedSession,
-    recoverable_cells, recoverable_cells_from_frames,
+    recoverable_cells, recoverable_cells_from_frames, recoverable_cells_from_scopes,
 };
 pub use node_log_shipper::{NodeLogShipper, NodeLogSubmission};
 pub use node_log_state::{NodeLogPhase, NodeLogStatus, NodeRecoveryClaim};
