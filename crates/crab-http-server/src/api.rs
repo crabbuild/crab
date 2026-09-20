@@ -716,10 +716,23 @@ async fn execute(
                     None => None,
                 };
                 if matches!(action, Action::Diff) {
-                    let old = match &base { Some(base) => optional_blob(base, &path, &operation).await?, None => None };
-                    let new = optional_blob(&snapshot, &path, &operation).await?;
-                    if old.is_none() && new.is_none() { return Err(Error::PathNotFound); }
-                    json!({"base":base.as_ref().map(|base|base.commit_oid().to_string()),"old":old.as_ref().map(content_json),"new":new.as_ref().map(content_json),"path":display_path(path.as_bytes()),"path_hex":encode_hex(path.as_bytes())})
+                    let blobs = comparison_blobs_for_snapshots(
+                        base.as_ref(),
+                        &snapshot,
+                        &path,
+                        &operation,
+                    )
+                    .await?;
+                    if blobs.old.is_none() && blobs.new.is_none() {
+                        return Err(Error::PathNotFound);
+                    }
+                    json!({
+                        "base": base.as_ref().map(|base| base.commit_oid().to_string()),
+                        "old": blobs.old.as_ref().map(content_json),
+                        "new": blobs.new.as_ref().map(content_json),
+                        "path": display_path(path.as_bytes()),
+                        "path_hex": encode_hex(path.as_bytes())
+                    })
                 } else if let Some(base) = &base {
                     let result = snapshot.compare(base, &operation).await?;
                     json!({"base":result.base.to_string(),"changes":result.changes.iter().map(|change|json!({"path":display_path(change.path.as_bytes()),"path_hex":encode_hex(change.path.as_bytes()),"kind":format!("{:?}",change.kind),"old":change.old.as_ref().map(entry_json),"new":change.new.as_ref().map(entry_json)})).collect::<Vec<_>>()})
@@ -765,6 +778,58 @@ async fn optional_blob(
         return Ok(None);
     }
     snapshot.read_blob(path, operation).await.map(Some)
+}
+
+pub(crate) struct ComparisonBlobs {
+    pub old: Option<Blob>,
+    pub new: Option<Blob>,
+    pub changed: bool,
+}
+
+async fn comparison_blobs_for_snapshots(
+    base: Option<&RemoteGitSnapshot>,
+    head: &RemoteGitSnapshot,
+    path: &GitPath,
+    operation: &crab_remote_git::OperationContext,
+) -> crab_remote_git::Result<ComparisonBlobs> {
+    let old = match base {
+        Some(base) => optional_blob(base, path, operation).await?,
+        None => None,
+    };
+    let new = optional_blob(head, path, operation).await?;
+    let changed = match base {
+        Some(base) => head
+            .compare(base, operation)
+            .await?
+            .changes
+            .iter()
+            .any(|change| change.path.as_bytes() == path.as_bytes()),
+        None => new.is_some(),
+    };
+    Ok(ComparisonBlobs { old, new, changed })
+}
+
+pub(crate) async fn comparison_blobs(
+    repository: &RemoteGitRepository,
+    base_oid: &str,
+    head_oid: &str,
+    path: &GitPath,
+    cancellation: &CancellationToken,
+) -> crab_remote_git::Result<ComparisonBlobs> {
+    let operation = repository
+        .operation(OperationKind::Diff, cancellation)
+        .await?;
+    let result = async {
+        let base = repository
+            .snapshot(&Revision::parse(base_oid)?, &operation)
+            .await?;
+        let head = repository
+            .snapshot(&Revision::parse(head_oid)?, &operation)
+            .await?;
+        comparison_blobs_for_snapshots(Some(&base), &head, path, &operation).await
+    }
+    .await;
+    operation.finish(result).await
 }
 
 fn content_json(blob: &Blob) -> Value {
@@ -836,7 +901,7 @@ fn path_history_json(entry: &crab_remote_git::PathHistoryEntry) -> Value {
     value
 }
 
-fn display_path(bytes: &[u8]) -> String {
+pub(crate) fn display_path(bytes: &[u8]) -> String {
     bytes
         .split(|byte| *byte == b'/')
         .map(|component| match std::str::from_utf8(component) {
@@ -905,7 +970,7 @@ fn decode_cursor(key: &[u8; 32], value: &str) -> std::result::Result<PageCursor,
     Ok(PageCursor::from_bytes(bytes)?)
 }
 
-fn encode_hex(bytes: &[u8]) -> String {
+pub(crate) fn encode_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 fn decode_hex(value: &str) -> std::result::Result<Vec<u8>, ApiError> {

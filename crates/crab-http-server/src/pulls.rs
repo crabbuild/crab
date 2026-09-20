@@ -25,6 +25,8 @@ use crate::{
 
 mod merge;
 mod merge_tree;
+mod review_thread_storage;
+mod review_threads;
 mod reviews;
 mod storage;
 use storage::{NewPullRequest, PullComment, PullRequest, PullState, PullSummary};
@@ -51,8 +53,9 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             get(comment_detail).patch(edit_comment),
         )
         .merge(reviews::routes())
+        .merge(review_threads::routes())
         .merge(merge::routes())
-        .layer(axum::extract::DefaultBodyLimit::max(80 * 1024))
+        .layer(axum::extract::DefaultBodyLimit::max(160 * 1024))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
 

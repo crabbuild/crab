@@ -162,6 +162,14 @@ behavior and acceptance gates separately from the current implementation.
 | Work on issues, pull requests, reviews, or merges | [Collaboration](REFERENCE.md#issues-pull-requests-and-reviews) |
 | Report CI results or enforce merge checks | [Statuses and checks](REFERENCE.md#commit-statuses-and-required-checks) |
 
+Pull request Files changed views support durable inline review threads in
+addition to the existing summary review. Members can anchor a comment to an
+old or new line range, reply and edit their own messages, resolve or reopen a
+conversation, and keep exact-commit conversations visible when a later push
+makes them outdated. New-side suggestions use the existing exact-head
+`/contents` mutation, so applying one creates the normal Git commit and keeps
+branch/blob conflicts authoritative.
+
 ## Trace issue creation
 
 Use `POST /api/repos/{owner}/{name}/issues` to follow a collaboration request.

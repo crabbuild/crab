@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import type { SelectedLineRange } from "@pierre/diffs";
 import { ActionList, ActionMenu, Button, TextInput } from "@primer/react";
 import {
   CheckCircleFillIcon,
@@ -17,16 +18,23 @@ import {
   endpoint,
   navigate,
   repoHref,
+  request,
   useRequest,
   type Commit,
+  type Content,
   type Refs,
   type Repository,
   type RepositoryAssignee,
   type RepositoryLabel,
 } from "./api";
-import { ComparisonView } from "./content";
+import {
+  ComparisonView,
+  type DiffReviewState,
+  type InlineDiffThread,
+} from "./content";
 import { CommitList } from "./browse";
 import { CheckRuns } from "./check-runs";
+import { changeContent } from "./content-editor";
 import { useMutation } from "./discussion-mutations";
 import { DiscussionSearch } from "./discussion-search";
 import { LabelBadges } from "./discussion-labels";
@@ -39,6 +47,7 @@ import {
 } from "./discussion";
 import { Link, Result, short } from "./ui";
 import type { CodeThemes } from "./code-theme";
+import { replaceSelectedLines } from "./pull-review-model";
 
 interface PullComment {
   number: number;
@@ -128,9 +137,66 @@ interface PullReview {
   can_edit: boolean;
 }
 
+interface PullReviewThread extends InlineDiffThread {
+  path: string;
+  base_oid: string;
+  head_oid: string;
+  old_blob_oid: string | null;
+  new_blob_oid: string | null;
+  resolved_by: string | null;
+  resolved_at: number | null;
+  current: boolean;
+  version: number;
+  created_at: number;
+  updated_at: number;
+  can_edit: boolean;
+  can_reply: boolean;
+  can_resolve: boolean;
+}
+
+interface PullReviewReply {
+  number: number;
+  author: string;
+  body: string;
+  version: number;
+  created_at: number;
+  updated_at: number;
+  can_edit: boolean;
+}
+
 interface Page<T> {
   items: T[];
   next: number | null;
+}
+
+function usePagedRequest<T>(url: (before?: number) => string) {
+  const [before, setBefore] = useState<number>();
+  const [items, setItems] = useState<T[]>([]);
+  const state = useRequest<Page<T>>(url(before));
+  useEffect(() => {
+    if (!state.data) return;
+    setItems((current) =>
+      before === undefined
+        ? state.data!.items
+        : [...current, ...state.data!.items],
+    );
+  }, [before, state.data]);
+  function retry() {
+    setBefore(undefined);
+    setItems([]);
+    state.retry();
+  }
+  function loadMore() {
+    if (state.data?.next !== null && state.data?.next !== undefined)
+      setBefore(state.data.next);
+  }
+  return {
+    ...state,
+    items,
+    next: state.data?.next ?? null,
+    retry,
+    loadMore,
+  };
 }
 
 interface CursorPage<T> {
@@ -663,12 +729,13 @@ function PullDetail({
             ) : tab === "files" ? (
               data.branches_available ? (
                 <>
-                  <ComparisonView
+                  <PullReviewThreads
                     repo={repo}
-                    base={data.base_oid}
-                    head={data.head_oid}
+                    pull={data}
+                    csrf={csrf}
                     theme={theme}
                     codeThemes={codeThemes}
+                    refresh={pull.retry}
                   />
                   {data.state === "open" && !repo.archived && (
                     <ReviewForm
@@ -705,6 +772,645 @@ function PullDetail({
         )}
       </Result>
     </section>
+  );
+}
+
+type ThreadSelection = {
+  pathHex: string;
+  range: SelectedLineRange;
+};
+
+function PullReviewThreads({
+  repo,
+  pull,
+  csrf,
+  theme,
+  codeThemes,
+  refresh,
+}: {
+  repo: Repository;
+  pull: PullRequest;
+  csrf: string;
+  theme: "light" | "dark";
+  codeThemes: CodeThemes;
+  refresh: () => void;
+}) {
+  const path = (before?: number) =>
+    endpoint(repo, `pulls/${pull.number}/threads`, {
+      outdated: "false",
+      before: before?.toString(),
+    });
+  const outdatedPath = (before?: number) =>
+    endpoint(repo, `pulls/${pull.number}/threads`, {
+      outdated: "true",
+      before: before?.toString(),
+    });
+  const threads = usePagedRequest<PullReviewThread>(path);
+  const outdatedThreads = usePagedRequest<PullReviewThread>(outdatedPath);
+  const [selection, setSelection] = useState<ThreadSelection>();
+  const [body, setBody] = useState("");
+  const [suggestion, setSuggestion] = useState("");
+  const [suggestionEnabled, setSuggestionEnabled] = useState(false);
+  const mutation = useMutation(csrf);
+  const submission = useSubmission();
+  function clearSelection() {
+    setSelection(undefined);
+    setBody("");
+    setSuggestion("");
+    setSuggestionEnabled(false);
+  }
+  const review: DiffReviewState = {
+    threads: threads.items,
+    onLineSelected(pathHex, range) {
+      if (!range || range.endSide) {
+        clearSelection();
+        return;
+      }
+      setSelection({ pathHex, range });
+      setBody("");
+      setSuggestion("");
+      setSuggestionEnabled(false);
+    },
+    onThreadSelected(thread) {
+      const node = document.getElementById(`review-thread-${thread.number}`);
+      node?.scrollIntoView({ behavior: "smooth", block: "center" });
+    },
+    renderAnnotation(thread) {
+      return (
+        <span>
+          #{thread.number} {thread.resolved ? "Resolved" : "Review thread"}
+        </span>
+      );
+    },
+  };
+  const selectedSide = selection?.range.side === "deletions" ? "old" : "new";
+  const selectedStart = selection
+    ? Math.min(selection.range.start, selection.range.end)
+    : 0;
+  const selectedEnd = selection
+    ? Math.max(selection.range.start, selection.range.end)
+    : 0;
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!selection) return;
+    const input = {
+      body,
+      suggested_text:
+        selectedSide === "new" && suggestionEnabled ? suggestion : null,
+      base_oid: pull.base_oid,
+      head_oid: pull.head_oid,
+      path_hex: selection.pathHex,
+      side: selectedSide,
+      start_line: selectedStart,
+      end_line: selectedEnd,
+    };
+    const created = await mutation.run<PullReviewThread>(path(), "POST", {
+      ...input,
+      request_id: submission(input),
+    });
+    if (created) {
+      clearSelection();
+      threads.retry();
+      outdatedThreads.retry();
+    }
+  }
+  return (
+    <section className="pull-review-threads" aria-label="Inline review threads">
+      <ComparisonView
+        repo={repo}
+        base={pull.base_oid}
+        head={pull.head_oid}
+        theme={theme}
+        codeThemes={codeThemes}
+        review={review}
+      />
+      {selection && pull.state === "open" && !repo.archived && (
+        <form
+          className="panel discussion-form inline-review-form"
+          onSubmit={submit}
+          aria-labelledby="inline-review-composer-heading"
+        >
+          <h3 id="inline-review-composer-heading">Comment on selected lines</h3>
+          <p className="muted">
+            {selectedSide === "old" ? "Old" : "New"} lines {selectedStart}–
+            {selectedEnd} · <code>{selection.pathHex}</code>
+          </p>
+          <Editor
+            id="inline-review-body"
+            label="Comment"
+            value={body}
+            onChange={setBody}
+            disabled={mutation.pending}
+            required
+          />
+          {selectedSide === "new" && (
+            <div className="inline-review-suggestion">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={suggestionEnabled}
+                  disabled={mutation.pending}
+                  onChange={(event) =>
+                    setSuggestionEnabled(event.target.checked)
+                  }
+                />{" "}
+                Include suggested replacement
+              </label>
+              {suggestionEnabled && (
+                <textarea
+                  aria-label="Suggested replacement"
+                  value={suggestion}
+                  rows={4}
+                  maxLength={65536}
+                  disabled={mutation.pending}
+                  onChange={(event) => setSuggestion(event.target.value)}
+                />
+              )}
+            </div>
+          )}
+          <Failure message={mutation.error} />
+          <div className="discussion-actions">
+            <Button
+              type="submit"
+              variant="primary"
+              disabled={mutation.pending || !body.trim()}
+            >
+              {mutation.pending ? "Posting…" : "Comment"}
+            </Button>
+            <Button type="button" onClick={clearSelection}>
+              Cancel
+            </Button>
+          </div>
+        </form>
+      )}
+      <Result state={threads}>
+        {() => (
+          <div className="inline-review-list">
+            <div className="section-heading">
+              <div>
+                <h3 id="inline-review-heading">Inline review threads</h3>
+                <p className="muted">
+                  Select lines in the diff to start a thread. Outdated threads
+                  remain visible for context.
+                </p>
+              </div>
+              <Button size="small" onClick={threads.retry}>
+                Refresh
+              </Button>
+            </div>
+            {threads.items.length ? (
+              threads.items.map((thread) => (
+                <ReviewThreadCard
+                  key={thread.number}
+                  repo={repo}
+                  pull={pull}
+                  thread={thread}
+                  csrf={csrf}
+                  refresh={() => {
+                    threads.retry();
+                    outdatedThreads.retry();
+                    refresh();
+                  }}
+                />
+              ))
+            ) : (
+              <p className="muted">No inline review threads yet.</p>
+            )}
+            {threads.next !== null && (
+              <Button size="small" onClick={threads.loadMore}>
+                Load more threads
+              </Button>
+            )}
+          </div>
+        )}
+      </Result>
+      <details className="inline-review-outdated">
+        <summary>
+          Outdated conversations ({outdatedThreads.items.length})
+        </summary>
+        <Result state={outdatedThreads}>
+          {() =>
+            outdatedThreads.items.length ? (
+              <div className="inline-review-list">
+                {outdatedThreads.items.map((thread) => (
+                  <ReviewThreadCard
+                    key={thread.number}
+                    repo={repo}
+                    pull={pull}
+                    thread={thread}
+                    csrf={csrf}
+                    refresh={() => {
+                      threads.retry();
+                      outdatedThreads.retry();
+                      refresh();
+                    }}
+                  />
+                ))}
+                {outdatedThreads.next !== null && (
+                  <Button size="small" onClick={outdatedThreads.loadMore}>
+                    Load more outdated conversations
+                  </Button>
+                )}
+              </div>
+            ) : (
+              <p className="muted">No outdated conversations.</p>
+            )
+          }
+        </Result>
+      </details>
+    </section>
+  );
+}
+
+function ReviewThreadCard({
+  repo,
+  pull,
+  thread,
+  csrf,
+  refresh,
+}: {
+  repo: Repository;
+  pull: PullRequest;
+  thread: PullReviewThread;
+  csrf: string;
+  refresh: () => void;
+}) {
+  const mutation = useMutation(csrf);
+  const [editing, setEditing] = useState(false);
+  const [editBody, setEditBody] = useState(thread.body);
+  const location = `${thread.path}:${thread.start_line}${thread.end_line === thread.start_line ? "" : `–${thread.end_line}`}`;
+  async function saveEdit(event: React.FormEvent) {
+    event.preventDefault();
+    const updated = await mutation.run<PullReviewThread>(
+      endpoint(repo, `pulls/${pull.number}/threads/${thread.number}`),
+      "PATCH",
+      { version: thread.version, body: editBody },
+    );
+    if (updated) {
+      setEditing(false);
+      refresh();
+    }
+  }
+  async function toggleResolved() {
+    const updated = await mutation.run<PullReviewThread>(
+      endpoint(repo, `pulls/${pull.number}/threads/${thread.number}`),
+      "PATCH",
+      { version: thread.version, resolved: !thread.resolved },
+    );
+    if (updated) refresh();
+  }
+  return (
+    <article
+      id={`review-thread-${thread.number}`}
+      className={`panel review-thread-card${thread.outdated ? " outdated" : ""}${thread.resolved ? " resolved" : ""}`}
+    >
+      <details
+        className="review-thread-details"
+        open={!thread.resolved || undefined}
+      >
+        <summary className="review-thread-summary">
+          <span>
+            <strong>{thread.author}</strong>{" "}
+            <span className="muted">commented on {location}</span>
+          </span>
+          {thread.outdated && (
+            <span className="review-thread-badge">Outdated</span>
+          )}
+          {thread.resolved && (
+            <span className="review-thread-badge">Resolved</span>
+          )}
+        </summary>
+        <div className="review-thread-content">
+          {editing ? (
+            <form className="review-thread-edit" onSubmit={saveEdit}>
+              <Editor
+                id={`thread-${thread.number}-edit`}
+                label="Edit comment"
+                value={editBody}
+                onChange={setEditBody}
+                disabled={mutation.pending}
+                required
+                autoFocus
+              />
+              <div className="discussion-actions">
+                <Button
+                  size="small"
+                  variant="primary"
+                  type="submit"
+                  disabled={mutation.pending || !editBody.trim()}
+                >
+                  {mutation.pending ? "Saving…" : "Save"}
+                </Button>
+                <Button
+                  size="small"
+                  type="button"
+                  disabled={mutation.pending}
+                  onClick={() => {
+                    setEditBody(thread.body);
+                    setEditing(false);
+                  }}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </form>
+          ) : (
+            <DiscussionMarkdown>{thread.body}</DiscussionMarkdown>
+          )}
+          {thread.suggested_text !== null &&
+            !thread.outdated &&
+            !thread.vanished &&
+            !thread.resolved &&
+            thread.side === "new" &&
+            repo.access === "write" && (
+              <SuggestionAction
+                repo={repo}
+                pull={pull}
+                thread={thread}
+                csrf={csrf}
+                refresh={refresh}
+              />
+            )}
+          <div className="discussion-actions">
+            {thread.can_edit && !repo.archived && !editing && (
+              <Button
+                size="small"
+                disabled={mutation.pending}
+                onClick={() => {
+                  setEditBody(thread.body);
+                  setEditing(true);
+                }}
+              >
+                Edit
+              </Button>
+            )}
+            {thread.can_resolve && (
+              <Button
+                size="small"
+                disabled={mutation.pending}
+                onClick={toggleResolved}
+              >
+                {thread.resolved ? "Reopen" : "Resolve"}
+              </Button>
+            )}
+          </div>
+          {thread.outdated && (
+            <p className="muted review-thread-warning">
+              This comment is attached to an earlier version of the file. The
+              path or anchored lines may no longer exist.
+            </p>
+          )}
+          <ReviewReplies repo={repo} pull={pull} thread={thread} csrf={csrf} />
+          <Failure message={mutation.error} />
+        </div>
+      </details>
+    </article>
+  );
+}
+
+function SuggestionAction({
+  repo,
+  pull,
+  thread,
+  csrf,
+  refresh,
+}: {
+  repo: Repository;
+  pull: PullRequest;
+  thread: PullReviewThread;
+  csrf: string;
+  refresh: () => void;
+}) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string>();
+  async function apply() {
+    if (thread.suggested_text === null || !thread.new_blob_oid) return;
+    setPending(true);
+    setError(undefined);
+    try {
+      const file = await request<Content>(
+        endpoint(repo, "file", {
+          rev: pull.head_oid,
+          path_hex: thread.path_hex,
+        }),
+        new AbortController().signal,
+      );
+      if (
+        file.data.text === null ||
+        file.data.text_truncated ||
+        file.data.classification !== "OrdinaryGit" ||
+        file.data.size > 900 * 1024
+      )
+        throw new Error("The file is not an editable UTF-8 text file");
+      const content = replaceSelectedLines(
+        file.data.text,
+        thread.start_line,
+        thread.end_line,
+        thread.suggested_text,
+      );
+      if (new TextEncoder().encode(content).byteLength > 900 * 1024)
+        throw new Error("The updated file is larger than 900 KiB");
+      await changeContent(repo, csrf, "PATCH", {
+        branch: pull.head_ref,
+        expected_head: pull.head_oid,
+        expected_blob: thread.new_blob_oid,
+        path_hex: thread.path_hex,
+        content,
+        message: `Apply suggestion from review thread #${thread.number}`,
+      });
+      refresh();
+    } catch (failure) {
+      setError(
+        failure instanceof Error
+          ? failure.message
+          : "The suggestion could not be applied",
+      );
+    } finally {
+      setPending(false);
+    }
+  }
+  return (
+    <div className="review-suggestion">
+      <pre>{thread.suggested_text}</pre>
+      {pull.state === "open" && !repo.archived && repo.access === "write" && (
+        <Button
+          size="small"
+          variant="primary"
+          disabled={pending}
+          onClick={apply}
+        >
+          {pending ? "Applying…" : "Apply suggestion"}
+        </Button>
+      )}
+      <Failure message={error} />
+    </div>
+  );
+}
+
+function ReviewReplies({
+  repo,
+  pull,
+  thread,
+  csrf,
+}: {
+  repo: Repository;
+  pull: PullRequest;
+  thread: PullReviewThread;
+  csrf: string;
+}) {
+  const repliesPath = (before?: number) =>
+    endpoint(repo, `pulls/${pull.number}/threads/${thread.number}/replies`, {
+      before: before?.toString(),
+    });
+  const replies = usePagedRequest<PullReviewReply>(repliesPath);
+  const [body, setBody] = useState("");
+  const mutation = useMutation(csrf);
+  const submission = useSubmission();
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    const input = { body };
+    const created = await mutation.run<PullReviewReply>(repliesPath(), "POST", {
+      ...input,
+      request_id: submission(input),
+    });
+    if (created) {
+      setBody("");
+      replies.retry();
+    }
+  }
+  return (
+    <div className="review-replies">
+      <Result state={replies}>
+        {() =>
+          replies.items.map((reply) => (
+            <ReviewReplyItem
+              key={reply.number}
+              repo={repo}
+              pull={pull}
+              thread={thread}
+              reply={reply}
+              csrf={csrf}
+              refresh={replies.retry}
+            />
+          ))
+        }
+      </Result>
+      {replies.next !== null && (
+        <Button size="small" onClick={replies.loadMore}>
+          Load more replies
+        </Button>
+      )}
+      {thread.can_reply && !repo.archived && (
+        <form className="review-reply-form" onSubmit={submit}>
+          <Editor
+            id={`reply-${thread.number}`}
+            label="Reply"
+            value={body}
+            onChange={setBody}
+            disabled={mutation.pending}
+            required
+          />
+          <Failure message={mutation.error} />
+          <Button
+            size="small"
+            type="submit"
+            disabled={mutation.pending || !body.trim()}
+          >
+            {mutation.pending ? "Replying…" : "Reply"}
+          </Button>
+        </form>
+      )}
+    </div>
+  );
+}
+
+function ReviewReplyItem({
+  repo,
+  pull,
+  thread,
+  reply,
+  csrf,
+  refresh,
+}: {
+  repo: Repository;
+  pull: PullRequest;
+  thread: PullReviewThread;
+  reply: PullReviewReply;
+  csrf: string;
+  refresh: () => void;
+}) {
+  const mutation = useMutation(csrf);
+  const [editing, setEditing] = useState(false);
+  const [body, setBody] = useState(reply.body);
+  async function save(event: React.FormEvent) {
+    event.preventDefault();
+    const updated = await mutation.run<PullReviewReply>(
+      endpoint(
+        repo,
+        `pulls/${pull.number}/threads/${thread.number}/replies/${reply.number}`,
+      ),
+      "PATCH",
+      { version: reply.version, body },
+    );
+    if (updated) {
+      setBody(updated.body);
+      setEditing(false);
+      refresh();
+    }
+  }
+  return (
+    <div className="review-reply">
+      <strong>{reply.author}</strong>
+      <span className="muted">replied {timestamp(reply.created_at)}</span>
+      {editing ? (
+        <form className="review-reply-edit" onSubmit={save}>
+          <Editor
+            id={`reply-${thread.number}-${reply.number}-edit`}
+            label="Edit reply"
+            value={body}
+            onChange={setBody}
+            disabled={mutation.pending}
+            required
+            autoFocus
+          />
+          <div className="discussion-actions">
+            <Button
+              size="small"
+              variant="primary"
+              type="submit"
+              disabled={mutation.pending || !body.trim()}
+            >
+              {mutation.pending ? "Saving…" : "Save"}
+            </Button>
+            <Button
+              size="small"
+              type="button"
+              disabled={mutation.pending}
+              onClick={() => {
+                setBody(reply.body);
+                setEditing(false);
+              }}
+            >
+              Cancel
+            </Button>
+          </div>
+        </form>
+      ) : (
+        <>
+          <DiscussionMarkdown>{body}</DiscussionMarkdown>
+          {reply.can_edit && !repo.archived && (
+            <Button
+              size="small"
+              disabled={mutation.pending}
+              onClick={() => setEditing(true)}
+            >
+              Edit
+            </Button>
+          )}
+        </>
+      )}
+      <Failure message={mutation.error} />
+    </div>
   );
 }
 

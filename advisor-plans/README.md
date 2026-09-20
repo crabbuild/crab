@@ -455,3 +455,21 @@ by the actor takeover suite, and
 `typed_effect_source_publishes_claim_validation_ack_and_lost_lease` recovers
 the durable effect ledger before claim/ack. These are local in-memory
 ownership receipts; protected three-Pod primitive-fault evidence remains open.
+
+## Repository product implementation track
+
+Created 2026-09-19 with the improve skill; planned against `892720ce6a6`.
+This track is independent of the canonical Cell runtime plans above, but its
+durable collaboration state uses the repository Cell's migration and operation
+contracts. Do not execute it concurrently with another repository schema or
+operation-ID change without rebasing and reconciling the plan.
+
+| Plan | Outcome | Priority | Effort | Depends on | Status |
+| --- | --- | --- | --- | --- | --- |
+| [018](018-inline-pull-review-threads.md) | Durable line/range review threads, replies, resolution, outdated handling, and exact-blob suggestions | P1 | XL | None | IMPLEMENTED |
+
+Plan 018 deliberately keeps inline comments immediately published and separate
+from general approval reviews. It reuses the existing `/contents` mutation for
+suggestion commits and stops if the pinned diff renderer cannot supply public
+selection/annotation contracts; neither pending-review drafts nor dependency
+upgrades are implicit follow-up work.

@@ -111,7 +111,7 @@ function fileSize(bytes: number) {
   return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
 }
 
-async function changeContent(
+export async function changeContent(
   repo: Repository,
   csrf: string,
   method: "POST" | "PATCH" | "DELETE",

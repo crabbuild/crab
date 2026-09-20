@@ -24,6 +24,36 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   let checkState: "success" | null = null;
   const comments: Array<Record<string, unknown>> = [];
   const reviews: Array<Record<string, unknown>> = [];
+  const threads: Array<Record<string, unknown>> = [
+    {
+      number: 1,
+      pull: 2,
+      path: "README.md",
+      path_hex: pathHex,
+      side: "new",
+      start_line: 1,
+      end_line: 1,
+      author: "Bob",
+      body: "Consider a clearer opening.",
+      suggested_text: "Applied content",
+      base_oid: base,
+      head_oid: head,
+      old_blob_oid: "c".repeat(40),
+      new_blob_oid: "d".repeat(40),
+      resolved: false,
+      outdated: false,
+      vanished: false,
+      resolver: null,
+      current: true,
+      version: 1,
+      created_at: 1_700_000_060_000,
+      updated_at: 1_700_000_060_000,
+      can_edit: true,
+      can_reply: true,
+      can_resolve: true,
+    },
+  ];
+  const replies: Array<Record<string, unknown>> = [];
   const pull = () => {
     const approvals = branchesAvailable && reviews.length ? 1 : 0;
     return {
@@ -187,6 +217,36 @@ test("pull request creation, discussion, and files follow the GitHub review flow
           },
         },
       });
+    if (path === "/api/repos/team/project/file") {
+      expect(url.searchParams.get("rev")).toBe(head);
+      expect(url.searchParams.get("path_hex")).toBe(pathHex);
+      return route.fulfill({
+        json: {
+          oid: "d".repeat(40),
+          size: 12,
+          mode: "100644",
+          classification: "OrdinaryGit",
+          text: "New content\n",
+          text_truncated: false,
+        },
+      });
+    }
+    if (
+      path === "/api/repos/team/project/contents" &&
+      request.method() === "PATCH"
+    ) {
+      const input = request.postDataJSON();
+      expect(input.branch).toBe("refs/heads/feature/docs");
+      expect(input.expected_head).toBe(head);
+      expect(input.expected_blob).toBe("d".repeat(40));
+      expect(input.path_hex).toBe(pathHex);
+      expect(input.content).toBe("Applied content\n");
+      expect(input.message).toBe("Apply suggestion from review thread #1");
+      threads[0].outdated = true;
+      return route.fulfill({
+        json: { commit: "e".repeat(40), path_hex: pathHex },
+      });
+    }
     if (path === "/api/repos/team/project/commits") {
       expect(url.searchParams.get("rev")).toBe(head);
       expect(url.searchParams.get("base")).toBe(base);
@@ -311,6 +371,87 @@ test("pull request creation, discussion, and files follow the GitHub review flow
         return route.fulfill({ status: 201, json: comments[0] });
       }
       return route.fulfill({ json: { items: comments, next: null } });
+    }
+    if (/\/pulls\/\d+\/threads$/.test(path)) {
+      if (request.method() === "POST") {
+        const input = request.postDataJSON();
+        const thread = {
+          number: threads.length + 1,
+          pull: 2,
+          path: "README.md",
+          path_hex: input.path_hex,
+          side: input.side,
+          start_line: input.start_line,
+          end_line: input.end_line,
+          author: "Alice",
+          body: input.body,
+          suggested_text: input.suggested_text,
+          base_oid: input.base_oid,
+          head_oid: input.head_oid,
+          old_blob_oid: "c".repeat(40),
+          new_blob_oid: "d".repeat(40),
+          resolved: false,
+          outdated: false,
+          vanished: false,
+          resolver: null,
+          current: true,
+          version: 1,
+          created_at: 1_700_000_070_000,
+          updated_at: 1_700_000_070_000,
+          can_edit: true,
+          can_reply: true,
+          can_resolve: true,
+        };
+        threads.push(thread);
+        return route.fulfill({ status: 201, json: thread });
+      }
+      const outdated = url.searchParams.get("outdated") === "true";
+      return route.fulfill({
+        json: {
+          items: threads.filter(
+            (thread) => Boolean(thread.outdated) === outdated,
+          ),
+          next: null,
+        },
+      });
+    }
+    if (/\/pulls\/\d+\/threads\/\d+\/replies$/.test(path)) {
+      if (request.method() === "POST") {
+        const input = request.postDataJSON();
+        const reply = {
+          number: replies.length + 1,
+          pull: 2,
+          thread: Number(path.match(/threads\/(\d+)\/replies$/)?.[1] ?? 1),
+          author: "Alice",
+          body: input.body,
+          version: 1,
+          created_at: 1_700_000_080_000,
+          updated_at: 1_700_000_080_000,
+          can_edit: true,
+        };
+        replies.push(reply);
+        return route.fulfill({ status: 201, json: reply });
+      }
+      const thread = Number(path.match(/threads\/(\d+)\/replies$/)?.[1] ?? 1);
+      return route.fulfill({
+        json: {
+          items: replies.filter((reply) => reply.thread === thread),
+          next: null,
+        },
+      });
+    }
+    if (/\/pulls\/\d+\/threads\/\d+$/.test(path)) {
+      const number = Number(path.match(/threads\/(\d+)$/)?.[1] ?? 1);
+      const thread = threads.find((item) => item.number === number);
+      if (!thread) return route.fulfill({ status: 404 });
+      if (request.method() === "PATCH") {
+        const input = request.postDataJSON();
+        if (typeof input.resolved === "boolean")
+          thread.resolved = input.resolved;
+        thread.version = Number(thread.version) + 1;
+        return route.fulfill({ json: thread });
+      }
+      return route.fulfill({ json: thread });
     }
     if (/\/pulls\/\d+\/reviews$/.test(path)) {
       if (request.method() === "POST") {
@@ -484,6 +625,40 @@ test("pull request creation, discussion, and files follow the GitHub review flow
     changedFiles.getByRole("treeitem", { name: "README.md", exact: true }),
   ).toHaveAttribute("aria-selected", "true");
   await expect(page.locator(".diff-panel")).toContainText("New content");
+  await expect(
+    page.getByRole("button", { name: "Apply suggestion" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Apply suggestion" }).click();
+  await page.locator(".inline-review-outdated > summary").click();
+  await expect(page.locator(".inline-review-outdated")).toContainText(
+    "Outdated conversations (1)",
+  );
+  await expect(page.locator(".review-thread-card")).toContainText(
+    "Consider a clearer opening.",
+  );
+  await page
+    .locator(".review-thread-card")
+    .getByRole("button", { name: "Resolve", exact: true })
+    .click();
+  await expect(page.locator(".review-thread-card")).toContainText("Resolved");
+  await expect(
+    page.locator(".review-thread-card .review-thread-details"),
+  ).not.toHaveAttribute("open", "");
+  await page
+    .locator(".inline-review-outdated")
+    .evaluate((node) => ((node as HTMLDetailsElement).open = true));
+  await page.locator(".review-thread-card .review-thread-summary").click();
+  await page
+    .locator(".review-thread-card")
+    .getByRole("textbox", { name: "Reply", exact: true })
+    .fill("I will update the wording.");
+  await page
+    .locator(".review-thread-card")
+    .getByRole("button", { name: "Reply", exact: true })
+    .click();
+  await expect(page.locator(".review-thread-card")).toContainText(
+    "I will update the wording.",
+  );
   await expectNoAccessibilityViolations(page);
 
   await page

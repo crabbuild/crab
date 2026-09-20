@@ -6,9 +6,15 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
 } from "react";
 import { File, MultiFileDiff } from "@pierre/diffs/react";
-import type { PostRenderPhase, TokenEventBase } from "@pierre/diffs";
+import type {
+  DiffLineAnnotation,
+  PostRenderPhase,
+  SelectedLineRange,
+  TokenEventBase,
+} from "@pierre/diffs";
 import { FileTree, useFileTree } from "@pierre/trees/react";
 import type { GitStatus } from "@pierre/trees";
 import { IconButton, Label, SegmentedControl } from "@primer/react";
@@ -90,6 +96,27 @@ function changeStatus(kind: string): GitStatus {
 
 function changePanelId(pathHex: string) {
   return `changed-file-${pathHex}`;
+}
+
+export interface InlineDiffThread {
+  number: number;
+  path_hex: string;
+  side: "old" | "new";
+  start_line: number;
+  end_line: number;
+  author: string;
+  body: string;
+  suggested_text: string | null;
+  resolved: boolean;
+  outdated: boolean;
+  vanished: boolean;
+}
+
+export interface DiffReviewState {
+  threads: InlineDiffThread[];
+  onLineSelected: (pathHex: string, range: SelectedLineRange | null) => void;
+  onThreadSelected: (thread: InlineDiffThread) => void;
+  renderAnnotation?: (thread: InlineDiffThread) => ReactNode;
 }
 
 export function FileView({
@@ -580,12 +607,14 @@ export function ComparisonView({
   head,
   theme,
   codeThemes,
+  review,
 }: {
   repo: Repository;
   base: string;
   head: string;
   theme: "light" | "dark";
   codeThemes: CodeThemes;
+  review?: DiffReviewState;
 }) {
   const changes = useRequest<Changes>(
     endpoint(repo, "changes", { rev: head, base }),
@@ -599,6 +628,7 @@ export function ComparisonView({
       base={base}
       theme={theme}
       codeThemes={codeThemes}
+      review={review}
     />
   );
 }
@@ -611,6 +641,7 @@ function ChangeComparison({
   theme,
   codeThemes,
   sticky = false,
+  review,
 }: {
   state: ReturnType<typeof useRequest<Changes>>;
   repo: Repository;
@@ -619,6 +650,7 @@ function ChangeComparison({
   theme: "light" | "dark";
   codeThemes: CodeThemes;
   sticky?: boolean;
+  review?: DiffReviewState;
 }) {
   return (
     <Result state={state}>
@@ -632,6 +664,7 @@ function ChangeComparison({
           theme={theme}
           codeThemes={codeThemes}
           sticky={sticky}
+          review={review}
         />
       )}
     </Result>
@@ -646,6 +679,7 @@ function ChangeWorkspace({
   theme,
   codeThemes,
   sticky,
+  review,
 }: {
   changes: Change[];
   repo: Repository;
@@ -654,6 +688,7 @@ function ChangeWorkspace({
   theme: "light" | "dark";
   codeThemes: CodeThemes;
   sticky: boolean;
+  review?: DiffReviewState;
 }) {
   const diffPane = useRef<HTMLDivElement>(null);
 
@@ -701,6 +736,7 @@ function ChangeWorkspace({
                   theme={theme}
                   codeThemes={codeThemes}
                   eager={index === 0}
+                  review={review}
                 />
               ))}
             </div>
@@ -771,10 +807,12 @@ function DiffView({
   theme,
   codeThemes,
   eager,
+  review,
 }: Omit<Props, "name" | "path"> & {
   base?: string;
   change: Change;
   eager: boolean;
+  review?: DiffReviewState;
 }) {
   const panel = useRef<HTMLElement>(null);
   const [load, setLoad] = useState(eager);
@@ -810,8 +848,15 @@ function DiffView({
       diffStyle: style,
       preferredHighlighter: "shiki-js" as const,
       onPostRender: enableCodeKeyboardScroll,
+      ...(review
+        ? {
+            enableLineSelection: true,
+            onLineSelected: (range: SelectedLineRange | null) =>
+              review.onLineSelected(change.path_hex, range),
+          }
+        : {}),
     }),
-    [codeThemes, theme, style],
+    [change.path_hex, codeThemes, review, style, theme],
   );
   const files = useMemo(() => {
     const data = state.data;
@@ -840,6 +885,17 @@ function DiffView({
     if (oldFile) return { oldFile, newFile: null };
     return null;
   }, [state.data]);
+  const lineAnnotations = useMemo<DiffLineAnnotation<InlineDiffThread>[]>(
+    () =>
+      (review?.threads ?? [])
+        .filter((thread) => thread.path_hex === change.path_hex)
+        .map((thread) => ({
+          side: thread.side === "old" ? "deletions" : "additions",
+          lineNumber: thread.start_line,
+          metadata: thread,
+        })),
+    [change.path_hex, review?.threads],
+  );
   return (
     <section
       ref={panel}
@@ -876,10 +932,24 @@ function DiffView({
         <Result state={state} showTiming={false}>
           {() =>
             files ? (
-              <MultiFileDiff
+              <MultiFileDiff<InlineDiffThread>
                 key={`${theme}:${codeThemes.light}:${codeThemes.dark}`}
                 {...files}
                 options={options}
+                lineAnnotations={lineAnnotations}
+                renderAnnotation={(annotation) => {
+                  const thread = annotation.metadata;
+                  return (
+                    <button
+                      type="button"
+                      className="inline-review-annotation"
+                      onClick={() => review?.onThreadSelected(thread)}
+                    >
+                      {review?.renderAnnotation?.(thread) ??
+                        `Comment #${thread.number}`}
+                    </button>
+                  );
+                }}
                 style={diffColors}
               />
             ) : (

@@ -695,14 +695,14 @@ fn merge_matches_cell(left: &crate::cells::repository::PullMerge, input: &NewPul
         && left.head_oid == input.head_oid
         && left.message == input.message
 }
-fn to_author(value: &Identity) -> crate::cells::repository::RepositoryAuthor {
+pub(super) fn to_author(value: &Identity) -> crate::cells::repository::RepositoryAuthor {
     crate::cells::repository::RepositoryAuthor {
         issuer: value.issuer.clone(),
         subject: value.subject.clone(),
         name: value.name.clone(),
     }
 }
-fn from_author(value: crate::cells::repository::RepositoryAuthor) -> Identity {
+pub(super) fn from_author(value: crate::cells::repository::RepositoryAuthor) -> Identity {
     Identity {
         issuer: value.issuer,
         subject: value.subject,
@@ -806,7 +806,7 @@ fn from_review(value: crate::cells::repository::PullReviewRecord) -> PullReview 
     }
 }
 
-async fn route(
+pub(super) async fn route(
     server: &Server,
     repository: &Repository,
     principal: &Identity,
@@ -824,12 +824,12 @@ async fn route(
             source => Error::Repository(source),
         })
 }
-fn submission_id(value: &str) -> Result<[u8; 16]> {
+pub(super) fn submission_id(value: &str) -> Result<[u8; 16]> {
     Uuid::parse_str(value)
         .map(Uuid::into_bytes)
         .map_err(|_| Error::Invalid("Submission ID must be a UUID"))
 }
-fn mutation_identity() -> Result<MutationIdentity> {
+pub(super) fn mutation_identity() -> Result<MutationIdentity> {
     let now_ms = crate::cells::unix_now_ms().map_err(Error::Repository)?;
     Ok(MutationIdentity {
         request_id: RequestId::from_bytes(Uuid::now_v7().into_bytes()),
@@ -839,7 +839,9 @@ fn mutation_identity() -> Result<MutationIdentity> {
             .ok_or(Error::CellContract("Cell request expiry overflowed"))?,
     })
 }
-fn command_output<T>(result: std::result::Result<Committed<T>, InvocationError<T>>) -> Result<T> {
+pub(super) fn command_output<T>(
+    result: std::result::Result<Committed<T>, InvocationError<T>>,
+) -> Result<T> {
     match result {
         Ok(committed) => Ok(committed.output),
         Err(InvocationError::Rejected(committed)) => Ok(committed.output),
@@ -848,7 +850,9 @@ fn command_output<T>(result: std::result::Result<Committed<T>, InvocationError<T
         Err(InvocationError::NotStarted(source)) => Err(Error::Cell(source)),
     }
 }
-fn query_output<T>(result: std::result::Result<Observed<T>, InvocationError<T>>) -> Result<T> {
+pub(super) fn query_output<T>(
+    result: std::result::Result<Observed<T>, InvocationError<T>>,
+) -> Result<T> {
     match result {
         Ok(observed) => Ok(observed.output),
         Err(InvocationError::Rejected(_)) => Err(Error::CellContract(
