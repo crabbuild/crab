@@ -866,6 +866,13 @@ The HTTP server invalidates its repository cache and attempts an authoritative r
 
 Later API refresh or Git fetch starts an on-demand readiness job under generation-owner election and both GC fences. Requests for one repository share a retained job, and at most two repositories run maintenance concurrently.
 
+The three-minute maintenance budget applies only to catalog-only publication.
+When Cell-backed Git browsing is enabled, the worker keeps one immutable
+projection rebuild alive until it completes; cancelling and restarting a large
+repository would otherwise discard its staged epoch and repeat all origin
+reads. Parent cancellation still propagates to the worker, which awaits the
+cooperative cleanup before the server closes its runtimes.
+
 A disconnected reader does not own the job. The server drains it during shutdown before closing the remote-read runtime.
 
 ## Classify failures by commit boundary

@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use crab_remote_git::{RemoteGitRuntime, RepositoryIdentity, RepositoryOptions};
 use crab_storage::{Store, StoreLayout};
@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const LEASE_TTL: Duration = Duration::from_secs(60);
-const PASS_BUDGET: Duration = Duration::from_secs(3 * 60);
+const CATALOG_PASS_BUDGET: Duration = Duration::from_secs(3 * 60);
 
 async fn publish(
     store: &Store,
@@ -45,6 +45,7 @@ pub(crate) async fn run_with_projection(
     parent: CancellationToken,
     projection: Option<ProjectionContext>,
 ) -> Result<()> {
+    let has_projection = projection.is_some();
     let cancel = parent.child_token();
     let operation = async {
         let _permit = match initial_permit {
@@ -83,10 +84,43 @@ pub(crate) async fn run_with_projection(
         }
         result
     };
+    await_pass(
+        operation,
+        cancel.clone(),
+        &parent,
+        has_projection,
+        CATALOG_PASS_BUDGET,
+    )
+    .await
+}
+
+async fn await_pass<F>(
+    operation: F,
+    cancel: CancellationToken,
+    parent: &CancellationToken,
+    has_projection: bool,
+    catalog_budget: Duration,
+) -> Result<()>
+where
+    F: Future<Output = Result<()>>,
+{
     tokio::pin!(operation);
+    if has_projection {
+        // A projection is one immutable rebuild. Cancelling it on a short
+        // wall-clock budget discards the staged epoch and makes a large
+        // repository restart from the first commit on every retry. Shutdown
+        // still cancels the child token and awaits cleanup before returning.
+        return tokio::select! {
+            result = &mut operation => result,
+            () = parent.cancelled() => {
+                cancel.cancel();
+                operation.await
+            }
+        };
+    }
     tokio::select! {
         result = &mut operation => result,
-        () = tokio::time::sleep(PASS_BUDGET) => {
+        () = tokio::time::sleep(catalog_budget) => {
             // Cancellation is cooperative; dropping publication here would leak
             // catalog handles or release admission while writes are still running.
             cancel.cancel();
@@ -124,5 +158,25 @@ mod tests {
             finish_budgeted_pass(Err(WriteError::Cancelled), true),
             Err(WriteError::Cancelled)
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn projection_pass_is_not_cut_off_by_catalog_budget() {
+        let parent = CancellationToken::new();
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            await_pass(
+                async {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    Ok(())
+                },
+                parent.child_token(),
+                &parent,
+                true,
+                Duration::from_millis(1),
+            ),
+        )
+        .await;
+        assert!(matches!(result, Ok(Ok(()))));
     }
 }
