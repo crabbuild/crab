@@ -159,7 +159,7 @@ async fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error
     let started = Instant::now();
     ltx_db.sync()?;
     if config.sync_parent {
-        sync_ltx_parent(ltx_db.meta_path())?;
+        sync_ltx_parent(ltx_db.meta_path(), 0)?;
     }
     capture_us += elapsed_us(started);
 
@@ -177,7 +177,7 @@ async fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error
         let started = Instant::now();
         ltx_db.sync()?;
         if config.sync_parent {
-            sync_ltx_parent(ltx_db.meta_path())?;
+            sync_ltx_parent(ltx_db.meta_path(), 0)?;
         }
         capture_us += elapsed_us(started);
     }
@@ -198,6 +198,9 @@ async fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error
         .compact(1)
         .await?
         .ok_or("Celld compaction produced no output")?;
+    if config.sync_parent {
+        sync_ltx_parent(&meta_path, 1)?;
+    }
     let compact_us = elapsed_us(started);
     let compacted_ltx_bytes = u64::try_from(output.info.size)
         .map_err(|_| "Celld compaction returned a negative output size")?;
@@ -211,6 +214,9 @@ async fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error
         Arc::new(Semaphore::new(1)),
     )
     .await?;
+    if config.sync_parent {
+        sync_parent(&restored)?;
+    }
     let restore_us = elapsed_us(started);
     validate_restore(&restored, config.transactions)?;
 
@@ -238,8 +244,14 @@ async fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error
     })
 }
 
-fn sync_ltx_parent(meta_path: &Path) -> Result<(), Box<dyn Error>> {
-    std::fs::File::open(meta_path.join("ltx").join("0"))?.sync_all()?;
+fn sync_ltx_parent(meta_path: &Path, level: u32) -> Result<(), Box<dyn Error>> {
+    std::fs::File::open(meta_path.join("ltx").join(level.to_string()))?.sync_all()?;
+    Ok(())
+}
+
+fn sync_parent(path: &Path) -> Result<(), Box<dyn Error>> {
+    let parent = path.parent().filter(|path| !path.as_os_str().is_empty());
+    std::fs::File::open(parent.unwrap_or_else(|| Path::new(".")))?.sync_all()?;
     Ok(())
 }
 

@@ -702,14 +702,16 @@ durable per-capture latency. Grouped throughput is the verified 1.5x–2x-plus
 win, while recovery remains workload-dependent, and the contracts must not be
 collapsed into one headline.
 
-The Celld runner's diagnostic `--sync-parent` mode adds the same L0-directory
-barrier after every upstream `Db::sync()` without changing pinned Celld itself.
-Against that contract-normalized runner, Crab total medians were 0.95x, 1.00x,
-and 0.97x Celld for small, medium, and large workloads respectively. In other
-words, per-capture local performance is presently parity within host noise, not
-a 1.5x–2x Crab advantage. Crab recovery remained faster for medium and large.
-This reinforces that the large headline win comes from the explicit grouped
-durability protocol, where one barrier covers many complete captures.
+The Celld runner's diagnostic `--sync-parent` mode adds the same directory
+barrier after every upstream `Db::sync()`, compaction installation, and restore
+installation without changing pinned Celld itself. Against that fully
+contract-normalized runner, Crab capture was effectively parity: 1.09x, 0.99x,
+and 1.00x Celld for small, medium, and large workloads. Crab recovery was
+2.25x, 2.20x, and 2.36x faster, while total medians were 1.16x, 1.02x, and
+1.01x faster. Per-capture total time is therefore barrier-dominated rather than
+a 1.5x–2x engine win. The large total-latency headline still belongs to the
+explicit grouped durability protocol, where one barrier covers many complete
+captures.
 
 ## Test plan
 

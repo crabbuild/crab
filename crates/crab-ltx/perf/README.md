@@ -113,9 +113,10 @@ making that durability choice explicit.
 
 The Celld runner accepts `--sync-parent` as a diagnostic contract-normalization
 mode. After each upstream `Db::sync()`, it syncs Celld's L0 directory before
-recording capture completion. This is not pinned Celld behavior and must be
-reported separately; it answers what the local comparison looks like when both
-runners pay a parent-directory barrier per capture.
+recording capture completion. It also syncs the destination directory after
+compaction and restore installation. This is not pinned Celld behavior and
+must be reported separately; it answers what the local comparison looks like
+when both runners pay parent-directory barriers for installed artifacts.
 
 The grouped Crab mode measures batch completion: all captures remain
 unacknowledged until the final file-and-directory barrier succeeds. It is a
