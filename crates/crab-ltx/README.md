@@ -152,24 +152,26 @@ Enable `replica` and construct `CellReplica` with the application's existing
 `crab_storage::Store` and `CellStorageLayout`. Provider credentials, retries,
 leases, and authority stay outside this crate.
 
-```rust,no_run
-# #[cfg(feature = "replica")]
-# async fn prepare_root(
-#     database: &mut crab_ltx::ManagedDb,
-#     replica: &crab_ltx::CellReplica,
-#     previous: Option<&crab_ltx::RootRef>,
-#     commit_sequence: u64,
-#     schema: u32,
-# ) -> crab_ltx::Result<crab_ltx::PreparedRoot> {
-let captured = database.capture()?;
-let prepared = replica
-    .prepare(previous, &captured, commit_sequence, schema)
-    .await?;
+```rust,ignore
+use crab_ltx::{CellReplica, ManagedDb, PreparedRoot, RootRef};
 
-// `prepared.root()` is a proposal. The embedding runtime must publish it with
-// its owner/head CAS before acknowledging the mutation or pruning `captured`.
-Ok(prepared)
-# }
+async fn prepare_root(
+    database: &mut ManagedDb,
+    replica: &CellReplica,
+    previous: Option<&RootRef>,
+    commit_sequence: u64,
+    schema: u32,
+) -> crab_ltx::Result<PreparedRoot> {
+    let captured = database.capture()?;
+    let prepared = replica
+        .prepare(previous, &captured, commit_sequence, schema)
+        .await?;
+
+    // `prepared.root()` is a proposal. The embedding runtime must publish it
+    // with its owner/head CAS before acknowledging the mutation or pruning
+    // `captured`.
+    Ok(prepared)
+}
 ```
 
 `CellReplica::prepare` writes only immutable, content-addressed objects. The
