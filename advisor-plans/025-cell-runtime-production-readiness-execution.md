@@ -24,9 +24,10 @@
   provider-neutral durability construction/recruitment/rotation, deterministic
   workload, public `CellNode` typed all-primitive execution, public
   receipt/matrix validation, protected-profile/run-artifact verifier coverage,
-  release negative gates, and a fresh/clock-skew check for protected matrix
-  consumption are implemented and tested; the protected ten-row profile
-  workload and provider/Kubernetes/scale receipts remain open
+  release negative gates, exact tagged-source profile binding, and a
+  fresh/clock-skew check for protected matrix consumption are implemented and
+  tested; the protected ten-row profile workload and provider/Kubernetes/scale
+  receipts remain open
 
 ## Decision boundary
 
