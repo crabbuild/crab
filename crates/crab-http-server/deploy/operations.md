@@ -220,6 +220,10 @@ sign in twice, issue a scoped Git token, deliver logout, then verify that both
 browser sessions and the Git credential fail on their next request. Request logs
 retain normal request IDs and outcomes; never collect or paste a raw Logout
 Token into logs, tickets, or commands.
+The identity-index cutoff at `.crab/http-server/v1/identity-index-migration.json`
+and replay records under `.crab/http-server/v1/logout-replays/` are outside the
+24-hour `.crab/http-server/v1/auth/` lifecycle rule. Retain replay records until
+their signed expiry and remove them only with an expiry-aware operator job.
 
 ## Observe requests and capacity
 

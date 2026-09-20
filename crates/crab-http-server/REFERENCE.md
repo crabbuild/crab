@@ -856,6 +856,13 @@ out of the identity provider. Configure an object-store lifecycle rule that
 deletes objects below `.crab/http-server/v1/auth/` after 24 hours. Active state
 expires within eight hours; the rule only collects consumed flows, expired
 sessions, and token records left after session invalidation.
+The identity-index migration cutoff at
+`.crab/http-server/v1/identity-index-migration.json` and Logout Token replay
+records under `.crab/http-server/v1/logout-replays/` intentionally live outside
+that lifecycle prefix. Keep the cutoff until rollout completes and retain replay
+records at least through their signed token expiry; clean them with an
+operator-controlled, expiry-aware job rather than applying the 24-hour auth
+rule to these coordination records.
 
 Register the provider's Back-Channel Logout URI as
 `https://git.example.com/auth/backchannel-logout` with

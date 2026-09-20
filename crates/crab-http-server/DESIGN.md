@@ -234,6 +234,10 @@ does not interrupt a request that already passed authorization; every later
 request resolves the durable parent again and observes revocation. A 24-hour
 object lifecycle on the auth prefix safely collects all state because its
 maximum active lifetime is eight hours.
+The migration cutoff at `.crab/http-server/v1/identity-index-migration.json`
+and replay records at `.crab/http-server/v1/logout-replays/` are deliberately
+outside that lifecycle prefix; replay cleanup must be expiry-aware and
+operator-controlled.
 
 The provider callback at `/auth/backchannel-logout` accepts a signed OIDC
 Back-Channel Logout Token and revokes only its exact issuer/subject identity.
