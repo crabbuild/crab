@@ -464,6 +464,7 @@ impl CaptureEngine {
                 bytes_written: 0,
                 digest: blake3::Hasher::new(),
             };
+            let output = std::io::BufWriter::with_capacity(64 << 10, output);
             let index = index.map(|index| {
                 Box::new(TimedFileIo {
                     inner: index,
@@ -504,6 +505,10 @@ impl CaptureEngine {
                 )?;
             }
             encoder.close(checksums.checksum())?;
+            let output = encoder
+                .into_writer()
+                .into_inner()
+                .map_err(|error| error.into_error())?;
             let encode_elapsed = nanos(
                 self.host
                     .now_monotonic()
@@ -515,7 +520,7 @@ impl CaptureEngine {
                 encode_elapsed.saturating_sub(local_write_nanos),
             );
             self.timing_add_phase_nanos(crate::capture::TimingPhase::LocalWrite, local_write_nanos);
-            let (mut output, size_bytes, digest) = encoder.into_writer().finish();
+            let (mut output, size_bytes, digest) = output.finish();
             if durable {
                 self.timing_begin(crate::capture::TimingPhase::Fsync);
                 output.sync_all()?;

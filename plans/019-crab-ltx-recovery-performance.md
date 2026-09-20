@@ -680,6 +680,17 @@ moved from 16.2 ms to 8.3 ms. These runs were still host-contended; the change
 is accepted because it removes allocator work without changing parsing,
 checksums, or output bytes, not because the raw totals are release-grade.
 
+Capture-side profiling then found that L0 encoding sent each header, page
+record, compressed body, and index fragment directly to the filesystem. A
+bounded 64 KiB writer now coalesces those writes before the unchanged file
+fsync and rename/barrier sequence. Medium grouped local-write time moved from
+8.6 ms to 2.6 ms and improved in all 20 pairs. Large grouped local-write time
+moved from 60.3 ms to 17.8 ms and improved in all 12 pairs; paired capture time
+improved by about 57.2 ms. A 12-pair, three-round synchronous small follow-up
+improved capture in 9 pairs with a paired median reduction of 7.3 ms. One-round
+synchronous samples remained barrier-noisy, so the result is attributed to
+fewer write syscalls rather than to any fsync or acknowledgement change.
+
 A fresh 15-pair synchronous small-workload comparison is the current honesty
 gate. Crab recovery was 13.8 ms versus Celld's 15.8 ms, but Crab capture was
 172.5 ms versus 94.9 ms and total latency was 202.2 ms versus 123.2 ms. Crab's
