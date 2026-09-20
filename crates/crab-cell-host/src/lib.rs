@@ -86,6 +86,18 @@ pub struct CellNodeTaskGroup {
     tasks: Mutex<Vec<JoinHandle<FacilityResult>>>,
 }
 
+impl Drop for CellNodeTaskGroup {
+    fn drop(&mut self) {
+        let tasks = match self.tasks.lock() {
+            Ok(tasks) => tasks,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        for task in tasks {
+            task.abort();
+        }
+    }
+}
+
 impl CellNodeTaskGroup {
     /// Creates a task group whose cancellation tokens are controlled by the product host.
     #[must_use]
@@ -904,6 +916,36 @@ mod tests {
 
         assert!(result.is_err());
         tokio::task::yield_now().await;
+        assert!(dropped.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn dropping_task_group_aborts_unjoined_tasks() {
+        struct DropProbe(Arc<AtomicBool>);
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(tokio::sync::Notify::new());
+        {
+            let tasks = CellNodeTaskGroup::new(CancellationToken::new(), CancellationToken::new());
+            let task_dropped = Arc::clone(&dropped);
+            let task_started = Arc::clone(&started);
+            tasks
+                .spawn(async move {
+                    let _probe = DropProbe(task_dropped);
+                    task_started.notify_one();
+                    std::future::pending::<()>().await;
+                    Ok::<(), Error>(())
+                })
+                .unwrap();
+            started.notified().await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         assert!(dropped.load(Ordering::Acquire));
     }
 
