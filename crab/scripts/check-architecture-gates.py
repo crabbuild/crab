@@ -1805,6 +1805,7 @@ CELL_RUNTIME_SERVER_COMPONENT_FIELDS = frozenset(
     {
         "cell_runtime",
         "catalog",
+        "scheduler_status",
         "repository_cells",
         "peer_receiver",
         "follower_store",

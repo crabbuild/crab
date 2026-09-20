@@ -79,6 +79,7 @@ const CELL_COMPONENT_FOLLOWER_STORE: &str = "follower-store";
 const CELL_COMPONENT_NODE_LOG_TRANSPORT: &str = "node-log-transport";
 const CELL_COMPONENT_NODE_PUBLISHER: &str = "node-publisher";
 const CELL_COMPONENT_CATALOG: &str = "repository-catalog";
+const CELL_COMPONENT_SCHEDULER_STATUS: &str = "scheduler-status";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CellRuntimeBudget {
@@ -740,7 +741,8 @@ pub(crate) struct Server {
     pub(crate) catalog: Option<CatalogStore>,
     catalog_healthy: AtomicBool,
     pub(crate) node_healthy: AtomicBool,
-    scheduler_status: crate::cells::SchedulerStatus,
+    #[cfg(test)]
+    pub(crate) scheduler_status: crate::cells::SchedulerStatus,
     cell_capacity: CellCapacityReport,
     pub(crate) metrics: crate::metrics::Metrics,
 }
@@ -840,6 +842,21 @@ impl Server {
                 #[cfg(test)]
                 {
                     self.catalog.clone()
+                }
+                #[cfg(not(test))]
+                {
+                    None
+                }
+            })
+    }
+
+    fn scheduler_status(&self) -> Option<crate::cells::SchedulerStatus> {
+        self.node_component::<crate::cells::SchedulerStatus>(CELL_COMPONENT_SCHEDULER_STATUS)
+            .map(|status| status.as_ref().clone())
+            .or({
+                #[cfg(test)]
+                {
+                    Some(self.scheduler_status.clone())
                 }
                 #[cfg(not(test))]
                 {
@@ -1130,6 +1147,10 @@ pub async fn serve(config: Config) -> Result<()> {
     cell_node
         .install_owned_component(CELL_COMPONENT_NODE_PUBLISHER, Arc::clone(&node_publisher))?;
     cell_node.install_owned_component(CELL_COMPONENT_CATALOG, Arc::new(catalog.clone()))?;
+    cell_node.install_owned_component(
+        CELL_COMPONENT_SCHEDULER_STATUS,
+        Arc::new(scheduler_status.clone()),
+    )?;
     let durability_application = startup.identity.application();
     let server = Arc::new(Server {
         repositories: repositories.into(),
@@ -1166,6 +1187,7 @@ pub async fn serve(config: Config) -> Result<()> {
         catalog: None,
         catalog_healthy: AtomicBool::new(true),
         node_healthy: AtomicBool::new(false),
+        #[cfg(test)]
         scheduler_status,
         cell_capacity,
         metrics,
@@ -1971,9 +1993,16 @@ async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
         crate::metrics::RuntimeSnapshot {
             repositories: server.repositories.len(),
             catalog_healthy: server.catalog_healthy.load(Ordering::Acquire),
-            scheduler_healthy: server.scheduler_status.is_healthy(scheduler_now_ms),
-            scheduler_progress: server.scheduler_status.progress(),
-            scheduler_lag_seconds: server.scheduler_status.lag_ms(scheduler_now_ms) as f64
+            scheduler_healthy: server
+                .scheduler_status()
+                .is_some_and(|status| status.is_healthy(scheduler_now_ms)),
+            scheduler_progress: server
+                .scheduler_status()
+                .map_or(0, |status| status.progress()),
+            scheduler_lag_seconds: server
+                .scheduler_status()
+                .map_or(0, |status| status.lag_ms(scheduler_now_ms))
+                as f64
                 / 1_000.0,
             draining: server.cancellation.is_cancelled(),
             receive_workers: server.receives.len(),
@@ -2036,10 +2065,10 @@ async fn check_readiness(server: &Server) -> Result<()> {
     if !server.accepts_application_peers() {
         return Err(crate::Error::Config("Cell node advertisement is unhealthy"));
     }
-    if !server
-        .scheduler_status
-        .is_healthy(crate::cells::unix_now_ms()?)
-    {
+    let scheduler_status = server
+        .scheduler_status()
+        .ok_or(crate::Error::Config("Cell scheduler status is unavailable"))?;
+    if !scheduler_status.is_healthy(crate::cells::unix_now_ms()?) {
         return Err(crate::Error::Config("Cell scheduler is unhealthy"));
     }
     if !server.catalog_healthy.load(Ordering::Acquire) {

@@ -170,6 +170,7 @@ fn later_production_code() {}
         for field in (
             "cell_runtime",
             "catalog",
+            "scheduler_status",
             "repository_cells",
             "peer_receiver",
             "follower_store",
