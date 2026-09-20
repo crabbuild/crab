@@ -25,7 +25,10 @@ entry point when scheduled operations are independent or idempotent. The serial
 ordering dependencies; both paths retain the same streaming schedule, counters,
 latency histogram, and logical outcome digest.
 
-The PR profile is a correctness gate. `local-provider-v1`, `fault-v1`,
+The measured summary also emits `throughput_ops_per_sec` using a conservative
+rounded-up duration; protected profiles still verify the raw elapsed duration
+and their independent resource counters. The PR profile is a correctness gate.
+`local-provider-v1`, `fault-v1`,
 `provider-v1`, `compatibility-v1`, and `scale-v1` are release-candidate inputs
 only; they do not claim provider or Kubernetes qualification until a protected
 run records matching receipts and artifacts signed by the pinned qualification

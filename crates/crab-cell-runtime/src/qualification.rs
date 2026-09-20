@@ -676,11 +676,17 @@ impl QualificationRunSummary {
 
     /// Returns receipt-compatible bounded metrics from this run.
     pub fn metrics(&self) -> Result<Vec<QualificationMetric>> {
-        let duration_secs = self.elapsed.as_secs();
+        let duration_secs = self
+            .elapsed
+            .as_secs()
+            .saturating_add(u64::from(self.elapsed.subsec_nanos() != 0))
+            .max(1);
+        let throughput = self.operations / duration_secs;
         Ok(vec![
             QualificationMetric::new("cells".into(), self.cells, "cells".into())?,
             QualificationMetric::new("operations".into(), self.operations, "operations".into())?,
             QualificationMetric::new("duration_secs".into(), duration_secs, "seconds".into())?,
+            QualificationMetric::new("throughput_ops_per_sec".into(), throughput, "ops/s".into())?,
             QualificationMetric::new(
                 "p50_latency_ms".into(),
                 self.latency_percentile_ms(50),
@@ -1116,9 +1122,10 @@ impl QualificationWorkload {
         let mut latency = QualificationLatencyHistogram::default();
         let mut operations = self.iter_operations();
         let mut pending = FuturesUnordered::new();
+        let mut first_error = None;
 
         loop {
-            while pending.len() < concurrency {
+            while first_error.is_none() && pending.len() < concurrency {
                 let Some(operation) = operations.next() else {
                     break;
                 };
@@ -1132,8 +1139,25 @@ impl QualificationWorkload {
             let Some(result) = pending.next().await else {
                 break;
             };
-            let (operation, execution, elapsed) = result?;
-            Self::record_execution(&mut counts, &mut latency, operation, execution, elapsed);
+            match result {
+                Ok((operation, execution, elapsed)) => {
+                    Self::record_execution(
+                        &mut counts,
+                        &mut latency,
+                        operation,
+                        execution,
+                        elapsed,
+                    );
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
         }
         self.summary(counts, latency, started.elapsed())
     }
@@ -2648,6 +2672,7 @@ mod tests {
     struct ConcurrentExecutor {
         active: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         maximum: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        fail_at: Option<u64>,
     }
 
     impl QualificationOperationExecutor for ConcurrentExecutor {
@@ -2657,11 +2682,15 @@ mod tests {
         fn execute<'a>(&'a mut self, operation: QualificationOperation) -> Self::Future<'a> {
             let active = std::sync::Arc::clone(&self.active);
             let maximum = std::sync::Arc::clone(&self.maximum);
+            let fail_at = self.fail_at;
             Box::pin(async move {
                 let current = active.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
                 maximum.fetch_max(current, std::sync::atomic::Ordering::AcqRel);
                 tokio::task::yield_now().await;
                 active.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                if Some(operation.index()) == fail_at {
+                    return Err(Error::Control("qualification executor failed"));
+                }
                 let execution = if operation.rejection_hint() {
                     QualificationExecution::rejected()
                 } else if operation.ambiguous_hint() {
@@ -2714,6 +2743,7 @@ mod tests {
         let executor = ConcurrentExecutor {
             active: std::sync::Arc::clone(&active),
             maximum: std::sync::Arc::clone(&maximum),
+            fail_at: None,
         };
         assert!(workload.run_concurrent(executor.clone(), 0).await.is_err());
         assert!(
@@ -2727,6 +2757,22 @@ mod tests {
         assert!(maximum.load(std::sync::atomic::Ordering::Acquire) >= 2);
         assert!(maximum.load(std::sync::atomic::Ordering::Acquire) <= 4);
         summary.artifact(&workload).unwrap().encode().unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_workload_runner_drains_inflight_operations_after_failure() {
+        let profile =
+            QualificationProfile::new("concurrent-failure".into(), 1, 32, 1, 1_000).unwrap();
+        let workload = QualificationWorkload::generate_with_size(&profile, 41, 2, 32, 1).unwrap();
+        let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let maximum = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let executor = ConcurrentExecutor {
+            active: std::sync::Arc::clone(&active),
+            maximum,
+            fail_at: Some(0),
+        };
+        assert!(workload.run_concurrent(executor, 4).await.is_err());
+        assert_eq!(active.load(std::sync::atomic::Ordering::Acquire), 0);
     }
 
     #[test]
