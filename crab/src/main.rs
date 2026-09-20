@@ -3075,6 +3075,37 @@ impl StdIo for RealStdIo {
     }
 }
 
+async fn run_mirror_command(
+    args: &crab::cmd::mirror::MirrorArgs,
+    cancel: &CancellationToken,
+) -> Result<ExitCode> {
+    let _span = tracing::info_span!("mirror", source = %args.source).entered();
+    let mode = args.output_mode();
+    if args.is_integrity_operation() {
+        let outcome = crab::cmd::mirror::run_mirror_integrity(args, cancel).await?;
+        match mode {
+            OutputMode::Json => outcome.emit_json()?,
+            OutputMode::Jsonl => outcome.emit_jsonl()?,
+            OutputMode::Text => {}
+        }
+        if args.ci && !outcome.ci_passed() {
+            return Ok(ExitCode::from(1));
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let summary = crab::cmd::mirror::run_mirror(args, cancel)?;
+    match mode {
+        OutputMode::Json => crab::core::output::emit_json("mirror", "1.0", &summary)?,
+        OutputMode::Jsonl => {
+            let mut stream = JsonlStream::new("mirror.event", "1.0", std::io::stdout());
+            stream.emit_result(&summary)?;
+        }
+        OutputMode::Text => {}
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 #[allow(clippy::too_many_lines)]
 async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
     match cli.cmd {
@@ -3562,37 +3593,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             crab::cmd::mirror::run_mirror_pre_push(args, &cancel).await?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Mirror(ref args)) => {
-            let _span = tracing::info_span!("mirror", source = %args.source).entered();
-            let mode = args.output_mode();
-            if args.is_integrity_operation() {
-                let outcome = crab::cmd::mirror::run_mirror_integrity(args, &cancel).await?;
-                match mode {
-                    OutputMode::Json => outcome.emit_json()?,
-                    OutputMode::Jsonl => outcome.emit_jsonl()?,
-                    OutputMode::Text => {}
-                }
-                if args.ci && !outcome.ci_passed() {
-                    return Ok(ExitCode::from(1));
-                }
-                return Ok(ExitCode::SUCCESS);
-            }
-
-            let summary = crab::cmd::mirror::run_mirror(args, &cancel)?;
-
-            match mode {
-                OutputMode::Json => {
-                    crab::core::output::emit_json("mirror", "1.0", &summary)?;
-                }
-                OutputMode::Jsonl => {
-                    let mut stream = JsonlStream::new("mirror.event", "1.0", std::io::stdout());
-                    stream.emit_result(&summary)?;
-                }
-                OutputMode::Text => {}
-            }
-
-            Ok(ExitCode::SUCCESS)
-        }
+        Some(Cmd::Mirror(ref args)) => run_mirror_command(args, &cancel).await,
         Some(Cmd::Download {
             repo,
             paths,
@@ -6106,6 +6107,32 @@ mod tests {
                     Err(error) => error,
                 };
             assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        });
+    }
+
+    #[test]
+    fn mirror_is_the_only_external_git_import_command() {
+        parse_cli_on_large_stack(|| {
+            let parsed = Cli::try_parse_from([
+                "crab",
+                "mirror",
+                "https://github.com/org/repo.git",
+                "crab://bucket/repo",
+            ])
+            .expect("mirror should parse hosted Git sources");
+            assert!(matches!(parsed.cmd, Some(Cmd::Mirror(_))));
+
+            let error = match Cli::try_parse_from([
+                "crab",
+                "github",
+                "import",
+                "org/repo",
+                "crab://bucket/repo",
+            ]) {
+                Ok(_) => panic!("retired GitHub import command remained available"),
+                Err(error) => error,
+            };
+            assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
         });
     }
 

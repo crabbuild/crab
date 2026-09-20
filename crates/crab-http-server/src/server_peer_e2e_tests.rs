@@ -845,6 +845,7 @@ fn server(
         cancellation: CancellationToken::new(),
         receives: tokio_util::task::TaskTracker::new(),
         auth: None,
+        git_import: None,
         catalog: None,
         catalog_healthy: AtomicBool::new(false),
         node_healthy: AtomicBool::new(true),

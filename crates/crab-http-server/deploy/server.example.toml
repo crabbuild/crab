@@ -15,6 +15,9 @@ peer_ca = "/run/secrets/crab-peer/ca.crt"
 [storage]
 url = "s3://my-git-bucket/repositories"
 
+[import]
+allowed_hosts = ["github.com", "git.example.com"]
+
 [auth]
 provider = "oidc"
 issuer = "https://identity.example.com/realms/team"

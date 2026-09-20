@@ -32,8 +32,11 @@ lifecycle, Pull requests, reviews, and Release metadata use typed Rust commands
 against one SQLite/LTX Cell per repository. The remote-owner path is verified
 from the public HTTP listener through the private mTLS listener to an advanced
 LTX root. No serving route reads or writes the retired collaboration object
-trees. The server uses writable temporary space for pack/index preparation; it
-creates no Git checkout or local Git object database.
+trees. Normal serving paths create no Git checkout or local Git object database;
+the explicit browser Git import workflow runs a time-bounded
+`git clone --mirror` in Cell-managed staging and pushes the result through the
+native receive-pack path. Sources are limited to the operator's configured Git
+host allowlist.
 
 Authenticated repository administrators manage the complete member list in
 **Settings → Members** or through the conditional CLI replacement command.

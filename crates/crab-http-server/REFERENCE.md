@@ -17,6 +17,8 @@ Use this map to enter the reference without reading it in order.
 | Understand the process and storage boundaries | [Understand the runtime architecture](#understand-the-runtime-architecture) |
 | Call repository browser APIs | [Repository browser and application APIs](#repository-browser-and-application-apis) |
 | Configure browser sign-in (OIDC or GitHub OAuth) | [Team sign-in](#team-sign-in) |
+| Import a repository from Git | [Git imports](#git-imports) |
+| Configure OpenID Connect (OIDC) | [Team sign-in](#team-sign-in) |
 | Clone or fetch with native Git | [Git HTTP reads](#git-http-reads) |
 | Transfer LFS objects | [Git LFS transfers](#git-lfs-transfers) |
 | Push branches and tags | [Native Git push](#native-git-push) |
@@ -48,7 +50,11 @@ flowchart LR
     Server -->|Git, metadata, app state| Store
 ```
 
-The process does not create a server checkout, clone a repository, run the Git executable, or maintain a local Git object database. The integration tests may use Git as an independent protocol oracle.
+Normal serving paths do not create a server checkout, run the Git executable, or
+maintain a local Git object database. The browser Git import is an explicit
+background workflow: it runs `git clone --mirror` in Cell-managed staging, then
+pushes Git history and refs through the server's receive-pack endpoint. The
+integration tests may use Git as an independent protocol oracle.
 
 ### Know which component owns each boundary
 
@@ -557,6 +563,45 @@ one bounded maintenance pass remains a 202 indexing state and the next pass
 resumes that exact Git generation.
 
 Root commits compare against an empty tree. Path history follows the exact first-parent path. Commit history with `base` instead returns commits reachable from `rev` but not from `base`, across every parent.
+
+### Git imports
+
+The catalog page exposes **Import from Git** for an authenticated browser
+session. The workflow accepts a public or private repository from an
+allowlisted Git host, creates a new Crab repository, and copies its Git history
+and refs into the configured object store. It does not migrate Git LFS payloads;
+use the native Git/LFS workflow for repositories whose large files must be
+copied as well.
+
+| Endpoint | Contract |
+| --- | --- |
+| `POST /api/imports/git` | Starts an asynchronous import. The JSON body is `{source, owner, name, description?, token?}`. `source` is an HTTPS or SSH clone URL (or GitHub `owner/repository` shorthand) whose host appears in `import.allowed_hosts`; HTTPS tokens are sent as a bearer header and never persisted. Browser requests require the session CSRF token. |
+| `GET /api/imports/git/{id}` | Returns `queued`, `running`, `succeeded`, or `failed` status for the caller's own job. Job records are in-memory and retained for one hour after completion. |
+
+Configure additional Git hosts explicitly:
+
+```toml
+[import]
+allowed_hosts = ["github.com", "gitlab.com", "git.example.internal"]
+```
+
+Hosts are exact, lower-case matches. The server accepts HTTPS and SSH clone
+URLs only; file paths, `git://`, embedded credentials, query strings, and
+fragments are rejected. Child Git commands disable inherited credential
+helpers and HTTP redirects. Keep outbound network policy enabled as a second
+boundary for private deployments.
+
+On success, the importing identity is the new repository's administrator in an
+OIDC deployment. A local-trust deployment uses the local operator. Imports are
+bounded to four concurrent jobs; cloning and each push batch have a 30-minute
+deadline, each batch uses the server's atomic receive capability, and failed
+push batches retry with bounded backoff. The runtime image
+includes `git`; each import reserves up to 8 GiB from the Cell local-disk
+budget, and `TMPDIR` must still have room for Git's process scratch files.
+The server also needs outbound access to the configured Git host (or the
+configured network proxy). Transient push failures are retried at the Git
+batch boundary; a terminal failure leaves the destination name reserved until
+an operator removes the repository that was created before the failure.
 
 ### Render repository content safely
 

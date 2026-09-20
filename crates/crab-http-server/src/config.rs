@@ -16,7 +16,34 @@ pub struct Config {
     pub management_listen: SocketAddr,
     pub storage: StorageConfig,
     pub cells: CellsConfig,
+    #[serde(default)]
+    pub import: ImportConfig,
     pub auth: Option<OidcConfig>,
+}
+
+/// Outbound Git source policy for the browser import service.
+///
+/// Hosts are matched exactly after lower-casing. An explicit allowlist keeps
+/// the server from becoming an unrestricted internal-network fetch proxy while
+/// still allowing operators to import from GitHub, GitLab, Gitea, or a private
+/// Git service.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportConfig {
+    #[serde(default = "default_import_allowed_hosts")]
+    pub allowed_hosts: Vec<String>,
+}
+
+impl Default for ImportConfig {
+    fn default() -> Self {
+        Self {
+            allowed_hosts: default_import_allowed_hosts(),
+        }
+    }
+}
+
+fn default_import_allowed_hosts() -> Vec<String> {
+    vec!["github.com".to_owned()]
 }
 
 /// Provider-neutral object-storage root containing the repository catalog.
@@ -134,6 +161,7 @@ impl Config {
             ));
         }
         validate_cells(&self.cells, self.management_listen)?;
+        validate_import(&self.import)?;
         let storage = crab_git::url::ObjectUrl::parse(&self.storage.url)
             .map_err(|_| Error::Config("storage.url must be a valid raw cloud URL"))?;
         if storage.form != crab_git::url::UrlForm::Raw
@@ -197,6 +225,35 @@ impl Config {
         }
         Ok(())
     }
+}
+
+fn validate_import(import: &ImportConfig) -> Result<()> {
+    if import.allowed_hosts.is_empty() || import.allowed_hosts.len() > 128 {
+        return Err(Error::Config(
+            "import.allowed_hosts must contain between 1 and 128 hosts",
+        ));
+    }
+    let mut seen = HashSet::new();
+    for value in &import.allowed_hosts {
+        let normalized = value.trim().to_ascii_lowercase();
+        if normalized != *value
+            || normalized.is_empty()
+            || normalized.len() > 253
+            || !seen.insert(normalized.clone())
+        {
+            return Err(Error::Config(
+                "import.allowed_hosts must contain unique lower-case host names",
+            ));
+        }
+        let host = Host::parse(&normalized)
+            .map_err(|_| Error::Config("import.allowed_hosts contains an invalid host"))?;
+        if matches!(host, Host::Domain(domain) if domain.is_empty()) {
+            return Err(Error::Config(
+                "import.allowed_hosts contains an invalid host",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_cells(cells: &CellsConfig, management_listen: SocketAddr) -> Result<()> {
@@ -513,6 +570,23 @@ mod tests {
             }),
         });
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn import_allowlist_is_exact_lower_case_host_policy() {
+        let mut config = local_config("s3://bucket/repositories");
+        config.import.allowed_hosts = vec!["github.com".into(), "git.example.internal".into()];
+        assert!(config.validate().is_ok());
+
+        for hosts in [
+            vec![],
+            vec!["GitHub.com".into()],
+            vec!["github.com".into(), "github.com".into()],
+            vec!["https://github.com".into()],
+        ] {
+            config.import.allowed_hosts = hosts;
+            assert!(config.validate().is_err());
+        }
     }
 
     #[test]

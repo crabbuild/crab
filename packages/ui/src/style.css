@@ -404,6 +404,118 @@ main {
   margin: 0 auto;
   padding: 48px 32px;
 }
+.catalog-heading-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.catalog > .section-heading {
+  flex-wrap: wrap;
+}
+.git-import {
+  margin-top: 24px;
+  min-width: 0;
+  flex: 1 0 100%;
+}
+.git-import-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--borderColor-muted);
+  background: linear-gradient(
+    135deg,
+    var(--bgColor-muted),
+    var(--bgColor-default)
+  );
+}
+.git-import-header h2 {
+  margin: 0;
+  font-size: 18px;
+}
+.git-import-header p {
+  max-width: 640px;
+}
+.git-import-eyebrow {
+  margin: 0 0 4px;
+  color: var(--fgColor-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+.git-import-form {
+  display: grid;
+  gap: 16px;
+  padding: 24px;
+}
+.git-import-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.git-import-grid label {
+  display: grid;
+  gap: 6px;
+  color: var(--fgColor-default);
+  font-weight: 600;
+}
+.git-import-grid input,
+.git-import-grid textarea {
+  width: 100%;
+  padding: 8px 10px;
+  color: var(--fgColor-default);
+  background: var(--bgColor-default);
+  border: 1px solid var(--borderColor-default);
+  border-radius: var(--borderRadius-medium);
+  font: inherit;
+  font-weight: 400;
+}
+.git-import-grid input:focus-visible,
+.git-import-grid textarea:focus-visible {
+  outline: 2px solid var(--focus-outlineColor);
+  outline-offset: 1px;
+}
+.git-import-description {
+  grid-column: 1 / -1;
+}
+.git-import-feedback {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--borderColor-muted);
+  border-radius: var(--borderRadius-medium);
+  color: var(--fgColor-muted);
+}
+.git-import-feedback.error {
+  color: var(--fgColor-danger);
+  background: var(--bgColor-danger-muted);
+  border-color: var(--borderColor-danger-muted);
+}
+.git-import-succeeded {
+  color: var(--fgColor-success);
+  background: var(--bgColor-success-muted);
+  border-color: var(--borderColor-success-muted);
+}
+.git-import-failed {
+  color: var(--fgColor-danger);
+  background: var(--bgColor-danger-muted);
+  border-color: var(--borderColor-danger-muted);
+}
+.git-import-result {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  font-weight: 600;
+}
+.git-import-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 .repo-cards {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
@@ -4111,6 +4223,19 @@ main {
   }
 }
 @media (max-width: 640px) {
+  .git-import-header {
+    flex-direction: column;
+    gap: 16px;
+  }
+  .git-import-form {
+    padding: 16px;
+  }
+  .git-import-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .git-import-description {
+    grid-column: auto;
+  }
   .toolbar {
     gap: 12px;
   }

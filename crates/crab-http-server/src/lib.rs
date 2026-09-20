@@ -12,6 +12,7 @@ mod checks;
 mod config;
 mod contents;
 mod git;
+mod git_import;
 mod git_objects;
 mod issues;
 mod labels;
@@ -34,7 +35,7 @@ mod storage_root;
 mod transfer_admission;
 
 pub use config::{
-    AuthProvider, BranchProtection, CellsConfig, Config, GitHubConfig, OidcConfig,
+    AuthProvider, BranchProtection, CellsConfig, Config, GitHubConfig, ImportConfig, OidcConfig,
     RepositoryAccess, RepositoryConfig, RepositoryMember, StorageConfig,
 };
 pub use server::{probe_storage, serve};

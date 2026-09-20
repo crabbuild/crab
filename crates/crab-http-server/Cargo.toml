@@ -49,7 +49,7 @@ sha2 = "0.10"
 sysinfo = "0.38.4"
 thiserror = { workspace = true }
 time = { workspace = true }
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls = "0.26"
 tokio-util = { workspace = true, features = ["io", "rt"] }
 toml = { workspace = true }
