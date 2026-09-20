@@ -153,7 +153,7 @@ pub(crate) struct CommitRow {
     pub encoded_bytes: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TreeEntryRow {
     pub name: Vec<u8>,
