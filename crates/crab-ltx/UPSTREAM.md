@@ -33,7 +33,7 @@ written by `crab-ltx`; it does not make the two replica layouts or publication
 protocols compatible.
 
 ```text
-Litestream v0.5 ───────┐
+Litestream v0.5 ──────┐
                       ├── rustyriver ── Celld crates/ltx ── crab-ltx
 superfly/ltx v0.5.2 ──┘                                      │
                                                              └─ Crab Cell roots,
