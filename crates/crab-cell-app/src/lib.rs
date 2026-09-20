@@ -72,6 +72,14 @@ impl CellType {
         Ok(self)
     }
 
+    /// Replaces the schema range while retaining the stable Cell identity.
+    pub fn with_schema_range(mut self, schema_min: u32, schema_max: u32) -> Result<Self> {
+        self.schema_min = schema_min;
+        self.schema_max = schema_max;
+        self.validate()?;
+        Ok(self)
+    }
+
     /// Returns the stable module owner.
     #[must_use]
     pub const fn module(&self) -> &'static str {
@@ -192,6 +200,13 @@ impl ApplicationBuilder {
                 || namespace.shards != cell_type.shards
             {
                 return Err(Error::Registry("Cell type differs from compiled namespace"));
+            }
+            if registry.module_schema_range(cell_type.module)
+                != Some((cell_type.schema_min, cell_type.schema_max))
+            {
+                return Err(Error::Registry(
+                    "Cell type schema range differs from compiled module",
+                ));
             }
         }
         let bytes = encode_descriptor(self.name, &registry, &self.cell_types)?;
@@ -675,6 +690,35 @@ mod tests {
                     CatalogRole::Sql,
                     1,
                 )
+                .unwrap(),
+            )
+            .unwrap();
+
+        assert!(builder.finish().is_err());
+    }
+
+    #[test]
+    fn cell_type_schema_range_must_match_compiled_module() {
+        let mut builder = ApplicationBuilder::new(
+            "app",
+            BuildDescriptor {
+                source_revision: "source".into(),
+                cargo_lock_digest: Digest::from_bytes([9; 32]),
+            },
+        )
+        .unwrap();
+        builder.register(SqlModule).unwrap();
+        builder
+            .cell_type(
+                CellType::new(
+                    "app-sql",
+                    "orders",
+                    NamespaceId::from_bytes([2; 16]),
+                    CatalogRole::Sql,
+                    1,
+                )
+                .unwrap()
+                .with_schema_range(1, 2)
                 .unwrap(),
             )
             .unwrap();

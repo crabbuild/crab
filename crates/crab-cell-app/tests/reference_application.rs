@@ -497,6 +497,66 @@ fn compiled() -> crab_cell_app::CompiledApplication {
     .expect("reference application compiles")
 }
 
+fn compile_reference_in_order(reverse: bool) -> crab_cell_app::CompiledApplication {
+    let mut builder = ApplicationBuilder::new(
+        ReferenceApplication::NAME,
+        BuildDescriptor {
+            source_revision: "reference-source".into(),
+            cargo_lock_digest: Digest::from_bytes([42; 32]),
+        },
+    )
+    .unwrap();
+    if reverse {
+        builder.register(ReferenceWorkflow).unwrap();
+        builder.register(ReferenceCron).unwrap();
+        builder.register(ReferenceDeadLetter).unwrap();
+        builder.register(ReferenceQueue).unwrap();
+        builder.register(ReferenceBlob).unwrap();
+        builder.register(ReferenceKv).unwrap();
+        builder.register(ReferenceSql).unwrap();
+    } else {
+        builder.register(ReferenceSql).unwrap();
+        builder.register(ReferenceKv).unwrap();
+        builder.register(ReferenceBlob).unwrap();
+        builder.register(ReferenceQueue).unwrap();
+        builder.register(ReferenceDeadLetter).unwrap();
+        builder.register(ReferenceCron).unwrap();
+        builder.register(ReferenceWorkflow).unwrap();
+    }
+    for (module, name, namespace, role) in [
+        (SQL_MODULE, "sql", SQL_NAMESPACE, CatalogRole::Sql),
+        (KV_MODULE, "kv", KV_NAMESPACE, CatalogRole::Kv),
+        (BLOB_MODULE, "blob", BLOB_NAMESPACE, CatalogRole::Blob),
+        (QUEUE_MODULE, "queue", QUEUE_NAMESPACE, CatalogRole::Queue),
+        (
+            DEAD_LETTER_MODULE,
+            "dead-letter",
+            DEAD_LETTER_NAMESPACE,
+            CatalogRole::Queue,
+        ),
+        (CRON_MODULE, "cron", CRON_NAMESPACE, CatalogRole::Cron),
+        (
+            WORKFLOW_MODULE,
+            "workflow",
+            WORKFLOW_NAMESPACE,
+            CatalogRole::Workflow,
+        ),
+    ] {
+        builder
+            .cell_type(CellType::new(module, name, namespace, role, 1).unwrap())
+            .unwrap();
+    }
+    builder.finish().unwrap()
+}
+
+#[test]
+fn application_descriptor_is_stable_when_modules_register_in_reverse_order() {
+    let forward = compile_reference_in_order(false);
+    let reverse = compile_reference_in_order(true);
+    assert_eq!(forward.descriptor_bytes(), reverse.descriptor_bytes());
+    assert_eq!(forward.descriptor_digest(), reverse.descriptor_digest());
+}
+
 #[test]
 fn reference_application_registers_every_primitive_and_relationship() {
     let application = compiled();

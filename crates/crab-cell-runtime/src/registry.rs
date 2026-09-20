@@ -946,6 +946,12 @@ impl Registry {
         self.module_codes.get(module).copied()
     }
 
+    /// Returns the schema range compiled for one registered module.
+    #[must_use]
+    pub fn module_schema_range(&self, module: &str) -> Option<(u32, u32)> {
+        self.module_schemas.get(module).copied()
+    }
+
     /// Returns the sorted module-code inventory advertised by eligible nodes.
     #[must_use]
     pub fn module_digests(&self) -> Vec<Digest> {
