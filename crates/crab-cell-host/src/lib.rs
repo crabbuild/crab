@@ -35,7 +35,8 @@ pub struct CellNodeFacility {
 }
 
 impl CellNodeFacility {
-    /// Creates one named drain callback. The callback must be idempotent.
+    /// Creates one named drain callback. The callback must be idempotent and
+    /// must finish promptly when the node's shutdown cancellation is observed.
     pub fn new<F, Fut>(name: &'static str, drain: F) -> crab_cell_runtime::Result<Self>
     where
         F: Fn() -> Fut + Send + Sync + 'static,
@@ -339,10 +340,15 @@ impl CellNode {
     }
 
     /// Installs the authoritative node lease before readiness is exposed.
+    ///
+    /// A coordination task group must already be installed. This convenience
+    /// path is intentionally fail-closed so a node can never advertise while
+    /// its runtime-wide supervisors are unowned.
     pub fn install_node_lease(
         &self,
         lease: crab_cell_runtime::NodeLeaseGuard,
     ) -> crab_cell_runtime::Result<()> {
+        self.require_task_group()?;
         self.install_node_lease_for_startup(lease)?;
         self.mark_ready()
     }
@@ -391,6 +397,7 @@ impl CellNode {
                 "CellNode cannot become ready before its node lease is installed",
             ));
         }
+        self.require_task_group()?;
         let mut state = self
             .state
             .lock()
@@ -405,6 +412,19 @@ impl CellNode {
         Err(Error::Control(
             "CellNode cannot become ready after shutdown",
         ))
+    }
+
+    fn require_task_group(&self) -> crab_cell_runtime::Result<()> {
+        let installed = self
+            .task_group
+            .lock()
+            .map_err(|_| Error::Control("CellNode task group lock poisoned"))?;
+        if installed.is_none() {
+            return Err(Error::Control(
+                "CellNode cannot become ready before its task group is installed",
+            ));
+        }
+        Ok(())
     }
 
     /// Returns whether the owned runtime has entered shutdown.
@@ -640,6 +660,8 @@ mod tests {
         assert_eq!(node.state(), NodeState::Starting);
         assert!(!node.is_ready());
         assert!(node.mark_ready().is_err());
+        node.install_task_group(CancellationToken::new(), CancellationToken::new())
+            .unwrap();
         node.install_node_lease(NodeLeaseGuard::new(0, 60_000).unwrap())
             .unwrap();
         assert_eq!(node.state(), NodeState::Ready);
@@ -661,6 +683,31 @@ mod tests {
             .unwrap();
         assert_eq!(node.state(), NodeState::Starting);
         assert!(!node.is_ready());
+        assert!(node.mark_ready().is_err());
+        node.install_task_group(CancellationToken::new(), CancellationToken::new())
+            .unwrap();
+        node.mark_ready().unwrap();
+        assert!(node.is_ready());
+        node.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn readiness_requires_the_node_task_group() {
+        let node = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([22; 16]))
+            .build()
+            .unwrap();
+        node.install_node_lease_for_startup(NodeLeaseGuard::new(0, 60_000).unwrap())
+            .unwrap();
+
+        let error = node.mark_ready().unwrap_err();
+        assert!(matches!(error, Error::Control(_)));
+        assert_eq!(node.state(), NodeState::Starting);
+
+        node.install_task_group(CancellationToken::new(), CancellationToken::new())
+            .unwrap();
         node.mark_ready().unwrap();
         assert!(node.is_ready());
         node.shutdown().await.unwrap();
