@@ -167,14 +167,22 @@ fn later_production_code() {}
         )
 
     def test_production_server_component_fields_are_rejected(self):
-        self.assertFalse(
-            self.check_source(
-                "pub(crate) struct Server {\n"
-                "    repository_cells: usize,\n"
-                "}\n",
-                relative="crates/crab-http-server/src/server.rs",
-            )
-        )
+        for field in (
+            "cell_runtime",
+            "repository_cells",
+            "peer_receiver",
+            "follower_store",
+            "node_log_transport",
+        ):
+            with self.subTest(field=field):
+                self.assertFalse(
+                    self.check_source(
+                        "pub(crate) struct Server {\n"
+                        f"    {field}: usize,\n"
+                        "}\n",
+                        relative="crates/crab-http-server/src/server.rs",
+                    )
+                )
 
     def test_test_only_server_component_fields_are_admitted(self):
         self.assertTrue(

@@ -766,7 +766,10 @@ pub(crate) async fn forward(
         Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
     };
     let request = {
-        let Some(_codec) = reserve_peer_codec(&server.cell_runtime) else {
+        let Ok(runtime) = server.cell_runtime() else {
+            return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+        };
+        let Some(_codec) = reserve_peer_codec(&runtime) else {
             return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
         };
         match receiver
@@ -840,7 +843,10 @@ pub(crate) async fn forward(
         Arc::clone(&server) as Arc<dyn PeerAuthorizer>,
     );
     let reply = dispatcher.dispatch(&request, now_ms).await;
-    let Some(_codec) = reserve_peer_codec(&server.cell_runtime) else {
+    let Ok(runtime) = server.cell_runtime() else {
+        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let Some(_codec) = reserve_peer_codec(&runtime) else {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     };
     match encode_peer_reply(&reply) {
@@ -885,7 +891,10 @@ pub(crate) async fn append_node_log(
         return peer_http_error(StatusCode::UNAUTHORIZED);
     }
     let (covered_through, frames) = {
-        let Some(_codec) = reserve_peer_codec(&server.cell_runtime) else {
+        let Ok(runtime) = server.cell_runtime() else {
+            return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+        };
+        let Some(_codec) = reserve_peer_codec(&runtime) else {
             return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
         };
         match decode_append_batch(body) {
@@ -1023,7 +1032,10 @@ pub(crate) async fn tail_node_log(
     }
     match store.read_tail_page(leader, epoch, first).await {
         Ok(page) => {
-            let Some(_codec) = reserve_peer_codec(&server.cell_runtime) else {
+            let Ok(runtime) = server.cell_runtime() else {
+                return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+            };
+            let Some(_codec) = reserve_peer_codec(&runtime) else {
                 return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
             };
             match encode_tail_page(page) {

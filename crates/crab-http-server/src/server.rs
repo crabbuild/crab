@@ -713,8 +713,9 @@ impl Repository {
 pub(crate) struct Server {
     pub repositories: RepositorySet,
     pub runtime: Arc<RemoteGitRuntime>,
-    pub cell_runtime: CellRuntime,
     pub(crate) cell_node: Option<Arc<CellNode>>,
+    #[cfg(test)]
+    pub(crate) cell_runtime: CellRuntime,
     #[cfg(test)]
     pub(crate) repository_cells: Option<crate::cells::RepositoryCellRouter>,
     #[cfg(test)]
@@ -743,6 +744,23 @@ pub(crate) struct Server {
 }
 
 impl Server {
+    pub(crate) fn cell_runtime(&self) -> Result<CellRuntime> {
+        self.cell_node
+            .as_ref()
+            .map(|node| node.runtime())
+            .or_else(|| {
+                #[cfg(test)]
+                {
+                    Some(self.cell_runtime.clone())
+                }
+                #[cfg(not(test))]
+                {
+                    None
+                }
+            })
+            .ok_or(crate::Error::Config("Cell runtime host is unavailable"))
+    }
+
     fn node_component<T>(&self, name: &str) -> Option<Arc<T>>
     where
         T: Send + Sync + 'static,
@@ -862,7 +880,7 @@ impl Server {
                 Some(deadline) => node.shutdown_until(deadline).await,
                 None => node.shutdown().await,
             },
-            None => self.cell_runtime.shutdown().await,
+            None => self.cell_runtime()?.shutdown().await,
         };
         self.runtime.shutdown().await;
         cells.map_err(Into::into)
@@ -1098,7 +1116,8 @@ pub async fn serve(config: Config) -> Result<()> {
     let server = Arc::new(Server {
         repositories: repositories.into(),
         runtime: Arc::clone(&runtime),
-        cell_runtime,
+        #[cfg(test)]
+        cell_runtime: cell_runtime.clone(),
         cell_node: Some(Arc::clone(&cell_node)),
         #[cfg(test)]
         repository_cells: None,
@@ -1204,7 +1223,7 @@ pub async fn serve(config: Config) -> Result<()> {
     let projection_sweep_server = Arc::clone(&server);
     cell_tasks.spawn(async move { sweep_projections(projection_sweep_server).await })?;
     let durability_publisher = Arc::clone(&node_publisher);
-    let durability_runtime = server.cell_runtime.clone();
+    let durability_runtime = server.cell_runtime()?;
     let durability_transport = server
         .node_log_transport()
         .ok_or(crate::Error::Config("node-log transport is unavailable"))?;
@@ -1220,7 +1239,7 @@ pub async fn serve(config: Config) -> Result<()> {
         .await
     })?;
     let rotation_publisher = Arc::clone(&node_publisher);
-    let rotation_runtime = server.cell_runtime.clone();
+    let rotation_runtime = server.cell_runtime()?;
     let rotation_transport = server
         .node_log_transport()
         .ok_or(crate::Error::Config("node-log transport is unavailable"))?;
@@ -1922,7 +1941,13 @@ async fn render_capacity(State(server): State<Arc<Server>>) -> Response {
 
 async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
     let scheduler_now_ms = crate::cells::unix_now_ms().unwrap_or(0);
-    let cell_runtime = server.cell_runtime.stats();
+    let cell_runtime = match server.cell_runtime() {
+        Ok(runtime) => runtime.stats(),
+        Err(error) => {
+            tracing::error!(error = %error, "Cell runtime host is unavailable for metrics");
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    };
     let body = server.metrics.render(
         crate::metrics::RuntimeSnapshot {
             repositories: server.repositories.len(),
@@ -1983,7 +2008,7 @@ async fn check_readiness(server: &Server) -> Result<()> {
     if server.cancellation.is_cancelled() {
         return Err(crate::Error::Config("server is draining"));
     }
-    if server.cell_runtime.is_shutting_down() {
+    if server.cell_runtime()?.is_shutting_down() {
         return Err(crate::Error::Config("embedded Cell runtime is draining"));
     }
     if server.catalog.is_some() && server.peer_receiver().is_none() {
