@@ -31,7 +31,7 @@ use object_store::{
 
 use super::*;
 use crate::cells::{
-    REPOSITORY_MIGRATION, REPOSITORY_NAMESPACE, bootstrap_release_at, provision_repository,
+    REPOSITORY_NAMESPACE, bootstrap_release_at, initialize_repository_schema, provision_repository,
 };
 
 const WORKFLOW_MODULE: &str = "scheduler-workflow-test";
@@ -610,7 +610,7 @@ async fn bootstrap_due_repository(
             observed,
             directory.join(format!("{repository}.sqlite")),
             move |transaction| {
-                transaction.execute_batch(REPOSITORY_MIGRATION)?;
+                initialize_repository_schema(transaction)?;
                 transaction.execute(
                     "INSERT INTO repository_identity(singleton, repository_uuid) VALUES (1, ?1)",
                     [repository_bytes.as_slice()],

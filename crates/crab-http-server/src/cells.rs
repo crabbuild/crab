@@ -39,6 +39,7 @@ pub(crate) use router::{RepositoryCell, RepositoryCellPeer, RepositoryCellRouter
 pub(crate) use scheduler::{RepositoryCellScheduler, SchedulerStatus};
 
 const REPOSITORY_MIGRATION: &str = include_str!("cells/migrations/0001_repository_identity.sql");
+const REPOSITORY_MIGRATION_V2: &str = include_str!("cells/migrations/0002_pull_review_threads.sql");
 const REPOSITORY_MAX_DATABASE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const REPOSITORY_MAX_CAPTURE_BYTES: u64 = 64 * 1024 * 1024;
 const REPOSITORY_MAX_FILE_BYTES: u64 = 6 * 1024 * 1024 * 1024;
@@ -51,6 +52,24 @@ pub(crate) const REPOSITORY_EFFECT_VALIDATE_QUERY_ID: u32 = 5;
 pub(crate) const REPOSITORY_PROJECTION_COMMAND_ID: u32 = 31;
 pub(crate) const REPOSITORY_PROJECTION_STATE_QUERY_ID: u32 = 27;
 pub(crate) const REPOSITORY_PROJECTION_ATTRIBUTION_QUERY_ID: u32 = 28;
+pub(crate) const REPOSITORY_PULL_REVIEW_THREAD_CREATE_COMMAND_ID: u32 = 32;
+pub(crate) const REPOSITORY_PULL_REVIEW_THREAD_UPDATE_COMMAND_ID: u32 = 33;
+pub(crate) const REPOSITORY_PULL_REVIEW_REPLY_CREATE_COMMAND_ID: u32 = 34;
+pub(crate) const REPOSITORY_PULL_REVIEW_REPLY_UPDATE_COMMAND_ID: u32 = 35;
+pub(crate) const REPOSITORY_PULL_REVIEW_THREAD_GET_QUERY_ID: u32 = 29;
+pub(crate) const REPOSITORY_PULL_REVIEW_THREAD_LIST_QUERY_ID: u32 = 30;
+pub(crate) const REPOSITORY_PULL_REVIEW_THREAD_SUBMISSION_QUERY_ID: u32 = 31;
+pub(crate) const REPOSITORY_PULL_REVIEW_REPLY_GET_QUERY_ID: u32 = 32;
+pub(crate) const REPOSITORY_PULL_REVIEW_REPLY_LIST_QUERY_ID: u32 = 33;
+pub(crate) const REPOSITORY_PULL_REVIEW_REPLY_SUBMISSION_QUERY_ID: u32 = 34;
+
+pub(crate) fn initialize_repository_schema(
+    transaction: &rusqlite::Transaction<'_>,
+) -> rusqlite::Result<()> {
+    transaction.execute_batch(REPOSITORY_MIGRATION)?;
+    transaction.execute_batch(REPOSITORY_MIGRATION_V2)
+}
+
 const MAX_LIVE_NODES: usize = 10_000;
 const MAX_MIGRATION_STATUS_LIMIT: usize = 256;
 const MAX_MIGRATION_STATUS_EXAMINED: usize = 1_024;
@@ -99,6 +118,26 @@ const REPOSITORY_COMMANDS: &[OperationDescriptor] = &[
     operation(29, 32 * 1024, 1024 * 1024),
     operation(30, 4 * 1024, 1024 * 1024),
     operation(REPOSITORY_PROJECTION_COMMAND_ID, 768 * 1024, 64),
+    operation_v2(
+        REPOSITORY_PULL_REVIEW_THREAD_CREATE_COMMAND_ID,
+        256 * 1024,
+        256 * 1024,
+    ),
+    operation_v2(
+        REPOSITORY_PULL_REVIEW_THREAD_UPDATE_COMMAND_ID,
+        256 * 1024,
+        256 * 1024,
+    ),
+    operation_v2(
+        REPOSITORY_PULL_REVIEW_REPLY_CREATE_COMMAND_ID,
+        128 * 1024,
+        128 * 1024,
+    ),
+    operation_v2(
+        REPOSITORY_PULL_REVIEW_REPLY_UPDATE_COMMAND_ID,
+        128 * 1024,
+        128 * 1024,
+    ),
 ];
 const REPOSITORY_QUERIES: &[OperationDescriptor] = &[
     operation(1, 8, 80 * 1024),
@@ -132,6 +171,36 @@ const REPOSITORY_QUERIES: &[OperationDescriptor] = &[
         REPOSITORY_PROJECTION_ATTRIBUTION_QUERY_ID,
         64 * 1024,
         1024 * 1024,
+    ),
+    operation_v2(
+        REPOSITORY_PULL_REVIEW_THREAD_GET_QUERY_ID,
+        4 * 1024,
+        256 * 1024,
+    ),
+    operation_v2(
+        REPOSITORY_PULL_REVIEW_THREAD_LIST_QUERY_ID,
+        8 * 1024,
+        1024 * 1024,
+    ),
+    operation_v2(
+        REPOSITORY_PULL_REVIEW_THREAD_SUBMISSION_QUERY_ID,
+        4 * 1024,
+        256 * 1024,
+    ),
+    operation_v2(
+        REPOSITORY_PULL_REVIEW_REPLY_GET_QUERY_ID,
+        4 * 1024,
+        128 * 1024,
+    ),
+    operation_v2(
+        REPOSITORY_PULL_REVIEW_REPLY_LIST_QUERY_ID,
+        4 * 1024,
+        1024 * 1024,
+    ),
+    operation_v2(
+        REPOSITORY_PULL_REVIEW_REPLY_SUBMISSION_QUERY_ID,
+        4 * 1024,
+        128 * 1024,
     ),
 ];
 
@@ -1901,21 +1970,28 @@ async fn verify_cell_inventory(
 }
 
 fn repository_descriptor() -> &'static ModuleDescriptor {
-    static MIGRATIONS: OnceLock<[MigrationDescriptor; 1]> = OnceLock::new();
+    static MIGRATIONS: OnceLock<[MigrationDescriptor; 2]> = OnceLock::new();
     static DESCRIPTOR: OnceLock<ModuleDescriptor> = OnceLock::new();
     let migrations = MIGRATIONS.get_or_init(|| {
-        [MigrationDescriptor {
-            version: 1,
-            sql: REPOSITORY_MIGRATION,
-            digest: digest(REPOSITORY_MIGRATION.as_bytes()),
-        }]
+        [
+            MigrationDescriptor {
+                version: 1,
+                sql: REPOSITORY_MIGRATION,
+                digest: digest(REPOSITORY_MIGRATION.as_bytes()),
+            },
+            MigrationDescriptor {
+                version: 2,
+                sql: REPOSITORY_MIGRATION_V2,
+                digest: digest(REPOSITORY_MIGRATION_V2.as_bytes()),
+            },
+        ]
     });
     DESCRIPTOR.get_or_init(|| ModuleDescriptor {
         name: RepositoryModule::NAME,
         source_digest: repository_source_digest(),
         retained_codes: &[],
         schema_min: 1,
-        schema_max: 1,
+        schema_max: 2,
         migrations,
         commands: REPOSITORY_COMMANDS,
         queries: REPOSITORY_QUERIES,
@@ -1934,8 +2010,9 @@ fn repository_descriptor() -> &'static ModuleDescriptor {
 
 fn repository_source_digest() -> Digest {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"crab.http.repository.module.v1\0");
+    hasher.update(b"crab.http.repository.module.v2\0");
     hasher.update(REPOSITORY_MIGRATION.as_bytes());
+    hasher.update(REPOSITORY_MIGRATION_V2.as_bytes());
     hasher.update(include_bytes!("cells/repository.rs"));
     hasher.update(include_bytes!("cells/repository/codec.rs"));
     hasher.update(include_bytes!("cells/repository/checks.rs"));
@@ -1943,6 +2020,10 @@ fn repository_source_digest() -> Digest {
     hasher.update(include_bytes!("cells/repository/operations.rs"));
     hasher.update(include_bytes!("cells/repository/pulls.rs"));
     hasher.update(include_bytes!("cells/repository/pulls_codec.rs"));
+    hasher.update(include_bytes!("cells/repository/pull_review_threads.rs"));
+    hasher.update(include_bytes!(
+        "cells/repository/pull_review_threads_codec.rs"
+    ));
     hasher.update(include_bytes!("cells/repository/releases.rs"));
     hasher.update(include_bytes!("cells/repository/releases_codec.rs"));
     hasher.update(include_bytes!("cells/repository/settings.rs"));
@@ -1955,7 +2036,18 @@ const fn operation(id: u32, input_limit: u32, output_limit: u32) -> OperationDes
         id,
         codec_version: 1,
         schema_min: 1,
-        schema_max: 1,
+        schema_max: 2,
+        input_limit,
+        output_limit,
+    }
+}
+
+const fn operation_v2(id: u32, input_limit: u32, output_limit: u32) -> OperationDescriptor {
+    OperationDescriptor {
+        id,
+        codec_version: 1,
+        schema_min: 2,
+        schema_max: 2,
         input_limit,
         output_limit,
     }
@@ -2001,18 +2093,24 @@ mod tests {
         CreateCommentOutcome, CreateCommitStatus, CreateCommitStatusInput,
         CreateCommitStatusOutcome, CreateIssue, CreateIssueInput, CreateIssueOutcome, CreateLabel,
         CreateLabelInput, CreateLabelOutcome, CreatePull, CreatePullInput, CreatePullOutcome,
+        CreatePullReviewReply, CreatePullReviewReplyInput, CreatePullReviewReplyOutcome,
+        CreatePullReviewThread, CreatePullReviewThreadInput, CreatePullReviewThreadOutcome,
         CreateRelease, CreateReleaseInput, CreateReleaseOutcome, GetBranchProtections, GetCheckRun,
-        GetCheckUpdateSubmission, GetComment, GetIssue, GetPull, GetRelease,
-        GetRepositoryLifecycle, IssuePage, LabelCatalog, ListComments, ListCommentsInput,
-        ListCommitStatuses, ListIssues, ListIssuesInput, ListLabels, MergeMethod, PullMerge,
-        PullMergeTransition, PullState, ReplaceBranchProtections, ReplaceBranchProtectionsInput,
-        ReplaceBranchProtectionsOutcome, ReplaceRepositoryLifecycle,
-        ReplaceRepositoryLifecycleInput, ReplaceRepositoryLifecycleOutcome, RepositoryAuthor,
-        RepositoryLifecycleRecord, ReservePullMerge, ReservePullMergeInput,
-        ReservePullMergeOutcome, TransitionPullMerge, TransitionPullMergeInput,
-        TransitionPullMergeOutcome, UpdateCheckRun, UpdateCheckRunInput, UpdateCheckRunOutcome,
-        UpdateComment, UpdateCommentInput, UpdateCommentOutcome, UpdateIssue, UpdateIssueInput,
-        UpdateIssueOutcome,
+        GetCheckUpdateSubmission, GetComment, GetIssue, GetPull, GetPullReviewReply,
+        GetPullReviewThread, GetRelease, GetRepositoryLifecycle, IssuePage, LabelCatalog,
+        ListComments, ListCommentsInput, ListCommitStatuses, ListIssues, ListIssuesInput,
+        ListLabels, ListPullReviewReplies, ListPullReviewThreads, MergeMethod, PullMerge,
+        PullMergeTransition, PullReviewReplyKey, PullReviewReplyListInput, PullReviewReplyPage,
+        PullReviewThreadKey, PullReviewThreadListInput, PullReviewThreadSide, PullState,
+        ReplaceBranchProtections, ReplaceBranchProtectionsInput, ReplaceBranchProtectionsOutcome,
+        ReplaceRepositoryLifecycle, ReplaceRepositoryLifecycleInput,
+        ReplaceRepositoryLifecycleOutcome, RepositoryAuthor, RepositoryLifecycleRecord,
+        ReservePullMerge, ReservePullMergeInput, ReservePullMergeOutcome, TransitionPullMerge,
+        TransitionPullMergeInput, TransitionPullMergeOutcome, UpdateCheckRun, UpdateCheckRunInput,
+        UpdateCheckRunOutcome, UpdateComment, UpdateCommentInput, UpdateCommentOutcome,
+        UpdateIssue, UpdateIssueInput, UpdateIssueOutcome, UpdatePullReviewReply,
+        UpdatePullReviewReplyInput, UpdatePullReviewReplyOutcome, UpdatePullReviewThread,
+        UpdatePullReviewThreadInput, UpdatePullReviewThreadOutcome,
     };
     use super::*;
 
@@ -2113,6 +2211,21 @@ mod tests {
     }
 
     #[test]
+    fn repository_bootstrap_schema_includes_inline_review_tables() {
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        let transaction = connection.transaction().unwrap();
+        initialize_repository_schema(&transaction).unwrap();
+        let table_count: i64 = transaction
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN ('repository_pull_review_threads', 'repository_pull_review_replies')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 2);
+    }
+
+    #[test]
     fn release_inspection_is_canonical_and_matches_repository_inventory() {
         let first = compiled_registry().unwrap();
         let second = compiled_registry().unwrap();
@@ -2124,23 +2237,23 @@ mod tests {
         assert_eq!(descriptor["modules"][0]["name"], "repository");
         assert_eq!(
             descriptor["modules"][0]["code"],
-            "420552424e5edf42ff35c9c0e3c7ed66f3a23202a61fec343987d7dd14b51fb3"
+            "260b8600f1dcc6ea9ae0695f02de551aeac4609ec1bc8be4e73d3ca11ac339f0"
         );
         assert_eq!(descriptor["modules"][0]["schema_min"], 1);
-        assert_eq!(descriptor["modules"][0]["schema_max"], 1);
+        assert_eq!(descriptor["modules"][0]["schema_max"], 2);
         assert_eq!(
             descriptor["modules"][0]["commands"]
                 .as_array()
                 .unwrap()
                 .len(),
-            31
+            35
         );
         assert_eq!(
             descriptor["modules"][0]["queries"]
                 .as_array()
                 .unwrap()
                 .len(),
-            28
+            34
         );
         assert_eq!(descriptor["namespaces"][0]["role"], "repository");
         assert_eq!(descriptor["namespaces"][0]["shards"], 1);
@@ -2813,7 +2926,7 @@ mod tests {
                     &supported,
                     CatalogRole::Repository,
                     registry.module_code(RepositoryModule::NAME).unwrap(),
-                    1,
+                    2,
                 )
                 .unwrap(),
             )
@@ -2836,7 +2949,7 @@ mod tests {
                     &unsupported,
                     CatalogRole::Repository,
                     Digest::from_bytes([9; 32]),
-                    1,
+                    2,
                 )
                 .unwrap(),
             )
@@ -3121,7 +3234,7 @@ mod tests {
                     &target,
                     CatalogRole::Repository,
                     registry.module_code(RepositoryModule::NAME).unwrap(),
-                    1,
+                    2,
                 )
                 .unwrap(),
             )
@@ -3158,7 +3271,7 @@ mod tests {
             })
             .unwrap();
         let prepared = replica
-            .prepare(None, &database.capture().unwrap(), 1, 1)
+            .prepare(None, &database.capture().unwrap(), 1, 2)
             .await
             .unwrap();
         database.close().unwrap();
@@ -3367,7 +3480,7 @@ mod tests {
             &target,
             CatalogRole::Repository,
             registry.module_code(RepositoryModule::NAME).unwrap(),
-            1,
+            2,
         )
         .unwrap();
         let proof = releases
@@ -3412,7 +3525,7 @@ mod tests {
                         &blocked,
                         CatalogRole::Repository,
                         registry.module_code(RepositoryModule::NAME).unwrap(),
-                        1,
+                        2,
                     )
                     .unwrap(),
                 )
@@ -3448,7 +3561,7 @@ mod tests {
                     &target,
                     CatalogRole::Repository,
                     registry.module_code(RepositoryModule::NAME).unwrap(),
-                    1,
+                    2,
                 )
                 .unwrap(),
             )
@@ -3482,7 +3595,7 @@ mod tests {
                 recovering,
                 first_local.path().join("repository.sqlite"),
                 move |transaction| {
-                    transaction.execute_batch(REPOSITORY_MIGRATION)?;
+                    initialize_repository_schema(transaction)?;
                     transaction.execute(
                         "INSERT INTO repository_identity(singleton, repository_uuid) VALUES (1, ?1)",
                         [repository_id.as_slice()],
@@ -3982,6 +4095,244 @@ mod tests {
         let CreatePullOutcome::Created(pull_record) = &pull.output else {
             panic!("successful pull command returned a rejection outcome");
         };
+        let review_thread_input = CreatePullReviewThreadInput {
+            pull: pull_record.number,
+            submission_id: [32; 16],
+            author: status_input.author.clone(),
+            body: "Explain this changed line".into(),
+            suggested_text: Some("a better line".into()),
+            base_oid: "1111111111111111111111111111111111111111".into(),
+            head_oid: "2222222222222222222222222222222222222222".into(),
+            path: vec![0xff, b'.', b't', b'x', b't'],
+            old_blob_oid: Some("3333333333333333333333333333333333333333".into()),
+            new_blob_oid: Some("4444444444444444444444444444444444444444".into()),
+            side: PullReviewThreadSide::New,
+            start_line: 2,
+            end_line: 2,
+        };
+        let created_thread = first_client
+            .command::<CreatePullReviewThread>(&target, mutation(32), review_thread_input.clone())
+            .await
+            .unwrap();
+        let CreatePullReviewThreadOutcome::Created(created_thread_record) = &created_thread.output
+        else {
+            panic!("successful review thread command returned a rejection outcome");
+        };
+        assert_eq!(created_thread_record.number, 1);
+        assert_eq!(
+            created_thread_record.path,
+            vec![0xff, b'.', b't', b'x', b't']
+        );
+        let replayed_thread = first_client
+            .command::<CreatePullReviewThread>(&target, mutation(33), review_thread_input.clone())
+            .await
+            .unwrap();
+        assert_eq!(replayed_thread.output, created_thread.output);
+        let thread_conflict = first_client
+            .command::<CreatePullReviewThread>(
+                &target,
+                mutation(34),
+                CreatePullReviewThreadInput {
+                    body: "changed replay body".into(),
+                    ..review_thread_input.clone()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            thread_conflict,
+            InvocationError::Rejected(ref outcome)
+                if outcome.output == CreatePullReviewThreadOutcome::RequestConflict
+        ));
+        let second_thread = first_client
+            .command::<CreatePullReviewThread>(
+                &target,
+                mutation(35),
+                CreatePullReviewThreadInput {
+                    submission_id: [35; 16],
+                    path: b"README.md".to_vec(),
+                    side: PullReviewThreadSide::Old,
+                    suggested_text: None,
+                    old_blob_oid: Some("3333333333333333333333333333333333333333".into()),
+                    new_blob_oid: Some("4444444444444444444444444444444444444444".into()),
+                    start_line: 1,
+                    end_line: 1,
+                    ..review_thread_input.clone()
+                },
+            )
+            .await
+            .unwrap();
+        let CreatePullReviewThreadOutcome::Created(second_thread_record) = &second_thread.output
+        else {
+            panic!("second review thread command returned a rejection outcome");
+        };
+        assert_eq!(second_thread_record.number, 2);
+        let reply_input = CreatePullReviewReplyInput {
+            pull: pull_record.number,
+            thread: created_thread_record.number,
+            submission_id: [36; 16],
+            author: status_input.author.clone(),
+            body: "I will revise it".into(),
+        };
+        let created_reply = first_client
+            .command::<CreatePullReviewReply>(&target, mutation(36), reply_input.clone())
+            .await
+            .unwrap();
+        let CreatePullReviewReplyOutcome::Created(created_reply_record) = &created_reply.output
+        else {
+            panic!("successful review reply command returned a rejection outcome");
+        };
+        assert_eq!(created_reply_record.number, 1);
+        let replayed_reply = first_client
+            .command::<CreatePullReviewReply>(&target, mutation(37), reply_input.clone())
+            .await
+            .unwrap();
+        assert_eq!(replayed_reply.output, created_reply.output);
+        let updated_reply = first_client
+            .command::<UpdatePullReviewReply>(
+                &target,
+                mutation(38),
+                UpdatePullReviewReplyInput {
+                    key: PullReviewReplyKey {
+                        pull: pull_record.number,
+                        thread: created_thread_record.number,
+                        number: created_reply_record.number,
+                    },
+                    actor: status_input.author.clone(),
+                    version: created_reply_record.version,
+                    body: "I will revise it today".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let UpdatePullReviewReplyOutcome::Updated(updated_reply_record) = &updated_reply.output
+        else {
+            panic!("review reply update returned a rejection outcome");
+        };
+        assert_eq!(updated_reply_record.version, 2);
+        let reply_conflict = first_client
+            .command::<UpdatePullReviewReply>(
+                &target,
+                mutation(39),
+                UpdatePullReviewReplyInput {
+                    key: PullReviewReplyKey {
+                        pull: pull_record.number,
+                        thread: created_thread_record.number,
+                        number: created_reply_record.number,
+                    },
+                    actor: status_input.author.clone(),
+                    version: created_reply_record.version,
+                    body: "stale edit".into(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            reply_conflict,
+            InvocationError::Rejected(ref outcome)
+                if outcome.output == UpdatePullReviewReplyOutcome::Conflict
+        ));
+        let resolved_thread = first_client
+            .command::<UpdatePullReviewThread>(
+                &target,
+                mutation(40),
+                UpdatePullReviewThreadInput {
+                    key: PullReviewThreadKey {
+                        pull: pull_record.number,
+                        number: created_thread_record.number,
+                    },
+                    actor: status_input.author.clone(),
+                    can_resolve: true,
+                    version: created_thread_record.version,
+                    body: None,
+                    suggested_text: None,
+                    resolved: Some(true),
+                },
+            )
+            .await
+            .unwrap();
+        let UpdatePullReviewThreadOutcome::Updated(resolved_thread_record) =
+            &resolved_thread.output
+        else {
+            panic!("review thread resolution returned a rejection outcome");
+        };
+        assert!(resolved_thread_record.resolved);
+        assert_eq!(
+            resolved_thread_record.resolved_by,
+            Some(status_input.author.clone())
+        );
+        let reopened_thread = first_client
+            .command::<UpdatePullReviewThread>(
+                &target,
+                mutation(41),
+                UpdatePullReviewThreadInput {
+                    key: PullReviewThreadKey {
+                        pull: pull_record.number,
+                        number: created_thread_record.number,
+                    },
+                    actor: status_input.author.clone(),
+                    can_resolve: true,
+                    version: resolved_thread_record.version,
+                    body: None,
+                    suggested_text: None,
+                    resolved: Some(false),
+                },
+            )
+            .await
+            .unwrap();
+        let UpdatePullReviewThreadOutcome::Updated(reopened_thread_record) =
+            &reopened_thread.output
+        else {
+            panic!("review thread reopen returned a rejection outcome");
+        };
+        assert!(!reopened_thread_record.resolved);
+        assert!(reopened_thread_record.resolved_by.is_none());
+        let thread_page = first_client
+            .query::<ListPullReviewThreads>(
+                &target,
+                Some(reopened_thread.receipt),
+                PullReviewThreadListInput {
+                    pull: pull_record.number,
+                    before: None,
+                    limit: 1,
+                    path: Some(vec![0xff, b'.', b't', b'x', b't']),
+                    resolved: Some(false),
+                    comparison_base_oid: Some(pull_record.base_oid.clone()),
+                    comparison_head_oid: Some(pull_record.head_oid.clone()),
+                    outdated: Some(false),
+                },
+            )
+            .await
+            .unwrap();
+        let Some(thread_page) = thread_page.output else {
+            panic!("review thread list did not find the pull");
+        };
+        assert_eq!(thread_page.items.len(), 1);
+        assert_eq!(
+            thread_page.items[0].path,
+            vec![0xff, b'.', b't', b'x', b't']
+        );
+        assert_eq!(thread_page.next, Some(1));
+        let replies_page = first_client
+            .query::<ListPullReviewReplies>(
+                &target,
+                Some(updated_reply.receipt),
+                PullReviewReplyListInput {
+                    pull: pull_record.number,
+                    thread: created_thread_record.number,
+                    before: None,
+                    limit: 30,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            replies_page.output,
+            Some(PullReviewReplyPage {
+                items: vec![updated_reply_record.clone()],
+                next: None,
+            })
+        );
         let merge = PullMerge {
             request_id: [27; 16],
             author: status_input.author.clone(),
@@ -4174,6 +4525,37 @@ mod tests {
                 .unwrap()
                 .output,
             Some(updated_issue_record.as_ref().clone())
+        );
+        assert_eq!(
+            second_client
+                .query::<GetPullReviewThread>(
+                    &target,
+                    Some(reopened_thread.receipt),
+                    PullReviewThreadKey {
+                        pull: pull_record.number,
+                        number: created_thread_record.number,
+                    },
+                )
+                .await
+                .unwrap()
+                .output,
+            Some(reopened_thread_record.as_ref().clone())
+        );
+        assert_eq!(
+            second_client
+                .query::<GetPullReviewReply>(
+                    &target,
+                    Some(updated_reply.receipt),
+                    PullReviewReplyKey {
+                        pull: pull_record.number,
+                        thread: created_thread_record.number,
+                        number: created_reply_record.number,
+                    },
+                )
+                .await
+                .unwrap()
+                .output,
+            Some(updated_reply_record.clone())
         );
         assert_eq!(
             second_client

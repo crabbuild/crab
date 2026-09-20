@@ -16,6 +16,19 @@ pub(crate) use operations::{
     CreateCommitStatus, CreateLabel, DeleteLabel, GetCommitStatusSubmission, ListComments,
     ListCommitStatuses, ListIssues, ListLabels, UpdateComment, UpdateIssue, UpdateLabel,
 };
+#[cfg(test)]
+pub(crate) use pull_review_threads::PullReviewReplyPage;
+pub(crate) use pull_review_threads::{
+    CreatePullReviewReply, CreatePullReviewReplyInput, CreatePullReviewReplyOutcome,
+    CreatePullReviewThread, CreatePullReviewThreadInput, CreatePullReviewThreadOutcome,
+    GetPullReviewReply, GetPullReviewReplySubmission, GetPullReviewThread,
+    GetPullReviewThreadSubmission, ListPullReviewReplies, ListPullReviewThreads,
+    PullReviewReplyKey, PullReviewReplyListInput, PullReviewReplyRecord,
+    PullReviewReplySubmissionKey, PullReviewThreadKey, PullReviewThreadListInput,
+    PullReviewThreadRecord, PullReviewThreadSide, PullReviewThreadSubmissionKey,
+    UpdatePullReviewReply, UpdatePullReviewReplyInput, UpdatePullReviewReplyOutcome,
+    UpdatePullReviewThread, UpdatePullReviewThreadInput, UpdatePullReviewThreadOutcome,
+};
 pub(crate) use pulls::{
     CreatePull, CreatePullComment, CreatePullCommentInput, CreatePullCommentOutcome,
     CreatePullInput, CreatePullOutcome, CreatePullReview, CreatePullReviewInput,
@@ -570,6 +583,8 @@ mod checks;
 mod checks_codec;
 mod operations;
 pub(crate) mod projection;
+mod pull_review_threads;
+mod pull_review_threads_codec;
 mod pulls;
 mod pulls_codec;
 mod releases;
@@ -596,6 +611,10 @@ pub(crate) fn register(registry: &mut RegistryBuilder) -> crab_cell_runtime::Res
     registry.bind_command::<UpdatePullComment>()?;
     registry.bind_command::<CreatePullReview>()?;
     registry.bind_command::<UpdatePullReview>()?;
+    registry.bind_command::<CreatePullReviewThread>()?;
+    registry.bind_command::<UpdatePullReviewThread>()?;
+    registry.bind_command::<CreatePullReviewReply>()?;
+    registry.bind_command::<UpdatePullReviewReply>()?;
     registry.bind_command::<ReservePullMerge>()?;
     registry.bind_command::<TransitionPullMerge>()?;
     registry.bind_command::<CreateRelease>()?;
@@ -626,6 +645,12 @@ pub(crate) fn register(registry: &mut RegistryBuilder) -> crab_cell_runtime::Res
     registry.bind_query::<GetPullReview>()?;
     registry.bind_query::<ListPullReviews>()?;
     registry.bind_query::<GetPullReviewSubmission>()?;
+    registry.bind_query::<GetPullReviewThread>()?;
+    registry.bind_query::<ListPullReviewThreads>()?;
+    registry.bind_query::<GetPullReviewThreadSubmission>()?;
+    registry.bind_query::<GetPullReviewReply>()?;
+    registry.bind_query::<ListPullReviewReplies>()?;
+    registry.bind_query::<GetPullReviewReplySubmission>()?;
     registry.bind_query::<GetPullMergeSubmission>()?;
     registry.bind_query::<GetRelease>()?;
     registry.bind_query::<GetReleaseSubmission>()?;

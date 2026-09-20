@@ -1574,6 +1574,7 @@ fn permits_repository_mutation(request: &VerifiedPeerRequest, access: Repository
         "repository.pull.update",
         "repository.pull.comment",
         "repository.pull.review",
+        "repository.pull.review.thread",
         "repository.pull.merge",
         "repository.release.create",
         "repository.release.update",
@@ -1588,6 +1589,7 @@ fn required_mutation_access(action: &str) -> RepositoryAccess {
         "repository.settings.protections" | "repository.settings.lifecycle" => {
             RepositoryAccess::Admin
         }
+        "repository.pull.review.thread" => RepositoryAccess::Read,
         _ => RepositoryAccess::Write,
     }
 }
@@ -1610,6 +1612,7 @@ const fn required_mutation_action(command_id: u32) -> Option<&'static str> {
         17 => Some("repository.pull.update"),
         18 | 19 => Some("repository.pull.comment"),
         20 | 21 => Some("repository.pull.review"),
+        32..=35 => Some("repository.pull.review.thread"),
         22 | 23 => Some("repository.pull.merge"),
         24 => Some("repository.release.create"),
         25..=27 => Some("repository.release.update"),
@@ -2003,6 +2006,10 @@ mod tests {
             (19, "repository.pull.comment"),
             (20, "repository.pull.review"),
             (21, "repository.pull.review"),
+            (32, "repository.pull.review.thread"),
+            (33, "repository.pull.review.thread"),
+            (34, "repository.pull.review.thread"),
+            (35, "repository.pull.review.thread"),
             (22, "repository.pull.merge"),
             (23, "repository.pull.merge"),
             (24, "repository.release.create"),
@@ -2033,6 +2040,14 @@ mod tests {
             assert!(
                 authorize_repository(&administrator, Some("https://issuer.example"), &request)
                     .is_ok()
+            );
+        }
+        let mut reader = repository();
+        reader.members[0].access = RepositoryAccess::Read;
+        for command in 32..=35 {
+            let request = verified(command, vec!["repository.pull.review.thread".into()]);
+            assert!(
+                authorize_repository(&reader, Some("https://issuer.example"), &request).is_ok()
             );
         }
     }

@@ -886,6 +886,7 @@ fn validate_action(action: &str) -> crate::Result<()> {
             | "repository.pull.update"
             | "repository.pull.comment"
             | "repository.pull.review"
+            | "repository.pull.review.thread"
             | "repository.pull.merge"
             | "repository.release.create"
             | "repository.release.update"
@@ -928,7 +929,7 @@ mod tests {
 
     use super::*;
     use crate::cells::{
-        REPOSITORY_MIGRATION, bootstrap_release_at,
+        bootstrap_release_at, initialize_repository_schema,
         repository::{CreateIssue, CreateIssueInput, GetIssue, RepositoryAuthor},
     };
 
@@ -1023,7 +1024,7 @@ mod tests {
                 observed,
                 first_dir.path().join("bootstrap.sqlite"),
                 move |transaction| {
-                    transaction.execute_batch(REPOSITORY_MIGRATION)?;
+                    initialize_repository_schema(transaction)?;
                     transaction.execute(
                         "INSERT INTO repository_identity(singleton, repository_uuid) VALUES (1, ?1)",
                         [repository_bytes.as_slice()],

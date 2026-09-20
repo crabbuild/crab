@@ -3,14 +3,12 @@ use std::path::Path;
 use crab_cell_runtime::CellStorageLayout;
 use crab_cell_runtime::{
     ApplicationIdentity, CatalogEntry, CatalogProof, CatalogRole, CellAuthority, CellCatalog,
-    CellHandle, CellModule, CellReplica, CellRuntime, CellTarget, ControlState, IncarnationId,
-    Owner, Registry, ReleaseState, ReleaseStore, SessionId, SqlWorkerPool,
+    CellHandle, CellReplica, CellRuntime, CellTarget, ControlState, IncarnationId, Owner, Registry,
+    ReleaseState, ReleaseStore, SessionId, SqlWorkerPool,
 };
 use uuid::Uuid;
 
-use super::{
-    REPOSITORY_MIGRATION, REPOSITORY_NAMESPACE, RepositoryModule, repository_replica_limits,
-};
+use super::{REPOSITORY_NAMESPACE, initialize_repository_schema, repository_replica_limits};
 use crate::catalog::RepositoryApplicationState;
 use crate::{Config, Error, Result};
 
@@ -106,7 +104,7 @@ pub(crate) async fn initialize_repository_at(
             (ControlState::Recovering, false) => {
                 let repository_bytes = repository.into_bytes();
                 let initialize = move |transaction: &rusqlite::Transaction<'_>| {
-                    transaction.execute_batch(REPOSITORY_MIGRATION)?;
+                    initialize_repository_schema(transaction)?;
                     transaction.execute(
                         "INSERT INTO repository_identity(singleton, repository_uuid) VALUES (1, ?1)",
                         [repository_bytes.as_slice()],
@@ -262,17 +260,16 @@ pub(crate) async fn provision_repository(
     target: &CellTarget,
 ) -> Result<(CatalogProof, CellAuthority)> {
     let catalog = CellCatalog::new(layout.clone(), identity.tenant());
-    let code =
-        registry
-            .module_code(RepositoryModule::NAME)
-            .ok_or(crab_cell_runtime::Error::Registry(
-                "repository module is not registered",
-            ))?;
+    let (code, schema) = registry
+        .current_cell_version(REPOSITORY_NAMESPACE, CatalogRole::Repository)
+        .ok_or(crab_cell_runtime::Error::Registry(
+            "repository module is not registered",
+        ))?;
     let proof = ReleaseStore::new(layout.clone(), identity)?
         .provision(
             &catalog,
             registry,
-            CatalogEntry::new(target, CatalogRole::Repository, code, 1)?,
+            CatalogEntry::new(target, CatalogRole::Repository, code, schema)?,
         )
         .await?;
     Ok((proof, CellAuthority::new(layout.clone())))

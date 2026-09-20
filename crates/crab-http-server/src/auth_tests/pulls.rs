@@ -194,6 +194,134 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     let bob = h.login().await;
     let bob_session = h.json("/api/session", &bob).await;
     let bob_csrf = bob_session["csrf"].as_str().unwrap();
+    let missing_csrf = h
+        .http
+        .post(format!("{}{ROOT}/1/threads", h.origin))
+        .header(header::COOKIE, &bob)
+        .header(header::ORIGIN, &h.origin)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(
+            json!({
+                "request_id":"00000000-0000-4000-8000-000000000030",
+                "body":"missing csrf",
+                "base_oid":created.1["base_oid"],
+                "head_oid":created.1["head_oid"],
+                "path_hex":"524541444d452e6d64",
+                "side":"new",
+                "start_line":2,
+                "end_line":2
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_csrf.status(), StatusCode::FORBIDDEN);
+    let thread = mutate(
+        &h,
+        &bob,
+        bob_csrf,
+        reqwest::Method::POST,
+        &format!("{ROOT}/1/threads"),
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000031",
+            "body":"Please make this line more explicit.",
+            "suggested_text":"feature improved",
+            "base_oid":created.1["base_oid"],
+            "head_oid":created.1["head_oid"],
+            "path_hex":"524541444d452e6d64",
+            "side":"new",
+            "start_line":2,
+            "end_line":2
+        }),
+    )
+    .await;
+    assert_eq!(thread.0, StatusCode::CREATED, "{}", thread.1);
+    assert_eq!(thread.1["number"], 1);
+    assert_eq!(thread.1["path_hex"], "524541444d452e6d64");
+    assert_eq!(thread.1["new_blob_oid"].as_str().unwrap().len(), 40);
+    assert_eq!(thread.1["can_reply"], true);
+    let member_reply = mutate(
+        &h,
+        &bob,
+        bob_csrf,
+        reqwest::Method::POST,
+        &format!("{ROOT}/1/threads/1/replies"),
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000034",
+            "body":"A read member can participate in the conversation."
+        }),
+    )
+    .await;
+    assert_eq!(member_reply.0, StatusCode::CREATED, "{}", member_reply.1);
+    assert_eq!(member_reply.1["number"], 1);
+    let old_suggestion = mutate(
+        &h,
+        &bob,
+        bob_csrf,
+        reqwest::Method::POST,
+        &format!("{ROOT}/1/threads"),
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000032",
+            "body":"old-side suggestions are invalid",
+            "suggested_text":"replacement",
+            "base_oid":created.1["base_oid"],
+            "head_oid":created.1["head_oid"],
+            "path_hex":"524541444d452e6d64",
+            "side":"old",
+            "start_line":1,
+            "end_line":1
+        }),
+    )
+    .await;
+    assert_eq!(old_suggestion.0, StatusCode::BAD_REQUEST);
+    let reply = mutate(
+        &h,
+        &alice,
+        alice_csrf,
+        reqwest::Method::POST,
+        &format!("{ROOT}/1/threads/1/replies"),
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000033",
+            "body":"I agree; I will update it."
+        }),
+    )
+    .await;
+    assert_eq!(reply.0, StatusCode::CREATED, "{}", reply.1);
+    assert_eq!(reply.1["number"], 2);
+    let resolved = mutate(
+        &h,
+        &alice,
+        alice_csrf,
+        reqwest::Method::PATCH,
+        &format!("{ROOT}/1/threads/1"),
+        json!({"version":thread.1["version"],"resolved":true}),
+    )
+    .await;
+    assert_eq!(resolved.0, StatusCode::OK, "{}", resolved.1);
+    assert_eq!(resolved.1["resolved"], true);
+    assert_eq!(resolved.1["resolved_by"], "Alice");
+    let unauthorized_resolution = mutate(
+        &h,
+        &bob,
+        bob_csrf,
+        reqwest::Method::PATCH,
+        &format!("{ROOT}/1/threads/1"),
+        json!({"version":thread.1["version"],"resolved":false}),
+    )
+    .await;
+    assert_eq!(unauthorized_resolution.0, StatusCode::FORBIDDEN);
+    let reopened = mutate(
+        &h,
+        &alice,
+        alice_csrf,
+        reqwest::Method::PATCH,
+        &format!("{ROOT}/1/threads/1"),
+        json!({"version":resolved.1["version"],"resolved":false}),
+    )
+    .await;
+    assert_eq!(reopened.0, StatusCode::OK);
+    assert_eq!(reopened.1["resolved"], false);
     assert_eq!(h.json(&format!("{ROOT}/1"), &bob).await["can_decide"], true);
     let approved = mutate(
         &h,
@@ -554,6 +682,25 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     crate::server::receive_tests::success(path, &["commit", "-am", "updated"]).await;
     let second_head = crate::server::receive_tests::success(path, &["rev-parse", "HEAD"]).await;
     crate::server::receive_tests::success(path, &["push", git_url.as_str(), "feature"]).await;
+    let current_threads = h
+        .json(&format!("{ROOT}/1/threads?outdated=false"), &alice)
+        .await;
+    assert!(current_threads["items"].as_array().unwrap().is_empty());
+    let outdated_threads = h
+        .json(&format!("{ROOT}/1/threads?outdated=true"), &alice)
+        .await;
+    assert_eq!(outdated_threads["items"].as_array().unwrap().len(), 1);
+    assert_eq!(outdated_threads["items"][0]["outdated"], true);
+    assert_eq!(
+        outdated_threads["items"][0]["path_hex"],
+        "524541444d452e6d64"
+    );
+    let replies = h.json(&format!("{ROOT}/1/threads/1/replies"), &alice).await;
+    assert_eq!(replies["items"][0]["body"], "I agree; I will update it.");
+    assert_eq!(
+        replies["items"][1]["body"],
+        "A read member can participate in the conversation."
+    );
     let stale = h.json(&format!("{ROOT}/1"), &alice).await;
     assert_eq!(stale["merge_requirements"]["approvals"], 0);
     assert_eq!(

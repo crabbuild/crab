@@ -6,11 +6,17 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
 } from "react";
 import { File, MultiFileDiff } from "@pierre/diffs/react";
-import type { PostRenderPhase, TokenEventBase } from "@pierre/diffs";
+import type {
+  DiffLineAnnotation,
+  PostRenderPhase,
+  SelectedLineRange,
+  TokenEventBase,
+} from "@pierre/diffs";
 import { FileTree, useFileTree } from "@pierre/trees/react";
-import type { GitStatus } from "@pierre/trees";
+import type { FileTreeRowDecorationContext, GitStatus } from "@pierre/trees";
 import { IconButton, Label, SegmentedControl } from "@primer/react";
 import {
   CopyIcon,
@@ -88,8 +94,39 @@ function changeStatus(kind: string): GitStatus {
   return "modified";
 }
 
-function changePanelId(pathHex: string) {
+export function changePanelId(pathHex: string) {
   return `changed-file-${pathHex}`;
+}
+
+export interface InlineDiffThread {
+  number: number;
+  path_hex: string;
+  side: "old" | "new";
+  start_line: number;
+  end_line: number;
+  author: string;
+  body: string;
+  suggested_text: string | null;
+  resolved: boolean;
+  outdated: boolean;
+  vanished: boolean;
+}
+
+export interface DiffReviewFileSummary {
+  total: number;
+  open: number;
+  resolved: number;
+  outdated: number;
+}
+
+export interface DiffReviewState {
+  threads: InlineDiffThread[];
+  onLineSelected: (pathHex: string, range: SelectedLineRange | null) => void;
+  onThreadSelected: (thread: InlineDiffThread) => void;
+  onDiffSelected?: (thread: InlineDiffThread) => void;
+  fileSummary?: (pathHex: string) => DiffReviewFileSummary | null;
+  fileSummaryVersion?: string;
+  renderAnnotation?: (thread: InlineDiffThread) => ReactNode;
 }
 
 export function FileView({
@@ -580,12 +617,14 @@ export function ComparisonView({
   head,
   theme,
   codeThemes,
+  review,
 }: {
   repo: Repository;
   base: string;
   head: string;
   theme: "light" | "dark";
   codeThemes: CodeThemes;
+  review?: DiffReviewState;
 }) {
   const changes = useRequest<Changes>(
     endpoint(repo, "changes", { rev: head, base }),
@@ -599,6 +638,7 @@ export function ComparisonView({
       base={base}
       theme={theme}
       codeThemes={codeThemes}
+      review={review}
     />
   );
 }
@@ -611,6 +651,7 @@ function ChangeComparison({
   theme,
   codeThemes,
   sticky = false,
+  review,
 }: {
   state: ReturnType<typeof useRequest<Changes>>;
   repo: Repository;
@@ -619,6 +660,7 @@ function ChangeComparison({
   theme: "light" | "dark";
   codeThemes: CodeThemes;
   sticky?: boolean;
+  review?: DiffReviewState;
 }) {
   return (
     <Result state={state}>
@@ -632,6 +674,7 @@ function ChangeComparison({
           theme={theme}
           codeThemes={codeThemes}
           sticky={sticky}
+          review={review}
         />
       )}
     </Result>
@@ -646,6 +689,7 @@ function ChangeWorkspace({
   theme,
   codeThemes,
   sticky,
+  review,
 }: {
   changes: Change[];
   repo: Repository;
@@ -654,13 +698,50 @@ function ChangeWorkspace({
   theme: "light" | "dark";
   codeThemes: CodeThemes;
   sticky: boolean;
+  review?: DiffReviewState;
 }) {
   const diffPane = useRef<HTMLDivElement>(null);
+  const [selectedPath, setSelectedPath] = useState(changes[0]?.path);
+
+  useEffect(() => {
+    setSelectedPath(changes[0]?.path);
+  }, [changes]);
+
+  useEffect(() => {
+    const pane = diffPane.current;
+    const firstChange = changes[0];
+    if (!pane || !review || !firstChange || changes.length < 2) return;
+    let frame = 0;
+    const updateSelection = () => {
+      frame = 0;
+      const paneTop = pane.getBoundingClientRect().top;
+      let active = firstChange;
+      for (const change of changes) {
+        const panel = document.getElementById(changePanelId(change.path_hex));
+        if (!panel) continue;
+        if (panel.getBoundingClientRect().top - paneTop <= 32) active = change;
+      }
+      setSelectedPath((current) =>
+        current === active.path ? current : active.path,
+      );
+    };
+    const onScroll = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(updateSelection);
+    };
+    updateSelection();
+    pane.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      pane.removeEventListener("scroll", onScroll);
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [changes]);
 
   function scrollToChange(change: Change) {
     const pane = diffPane.current;
     const panel = document.getElementById(changePanelId(change.path_hex));
     if (!pane || !panel) return;
+    setSelectedPath(change.path);
     const top =
       pane.scrollTop +
       panel.getBoundingClientRect().top -
@@ -680,9 +761,11 @@ function ChangeWorkspace({
         >
           <div className="change-tree-pane">
             <ChangeTree
+              key={review?.fileSummaryVersion ?? "changed-files"}
               changes={changes}
-              selected={changes[0]?.path}
+              selected={selectedPath}
               onSelect={scrollToChange}
+              review={review}
             />
           </div>
           <div
@@ -701,6 +784,7 @@ function ChangeWorkspace({
                   theme={theme}
                   codeThemes={codeThemes}
                   eager={index === 0}
+                  review={review}
                 />
               ))}
             </div>
@@ -717,17 +801,48 @@ function ChangeTree({
   changes,
   selected,
   onSelect,
+  review,
 }: {
   changes: Change[];
   selected?: string;
   onSelect: (change: Change) => void;
+  review?: DiffReviewState;
 }) {
   const paths = useMemo(
     () => new Map(changes.map((change) => [change.path, change])),
     [changes],
   );
+  const pathsRef = useRef(paths);
+  pathsRef.current = paths;
   const select = useRef(onSelect);
   select.current = onSelect;
+  const fileSummary = review?.fileSummary;
+  const fileSummaries = useMemo(
+    () =>
+      new Map(
+        changes.map((change) => [
+          change.path_hex,
+          fileSummary?.(change.path_hex) ?? null,
+        ]),
+      ),
+    [changes, fileSummary],
+  );
+  const fileSummariesRef = useRef(fileSummaries);
+  fileSummariesRef.current = fileSummaries;
+  const syncingSelection = useRef(false);
+  const renderRowDecoration = useRef(
+    ({ item }: FileTreeRowDecorationContext) => {
+      if (item.kind !== "file") return null;
+      const change = pathsRef.current.get(item.path);
+      const stats = fileSummariesRef.current.get(change?.path_hex ?? "");
+      if (!stats || stats.total === 0) return null;
+      const label = `${stats.total} ${stats.total === 1 ? "thread" : "threads"}`;
+      return {
+        text: label,
+        title: `${label}; ${stats.open} open, ${stats.resolved} resolved${stats.outdated ? `, ${stats.outdated} outdated` : ""}`,
+      };
+    },
+  ).current;
   const { model } = useFileTree({
     paths: changes.map((change) => change.path),
     gitStatus: changes.map((change) => ({
@@ -740,6 +855,15 @@ function ChangeTree({
     density: "default",
     itemHeight: 32,
     icons: "complete",
+    renderRowDecoration,
+    unsafeCSS: `
+      [data-item-section="decoration"] {
+        color: var(--trees-accent);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        font-weight: 600;
+      }
+    `,
     renaming: false,
     dragAndDrop: false,
     sort: (left, right) =>
@@ -750,16 +874,41 @@ function ChangeTree({
         right.isDirectory,
       ),
     onSelectionChange(selectedPaths) {
+      if (syncingSelection.current) return;
       const change = paths.get(selectedPaths[0] ?? "");
       if (change) select.current(change);
     },
   });
+  useEffect(() => {
+    if (!selected || model.getSelectedPaths()[0] === selected) return;
+    syncingSelection.current = true;
+    for (const path of model.getSelectedPaths()) {
+      if (path !== selected) model.getItem(path)?.deselect();
+    }
+    model.getItem(selected)?.select();
+    syncingSelection.current = false;
+  }, [model, selected]);
   return (
-    <FileTree
-      model={model}
-      className="change-file-tree"
-      aria-label="Changed files"
-    />
+    <div className="change-tree-shell">
+      <header className="change-tree-header">
+        <div>
+          <span className="change-tree-kicker">
+            {review ? "Review files" : "Changed files"}
+          </span>
+          <strong>
+            {changes.length} {changes.length === 1 ? "file" : "files"}
+          </strong>
+        </div>
+        {review && (
+          <span className="change-tree-hint">Select a file to jump</span>
+        )}
+      </header>
+      <FileTree
+        model={model}
+        className="change-file-tree"
+        aria-label="Changed files"
+      />
+    </div>
   );
 }
 
@@ -771,10 +920,12 @@ function DiffView({
   theme,
   codeThemes,
   eager,
+  review,
 }: Omit<Props, "name" | "path"> & {
   base?: string;
   change: Change;
   eager: boolean;
+  review?: DiffReviewState;
 }) {
   const panel = useRef<HTMLElement>(null);
   const [load, setLoad] = useState(eager);
@@ -810,8 +961,15 @@ function DiffView({
       diffStyle: style,
       preferredHighlighter: "shiki-js" as const,
       onPostRender: enableCodeKeyboardScroll,
+      ...(review
+        ? {
+            enableLineSelection: true,
+            onLineSelected: (range: SelectedLineRange | null) =>
+              review.onLineSelected(change.path_hex, range),
+          }
+        : {}),
     }),
-    [codeThemes, theme, style],
+    [change.path_hex, codeThemes, review, style, theme],
   );
   const files = useMemo(() => {
     const data = state.data;
@@ -840,12 +998,29 @@ function DiffView({
     if (oldFile) return { oldFile, newFile: null };
     return null;
   }, [state.data]);
+  const lineAnnotations = useMemo<DiffLineAnnotation<InlineDiffThread>[]>(
+    () =>
+      (review?.threads ?? [])
+        .filter(
+          (thread) =>
+            thread.path_hex === change.path_hex &&
+            !thread.outdated &&
+            !thread.vanished,
+        )
+        .map((thread) => ({
+          side: thread.side === "old" ? "deletions" : "additions",
+          lineNumber: thread.start_line,
+          metadata: thread,
+        })),
+    [change.path_hex, review?.threads],
+  );
   return (
     <section
       ref={panel}
       id={changePanelId(change.path_hex)}
       className="panel diff-panel"
       data-change-path={change.path}
+      data-change-path-hex={change.path_hex}
       aria-labelledby={`${changePanelId(change.path_hex)}-heading`}
     >
       <div className="panel-header">
@@ -876,10 +1051,26 @@ function DiffView({
         <Result state={state} showTiming={false}>
           {() =>
             files ? (
-              <MultiFileDiff
+              <MultiFileDiff<InlineDiffThread>
                 key={`${theme}:${codeThemes.light}:${codeThemes.dark}`}
                 {...files}
                 options={options}
+                lineAnnotations={lineAnnotations}
+                renderAnnotation={(annotation) => {
+                  const thread = annotation.metadata;
+                  return (
+                    <button
+                      type="button"
+                      className="inline-review-annotation"
+                      data-thread-number={thread.number}
+                      aria-label={`Open review thread #${thread.number}`}
+                      onClick={() => review?.onThreadSelected(thread)}
+                    >
+                      {review?.renderAnnotation?.(thread) ??
+                        `Comment #${thread.number}`}
+                    </button>
+                  );
+                }}
                 style={diffColors}
               />
             ) : (

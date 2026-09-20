@@ -473,6 +473,50 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     assert_eq!(pull.1["base_oid"], base_oid);
     assert_eq!(pull.1["head_oid"], feature_oid);
     eprintln!("qualified pull request mutation");
+    let review_thread = json_request(
+        &client,
+        reqwest::Method::POST,
+        format!("{public_origin}/api/repos/team/repo/pulls/1/threads"),
+        serde_json::json!({
+            "request_id": "00000000-0000-4000-8000-000000000010",
+            "body": "Remote inline review",
+            "suggested_text": "base\nreviewed\n",
+            "base_oid": base_oid,
+            "head_oid": feature_oid,
+            "path_hex": "524541444d452e6d64",
+            "side": "new",
+            "start_line": 2,
+            "end_line": 2
+        }),
+    )
+    .await;
+    assert_eq!(review_thread.0, StatusCode::CREATED);
+    assert_eq!(review_thread.1["number"], 1);
+    assert_eq!(review_thread.1["path_hex"], "524541444d452e6d64");
+    assert_eq!(review_thread.1["current"], true);
+    let review_reply = json_request(
+        &client,
+        reqwest::Method::POST,
+        format!("{public_origin}/api/repos/team/repo/pulls/1/threads/1/replies"),
+        serde_json::json!({
+            "request_id": "00000000-0000-4000-8000-000000000011",
+            "body": "I will address this in the next push"
+        }),
+    )
+    .await;
+    assert_eq!(review_reply.0, StatusCode::CREATED);
+    assert_eq!(review_reply.1["number"], 1);
+    let resolved_thread = json_request(
+        &client,
+        reqwest::Method::PATCH,
+        format!("{public_origin}/api/repos/team/repo/pulls/1/threads/1"),
+        serde_json::json!({"version": review_thread.1["version"], "resolved": true}),
+    )
+    .await;
+    assert_eq!(resolved_thread.0, StatusCode::OK);
+    assert_eq!(resolved_thread.1["resolved"], true);
+    assert_eq!(resolved_thread.1["resolved_by"], "Local operator");
+    eprintln!("qualified inline review thread, reply, and resolution");
     let pull_comment = json_request(
         &client,
         reqwest::Method::POST,
@@ -609,6 +653,28 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     assert_eq!(restored_pull["head_oid"], feature_oid);
     assert_eq!(restored_pull["merge_requirements"]["protected"], true);
     assert_eq!(restored_pull["merge_requirements"]["satisfied"], true);
+    let (restored_thread_status, restored_thread) = json_get(
+        &client,
+        format!("{public_origin}/api/repos/team/repo/pulls/1/threads/1"),
+    )
+    .await;
+    assert_eq!(restored_thread_status, StatusCode::OK);
+    assert_eq!(restored_thread["path_hex"], "524541444d452e6d64");
+    assert_eq!(restored_thread["start_line"], 2);
+    assert_eq!(restored_thread["end_line"], 2);
+    assert_eq!(restored_thread["resolved"], true);
+    assert_eq!(restored_thread["resolved_by"], "Local operator");
+    let (restored_replies_status, restored_replies) = json_get(
+        &client,
+        format!("{public_origin}/api/repos/team/repo/pulls/1/threads/1/replies"),
+    )
+    .await;
+    assert_eq!(restored_replies_status, StatusCode::OK);
+    assert_eq!(
+        restored_replies["items"][0]["body"],
+        "I will address this in the next push"
+    );
+    eprintln!("qualified restored inline review conversation");
     let (pull_comments_status, pull_comments) = json_get(
         &client,
         format!("{public_origin}/api/repos/team/repo/pulls/1/comments"),
