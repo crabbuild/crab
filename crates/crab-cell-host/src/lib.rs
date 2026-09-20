@@ -92,7 +92,7 @@ impl Drop for CellNodeTaskGroup {
             Ok(tasks) => tasks,
             Err(poisoned) => poisoned.into_inner(),
         };
-        for task in tasks {
+        for task in tasks.iter() {
             task.abort();
         }
     }
@@ -945,7 +945,13 @@ mod tests {
                 .unwrap();
             started.notified().await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !dropped.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         assert!(dropped.load(Ordering::Acquire));
     }
 
