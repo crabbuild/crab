@@ -722,14 +722,15 @@ impl QualificationRunSummary {
             operations: self.operations,
             elapsed_ms: self.elapsed.as_millis().max(1).min(u128::from(u64::MAX)) as u64,
             primitive_counts: self.primitive_counts.clone(),
-            outcome_digest: *self.outcome_digest.as_bytes(),
+            outcome_digest: *qualification_run_outcome_digest(workload, &self.primitive_counts)?
+                .as_bytes(),
             metrics: self.metrics()?,
         })
     }
 }
 
 /// Schema for a measured, typed execution artifact bound to one workload.
-pub const QUALIFICATION_RUN_ARTIFACT_SCHEMA_VERSION: u32 = 1;
+pub const QUALIFICATION_RUN_ARTIFACT_SCHEMA_VERSION: u32 = 2;
 
 /// Bounded measured outcome consumed by protected primitive qualification.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -875,6 +876,11 @@ impl QualificationRunArtifact {
             return Err(Error::Control("qualification run counters"));
         }
         self.workload.validate()?;
+        if qualification_run_outcome_digest(&self.workload, &self.primitive_counts)?
+            != self.outcome_digest()
+        {
+            return Err(Error::Control("qualification run outcome"));
+        }
         validate_metrics(&self.metrics)?;
         Ok(())
     }
@@ -940,7 +946,6 @@ impl QualificationWorkload {
             .iter()
             .map(|primitive| QualificationPrimitiveCounts::new(primitive))
             .collect::<Vec<_>>();
-        let mut hasher = blake3::Hasher::new();
         for operation in QualificationOperationIter::new(seed, cells, operations) {
             let primitive_index = operation.primitive_index as usize;
             let counts = &mut primitives[primitive_index];
@@ -959,11 +964,8 @@ impl QualificationWorkload {
                 }
                 counts.verified += 1;
             }
-            hasher.update(&operation.index.to_be_bytes());
-            hasher.update(&(primitive_index as u64).to_be_bytes());
-            hasher.update(&operation.cell_index.to_be_bytes());
-            hasher.update(&operation.nonce.to_be_bytes());
         }
+        let outcome_digest = qualification_workload_outcome_digest(seed, cells, operations);
         Ok(Self {
             schema_version: 1,
             profile: profile.name.clone(),
@@ -973,7 +975,7 @@ impl QualificationWorkload {
             operations,
             duration_secs,
             primitives,
-            outcome_digest: *hasher.finalize().as_bytes(),
+            outcome_digest: *outcome_digest.as_bytes(),
         })
     }
 
@@ -1070,7 +1072,6 @@ impl QualificationWorkload {
             .map(|primitive| QualificationPrimitiveCounts::new(primitive))
             .collect::<Vec<_>>();
         let mut latency = QualificationLatencyHistogram::default();
-        let mut hasher = blake3::Hasher::new();
         for operation in self.iter_operations() {
             let operation_started = Instant::now();
             let execution = executor.execute(operation).await?;
@@ -1095,18 +1096,8 @@ impl QualificationWorkload {
             if execution.retries != 0 {
                 primitive.retried = primitive.retried.saturating_add(1);
             }
-            hasher.update(&operation.index.to_be_bytes());
-            hasher.update(&[operation.primitive_index]);
-            hasher.update(&operation.cell_index.to_be_bytes());
-            hasher.update(&operation.nonce.to_be_bytes());
-            hasher.update(&[match execution.outcome {
-                QualificationOutcome::Acknowledged => 0,
-                QualificationOutcome::Rejected => 1,
-                QualificationOutcome::Ambiguous => 2,
-            }]);
-            hasher.update(&[u8::from(execution.verified)]);
-            hasher.update(&execution.retries.to_be_bytes());
         }
+        let outcome_digest = qualification_run_outcome_digest(self, &counts)?;
         Ok(QualificationRunSummary {
             profile: self.profile.clone(),
             profile_digest: self.profile_digest(),
@@ -1115,7 +1106,7 @@ impl QualificationWorkload {
             operations: self.operations,
             elapsed: started.elapsed(),
             primitive_counts: counts,
-            outcome_digest: Digest::from_bytes(*hasher.finalize().as_bytes()),
+            outcome_digest,
             latency,
         })
     }
@@ -1170,8 +1161,70 @@ impl QualificationWorkload {
         {
             return Err(Error::Control("qualification workload counters"));
         }
+        if self
+            .primitives
+            .iter()
+            .try_fold(0_u64, |total, counts| total.checked_add(counts.attempted))
+            != Some(self.operations)
+            || qualification_workload_outcome_digest(self.seed, self.cells, self.operations)
+                != self.outcome_digest()
+        {
+            return Err(Error::Control("qualification workload outcome"));
+        }
         Ok(())
     }
+}
+
+fn qualification_workload_outcome_digest(seed: u64, cells: u64, operations: u64) -> Digest {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"crab-cell-runtime/qualification/workload-v1");
+    hasher.update(&seed.to_be_bytes());
+    hasher.update(&cells.to_be_bytes());
+    hasher.update(&operations.to_be_bytes());
+    for operation in QualificationOperationIter::new(seed, cells, operations) {
+        hasher.update(&operation.index.to_be_bytes());
+        hasher.update(&u64::from(operation.primitive_index).to_be_bytes());
+        hasher.update(&operation.cell_index.to_be_bytes());
+        hasher.update(&operation.nonce.to_be_bytes());
+        hasher.update(&[
+            u8::from(operation.retry_hint),
+            u8::from(operation.rejection_hint),
+            u8::from(operation.ambiguous_hint),
+        ]);
+    }
+    Digest::from_bytes(*hasher.finalize().as_bytes())
+}
+
+fn qualification_run_outcome_digest(
+    workload: &QualificationWorkload,
+    counts: &[QualificationPrimitiveCounts],
+) -> Result<Digest> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"crab-cell-runtime/qualification/run-v2");
+    hasher.update(workload.outcome_digest().as_bytes());
+    hasher.update(workload.profile_digest().as_bytes());
+    hasher.update(&workload.seed.to_be_bytes());
+    hasher.update(&workload.cells.to_be_bytes());
+    hasher.update(&workload.operations.to_be_bytes());
+    for primitive in QUALIFICATION_PRIMITIVES {
+        let primitive_counts = counts
+            .iter()
+            .find(|counts| counts.primitive == *primitive)
+            .ok_or(Error::Control("qualification run primitive identity"))?;
+        hasher.update(&(primitive.len() as u64).to_be_bytes());
+        hasher.update(primitive.as_bytes());
+        for value in [
+            primitive_counts.attempted,
+            primitive_counts.acknowledged,
+            primitive_counts.rejected,
+            primitive_counts.ambiguous,
+            primitive_counts.retried,
+            primitive_counts.verified,
+        ] {
+            hasher.update(&value.to_be_bytes());
+        }
+    }
+    Ok(Digest::from_bytes(*hasher.finalize().as_bytes()))
 }
 
 fn valid_primitive_counts(counts: &QualificationPrimitiveCounts) -> bool {
@@ -2457,6 +2510,10 @@ mod tests {
         first.verify_for_profile(&profile).unwrap();
         let encoded = first.encode().unwrap();
         assert_eq!(QualificationWorkload::decode(&encoded).unwrap(), first);
+
+        let mut forged = first.clone();
+        forged.outcome_digest[0] ^= 1;
+        assert!(forged.encode().is_err());
     }
 
     #[test]
@@ -2538,7 +2595,9 @@ mod tests {
             operations: workload.operations(),
             elapsed_ms: 1_000,
             primitive_counts: workload.primitives.clone(),
-            outcome_digest: [7; 32],
+            outcome_digest: *qualification_run_outcome_digest(&workload, &workload.primitives)
+                .unwrap()
+                .as_bytes(),
             metrics: vec![
                 QualificationMetric::new("p99_latency_ms".into(), 1, "ms".into()).unwrap(),
             ],
@@ -2565,7 +2624,12 @@ mod tests {
             operations: throughput_workload.operations(),
             elapsed_ms: 2_000,
             primitive_counts: throughput_workload.primitives.clone(),
-            outcome_digest: [7; 32],
+            outcome_digest: *qualification_run_outcome_digest(
+                &throughput_workload,
+                &throughput_workload.primitives,
+            )
+            .unwrap()
+            .as_bytes(),
             metrics: vec![
                 QualificationMetric::new("p99_latency_ms".into(), 1, "ms".into()).unwrap(),
             ],
@@ -2577,6 +2641,10 @@ mod tests {
         let mut forged = artifact.clone();
         forged.seed = forged.seed.saturating_add(1);
         assert!(forged.verify_for_profile(&profile).is_err());
+
+        let mut forged_digest = artifact.clone();
+        forged_digest.outcome_digest[0] ^= 1;
+        assert!(forged_digest.encode().is_err());
 
         let mut unverified = artifact.clone();
         unverified.primitive_counts[0].verified = 0;
@@ -2666,7 +2734,9 @@ mod tests {
             operations: workload.operations(),
             elapsed_ms: 1_000,
             primitive_counts: workload.primitives.clone(),
-            outcome_digest: [7; 32],
+            outcome_digest: *qualification_run_outcome_digest(&workload, &workload.primitives)
+                .unwrap()
+                .as_bytes(),
             metrics: vec![
                 QualificationMetric::new("p99_latency_ms".into(), 1, "ms".into()).unwrap(),
                 QualificationMetric::new("p99_latency_ms".into(), 2, "ms".into()).unwrap(),
@@ -3270,7 +3340,9 @@ mod tests {
             operations: workload.operations(),
             elapsed_ms: 1_000,
             primitive_counts: workload.primitives.clone(),
-            outcome_digest: [29; 32],
+            outcome_digest: *qualification_run_outcome_digest(&workload, &workload.primitives)
+                .unwrap()
+                .as_bytes(),
             metrics: vec![
                 QualificationMetric::new("p99_latency_ms".into(), 1, "ms".into()).unwrap(),
             ],
