@@ -9,10 +9,14 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+const IN_MEMORY_INDEX_PAGE_LIMIT: usize = 64 << 10;
+
 struct TimedWriter<W> {
     inner: W,
     host: crate::Host,
     write_nanos: Arc<AtomicU64>,
+    bytes_written: u64,
+    digest: blake3::Hasher,
 }
 
 impl<W: std::io::Write> std::io::Write for TimedWriter<W> {
@@ -20,11 +24,26 @@ impl<W: std::io::Write> std::io::Write for TimedWriter<W> {
         let started = self.host.now_monotonic();
         let result = self.inner.write(bytes);
         add_elapsed(&self.write_nanos, started, self.host.now_monotonic());
+        if let Ok(written) = result {
+            let written = written.min(bytes.len());
+            self.bytes_written = self.bytes_written.saturating_add(written as u64);
+            self.digest.update(&bytes[..written]);
+        }
         result
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
+    }
+}
+
+impl<W> TimedWriter<W> {
+    fn finish(self) -> (W, u64, [u8; 32]) {
+        (
+            self.inner,
+            self.bytes_written,
+            *self.digest.finalize().as_bytes(),
+        )
     }
 }
 
@@ -320,7 +339,7 @@ impl Db {
             info.prev_commit,
             commit,
         );
-        let mut checksums = match write_result {
+        let (mut checksums, size_bytes, digest) = match write_result {
             Err(CrabError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 if let Some(parent) = &parent {
                     self.host.create_dir_all(parent)?;
@@ -368,6 +387,16 @@ impl Db {
                 final_page,
             },
         ));
+        self.last_l0_segment = Some(crate::SegmentInfo {
+            min_txid: tx_id.0,
+            max_txid: tx_id.0,
+            page_size: self.page_size,
+            database_pages: commit,
+            pre_checksum: pos.post_apply_checksum,
+            post_checksum,
+            size_bytes,
+            blake3: digest,
+        });
 
         // Advance cursor and checksum state together, only after the file is sealed.
         self.position = Pos::new(tx_id, post_checksum);
@@ -397,32 +426,49 @@ impl Db {
         snapshotting: bool,
         prev_commit: u32,
         commit: u32,
-    ) -> Result<crate::pages::PageChecksums> {
-        let result = (|| -> Result<crate::pages::PageChecksums> {
+    ) -> Result<(crate::pages::PageChecksums, u64, [u8; 32])> {
+        let result = (|| -> Result<(crate::pages::PageChecksums, u64, [u8; 32])> {
             let output = self.host.create(Path::new(tmp_filename))?;
-            let index = self
-                .host
-                .facilities
-                .filesystem
-                .create(Path::new(index_filename))?;
-            drop(index);
-            let index = self
-                .host
-                .facilities
-                .filesystem
-                .open_rw(Path::new(index_filename))?;
+            let estimated_pages = if snapshotting {
+                commit as usize
+            } else {
+                page_map
+                    .len()
+                    .saturating_add(commit.saturating_sub(prev_commit) as usize)
+            };
+            let spool_index = estimated_pages > IN_MEMORY_INDEX_PAGE_LIMIT;
+            let index = if spool_index {
+                let index = self
+                    .host
+                    .facilities
+                    .filesystem
+                    .create(Path::new(index_filename))?;
+                drop(index);
+                Some(
+                    self.host
+                        .facilities
+                        .filesystem
+                        .open_rw(Path::new(index_filename))?,
+                )
+            } else {
+                None
+            };
             let write_nanos = Arc::new(AtomicU64::new(0));
             let output = TimedWriter {
                 inner: output,
                 host: self.host.facilities.clone(),
                 write_nanos: Arc::clone(&write_nanos),
+                bytes_written: 0,
+                digest: blake3::Hasher::new(),
             };
-            let index = Box::new(TimedFileIo {
-                inner: index,
-                host: self.host.facilities.clone(),
-                write_nanos: Arc::clone(&write_nanos),
+            let index = index.map(|index| {
+                Box::new(TimedFileIo {
+                    inner: index,
+                    host: self.host.facilities.clone(),
+                    write_nanos: Arc::clone(&write_nanos),
+                }) as Box<dyn crate::environment::FileIo>
             });
-            let mut encoder = crate::codec::Encoder::new_block_spooled(output, index);
+            let mut encoder = crate::codec::Encoder::new_block_with_index(output, index);
             let encode_started = self.host.now_monotonic();
             encoder.encode_header(header)?;
 
@@ -466,17 +512,19 @@ impl Db {
                 encode_elapsed.saturating_sub(local_write_nanos),
             );
             self.timing_add_phase_nanos(crate::db::TimingPhase::LocalWrite, local_write_nanos);
-            let mut output = encoder.into_writer().inner;
+            let (mut output, size_bytes, digest) = encoder.into_writer().finish();
             self.timing_begin(crate::db::TimingPhase::Fsync);
             output.sync_all()?;
             self.timing_end(crate::db::TimingPhase::Fsync);
             drop(output);
-            self.host.remove_file(Path::new(index_filename))?;
+            if spool_index {
+                self.host.remove_file(Path::new(index_filename))?;
+            }
             self.timing_begin(crate::db::TimingPhase::ParentSync);
             self.host
                 .rename(Path::new(tmp_filename), Path::new(filename))?;
             self.timing_end(crate::db::TimingPhase::ParentSync);
-            Ok(checksums)
+            Ok((checksums, size_bytes, digest))
         })();
         if result.is_err() {
             let _ = self.host.remove_file(Path::new(tmp_filename));

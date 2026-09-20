@@ -1,15 +1,16 @@
 // Derived from denoland/celld, commit 10cb1303dac710dcb3b557e318e08c855261f68b.
 // Apache-2.0; see LICENSE and UPSTREAM.md. Modified by Crab contributors.
 
-use crate::Txid;
 use crate::codec::{Decoder, Encoder};
 use crate::error::{CrabError, Result};
-use crate::ltx::{Header, PageHeader, VERSION};
+use crate::ltx::{Header, PageHeader, VERSION, checksum_page};
+use crate::{CHECKSUM_FLAG, Txid};
 use std::io::{Read, Write};
 
 pub struct Compactor<W, R> {
     encoder: Encoder<W>,
     inputs: Vec<CompactorInput<R>>,
+    post_apply_checksum: u64,
 }
 
 impl<W: Write, R: Read> Compactor<W, R> {
@@ -24,6 +25,7 @@ impl<W: Write, R: Read> Compactor<W, R> {
                     data: Vec::new(),
                 })
                 .collect(),
+            post_apply_checksum: CHECKSUM_FLAG,
         }
     }
 
@@ -80,11 +82,9 @@ impl<W: Write, R: Read> Compactor<W, R> {
             input.decoder.close()?;
         }
 
-        let post_apply_checksum = self.inputs[self.inputs.len() - 1]
-            .decoder
-            .trailer
-            .post_apply_checksum;
-        self.encoder.close(post_apply_checksum)
+        // Recompute the snapshot checksum from the pages selected by the merge;
+        // do not trust a source trailer when validating compaction output.
+        self.encoder.close(self.post_apply_checksum)
     }
 
     fn fill_page_buffers(&mut self) -> Result<Option<u32>> {
@@ -116,6 +116,8 @@ impl<W: Write, R: Read> Compactor<W, R> {
             }
             written = true;
             self.encoder.encode_page(page, &input.data)?;
+            self.post_apply_checksum = CHECKSUM_FLAG
+                | (self.post_apply_checksum ^ checksum_page(page_number, &input.data));
         }
         Ok(())
     }

@@ -59,6 +59,10 @@ root schema, and authority protocol. External Litestream/Celld golden-vector
 qualification remains a release gate. See [UPSTREAM.md](UPSTREAM.md) for source
 lineage and the exact compatibility boundary.
 
+For reproducible local capture, compaction, and restore measurements against
+the pinned Celld implementation, see the
+[performance harness](perf/README.md).
+
 ## Lifecycle
 
 The embedding runtime owns the steps around the library calls. In particular,

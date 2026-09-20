@@ -314,8 +314,11 @@ impl<W: Write> Encoder<W> {
         Self::new(writer, EncoderIndex::Memory(Vec::new()))
     }
 
-    pub(crate) fn new_block_spooled(writer: W, index: Box<dyn FileIo>) -> Self {
-        Self::new(writer, EncoderIndex::File(index))
+    pub(crate) fn new_block_with_index(writer: W, index: Option<Box<dyn FileIo>>) -> Self {
+        Self::new(
+            writer,
+            index.map_or_else(|| EncoderIndex::Memory(Vec::new()), EncoderIndex::File),
+        )
     }
 
     fn new(writer: W, index: EncoderIndex) -> Self {
@@ -556,7 +559,10 @@ mod tests {
             .write(true)
             .open(index_path)
             .unwrap();
-        let actual = encode(Encoder::new_block_spooled(Vec::new(), Box::new(index)));
+        let actual = encode(Encoder::new_block_with_index(
+            Vec::new(),
+            Some(Box::new(index)),
+        ));
 
         assert_eq!(actual, expected);
         ltx::decode_file(&actual).unwrap();

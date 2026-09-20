@@ -418,9 +418,9 @@ impl OutputState {
         if first.page_size != last.page_size {
             return Err(CrabError::LTXCorrupted);
         }
-        let mut encoder = crate::codec::Encoder::new_block_spooled(
+        let mut encoder = crate::codec::Encoder::new_block_with_index(
             DigestWriter::new(output, limits.max_file_bytes),
-            codec_index,
+            Some(codec_index),
         );
         encoder.encode_header(crate::ltx::Header {
             version: crate::ltx::VERSION,
