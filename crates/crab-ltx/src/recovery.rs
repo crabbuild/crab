@@ -23,6 +23,7 @@ pub(crate) fn full_job_scratch_bytes(page_size: u32, database_pages: u32) -> Res
 pub struct VerifiedPlan {
     pub(crate) inputs: Vec<Vec<u8>>,
     pub(crate) infos: Vec<SegmentInfo>,
+    image_digest: [u8; 32],
     position: Position,
     limits: Limits,
 }
@@ -65,13 +66,15 @@ impl VerifiedPlan {
             infos.push(segment.info().clone());
             inputs.push(bytes);
         }
-        let plan = Self {
+        let mut plan = Self {
             inputs,
             infos,
+            image_digest: [0; 32],
             position: target,
             limits,
         };
-        plan.image()?;
+        let image = plan.image()?;
+        plan.image_digest = *blake3::hash(&image).as_bytes();
         Ok(plan)
     }
 
@@ -196,14 +199,30 @@ fn compact_verified(plan: &VerifiedPlan) -> Result<(Vec<u8>, SegmentInfo)> {
     let mut compactor = crate::compactor::Compactor::new(writer, readers);
     compactor.compact()?;
     let bytes = compactor.into_writer().bytes;
-    let (file, _) = ltx::decode_file_with_pages(&bytes)?;
+    let (file, pages) = ltx::decode_file_with_pages(&bytes)?;
     let info = SegmentInfo::from_decoded(&bytes, &file);
+    let mut image_digest = blake3::Hasher::new();
+    let zero_page = vec![0; file.header.page_size as usize];
+    let mut page_number = 1;
+    for (pgno, data) in pages {
+        while page_number < pgno {
+            image_digest.update(&zero_page);
+            page_number = page_number.checked_add(1).ok_or(CrabError::LTXCorrupted)?;
+        }
+        image_digest.update(&data);
+        page_number = pgno.checked_add(1).ok_or(CrabError::LTXCorrupted)?;
+    }
+    while page_number <= file.header.commit {
+        image_digest.update(&zero_page);
+        page_number = page_number.checked_add(1).ok_or(CrabError::LTXCorrupted)?;
+    }
     if info.min_txid != first.min_txid
         || info.max_txid != last.max_txid
         || info.pre_checksum != first.pre_checksum
         || info.position() != plan.position
         || info.database_pages != last.database_pages
         || info.page_size != first.page_size
+        || *image_digest.finalize().as_bytes() != plan.image_digest
     {
         return Err(CrabError::ChecksumMismatch);
     }
