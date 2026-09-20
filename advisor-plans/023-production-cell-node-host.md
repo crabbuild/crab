@@ -245,7 +245,7 @@ the new host must delete comparable manual composition complexity from server.
 - [x] Node admission is cancelled before provider-facility drains, with a deadline regression test.
 - [ ] Full-primitive application provisions and survives owner/source loss through public APIs.
 - [x] `crab-http-server` contains no parallel production composition path.
-- [ ] Existing repository HTTP/auth/provider behavior remains unchanged.
+- [x] Existing repository HTTP/auth/provider behavior remains unchanged.
 - [ ] Host, runtime, LTX, server, architecture, Clippy, format, and cleanup gates pass.
 
 ## STOP conditions
