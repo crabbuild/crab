@@ -15,5 +15,7 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
+crab-storage.workspace = true
+object_store.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

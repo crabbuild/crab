@@ -19,7 +19,8 @@
 - **Depends on**: plans 018–024 and an isolated qualification environment
 - **Category**: architecture / correctness / performance / operations / release
 - **Planned at**: commit `49bc8f0cc96`, 2026-09-20
-- **Implementation status**: local runtime, typed application, host lifecycle,
+- **Implementation status**: local runtime, typed application, public host typed
+  lifecycle smoke,
   provider-neutral durability construction/recruitment/rotation, deterministic
   workload, public receipt/matrix validation, and release negative gates are
   implemented and tested; protected provider/Kubernetes/scale receipts remain
