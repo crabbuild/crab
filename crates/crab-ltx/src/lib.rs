@@ -36,24 +36,24 @@ mod wal;
 #[cfg(feature = "replica")]
 pub mod bundle;
 #[cfg(feature = "replica")]
-mod cell_replica;
-#[cfg(feature = "replica")]
 mod node_frame;
 #[cfg(feature = "replica")]
 mod paged;
 #[cfg(feature = "replica")]
 mod paged_io;
 #[cfg(feature = "replica")]
+mod replica;
+#[cfg(feature = "replica")]
 pub use paged_io::with_paged_io_deadline;
 #[cfg(feature = "replica")]
 mod writable_vfs;
 #[cfg(feature = "replica")]
-pub use cell_replica::{
+pub use node_frame::{NodeFrameScope, VerifiedNodeFrame, encode_node_frame, inspect_node_frame};
+#[cfg(feature = "replica")]
+pub use replica::{
     CellObjectRef, CellPagedDatabase, CellReplica, CellWritableDatabase, PreparedRoot,
     RecoveryOverlay, RootRef, VerifiedRoot,
 };
-#[cfg(feature = "replica")]
-pub use node_frame::{NodeFrameScope, VerifiedNodeFrame, encode_node_frame, inspect_node_frame};
 #[cfg(feature = "replica")]
 pub use writable_vfs::Hydration;
 

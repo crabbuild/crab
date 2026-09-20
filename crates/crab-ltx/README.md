@@ -1,393 +1,319 @@
-# crab-ltx
+# `crab-ltx`
 
-Embedded SQLite WAL capture and exact LTX recovery, with an optional canonical
-Cell root transport. Crab-owned integration of Celld's mechanics; no Celld Git
-dependency or Litestream daemon. Default features remain empty. Enable
-`replica` for the existing `crab-storage` transport and Tokio integration.
+`crab-ltx` is an embeddable Rust library for capturing SQLite WAL commits as
+checksum-bearing LTX files and recovering an exact, verified database state.
+With the optional `replica` feature, it can prepare immutable Crab Cell roots
+in object storage and open them for exact restore or sparse SQL.
 
-Status: local capture and canonical Cell root preparation are implemented.
-Native and Cell-scoped bundle LTX cuts can be prepared as immutable
-Cell/incarnation-scoped roots, and exact range/full compaction can produce a
-representation-only prepared root.
-These roots are bound to checked `crab-cell-runtime` control successors and the
-runtime is composed by `crab-http-server`. Initial directories are constructed
-from a streaming k-way index merge and uploaded one radix leaf at a time.
-Writable Cell activation now streams authenticated checksums to a local
-fixed-width file and capture updates it incrementally. Cell compaction now uses
-disk-spooled authenticated indexes, a k-way external merge, bounded frame reads
-and multipart uploads from the injected filesystem. The complete product
-cutover and measured capacity qualification still remain. The former
-standalone epoch-head/paged/scheduler API was hard-removed under the recorded
-compatibility decision; its stored prefixes are never read as Cell roots. See
-[next architecture](../crab-http-server/next-architecture/README.md).
+It is **not Litestream packaged as a Rust crate**. Litestream is a standalone
+sidecar that monitors a database and operates its replication lifecycle.
+`crab-ltx` runs inside the application and leaves scheduling, storage
+configuration, authority, retention, and request acknowledgement to its host.
 
-## Contract
+![Litestream sidecar and crab-ltx embedded architecture](diagram/litestream-vs-crab-ltx.svg)
 
-| API | Local result |
-| --- | --- |
-| `ManagedDb::open(path, limits)` | Exclusive fresh capture session; owns control, read-lock and application-writer SQLite connections, each configured with a 64 KiB page-cache target |
-| `ManagedDb::{resume,resume_with_host}(plan, path, limits, …)` | New local session continuing an exact verified TXID/checksum; available without `replica` |
-| `transaction(closure)` | One locally committed SQL transaction; no remote-durability claim |
-| `capture()` | Ordered `CaptureBatch` containing every newly generated cut, its endpoint, and bounded in-memory timing observations, including checkpoint cuts |
-| `checkpoint(mode)` | Capture barrier plus PASSIVE/FULL/RESTART/TRUNCATE; returns every generated cut |
-| `snapshot(path)` | Returns `(LocalSegment, CaptureBatch)`: full `1..=txid` snapshot plus every newly captured cut |
-| `VerifiedLocalPlan::new(files, target, limits)` | Owns verified bytes of an explicitly selected snapshot-plus-deltas chain |
-| `restore_exact(plan, path)` | Installs a new SQLite file at exactly the verified endpoint; never overwrites |
-| `compact_exact(plan, path)` | Compacts that complete local chain into a verified snapshot; never deletes inputs |
-| `Host::with_local_disk_budget(DiskBudget)` | Shares byte-precise WAL/LTX/sparse-page admission across cloned hosts; exhausted write admission occurs before SQL begins |
-| `Host::install_disk_admission(...)` | Reconciles every local-disk reserve, resize, release, and late host installation with the embedding runtime's node ledger |
-| `Host::with_scratch_monitor(ScratchMonitor)` | Rechecks embedding-service disk pressure after process-wide full-job scratch admission and before remote body downloads |
-| `close()` | Releases local connections/read lock; does not upload, publish or release a remote lease |
+## Choose the right tool
 
-`SegmentInfo` includes TXID range, page size/count, pre/post rolling checksum,
-encoded size and BLAKE3 digest. Persist those expectations in the server's
-authenticated manifest. `LocalSegment::new` is an **unverified selection**;
-`VerifiedLocalPlan::new` validates it before recovery. Changing a path after plan
-construction cannot change its owned bytes. LTX CRC64 checks file structure and
-database state; it is not cryptographic authentication.
+Use Litestream when you want an operational SQLite backup tool with a CLI,
+configuration file, background synchronization, provider integrations,
+compaction, snapshots, and retention.
 
-`CaptureBatch::timing` is observational only: it is not serialized or included
-in a root digest, and ignoring it does not add asynchronous work or change
-capture, checkpoint, error, or fencing behavior.
+Use `crab-ltx` when a Rust service must:
 
-The first file must be a full snapshot. Every subsequent range starts at the
-previous maximum TXID plus one. Validation rejects gaps, overlaps, missing files,
-wrong digests, wrong metadata/target, invalid page order/index offsets, missing
-snapshot or growth pages, and checksum-disabled files. Every applied cut's
-rolling database checksum is verified, not just the final trailer.
+- execute SQLite writes and capture their exact WAL commit boundary in one
+  owned session;
+- validate every LTX segment before selecting it for recovery;
+- publish immutable objects behind an application-specific authority CAS;
+- restore a caller-selected state without listing a bucket for “latest”; or
+- lazily open an authenticated Cell root and hydrate it through SQLite.
 
-Snapshot capture transfers ownership of pending cuts just like `capture()` and
-`checkpoint()`. When preparing a Cell root, retain and publish the returned
-batch through `CellReplica`; do not append the full snapshot to an existing
-delta chain:
+Do not use `crab-ltx` as a drop-in Litestream client or point the two systems at
+the same replica prefix. They share LTX concepts, not a publication protocol.
 
-```rust,no_run
-# #[cfg(feature = "replica")]
-# async fn snapshot_publication(writer: &mut crab_ltx::ManagedDb, replica: &crab_ltx::CellReplica,
-#     base: Option<&crab_ltx::RootRef>, snapshot_path: &std::path::Path) -> crab_ltx::Result<()> {
-let (snapshot, pending) = writer.snapshot(snapshot_path)?;
-let prepared = replica.prepare(base, &pending, 1, 1).await?;
-// `snapshot` is an independent full recovery artifact, not another delta.
-let _root = prepared.root();
-# Ok(())
-# }
-```
+## Litestream comparison
 
-Writers emit checksum-bearing LTX v3 **sized-block** files (LTX v0.5.2 layout).
-Readers accept both sized-block and older LZ4-frame files when checksummed.
-Litestream v0.5.11 cannot read the sized-block layout; compatibility must not be
-inferred from the unchanged file-version number. Independent local vectors test
-both encodings; a full external Litestream/Celld interoperability matrix remains
-a release gate. Source revision and notices: [UPSTREAM.md](UPSTREAM.md).
-The reviewed current-Celld mechanics, adoption order, and acceptance gates are
-recorded in [CELLD-DELTA-PLAN.md](CELLD-DELTA-PLAN.md).
+This comparison was checked against the official
+[Litestream v0.5.17 release](https://github.com/benbjohnson/litestream/releases/tag/v0.5.17),
+its [`DB`](https://github.com/benbjohnson/litestream/blob/v0.5.17/db.go),
+[`Replica`](https://github.com/benbjohnson/litestream/blob/v0.5.17/replica.go),
+and [`Store`](https://github.com/benbjohnson/litestream/blob/v0.5.17/store.go)
+implementations, and the official
+[How it works](https://litestream.io/how-it-works/) guide.
 
-## Use
+| Concern | Litestream v0.5.17 | `crab-ltx` |
+| --- | --- | --- |
+| Deployment | Standalone process next to the application | Library linked into a Rust process |
+| Write ownership | Observes an application-owned SQLite database through SQLite and WAL files | All supported SQL writes pass through an exclusive `ManagedDb` session |
+| Progress | Background monitor loops sync WAL, upload LTX, compact levels, create snapshots, and enforce retention | The host explicitly calls `capture`, `checkpoint`, `prepare`, compaction, and pruning |
+| Remote state | `ReplicaClient` lists LTX levels and selects ranges for restore | `CellReplica` opens an exact `RootRef`; it never discovers truth by listing objects |
+| Durability boundary | A successful replica sync advances Litestream's replica position | Uploaded immutable objects are only a proposal; the host must publish the root with Cell authority before acknowledging |
+| Storage providers | Litestream owns its CLI/config provider integrations | The host supplies an existing `crab-storage` `Store` and `CellStorageLayout` |
+| Restore selection | Latest, TXID, or timestamp is resolved from replica LTX files | The caller supplies a verified local plan or an authority-pinned Cell root |
+| Retention | Built-in snapshot and LTX retention monitors | Remote pinning, retention, and garbage collection are host policy |
+| Format | Uses `superfly/ltx` v0.5.2 | Writes checksum-bearing LTX v3 files using the v0.5.2 sized-block layout and reads that layout plus older checksummed LZ4-frame files |
+
+The matching LTX dependency means current Litestream can parse the sized-block
+encoding used here. It does **not** prove end-to-end interoperability: Crab adds
+its own BLAKE3-bound segment metadata, authenticated Cell directory, immutable
+root schema, and authority protocol. External Litestream/Celld golden-vector
+qualification remains a release gate. See [UPSTREAM.md](UPSTREAM.md) for source
+lineage and the exact compatibility boundary.
+
+## Lifecycle
+
+The embedding runtime owns the steps around the library calls. In particular,
+`prepare` does not publish a mutable head and `capture` does not mean remote
+durability.
+
+![Capture, publish, and recover sequence](diagram/capture-publish-recover.svg)
+
+The safe write path is:
+
+1. Run a transaction through `ManagedDb`.
+2. Call `capture()` to produce one or more ordered local LTX segments.
+3. Upload and verify them with `CellReplica::prepare()`.
+4. Publish the returned root through the embedding runtime's owner/head CAS.
+5. Only after that CAS is durable, acknowledge the mutation and prune the exact
+   captured batch.
+
+Recovery reverses the boundary: load the authority-pinned `RootRef`, verify its
+complete immutable object graph, then restore it or activate sparse SQL.
+
+## Features
+
+| Feature | Default | Adds |
+| --- | --- | --- |
+| none | yes | Local capture, checkpointing, snapshots, exact verification, restore, and compaction |
+| `replica` | no | `crab-storage` transport, Cell roots, bundles, remote compaction, exact-root restore, sparse SQL, and hydration |
+
+The crate is currently an unpublished workspace library.
+
+## Local capture and exact restore
+
+The following example is compiled as a Rust doc test. Both destination
+directories exist, and the restored database path does not.
 
 ```rust,no_run
 use crab_ltx::{Limits, ManagedDb, VerifiedLocalPlan, restore_exact};
-use std::path::Path;
 
-# fn example() -> crab_ltx::Result<()> {
-// Parent directories already exist, are private, and are exclusively owned.
-let limits = Limits::default();
-let mut db = ManagedDb::open(Path::new("cell/repository.sqlite"), limits)?;
-db.transaction(|tx| {
-    tx.execute("CREATE TABLE issues (number INTEGER PRIMARY KEY, title TEXT)", [])?;
-    tx.execute("INSERT INTO issues VALUES (1, 'First issue')", [])?;
-    Ok(())
-})?;
-let captured = db.capture()?;
-
-// Server integration goes here: upload immutable files, publish a manifest and
-// prove the owner/head CAS before responding. Capture alone is not publication.
-let plan = VerifiedLocalPlan::new(&captured.segments, captured.position, limits)?;
-restore_exact(&plan, Path::new("recovery/repository.sqlite"))?;
-db.close()?;
-# Ok(())
-# }
-```
-
-`ManagedDb::transaction_with` preserves typed application failures separately
-from SQLite and WAL-boundary ambiguity. `ManagedDb::query_with` temporarily
-enables SQLite `query_only` for one synchronous callback and fences the session
-if that boundary cannot be installed or removed. This is a trusted-code
-guardrail, not a sandbox or a replacement for the runtime's scoped authorizer.
-
-Runnable demonstration, from the repository root with this worktree's external
-Cargo target directory configured:
-
-```sh
-CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-b347" \
-  cargo run -p crab-ltx --example local_roundtrip --locked
-```
-
-It writes an issue to real SQLite, copies LTX artifacts to another local
-directory, deletes the original database directory, restores and queries the
-issue. This demonstrates local mechanics, **not RustFS publication**.
-
-The canonical RustFS Cell example covers object-store publication, sparse
-activation, compaction, source deletion, and exact recovery. See the
-[examples guide](examples/README.md).
-
-
-## Object-store Cell roots and sparse SQL
-
-Enable the `replica` feature. Construct a `crab_storage::Store` with Crab’s
-existing provider builders and a `CellStorageLayout`; there is no second
-credential or S3 parser.
-
-| API | Result |
-| --- | --- |
-| `CellReplica::new(layout, cell, incarnation, limits)` | Binds every immutable object to one typed Cell incarnation and rejects staged stores |
-| `prepare(base, cuts, sequence, schema).await` | Verifies native LTX cuts, writes content-addressed objects and directory nodes, and returns a private `PreparedRoot` for authority CAS |
-| `prepare_bundle(base, bundle, sequence, schema).await` | Selects `BundleEntry::for_cell` rows for this Cell, verifies the chain, and prepares the advancing root |
-| `prepare_compaction(base, range, level, scratch).await` | Performs bounded authenticated range compaction and returns a representation-only prepared root |
-| `open_root(root).await` | Reopens one exact root and validates Cell scope, chain, metadata, and the authenticated directory |
-| `VerifiedRoot::paged().read_page(page).await` | Walks the selected hash-pinned directory path, range-reads one frame, and verifies BLAKE3, page number, and checksum |
-| `VerifiedRoot::paged().prepare_writable(path).await` | Streams authenticated checksums to a fresh sidecar and returns a root-bound writable activation |
-| `CellWritableDatabase::open_writable(path)` | Creates a fresh sparse SQLite file and seeds exact TXID/checksum continuation |
-| `ManagedDb::{hydration,hydrate_step,take_io_error}` | Reports and advances bounded hydration through the same VFS as foreground SQL |
-| `ManagedDb::prune_captured(batch)` | Re-verifies and removes only the exact local capture batch after its root is durably acknowledged |
-| `bundle::Bundle` | Validates CRB1 ranges, supports bounded file-backed reopen and replayable upload sources for Cell recovery overlays; it does not publish mutable authority |
-
-The runtime calls `Control::publish_prepared` and `CellAuthority` to bind a
-prepared root to owner, incarnation, sequence, and response durability. A
-`PreparedRoot` or uploaded object alone is not publication.
-
-Cell objects live under
-`cells/v1/apps/<app>/cells/<cell>/inc/<inc>/objects/`. Root JSON is canonical
-compact v1 and references bounded segment descriptors. The `CRBDIR01` radix
-tree hashes every node and binds live-page count and rolling SQLite checksum.
-Initial directories use a streaming k-way index merge; incremental preparation
-copy-on-writes changed leaves only. Compaction range-fetches authenticated index
-chunks into caller-owned scratch and streams selected frames through one
-verifier. Directory-cache bytes, sparse pages, and scratch are charged to the
-embedding runtime’s limits.
-
-Cell sparse activation uses a fresh local file and the writable VFS. Missing
-main-file pages fault through verified object ranges while SQLite WAL, locking,
-and checkpoints use the base VFS. `hydrate_step` is an owner-paced bounded
-operation on the database worker; it is not a detached task. Range read-ahead is
-capped at 64 pages/1 MiB per request and the shared decoded cache is capped at
-8 MiB. `with_paged_io_deadline` applies one absolute deadline to the SQL
-thread’s page faults, while `take_io_error` preserves the provider/checksum
-failure behind SQLite’s I/O code.
-
-The object-store provider remains caller-owned. The filesystem backend supports
-immutable reads but does not provide conditional Cell authority updates; the
-runtime must fail closed when the authority CAS is unavailable. Server
-retention owns remote pins and deletion scope. No method lists object prefixes
-to infer state, and no method reads the retired standalone `ltx/<epoch>/`
-layout as a Cell root.
-
-A canonical Cell preparation looks like:
-
-```rust,no_run
-# #[cfg(feature = "replica")]
-# async fn cell_example(
-#     replica: &crab_ltx::CellReplica,
-#     writer: &mut crab_ltx::ManagedDb,
-# ) -> crab_ltx::Result<()> {
-let capture = writer.capture()?;
-let prepared = replica.prepare(None, &capture, 1, 1).await?;
-let root = prepared.root();
-// Bind `root` through crab-cell-runtime authority CAS before acknowledging.
-let _verified = replica.open_root(&root).await?;
-# Ok(())
-# }
-```
-
-The old standalone epoch-head, public page-map, read-only VFS, and scheduler
-surface is intentionally absent. Existing tagged standalone objects remain
-outside the Cell graph and require an explicit offline export/import tool if an
-operator must migrate them; this crate adds no compatibility reader or alias.
-
-## Session, filesystem and execution rules
-
-- Use a dedicated database thread or bounded blocking executor for local APIs.
-  Optional replica methods perform async network I/O and offload replay/compaction.
-  `&mut ManagedDb` serializes SQL and capture;
-  the server must additionally prevent reads/writes while publication is pending.
-- Treat SQL callbacks as trusted application code. Only mutate the main
-  database. Do not ATTACH databases, change pager pragmas/hooks, manually
-  commit/rollback, run direct checkpoints, or alter `_litestream_seq` and
-  `_litestream_lock`. There is no arbitrary-SQL service or borrowed writer pool.
-- SQLite's WAL hook records the application's committed frame boundary. Capture
-  must reach that boundary before any checkpoint/control write can reset it.
-  A damaged later commit cannot be acknowledged as an earlier valid cut.
-- The private metadata directory `.<filename>-crab-ltx` is atomically claimed.
-  Existing sessions are refused, including after clean close. On activation or
-  capture failure, restore the authoritative plan to a **fresh local directory**
-  and let the runtime reopen the authoritative Cell root. Local file listing
-  never selects truth.
-- No other process may mutate the database, sidecars or session directory.
-  Paths are canonicalized before claiming a session; hard-linked database aliases
-  remain forbidden, as they do not share SQLite's filename-derived sidecars.
-  Directory ownership is local exclusion, not distributed fencing. Paths are
-  UTF-8. Destination parent directories must exist; restore rejects SQLite
-  sidecars and will not replace an existing destination.
-- Retained artifacts are not removed by drop/close. `prune_captured()` releases
-  one exact acknowledged batch by path and root equality after Cell authority
-  publication. It reverifies bytes before deletion; remote retention and
-  retired-directory cleanup remain caller-owned.
-- Artifact writes fsync files and their containing directory. A failed operation
-  may have installed a file before directory fsync failed; treat it as ambiguous,
-  not published. No power-loss guarantee beyond the filesystem's fsync contract.
-  Qualified locally on macOS; Linux CI and other platform/filesystem qualification
-  are separate evidence. Windows directory fsync is not currently supported.
-
-## Resource bounds and current limits
-
-Defaults: 256 MiB database, 64 MiB per capture, 512 MiB per local input/output
-file and 1 GiB aggregate plan/retained captured bytes, with 1,024 segments.
-Oversized headers
-are rejected before page allocation. The managed writer has `max_page_count`;
-capture checks database/WAL sizes and stops on limits. Capture errors fence the
-handle. A session at its retention limit must be published/rotated by the caller.
-
-These format and per-operation limits are not an RSS quota. A host may add an
-aggregate local-disk quota with `DiskBudget`; local snapshot capture and plan
-operations still materialize database-sized buffers.
-Plans retain compressed input bytes. Cell exact-root restore and compaction use
-bounded frame batches and disk scratch rather than database-sized memory. Cell
-capture keeps its packed checksum index on local disk (about 2 MiB
-per GiB at 4 KiB pages) and keeps only the current changed-page overlay resident;
-large truncations still read the removed suffix to update the exact rolling sum.
-Standalone local capture retains its dense in-memory checksum base. Cell
-compaction retains O(segment count) cursors and a bounded decoded-page batch;
-its scratch requirement includes all authenticated indexes plus the compacted
-LTX, codec index and sidecar. Managed writes reserve twice `max_capture_bytes`
-before SQLite begins and reconcile to exact main database, live WAL and retained LTX bytes
-after capture, checkpoint and pruning. Sparse activation reserves every newly
-materialized page. A failed post-BEGIN operation retains conservative admission
-until the fenced handle is discarded. `ScratchMonitor` lets the embedding
-service reserve filesystem headroom and remeasure actual free space alongside
-unrelated consumers.
-`resume_with_host` reserves the complete restored database before installing its
-destination; writable sparse activation instead admits pages as they materialize.
-
-`Host` injects all library-owned local filesystem operations: canonical paths,
-exclusive session claims, committed WAL observation, bounded artifact reads,
-capture, snapshot/restore/compaction installation, sparse creation and local pruning.
-Use `Host::{verify,restore,compact}` for injected local operations; the free
-functions use the same path with the default host. `resume_with_host` retains
-that host through installation and subsequent capture, even without `replica`.
-`with_local_disk_budget(DiskBudget)` shares byte-precise admission across cloned
-hosts. A failed write reservation returns `TransactionError::Admission` before
-the callback runs, so callers may retry without treating the writer as ambiguous.
-
-`with_sqlite_vfs(name)` selects an already registered SQLite base VFS, including
-for the writable sparse wrapper. The embedding host must keep that registration
-alive for the process lifetime and match its file namespace to `FileSystem`.
-Unknown names fail closed. The filesystem controls artifacts/installation;
-SQLite's selected VFS controls its pager, WAL writes, locks and shared memory.
-Both seams are needed to simulate local machine faults coherently.
-
-`Executor::dispatch` runs replica verification/encoding/recovery/compaction jobs.
-`Executor::start_worker` starts each paged I/O worker independently of the caller
-and blocking pool; `Worker::join` supervises teardown after queue closure. The
-worker still drives a Tokio runtime while idle so pooled provider connections
-continue progressing. Dispatch cancellation never rolls back side effects.
-Default hosts share 32 object-store request slots, up to 16 CPU and dirty-job
-slots (each independently capped by available CPUs), and two large-recovery slots.
-`with_io_slots`, `with_job_slots`, `with_dirty_slots`, `with_recovery_slots` and
-`with_scratch_slots` accept shared Tokio semaphores for explicit service budgets;
-scratch permits represent one MiB each. `with_scratch_monitor` receives the
-process-wide admitted scratch bytes after those permits are acquired, so the
-embedding service can reject current disk pressure before body downloads. Dirty admission
-precedes capture preparation; recovery admission is nested inside it before body
-downloads for restore, resume, bundle and compaction. Full restore/resume and
-Cell compaction reserve two database images plus 64 MiB; Cell compaction also
-reserves the exact authenticated source-index bytes. Oversized jobs fail before
-body downloads instead of waiting forever. Cancelled dispatched jobs retain
-their CPU/dirty/recovery/scratch reservation until the work finishes; returned
-roots, page maps, sparse writers and database handles do not retain it.
-Closed semaphores reject new work. These are concurrency ceilings, not byte-weighted
-memory admission, bounded caller task queues or admission for synchronous local APIs.
-The disk budget covers managed WAL/LTX and sparse-page growth; request scheduling
-and memory admission remain host policy. An embedding runtime may install one
-`HostResourceAdmission` so each host I/O, blocking job, recovery cohort, dirty
-  cohort and scratch MiB also owns a runtime-ledger token; hosts without that
-  hook retain the semaphore-only contract.
-
-The clock controls capture timestamps and checkpoint ages; compaction receives
-explicit monotonic times from its owner. No default provider or dependency
-versions change. See the [parity matrix](PARITY.md) for qualification boundaries.
-
-```no_run
-use crab_ltx::{CaptureBatch, Host, Limits, ManagedDb, Result};
-use std::path::Path;
-
-fn continue_local(host: Host, acknowledged: &CaptureBatch, fresh: &Path) -> Result<ManagedDb> {
-    // The caller supplies the complete acknowledged snapshot-plus-deltas plan,
-    // not a latest-file listing or an unacknowledged local WAL.
+fn main() -> crab_ltx::Result<()> {
+    let source = tempfile::tempdir()?;
+    let restored = tempfile::tempdir()?;
     let limits = Limits::default();
-    let plan = host.verify(&acknowledged.segments, acknowledged.position, limits)?;
-    ManagedDb::resume_with_host(&plan, fresh, limits, host)
+    let database_path = source.path().join("repository.sqlite");
+
+    let mut database = ManagedDb::open(&database_path, limits)?;
+    database.transaction(|transaction| {
+        transaction.execute(
+            "CREATE TABLE issues (number INTEGER PRIMARY KEY, title TEXT NOT NULL)",
+            [],
+        )?;
+        transaction.execute(
+            "INSERT INTO issues VALUES (1, 'Recover this issue from LTX')",
+            [],
+        )?;
+        Ok(())
+    })?;
+
+    let captured = database.capture()?;
+    let plan = VerifiedLocalPlan::new(
+        &captured.segments,
+        captured.position,
+        limits,
+    )?;
+    let restored_path = restored.path().join("repository.sqlite");
+    let restored_position = restore_exact(&plan, &restored_path)?;
+
+    assert_eq!(restored_position, captured.position);
+    database.close()?;
+    Ok(())
 }
 ```
 
-Not implemented here: HTTP owner/control CAS, owner election, metrics export,
-remote retention/GC, encryption/key management, application schema or HTTP integration.
+`LocalSegment::new` only describes a selected file and its expected metadata.
+It is not trusted until `VerifiedLocalPlan::new` has read the bytes, checked the
+BLAKE3 digest and LTX structure, verified the complete checksum-linked chain,
+and reconstructed the requested endpoint.
+
+Run the complete local demonstration from the repository root:
+
+```sh
+export CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-your-worktree"
+cargo run -p crab-ltx --example local_roundtrip --locked
+```
+
+It writes to real SQLite, copies the resulting LTX artifacts across the
+transport boundary, deletes the source directory, restores the database, and
+queries the recovered row.
+
+## Preparing a Cell root
+
+Enable `replica` and construct `CellReplica` with the application's existing
+`crab_storage::Store` and `CellStorageLayout`. Provider credentials, retries,
+leases, and authority stay outside this crate.
+
+```rust,no_run
+# #[cfg(feature = "replica")]
+# async fn prepare_root(
+#     database: &mut crab_ltx::ManagedDb,
+#     replica: &crab_ltx::CellReplica,
+#     previous: Option<&crab_ltx::RootRef>,
+#     commit_sequence: u64,
+#     schema: u32,
+# ) -> crab_ltx::Result<crab_ltx::PreparedRoot> {
+let captured = database.capture()?;
+let prepared = replica
+    .prepare(previous, &captured, commit_sequence, schema)
+    .await?;
+
+// `prepared.root()` is a proposal. The embedding runtime must publish it with
+// its owner/head CAS before acknowledging the mutation or pruning `captured`.
+Ok(prepared)
+# }
+```
+
+`CellReplica::prepare` writes only immutable, content-addressed objects. The
+embedding runtime publishes `PreparedRoot::root()` through `crab-cell-runtime`
+authority. After durable publication it may call
+`ManagedDb::prune_captured(&captured)` for that exact acknowledged batch.
+
+The live RustFS example exercises Cell publication, sparse activation,
+compaction, source deletion, and exact recovery. See the
+[examples guide](examples/README.md) before running it against a disposable
+bucket.
+
+## Core API
+
+### Local capture and recovery
+
+| API | Contract |
+| --- | --- |
+| `ManagedDb::open` | Claims a fresh exclusive session and owns the writer, control, and read-lock SQLite connections |
+| `ManagedDb::transaction` | Commits one local SQL transaction; does not claim remote durability |
+| `ManagedDb::capture` | Returns every new ordered cut plus its exact TXID/checksum endpoint |
+| `ManagedDb::checkpoint` | Captures a barrier, runs the selected SQLite checkpoint, and returns every generated cut |
+| `ManagedDb::snapshot` | Returns an independent full snapshot plus any pending captured cuts |
+| `VerifiedLocalPlan::new` | Owns and verifies the complete selected snapshot-plus-delta chain |
+| `restore_exact` | Installs a fresh database at exactly the verified endpoint; never overwrites |
+| `compact_exact` | Produces a verified full snapshot without deleting its inputs |
+| `ManagedDb::resume` | Restores a verified plan into a fresh session and continues its TXID/checksum lineage |
+
+### Cell replication (`replica`)
+
+| API | Contract |
+| --- | --- |
+| `CellReplica::prepare` | Verifies captured cuts and prepares an immutable successor root |
+| `CellReplica::prepare_bundle` | Selects and verifies this Cell's rows from a shared bundle |
+| `CellReplica::prepare_compaction` | Rewrites an exact range into a representation-only prepared root |
+| `CellReplica::open_root` | Reopens one exact root and verifies its scope, chain, metadata, and directory |
+| `VerifiedRoot::restore` | Streams an exact verified database into a fresh destination |
+| `VerifiedRoot::paged` | Opens authenticated page and page-run reads |
+| `CellPagedDatabase::prepare_writable` | Seeds a fresh sparse writable activation at the root's exact position |
+| `ManagedDb::hydrate_step` | Resolves a bounded number of missing sparse pages on the owner-controlled database worker |
+| `CellReplica::reachable_objects` | Returns the verified immutable dependency set for pinning and collection |
+
+## Safety model
+
+`crab-ltx` fails closed around state selection and reconstruction:
+
+- The first local plan segment must be a full snapshot. Later segments must be
+  contiguous, checksum-linked, ordered, and consistent in page size.
+- Every segment's declared size, BLAKE3 digest, LTX checksum, page ordering,
+  page coverage, and pre/post database checksum is verified.
+- Restore and compaction create a new destination and never replace an existing
+  database or consult sidecars, local listings, or object listings for truth.
+- A capture/checkpoint error fences the managed handle when the commit boundary
+  can no longer be proven.
+- Cell objects are scoped to one Cell incarnation. A `PreparedRoot` is not a
+  lease, authority update, or durable response gate.
+- Cancellation does not roll back work already dispatched to blocking or
+  object-store workers. The host must await or reconcile the exact root before
+  retrying.
+
+LTX CRC64 protects file structure and rolling database state. It is not a
+cryptographic authenticator. Crab manifests and Cell objects add BLAKE3 digests;
+the embedding service remains responsible for authenticating the manifest or
+authority record that selects them.
+
+## Host responsibilities
+
+The application must provide the policy a sidecar would normally own:
+
+- serialize SQL and publication for each database;
+- keep all mutations inside `ManagedDb` and avoid direct checkpoints, `ATTACH`,
+  pager-changing pragmas, and edits to `_litestream_seq` or `_litestream_lock`;
+- publish roots through owner/incarnation/sequence authority before responding;
+- schedule capture, checkpoint, hydration, compaction, and retries;
+- configure provider access through `crab-storage`;
+- budget local disk, scratch space, blocking work, remote I/O, and active SQLite
+  connections; and
+- pin live roots and own remote retention and garbage collection.
+
+Local calls are synchronous and should run on a dedicated database thread or a
+bounded blocking executor. `&mut ManagedDb` serializes access within one handle;
+it does not create a distributed lock.
+
+The database path, SQLite sidecars, and private
+`.<filename>-crab-ltx` directory must have one owner. Parent directories must
+already exist. Reopening a prior session directory is intentionally refused;
+recover the authoritative plan or Cell root into a fresh directory instead.
+
+## Resource limits
+
+`Limits::default()` admits a 256 MiB database, 64 MiB per capture, 512 MiB per
+input/output file, 1 GiB across a plan or retained captures, and 1,024 segments.
+These are per-operation correctness bounds, not an RSS quota.
+
+Each open `ManagedDb` retains three SQLite connections with a 64 KiB page-cache
+target per connection. `Host` can share disk, I/O, blocking-job, recovery,
+dirty-job, scratch, and telemetry admission across many databases. Sparse page
+read-ahead is capped at 64 pages or 1 MiB per request, and the shared decoded
+page cache is capped at 8 MiB.
+
+Large-database and multi-tenant capacity still require workload-specific
+measurement. The existing tests prove bounded correctness behavior; they do not
+establish a 10,000-database or 1,000-TPS production capacity claim.
 
 ## Verification
 
-Latest local proof (2026-09-18, macOS): the canonical Cell root suites and
-doctests pass with `replica`; the minimal-feature local suite also passes.
-Shared-worker/cache bounds,
-ordered concurrent reads, cancellation-safe admission, copy-on-write metadata,
-external-merge compaction, injected-filesystem failure cleanup and bounded frame
-reads have regression coverage. The isolated RustFS fixture passes separately;
-its disposable container/bucket were removed. This is library correctness evidence,
-not a 1K–10K active-database or 1,000 TPS capacity result. See
-[SCALABILITY.md](SCALABILITY.md) for sizing assumptions and remaining gates.
-Strict Clippy passes on Rust 1.97 with and without `replica`; formatting and the
-workspace architecture guardrails pass.
+From the repository root, choose a target directory unique to this checkout:
 
 ```sh
-CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-b347" cargo test -p crab-ltx --locked
-CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-b347" cargo clippy -p crab-ltx --all-targets --locked -- -D warnings
-CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-b347" cargo test -p crab-ltx --features replica --locked
-CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-b347" cargo clippy -p crab-ltx --features replica --all-targets --locked -- -D warnings
-CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-b347" cargo fmt -p crab-ltx -- --check
+export CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-your-worktree"
+
+cargo test -p crab-ltx --locked
+cargo test -p crab-ltx --features replica --locked
+cargo test -p crab-ltx --doc --features replica --locked
+cargo clippy -p crab-ltx --all-targets --locked -- -D warnings
+cargo clippy -p crab-ltx --features replica --all-targets --locked -- -D warnings
+cargo fmt -p crab-ltx -- --check
 ```
 
-Tests exercise real SQLite commit/rollback, passive/truncate checkpoints,
-auto-vacuum shrink/regrowth, cold restore, process kill followed by source loss,
-snapshot/compaction byte identity, an independent bitwise CRC oracle, both page
-encodings, corrupt WAL capture fencing, malformed files/chains and limits.
-The workspace's existing `cargo test --workspace` CI includes this member.
+The suite covers real SQLite commits and rollbacks, checkpoints, database
+growth and truncation, cold restore, process death followed by source loss,
+snapshot/compaction byte identity, both supported page encodings, malformed
+chains, checksum failures, exact Cell roots, bundles, sparse activation,
+hydration, remote compaction, and provider/cache lifecycle boundaries.
 
-Initial local evidence (2026-09-13, macOS): 8 unit tests, 14 integration tests
-(including the subprocess fixture entry point), and 1 compiling doc-test passed.
-Strict Clippy, minimal-feature/all-target compilation, formatting and the local
-round-trip example passed. Both copied license texts match upstream SHA-256.
+Still required before a broad production-readiness claim: external
+Litestream/Celld fixture interoperability, fuzzing, exhaustive filesystem and
+power-loss faults, broader platform/provider CI, and measured latency, memory,
+scratch, and concurrency qualification.
 
-Canonical Cell-root evidence (2026-09-18, macOS): the feature-gated
-`cell_roots`, `host_hooks`, `replication`, and node-frame suites cover source
-loss, exact root reopen/restore, sparse activation, bounded hydration, delayed
-faults, checksum fencing, compaction, bundle overlays, and provider/cache
-lifetime. The default-feature local suite and strict Clippy remain separate
-proofs. These are bounded correctness fixtures, not a 1K–10K active-Cell or
-1,000 TPS capacity result.
+## Provenance and compatibility
 
-The RustFS scale example is the live provider path. It prepares a unique
-CellStorageLayout prefix through `CellReplica`, deletes the source database,
-restores the exact root, compacts the complete range, and compares source and
-restored BLAKE3/length. Run it only against a disposable bucket as documented
-in [examples/README.md](examples/README.md).
+This is Crab-owned, modified source derived from the Apache-2.0 Celld LTX
+implementation—not an unmodified vendor directory or a floating dependency.
+The readable source inventory, upstream revisions, deliberate adaptations,
+license obligations, and future-import checklist live in
+[UPSTREAM.md](UPSTREAM.md).
 
-```sh
-CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-main" \
-  cargo test -p crab-ltx --features replica --locked
-CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-main" \
-  cargo clippy -p crab-ltx --features replica --all-targets --locked -- -D warnings
-```
+Compatibility summary:
 
-Remaining qualification: broad affected-consumer/platform CI, upstream golden
-fixture corpus/external interoperability, fuzzing, exhaustive filesystem and
-power-loss faults, measured memory/latency, and the complete RustFS/HTTP
-owner-publication protocol. No production-ready or browser-parity claim is
-made by these tests. Tagged standalone object prefixes remain outside the Cell
-graph and are not read by the runtime.
+- readers accept checksum-bearing sized-block LTX and the older checksummed
+  LZ4-frame representation;
+- writers emit only the v0.5.2 sized-block representation;
+- checksum-disabled LTX is rejected;
+- retired standalone Crab epoch-head and page-map layouts are not read; and
+- Cell root JSON, authenticated directories, bundle envelopes, and authority
+  records are Crab-specific contracts.

@@ -28,8 +28,7 @@ git diff --stat 4a77b6f1252a..origin/main -- \
   crates/crab-ltx/tests \
   crates/crab-ltx/examples \
   crates/crab-ltx/UPSTREAM.md \
-  crates/crab-ltx/PARITY.md \
-  crates/crab-ltx/SCALABILITY.md
+  crates/crab-ltx/README.md
 ```
 
 If a production workspace caller or newer tagged public use exists, add it to
@@ -81,8 +80,8 @@ Unknown external usage must be recorded as unknown, not converted to “none.”
 6. Present the evidence to the named maintainer/product owner and record the
    explicit decision. The recorded authorization is the hard-removal branch;
    plan 017 implements it without retaining a compatibility reader.
-7. Link the decision from `UPSTREAM.md`, `PARITY.md`, `SCALABILITY.md`, and the
-   canonical design.
+7. Link the decision from `UPSTREAM.md`, the crate `README.md`, and the canonical
+   design.
 
 ## Recorded decision
 

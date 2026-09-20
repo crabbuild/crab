@@ -1,0 +1,73 @@
+<svg viewBox="0 0 1120 690" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title description">
+  <title id="title">Crab LTX capture, publication, and recovery sequence</title>
+  <desc id="description">The application writes through ManagedDb, prepares immutable objects through CellReplica, publishes the root through Cell authority, and later recovers only that authority-pinned root.</desc>
+  <style>text { font-family: 'SF Mono', 'Cascadia Code', 'DejaVu Sans Mono', monospace; }</style>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/></pattern>
+    <marker id="arrow-cyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#22d3ee"/></marker>
+    <marker id="arrow-emerald" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#34d399"/></marker>
+    <marker id="arrow-violet" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#a78bfa"/></marker>
+    <marker id="arrow-amber" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#fbbf24"/></marker>
+    <marker id="arrow-slate" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polyline points="0 0, 10 3.5, 0 7" fill="none" stroke="#94a3b8" stroke-width="1.5"/></marker>
+  </defs>
+  <rect width="1120" height="690" fill="#0f172a"/>
+  <rect width="1120" height="690" fill="url(#grid)"/>
+  <text x="40" y="38" fill="#f8fafc" font-size="18" font-weight="700">Capture → prepare → publish → recover</text>
+  <text x="40" y="59" fill="#94a3b8" font-size="9">Immutable upload is not acknowledgement. Authority publication is the durability boundary.</text>
+
+  <line x1="130" y1="130" x2="130" y2="645" stroke="#334155" stroke-width="1" stroke-dasharray="6,4"/>
+  <line x1="345" y1="130" x2="345" y2="645" stroke="#334155" stroke-width="1" stroke-dasharray="6,4"/>
+  <line x1="560" y1="130" x2="560" y2="645" stroke="#334155" stroke-width="1" stroke-dasharray="6,4"/>
+  <line x1="775" y1="130" x2="775" y2="645" stroke="#334155" stroke-width="1" stroke-dasharray="6,4"/>
+  <line x1="990" y1="130" x2="990" y2="645" stroke="#334155" stroke-width="1" stroke-dasharray="6,4"/>
+
+  <line x1="130" y1="175" x2="345" y2="175" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-cyan)"/>
+  <text x="237" y="164" fill="#e2e8f0" font-size="9" text-anchor="middle">transaction(...)</text>
+  <path d="M 345 205 L 405 205 L 405 235 L 345 235" fill="none" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-cyan)"/>
+  <text x="415" y="214" fill="#e2e8f0" font-size="8">commit SQLite WAL</text>
+  <line x1="130" y1="275" x2="345" y2="275" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-cyan)"/>
+  <text x="237" y="264" fill="#e2e8f0" font-size="9" text-anchor="middle">capture()</text>
+  <line x1="345" y1="310" x2="130" y2="310" stroke="#94a3b8" stroke-width="1" stroke-dasharray="6,3" marker-end="url(#arrow-slate)"/>
+  <text x="237" y="299" fill="#94a3b8" font-size="8" font-style="italic" text-anchor="middle">CaptureBatch + exact Position</text>
+  <line x1="130" y1="350" x2="560" y2="350" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-emerald)"/>
+  <text x="345" y="339" fill="#e2e8f0" font-size="9" text-anchor="middle">prepare(previous, batch, sequence, schema)</text>
+  <line x1="560" y1="385" x2="990" y2="385" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
+  <text x="775" y="374" fill="#e2e8f0" font-size="9" text-anchor="middle">write verified immutable objects</text>
+  <line x1="990" y1="420" x2="560" y2="420" stroke="#94a3b8" stroke-width="1" stroke-dasharray="6,3" marker-end="url(#arrow-slate)"/>
+  <text x="775" y="409" fill="#94a3b8" font-size="8" font-style="italic" text-anchor="middle">content digests</text>
+  <line x1="560" y1="455" x2="130" y2="455" stroke="#94a3b8" stroke-width="1" stroke-dasharray="6,3" marker-end="url(#arrow-slate)"/>
+  <text x="345" y="444" fill="#94a3b8" font-size="8" font-style="italic" text-anchor="middle">PreparedRoot (proposal only)</text>
+  <line x1="130" y1="500" x2="775" y2="500" stroke="#fbbf24" stroke-width="1.7" marker-end="url(#arrow-amber)"/>
+  <text x="452" y="489" fill="#fbbf24" font-size="9" font-weight="600" text-anchor="middle">owner/head compare-and-swap</text>
+  <line x1="775" y1="535" x2="130" y2="535" stroke="#94a3b8" stroke-width="1" stroke-dasharray="6,3" marker-end="url(#arrow-slate)"/>
+  <text x="452" y="524" fill="#94a3b8" font-size="8" font-style="italic" text-anchor="middle">durably published exact RootRef</text>
+  <line x1="130" y1="575" x2="345" y2="575" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-emerald)"/>
+  <text x="237" y="564" fill="#e2e8f0" font-size="9" text-anchor="middle">prune_captured(exact batch)</text>
+  <line x1="130" y1="620" x2="560" y2="620" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
+  <text x="345" y="609" fill="#e2e8f0" font-size="9" text-anchor="middle">open_root(authority-pinned RootRef)</text>
+  <line x1="560" y1="652" x2="990" y2="652" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
+  <text x="775" y="641" fill="#e2e8f0" font-size="8" text-anchor="middle">verify graph, restore or sparse-read</text>
+
+  <rect x="70" y="85" width="120" height="45" rx="6" fill="#0f172a"/>
+  <rect x="70" y="85" width="120" height="45" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="130" y="112" fill="#f8fafc" font-size="11" font-weight="600" text-anchor="middle">Host runtime</text>
+  <rect x="280" y="85" width="130" height="45" rx="6" fill="#0f172a"/>
+  <rect x="280" y="85" width="130" height="45" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="345" y="112" fill="#f8fafc" font-size="11" font-weight="600" text-anchor="middle">ManagedDb</text>
+  <rect x="495" y="85" width="130" height="45" rx="6" fill="#0f172a"/>
+  <rect x="495" y="85" width="130" height="45" rx="6" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="560" y="112" fill="#f8fafc" font-size="11" font-weight="600" text-anchor="middle">CellReplica</text>
+  <rect x="710" y="85" width="130" height="45" rx="6" fill="#0f172a"/>
+  <rect x="710" y="85" width="130" height="45" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="775" y="112" fill="#f8fafc" font-size="11" font-weight="600" text-anchor="middle">Cell authority</text>
+  <rect x="925" y="85" width="130" height="45" rx="6" fill="#0f172a"/>
+  <rect x="925" y="85" width="130" height="45" rx="6" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="990" y="105" fill="#f8fafc" font-size="10" font-weight="600" text-anchor="middle">Object store</text>
+  <text x="990" y="119" fill="#94a3b8" font-size="8" text-anchor="middle">immutable only</text>
+
+  <rect x="630" y="250" width="390" height="70" rx="7" fill="#0f172a"/>
+  <rect x="630" y="250" width="390" height="70" rx="7" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1.5"/>
+  <text x="825" y="276" fill="#fb7185" font-size="10" font-weight="700" text-anchor="middle">DO NOT ACKNOWLEDGE AFTER CAPTURE OR UPLOAD</text>
+  <text x="825" y="296" fill="#e2e8f0" font-size="8" text-anchor="middle">Only a successful authority CAS selects the durable root.</text>
+  <text x="825" y="309" fill="#94a3b8" font-size="8" text-anchor="middle">On timeout, reconcile the exact proposed root before retrying.</text>
+</svg>
