@@ -1177,20 +1177,11 @@ impl QualificationWorkload {
 
 fn qualification_workload_outcome_digest(seed: u64, cells: u64, operations: u64) -> Digest {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"crab-cell-runtime/qualification/workload-v1");
-    hasher.update(&seed.to_be_bytes());
-    hasher.update(&cells.to_be_bytes());
-    hasher.update(&operations.to_be_bytes());
     for operation in QualificationOperationIter::new(seed, cells, operations) {
         hasher.update(&operation.index.to_be_bytes());
         hasher.update(&u64::from(operation.primitive_index).to_be_bytes());
         hasher.update(&operation.cell_index.to_be_bytes());
         hasher.update(&operation.nonce.to_be_bytes());
-        hasher.update(&[
-            u8::from(operation.retry_hint),
-            u8::from(operation.rejection_hint),
-            u8::from(operation.ambiguous_hint),
-        ]);
     }
     Digest::from_bytes(*hasher.finalize().as_bytes())
 }
