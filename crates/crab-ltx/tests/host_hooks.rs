@@ -1,7 +1,7 @@
 #[cfg(feature = "replica")]
 use crab_ltx::{CellReplica, CellStorageLayout};
 use crab_ltx::{
-    CheckpointMode, CrabError, Host, Limits, ManagedDb,
+    CheckpointMode, CrabError, Db, Host, Limits,
     environment::{DirectFileSystem, FileIo, FileSystem},
 };
 #[cfg(feature = "replica")]
@@ -144,11 +144,11 @@ impl FileSystem for Faults {
     filesystem_operation!(persist_file_new(source: &Path, destination: &Path) -> ());
 }
 
-fn fixture() -> (tempfile::TempDir, Arc<Faults>, Host, ManagedDb) {
+fn fixture() -> (tempfile::TempDir, Arc<Faults>, Host, Db) {
     let directory = tempfile::TempDir::new().unwrap();
     let faults = Arc::new(Faults::default());
     let host = Host::default().with_filesystem(faults.clone());
-    let mut writer = ManagedDb::open_with_host(
+    let mut writer = Db::open_with_host(
         &directory.path().join("source.sqlite"),
         Limits::default(),
         host.clone(),
@@ -173,7 +173,7 @@ fn capture_and_inspection_bound_each_filesystem_transfer() {
     let directory = tempfile::TempDir::new().unwrap();
     let faults = Arc::new(Faults::default());
     let host = Host::default().with_filesystem(faults.clone());
-    let mut writer = ManagedDb::open_with_host(
+    let mut writer = Db::open_with_host(
         &directory.path().join("streamed.sqlite"),
         Limits::default(),
         host,
@@ -345,8 +345,7 @@ async fn cell_compaction_uses_injected_filesystem_and_cleans_failed_scratch() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cancelled_cell_prepare_releases_scratch_without_publishing_a_root() {
     let directory = tempfile::TempDir::new().unwrap();
-    let mut writer =
-        ManagedDb::open(&directory.path().join("source.sqlite"), Limits::default()).unwrap();
+    let mut writer = Db::open(&directory.path().join("source.sqlite"), Limits::default()).unwrap();
     writer
         .transaction(|transaction| {
             transaction
@@ -469,7 +468,7 @@ fn fresh_session_claims_do_not_bypass_the_host() {
         let directory = tempfile::TempDir::new().unwrap();
         let faults = Arc::new(Faults::default());
         faults.arm(Some(operation));
-        injected(ManagedDb::open_with_host(
+        injected(Db::open_with_host(
             &directory.path().join("db"),
             Limits::default(),
             Host::default().with_filesystem(faults),
@@ -492,7 +491,7 @@ fn exact_local_resume_and_all_checkpoints_preserve_the_injected_plan() {
     let destination = directory.path().join("resumed");
     for operation in ["exists", "persist_new"] {
         faults.arm(Some(operation));
-        injected(ManagedDb::resume_with_host(
+        injected(Db::resume_with_host(
             &plan,
             &destination,
             Limits::default(),
@@ -502,7 +501,7 @@ fn exact_local_resume_and_all_checkpoints_preserve_the_injected_plan() {
     }
     faults.arm(None);
     let mut writer =
-        ManagedDb::resume_with_host(&plan, &destination, Limits::default(), host.clone()).unwrap();
+        Db::resume_with_host(&plan, &destination, Limits::default(), host.clone()).unwrap();
     assert_eq!(writer.position(), first.position);
     let mut segments = first.segments;
     for (index, mode) in [
@@ -570,7 +569,7 @@ fn unknown_sqlite_vfs_does_not_fall_back_to_the_platform_vfs() {
     let directory = tempfile::TempDir::new().unwrap();
     let path = directory.path().join("db");
     assert!(
-        ManagedDb::open_with_host(
+        Db::open_with_host(
             &path,
             Limits::default(),
             Host::default().with_sqlite_vfs("absent-test-vfs")

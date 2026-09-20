@@ -1,896 +1,1152 @@
-// Derived from denoland/celld, commit 10cb1303dac710dcb3b557e318e08c855261f68b.
-// Apache-2.0; see LICENSE and UPSTREAM.md. Modified by Crab contributors.
-
-use crate::error::{CrabError, Result};
-use crate::ltx::{self, lock_pgno};
-use crate::wal::WalReader;
-use crate::{
-    CHECKPOINT_MODE_PASSIVE, CHECKPOINT_MODE_TRUNCATE, META_DIR_SUFFIX, Pos, Txid,
-    WAL_FRAME_HEADER_SIZE, WAL_HEADER_SIZE, ltx_file_path,
-};
-use rusqlite::Connection;
-
-mod capture;
-mod checkpoint;
-mod verify;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CheckpointMode {
-    Passive,
-    Full,
-    Restart,
-    Truncate,
-}
+use rusqlite::{Connection, Transaction};
 
-#[derive(Clone, Copy, Debug)]
-struct CheckpointPragma {
-    busy: bool,
-    wal_frames: i64,
-    backfilled: i64,
-}
+use crate::{CaptureBatch, CrabError, Limits, LocalSegment, Position, Result, SegmentInfo};
+use crate::{capture::CaptureEngine, host::LtxHost, ltx, types::Txid};
 
-impl std::fmt::Display for CheckpointMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            CheckpointMode::Passive => CHECKPOINT_MODE_PASSIVE,
-            CheckpointMode::Full => "FULL",
-            CheckpointMode::Restart => "RESTART",
-            CheckpointMode::Truncate => CHECKPOINT_MODE_TRUNCATE,
-        };
-        f.write_str(s)
-    }
-}
+/// Number of SQLite connections retained by one open managed database.
+pub const MANAGED_SQLITE_CONNECTIONS: u64 = 3;
 
-#[derive(Debug, Clone, Default)]
-struct SyncInfo {
-    offset: i64,
-    salt1: u32,
-    salt2: u32,
-    prev_commit: u32,
-    snapshotting: bool,
-}
+/// Page-cache byte target budgeted for each retained SQLite connection.
+pub const MANAGED_CONNECTION_PAGE_CACHE_BYTES: u64 = 64 * 1024;
 
-const RELATIVE_TRUNCATE_PAGES: u32 = 1024;
+const MANAGED_CONNECTION_PAGE_CACHE_KIB: i64 = 64;
 
-#[derive(Clone, Debug)]
-struct LastL0Header {
-    wal_offset: i64,
-    wal_size: i64,
-    wal_salt1: u32,
-    wal_salt2: u32,
-    commit: u32,
-    final_pgno: u32,
-    final_page: Vec<u8>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TimingPhase {
-    Preparation,
-    SchemaCheck,
-    WalExistence,
-    PositionResolution,
-    WalRead,
-    PageCollection,
-    Verification,
-    Encode,
-    LocalWrite,
-    Fsync,
-    ParentSync,
-    Checkpoint,
-}
-
-pub(crate) struct TimingRecorder {
-    started: Instant,
-    active: Option<(TimingPhase, Instant)>,
-    timing: crate::CaptureTiming,
-}
-
-impl TimingRecorder {
-    pub(crate) fn new(started: Instant) -> Self {
-        Self {
-            started,
-            active: None,
-            timing: crate::CaptureTiming::default(),
-        }
-    }
-
-    pub(crate) fn begin(&mut self, phase: TimingPhase, now: Instant) {
-        if let Some((active, started)) = self.active.take() {
-            self.add_phase(active, now.saturating_duration_since(started));
-        }
-        self.active = Some((phase, now));
-    }
-
-    pub(crate) fn end(&mut self, phase: TimingPhase, now: Instant) {
-        if let Some((active, started)) = self.active
-            && active == phase
-        {
-            self.add_phase(active, now.saturating_duration_since(started));
-            self.active = None;
-        }
-    }
-
-    pub(crate) fn add_wal_bytes(&mut self, bytes: u64) {
-        self.timing.wal_bytes = self.timing.wal_bytes.saturating_add(bytes);
-    }
-
-    pub(crate) fn add_database_bytes(&mut self, bytes: u64) {
-        self.timing.database_bytes = self.timing.database_bytes.saturating_add(bytes);
-    }
-
-    pub(crate) fn add_ltx_bytes(&mut self, bytes: u64) {
-        self.timing.ltx_bytes = self.timing.ltx_bytes.saturating_add(bytes);
-    }
-
-    pub(crate) fn add_segment(&mut self) {
-        self.timing.segment_count = self.timing.segment_count.saturating_add(1);
-    }
-
-    pub(crate) fn add_phase_nanos(&mut self, phase: TimingPhase, elapsed: u64) {
-        self.add_phase(phase, Duration::from_nanos(elapsed));
-    }
-
-    pub(crate) fn observe_wal_image(&mut self, sparse: bool, fallback: bool, bytes: usize) {
-        if sparse {
-            self.timing.wal_sparse_reads = self.timing.wal_sparse_reads.saturating_add(1);
-        } else {
-            self.timing.wal_full_reads = self.timing.wal_full_reads.saturating_add(1);
-        }
-        if fallback {
-            self.timing.wal_fallback_reads = self.timing.wal_fallback_reads.saturating_add(1);
-        }
-        self.timing.wal_image_bytes = self.timing.wal_image_bytes.max(bytes as u64);
-    }
-
-    pub(crate) fn observe_wal_transfer(&mut self, file_bytes: u64, read_bytes: u64) {
-        self.timing.wal_file_bytes = self.timing.wal_file_bytes.max(file_bytes);
-        self.timing.wal_read_bytes = self.timing.wal_read_bytes.saturating_add(read_bytes);
-    }
-
-    pub(crate) fn observe_wal_snapshot(&mut self) {
-        self.timing.wal_snapshot_reads = self.timing.wal_snapshot_reads.saturating_add(1);
-    }
-
-    pub(crate) fn checkpoint_run(&mut self) {
-        self.timing.checkpoint_runs = self.timing.checkpoint_runs.saturating_add(1);
-    }
-
-    pub(crate) fn checkpoint_result(&mut self, busy: bool, frames: i64, backfilled: i64) {
-        self.timing.checkpoint_busy = self.timing.checkpoint_busy.saturating_add(u32::from(busy));
-        self.timing.checkpoint_frames = self
-            .timing
-            .checkpoint_frames
-            .saturating_add(u64::try_from(frames.max(0)).unwrap_or_default());
-        self.timing.checkpoint_backfilled = self
-            .timing
-            .checkpoint_backfilled
-            .saturating_add(u64::try_from(backfilled.max(0)).unwrap_or_default());
-    }
-
-    pub(crate) fn checkpoint_busy_error(&mut self) {
-        self.timing.checkpoint_busy_errors = self.timing.checkpoint_busy_errors.saturating_add(1);
-    }
-
-    pub(crate) fn checkpoint_restart(&mut self) {
-        self.timing.checkpoint_restarts = self.timing.checkpoint_restarts.saturating_add(1);
-    }
-
-    pub(crate) fn finish(mut self, now: Instant) -> crate::CaptureTiming {
-        if let Some((active, started)) = self.active.take() {
-            self.add_phase(active, now.saturating_duration_since(started));
-        }
-        self.timing.total_nanos = nanos(now.saturating_duration_since(self.started));
-        self.timing
-    }
-
-    fn add_phase(&mut self, phase: TimingPhase, elapsed: Duration) {
-        let target = match phase {
-            TimingPhase::Preparation => &mut self.timing.preparation_nanos,
-            TimingPhase::SchemaCheck => &mut self.timing.schema_check_nanos,
-            TimingPhase::WalExistence => &mut self.timing.wal_existence_nanos,
-            TimingPhase::PositionResolution => &mut self.timing.position_resolution_nanos,
-            TimingPhase::WalRead => &mut self.timing.wal_read_nanos,
-            TimingPhase::PageCollection => &mut self.timing.page_collection_nanos,
-            TimingPhase::Verification => &mut self.timing.verification_nanos,
-            TimingPhase::Encode => &mut self.timing.encode_nanos,
-            TimingPhase::LocalWrite => &mut self.timing.local_write_nanos,
-            TimingPhase::Fsync => &mut self.timing.fsync_nanos,
-            TimingPhase::ParentSync => &mut self.timing.parent_sync_nanos,
-            TimingPhase::Checkpoint => &mut self.timing.checkpoint_nanos,
-        };
-        *target = target.saturating_add(nanos(elapsed));
-    }
-}
-
-fn nanos(duration: Duration) -> u64 {
-    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
-}
-
+/// One exclusive local capture session with a serialized SQLite writer.
+///
+/// The caller owns the database and its directory: no external writers, direct
+/// checkpoints, control-table edits, or deletion of retained LTX files. Opening
+/// claims a fresh metadata directory; reactivation requires exact restore into
+/// a fresh directory, not reusing potentially unpublished local state.
 pub struct Db {
-    checksums: crate::pages::PageChecksums,
-    host: crate::LtxHost,
+    capture: CaptureEngine,
+    writer: Connection,
+    observer: crate::commit::CommitObserver,
+    required_cut: Option<crate::commit::WalCut>,
+    limits: Limits,
+    fenced: bool,
+    retained_bytes: u64,
+    retained_segments: usize,
+    local_disk: crate::DiskReservation,
+    sparse: bool,
+    #[cfg(feature = "replica")]
+    retained: Vec<LocalSegment>,
     path: PathBuf,
-    meta_path: PathBuf,
-    conn: Connection,
-    rtx_conn: Connection,
-    page_size: u32,
-
-    read_lock_held: bool,
-
-    pub min_checkpoint_page_n: u32,
-    pub truncate_page_n: u32,
-    pub checkpoint_interval: Duration,
-
-    synced_since_checkpoint: bool,
-    synced_to_wal_end: bool,
-    last_synced_wal_offset: i64,
-    last_db_pages: u32,
-    checkpointed_wal_offset: i64,
-    verified_schema_version: Option<i64>,
-    last_l0_header: Option<(Txid, LastL0Header)>,
-    last_l0_segment: Option<crate::SegmentInfo>,
-
-    position: Pos,
-    l0_dir_ready: bool,
-    wal_file: Option<crate::HostFile>,
-    timing: Option<TimingRecorder>,
+    host: crate::Host,
+    #[cfg(feature = "replica")]
+    paged: Option<crate::writable_vfs::Registration>,
 }
-
-const CONTROL_TABLES_DDL: &str = "CREATE TABLE IF NOT EXISTS _litestream_seq (id INTEGER PRIMARY KEY, seq INTEGER);\
-     CREATE TABLE IF NOT EXISTS _litestream_lock (id INTEGER);";
 
 impl Db {
-    pub const DEFAULT_MIN_CHECKPOINT_PAGE_N: u32 = 1000;
-    pub const DEFAULT_TRUNCATE_PAGE_N: u32 = 121_359;
+    /// Returns a thread-safe handle for interrupting the current SQLite operation.
+    ///
+    /// The handle becomes inert after the database closes. Calling it does not
+    /// prove rollback or cancellation; the owner must still await the operation.
+    #[must_use]
+    pub fn interrupt_handle(&self) -> rusqlite::InterruptHandle {
+        self.writer.get_interrupt_handle()
+    }
 
-    pub const DEFAULT_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(60);
-    pub const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(1);
+    #[cfg(feature = "replica")]
+    pub(crate) fn open_cell_paged(
+        database: crate::CellWritableDatabase,
+        destination: &Path,
+    ) -> Result<Self> {
+        Self::open_sparse(crate::paged_io::Database::Cell(database), destination)
+    }
 
-    pub fn open_with_host(
-        path: impl AsRef<Path>,
-        host: crate::LtxHost,
-        vfs: Option<&str>,
-    ) -> Result<Db> {
-        let path = path.as_ref().to_path_buf();
-        let meta_path = Self::meta_path_for(&path);
-
-        let open = |path: &Path| crate::managed::open_connection(path, vfs);
-        let conn = open(&path).map_err(CrabError::Sqlite)?;
-
-        // All managed writers disable autocheckpoint. The separate long-lived
-        // read mark protects the WAL until the capture/checkpoint barrier runs.
-        conn.busy_timeout(Self::DEFAULT_BUSY_TIMEOUT)
-            .map_err(CrabError::Sqlite)?;
-        conn.pragma_update(None, "wal_autocheckpoint", 0)
-            .map_err(CrabError::Sqlite)?;
-        conn.pragma_update(None, "synchronous", "FULL")
-            .map_err(CrabError::Sqlite)?;
-        conn.pragma_update(None, "foreign_keys", true)
-            .map_err(CrabError::Sqlite)?;
-
-        // Enable WAL; SQLite returns the new mode on success (db.go:849-853).
-        let mode: String = conn
-            .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
-            .map_err(CrabError::Sqlite)?;
-        if mode != "wal" {
-            return Err(CrabError::Other(
-                format!("enable wal failed, mode={mode:?}").into(),
-            ));
-        }
-
-        conn.execute_batch(CONTROL_TABLES_DDL)
-            .map_err(CrabError::Sqlite)?;
-
-        // Dedicated read-lock connection (mirrors a second pooled connection).
-        let rtx_conn = open(&path).map_err(CrabError::Sqlite)?;
-        rtx_conn
-            .busy_timeout(Self::DEFAULT_BUSY_TIMEOUT)
-            .map_err(CrabError::Sqlite)?;
-        rtx_conn
-            .pragma_update(None, "wal_autocheckpoint", 0)
-            .map_err(CrabError::Sqlite)?;
-        rtx_conn
-            .pragma_update(None, "synchronous", "FULL")
-            .map_err(CrabError::Sqlite)?;
-        rtx_conn
-            .pragma_update(None, "foreign_keys", true)
-            .map_err(CrabError::Sqlite)?;
-
-        let mut db = Db {
-            checksums: crate::pages::PageChecksums::default(),
+    #[cfg(feature = "replica")]
+    fn open_sparse(database: crate::paged_io::Database, destination: &Path) -> Result<Self> {
+        let limits = database.limits();
+        let position = database.position();
+        let page_size = database.page_size();
+        let count = database.page_count();
+        let checksums = database.checksums()?;
+        let host = database.host();
+        let registration = crate::writable_vfs::Registration::new(database, destination)?;
+        let mut db = Self::open_inner(
+            destination,
+            limits,
+            Some(registration.vfs()),
             host,
-            path,
-            meta_path,
-            conn,
-            rtx_conn,
-            page_size: 0,
-            read_lock_held: false,
-            min_checkpoint_page_n: Self::DEFAULT_MIN_CHECKPOINT_PAGE_N,
-            truncate_page_n: Self::DEFAULT_TRUNCATE_PAGE_N,
-            checkpoint_interval: Self::DEFAULT_CHECKPOINT_INTERVAL,
-            synced_since_checkpoint: false,
-            synced_to_wal_end: false,
-            last_synced_wal_offset: 0,
-            last_db_pages: 0,
-            checkpointed_wal_offset: 0,
-            verified_schema_version: None,
-            last_l0_header: None,
-            last_l0_segment: None,
-            position: Pos::ZERO,
-            l0_dir_ready: false,
-            wal_file: None,
-            timing: None,
-        };
-
-        // Start the long-running read transaction (db.go:867-871).
-        db.acquire_read_lock()?;
-
-        // Read page size (db.go:874-878).
-        let page_size: i64 = db
-            .conn
-            .query_row("PRAGMA page_size", [], |r| r.get(0))
-            .map_err(CrabError::Sqlite)?;
-        if !ltx::is_valid_page_size(page_size as u32) {
-            return Err(CrabError::Other(
-                format!("invalid db page size: {page_size}").into(),
-            ));
-        }
-        // Validated > 0 above; SQLite page sizes are <= 65536.
-        db.page_size = page_size as u32;
-        let pages: u32 = db
-            .conn
-            .query_row("PRAGMA page_count", [], |r| r.get(0))
-            .map_err(CrabError::Sqlite)?;
-        db.host
-            .check_database_size(u64::from(pages) * u64::from(db.page_size))?;
-
-        // Ensure the meta directory exists (db.go:880-883).
-        db.host.create_dir_all(&db.meta_path)?;
-
-        // Ensure the WAL has at least one frame (db.go:886-888).
-        db.ensure_wal_exists()?;
-
+            true,
+            None,
+        )
+        .map_err(|error| registration.take_error().unwrap_or(error))?;
+        db.capture
+            .seed_continuation(position, checksums, page_size, count)?;
+        db.paged = Some(registration);
         Ok(db)
     }
 
-    pub(crate) fn meta_path_for(path: &Path) -> PathBuf {
-        // Go: filepath.Join(dir, "."+file+MetaDirSuffix) (db.go:206).
-        let dir = path.parent();
-        let file = path.file_name().map(|s| s.to_owned()).unwrap_or_default();
-        let mut name = std::ffi::OsString::from(".");
-        name.push(&file);
-        name.push(META_DIR_SUFFIX);
-        match dir {
-            Some(d) if !d.as_os_str().is_empty() => d.join(name),
-            _ => PathBuf::from(name),
-        }
+    /// Reports resolved pages of the pinned cut for a sparse activation.
+    #[cfg(feature = "replica")]
+    pub fn hydration(&self) -> Result<Option<crate::Hydration>> {
+        self.paged.as_ref().map(|p| p.hydration()).transpose()
     }
 
-    pub fn wal_path(&self) -> PathBuf {
-        let mut s = self.path.clone().into_os_string();
-        s.push("-wal");
-        PathBuf::from(s)
+    /// Hydrates at most `pages` unresolved cut pages through the same VFS as SQL.
+    ///
+    /// Call periodically on the database worker; scheduling and cancellation
+    /// belong to the owner. This operation never publishes or checkpoints WAL.
+    #[cfg(feature = "replica")]
+    pub fn hydrate_step(&mut self, pages: u32) -> Result<crate::Hydration> {
+        self.ensure_active()?;
+        let paged = self
+            .paged
+            .as_mut()
+            .ok_or(CrabError::InvalidState("not a sparse activation"))?;
+        crate::paged_io::with_paged_io_origin(crate::LtxReadOrigin::Hydrating, || {
+            paged.step(&self.writer, pages)
+        })
     }
 
-    pub fn ltx_path(&self, level: u32, min_txid: Txid, max_txid: Txid) -> String {
-        ltx_file_path(&self.meta_path.to_string_lossy(), level, min_txid, max_txid)
+    /// Takes the provider/checksum source behind a sparse SQLite I/O error.
+    #[cfg(feature = "replica")]
+    pub fn take_io_error(&self) -> Option<CrabError> {
+        self.paged.as_ref().and_then(|p| p.take_error())
     }
 
-    fn acquire_read_lock(&mut self) -> Result<()> {
-        if self.read_lock_held {
-            return Ok(());
-        }
-        self.rtx_conn
-            .prepare_cached("BEGIN")
-            .and_then(|mut statement| statement.execute([]))
-            .map_err(CrabError::Sqlite)?;
-        // Execute a read query to obtain the read lock. On failure, roll back.
-        if let Err(e) = self
-            .rtx_conn
-            .query_row("SELECT COUNT(1) FROM _litestream_seq", [], |r| {
-                r.get::<_, i64>(0)
+    /// Deletes this session's exact captured artifacts after their root publishes.
+    ///
+    /// Every selected file is reverified before deletion. An error retains its
+    /// accounting so the owner can retry or discard the complete local session.
+    #[cfg(feature = "replica")]
+    pub fn prune_captured(&mut self, batch: &crate::CaptureBatch) -> Result<usize> {
+        self.prune_retained(|segment| {
+            batch.segments.iter().any(|published| {
+                published.path() == segment.path() && published.info() == segment.info()
             })
-        {
-            let _ = self.rtx_conn.execute_batch("ROLLBACK");
-            return Err(CrabError::Sqlite(e));
-        }
-        self.read_lock_held = true;
-        Ok(())
+        })
     }
 
-    fn release_read_lock(&mut self) -> Result<()> {
-        if !self.read_lock_held {
-            return Ok(());
-        }
-        self.read_lock_held = false;
-        rollback(&self.rtx_conn)
-    }
-
-    fn ensure_control_tables(&mut self) -> Result<()> {
-        // A swept control table is a schema change, and every schema change
-        // bumps SQLite's schema version — so an unchanged version proves
-        // the last verification still holds and the DDL (a full parse and
-        // execute per statement) can be skipped on the hot capture path.
-        // Through the statement cache: this guard runs on every sync, and a
-        // fresh `PRAGMA` per sync was one SQL compilation per capture on the
-        // fleet profile.
-        let version: i64 = self
-            .conn
-            .prepare_cached("PRAGMA schema_version")
-            .and_then(|mut statement| statement.query_row([], |row| row.get(0)))
-            .map_err(CrabError::Sqlite)?;
-        if self.verified_schema_version == Some(version) {
-            return Ok(());
-        }
-        self.conn
-            .execute_batch(CONTROL_TABLES_DDL)
-            .map_err(CrabError::Sqlite)?;
-        let verified: i64 = self
-            .conn
-            .prepare_cached("PRAGMA schema_version")
-            .and_then(|mut statement| statement.query_row([], |row| row.get(0)))
-            .map_err(CrabError::Sqlite)?;
-        self.verified_schema_version = Some(verified);
-        Ok(())
-    }
-
-    fn with_wal_file<T>(
+    #[cfg(feature = "replica")]
+    fn prune_retained(
         &mut self,
-        op: impl Fn(&mut crate::HostFile) -> std::io::Result<T>,
-    ) -> std::io::Result<T> {
-        let mut attempt = 0;
-        loop {
-            if self.wal_file.is_none() {
-                self.wal_file = Some(self.host.open(&self.wal_path())?);
+        mut selected: impl FnMut(&crate::LocalSegment) -> bool,
+    ) -> Result<usize> {
+        let mut removed = 0;
+        let mut index = 0;
+        while index < self.retained.len() {
+            let segment = &self.retained[index];
+            if !selected(segment) {
+                index += 1;
+                continue;
             }
-            let file = self
-                .wal_file
-                .as_mut()
-                .ok_or_else(|| std::io::Error::other("WAL handle missing"))?;
-            match op(file) {
-                Ok(value) => return Ok(value),
-                Err(error) => {
-                    self.wal_file = None;
-                    let retry = attempt == 0
-                        && matches!(
-                            error.kind(),
-                            std::io::ErrorKind::NotFound | std::io::ErrorKind::UnexpectedEof
-                        );
-                    if !retry {
-                        return Err(error);
-                    }
-                    attempt += 1;
+            match self.host.read(segment.path(), segment.info().size_bytes) {
+                Ok(bytes) => {
+                    crate::recovery::verify_segment(&bytes, segment.info(), self.limits)?;
+                    self.host.filesystem.remove_file(segment.path())?;
                 }
+                // A previous removal may have succeeded before parent sync failed.
+                // Keep accounting until sync succeeds, including on retry.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
             }
+            self.host.filesystem.sync_parent(segment.path())?;
+            let segment = self.retained.remove(index);
+            self.retained_bytes -= segment.info().size_bytes;
+            self.retained_segments -= 1;
+            removed += 1;
         }
+        self.reconcile_local_disk()?;
+        Ok(removed)
     }
 
-    fn wal_header_bytes(&mut self) -> Result<[u8; WAL_HEADER_SIZE]> {
-        let bytes = self.with_wal_file(|file| file.read_exact_at(0, WAL_HEADER_SIZE))?;
-        self.timing_observe_wal_transfer(0, bytes.len() as u64);
-        bytes.try_into().map_err(|_| CrabError::LTXCorrupted)
+    /// Restores a pinned plan into a fresh session, preserving the parent position.
+    ///
+    /// Local leftovers are never used to infer acknowledged state. Any prior
+    /// unacknowledged session remains quarantined for explicit reconciliation.
+    pub fn resume(plan: &crate::VerifiedPlan, destination: &Path, limits: Limits) -> Result<Self> {
+        Self::resume_with_host(plan, destination, limits, crate::Host::default())
     }
 
-    fn wal_bytes_at(&mut self, offset: i64, n: i64) -> Result<Vec<u8>> {
-        let bytes = self.with_wal_file(|file| file.read_exact_at(offset as u64, n as usize))?;
-        self.timing_observe_wal_transfer(0, bytes.len() as u64);
-        Ok(bytes)
-    }
-
-    fn read_whole_wal(&mut self) -> Result<Vec<u8>> {
-        let bytes = self.host.read(&self.wal_path())?;
-        self.timing_observe_wal_transfer(bytes.len() as u64, bytes.len() as u64);
-        Ok(bytes)
-    }
-
-    fn ensure_wal_exists(&mut self) -> Result<()> {
-        if self.wal_file_size()? >= WAL_HEADER_SIZE as i64 {
-            return Ok(());
+    /// Resumes an exact verified plan using the same host for installation and capture.
+    pub fn resume_with_host(
+        plan: &crate::VerifiedPlan,
+        destination: &Path,
+        limits: Limits,
+        host: crate::Host,
+    ) -> Result<Self> {
+        let (checksums, page_size, count) = crate::recovery::continuation(plan)?;
+        let limits = limits.validate()?;
+        if u64::from(count) * u64::from(page_size) > limits.max_database_bytes {
+            return Err(CrabError::Limit("database bytes"));
         }
-        self.conn
-            .execute_batch(
-                "INSERT INTO _litestream_seq (id, seq) VALUES (1, 1) \
-                 ON CONFLICT (id) DO UPDATE SET seq = seq + 1",
-            )
-            .map_err(CrabError::Sqlite)?;
-        Ok(())
+        let database_bytes = u64::from(count) * u64::from(page_size);
+        let local_disk = host.reserve_local_disk(database_bytes)?;
+        host.restore(plan, destination)?;
+        let vfs = host.sqlite_vfs.clone();
+        let mut db = Self::open_inner(
+            destination,
+            limits,
+            vfs.as_deref(),
+            host,
+            false,
+            Some(local_disk),
+        )?;
+        db.capture
+            .seed_continuation(plan.position(), checksums, page_size, count)?;
+        Ok(db)
     }
 
-    fn wal_file_size(&mut self) -> Result<i64> {
-        match self.with_wal_file(|file| file.file_len()) {
-            Ok(len) => {
-                self.timing_observe_wal_transfer(len, 0);
-                Ok(len as i64)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
-            Err(e) => Err(e.into()),
-        }
+    /// Opens a new capture session on a new or exactly restored SQLite file.
+    ///
+    /// The parent must exist and the local path must be UTF-8. An existing
+    /// capture directory is refused, even after a clean close. Failed opens
+    /// leave that directory quarantined for caller-owned cleanup.
+    pub fn open(path: &Path, limits: Limits) -> Result<Self> {
+        Self::open_with_host(path, limits, crate::Host::default())
     }
 
-    fn db_file_size(&self) -> Result<i64> {
-        match self.host.metadata(&self.path) {
-            Ok(md) => Ok(md.len as i64),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
-            Err(e) => Err(e.into()),
-        }
+    /// Opens a fresh session using the host's filesystem, SQLite VFS and clock.
+    pub fn open_with_host(path: &Path, limits: Limits, host: crate::Host) -> Result<Self> {
+        let vfs = host.sqlite_vfs.clone();
+        Self::open_inner(path, limits, vfs.as_deref(), host, false, None)
     }
 
-    pub fn pos(&self) -> Pos {
-        self.position
-    }
-
-    pub(crate) fn sealed_l0_segment(&self, txid: Txid) -> Option<crate::SegmentInfo> {
-        self.last_l0_segment
-            .as_ref()
-            .filter(|info| info.max_txid == txid.0)
-            .cloned()
-    }
-
-    pub(crate) fn seed_continuation(
-        &mut self,
-        position: crate::Position,
-        checksums: crate::pages::PageChecksums,
-        page_size: u32,
-        count: u32,
-    ) -> Result<()> {
-        if self.position != Pos::ZERO
-            || page_size != self.page_size
-            || checksums.checksum() != position.checksum
-            || position.txid == 0
-        {
-            return Err(CrabError::ChecksumMismatch);
-        }
-        let wal = self.wal_header_bytes()?;
-        self.last_l0_segment = None;
-        self.last_l0_header = Some((
-            Txid(position.txid),
-            LastL0Header {
-                wal_offset: WAL_HEADER_SIZE as i64,
-                wal_size: 0,
-                wal_salt1: be_u32(&wal[16..]),
-                wal_salt2: be_u32(&wal[20..]),
-                commit: count,
-                final_pgno: 0,
-                final_page: Vec::new(),
-            },
-        ));
-        self.position = Pos::new(Txid(position.txid), position.checksum);
-        self.checksums = checksums;
-        self.last_db_pages = count;
-        Ok(())
-    }
-
-    pub(crate) fn start_timing(&mut self, now: Instant) {
-        self.timing = Some(TimingRecorder::new(now));
-    }
-
-    pub(crate) fn finish_timing(&mut self, now: Instant) -> crate::CaptureTiming {
-        self.timing
-            .take()
-            .map(|recorder| recorder.finish(now))
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn timing_begin(&mut self, phase: TimingPhase) {
-        if self.timing.is_some() {
-            let now = self.host.now_monotonic();
-            if let Some(recorder) = &mut self.timing {
-                recorder.begin(phase, now);
-            }
-        }
-    }
-
-    pub(crate) fn timing_end(&mut self, phase: TimingPhase) {
-        if self.timing.is_some() {
-            let now = self.host.now_monotonic();
-            if let Some(recorder) = &mut self.timing {
-                recorder.end(phase, now);
-            }
-        }
-    }
-
-    pub(crate) fn timing_add_wal_bytes(&mut self, bytes: u64) {
-        if let Some(recorder) = &mut self.timing {
-            recorder.add_wal_bytes(bytes);
-        }
-    }
-
-    pub(crate) fn timing_add_database_bytes(&mut self, bytes: u64) {
-        if let Some(recorder) = &mut self.timing {
-            recorder.add_database_bytes(bytes);
-        }
-    }
-
-    pub(crate) fn timing_add_ltx_bytes(&mut self, bytes: u64) {
-        if let Some(recorder) = &mut self.timing {
-            recorder.add_ltx_bytes(bytes);
-        }
-    }
-
-    pub(crate) fn timing_add_segment(&mut self) {
-        if let Some(recorder) = &mut self.timing {
-            recorder.add_segment();
-        }
-    }
-
-    pub(crate) fn timing_add_phase_nanos(&mut self, phase: TimingPhase, elapsed: u64) {
-        if let Some(recorder) = &mut self.timing {
-            recorder.add_phase_nanos(phase, elapsed);
-        }
-    }
-
-    pub(crate) fn timing_observe_wal_image(&mut self, sparse: bool, fallback: bool, bytes: usize) {
-        if let Some(recorder) = &mut self.timing {
-            recorder.observe_wal_image(sparse, fallback, bytes);
-        }
-    }
-
-    pub(crate) fn timing_observe_wal_transfer(&mut self, file_bytes: u64, read_bytes: u64) {
-        if let Some(recorder) = &mut self.timing {
-            recorder.observe_wal_transfer(file_bytes, read_bytes);
-        }
-    }
-
-    pub(crate) fn timing_observe_wal_snapshot(&mut self) {
-        if let Some(recorder) = &mut self.timing {
-            recorder.observe_wal_snapshot();
-        }
-    }
-
-    pub fn sync(&mut self, required: Option<crate::commit::WalCut>) -> Result<()> {
-        // Self-heal: recreate the control tables if something swept them out
-        // of `sqlite_schema` from under the replicator — without them every
-        // capture fails until the database is reopened. A no-op when the
-        // tables exist (no schema change, no WAL write).
-        self.timing_begin(TimingPhase::SchemaCheck);
-        let schema_result = self.ensure_control_tables();
-        self.timing_end(TimingPhase::SchemaCheck);
-        schema_result?;
-
-        // Ensure the WAL has at least one frame (db.go:1017-1020).
-        self.timing_begin(TimingPhase::WalExistence);
-        let wal_result = self.ensure_wal_exists();
-        self.timing_end(TimingPhase::WalExistence);
-        wal_result?;
-
-        let (orig_wal_size, new_wal_size, synced) = self.verify_and_sync()?;
-
-        // Validate the application's WAL hook boundary BEFORE any checkpoint
-        // can replace its salts or write control frames. A valid earlier cut
-        // alone does not prove the last committed transaction was captured.
-        if let Some(required) = required {
-            let (_, header) = self
-                .last_l0_header
-                .as_ref()
-                .ok_or(CrabError::LTXCorrupted)?;
-            let end = WAL_HEADER_SIZE as i64
-                + i64::from(required.frames)
-                    * (i64::from(self.page_size) + WAL_FRAME_HEADER_SIZE as i64);
-            if header.wal_salt1 != required.salt1
-                || header.wal_salt2 != required.salt2
-                || self.last_synced_wal_offset < end
-            {
-                return Err(CrabError::LTXCorrupted);
-            }
-        }
-
-        // Track that data was synced for time-based checkpoint decisions.
-        if synced {
-            self.synced_since_checkpoint = true;
-        }
-
-        self.checkpoint_if_needed(orig_wal_size, new_wal_size)?;
-
-        Ok(())
-    }
-
-    fn verify_and_sync(&mut self) -> Result<(i64, i64, bool)> {
-        // Use the last synced WAL offset as the logical size for checkpoint
-        // decisions; on the first sync fall back to file size (db.go:1062-1069).
-        let mut orig_wal_size = self.last_synced_wal_offset;
-        if orig_wal_size == 0 {
-            orig_wal_size = self.wal_file_size()?;
-        }
-
-        self.timing_begin(TimingPhase::PositionResolution);
-        let info_result = self.verify();
-        self.timing_end(TimingPhase::PositionResolution);
-        let info = info_result?;
-
-        let synced = self.sync_inner(info)?;
-
-        let new_wal_size = self.last_synced_wal_offset;
-        Ok((orig_wal_size, new_wal_size, synced))
-    }
-
-    pub fn snapshot_to_writer<W: std::io::Write>(&mut self, w: &mut W) -> Result<Pos> {
-        if self.page_size == 0 {
-            return Err(CrabError::Other(
-                "db not ready: page size not initialized".into(),
+    fn open_inner(
+        path: &Path,
+        limits: Limits,
+        vfs: Option<&str>,
+        facilities: crate::Host,
+        sparse: bool,
+        local_disk: Option<crate::DiskReservation>,
+    ) -> Result<Self> {
+        let limits = limits.validate()?;
+        if path.to_str().is_none() || path.file_name().is_none() {
+            return Err(CrabError::InvalidState(
+                "database path must be a UTF-8 file path",
             ));
         }
-
-        let pos = self.position;
-
-        let db_size = self.db_file_size()?;
-        let mut commit = (db_size / self.page_size as i64) as u32;
-
-        let wal = WalImage::whole(self.read_whole_wal()?);
-        let mut rd = WalReader::new(&wal.bytes).map_err(CrabError::from)?;
-        let (page_map, max_offset, wal_commit) = rd.page_map().map_err(CrabError::from)?;
-        if wal_commit > 0 {
-            commit = wal_commit;
-        }
-        let wal_offset = rd.offset();
-        let sz = if max_offset > 0 {
-            max_offset - wal_offset
-        } else {
-            0
+        // Resolve aliases before claiming the session directory, and keep all
+        // later WAL reads independent of the process working directory.
+        let resolved = match facilities.filesystem.canonicalize(path) {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let parent = path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new("."));
+                facilities.filesystem.canonicalize(parent)?.join(
+                    path.file_name()
+                        .ok_or(CrabError::InvalidState("missing database filename"))?,
+                )
+            }
+            Err(error) => return Err(error.into()),
         };
-        let (salt1, salt2) = rd.salt();
-
-        self.host
-            .check_database_size(u64::from(commit) * u64::from(self.page_size))?;
-        let header = ltx::Header {
-            version: ltx::VERSION,
-            flags: 0,
-            page_size: self.page_size,
-            commit,
-            min_txid: Txid(1),
-            max_txid: pos.txid,
-            timestamp: self.host.now_unix_millis(),
-            pre_apply_checksum: 0,
-            wal_offset,
-            wal_size: sz,
-            wal_salt1: salt1,
-            wal_salt2: salt2,
-            node_id: 0,
+        let path = resolved.as_path();
+        if path.to_str().is_none() {
+            return Err(CrabError::InvalidState(
+                "resolved database path must be UTF-8",
+            ));
+        }
+        let host = LtxHost {
+            facilities: facilities.clone(),
+            max_database_bytes: limits.max_database_bytes,
+            max_file_bytes: limits.max_file_bytes,
         };
-
-        // A snapshot tracks the rolling post-apply checksum (MinTXID==1, no
-        // NoChecksum flag). Encode each page as it is read so callers can back
-        // the writer with a bounded scratch file instead of a database-sized
-        // resident buffer.
-        let lock = lock_pgno(self.page_size);
-        let mut rolling: crate::Checksum = crate::CHECKSUM_FLAG;
-        let mut encoder = crate::codec::Encoder::new_block(w);
-        encoder.encode_header(header)?;
-        for pgno in (1..=commit).filter(|page| *page != lock) {
-            let data = self.capture_page(&wal, &page_map, pgno)?;
-            rolling = crate::CHECKSUM_FLAG | (rolling ^ ltx::checksum_page(pgno, &data));
-            encoder.encode_page(ltx::PageHeader { pgno, flags: 0 }, &data)?;
-        }
-        encoder.close(rolling)?;
-
-        Ok(Pos::new(pos.txid, rolling))
-    }
-
-    pub fn close(mut self) -> Result<()> {
-        self.release_read_lock()?;
-        // The connection is dropped here, closing it.
-        Ok(())
-    }
-}
-
-fn calc_wal_size(page_size: u32, page_n: u32) -> i64 {
-    WAL_HEADER_SIZE as i64 + (WAL_FRAME_HEADER_SIZE as i64 + page_size as i64) * page_n as i64
-}
-
-fn rollback(conn: &Connection) -> Result<()> {
-    // SQLite can auto-rollback on I/O failure. Check native state instead of
-    // swallowing arbitrary errors whose text happens to mention rollback.
-    if conn.is_autocommit() {
-        return Ok(());
-    }
-    conn.execute_batch("ROLLBACK").map_err(CrabError::Sqlite)
-}
-
-struct WalImage {
-    bytes: Vec<u8>,
-    tail_base: usize,
-}
-
-impl WalImage {
-    fn whole(bytes: Vec<u8>) -> Self {
-        Self {
-            bytes,
-            tail_base: 0,
-        }
-    }
-
-    fn reader_at(
-        &self,
-        offset: i64,
-        salt1: u32,
-        salt2: u32,
-    ) -> std::result::Result<WalReader<'_>, crate::wal::WalError> {
-        if self.tail_base == 0 {
-            WalReader::new_with_offset(&self.bytes, offset, salt1, salt2)
-        } else {
-            WalReader::new_with_offset_over_tail(
-                &self.bytes,
-                self.tail_base as i64,
-                offset,
-                salt1,
-                salt2,
-            )
-        }
-    }
-
-    fn slice(&self, offset: i64, n: usize) -> Option<&[u8]> {
-        if offset < 0 {
-            return None;
-        }
-        let offset = offset as usize;
-        let start = if self.tail_base == 0 || offset < WAL_HEADER_SIZE {
-            offset
-        } else {
-            WAL_HEADER_SIZE + offset.checked_sub(self.tail_base)?
+        let database_bytes = match facilities.filesystem.file_len(path) {
+            Ok(len) => {
+                host.check_database_size(len)?;
+                len
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error.into()),
         };
-        let end = start.checked_add(n)?;
-        (end <= self.bytes.len()).then(|| &self.bytes[start..end])
+        let local_disk = match local_disk {
+            Some(local_disk) => {
+                local_disk.resize(if sparse { 0 } else { database_bytes })?;
+                local_disk
+            }
+            None => facilities.reserve_local_disk(if sparse { 0 } else { database_bytes })?,
+        };
+        // Atomic directory creation fences concurrent handles and stale sessions.
+        // Never unlink it on close: an old open file must not acquire a new epoch.
+        facilities
+            .filesystem
+            .create_dir(&CaptureEngine::meta_path_for(path))?;
+        let capture = CaptureEngine::open_with_host(path, host, vfs)?;
+        let writer = open_connection(path, vfs)?;
+        writer.busy_timeout(std::time::Duration::from_secs(1))?;
+        writer.pragma_update(None, "wal_autocheckpoint", 0)?;
+        writer.pragma_update(None, "synchronous", "FULL")?;
+        writer.pragma_update(None, "foreign_keys", true)?;
+        let page_size: u32 = writer.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        let max_pages = limits.max_database_bytes / u64::from(page_size);
+        if max_pages == 0 {
+            return Err(CrabError::Limit("database page size"));
+        }
+        writer.pragma_update(None, "max_page_count", max_pages)?;
+        let observer = crate::commit::CommitObserver::install(&writer);
+        Ok(Self {
+            capture,
+            writer,
+            observer,
+            required_cut: None,
+            limits,
+            fenced: false,
+            retained_bytes: 0,
+            retained_segments: 0,
+            local_disk,
+            sparse,
+            #[cfg(feature = "replica")]
+            retained: Vec::new(),
+            path: path.to_owned(),
+            host: facilities,
+            #[cfg(feature = "replica")]
+            paged: None,
+        })
     }
 
-    fn page(&self, offset: i64, page_size: u32) -> Result<Vec<u8>> {
-        self.slice(offset + WAL_FRAME_HEADER_SIZE as i64, page_size as usize)
-            .map(<[u8]>::to_vec)
-            .ok_or_else(|| {
-                CrabError::Io(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    format!("short read wal page @ {offset}"),
-                ))
+    /// Commits one local SQL transaction; call `capture` before publishing it.
+    ///
+    /// SQL is trusted: do not issue transaction-control statements or change
+    /// pager pragmas through the callback. Success is NOT remote durability.
+    pub fn transaction<T>(
+        &mut self,
+        operation: impl FnOnce(&Transaction<'_>) -> rusqlite::Result<T>,
+    ) -> Result<T> {
+        self.transaction_with(operation)
+            .map_err(|error| match error {
+                crate::TransactionError::Admission(error) => error,
+                crate::TransactionError::Operation(error)
+                | crate::TransactionError::Sqlite(error) => error.into(),
+                crate::TransactionError::Capture(error) => error,
             })
     }
+
+    /// Commits one transaction while preserving application-domain failures.
+    ///
+    /// An `Operation` result guarantees the transaction was rolled back and the
+    /// writer remains reusable. SQLite commit/rollback ambiguity fences the
+    /// writer. A successful return is still local-only until capture and remote
+    /// publication complete.
+    pub fn transaction_with<T, E>(
+        &mut self,
+        operation: impl FnOnce(&Transaction<'_>) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, crate::TransactionError<E>>
+    where
+        E: std::error::Error + 'static,
+    {
+        self.ensure_active()
+            .map_err(crate::TransactionError::Capture)?;
+        self.ensure_capacity()
+            .map_err(crate::TransactionError::Capture)?;
+        let disk_before = self.local_disk.bytes();
+        let write_bytes = self.limits.max_capture_bytes.checked_mul(2).ok_or(
+            crate::TransactionError::Admission(CrabError::Limit("local disk bytes")),
+        )?;
+        self.local_disk
+            .try_grow(write_bytes)
+            .map_err(crate::TransactionError::Admission)?;
+        self.observer.reset();
+        let tx = match self
+            .writer
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        {
+            Ok(tx) => tx,
+            Err(error) => {
+                let _ = self.local_disk.resize(disk_before);
+                return Err(crate::TransactionError::Sqlite(error));
+            }
+        };
+        let value = match operation(&tx) {
+            Ok(value) => value,
+            Err(error) => {
+                if let Err(rollback) = tx.rollback() {
+                    self.fenced = true;
+                    return Err(crate::TransactionError::Sqlite(rollback));
+                }
+                let _ = self.local_disk.resize(disk_before);
+                return Err(crate::TransactionError::Operation(error));
+            }
+        };
+        if let Err(error) = tx.commit() {
+            // Commit failure is potentially ambiguous even if SQLite did not
+            // invoke the WAL hook. Never accept another mutation here.
+            self.fenced = true;
+            return Err(crate::TransactionError::Sqlite(error));
+        }
+        match self.observer.cut(&self.path, &self.host) {
+            Ok(Some(cut)) => self.required_cut = Some(cut),
+            Ok(None) => {
+                let _ = self.local_disk.resize(disk_before);
+            }
+            Err(error) => {
+                self.fenced = true;
+                return Err(crate::TransactionError::Capture(error));
+            }
+        }
+        Ok(value)
+    }
+
+    /// Runs one synchronous callback with SQLite writes disabled.
+    ///
+    /// The callback must not change connection pragmas or retain borrowed SQLite
+    /// values. Establishing or removing the read-only boundary failure fences
+    /// this capture session; an application error leaves it reusable.
+    pub fn query_with<T, E>(
+        &mut self,
+        operation: impl FnOnce(&Connection) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, crate::QueryError<E>>
+    where
+        E: std::error::Error + 'static,
+    {
+        self.ensure_active().map_err(crate::QueryError::State)?;
+        if let Err(error) = self.writer.pragma_update(None, "query_only", true) {
+            self.fenced = true;
+            return Err(crate::QueryError::Sqlite(error));
+        }
+        let result = operation(&self.writer);
+        if let Err(error) = self.writer.pragma_update(None, "query_only", false) {
+            self.fenced = true;
+            return Err(crate::QueryError::Sqlite(error));
+        }
+        result.map_err(crate::QueryError::Operation)
+    }
+
+    /// Captures committed WAL pages and all cuts made by checkpoint maintenance.
+    ///
+    /// Any failure fences further use, since some local cuts may already exist.
+    /// Retain returned files until the canonical Cell root publishes;
+    /// `prune_captured` can then release one exact acknowledged batch.
+    pub fn capture(&mut self) -> Result<CaptureBatch> {
+        self.ensure_active()?;
+        let (result, timing) = self.capture_inner();
+        #[cfg(feature = "replica")]
+        self.host.observe_ltx_capture(&timing, result.is_ok());
+        let result = result.map(|mut batch| {
+            batch.timing = timing;
+            batch
+        });
+        if result.is_err() {
+            self.fenced = true;
+        }
+        result
+    }
+
+    fn capture_inner(&mut self) -> (Result<CaptureBatch>, crate::CaptureTiming) {
+        self.capture.start_timing(self.host.now_monotonic());
+        self.capture
+            .timing_begin(crate::capture::TimingPhase::Preparation);
+        let result = (|| {
+            self.ensure_capacity()?;
+            self.capture
+                .timing_end(crate::capture::TimingPhase::Preparation);
+            let before = self.capture.pos();
+            self.capture.sync(self.required_cut)?;
+            self.required_cut = None;
+            let batch = self.collect_cuts(before)?;
+            self.reconcile_local_disk()?;
+            Ok(batch)
+        })();
+        let timing = self.capture.finish_timing(self.host.now_monotonic());
+        (result, timing)
+    }
+
+    fn collect_cuts(&mut self, before: crate::Pos) -> Result<CaptureBatch> {
+        let after = self.capture.pos();
+        let mut segments = Vec::new();
+        if after.txid.0 > before.txid.0 {
+            for txid in before.txid.0 + 1..=after.txid.0 {
+                let path = PathBuf::from(self.capture.ltx_path(0, Txid(txid), Txid(txid)));
+                let info = if let Some(info) = self.capture.sealed_l0_segment(Txid(txid)) {
+                    info
+                } else {
+                    let file = crate::LtxHost {
+                        facilities: self.host.clone(),
+                        max_database_bytes: self.limits.max_database_bytes,
+                        max_file_bytes: self.limits.max_capture_bytes,
+                    }
+                    .open(&path)?;
+                    self.capture
+                        .timing_begin(crate::capture::TimingPhase::Verification);
+                    let inspected = ltx::inspect_reader(file);
+                    self.capture
+                        .timing_end(crate::capture::TimingPhase::Verification);
+                    let (decoded, size, digest) = inspected?;
+                    SegmentInfo::from_inspected(&decoded, size, digest)
+                };
+                self.capture.timing_add_ltx_bytes(info.size_bytes);
+                self.capture.timing_add_segment();
+                self.account_capture(&info)?;
+                let segment = LocalSegment::new(path, info);
+                #[cfg(feature = "replica")]
+                self.retained.push(segment.clone());
+                segments.push(segment);
+            }
+        }
+        Ok(CaptureBatch {
+            segments,
+            position: after.into(),
+            timing: crate::CaptureTiming::default(),
+        })
+    }
+
+    /// Captures pending writes before a requested checkpoint and returns every cut.
+    ///
+    /// Failure fences this session, including failed forced checkpoints. All
+    /// returned cuts must be published before acknowledging the operation.
+    pub fn checkpoint(&mut self, mode: crate::CheckpointMode) -> Result<CaptureBatch> {
+        self.ensure_active()?;
+        let (initial, mut timing) = self.capture_inner();
+        let result = (|| {
+            let mut batch = initial?;
+            self.local_disk.try_grow(
+                self.limits
+                    .max_capture_bytes
+                    .checked_mul(2)
+                    .ok_or(CrabError::Limit("local disk bytes"))?,
+            )?;
+            let before = self.capture.pos();
+            self.capture.start_timing(self.host.now_monotonic());
+            let checkpoint_result = self.capture.checkpoint(mode);
+            let extra_result = checkpoint_result.and_then(|()| self.collect_cuts(before));
+            let checkpoint_timing = self.capture.finish_timing(self.host.now_monotonic());
+            timing.merge(checkpoint_timing);
+            let extra = extra_result?;
+            batch.timing = timing;
+            batch.segments.extend(extra.segments);
+            batch.position = extra.position;
+            self.reconcile_local_disk()?;
+            Ok(batch)
+        })();
+        #[cfg(feature = "replica")]
+        self.host.observe_ltx_capture(&timing, result.is_ok());
+        if result.is_err() {
+            self.fenced = true;
+        }
+        result
+    }
+
+    /// Returns the last sealed local position, not a remote durability receipt.
+    #[must_use]
+    pub fn position(&self) -> Position {
+        self.capture.pos().into()
+    }
+
+    /// Captures pending commits, then writes a full checksum-bearing snapshot.
+    ///
+    /// Its range is `1..=position.txid`. The snapshot can replace all preceding
+    /// cuts in a new manifest. The second return value owns every newly captured
+    /// cut: publish it to continue an existing head. Neither output is published.
+    pub fn snapshot(&mut self, destination: &Path) -> Result<(LocalSegment, CaptureBatch)> {
+        self.ensure_active()?;
+        let result = self.snapshot_inner(destination);
+        if result.is_err() {
+            self.fenced = true;
+        }
+        result
+    }
+
+    fn snapshot_inner(&mut self, destination: &Path) -> Result<(LocalSegment, CaptureBatch)> {
+        let (batch, timing) = self.capture_inner();
+        #[cfg(feature = "replica")]
+        self.host.observe_ltx_capture(&timing, batch.is_ok());
+        let mut batch = batch?;
+        batch.timing = timing;
+        self.local_disk.try_grow(self.limits.max_file_bytes)?;
+        let (mut scratch, mut output) =
+            SnapshotScratch::create(&self.host, destination, self.limits.max_file_bytes)?;
+        let pos: Position = self.capture.snapshot_to_writer(&mut output)?.into();
+        if pos != batch.position {
+            return Err(CrabError::ChecksumMismatch);
+        }
+        output.sync_all()?;
+        drop(output);
+        let file = crate::LtxHost {
+            facilities: self.host.clone(),
+            max_database_bytes: self.limits.max_database_bytes,
+            max_file_bytes: self.limits.max_file_bytes,
+        }
+        .open(&scratch.path)?;
+        let (decoded, size, digest) = ltx::inspect_reader(file)?;
+        let info = SegmentInfo::from_inspected(&decoded, size, digest);
+        self.account(&info)?;
+        self.host
+            .filesystem
+            .persist_file_new(&scratch.path, destination)?;
+        scratch.installed = true;
+        let segment = LocalSegment::new(destination.to_owned(), info);
+        #[cfg(feature = "replica")]
+        self.retained.push(segment.clone());
+        self.reconcile_local_disk()?;
+        Ok((segment, batch))
+    }
+
+    /// Returns the local file path; it must not be independently mutated.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Releases the writer and checkpoint read lock without claiming publication.
+    pub fn close(self) -> Result<()> {
+        drop(self.writer);
+        self.capture.close()
+    }
+
+    fn ensure_active(&self) -> Result<()> {
+        if self.fenced {
+            return Err(CrabError::Fenced);
+        }
+        Ok(())
+    }
+
+    fn ensure_capacity(&self) -> Result<()> {
+        if self.retained_segments >= self.limits.max_segments
+            || self.retained_bytes >= self.limits.max_plan_bytes
+        {
+            return Err(CrabError::Limit(
+                "retained capture artifacts; rotate session",
+            ));
+        }
+        Ok(())
+    }
+
+    fn account(&mut self, info: &SegmentInfo) -> Result<()> {
+        if info.size_bytes > self.limits.max_file_bytes {
+            return Err(CrabError::Limit("LTX file bytes"));
+        }
+        self.retained_bytes = self
+            .retained_bytes
+            .checked_add(info.size_bytes)
+            .ok_or(CrabError::Limit("retained bytes"))?;
+        self.retained_segments += 1;
+        if self.retained_segments > self.limits.max_segments
+            || self.retained_bytes > self.limits.max_plan_bytes
+        {
+            return Err(CrabError::Limit(
+                "retained capture artifacts; rotate session",
+            ));
+        }
+        Ok(())
+    }
+
+    fn account_capture(&mut self, info: &SegmentInfo) -> Result<()> {
+        if info.size_bytes > self.limits.max_capture_bytes {
+            return Err(CrabError::Limit("captured LTX bytes"));
+        }
+        self.account(info)
+    }
+
+    fn reconcile_local_disk(&self) -> Result<()> {
+        let database_bytes = if self.sparse {
+            0
+        } else {
+            self.host.filesystem.file_len(&self.path)?
+        };
+        let wal_bytes = match self.host.filesystem.file_len(&self.capture.wal_path()) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error.into()),
+        };
+        let live = database_bytes
+            .checked_add(self.retained_bytes)
+            .ok_or(CrabError::Limit("local disk bytes"))?
+            .checked_add(wal_bytes)
+            .ok_or(CrabError::Limit("local disk bytes"))?;
+        self.local_disk.resize(live)
+    }
 }
 
-#[inline]
-fn be_u32(b: &[u8]) -> u32 {
-    u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+struct SnapshotScratch {
+    filesystem: std::sync::Arc<dyn crate::environment::FileSystem>,
+    path: PathBuf,
+    installed: bool,
+}
+
+impl SnapshotScratch {
+    fn create(
+        host: &crate::Host,
+        destination: &Path,
+        max_file_bytes: u64,
+    ) -> Result<(Self, crate::HostFile)> {
+        let parent = destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let filename = destination
+            .file_name()
+            .ok_or(CrabError::InvalidState("missing snapshot filename"))?;
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        for _ in 0..16 {
+            let mut scratch_name = filename.to_owned();
+            scratch_name.push(format!(
+                ".crab-snapshot-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            let path = parent.join(scratch_name);
+            let ltx_host = crate::LtxHost {
+                facilities: host.clone(),
+                max_database_bytes: max_file_bytes,
+                max_file_bytes,
+            };
+            match ltx_host.create(&path) {
+                Ok(file) => {
+                    return Ok((
+                        Self {
+                            filesystem: host.filesystem.clone(),
+                            path,
+                            installed: false,
+                        },
+                        file,
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "snapshot scratch namespace exhausted",
+        )
+        .into())
+    }
+}
+
+impl Drop for SnapshotScratch {
+    fn drop(&mut self) {
+        if !self.installed {
+            let _ = self.filesystem.remove_file(&self.path);
+        }
+    }
+}
+
+pub(crate) fn open_connection(path: &Path, vfs: Option<&str>) -> rusqlite::Result<Connection> {
+    let connection = match vfs {
+        Some(vfs) => Connection::open_with_flags_and_vfs(path, rusqlite::OpenFlags::default(), vfs),
+        None => Connection::open(path),
+    }?;
+    disable_lookaside(&connection)?;
+    connection.pragma_update(None, "cache_size", -MANAGED_CONNECTION_PAGE_CACHE_KIB)?;
+    Ok(connection)
+}
+
+fn disable_lookaside(connection: &Connection) -> rusqlite::Result<()> {
+    use rusqlite::ffi;
+
+    // SQLite's default lookaside arena reserves memory per connection. Managed
+    // LTX connections use a small, stable statement vocabulary, so keeping
+    // that arena only adds resident cost across a dense Cell fleet.
+    // SAFETY: the connection was opened immediately above and no SQLite
+    // operation has run, so no lookaside slot can be in use.
+    let result = unsafe {
+        ffi::sqlite3_db_config(
+            connection.handle(),
+            ffi::SQLITE_DBCONFIG_LOOKASIDE,
+            std::ptr::null_mut::<std::ffi::c_void>(),
+            0,
+            0,
+        )
+    };
+    if result != ffi::SQLITE_OK {
+        return Err(rusqlite::Error::SqliteFailure(
+            ffi::Error::new(result),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn read_main(connection: &Connection, offset: u64, size: usize) -> Result<Vec<u8>> {
+    use rusqlite::ffi;
+    let mut file: *mut ffi::sqlite3_file = std::ptr::null_mut();
+    let mut data = vec![0u8; size];
+    let offset = i64::try_from(offset).map_err(|_| CrabError::LTXCorrupted)?;
+    let size = i32::try_from(size).map_err(|_| CrabError::LTXCorrupted)?;
+    // SAFETY: the connection is exclusively borrowed on its database worker.
+    // SQLite owns FILE_POINTER until this borrow ends; data holds size bytes.
+    let rc = unsafe {
+        let rc = ffi::sqlite3_file_control(
+            connection.handle(),
+            c"main".as_ptr(),
+            ffi::SQLITE_FCNTL_FILE_POINTER,
+            (&mut file as *mut *mut ffi::sqlite3_file).cast(),
+        );
+        if rc != ffi::SQLITE_OK || file.is_null() || (*file).pMethods.is_null() {
+            return Err(CrabError::InvalidState("SQLite main file unavailable"));
+        }
+        let read = (*(*file).pMethods)
+            .xRead
+            .ok_or(CrabError::InvalidState("SQLite main file cannot read"))?;
+        read(file, data.as_mut_ptr().cast(), size, offset)
+    };
+    if rc != ffi::SQLITE_OK {
+        return Err(rusqlite::Error::SqliteFailure(ffi::Error::new(rc), None).into());
+    }
+    Ok(data)
 }
 
 #[cfg(test)]
-mod timing_tests {
+mod tests {
     use super::*;
+    use std::{
+        path::Path,
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
+        time::{Duration, Instant},
+    };
 
-    #[test]
-    fn recorder_uses_monotonic_instants_without_affecting_capture_state() {
-        let start = Instant::now();
-        let mut recorder = TimingRecorder::new(start);
-        recorder.begin(TimingPhase::Preparation, start + Duration::from_millis(1));
-        recorder.end(TimingPhase::Preparation, start + Duration::from_millis(3));
-        recorder.begin(TimingPhase::WalRead, start + Duration::from_millis(4));
-        recorder.end(TimingPhase::WalRead, start + Duration::from_millis(9));
-        recorder.add_wal_bytes(11);
-        recorder.add_database_bytes(22);
-        recorder.add_ltx_bytes(33);
-        recorder.add_segment();
+    #[derive(Debug, thiserror::Error)]
+    #[error("inventory rejected the command")]
+    struct Rejected;
 
-        let timing = recorder.finish(start + Duration::from_millis(10));
-        assert_eq!(timing.total_nanos, 10_000_000);
-        assert_eq!(timing.preparation_nanos, 2_000_000);
-        assert_eq!(timing.wal_read_nanos, 5_000_000);
-        assert_eq!(timing.wal_bytes, 11);
-        assert_eq!(timing.database_bytes, 22);
-        assert_eq!(timing.ltx_bytes, 33);
-        assert_eq!(timing.segment_count, 1);
+    struct TimingClock {
+        origin: Instant,
+        ticks: AtomicU64,
+    }
+
+    impl TimingClock {
+        fn new() -> Self {
+            Self {
+                origin: Instant::now(),
+                ticks: AtomicU64::new(0),
+            }
+        }
+    }
+
+    impl crate::environment::Clock for TimingClock {
+        fn unix_millis(&self) -> i64 {
+            123456789
+        }
+
+        fn file_age(&self, _: &Path) -> std::io::Result<Duration> {
+            Ok(Duration::ZERO)
+        }
+
+        fn monotonic(&self) -> Instant {
+            self.origin + Duration::from_micros(self.ticks.fetch_add(1, Ordering::Relaxed))
+        }
     }
 
     #[test]
-    fn recorder_closes_an_incomplete_phase_and_saturates_counters() {
-        let start = Instant::now();
-        let mut recorder = TimingRecorder::new(start);
-        recorder.begin(TimingPhase::Encode, start);
-        recorder.add_wal_bytes(u64::MAX);
-        recorder.add_wal_bytes(1);
-        recorder.add_segment();
-        recorder.add_segment();
+    fn managed_connections_set_the_budgeted_page_cache() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let connection = open_connection(&temp.path().join("cache.sqlite"), None).unwrap();
+        let cache_kib: i64 = connection
+            .query_row("PRAGMA cache_size", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(cache_kib, -MANAGED_CONNECTION_PAGE_CACHE_KIB);
+    }
 
-        let timing = recorder.finish(start + Duration::from_nanos(7));
-        assert_eq!(timing.encode_nanos, 7);
-        assert_eq!(timing.wal_bytes, u64::MAX);
-        assert_eq!(timing.segment_count, 2);
+    #[test]
+    fn capture_reports_deterministic_bounded_timing_for_real_ltx_work() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let host = crate::Host::default().with_clock(Arc::new(TimingClock::new()));
+        let mut db =
+            Db::open_with_host(&temp.path().join("timed.sqlite"), Limits::default(), host).unwrap();
+        db.transaction(|tx| {
+            tx.execute_batch("CREATE TABLE events(value TEXT); INSERT INTO events VALUES ('ok')")
+        })
+        .unwrap();
+
+        let batch = db.capture().unwrap();
+        let phase_nanos = batch.timing.preparation_nanos
+            + batch.timing.schema_check_nanos
+            + batch.timing.wal_existence_nanos
+            + batch.timing.position_resolution_nanos
+            + batch.timing.wal_read_nanos
+            + batch.timing.page_collection_nanos
+            + batch.timing.verification_nanos
+            + batch.timing.encode_nanos
+            + batch.timing.local_write_nanos
+            + batch.timing.fsync_nanos
+            + batch.timing.parent_sync_nanos
+            + batch.timing.checkpoint_nanos;
+        let ltx_bytes = batch
+            .segments
+            .iter()
+            .map(|segment| segment.info().size_bytes)
+            .sum::<u64>();
+        let segment = &batch.segments[0];
+        let file = crate::LtxHost {
+            facilities: crate::Host::default(),
+            max_database_bytes: Limits::default().max_database_bytes,
+            max_file_bytes: Limits::default().max_file_bytes,
+        }
+        .open(segment.path())
+        .unwrap();
+        let (decoded, size, digest) = crate::ltx::inspect_reader(file).unwrap();
+        assert_eq!(
+            segment.info(),
+            &crate::SegmentInfo::from_inspected(&decoded, size, digest)
+        );
+        assert!(batch.timing.total_nanos > 0);
+        assert!(phase_nanos <= batch.timing.total_nanos);
+        assert_eq!(batch.timing.segment_count as usize, batch.segments.len());
+        assert_eq!(batch.timing.ltx_bytes, ltx_bytes);
+        assert!(batch.timing.wal_bytes > 0);
+        assert!(batch.timing.database_bytes > 0);
+        assert!(batch.timing.schema_check_nanos > 0);
+        assert!(batch.timing.wal_existence_nanos > 0);
+        assert!(batch.timing.position_resolution_nanos > 0);
+        assert!(batch.timing.page_collection_nanos > 0);
+        assert!(batch.timing.local_write_nanos > 0);
+        assert!(batch.timing.fsync_nanos > 0);
+        assert!(batch.timing.parent_sync_nanos > 0);
+        assert_eq!(
+            batch.timing.wal_sparse_reads + batch.timing.wal_full_reads,
+            1
+        );
+        assert!(batch.timing.wal_image_bytes > 0);
+        assert!(batch.timing.wal_file_bytes >= batch.timing.wal_read_bytes);
+        assert!(batch.timing.wal_read_bytes > 0);
+        assert_eq!(batch.timing.wal_snapshot_reads, 1);
+    }
+
+    #[cfg(feature = "replica")]
+    #[test]
+    fn failed_capture_emits_its_bounded_ledger() {
+        #[derive(Default)]
+        struct CaptureTelemetry(std::sync::Mutex<Vec<(crate::CaptureTiming, bool)>>);
+
+        impl crate::LtxTelemetry for CaptureTelemetry {
+            fn capture(&self, timing: &crate::CaptureTiming, succeeded: bool) {
+                self.0.lock().unwrap().push((*timing, succeeded));
+            }
+        }
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let telemetry = Arc::new(CaptureTelemetry::default());
+        let host = crate::Host::default().with_ltx_telemetry(telemetry.clone());
+        let limits = Limits {
+            max_capture_bytes: 128,
+            ..Limits::default()
+        };
+        let mut db = Db::open_with_host(&temp.path().join("failed.sqlite"), limits, host).unwrap();
+        db.transaction(|tx| {
+            tx.execute_batch(
+                "CREATE TABLE events(value BLOB); INSERT INTO events VALUES(randomblob(4096))",
+            )
+        })
+        .unwrap();
+
+        assert!(db.capture().is_err());
+        let attempts = telemetry.0.lock().unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert!(!attempts[0].1);
+        assert!(attempts[0].0.total_nanos > 0);
+        assert!(attempts[0].0.wal_read_bytes > 0);
+    }
+
+    #[test]
+    fn managed_connections_disable_sqlite_lookaside() {
+        use rusqlite::ffi;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        for index in 0..MANAGED_SQLITE_CONNECTIONS {
+            let connection =
+                open_connection(&temp.path().join(format!("lookaside-{index}.sqlite")), None)
+                    .unwrap();
+            let _statement = connection.prepare("SELECT 1").unwrap();
+            let mut current = 0;
+            let mut highwater = 0;
+            let result = unsafe {
+                // SAFETY: the connection remains alive and is exclusively
+                // borrowed for the duration of this status query.
+                ffi::sqlite3_db_status(
+                    connection.handle(),
+                    ffi::SQLITE_DBSTATUS_LOOKASIDE_USED,
+                    &mut current,
+                    &mut highwater,
+                    0,
+                )
+            };
+            assert_eq!(result, ffi::SQLITE_OK);
+            assert_eq!(current, 0);
+            assert_eq!(highwater, 0);
+        }
+    }
+
+    #[test]
+    fn local_disk_admission_rejects_before_running_the_transaction() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let budget = crate::DiskBudget::new(255);
+        let host = crate::Host::default().with_local_disk_budget(budget.clone());
+        let limits = Limits {
+            max_capture_bytes: 128,
+            ..Limits::default()
+        };
+        let mut db = Db::open_with_host(&temp.path().join("disk.sqlite"), limits, host).unwrap();
+        let ran = std::cell::Cell::new(false);
+
+        let result = db.transaction(|_| {
+            ran.set(true);
+            Ok(())
+        });
+
+        assert!(matches!(result, Err(CrabError::Limit("local disk bytes"))));
+        assert!(!ran.get());
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn existing_database_disk_admission_precedes_session_claim() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("existing.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TABLE t(v)").unwrap();
+        drop(connection);
+        let bytes = std::fs::metadata(&path).unwrap().len();
+        let host = crate::Host::default()
+            .with_local_disk_budget(crate::DiskBudget::new(bytes.saturating_sub(1)));
+
+        let result = Db::open_with_host(&path, Limits::default(), host);
+
+        assert!(matches!(result, Err(CrabError::Limit("local disk bytes"))));
+        assert!(!CaptureEngine::meta_path_for(&path).exists());
+    }
+
+    #[test]
+    fn resume_disk_admission_precedes_database_installation() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let source_path = temp.path().join("source.sqlite");
+        let limits = Limits::default();
+        let mut source = Db::open(&source_path, limits).unwrap();
+        source
+            .transaction(|transaction| {
+                transaction.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES (1)")
+            })
+            .unwrap();
+        let batch = source.capture().unwrap();
+        let plan = crate::VerifiedPlan::new(&batch.segments, batch.position, limits).unwrap();
+        source.close().unwrap();
+        let database_bytes = u64::from(batch.segments[0].info().database_pages)
+            * u64::from(batch.segments[0].info().page_size);
+        let host = crate::Host::default()
+            .with_local_disk_budget(crate::DiskBudget::new(database_bytes.saturating_sub(1)));
+        let destination = temp.path().join("destination.sqlite");
+
+        let result = Db::resume_with_host(&plan, &destination, limits, host);
+
+        assert!(matches!(result, Err(CrabError::Limit("local disk bytes"))));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn pending_wal_and_captured_segments_reconcile_and_release_disk_admission() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("accounted.sqlite");
+        let budget = crate::DiskBudget::new(4 * 1024 * 1024);
+        let host = crate::Host::default().with_local_disk_budget(budget.clone());
+        let limits = Limits {
+            max_capture_bytes: 1024 * 1024,
+            ..Limits::default()
+        };
+        let mut db = Db::open_with_host(&path, limits, host).unwrap();
+
+        db.transaction(|transaction| {
+            transaction.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES (1)")
+        })
+        .unwrap();
+        assert_eq!(budget.used(), 2 * limits.max_capture_bytes);
+
+        let batch = db.capture().unwrap();
+        let retained = batch
+            .segments
+            .iter()
+            .map(|segment| segment.info().size_bytes)
+            .sum::<u64>();
+        let wal = std::fs::metadata(format!("{}-wal", path.display()))
+            .unwrap()
+            .len();
+        let database = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(budget.used(), database + retained + wal);
+
+        db.close().unwrap();
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn typed_operation_error_rolls_back_and_keeps_writer_usable() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut db = Db::open(&temp.path().join("typed.sqlite"), Limits::default()).unwrap();
+        db.transaction(|tx| tx.execute_batch("CREATE TABLE inventory(value INTEGER NOT NULL)"))
+            .unwrap();
+
+        let rejected = db.transaction_with(|tx| {
+            tx.execute("INSERT INTO inventory VALUES (1)", [])
+                .map_err(|_| Rejected)?;
+            Err::<(), _>(Rejected)
+        });
+        assert!(matches!(
+            rejected,
+            Err(crate::TransactionError::Operation(Rejected))
+        ));
+
+        db.transaction(|tx| {
+            tx.execute("INSERT INTO inventory VALUES (2)", [])
+                .map(|_| ())
+        })
+        .unwrap();
+        let count = db
+            .writer
+            .query_row("SELECT count(*) FROM inventory", [], |row| {
+                row.get::<_, u32>(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn truncate_checkpoint_and_auto_vacuum_preserve_every_cut() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("source.sqlite");
+        let initial = Connection::open(&path).unwrap();
+        initial
+            .execute_batch("PRAGMA auto_vacuum=FULL; VACUUM;")
+            .unwrap();
+        drop(initial);
+        let mut db = Db::open(&path, Limits::default()).unwrap();
+        db.capture.truncate_page_n = 20;
+        db.capture.min_checkpoint_page_n = 10;
+        let mut segments = Vec::new();
+        let mut last_pages = 0;
+        let mut shrank = false;
+        let mut multiple_cuts = false;
+        for round in 0..6 {
+            db.transaction(|tx| {
+                tx.execute("CREATE TABLE IF NOT EXISTS t (data BLOB)", [])?;
+                if round % 2 == 0 {
+                    for _ in 0..80 {
+                        tx.execute("INSERT INTO t VALUES (randomblob(8000))", [])?;
+                    }
+                } else {
+                    tx.execute("DELETE FROM t", [])?;
+                }
+                Ok(())
+            })
+            .unwrap();
+            let batch = db.capture().unwrap();
+            multiple_cuts |= batch.segments.len() > 1;
+            for segment in &batch.segments {
+                shrank |= last_pages > segment.info().database_pages;
+                last_pages = segment.info().database_pages;
+            }
+            segments.extend(batch.segments);
+            let plan =
+                crate::VerifiedPlan::new(&segments, batch.position, Limits::default()).unwrap();
+            let restored = temp.path().join(format!("restored-{round}.sqlite"));
+            crate::restore_exact(&plan, &restored).unwrap();
+            let conn = Connection::open(&restored).unwrap();
+            let check: String = conn
+                .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(check, "ok");
+            let count: u32 = conn
+                .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, if round % 2 == 0 { 80 } else { 0 });
+            crate::compact_exact(&plan, &temp.path().join(format!("compacted-{round}.ltx")))
+                .unwrap();
+        }
+        assert!(shrank);
+        assert!(multiple_cuts);
     }
 }

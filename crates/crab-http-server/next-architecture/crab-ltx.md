@@ -15,7 +15,7 @@ performance and process/network fault qualification remain delivery work.
 
 | Boundary | Current state |
 | --- | --- |
-| SQLite lifecycle | `ManagedDb` owns three connections and a serialized transaction callback; WAL read-lock and managed checkpoints retained |
+| SQLite lifecycle | `Db` owns three connections and a serialized transaction callback; WAL read-lock and managed checkpoints retained |
 | Capture | Checksum-bearing sized-block LTX, all cuts returned; SQLite WAL-hook frame boundary checked before checkpointing |
 | Snapshot | Full local snapshot plus ownership of every newly generated capture cut |
 | Restore | Explicit snapshot-plus-deltas plan; exact ranges/digests/checksums; owned verified bytes; new-file installation |
@@ -140,7 +140,7 @@ patches or a change to Crab's storage guarantees.
 ```mermaid
 flowchart TB
     Handler[HTTP domain handler] --> Actor[Repository AppCell actor]
-    Actor --> SQL[SQL callback on ManagedDb writer]
+    Actor --> SQL[SQL callback on Db writer]
     Actor --> LTX[crab-ltx capture and exact restore]
     SQL --> WAL[Local SQLite WAL]
     WAL --> LTX
@@ -244,7 +244,7 @@ resource admission must budget all of them.
 2. Open managed replication connections before admitting application writes.
 3. Apply and verify the connection factory's WAL, synchronous, timeout and
    foreign-key policy on each connection where applicable.
-4. Execute domain SQL through `ManagedDb::transaction` on the bounded executor;
+4. Execute domain SQL through `Db::transaction` on the bounded executor;
    do not open a second independent application-writer connection.
 5. Establish the initial captured full snapshot and publish the activation.
 6. Execute one domain mutation, then capture and publish it before another
@@ -337,7 +337,7 @@ The following signatures summarize callable crate APIs. Full types and a
 compilable example live in the [crate README](../../crab-ltx/README.md).
 
 ```rust
-impl ManagedDb {
+impl Db {
     fn open(path: &Path, limits: Limits) -> Result<Self>;
     fn transaction<T>(
         &mut self,
@@ -368,14 +368,14 @@ endpoint and each intermediate database checksum, then owns the input bytes.
 It has no bucket URL, epoch inference, local-database fallback or latest option.
 Only a full snapshot followed by contiguous, non-overlapping ranges is accepted.
 
-`ManagedDb::open` atomically claims `.<filename>-crab-ltx` and refuses reuse.
+`Db::open` atomically claims `.<filename>-crab-ltx` and refuses reuse.
 After failure or owner replacement, restore into a fresh directory and start a
 new epoch. SQL callbacks are trusted main-database application code; they cannot
 change transaction control, pager policy, hooks, or the reserved control tables.
 
 The server wraps these local facts with repository UUID, generation, owner
 epoch and application revision. Only its publication coordinator constructs a
-durable result after the control CAS. `ManagedDb` never accepts `AppCommand` or
+durable result after the control CAS. `Db` never accepts `AppCommand` or
 returns `PublishedPosition`; those belong to the server composition layer.
 
 ## One mutation through the library
@@ -486,7 +486,7 @@ includes listing, `delete_ltx_files` and `delete_all`; importing that entire
 trait into production would expose capabilities the restore/capture caller does
 not need. Server-side retention owns remote pins and deletion scope.
 
-`ManagedDb::prune_captured` removes only exact local artifacts named in an
+`Db::prune_captured` removes only exact local artifacts named in an
 acknowledged Cell capture batch, restoring local retention admission. In-flight
 cuts remain retained; the managed cursor owns its WAL continuity proof
 independently of removed files. Release of one publication pin does not mean

@@ -57,8 +57,7 @@ async fn pin_verifies_roots_and_fails_closed_when_a_dependency_is_missing() {
     )
     .unwrap();
     let directory = tempfile::TempDir::new().unwrap();
-    let mut database =
-        crab_ltx::ManagedDb::open(&directory.path().join("cell.sqlite"), limits).unwrap();
+    let mut database = crab_ltx::Db::open(&directory.path().join("cell.sqlite"), limits).unwrap();
     database
         .transaction(|transaction| {
             transaction.execute_batch(

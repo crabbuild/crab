@@ -1,7 +1,7 @@
 # Complete and qualify canonical Cell LTX scaling
 
 Crab will finish production scaling on one canonical persistence path:
-`ManagedDb` captures SQLite, `CellReplica` prepares immutable roots,
+`Db` captures SQLite, `CellReplica` prepares immutable roots,
 `CellRuntime` owns execution and durability, and `crab-http-server` composes the
 product. The older standalone epoch-head, paged, and scheduler surfaces were
 present in release tag `v1.2.4` but are now hard-removed under the recorded
@@ -26,7 +26,7 @@ The production dependency and authority path is:
 crab-http-server RepositoryCellRouter
   -> crab-cell-runtime CellRuntime
     -> CellExecutor + CellPublisher + CellAuthority
-      -> crab-ltx ManagedDb + CellReplica
+      -> crab-ltx Db + CellReplica
         -> crab-ltx CellStorageLayout
 ```
 
@@ -34,7 +34,7 @@ Each module has one responsibility:
 
 | Module | Responsibility | Explicitly does not own |
 | --- | --- | --- |
-| `ManagedDb` | Exclusive SQLite session, WAL capture, checkpoints, retained local cuts | Remote authority or response release |
+| `Db` | Exclusive SQLite session, WAL capture, checkpoints, retained local cuts | Remote authority or response release |
 | `CellReplica` | Verify and prepare immutable Cell roots, sparse reads, restore, compaction | Mutable owner or root publication |
 | `CellExecutor` | Serialized SQL, request ledger, captured mutation outcome | Object-store authority |
 | `CellPublisher` | Immutable preparation, ordered publication, ambiguous-result reconciliation | Owner selection |
@@ -60,7 +60,7 @@ product behavior crosses the `crab-cell-runtime` interface.
 
 This design removes duplicate ownership, not useful independent mechanisms.
 
-- `ManagedDb` and `CellReplica` are not competing paths. One owns local SQLite
+- `Db` and `CellReplica` are not competing paths. One owns local SQLite
   capture; the other owns immutable remote mechanics.
 - `CellReplica` and `CellAuthority` are not competing roots. One prepares an
   immutable proposal; the other conditionally publishes the sole authoritative
@@ -130,7 +130,7 @@ the path should be replaced.
 | Gap | Current Crab evidence | Target architecture | Required proof |
 | --- | --- | --- | --- |
 | Protocol assurance | `Control` retains pure persistent transitions. The runtime now has a private coordination state machine, deterministic simulator, and pinned TLA+ model; async adapters carry activation generations and typed per-effect intents/IDs while parity coverage is still expanding. | One private sans-I/O coordination kernel used by production and simulation, a replayable adversarial scheduler, and a TLA+ model of the same durable state machine. | Pinned seeds find deliberately broken variants; model configurations check single-writer and acknowledged-durability invariants; remaining work is full decision extraction/parity, not a second policy path. |
-| Warm request latency | `RepositoryCellRouter::route_existing` first asks the actor-owned resident lookup; sparse activation receives bounded background `ManagedDb::hydrate_step` work on the existing SQL worker. The zero-origin post-promotion qualification is still outstanding. | Actor-owned resident lookup before remote metadata, plus bounded background hydration. A fully hydrated local read performs zero object-store operations from route through SQL result. | An instrumented store observes zero calls for qualified resident reads; cold, sparse, hydrating, resident, local-write, fleet-proof, and object-proof latency are reported separately. |
+| Warm request latency | `RepositoryCellRouter::route_existing` first asks the actor-owned resident lookup; sparse activation receives bounded background `Db::hydrate_step` work on the existing SQL worker. The zero-origin post-promotion qualification is still outstanding. | Actor-owned resident lookup before remote metadata, plus bounded background hydration. A fully hydrated local read performs zero object-store operations from route through SQL result. | An instrumented store observes zero calls for qualified resident reads; cold, sparse, hydrating, resident, local-write, fleet-proof, and object-proof latency are reported separately. |
 | Fleet balancing | Signed versioned placement observations carry measured memory/disk totals and runtime Cell/job counts; deterministic weighted planning, idle-victim selection, hysteretic pressure classification, and a held movement budget are local seams. Cold activation now sends one authenticated activation hint to the preferred live node; feature-gated OS-process probes prove one idle-control winner, exact-root preservation, stale-owner fencing/recovery, committed-release response-loss reconciliation, and local failed idle/takeover receiver rollback to unowned `Idle`, while protected multi-process movement proof remains. | Deterministic weighted placement over signed live capacity, actor-approved quiescent release, idle eviction, cgroup-aware pressure tiers, hysteresis, and paced drains. Placement remains advisory; existing control CAS remains authoritative. | Skew, membership change, stale samples, pressure, receiver death, rolling drain, and oscillation tests preserve authority and converge within declared movement and latency bounds. |
 
 The Celld comparison is pinned to upstream commit `10cb1303dac710dcb3b557e318e08c855261f68b`.
@@ -156,7 +156,7 @@ shared authenticated mechanics remain private to Cell roots.
 | Request entry | [`RepositoryCellRouter::route_target`](../../crab-http-server/src/cells/router.rs) calls `route_existing` twice around an activation lock, then repeats catalog and control loads for activation. |
 | Metadata lookup | [`CellCatalog::lookup`](../src/catalog.rs) loads the shard head and every referenced immutable catalog page; [`CellAuthority::load`](../src/authority.rs) separately reads exact control. |
 | Local residency | [`CellRuntime::resident_handle`](../src/actor.rs) asks the actor for a fully resident owner before remote metadata; [`local_handle`](../src/actor.rs) remains the verified slow-path lookup for sparse or activation callers. Fenced, draining, and non-resident actors miss safely. |
-| Sparse hydration | [`ManagedDb::hydration` and `hydrate_step`](../../crab-ltx/src/managed.rs) are driven by the actor's bounded hydration tick through the existing SQL worker; cancellation/restart and post-promotion zero-I/O qualification remain. |
+| Sparse hydration | [`Db::hydration` and `hydrate_step`](../../crab-ltx/src/db.rs) are driven by the actor's bounded hydration tick through the existing SQL worker; cancellation/restart and post-promotion zero-I/O qualification remain. |
 | Fleet observation | [`NodePublisher`](../../crab-http-server/src/peer.rs) signs short-lived live capacity observations; `NodeAdvertisement` carries a versioned placement signature, advertised memory/disk/job headroom and the signed disk total are clamped by the runtime ledger, server memory capacity resolves nested cgroup-v1/v2 membership with fail-closed root fallbacks, and cold activation sends a bounded direct-node hint before normal authority acquisition. The test-only process race covers one shared-control winner; unified process-wide probe parity and protected multi-process movement proof remain. |
 | Existing rendezvous | [`preferred_scanner`](../src/scheduler.rs) elects a catalog scheduler scanner. It does not rank or move Cell owners. |
 | Transition safety | [`Control`](../src/control.rs) validates named single-record transitions; [`coordination.rs`](../src/coordination.rs) allocates and retires typed per-effect intents/IDs, while the actor fences completions by activation generation and effect family, drains the kernel-owned pending-effect set before fenced deactivation, and keeps effect timing coupled to the production publisher. Background hydration, renewal, persisted-work inventory refresh, drain, and shutdown pass queue/publisher/lease observations through the same kernel schedule transition before an adapter starts work. |
@@ -168,7 +168,7 @@ WAL existence and position resolution, WAL reads and page collection, encoding,
 local writes, file sync, parent sync, verification, and checkpoint time. The
 same ledger records logical WAL work, physical WAL file/read bytes, allocated
 image bytes, finite read/snapshot strategy counters, and checkpoint runs, busy
-outcomes, frames, backfill, and restarts. `ManagedDb` emits the ledger for both
+outcomes, frames, backfill, and restarts. `Db` emits the ledger for both
 successful and failed capture attempts; publication is not a second reporting
 boundary. None of these observations is persisted or participates in authority,
 checkpoint, or recovery decisions.
@@ -219,7 +219,7 @@ predicates; the simulator's movement release also passes queue/publisher
 observations through the same deactivation gate; resident-only lookup is
 actor-owned and attempted before
 catalog/control I/O; sparse restored Cells receive bounded
-`ManagedDb::hydrate_step` work on the existing SQL worker; active-cell admission
+`Db::hydrate_step` work on the existing SQL worker; active-cell admission
 uses an exact RAII resource ledger (including resident native bytes, active-Cell
 file-descriptor reservations, bounded SQL-worker, hydration-job, and primitive
 activity/effect reservations, with runtime metrics for hydration and descriptor
@@ -492,7 +492,7 @@ owner endpoints and cold Cells are never served from this local index.
 
 Sparse activation remains legal and may begin serving after exact-root
 verification. It is called `ActiveSparse`, not fully resident. Wire
-`ManagedDb::hydration` and `hydrate_step` through bounded SQL-worker jobs so an
+`Db::hydration` and `hydrate_step` through bounded SQL-worker jobs so an
 active sparse Cell progressively resolves inherited pages while foreground
 work remains prioritized.
 
@@ -1174,13 +1174,13 @@ The authorized hard-removal change deletes:
 - Standalone epoch-head layout and publication.
 - `CompactionSchedule` for standalone heads.
 - Standalone read-only `PagedDatabase` and `PagedConnection`.
-- Standalone-only `ManagedDb` helpers.
+- Standalone-only `Db` helpers.
 - Standalone examples, documentation, and tests after evidence migration.
 - The standalone branch of `paged_io`; the retained bridge has one Cell variant.
 
 Retain:
 
-- `ManagedDb`, WAL capture, snapshots, and checkpoints.
+- `Db`, WAL capture, snapshots, and checkpoints.
 - LTX codecs, checksums, and exact local recovery.
 - `Host`, filesystem, executor, disk, dirty, recovery, and scratch admission.
 - `bundle::Bundle` and node-log recovery use.

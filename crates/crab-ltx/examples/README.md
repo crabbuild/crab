@@ -56,7 +56,7 @@ With `--features replica`, the canonical surface is:
 | `PreparedRoot` | `root`, `predecessor`, `verified` | Carry an exact proposal into Cell authority CAS |
 | `CellPagedDatabase` | `read_page`, `read_run`, `prepare_writable` | Authenticate sparse reads and seed a writable activation |
 | `CellWritableDatabase` | `open_writable` | Open a fresh sparse SQLite writer at one exact root |
-| `ManagedDb` | `hydration`, `hydrate_step`, `take_io_error`, `prune_captured` | Drive bounded hydration and release exact acknowledged captures |
+| `Db` | `hydration`, `hydrate_step`, `take_io_error`, `prune_captured` | Drive bounded hydration and release exact acknowledged captures |
 | `Hydration` | `resolved`, `total`, `faults`, `complete` | Report sparse activation progress |
 | `bundle` | `Bundle::encode`, `decode`; `BundleEntry::for_cell` | Carry verified Cell-scoped LTX ranges into recovery overlays |
 

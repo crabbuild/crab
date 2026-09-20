@@ -452,6 +452,7 @@ for _ in $(seq 1 45); do
   candidate="$("${compose[@]}" exec -T server-b crab-http-server \
     --config /etc/crab/server.toml cells status --owner demo --name hello \
     2>/dev/null || true)"
+  # The owner may publish a later monotonic root while the follower rejoins.
   if jq --exit-status \
     --arg session_after "$session_after" \
     --argjson epoch_after "$epoch_after" \
@@ -461,7 +462,7 @@ for _ in $(seq 1 45); do
      .owner_lease.state == "live" and
      .owner_lease.expires_at_ms > .owner_lease.observed_at_ms and
      .recovery == null and
-     .root.commit_sequence == $sequence_continued' <<<"$candidate" >/dev/null 2>&1; then
+     .root.commit_sequence >= $sequence_continued' <<<"$candidate" >/dev/null 2>&1; then
     control_after_rejoin="$candidate"
     break
   fi
