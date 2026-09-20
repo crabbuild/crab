@@ -17,7 +17,7 @@
 - **Depends on**: plans 018–021
 - **Category**: architecture / API / direction
 - **Planned at**: commit `892720ce6a6`, 2026-09-19
-- **Implementation status**: deterministic authoring boundary and handwritten full-primitive reference application implemented, including one successful typed invocation per primitive through a bounded local multi-Cell router; generated clients, complete semantic validation, and protected release evidence remain open
+- **Implementation status**: deterministic authoring boundary and handwritten full-primitive reference application implemented, including one successful typed invocation per primitive through a bounded local multi-Cell router plus executable scope, role, and capability rejection checks; generated clients, complete descriptor semantic validation, and protected release evidence remain open
 
 ## Why this matters
 
@@ -207,10 +207,10 @@ unapproved dependency was added.
 
 - [ ] An application compiles to deterministic registry and topology bytes independent of registration order.
 - [ ] Stable IDs, migrations, operation limits, effect targets, definitions, and activities fail closed on mismatch.
-- [ ] Typed handles expose every primitive without exposing runtime internals.
-- [ ] The reference application registers and invokes all primitives through public author APIs.
-- [ ] Semantic exclusions and bounded limits are executable tests, not prose-only claims.
-- [ ] No node/provider/server policy moved into low-level crates.
+- [x] Typed handles expose every primitive without exposing runtime internals.
+- [x] The reference application registers and invokes all primitives through public author APIs.
+- [x] Semantic exclusions and bounded limits are executable tests, not prose-only claims.
+- [x] No node/provider/server policy moved into low-level crates.
 - [ ] Workspace, runtime, architecture, Clippy, format, and docs gates pass.
 
 ## STOP conditions
