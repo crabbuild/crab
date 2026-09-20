@@ -9,6 +9,10 @@ an object-store call ceiling. Matrix verification requires the corresponding
 `cells`, `operations`, `duration_secs`, `p99_latency_ms`,
 `peak_local_disk_bytes`, and `peak_file_descriptors` metrics when a profile
 sets those limits; a missing metric is a failed gate, not an assumed zero.
+The release CLI additionally rejects protected receipts finished more than
+seven days ago or more than five minutes ahead of its verifier clock. The
+historical library verifier remains timestamp-neutral; use the fresh protected
+matrix entry point for release decisions.
 
 Generate and verify a deterministic mixed primitive workload with:
 

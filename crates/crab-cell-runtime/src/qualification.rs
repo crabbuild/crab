@@ -19,6 +19,11 @@ const MAX_QUALIFICATION_OPERATIONS: u64 = 100_000_000;
 const MAX_QUALIFICATION_DURATION_SECS: u64 = 7 * 24 * 60 * 60;
 const MAX_QUALIFICATION_CONCURRENCY: usize = 1_024;
 
+/// Maximum age of protected qualification evidence accepted by a release gate.
+pub const QUALIFICATION_PROTECTED_EVIDENCE_MAX_AGE_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+/// Clock skew tolerated when a protected receipt is checked by a release gate.
+pub const QUALIFICATION_PROTECTED_EVIDENCE_MAX_CLOCK_SKEW_MS: u64 = 5 * 60 * 1_000;
+
 /// Current wire schema for qualification evidence.
 pub const QUALIFICATION_SCHEMA_VERSION: u32 = 4;
 /// Schema for a manifest that binds one receipt to every qualification row.
@@ -1958,6 +1963,25 @@ impl QualificationReceipt {
         self.verify_trusted_signer(trusted_signer)
     }
 
+    /// Rejects protected evidence that is stale or materially ahead of the verifier clock.
+    pub fn verify_fresh_at(&self, now_ms: u64) -> Result<()> {
+        if now_ms == 0 {
+            return Err(Error::Control("qualification verifier timestamp"));
+        }
+        if self.finished_at_ms
+            > now_ms.saturating_add(QUALIFICATION_PROTECTED_EVIDENCE_MAX_CLOCK_SKEW_MS)
+        {
+            return Err(Error::Control(
+                "qualification evidence timestamp is in the future",
+            ));
+        }
+        if now_ms.saturating_sub(self.finished_at_ms) > QUALIFICATION_PROTECTED_EVIDENCE_MAX_AGE_MS
+        {
+            return Err(Error::Control("qualification evidence is stale"));
+        }
+        Ok(())
+    }
+
     /// Verifies the exact profile thresholds from measured receipt metrics.
     pub fn verify_profile_thresholds(&self, profile: &QualificationProfile) -> Result<()> {
         let cells = self.threshold_metric("cells", "cells")?;
@@ -2148,6 +2172,28 @@ impl QualificationReceipt {
                 receipt.verify_primitive_workload(profile, artifacts)?;
                 receipt.verify_primitive_run_artifact(profile, artifacts)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Verifies a signed protected matrix and requires every row to be recent.
+    pub fn verify_matrix_for_profile_with_signer_fresh_at(
+        source_revision: &str,
+        image: Digest,
+        profile: &QualificationProfile,
+        evidence: &[(&str, &QualificationReceipt, &[&[u8]])],
+        trusted_signer: [u8; 32],
+        now_ms: u64,
+    ) -> Result<()> {
+        Self::verify_matrix_for_profile_with_signer(
+            source_revision,
+            image,
+            profile,
+            evidence,
+            trusted_signer,
+        )?;
+        for (_, receipt, _) in evidence {
+            receipt.verify_fresh_at(now_ms)?;
         }
         Ok(())
     }

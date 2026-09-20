@@ -203,7 +203,10 @@ fn run() -> Result<(), String> {
                 return Err("qualification receipt is not passed".into());
             }
             let artifact = fs::read(artifact).map_err(|error| format!("read artifact: {error}"))?;
-            match profile {
+            let requires_freshness = profile
+                .as_ref()
+                .is_some_and(QualificationProfile::requires_protected_evidence);
+            let result = match profile {
                 Some(profile) => match trusted_signer {
                     Some(trusted_signer) => receipt
                         .verify_for_profile_with_signer(
@@ -226,7 +229,14 @@ fn run() -> Result<(), String> {
                         .verify_for(&source, image, &artifact)
                         .map_err(|error| error.to_string()),
                 },
+            };
+            result?;
+            if requires_freshness {
+                receipt
+                    .verify_fresh_at(unix_millis()?)
+                    .map_err(|error| error.to_string())?;
             }
+            Ok(())
         }
         Some("verify-matrix") => verify_matrix(&mut args),
         Some("validate-cluster") => validate_cluster(&mut args),
@@ -322,14 +332,26 @@ fn verify_matrix(args: &mut impl Iterator<Item = String>) -> Result<(), String> 
         .collect::<Vec<_>>();
     match (profile, trusted_signer) {
         (Some(profile), Some(trusted_signer)) => {
-            QualificationReceipt::verify_matrix_for_profile_with_signer(
-                &source,
-                image,
-                &profile,
-                &evidence,
-                trusted_signer,
-            )
-            .map_err(|error| error.to_string())?;
+            if profile.requires_protected_evidence() {
+                QualificationReceipt::verify_matrix_for_profile_with_signer_fresh_at(
+                    &source,
+                    image,
+                    &profile,
+                    &evidence,
+                    trusted_signer,
+                    unix_millis()?,
+                )
+                .map_err(|error| error.to_string())?;
+            } else {
+                QualificationReceipt::verify_matrix_for_profile_with_signer(
+                    &source,
+                    image,
+                    &profile,
+                    &evidence,
+                    trusted_signer,
+                )
+                .map_err(|error| error.to_string())?;
+            }
         }
         (Some(profile), None) => {
             QualificationReceipt::verify_matrix_for_profile(&source, image, &profile, &evidence)

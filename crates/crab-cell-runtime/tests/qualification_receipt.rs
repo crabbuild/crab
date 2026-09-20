@@ -1,9 +1,10 @@
 use std::{future::Future, pin::Pin, time::Duration};
 
 use crab_cell_runtime::{
-    Digest, QualificationExecution, QualificationOperation, QualificationOperationExecutor,
-    QualificationOwnership, QualificationProfile, QualificationReceipt, QualificationRunner,
-    QualificationWorkload, Result,
+    Digest, QUALIFICATION_PROTECTED_EVIDENCE_MAX_AGE_MS,
+    QUALIFICATION_PROTECTED_EVIDENCE_MAX_CLOCK_SKEW_MS, QualificationExecution,
+    QualificationOperation, QualificationOperationExecutor, QualificationOwnership,
+    QualificationProfile, QualificationReceipt, QualificationRunner, QualificationWorkload, Result,
 };
 use ed25519_dalek::SigningKey;
 
@@ -145,6 +146,44 @@ fn public_receipt_verifier_binds_source_image_and_artifact() {
     );
 }
 
+#[test]
+fn protected_evidence_freshness_rejects_stale_and_future_receipts() {
+    let current = receipt("protocol", b"raw-evidence")
+        .with_evidence(
+            900,
+            1_000,
+            b"none",
+            vec![Digest::from_bytes(
+                *blake3::hash(b"raw-evidence").as_bytes(),
+            )],
+            Vec::new(),
+        )
+        .expect("evidence timestamps");
+
+    current.verify_fresh_at(1_000).expect("current evidence");
+    current
+        .verify_fresh_at(1_000 + QUALIFICATION_PROTECTED_EVIDENCE_MAX_AGE_MS)
+        .expect("boundary evidence");
+    assert!(
+        current
+            .verify_fresh_at(1_001 + QUALIFICATION_PROTECTED_EVIDENCE_MAX_AGE_MS)
+            .is_err()
+    );
+    let future = receipt("protocol", b"raw-evidence")
+        .with_evidence(
+            QUALIFICATION_PROTECTED_EVIDENCE_MAX_CLOCK_SKEW_MS + 1_000,
+            QUALIFICATION_PROTECTED_EVIDENCE_MAX_CLOCK_SKEW_MS + 2_000,
+            b"none",
+            vec![Digest::from_bytes(
+                *blake3::hash(b"raw-evidence").as_bytes(),
+            )],
+            Vec::new(),
+        )
+        .expect("future evidence timestamps");
+    assert!(future.verify_fresh_at(1_000).is_err());
+    assert!(current.verify_fresh_at(0).is_err());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn public_protected_matrix_binds_run_artifact_profile_and_signer() {
     let profile = QualificationProfile::new("protected-contract".into(), 1, 8, 1, 5_000)
@@ -266,6 +305,26 @@ async fn public_protected_matrix_binds_run_artifact_profile_and_signer() {
         trusted_signer,
     )
     .expect("complete protected matrix");
+    QualificationReceipt::verify_matrix_for_profile_with_signer_fresh_at(
+        "protected-source",
+        image,
+        &profile,
+        &evidence,
+        trusted_signer,
+        2,
+    )
+    .expect("fresh protected matrix");
+    assert!(
+        QualificationReceipt::verify_matrix_for_profile_with_signer_fresh_at(
+            "protected-source",
+            image,
+            &profile,
+            &evidence,
+            trusted_signer,
+            2 + QUALIFICATION_PROTECTED_EVIDENCE_MAX_AGE_MS + 1,
+        )
+        .is_err()
+    );
     assert!(
         QualificationReceipt::verify_matrix_for_profile_with_signer(
             "protected-source",
