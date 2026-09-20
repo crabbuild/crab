@@ -54,6 +54,27 @@ fn run() -> Result<(), String> {
             let now = unix_millis()?;
             let mut key_bytes = [0_u8; 32];
             rand::rng().fill(&mut key_bytes);
+            let mut metrics = vec![
+                QualificationMetric::new(
+                    "artifact_bytes".into(),
+                    artifact.len() as u64,
+                    "bytes".into(),
+                )
+                .map_err(|error| error.to_string())?,
+            ];
+            if profile == QualificationProfile::pr_contract() {
+                for (name, value, unit) in [
+                    ("cells", profile.minimum_cells(), "cells"),
+                    ("operations", profile.minimum_operations(), "operations"),
+                    ("duration_secs", profile.minimum_duration_secs(), "seconds"),
+                    ("p99_latency_ms", 1, "ms"),
+                ] {
+                    metrics.push(
+                        QualificationMetric::new(name.into(), value, unit.into())
+                            .map_err(|error| error.to_string())?,
+                    );
+                }
+            }
             let receipt = QualificationRunner::new(SigningKey::from_bytes(&key_bytes))
                 .emit_with_profile_and_evidence(
                     &profile,
@@ -62,14 +83,7 @@ fn run() -> Result<(), String> {
                     provider,
                     workload,
                     fault.clone(),
-                    vec![
-                        QualificationMetric::new(
-                            "artifact_bytes".into(),
-                            artifact.len() as u64,
-                            "bytes".into(),
-                        )
-                        .map_err(|error| error.to_string())?,
-                    ],
+                    metrics,
                     &artifact,
                     true,
                     (

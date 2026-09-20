@@ -18,7 +18,7 @@
 - **Depends on**: plans 018–023 and plan 015 qualification infrastructure
 - **Category**: tests / performance / operations / release
 - **Planned at**: commit `892720ce6a6`, 2026-09-19
-- **Implementation status**: versioned profiles with constructor bounds, deterministic streaming workload execution, measured run artifacts that require independently verified progress for every primitive and bind each primitive's attempted count to the canonical workload, preflight guards, pinned-signer validation, receipt-to-workload seed binding, a local typed all-primitive smoke driver, and release packaging of the verified protected evidence bundle are implemented; protected provider/Kubernetes/scale receipts remain open
+- **Implementation status**: schema-2 versioned profiles now bind provider/topology identity, throughput, RSS, local-disk, file-descriptor, and object-store-call envelopes; matrix verification fails closed on missing or over-limit measurements, and measured run artifacts enforce their throughput envelope in addition to per-primitive progress and p99/duration checks. Deterministic streaming workload execution, preflight guards, pinned-signer validation, receipt-to-workload seed binding, a local typed all-primitive smoke driver, and release packaging of the verified protected evidence bundle are implemented; protected provider/Kubernetes/scale receipts remain open
 
 ## Why this matters
 
@@ -41,6 +41,11 @@ schema, signer, artifact-digest, and exact-source/image checks.
   manifests but fixtures are explicitly not release evidence.
 - `advisor-plans/015-cell-runtime-qualification-receipts.md` records local
   RustFS and Compose proof plus remaining provider/Kubernetes gates.
+- `QualificationProfile` schema 2 is the tracked source of truth for the
+  environment envelope. The checked-in JSON profiles are regenerated from the
+  built-ins and verified byte-for-byte apart from their allowed terminal
+  newline; profile identity and threshold metrics are verified in a fresh
+  process before a matrix can pass.
 - Runtime audit baseline at `892720ce6a6`: 340 runtime tests passed with three
   provider tests ignored; 200 server tests passed with four ignored; LTX replica
   suites and Clippy passed. These are regression baselines, not scale evidence.

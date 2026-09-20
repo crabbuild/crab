@@ -22,7 +22,7 @@ pub const QUALIFICATION_SCHEMA_VERSION: u32 = 4;
 /// Schema for a manifest that binds one receipt to every qualification row.
 pub const QUALIFICATION_MATRIX_SCHEMA_VERSION: u32 = 1;
 /// Schema for a versioned workload threshold profile.
-pub const QUALIFICATION_PROFILE_SCHEMA_VERSION: u32 = 1;
+pub const QUALIFICATION_PROFILE_SCHEMA_VERSION: u32 = 2;
 /// Required workload rows for a complete release qualification matrix.
 pub const QUALIFICATION_MATRIX_ROWS: &[&str] = &[
     "protocol",
@@ -51,6 +51,13 @@ pub struct QualificationProfile {
     minimum_operations: u64,
     minimum_duration_secs: u64,
     maximum_p99_latency_ms: u64,
+    minimum_throughput_ops_per_sec: u64,
+    maximum_peak_rss_bytes: u64,
+    maximum_local_disk_bytes: u64,
+    maximum_file_descriptors: u64,
+    maximum_bucket_calls: u64,
+    provider: String,
+    topology: String,
 }
 
 impl QualificationProfile {
@@ -77,6 +84,13 @@ impl QualificationProfile {
             minimum_operations,
             minimum_duration_secs,
             maximum_p99_latency_ms,
+            minimum_throughput_ops_per_sec: 0,
+            maximum_peak_rss_bytes: 0,
+            maximum_local_disk_bytes: 0,
+            maximum_file_descriptors: 0,
+            maximum_bucket_calls: 0,
+            provider: String::new(),
+            topology: String::new(),
         };
         profile.validate()?;
         Ok(profile)
@@ -84,32 +98,97 @@ impl QualificationProfile {
 
     /// Returns the deterministic local correctness profile.
     pub fn pr_contract() -> Self {
-        Self::built_in("pr-contract-v1", 1, 1, 1, 5_000)
+        Self::built_in("pr-contract-v1", 1, 1, 1, 5_000, "", "", 0, 0, 0, 0, 0)
     }
 
     /// Returns the three-process provider iteration profile.
     pub fn local_provider() -> Self {
-        Self::built_in("local-provider-v1", 256, 1_000_000, 60, 1_000)
+        Self::built_in(
+            "local-provider-v1",
+            256,
+            1_000_000,
+            60,
+            1_000,
+            "rustfs",
+            "three-process",
+            1,
+            8 * 1024 * 1024 * 1024,
+            20 * 1024 * 1024 * 1024,
+            10_000,
+            10_000_000,
+        )
     }
 
     /// Returns the dedicated scale profile.
     pub fn scale() -> Self {
-        Self::built_in("scale-v1", 10_000, 10_000_000, 3_600, 500)
+        Self::built_in(
+            "scale-v1",
+            10_000,
+            10_000_000,
+            3_600,
+            500,
+            "rustfs",
+            "dedicated-hosts",
+            2_777,
+            32 * 1024 * 1024 * 1024,
+            200 * 1024 * 1024 * 1024,
+            100_000,
+            100_000_000,
+        )
     }
 
     /// Returns the protected Kubernetes fault profile.
     pub fn fault() -> Self {
-        Self::built_in("fault-v1", 256, 1_000_000, 60, 1_000)
+        Self::built_in(
+            "fault-v1",
+            256,
+            1_000_000,
+            60,
+            1_000,
+            "rustfs",
+            "kubernetes",
+            1,
+            8 * 1024 * 1024 * 1024,
+            20 * 1024 * 1024 * 1024,
+            10_000,
+            10_000_000,
+        )
     }
 
     /// Returns the provider-specific correctness profile.
     pub fn provider() -> Self {
-        Self::built_in("provider-v1", 256, 1_000_000, 60, 1_000)
+        Self::built_in(
+            "provider-v1",
+            256,
+            1_000_000,
+            60,
+            1_000,
+            "provider-matrix",
+            "three-process",
+            1,
+            8 * 1024 * 1024 * 1024,
+            20 * 1024 * 1024 * 1024,
+            10_000,
+            10_000_000,
+        )
     }
 
     /// Returns the rolling-release compatibility profile.
     pub fn compatibility() -> Self {
-        Self::built_in("compatibility-v1", 256, 1_000_000, 60, 1_000)
+        Self::built_in(
+            "compatibility-v1",
+            256,
+            1_000_000,
+            60,
+            1_000,
+            "rustfs",
+            "rolling",
+            1,
+            8 * 1024 * 1024 * 1024,
+            20 * 1024 * 1024 * 1024,
+            10_000,
+            10_000_000,
+        )
     }
 
     /// Returns the profile name used in signed receipts.
@@ -140,6 +219,49 @@ impl QualificationProfile {
     #[must_use]
     pub const fn maximum_p99_latency_ms(&self) -> u64 {
         self.maximum_p99_latency_ms
+    }
+
+    /// Returns the minimum measured throughput, or zero when the profile does
+    /// not impose a throughput threshold.
+    #[must_use]
+    pub const fn minimum_throughput_ops_per_sec(&self) -> u64 {
+        self.minimum_throughput_ops_per_sec
+    }
+
+    /// Returns the maximum permitted measured peak RSS, or zero when omitted.
+    #[must_use]
+    pub const fn maximum_peak_rss_bytes(&self) -> u64 {
+        self.maximum_peak_rss_bytes
+    }
+
+    /// Returns the maximum permitted measured local-disk usage, or zero when omitted.
+    #[must_use]
+    pub const fn maximum_local_disk_bytes(&self) -> u64 {
+        self.maximum_local_disk_bytes
+    }
+
+    /// Returns the maximum permitted measured file-descriptor count, or zero when omitted.
+    #[must_use]
+    pub const fn maximum_file_descriptors(&self) -> u64 {
+        self.maximum_file_descriptors
+    }
+
+    /// Returns the maximum permitted object-store call count, or zero when omitted.
+    #[must_use]
+    pub const fn maximum_bucket_calls(&self) -> u64 {
+        self.maximum_bucket_calls
+    }
+
+    /// Returns the required provider label, or an empty value for a generic profile.
+    #[must_use]
+    pub fn required_provider(&self) -> &str {
+        &self.provider
+    }
+
+    /// Returns the required topology label, or an empty value for a generic profile.
+    #[must_use]
+    pub fn required_topology(&self) -> &str {
+        &self.topology
     }
 
     /// Returns whether this profile represents release evidence rather than a
@@ -177,12 +299,23 @@ impl QualificationProfile {
         ))
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "built-in profiles keep every signed threshold explicit"
+    )]
     fn built_in(
         name: &'static str,
         minimum_cells: u64,
         minimum_operations: u64,
         minimum_duration_secs: u64,
         maximum_p99_latency_ms: u64,
+        provider: &'static str,
+        topology: &'static str,
+        minimum_throughput_ops_per_sec: u64,
+        maximum_peak_rss_bytes: u64,
+        maximum_local_disk_bytes: u64,
+        maximum_file_descriptors: u64,
+        maximum_bucket_calls: u64,
     ) -> Self {
         Self {
             schema_version: QUALIFICATION_PROFILE_SCHEMA_VERSION,
@@ -191,6 +324,13 @@ impl QualificationProfile {
             minimum_operations,
             minimum_duration_secs,
             maximum_p99_latency_ms,
+            minimum_throughput_ops_per_sec,
+            maximum_peak_rss_bytes,
+            maximum_local_disk_bytes,
+            maximum_file_descriptors,
+            maximum_bucket_calls,
+            provider: provider.to_owned(),
+            topology: topology.to_owned(),
         }
     }
 
@@ -203,10 +343,22 @@ impl QualificationProfile {
             || self.minimum_cells > MAX_QUALIFICATION_CELLS
             || self.minimum_operations > MAX_QUALIFICATION_OPERATIONS
             || self.minimum_duration_secs > MAX_QUALIFICATION_DURATION_SECS
+            || self.minimum_throughput_ops_per_sec > MAX_QUALIFICATION_OPERATIONS
+            || self.maximum_peak_rss_bytes > (u64::from(u32::MAX) << 32)
+            || self.maximum_local_disk_bytes > (u64::from(u32::MAX) << 32)
+            || self.maximum_file_descriptors > 1_000_000
+            || self.maximum_bucket_calls > MAX_QUALIFICATION_OPERATIONS
         {
             return Err(Error::Control("invalid qualification profile"));
         }
-        validate_label(&self.name, "qualification profile name")
+        validate_label(&self.name, "qualification profile name")?;
+        if !self.provider.is_empty() {
+            validate_label(&self.provider, "qualification profile provider")?;
+        }
+        if !self.topology.is_empty() {
+            validate_label(&self.topology, "qualification profile topology")?;
+        }
+        Ok(())
     }
 }
 
@@ -639,6 +791,14 @@ impl QualificationRunArtifact {
             || self.threshold_metric("p99_latency_ms", "ms")? > profile.maximum_p99_latency_ms()
         {
             return Err(Error::Control("qualification run profile threshold failed"));
+        }
+        if profile.minimum_throughput_ops_per_sec() != 0 {
+            let duration_secs = self.elapsed_ms.saturating_add(999) / 1_000;
+            if self.operations / duration_secs < profile.minimum_throughput_ops_per_sec() {
+                return Err(Error::Control(
+                    "qualification run throughput threshold failed",
+                ));
+            }
         }
         Ok(())
     }
@@ -1618,6 +1778,11 @@ impl QualificationReceipt {
         if self.profile != profile.name || self.profile_digest() != profile.digest()? {
             return Err(Error::Control("qualification profile identity"));
         }
+        if (!profile.provider.is_empty() && self.provider != profile.provider)
+            || (!profile.topology.is_empty() && self.topology != profile.topology)
+        {
+            return Err(Error::Control("qualification environment identity"));
+        }
         self.verify_execution_environment(profile)?;
         self.verify_for_artifacts(source_revision, image, artifacts)
     }
@@ -1660,6 +1825,36 @@ impl QualificationReceipt {
             || p99_latency_ms > profile.maximum_p99_latency_ms()
         {
             return Err(Error::Control("qualification profile threshold failed"));
+        }
+        if profile.minimum_throughput_ops_per_sec() != 0
+            && operations / duration_secs < profile.minimum_throughput_ops_per_sec()
+        {
+            return Err(Error::Control("qualification throughput threshold failed"));
+        }
+        if profile.maximum_peak_rss_bytes() != 0
+            && (self.peak_rss_bytes == 0 || self.peak_rss_bytes > profile.maximum_peak_rss_bytes())
+        {
+            return Err(Error::Control("qualification RSS threshold failed"));
+        }
+        if profile.maximum_local_disk_bytes() != 0
+            && self.threshold_metric("peak_local_disk_bytes", "bytes")?
+                > profile.maximum_local_disk_bytes()
+        {
+            return Err(Error::Control("qualification disk threshold failed"));
+        }
+        if profile.maximum_file_descriptors() != 0
+            && self.threshold_metric("peak_file_descriptors", "count")?
+                > profile.maximum_file_descriptors()
+        {
+            return Err(Error::Control(
+                "qualification file-descriptor threshold failed",
+            ));
+        }
+        if profile.maximum_bucket_calls() != 0 && self.bucket_calls > profile.maximum_bucket_calls()
+        {
+            return Err(Error::Control(
+                "qualification object-store threshold failed",
+            ));
         }
         Ok(())
     }
@@ -1763,6 +1958,7 @@ impl QualificationReceipt {
                 return Err(Error::Control("qualification matrix receipt workload"));
             }
             receipt.verify_for_profile(source_revision, image, profile, artifacts)?;
+            receipt.verify_profile_thresholds(profile)?;
             if *workload == "primitives" {
                 receipt.verify_primitive_workload(profile, artifacts)?;
             }
@@ -2354,6 +2550,30 @@ mod tests {
         );
         artifact.verify_for_profile(&profile).unwrap();
 
+        let mut throughput_profile =
+            QualificationProfile::new("throughput-run".into(), 1, 8, 1, 1_000).unwrap();
+        throughput_profile.minimum_throughput_ops_per_sec = 8;
+        let throughput_workload =
+            QualificationWorkload::generate_with_size(&throughput_profile, 19, 1, 8, 1).unwrap();
+        let mut slow = QualificationRunArtifact {
+            schema_version: QUALIFICATION_RUN_ARTIFACT_SCHEMA_VERSION,
+            workload: throughput_workload.clone(),
+            profile: throughput_profile.name.clone(),
+            profile_digest: *throughput_profile.digest().unwrap().as_bytes(),
+            seed: throughput_workload.seed(),
+            cells: throughput_workload.cells(),
+            operations: throughput_workload.operations(),
+            elapsed_ms: 2_000,
+            primitive_counts: throughput_workload.primitives.clone(),
+            outcome_digest: [7; 32],
+            metrics: vec![
+                QualificationMetric::new("p99_latency_ms".into(), 1, "ms".into()).unwrap(),
+            ],
+        };
+        assert!(slow.verify_for_profile(&throughput_profile).is_err());
+        slow.elapsed_ms = 1_000;
+        slow.verify_for_profile(&throughput_profile).unwrap();
+
         let mut forged = artifact.clone();
         forged.seed = forged.seed.saturating_add(1);
         assert!(forged.verify_for_profile(&profile).is_err());
@@ -2637,6 +2857,8 @@ mod tests {
             QualificationMetric::new("operations".into(), 10_000_000, "operations".into()).unwrap(),
             QualificationMetric::new("duration_secs".into(), 3_600, "seconds".into()).unwrap(),
             QualificationMetric::new("p99_latency_ms".into(), 500, "ms".into()).unwrap(),
+            QualificationMetric::new("peak_local_disk_bytes".into(), 1, "bytes".into()).unwrap(),
+            QualificationMetric::new("peak_file_descriptors".into(), 1, "count".into()).unwrap(),
         ];
         let local = QualificationRunner::new(key.clone())
             .emit_with_profile_and_evidence(
@@ -2691,7 +2913,7 @@ mod tests {
                 (
                     "rustc".into(),
                     "release".into(),
-                    "three-node".into(),
+                    "dedicated-hosts".into(),
                     7,
                     1,
                     1,
@@ -2890,6 +3112,14 @@ mod tests {
         let workload = QualificationWorkload::generate(&profile, 7).unwrap();
         let workload_artifact = workload.encode().unwrap();
         let runner = QualificationRunner::new(SigningKey::from_bytes(&[18; 32]));
+        let threshold_metrics = || {
+            vec![
+                QualificationMetric::new("cells".into(), 1, "cells".into()).unwrap(),
+                QualificationMetric::new("operations".into(), 1, "operations".into()).unwrap(),
+                QualificationMetric::new("duration_secs".into(), 1, "seconds".into()).unwrap(),
+                QualificationMetric::new("p99_latency_ms".into(), 1, "ms".into()).unwrap(),
+            ]
+        };
         let mut receipts = Vec::new();
         let mut artifacts = Vec::new();
         for workload_name in QUALIFICATION_MATRIX_ROWS {
@@ -2912,7 +3142,7 @@ mod tests {
                         "local".into(),
                         (*workload_name).into(),
                         "none".into(),
-                        Vec::new(),
+                        threshold_metrics(),
                         &artifact,
                         true,
                         (
@@ -2947,6 +3177,46 @@ mod tests {
         QualificationReceipt::verify_matrix_for_profile("source", image, &profile, &evidence)
             .unwrap();
 
+        let below_threshold = runner
+            .emit_with_profile(
+                &profile,
+                "source".into(),
+                image,
+                "local".into(),
+                "protocol".into(),
+                "none".into(),
+                vec![
+                    QualificationMetric::new("cells".into(), 1, "cells".into()).unwrap(),
+                    QualificationMetric::new("operations".into(), 1, "operations".into()).unwrap(),
+                    QualificationMetric::new("duration_secs".into(), 1, "seconds".into()).unwrap(),
+                    QualificationMetric::new("p99_latency_ms".into(), 5_001, "ms".into()).unwrap(),
+                ],
+                b"artifact-protocol",
+                true,
+                (
+                    "rustc".into(),
+                    "test".into(),
+                    "local".into(),
+                    0,
+                    0,
+                    0,
+                    false,
+                ),
+            )
+            .unwrap();
+        let mut below_threshold_evidence = evidence.clone();
+        let below_threshold_artifacts = [b"artifact-protocol" as &[u8]];
+        below_threshold_evidence[0] = ("protocol", &below_threshold, &below_threshold_artifacts);
+        assert!(
+            QualificationReceipt::verify_matrix_for_profile(
+                "source",
+                image,
+                &profile,
+                &below_threshold_evidence,
+            )
+            .is_err()
+        );
+
         let bad = runner
             .emit_with_profile(
                 &profile,
@@ -2955,7 +3225,7 @@ mod tests {
                 "local".into(),
                 "primitives".into(),
                 "none".into(),
-                Vec::new(),
+                threshold_metrics(),
                 &workload_artifact,
                 true,
                 (
