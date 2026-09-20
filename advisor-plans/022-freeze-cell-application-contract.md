@@ -211,7 +211,7 @@ unapproved dependency was added.
 - [x] The reference application registers and invokes all primitives through public author APIs.
 - [x] Semantic exclusions and bounded limits are executable tests, not prose-only claims.
 - [x] No node/provider/server policy moved into low-level crates.
-- [ ] Workspace, runtime, architecture, Clippy, format, and docs gates pass.
+- [x] Workspace, runtime, architecture, Clippy, format, and docs gates pass.
 
 ## STOP conditions
 
