@@ -1,6 +1,6 @@
 //! Rebuilds the repository Cell's Git browse projection from object storage.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -788,7 +788,10 @@ fn tree_rows(
             tree_by_path.insert(entry.path.as_bytes().to_vec(), tree_oid.clone());
         }
     }
-    let mut grouped = HashMap::<Vec<u8>, Vec<projection::TreeEntryRow>>::new();
+    // A Git tree object can be mounted at more than one path.  The recursive
+    // walk reports each mount, while the projection stores one row per tree
+    // object, so coalesce repeated names before sending the row to SQLite.
+    let mut grouped = HashMap::<Vec<u8>, BTreeMap<Vec<u8>, projection::TreeEntryRow>>::new();
     if let Some(root_oid) = root_oid {
         grouped.entry(root_oid).or_default();
     }
@@ -805,19 +808,24 @@ fn tree_rows(
         let Some(name) = entry.path.file_name() else {
             continue;
         };
-        grouped
-            .entry(tree_oid.clone())
-            .or_default()
-            .push(projection::TreeEntryRow {
-                name: name.to_vec(),
-                mode: entry.mode.raw(),
-                object_oid: entry.oid.as_slice().to_vec(),
-                object_kind: entry_kind_code(entry.kind),
-            });
+        let row = projection::TreeEntryRow {
+            name: name.to_vec(),
+            mode: entry.mode.raw(),
+            object_oid: entry.oid.as_slice().to_vec(),
+            object_kind: entry_kind_code(entry.kind),
+        };
+        let entries = grouped.entry(tree_oid.clone()).or_default();
+        if let Some(previous) = entries.insert(row.name.clone(), row.clone())
+            && previous != row
+        {
+            return Err(crate::Error::Remote(crab_remote_git::Error::Corrupt {
+                stage: crab_remote_git::CorruptionStage::Tree,
+            }));
+        }
     }
     let mut rows = Vec::new();
-    for (tree_oid, mut entries) in grouped {
-        entries.sort_by(|left, right| left.name.cmp(&right.name));
+    for (tree_oid, entries) in grouped {
+        let entries = entries.into_values().collect::<Vec<_>>();
         let row = projection::TreeRow {
             tree_oid,
             encoded_bytes: entries
@@ -1007,5 +1015,52 @@ mod tests {
     fn attribution_batches_reject_one_oversized_path() {
         let paths = vec![vec![b'x'; MAX_ATTRIBUTION_QUERY_BYTES]];
         assert!(attribution_batches("token", &[0x11; 20], paths).is_err());
+    }
+
+    #[test]
+    fn tree_rows_coalesce_reused_tree_objects() {
+        let tree_oid =
+            gix_hash::ObjectId::from_hex(b"2222222222222222222222222222222222222222").unwrap();
+        let blob_oid =
+            gix_hash::ObjectId::from_hex(b"3333333333333333333333333333333333333333").unwrap();
+        let entries = vec![
+            TreeEntry {
+                path: crab_remote_git::GitPath::new(b"one".to_vec()).unwrap(),
+                oid: tree_oid,
+                mode: crab_remote_git::EntryMode::Tree,
+                kind: EntryKind::Tree,
+                size: None,
+            },
+            TreeEntry {
+                path: crab_remote_git::GitPath::new(b"two".to_vec()).unwrap(),
+                oid: tree_oid,
+                mode: crab_remote_git::EntryMode::Tree,
+                kind: EntryKind::Tree,
+                size: None,
+            },
+            TreeEntry {
+                path: crab_remote_git::GitPath::new(b"one/file".to_vec()).unwrap(),
+                oid: blob_oid,
+                mode: crab_remote_git::EntryMode::Regular,
+                kind: EntryKind::Blob,
+                size: None,
+            },
+            TreeEntry {
+                path: crab_remote_git::GitPath::new(b"two/file".to_vec()).unwrap(),
+                oid: blob_oid,
+                mode: crab_remote_git::EntryMode::Regular,
+                kind: EntryKind::Blob,
+                size: None,
+            },
+        ];
+        let rows = tree_rows(vec![0x11; 20], entries).unwrap();
+        let reused_tree = rows
+            .iter()
+            .flatten()
+            .find(|row| row.tree_oid == tree_oid.as_slice())
+            .unwrap();
+        assert_eq!(reused_tree.entries.len(), 1);
+        assert_eq!(reused_tree.entries[0].name, b"file");
+        assert_eq!(reused_tree.entries[0].object_oid, blob_oid.as_slice());
     }
 }
