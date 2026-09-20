@@ -709,6 +709,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn node_deadline_returns_after_a_stalled_facility() {
+        let node = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([21; 16]))
+            .build()
+            .unwrap();
+        node.install_facility(
+            CellNodeFacility::new("stalled", || async {
+                std::future::pending::<FacilityResult>().await
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let result = node
+            .shutdown_until(Instant::now() + std::time::Duration::from_millis(10))
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(node.state(), NodeState::Draining);
+    }
+
+    #[tokio::test]
     async fn node_owns_one_task_group_and_drains_it() {
         let node = CellNodeBuilder::new(application())
             .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
