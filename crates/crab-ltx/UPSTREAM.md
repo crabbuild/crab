@@ -65,7 +65,7 @@ were moved behind Crab-owned APIs:
 
 | Celld source | Crab disposition |
 | --- | --- |
-| `lib.rs`, `db.rs`, `wal.rs` | WAL validation and capture split across `lib.rs`, `db/`, `wal.rs`, `managed.rs`, and `types.rs` |
+| `lib.rs`, `db.rs`, `wal.rs` | WAL validation and capture split across `lib.rs`, `capture.rs`, `capture/`, `wal.rs`, `db.rs`, and `types.rs` |
 | `ltx.rs`, `codec.rs`, `lz4_block.rs` | Strict LTX parsing, dual decoding, sized-block encoding, and checked LZ4 helpers |
 | `compactor.rs` | Exact-input local and Cell compaction with endpoint verification |
 | `host.rs` | Injectable filesystem, clock, SQLite VFS, disk admission, telemetry, executor, and worker contracts in `environment.rs` |

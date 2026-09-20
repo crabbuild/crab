@@ -10,7 +10,7 @@ Dependency: plan 008's actor-owned local routing
 
 ## Executor instructions
 
-Implement on `codex/009-cell-background-hydration`. Read `managed.rs`, sparse
+Implement on `codex/009-cell-background-hydration`. Read `db.rs`, sparse
 VFS/paging code, actor/worker lifecycle, admission budgets, SQL worker tests,
 and the complete resident-routing implementation. The runtime must schedule
 existing verified hydration mechanics; do not create another page-download or
@@ -21,7 +21,7 @@ SQLite-open path. Use a unique external Cargo target.
 ```bash
 git fetch origin main
 git diff --stat 4a77b6f1252a..origin/main -- \
-  crates/crab-ltx/src/managed.rs \
+  crates/crab-ltx/src/db.rs \
   crates/crab-ltx/src/paged* \
   crates/crab-cell-runtime/src/actor.rs \
   crates/crab-cell-runtime/src/worker.rs \

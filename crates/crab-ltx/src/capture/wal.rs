@@ -187,7 +187,7 @@ impl CaptureEngine {
         if info.offset == WAL_HEADER_SIZE as i64 {
             self.checkpointed_wal_offset = WAL_HEADER_SIZE as i64;
         }
-        self.timing_begin(crate::db::TimingPhase::WalRead);
+        self.timing_begin(crate::capture::TimingPhase::WalRead);
         let pos = self.position;
         let tx_id = Txid(pos.txid.0.checked_add(1).ok_or(CrabError::TxNotAvailable)?);
         let filename = self.ltx_path(0, tx_id, tx_id);
@@ -261,10 +261,10 @@ impl CaptureEngine {
                 .map_err(CrabError::from)?
         };
 
-        self.timing_end(crate::db::TimingPhase::WalRead);
-        self.timing_begin(crate::db::TimingPhase::PageCollection);
+        self.timing_end(crate::capture::TimingPhase::WalRead);
+        self.timing_begin(crate::capture::TimingPhase::PageCollection);
         let page_map_result = rd.page_map().map_err(CrabError::from);
-        self.timing_end(crate::db::TimingPhase::PageCollection);
+        self.timing_end(crate::capture::TimingPhase::PageCollection);
         let (page_map, max_offset, wal_commit) = page_map_result?;
         if wal_commit > 0 {
             commit = wal_commit;
@@ -508,22 +508,22 @@ impl CaptureEngine {
             );
             let local_write_nanos = write_nanos.load(Ordering::Relaxed);
             self.timing_add_phase_nanos(
-                crate::db::TimingPhase::Encode,
+                crate::capture::TimingPhase::Encode,
                 encode_elapsed.saturating_sub(local_write_nanos),
             );
-            self.timing_add_phase_nanos(crate::db::TimingPhase::LocalWrite, local_write_nanos);
+            self.timing_add_phase_nanos(crate::capture::TimingPhase::LocalWrite, local_write_nanos);
             let (mut output, size_bytes, digest) = encoder.into_writer().finish();
-            self.timing_begin(crate::db::TimingPhase::Fsync);
+            self.timing_begin(crate::capture::TimingPhase::Fsync);
             output.sync_all()?;
-            self.timing_end(crate::db::TimingPhase::Fsync);
+            self.timing_end(crate::capture::TimingPhase::Fsync);
             drop(output);
             if spool_index {
                 self.host.remove_file(Path::new(index_filename))?;
             }
-            self.timing_begin(crate::db::TimingPhase::ParentSync);
+            self.timing_begin(crate::capture::TimingPhase::ParentSync);
             self.host
                 .rename(Path::new(tmp_filename), Path::new(filename))?;
-            self.timing_end(crate::db::TimingPhase::ParentSync);
+            self.timing_end(crate::capture::TimingPhase::ParentSync);
             Ok((checksums, size_bytes, digest))
         })();
         if result.is_err() {
@@ -569,6 +569,6 @@ impl CaptureEngine {
             * u64::from(self.page_size);
         // Read through SQLite's file, below its WAL-aware pager. A sparse VFS
         // must hydrate holes here too, not only on application SQL reads.
-        crate::managed::read_main(&self.conn, offset, self.page_size as usize)
+        crate::db::read_main(&self.conn, offset, self.page_size as usize)
     }
 }

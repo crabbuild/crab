@@ -10,6 +10,7 @@
 
 #![doc = include_str!("../README.md")]
 
+mod capture;
 #[cfg(feature = "replica")]
 mod cell_layout;
 mod codec;
@@ -31,7 +32,6 @@ pub use environment::{
 };
 mod ltx;
 mod lz4_block;
-mod managed;
 mod pages;
 mod recovery;
 mod types;
@@ -64,9 +64,9 @@ pub use writable_vfs::Hydration;
 #[cfg(all(test, feature = "replica"))]
 mod format_tests;
 
-pub use db::CheckpointMode;
+pub use capture::CheckpointMode;
+pub use db::{Db, MANAGED_CONNECTION_PAGE_CACHE_BYTES, MANAGED_SQLITE_CONNECTIONS};
 pub use error::{CrabError, QueryError, Result, TransactionError};
-pub use managed::{Db, MANAGED_CONNECTION_PAGE_CACHE_BYTES, MANAGED_SQLITE_CONNECTIONS};
 pub use recovery::{VerifiedPlan, compact_exact, restore_exact};
 pub use rusqlite;
 pub use types::{CaptureBatch, CaptureTiming, Limits, LocalSegment, Position, SegmentInfo};

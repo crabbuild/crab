@@ -136,7 +136,7 @@ impl Registration {
                 .map_err(|_| CrabError::InvalidState("sparse state poisoned"))?
                 .present[page as usize - 1];
             if !present && page != crate::ltx::lock_pgno(self.app.page_size) {
-                crate::managed::read_main(
+                crate::db::read_main(
                     connection,
                     u64::from(page - 1) * u64::from(self.app.page_size),
                     self.app.page_size as usize,
