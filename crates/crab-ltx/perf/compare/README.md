@@ -58,6 +58,10 @@ important fields are:
 
 - `workload_write_us`: SQLite commit time for schema plus the `N` inserts.
 - `capture_us`: local WAL-to-LTX capture time, including local file syncs.
+- `capture_*_us`: Crab's capture phase ledger. `capture_fsync_us` is the LTX
+  file sync; `capture_parent_sync_us` is the directory-entry sync that makes
+  the atomic rename durable. The other fields split position resolution, WAL
+  reads, page collection, encoding, and local writes.
 - `verify_us`: Crab's explicit owned-input plan verification. Celld reports
   zero because its compactor does not expose an equivalent call.
 - `compact_us`: local LTX compaction, including source listing, reads, merge,
@@ -74,10 +78,18 @@ it does not include those checks in the reported restore timer.
 For a phase comparison, add Crab's `verify_us` to its `compact_us` (and, when
 you want the fully checked path, `compact_verify_us`) before comparing it with
 Celld's `compact_us`. Crab intentionally verifies and owns every input before
-the merge; Celld's pinned `ReplicaCompactor` validates the range shape and
-destination continuity but does not expose the same input-plan verification
-phase. The `end_to_end_us` field already includes all reported phases for each
-implementation, so it is the safer headline number.
+the merge; the compacted output also recomputes its page checksum while merging
+and is decoded once before installation. Celld's pinned `ReplicaCompactor`
+validates the range shape and destination continuity but does not expose the
+same input-plan verification phase. The `end_to_end_us` field already includes
+all reported phases for each implementation, so it is the safer headline
+number.
+
+The implementations do not have identical durability costs. Crab fsyncs the
+LTX file and its parent directory before returning a capture batch. The pinned
+Celld path fsyncs the file but uses a plain rename without a parent-directory
+sync. Do not treat the capture-only gap as a portable performance win without
+making that durability choice explicit.
 
 ## Scope
 

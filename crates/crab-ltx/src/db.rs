@@ -231,6 +231,7 @@ pub struct Db {
     checkpointed_wal_offset: i64,
     verified_schema_version: Option<i64>,
     last_l0_header: Option<(Txid, LastL0Header)>,
+    last_l0_segment: Option<crate::SegmentInfo>,
 
     position: Pos,
     l0_dir_ready: bool,
@@ -317,6 +318,7 @@ impl Db {
             checkpointed_wal_offset: 0,
             verified_schema_version: None,
             last_l0_header: None,
+            last_l0_segment: None,
             position: Pos::ZERO,
             l0_dir_ready: false,
             wal_file: None,
@@ -520,6 +522,13 @@ impl Db {
         self.position
     }
 
+    pub(crate) fn sealed_l0_segment(&self, txid: Txid) -> Option<crate::SegmentInfo> {
+        self.last_l0_segment
+            .as_ref()
+            .filter(|info| info.max_txid == txid.0)
+            .cloned()
+    }
+
     pub(crate) fn seed_continuation(
         &mut self,
         position: crate::Position,
@@ -535,6 +544,7 @@ impl Db {
             return Err(CrabError::ChecksumMismatch);
         }
         let wal = self.wal_header_bytes()?;
+        self.last_l0_segment = None;
         self.last_l0_header = Some((
             Txid(position.txid),
             LastL0Header {

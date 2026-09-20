@@ -448,17 +448,21 @@ impl ManagedDb {
         if after.txid.0 > before.txid.0 {
             for txid in before.txid.0 + 1..=after.txid.0 {
                 let path = PathBuf::from(self.db.ltx_path(0, Txid(txid), Txid(txid)));
-                let file = crate::LtxHost {
-                    facilities: self.host.clone(),
-                    max_database_bytes: self.limits.max_database_bytes,
-                    max_file_bytes: self.limits.max_capture_bytes,
-                }
-                .open(&path)?;
-                self.db.timing_begin(crate::db::TimingPhase::Verification);
-                let inspected = ltx::inspect_reader(file);
-                self.db.timing_end(crate::db::TimingPhase::Verification);
-                let (decoded, size, digest) = inspected?;
-                let info = SegmentInfo::from_inspected(&decoded, size, digest);
+                let info = if let Some(info) = self.db.sealed_l0_segment(Txid(txid)) {
+                    info
+                } else {
+                    let file = crate::LtxHost {
+                        facilities: self.host.clone(),
+                        max_database_bytes: self.limits.max_database_bytes,
+                        max_file_bytes: self.limits.max_capture_bytes,
+                    }
+                    .open(&path)?;
+                    self.db.timing_begin(crate::db::TimingPhase::Verification);
+                    let inspected = ltx::inspect_reader(file);
+                    self.db.timing_end(crate::db::TimingPhase::Verification);
+                    let (decoded, size, digest) = inspected?;
+                    SegmentInfo::from_inspected(&decoded, size, digest)
+                };
                 self.db.timing_add_ltx_bytes(info.size_bytes);
                 self.db.timing_add_segment();
                 self.account_capture(&info)?;
@@ -855,6 +859,19 @@ mod tests {
             .iter()
             .map(|segment| segment.info().size_bytes)
             .sum::<u64>();
+        let segment = &batch.segments[0];
+        let file = crate::LtxHost {
+            facilities: crate::Host::default(),
+            max_database_bytes: Limits::default().max_database_bytes,
+            max_file_bytes: Limits::default().max_file_bytes,
+        }
+        .open(segment.path())
+        .unwrap();
+        let (decoded, size, digest) = crate::ltx::inspect_reader(file).unwrap();
+        assert_eq!(
+            segment.info(),
+            &crate::SegmentInfo::from_inspected(&decoded, size, digest)
+        );
         assert!(batch.timing.total_nanos > 0);
         assert!(phase_nanos <= batch.timing.total_nanos);
         assert_eq!(batch.timing.segment_count as usize, batch.segments.len());

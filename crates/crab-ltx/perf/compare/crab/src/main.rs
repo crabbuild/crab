@@ -1,4 +1,6 @@
-use crab_ltx::{Limits, ManagedDb, Position, VerifiedPlan, compact_exact, restore_exact};
+use crab_ltx::{
+    CaptureTiming, Limits, ManagedDb, Position, VerifiedPlan, compact_exact, restore_exact,
+};
 use serde::Serialize;
 use std::error::Error;
 use std::path::Path;
@@ -19,6 +21,14 @@ struct Sample {
     round: usize,
     workload_write_us: u64,
     capture_us: u64,
+    capture_position_us: u64,
+    capture_wal_read_us: u64,
+    capture_page_collection_us: u64,
+    capture_verification_us: u64,
+    capture_encode_us: u64,
+    capture_local_write_us: u64,
+    capture_fsync_us: u64,
+    capture_parent_sync_us: u64,
     verify_us: u64,
     compact_us: u64,
     compact_verify_us: u64,
@@ -52,6 +62,14 @@ struct ConfigOutput {
 struct Summary {
     workload_write_us: u64,
     capture_us: u64,
+    capture_position_us: u64,
+    capture_wal_read_us: u64,
+    capture_page_collection_us: u64,
+    capture_verification_us: u64,
+    capture_encode_us: u64,
+    capture_local_write_us: u64,
+    capture_fsync_us: u64,
+    capture_parent_sync_us: u64,
     verify_us: u64,
     compact_us: u64,
     compact_verify_us: u64,
@@ -130,6 +148,7 @@ fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error>> {
     let mut database = ManagedDb::open(&source, Limits::default())?;
     let mut segments = Vec::new();
     let mut position = Position::default();
+    let mut capture_phases = CapturePhases::default();
     let mut workload_write_us = 0;
     let mut capture_us = 0;
 
@@ -140,7 +159,12 @@ fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error>> {
     })?;
     workload_write_us += elapsed_us(started);
     let started = Instant::now();
-    append_capture(&mut database, &mut segments, &mut position)?;
+    append_capture(
+        &mut database,
+        &mut segments,
+        &mut position,
+        &mut capture_phases,
+    )?;
     capture_us += elapsed_us(started);
 
     for id in 0..config.transactions {
@@ -156,7 +180,12 @@ fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error>> {
         workload_write_us += elapsed_us(started);
 
         let started = Instant::now();
-        append_capture(&mut database, &mut segments, &mut position)?;
+        append_capture(
+            &mut database,
+            &mut segments,
+            &mut position,
+            &mut capture_phases,
+        )?;
         capture_us += elapsed_us(started);
     }
 
@@ -187,6 +216,14 @@ fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error>> {
         round,
         workload_write_us,
         capture_us,
+        capture_position_us: capture_phases.position_us(),
+        capture_wal_read_us: capture_phases.wal_read_us(),
+        capture_page_collection_us: capture_phases.page_collection_us(),
+        capture_verification_us: capture_phases.verification_us(),
+        capture_encode_us: capture_phases.encode_us(),
+        capture_local_write_us: capture_phases.local_write_us(),
+        capture_fsync_us: capture_phases.fsync_us(),
+        capture_parent_sync_us: capture_phases.parent_sync_us(),
         verify_us,
         compact_us,
         compact_verify_us,
@@ -207,11 +244,80 @@ fn append_capture(
     database: &mut ManagedDb,
     segments: &mut Vec<crab_ltx::LocalSegment>,
     position: &mut Position,
+    phases: &mut CapturePhases,
 ) -> crab_ltx::Result<()> {
     let batch = database.capture()?;
     *position = batch.position;
+    phases.add(batch.timing);
     segments.extend(batch.segments);
     Ok(())
+}
+
+#[derive(Debug, Default)]
+struct CapturePhases {
+    position_nanos: u64,
+    wal_read_nanos: u64,
+    page_collection_nanos: u64,
+    verification_nanos: u64,
+    encode_nanos: u64,
+    local_write_nanos: u64,
+    fsync_nanos: u64,
+    parent_sync_nanos: u64,
+}
+
+impl CapturePhases {
+    fn add(&mut self, timing: CaptureTiming) {
+        self.position_nanos = self
+            .position_nanos
+            .saturating_add(timing.position_resolution_nanos);
+        self.wal_read_nanos = self.wal_read_nanos.saturating_add(timing.wal_read_nanos);
+        self.page_collection_nanos = self
+            .page_collection_nanos
+            .saturating_add(timing.page_collection_nanos);
+        self.verification_nanos = self
+            .verification_nanos
+            .saturating_add(timing.verification_nanos);
+        self.encode_nanos = self.encode_nanos.saturating_add(timing.encode_nanos);
+        self.local_write_nanos = self
+            .local_write_nanos
+            .saturating_add(timing.local_write_nanos);
+        self.fsync_nanos = self.fsync_nanos.saturating_add(timing.fsync_nanos);
+        self.parent_sync_nanos = self
+            .parent_sync_nanos
+            .saturating_add(timing.parent_sync_nanos);
+    }
+
+    fn position_us(&self) -> u64 {
+        nanos_to_us(self.position_nanos)
+    }
+
+    fn wal_read_us(&self) -> u64 {
+        nanos_to_us(self.wal_read_nanos)
+    }
+
+    fn page_collection_us(&self) -> u64 {
+        nanos_to_us(self.page_collection_nanos)
+    }
+
+    fn verification_us(&self) -> u64 {
+        nanos_to_us(self.verification_nanos)
+    }
+
+    fn encode_us(&self) -> u64 {
+        nanos_to_us(self.encode_nanos)
+    }
+
+    fn local_write_us(&self) -> u64 {
+        nanos_to_us(self.local_write_nanos)
+    }
+
+    fn fsync_us(&self) -> u64 {
+        nanos_to_us(self.fsync_nanos)
+    }
+
+    fn parent_sync_us(&self) -> u64 {
+        nanos_to_us(self.parent_sync_nanos)
+    }
 }
 
 fn validate_restore(path: &Path, transactions: usize) -> Result<(), Box<dyn Error>> {
@@ -237,11 +343,33 @@ fn elapsed_us(started: Instant) -> u64 {
     started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
 }
 
+fn nanos_to_us(nanos: u64) -> u64 {
+    nanos / 1_000
+}
+
 impl Summary {
     fn from_samples(samples: &[Sample]) -> Self {
         Self {
             workload_write_us: median(samples.iter().map(|sample| sample.workload_write_us)),
             capture_us: median(samples.iter().map(|sample| sample.capture_us)),
+            capture_position_us: median(samples.iter().map(|sample| sample.capture_position_us)),
+            capture_wal_read_us: median(samples.iter().map(|sample| sample.capture_wal_read_us)),
+            capture_page_collection_us: median(
+                samples
+                    .iter()
+                    .map(|sample| sample.capture_page_collection_us),
+            ),
+            capture_verification_us: median(
+                samples.iter().map(|sample| sample.capture_verification_us),
+            ),
+            capture_encode_us: median(samples.iter().map(|sample| sample.capture_encode_us)),
+            capture_local_write_us: median(
+                samples.iter().map(|sample| sample.capture_local_write_us),
+            ),
+            capture_fsync_us: median(samples.iter().map(|sample| sample.capture_fsync_us)),
+            capture_parent_sync_us: median(
+                samples.iter().map(|sample| sample.capture_parent_sync_us),
+            ),
             verify_us: median(samples.iter().map(|sample| sample.verify_us)),
             compact_us: median(samples.iter().map(|sample| sample.compact_us)),
             compact_verify_us: median(samples.iter().map(|sample| sample.compact_verify_us)),
