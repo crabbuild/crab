@@ -1,6 +1,6 @@
 <svg viewBox="0 0 1120 600" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title description">
   <title id="title">Litestream sidecar and crab-ltx embedded architecture</title>
-  <desc id="description">Litestream operates background replication beside an application. Crab-ltx is embedded in the host runtime and prepares immutable data for a separate authority decision.</desc>
+  <desc id="description">Litestream operates background replication beside an application. Crab-ltx is embedded in the host runtime and prepares immutable data. Cell authority validates the observed owner and version, atomically publishes the selected root, and rejects stale writers.</desc>
   <style>text { font-family: 'SF Mono', 'Cascadia Code', 'DejaVu Sans Mono', monospace; }</style>
   <defs>
     <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
@@ -64,17 +64,19 @@
 
   <rect x="585" y="85" width="500" height="455" rx="12" fill="none" stroke="#34d399" stroke-width="1.5" stroke-dasharray="8,4"/>
   <text x="603" y="111" fill="#34d399" font-size="12" font-weight="700">CRAB-LTX · EMBEDDED</text>
-  <text x="603" y="130" fill="#94a3b8" font-size="9">Host owns scheduling, authority, acknowledgement, and retention</text>
+  <text x="603" y="130" fill="#94a3b8" font-size="9">Host schedules work; Cell authority serializes ownership and root publication</text>
 
   <path d="M 745 205 L 745 250" fill="none" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-emerald)"/>
   <path d="M 825 285 L 885 285" fill="none" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-emerald)"/>
   <path d="M 965 320 L 965 374" fill="none" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-emerald)"/>
   <path d="M 925 250 L 925 225 L 845 225 L 845 178 L 825 178" fill="none" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arrow-amber)"/>
-  <path d="M 665 178 L 625 178 L 625 500 L 665 500" fill="none" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
+  <path d="M 665 168 L 630 168 L 630 470 L 650 470" fill="none" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
+  <path d="M 650 505 L 615 505 L 615 190 L 665 190" fill="none" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arrow-amber)"/>
   <text x="855" y="274" fill="#94a3b8" font-size="8" text-anchor="middle">capture</text>
   <text x="980" y="350" fill="#94a3b8" font-size="8">immutable upload</text>
   <text x="885" y="216" fill="#fbbf24" font-size="8" text-anchor="middle">root proposal</text>
-  <text x="614" y="340" fill="#94a3b8" font-size="8" text-anchor="middle" transform="rotate(-90 614 340)">owner/head CAS</text>
+  <text x="637" y="340" fill="#94a3b8" font-size="7" text-anchor="middle" transform="rotate(-90 637 340)">publish RootRef with observed owner + ETag</text>
+  <text x="607" y="347" fill="#fbbf24" font-size="7" text-anchor="middle" transform="rotate(-90 607 347)">CAS success gates acknowledgement</text>
 
   <rect x="665" y="150" width="160" height="55" rx="7" fill="#0f172a"/>
   <rect x="665" y="150" width="160" height="55" rx="7" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
@@ -105,10 +107,13 @@
     <text x="60" y="35" fill="#f8fafc" font-size="9" font-weight="600" text-anchor="middle">Immutable objects</text>
   </g>
 
-  <rect x="665" y="470" width="160" height="60" rx="7" fill="#0f172a"/>
-  <rect x="665" y="470" width="160" height="60" rx="7" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
-  <text x="745" y="496" fill="#f8fafc" font-size="11" font-weight="600" text-anchor="middle">Cell authority</text>
-  <text x="745" y="513" fill="#94a3b8" font-size="8" text-anchor="middle">selects durable truth</text>
+  <rect x="650" y="435" width="200" height="90" rx="7" fill="#0f172a"/>
+  <rect x="650" y="435" width="200" height="90" rx="7" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="750" y="458" fill="#f8fafc" font-size="11" font-weight="600" text-anchor="middle">Cell authority</text>
+  <text x="750" y="475" fill="#94a3b8" font-size="8" text-anchor="middle">versioned owner + root record</text>
+  <text x="750" y="489" fill="#94a3b8" font-size="8" text-anchor="middle">valid transition + exact ETag CAS</text>
+  <text x="750" y="503" fill="#94a3b8" font-size="8" text-anchor="middle">selects the published RootRef</text>
+  <text x="750" y="517" fill="#94a3b8" font-size="8" text-anchor="middle">conflict rejects a stale writer</text>
 
   <text x="40" y="577" fill="#64748b" font-size="8">Shared concept: checksum-linked LTX ranges. Different contract: lifecycle, layout, authority, and restore selection.</text>
 </svg>

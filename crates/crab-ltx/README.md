@@ -79,6 +79,32 @@ The safe write path is:
 Recovery reverses the boundary: load the authority-pinned `RootRef`, verify its
 complete immutable object graph, then restore it or activate sparse SQL.
 
+### What Cell authority does
+
+Cell authority is the publication boundary implemented by `crab-cell-runtime`,
+not by `crab-ltx`. It stores one strict, versioned control record for a Cell:
+the current incarnation, owner, lifecycle state, revision, and published
+`RootRef`.
+
+For each update, the runtime reads that exact record with its object-store ETag,
+builds a named and fully validated transition, and conditionally writes the
+complete successor using the observed ETag. There is no blind overwrite or
+“latest root” discovery by listing objects. If another owner wins first, the
+conditional write conflicts; the runtime reloads the record and rejects or
+fences the stale writer.
+
+This separates two guarantees:
+
+- `CellReplica` verifies and uploads immutable objects, then returns a root
+  proposal.
+- Cell authority atomically chooses which proposal is the published root for
+  the current owner and incarnation.
+
+Only a successful authority CAS makes the root durable truth. The host may then
+acknowledge the mutation and prune the exact captured batch. An uploaded root
+whose CAS did not succeed remains an unreferenced proposal, never an
+acknowledged database state.
+
 ## Features
 
 | Feature | Default | Adds |
