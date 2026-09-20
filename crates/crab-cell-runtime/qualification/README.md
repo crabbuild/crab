@@ -19,6 +19,12 @@ cargo run --locked -p crab-cell-runtime --bin qualification_receipt -- \
   verify-workload workload.json profiles/pr-contract-v1.json
 ```
 
+Typed qualification adapters may use the bounded `QualificationWorkload::run_concurrent`
+entry point when scheduled operations are independent or idempotent. The serial
+`run` entry point remains the safe choice for workloads with application-level
+ordering dependencies; both paths retain the same streaming schedule, counters,
+latency histogram, and logical outcome digest.
+
 The PR profile is a correctness gate. `local-provider-v1`, `fault-v1`,
 `provider-v1`, `compatibility-v1`, and `scale-v1` are release-candidate inputs
 only; they do not claim provider or Kubernetes qualification until a protected

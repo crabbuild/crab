@@ -6,6 +6,7 @@ use std::{
 };
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use serde::{Deserialize, Serialize};
 
 use crate::{Digest, Error, Result};
@@ -16,6 +17,7 @@ const MAX_RECEIPT_BYTES: usize = 1 << 20;
 const MAX_QUALIFICATION_CELLS: u64 = 1_000_000;
 const MAX_QUALIFICATION_OPERATIONS: u64 = 100_000_000;
 const MAX_QUALIFICATION_DURATION_SECS: u64 = 7 * 24 * 60 * 60;
+const MAX_QUALIFICATION_CONCURRENCY: usize = 1_024;
 
 /// Current wire schema for qualification evidence.
 pub const QUALIFICATION_SCHEMA_VERSION: u32 = 4;
@@ -1080,37 +1082,107 @@ impl QualificationWorkload {
         for operation in self.iter_operations() {
             let operation_started = Instant::now();
             let execution = executor.execute(operation).await?;
-            latency.record(operation_started.elapsed());
-            let primitive_index = usize::from(operation.primitive_index);
-            let primitive = &mut counts[primitive_index];
-            primitive.attempted = primitive.attempted.saturating_add(1);
-            match execution.outcome {
-                QualificationOutcome::Acknowledged => {
-                    primitive.acknowledged = primitive.acknowledged.saturating_add(1);
-                    if execution.verified {
-                        primitive.verified = primitive.verified.saturating_add(1);
-                    }
-                }
-                QualificationOutcome::Rejected => {
-                    primitive.rejected = primitive.rejected.saturating_add(1);
-                }
-                QualificationOutcome::Ambiguous => {
-                    primitive.ambiguous = primitive.ambiguous.saturating_add(1);
+            Self::record_execution(
+                &mut counts,
+                &mut latency,
+                operation,
+                execution,
+                operation_started.elapsed(),
+            );
+        }
+        self.summary(counts, latency, started.elapsed())
+    }
+
+    /// Executes the schedule with bounded in-flight operations through cloned
+    /// typed executors. The executor must make operations independent or
+    /// idempotent when it opts into concurrency; aggregate counters and the
+    /// logical outcome digest remain schedule-order independent.
+    pub async fn run_concurrent<E>(
+        &self,
+        executor: E,
+        concurrency: usize,
+    ) -> Result<QualificationRunSummary>
+    where
+        E: QualificationOperationExecutor + Clone + Send + 'static,
+    {
+        if concurrency == 0 || concurrency > MAX_QUALIFICATION_CONCURRENCY {
+            return Err(Error::Control("qualification concurrency is out of bounds"));
+        }
+        let started = Instant::now();
+        let mut counts = QUALIFICATION_PRIMITIVES
+            .iter()
+            .map(|primitive| QualificationPrimitiveCounts::new(primitive))
+            .collect::<Vec<_>>();
+        let mut latency = QualificationLatencyHistogram::default();
+        let mut operations = self.iter_operations();
+        let mut pending = FuturesUnordered::new();
+
+        loop {
+            while pending.len() < concurrency {
+                let Some(operation) = operations.next() else {
+                    break;
+                };
+                let mut worker = executor.clone();
+                pending.push(async move {
+                    let operation_started = Instant::now();
+                    let execution = worker.execute(operation).await?;
+                    Ok::<_, Error>((operation, execution, operation_started.elapsed()))
+                });
+            }
+            let Some(result) = pending.next().await else {
+                break;
+            };
+            let (operation, execution, elapsed) = result?;
+            Self::record_execution(&mut counts, &mut latency, operation, execution, elapsed);
+        }
+        self.summary(counts, latency, started.elapsed())
+    }
+
+    fn record_execution(
+        counts: &mut [QualificationPrimitiveCounts],
+        latency: &mut QualificationLatencyHistogram,
+        operation: QualificationOperation,
+        execution: QualificationExecution,
+        elapsed: Duration,
+    ) {
+        latency.record(elapsed);
+        let primitive_index = usize::from(operation.primitive_index);
+        let primitive = &mut counts[primitive_index];
+        primitive.attempted = primitive.attempted.saturating_add(1);
+        match execution.outcome {
+            QualificationOutcome::Acknowledged => {
+                primitive.acknowledged = primitive.acknowledged.saturating_add(1);
+                if execution.verified {
+                    primitive.verified = primitive.verified.saturating_add(1);
                 }
             }
-            if execution.retries != 0 {
-                primitive.retried = primitive.retried.saturating_add(1);
+            QualificationOutcome::Rejected => {
+                primitive.rejected = primitive.rejected.saturating_add(1);
+            }
+            QualificationOutcome::Ambiguous => {
+                primitive.ambiguous = primitive.ambiguous.saturating_add(1);
             }
         }
-        let outcome_digest = qualification_run_outcome_digest(self, &counts)?;
+        if execution.retries != 0 {
+            primitive.retried = primitive.retried.saturating_add(1);
+        }
+    }
+
+    fn summary(
+        &self,
+        primitive_counts: Vec<QualificationPrimitiveCounts>,
+        latency: QualificationLatencyHistogram,
+        elapsed: Duration,
+    ) -> Result<QualificationRunSummary> {
+        let outcome_digest = qualification_run_outcome_digest(self, &primitive_counts)?;
         Ok(QualificationRunSummary {
             profile: self.profile.clone(),
             profile_digest: self.profile_digest(),
             seed: self.seed,
             cells: self.cells,
             operations: self.operations,
-            elapsed: started.elapsed(),
-            primitive_counts: counts,
+            elapsed,
+            primitive_counts,
             outcome_digest,
             latency,
         })
@@ -2572,6 +2644,37 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct ConcurrentExecutor {
+        active: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        maximum: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl QualificationOperationExecutor for ConcurrentExecutor {
+        type Future<'a> =
+            std::pin::Pin<Box<dyn Future<Output = Result<QualificationExecution>> + Send + 'a>>;
+
+        fn execute<'a>(&'a mut self, operation: QualificationOperation) -> Self::Future<'a> {
+            let active = std::sync::Arc::clone(&self.active);
+            let maximum = std::sync::Arc::clone(&self.maximum);
+            Box::pin(async move {
+                let current = active.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+                maximum.fetch_max(current, std::sync::atomic::Ordering::AcqRel);
+                tokio::task::yield_now().await;
+                active.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                let execution = if operation.rejection_hint() {
+                    QualificationExecution::rejected()
+                } else if operation.ambiguous_hint() {
+                    QualificationExecution::ambiguous(u64::from(operation.retry_hint()))
+                } else {
+                    QualificationExecution::acknowledged(true)
+                        .with_retries(u64::from(operation.retry_hint()))
+                };
+                Ok(execution)
+            })
+        }
+    }
+
     #[tokio::test]
     async fn workload_iterator_and_executor_are_streaming_and_reproducible() {
         let profile = QualificationProfile::new("contract-run".into(), 1, 32, 1, 1_000).unwrap();
@@ -2600,6 +2703,30 @@ mod tests {
                 .any(|metric| { metric.name() == "p99_latency_ms" && metric.unit() == "ms" })
         );
         assert_ne!(summary.outcome_digest(), workload.outcome_digest());
+    }
+
+    #[tokio::test]
+    async fn concurrent_workload_runner_bounds_inflight_operations() {
+        let profile = QualificationProfile::new("concurrent-run".into(), 1, 32, 1, 1_000).unwrap();
+        let workload = QualificationWorkload::generate_with_size(&profile, 41, 2, 32, 1).unwrap();
+        let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let maximum = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let executor = ConcurrentExecutor {
+            active: std::sync::Arc::clone(&active),
+            maximum: std::sync::Arc::clone(&maximum),
+        };
+        assert!(workload.run_concurrent(executor.clone(), 0).await.is_err());
+        assert!(
+            workload
+                .run_concurrent(executor.clone(), MAX_QUALIFICATION_CONCURRENCY + 1)
+                .await
+                .is_err()
+        );
+        let summary = workload.run_concurrent(executor, 4).await.unwrap();
+        assert_eq!(summary.operations(), workload.operations());
+        assert!(maximum.load(std::sync::atomic::Ordering::Acquire) >= 2);
+        assert!(maximum.load(std::sync::atomic::Ordering::Acquire) <= 4);
+        summary.artifact(&workload).unwrap().encode().unwrap();
     }
 
     #[test]
