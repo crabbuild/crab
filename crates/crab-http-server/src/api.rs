@@ -261,7 +261,7 @@ pub(crate) async fn read(
         let repository = repository?;
         generation = Some(repository.generation());
         let projection_source = if matches!(action, Action::TreeAttribution) {
-            if let Some(router) = server.repository_cells.as_ref() {
+            if let Some(router) = server.repository_cells() {
                 let source = match projection::current_source(&entry.store, &entry.layout).await {
                     Ok(source) => source,
                     Err(error @ crate::Error::Remote(Error::Corrupt { .. })) => {
@@ -270,7 +270,7 @@ pub(crate) async fn read(
                     }
                     Err(error) => return Err(error.into()),
                 };
-                let state = projection::state(router, entry.id).await?;
+                let state = projection::state(&router, entry.id).await?;
                 let attribution_source =
                     attribution_source(&source, &state, repository.path_state_available());
                 let ready = matches!(attribution_source, AttributionSource::Projected(_));
@@ -587,8 +587,7 @@ async fn execute(
                     .await?
                     .ok_or(Error::PathNotFound)?;
                 let projected = server
-                    .repository_cells
-                    .as_ref()
+                    .repository_cells()
                     .zip(projection_source)
                     .map(|(router, source)| {
                         let paths = result

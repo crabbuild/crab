@@ -5,6 +5,7 @@
 //! it must not construct another runtime alongside this host.
 
 use std::{
+    any::Any,
     future::Future,
     pin::Pin,
     sync::{
@@ -31,6 +32,7 @@ pub type FacilityResult = std::result::Result<(), Box<dyn std::error::Error + Se
 /// One provider-owned lifecycle component attached to a [`CellNode`].
 pub struct CellNodeFacility {
     name: &'static str,
+    owner: Option<Arc<dyn Any + Send + Sync>>,
     drain: Arc<dyn Fn() -> Pin<Box<dyn Future<Output = FacilityResult> + Send>> + Send + Sync>,
 }
 
@@ -47,8 +49,33 @@ impl CellNodeFacility {
         }
         Ok(Self {
             name,
+            owner: None,
             drain: Arc::new(move || Box::pin(drain())),
         })
+    }
+
+    fn owned<T, F, Fut>(
+        name: &'static str,
+        owner: Arc<T>,
+        drain: F,
+    ) -> crab_cell_runtime::Result<Self>
+    where
+        T: Send + Sync + 'static,
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = FacilityResult> + Send + 'static,
+    {
+        if name.is_empty() {
+            return Err(Error::Control("CellNodeFacility name is empty"));
+        }
+        Ok(Self {
+            name,
+            owner: Some(owner),
+            drain: Arc::new(move || Box::pin(drain())),
+        })
+    }
+
+    fn owner<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
+        self.owner.as_ref()?.clone().downcast::<T>().ok()
     }
 }
 
@@ -116,12 +143,14 @@ impl CellNodeTaskGroup {
             abort_on_drop: true,
         };
         let mut first_error = None;
+        let mut timed_out = false;
         while let Some(index) = tasks.tasks.len().checked_sub(1) {
             let result = match deadline {
                 Some(deadline) => {
                     match tokio::time::timeout_at(deadline.into(), &mut tasks.tasks[index]).await {
                         Ok(result) => result,
                         Err(_) => {
+                            timed_out = true;
                             first_error.get_or_insert_with(|| {
                                 Box::new(std::io::Error::new(
                                     std::io::ErrorKind::TimedOut,
@@ -146,7 +175,9 @@ impl CellNodeTaskGroup {
                 Err(_) => {}
             }
         }
-        tasks.abort_on_drop = false;
+        if !timed_out {
+            tasks.abort_on_drop = false;
+        }
         first_error.map_or(Ok(()), Err)
     }
 }
@@ -483,8 +514,60 @@ impl CellNode {
         if facilities.len() >= MAX_NODE_FACILITIES {
             return Err(Error::Capacity("CellNode facility limit reached"));
         }
+        if facility.owner.is_some()
+            && facilities
+                .iter()
+                .any(|existing| existing.owner.is_some() && existing.name == facility.name)
+        {
+            return Err(Error::Control("CellNode component name already installed"));
+        }
         facilities.push(facility);
         Ok(())
+    }
+
+    /// Retains one shared composition component under the node lifecycle.
+    ///
+    /// Components are deliberately type-erased only inside the host. Callers
+    /// retrieve them by the same stable name and concrete type, while the
+    /// node remains the sole owner of the production composition boundary.
+    pub fn install_owned_component<T>(
+        &self,
+        name: &'static str,
+        component: Arc<T>,
+    ) -> crab_cell_runtime::Result<()>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.install_owned_component_with_drain(name, component, || async { Ok(()) })
+    }
+
+    /// Retains one component and attaches its idempotent drain callback.
+    pub fn install_owned_component_with_drain<T, F, Fut>(
+        &self,
+        name: &'static str,
+        component: Arc<T>,
+        drain: F,
+    ) -> crab_cell_runtime::Result<()>
+    where
+        T: Send + Sync + 'static,
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = FacilityResult> + Send + 'static,
+    {
+        self.install_facility(CellNodeFacility::owned(name, component, drain)?)
+    }
+
+    /// Looks up one node-owned component for a product adapter.
+    #[must_use]
+    pub fn owned_component<T>(&self, name: &str) -> Option<Arc<T>>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.facilities
+            .lock()
+            .ok()?
+            .iter()
+            .find(|facility| facility.name == name)
+            .and_then(CellNodeFacility::owner)
     }
 
     /// Binds a product-created typed client to this application's tenant scope.
@@ -567,6 +650,17 @@ impl CellNode {
         let result = match first_error {
             Some(error) => Err(error),
             None => Ok(()),
+        };
+        let result = if result.is_ok() {
+            match self.facilities.lock() {
+                Ok(mut facilities) => {
+                    facilities.clear();
+                    Ok(())
+                }
+                Err(_) => Err(Error::Control("CellNode facility lock poisoned")),
+            }
+        } else {
+            result
         };
         if result.is_ok()
             && let Ok(mut state) = self.state.lock()
@@ -785,9 +879,20 @@ mod tests {
 
     #[tokio::test]
     async fn task_group_deadline_aborts_unfinished_tasks() {
+        struct DropProbe(Arc<AtomicBool>);
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
         let tasks = CellNodeTaskGroup::new(CancellationToken::new(), CancellationToken::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_dropped = Arc::clone(&dropped);
         tasks
-            .spawn(async {
+            .spawn(async move {
+                let _probe = DropProbe(task_dropped);
                 std::future::pending::<()>().await;
                 Ok::<(), Error>(())
             })
@@ -798,6 +903,8 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+        tokio::task::yield_now().await;
+        assert!(dropped.load(Ordering::Acquire));
     }
 
     #[tokio::test]
@@ -857,6 +964,33 @@ mod tests {
         assert!(cancellation.is_cancelled());
         assert!(node_shutdown.is_cancelled());
         assert!(finished.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn node_retains_typed_components_without_duplicate_names() {
+        let node = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([26; 16]))
+            .build()
+            .unwrap();
+        node.install_task_group(CancellationToken::new(), CancellationToken::new())
+            .unwrap();
+        let component = Arc::new(7_u64);
+        let weak = Arc::downgrade(&component);
+        node.install_owned_component("fixture-component", Arc::clone(&component))
+            .unwrap();
+        drop(component);
+        assert_eq!(
+            node.owned_component::<u64>("fixture-component").as_deref(),
+            Some(&7)
+        );
+        assert!(
+            node.install_owned_component("fixture-component", Arc::new(8_u64))
+                .is_err()
+        );
+        node.shutdown().await.unwrap();
+        assert!(weak.upgrade().is_none());
     }
 
     #[tokio::test]

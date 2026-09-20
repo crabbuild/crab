@@ -6,7 +6,7 @@ use crate::{
     app::{Error, Result},
     auth::Identity,
     cells::{
-        RepositoryCell, RepositoryCellRouter,
+        RepositoryCell,
         repository::{
             AttachReleaseAsset, AttachReleaseAssetInput, AttachReleaseAssetOutcome,
             CompleteReleasePublication, CompleteReleasePublicationInput,
@@ -411,10 +411,7 @@ async fn route(
     principal: &Identity,
     action: &'static str,
 ) -> Result<RepositoryCell> {
-    let router: &RepositoryCellRouter = server
-        .repository_cells
-        .as_ref()
-        .ok_or(Error::CellUnavailable)?;
+    let router = server.repository_cells().ok_or(Error::CellUnavailable)?;
     router
         .route(repository.id, principal, action)
         .await

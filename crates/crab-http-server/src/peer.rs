@@ -643,7 +643,7 @@ impl PeerCellResolver for LocalCellResolver {
 
 impl PeerAuthorizer for Server {
     fn authorize(&self, request: &VerifiedPeerRequest) -> crab_cell_runtime::Result<()> {
-        let receiver = self.peer_receiver.as_ref().ok_or_else(denied)?;
+        let receiver = self.peer_receiver().ok_or_else(denied)?;
         if matches!(
             request.operation(),
             Some(
@@ -758,7 +758,7 @@ pub(crate) async fn forward(
     {
         return peer_http_error(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
-    let Some(receiver) = server.peer_receiver.as_ref() else {
+    let Some(receiver) = server.peer_receiver() else {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     };
     let now_ms = match now_ms() {
@@ -803,7 +803,7 @@ pub(crate) async fn forward(
         Err(CellError::CellNotActive | CellError::Fenced | CellError::CellDraining)
     );
     if local_unavailable && request.permits("cell.activate") {
-        let Some(router) = server.repository_cells.as_ref() else {
+        let Some(router) = server.repository_cells() else {
             return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
         };
         if router
@@ -864,9 +864,9 @@ pub(crate) async fn append_node_log(
         return peer_http_error(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
     let (Some(receiver), Some(store), Some(_transport)) = (
-        server.peer_receiver.as_ref(),
-        server.follower_store.as_ref(),
-        server.node_log_transport.as_ref(),
+        server.peer_receiver(),
+        server.follower_store(),
+        server.node_log_transport(),
     ) else {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     };
@@ -878,10 +878,10 @@ pub(crate) async fn append_node_log(
         Ok(now_ms) => now_ms,
         Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
     };
-    if !receiver_is_current(receiver, now_ms).await {
+    if !receiver_is_current(&receiver, now_ms).await {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     }
-    if !authenticated_session(receiver, leader, &identity, now_ms).await {
+    if !authenticated_session(&receiver, leader, &identity, now_ms).await {
         return peer_http_error(StatusCode::UNAUTHORIZED);
     }
     let (covered_through, frames) = {
@@ -915,9 +915,9 @@ pub(crate) async fn seal_node_log(
     AxumPath((leader, epoch, claimant)): AxumPath<(String, u64, String)>,
 ) -> Response {
     let (Some(receiver), Some(store), Some(_transport)) = (
-        server.peer_receiver.as_ref(),
-        server.follower_store.as_ref(),
-        server.node_log_transport.as_ref(),
+        server.peer_receiver(),
+        server.follower_store(),
+        server.node_log_transport(),
     ) else {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     };
@@ -930,7 +930,7 @@ pub(crate) async fn seal_node_log(
     };
     // Recovery must work before this follower publishes a new boot session.
     // The recovery claim below binds the request to its persisted physical node.
-    if !authenticated_session(receiver, claimant, &identity, now_ms).await {
+    if !authenticated_session(&receiver, claimant, &identity, now_ms).await {
         return peer_http_error(StatusCode::UNAUTHORIZED);
     }
     if receiver
@@ -954,9 +954,9 @@ pub(crate) async fn retire_node_log(
     AxumPath((leader, epoch, covered_through)): AxumPath<(String, u64, u64)>,
 ) -> Response {
     let (Some(receiver), Some(store), Some(_transport)) = (
-        server.peer_receiver.as_ref(),
-        server.follower_store.as_ref(),
-        server.node_log_transport.as_ref(),
+        server.peer_receiver(),
+        server.follower_store(),
+        server.node_log_transport(),
     ) else {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     };
@@ -968,10 +968,10 @@ pub(crate) async fn retire_node_log(
         Ok(now_ms) => now_ms,
         Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
     };
-    if !receiver_is_current(receiver, now_ms).await {
+    if !receiver_is_current(&receiver, now_ms).await {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     }
-    if !authenticated_session(receiver, leader, &identity, now_ms).await {
+    if !authenticated_session(&receiver, leader, &identity, now_ms).await {
         return peer_http_error(StatusCode::UNAUTHORIZED);
     }
     if receiver
@@ -995,9 +995,9 @@ pub(crate) async fn tail_node_log(
     AxumPath((leader, epoch, claimant, first)): AxumPath<(String, u64, String, u64)>,
 ) -> Response {
     let (Some(receiver), Some(store), Some(_transport)) = (
-        server.peer_receiver.as_ref(),
-        server.follower_store.as_ref(),
-        server.node_log_transport.as_ref(),
+        server.peer_receiver(),
+        server.follower_store(),
+        server.node_log_transport(),
     ) else {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     };
@@ -1010,7 +1010,7 @@ pub(crate) async fn tail_node_log(
     };
     // Recovery must work before this follower publishes a new boot session.
     // The recovery claim below binds the request to its persisted physical node.
-    if !authenticated_session(receiver, claimant, &identity, now_ms).await {
+    if !authenticated_session(&receiver, claimant, &identity, now_ms).await {
         return peer_http_error(StatusCode::UNAUTHORIZED);
     }
     if receiver

@@ -8,7 +8,7 @@ use crate::{
     app::{Error, Result},
     auth::Identity,
     cells::{
-        RepositoryCell, RepositoryCellRouter,
+        RepositoryCell,
         repository::{
             BranchProtectionRecord, BranchProtectionSettings, GetBranchProtections,
             GetRepositoryLifecycle, ReplaceBranchProtections, ReplaceBranchProtectionsInput,
@@ -159,10 +159,7 @@ async fn route(
     principal: &Identity,
     action: &'static str,
 ) -> Result<RepositoryCell> {
-    let router: &RepositoryCellRouter = server
-        .repository_cells
-        .as_ref()
-        .ok_or(Error::CellUnavailable)?;
+    let router = server.repository_cells().ok_or(Error::CellUnavailable)?;
     let deadline = Instant::now() + ROUTE_RETRY_TIMEOUT;
     let mut delay = ROUTE_RETRY_BASE;
     loop {

@@ -73,6 +73,10 @@ const PROJECTION_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 const PROJECTION_SWEEP_BATCH: usize = 16;
 const PROJECTION_RETRY_BASE: Duration = Duration::from_secs(10);
 const PROJECTION_RETRY_MAX: Duration = Duration::from_secs(5 * 60);
+const CELL_COMPONENT_REPOSITORY_ROUTER: &str = "repository-cell-router";
+const CELL_COMPONENT_PEER_RECEIVER: &str = "peer-receiver";
+const CELL_COMPONENT_FOLLOWER_STORE: &str = "follower-store";
+const CELL_COMPONENT_NODE_LOG_TRANSPORT: &str = "node-log-transport";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CellRuntimeBudget {
@@ -598,11 +602,10 @@ impl Repository {
             Some(permit),
             server.cancellation.clone(),
             server
-                .repository_cells
-                .clone()
+                .repository_cells()
                 .map(|router| maintenance::ProjectionContext {
                     repository_id: self.id,
-                    router,
+                    router: (*router).clone(),
                     metrics: server.metrics.clone(),
                 }),
         )));
@@ -684,11 +687,10 @@ impl Repository {
                 None,
                 server.cancellation.clone(),
                 server
-                    .repository_cells
-                    .clone()
+                    .repository_cells()
                     .map(|router| maintenance::ProjectionContext {
                         repository_id: self.id,
-                        router,
+                        router: (*router).clone(),
                         metrics: server.metrics.clone(),
                     }),
             )));
@@ -712,9 +714,13 @@ pub(crate) struct Server {
     pub runtime: Arc<RemoteGitRuntime>,
     pub cell_runtime: CellRuntime,
     pub(crate) cell_node: Option<Arc<CellNode>>,
+    #[cfg(test)]
     pub(crate) repository_cells: Option<crate::cells::RepositoryCellRouter>,
+    #[cfg(test)]
     pub(crate) peer_receiver: Option<crate::peer::PeerReceiver>,
+    #[cfg(test)]
     pub(crate) follower_store: Option<crab_cell_runtime::FollowerStore>,
+    #[cfg(test)]
     pub(crate) node_log_transport: Option<Arc<dyn crab_cell_runtime::NodeLogTransport>>,
     pub options: RepositoryOptions,
     pub cursor_key: [u8; 32],
@@ -736,6 +742,76 @@ pub(crate) struct Server {
 }
 
 impl Server {
+    fn node_component<T>(&self, name: &str) -> Option<Arc<T>>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.cell_node
+            .as_ref()
+            .and_then(|node| node.owned_component(name))
+    }
+
+    pub(crate) fn repository_cells(&self) -> Option<Arc<crate::cells::RepositoryCellRouter>> {
+        self.node_component(CELL_COMPONENT_REPOSITORY_ROUTER)
+            .or_else(|| {
+                #[cfg(test)]
+                {
+                    self.repository_cells.clone().map(Arc::new)
+                }
+                #[cfg(not(test))]
+                {
+                    None
+                }
+            })
+    }
+
+    pub(crate) fn peer_receiver(&self) -> Option<Arc<crate::peer::PeerReceiver>> {
+        self.node_component(CELL_COMPONENT_PEER_RECEIVER)
+            .or_else(|| {
+                #[cfg(test)]
+                {
+                    self.peer_receiver.clone().map(Arc::new)
+                }
+                #[cfg(not(test))]
+                {
+                    None
+                }
+            })
+    }
+
+    pub(crate) fn follower_store(&self) -> Option<Arc<crab_cell_runtime::FollowerStore>> {
+        self.node_component(CELL_COMPONENT_FOLLOWER_STORE)
+            .or_else(|| {
+                #[cfg(test)]
+                {
+                    self.follower_store.clone().map(Arc::new)
+                }
+                #[cfg(not(test))]
+                {
+                    None
+                }
+            })
+    }
+
+    pub(crate) fn node_log_transport(
+        &self,
+    ) -> Option<Arc<dyn crab_cell_runtime::NodeLogTransport>> {
+        self.node_component::<Arc<dyn crab_cell_runtime::NodeLogTransport>>(
+            CELL_COMPONENT_NODE_LOG_TRANSPORT,
+        )
+        .map(|transport| transport.as_ref().clone())
+        .or_else(|| {
+            #[cfg(test)]
+            {
+                self.node_log_transport.clone()
+            }
+            #[cfg(not(test))]
+            {
+                None
+            }
+        })
+    }
+
     pub(crate) fn accepts_application_peers(&self) -> bool {
         self.node_healthy.load(Ordering::Acquire) && !self.cancellation.is_cancelled()
     }
@@ -999,16 +1075,36 @@ pub async fn serve(config: Config) -> Result<()> {
     .with_node(node)
     .with_node_recovery_disk(local_disk.clone())
     .with_metrics(metrics.clone());
+    cell_node.install_owned_component(
+        CELL_COMPONENT_REPOSITORY_ROUTER,
+        Arc::new(repository_cells.clone()),
+    )?;
+    cell_node.install_owned_component(
+        CELL_COMPONENT_PEER_RECEIVER,
+        Arc::new(peer_receiver.clone()),
+    )?;
+    cell_node.install_owned_component(
+        CELL_COMPONENT_FOLLOWER_STORE,
+        Arc::new(follower_store.clone()),
+    )?;
+    cell_node.install_owned_component(
+        CELL_COMPONENT_NODE_LOG_TRANSPORT,
+        Arc::new(node_log_transport.clone()),
+    )?;
     let durability_application = startup.identity.application();
     let server = Arc::new(Server {
         repositories: repositories.into(),
         runtime: Arc::clone(&runtime),
         cell_runtime,
         cell_node: Some(Arc::clone(&cell_node)),
-        repository_cells: Some(repository_cells),
-        peer_receiver: Some(peer_receiver),
-        follower_store: Some(follower_store.clone()),
-        node_log_transport: Some(node_log_transport),
+        #[cfg(test)]
+        repository_cells: None,
+        #[cfg(test)]
+        peer_receiver: None,
+        #[cfg(test)]
+        follower_store: None,
+        #[cfg(test)]
+        node_log_transport: None,
         cancellation: cancellation.clone(),
         receives: tokio_util::task::TaskTracker::new(),
         options,
@@ -1106,12 +1202,9 @@ pub async fn serve(config: Config) -> Result<()> {
     cell_tasks.spawn(async move { sweep_projections(projection_sweep_server).await })?;
     let durability_publisher = Arc::clone(&node_publisher);
     let durability_runtime = server.cell_runtime.clone();
-    let durability_transport = Arc::clone(
-        server
-            .node_log_transport
-            .as_ref()
-            .ok_or(crate::Error::Config("node-log transport is unavailable"))?,
-    );
+    let durability_transport = server
+        .node_log_transport()
+        .ok_or(crate::Error::Config("node-log transport is unavailable"))?;
     let durability_cancellation = cancellation.clone();
     cell_tasks.spawn(async move {
         recruit_node_durability(
@@ -1125,12 +1218,9 @@ pub async fn serve(config: Config) -> Result<()> {
     })?;
     let rotation_publisher = Arc::clone(&node_publisher);
     let rotation_runtime = server.cell_runtime.clone();
-    let rotation_transport = Arc::clone(
-        server
-            .node_log_transport
-            .as_ref()
-            .ok_or(crate::Error::Config("node-log transport is unavailable"))?,
-    );
+    let rotation_transport = server
+        .node_log_transport()
+        .ok_or(crate::Error::Config("node-log transport is unavailable"))?;
     let rotation_cancellation = cancellation.clone();
     let rotation_metrics = server.metrics.clone();
     cell_tasks.spawn(async move {
@@ -1521,7 +1611,7 @@ async fn refresh_catalog(server: Arc<Server>, mut version: u64) {
             })
             .map(|record| (record.id, record.application))
             .collect::<Vec<_>>();
-        let verified = match server.repository_cells.as_ref() {
+        let verified = match server.repository_cells() {
             Some(router) => router.verify_repositories(repository_cells).await,
             None => Err(crate::Error::Config(
                 "repository catalog refresh requires Cell routing",
@@ -1841,9 +1931,8 @@ async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
             draining: server.cancellation.is_cancelled(),
             receive_workers: server.receives.len(),
             cell_follower_retained_bytes: server
-                .follower_store
-                .as_ref()
-                .map_or(0, crab_cell_runtime::FollowerStore::retained_bytes),
+                .follower_store()
+                .map_or(0, |store| store.retained_bytes()),
             admission_available: [
                 server.admission.available_permits(),
                 server.transfer_admission.available_permits(),
@@ -1894,7 +1983,7 @@ async fn check_readiness(server: &Server) -> Result<()> {
     if server.cell_runtime.is_shutting_down() {
         return Err(crate::Error::Config("embedded Cell runtime is draining"));
     }
-    if server.catalog.is_some() && server.peer_receiver.is_none() {
+    if server.catalog.is_some() && server.peer_receiver().is_none() {
         return Err(crate::Error::Config("Cell peer receiver is unavailable"));
     }
     if !server.accepts_application_peers() {
