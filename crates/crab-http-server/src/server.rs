@@ -566,7 +566,10 @@ impl Repository {
         *self.pinned.lock().await = None;
     }
 
-    pub(crate) async fn schedule_maintenance(&self, server: &Server) -> Result<()> {
+    pub(crate) async fn schedule_maintenance(
+        &self,
+        server: &Server,
+    ) -> Result<MaintenanceSchedule> {
         let completed = {
             let mut worker = self.maintenance.lock().await;
             worker
@@ -580,38 +583,35 @@ impl Repository {
             *self.pinned.lock().await = None;
             // The next retry must reopen the just-published generation. Starting
             // another worker here would duplicate the same immutable index build.
-            return Ok(());
+            return Ok(MaintenanceSchedule::Completed);
         }
         let mut worker = self.maintenance.lock().await;
-        if worker.is_none() {
-            let permit = server
-                .maintenance_admission
-                .clone()
-                .try_acquire_owned()
-                .ok();
-            if permit.is_none() {
-                return Ok(());
-            }
-            *worker = Some(tokio::spawn(maintenance::run_with_projection(
-                self.store.clone(),
-                self.layout.clone(),
-                self.identity.clone(),
-                Arc::clone(&server.runtime),
-                server.options,
-                Arc::clone(&server.maintenance_admission),
-                permit,
-                server.cancellation.clone(),
-                server
-                    .repository_cells
-                    .clone()
-                    .map(|router| maintenance::ProjectionContext {
-                        repository_id: self.id,
-                        router,
-                        metrics: server.metrics.clone(),
-                    }),
-            )));
+        if worker.is_some() {
+            return Ok(MaintenanceSchedule::Running);
         }
-        Ok(())
+        let permit = match server.maintenance_admission.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => return Ok(MaintenanceSchedule::Deferred),
+        };
+        *worker = Some(tokio::spawn(maintenance::run_with_projection(
+            self.store.clone(),
+            self.layout.clone(),
+            self.identity.clone(),
+            Arc::clone(&server.runtime),
+            server.options,
+            Arc::clone(&server.maintenance_admission),
+            Some(permit),
+            server.cancellation.clone(),
+            server
+                .repository_cells
+                .clone()
+                .map(|router| maintenance::ProjectionContext {
+                    repository_id: self.id,
+                    router,
+                    metrics: server.metrics.clone(),
+                }),
+        )));
+        Ok(MaintenanceSchedule::Started)
     }
 
     pub async fn open(
@@ -1535,6 +1535,30 @@ struct ProjectionSweepState {
     retry_delay: Duration,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MaintenanceSchedule {
+    Started,
+    Running,
+    Completed,
+    Deferred,
+}
+
+impl ProjectionSweepState {
+    fn record_schedule(&mut self, now: Instant, schedule: MaintenanceSchedule) {
+        if schedule == MaintenanceSchedule::Deferred {
+            self.next_attempt = now + PROJECTION_SWEEP_INTERVAL;
+            return;
+        }
+        self.next_attempt = now + self.retry_delay;
+        self.retry_delay = (self.retry_delay * 2).min(PROJECTION_RETRY_MAX);
+    }
+}
+
+fn next_projection_sweep_cursor(start: usize, count: usize, repository_count: usize) -> usize {
+    let advance = if count == repository_count { 1 } else { count };
+    start.saturating_add(advance) % repository_count
+}
+
 async fn sweep_projections(server: Arc<Server>) -> Result<()> {
     let mut cursor = 0_usize;
     let mut states = HashMap::<Uuid, ProjectionSweepState>::new();
@@ -1606,10 +1630,7 @@ async fn sweep_projections(server: Arc<Server>) -> Result<()> {
                 continue;
             }
             match repository.schedule_maintenance(&server).await {
-                Ok(()) => {
-                    state.next_attempt = now + state.retry_delay;
-                    state.retry_delay = (state.retry_delay * 2).min(PROJECTION_RETRY_MAX);
-                }
+                Ok(schedule) => state.record_schedule(now, schedule),
                 Err(error) => {
                     tracing::warn!(
                         repository_id = %repository.id,
@@ -1621,7 +1642,7 @@ async fn sweep_projections(server: Arc<Server>) -> Result<()> {
                 }
             }
         }
-        cursor = start.saturating_add(count) % repositories.len();
+        cursor = next_projection_sweep_cursor(start, count, repositories.len());
         states.retain(|repository_id, _| server.repositories.by_id(*repository_id).is_some());
     }
 }
@@ -2112,6 +2133,28 @@ mod tests {
     use axum::body::Body;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[test]
+    fn projection_sweep_rotates_when_one_batch_covers_every_repository() {
+        assert_eq!(next_projection_sweep_cursor(0, 12, 12), 1);
+        assert_eq!(next_projection_sweep_cursor(1, 12, 12), 2);
+    }
+
+    #[test]
+    fn projection_sweep_retries_capacity_deferral_without_growing_backoff() {
+        let now = Instant::now();
+        let retry_delay = Duration::from_secs(40);
+        let mut state = ProjectionSweepState {
+            source_token: "source".into(),
+            next_attempt: now,
+            retry_delay,
+        };
+
+        state.record_schedule(now, MaintenanceSchedule::Deferred);
+
+        assert_eq!(state.next_attempt, now + PROJECTION_SWEEP_INTERVAL);
+        assert_eq!(state.retry_delay, retry_delay);
+    }
 
     struct DropSignal(Arc<AtomicBool>);
 

@@ -39,6 +39,27 @@ pub(crate) enum Action {
     Blame,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttributionSource<'a> {
+    Projected(&'a str),
+    Canonical,
+    Indexing,
+}
+
+fn attribution_source<'a>(
+    source: &'a crate::cells::repository::projection::SourceIdentity,
+    state: &crate::cells::repository::projection::ProjectionStateView,
+    path_state_available: bool,
+) -> AttributionSource<'a> {
+    if state.source_token.as_deref() == Some(source.source_token.as_str()) {
+        AttributionSource::Projected(&source.source_token)
+    } else if source.path_state_hash.is_some() && path_state_available {
+        AttributionSource::Canonical
+    } else {
+        AttributionSource::Indexing
+    }
+}
+
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Parameters {
@@ -250,7 +271,9 @@ pub(crate) async fn read(
                     Err(error) => return Err(error.into()),
                 };
                 let state = projection::state(router, entry.id).await?;
-                let ready = state.source_token.as_deref() == Some(source.source_token.as_str());
+                let attribution_source =
+                    attribution_source(&source, &state, repository.path_state_available());
+                let ready = matches!(attribution_source, AttributionSource::Projected(_));
                 let lag_generations = state
                     .generation
                     .map_or(source.manifest_generation, |generation| {
@@ -259,16 +282,22 @@ pub(crate) async fn read(
                 server
                     .metrics
                     .update_projection_state(ready, lag_generations, 0.0, 0);
-                if !ready {
-                    entry.schedule_maintenance(&server).await?;
-                    return Ok((
-                        StatusCode::ACCEPTED,
-                        [("retry-after", "2")],
-                        Json(json!({"state":"indexing", "retry_after_ms": 2000})),
-                    )
-                        .into_response());
+                match attribution_source {
+                    AttributionSource::Projected(source_token) => Some(source_token.to_owned()),
+                    AttributionSource::Canonical => {
+                        entry.schedule_maintenance(&server).await?;
+                        None
+                    }
+                    AttributionSource::Indexing => {
+                        entry.schedule_maintenance(&server).await?;
+                        return Ok((
+                            StatusCode::ACCEPTED,
+                            [("retry-after", "2")],
+                            Json(json!({"state":"indexing", "retry_after_ms": 2000})),
+                        )
+                            .into_response());
+                    }
                 }
-                Some(source.source_token)
             } else if !repository.path_state_available() {
                 entry.schedule_maintenance(&server).await?;
                 return Ok((
@@ -914,6 +943,82 @@ mod tests {
             },
             bytes: bytes.to_vec().into(),
         }
+    }
+
+    fn projection_source(
+        path_state_hash: Option<&str>,
+    ) -> crate::cells::repository::projection::SourceIdentity {
+        crate::cells::repository::projection::SourceIdentity {
+            source_token: "current".into(),
+            manifest_generation: 2,
+            manifest_etag: "etag".into(),
+            journal_state_digest: "journal".into(),
+            pack_index_hash: "pack".into(),
+            git_validation_digest: "validation".into(),
+            commit_graph_hash: None,
+            path_state_hash: path_state_hash.map(str::to_owned),
+            head_ref: b"refs/heads/main".to_vec(),
+        }
+    }
+
+    #[test]
+    fn stale_projection_uses_canonical_attribution_when_path_state_is_published() {
+        let source = projection_source(Some("path-state"));
+        let state = crate::cells::repository::projection::ProjectionStateView {
+            ready_epoch: Some(1),
+            source_token: Some("previous".into()),
+            generation: Some(1),
+        };
+
+        assert_eq!(
+            attribution_source(&source, &state, true),
+            AttributionSource::Canonical
+        );
+    }
+
+    #[test]
+    fn stale_projection_without_path_state_remains_indexing() {
+        let source = projection_source(None);
+        let state = crate::cells::repository::projection::ProjectionStateView {
+            ready_epoch: None,
+            source_token: None,
+            generation: None,
+        };
+
+        assert_eq!(
+            attribution_source(&source, &state, false),
+            AttributionSource::Indexing
+        );
+    }
+
+    #[test]
+    fn matching_projection_is_preferred_over_canonical_attribution() {
+        let source = projection_source(Some("path-state"));
+        let state = crate::cells::repository::projection::ProjectionStateView {
+            ready_epoch: Some(2),
+            source_token: Some("current".into()),
+            generation: Some(2),
+        };
+
+        assert_eq!(
+            attribution_source(&source, &state, true),
+            AttributionSource::Projected("current")
+        );
+    }
+
+    #[test]
+    fn newer_path_state_waits_when_the_request_pinned_the_previous_generation() {
+        let source = projection_source(Some("path-state"));
+        let state = crate::cells::repository::projection::ProjectionStateView {
+            ready_epoch: Some(1),
+            source_token: Some("previous".into()),
+            generation: Some(1),
+        };
+
+        assert_eq!(
+            attribution_source(&source, &state, false),
+            AttributionSource::Indexing
+        );
     }
 
     #[test]
