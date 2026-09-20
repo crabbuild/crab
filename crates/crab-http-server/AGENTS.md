@@ -41,7 +41,7 @@ shared publication owner `crates/crab-write/src/journal.rs`.
 
 ## Features and platform
 
-No declared Cargo features. Both library and auto-discovered main binary exist. `crates/crab-http-server/build.rs` requires packages/repository/dist/index.html and rejects symlink assets. Build the frontend before any Cargo check/test/build for this crate; Node requirements are in its README.
+No declared Cargo features. Both library and auto-discovered main binary exist. `crates/crab-http-server/build.rs` requires packages/ui/dist/index.html and rejects symlink assets. Build the frontend before any Cargo check/test/build for this crate; Node requirements are in its README.
 
 ## Verification
 
@@ -53,8 +53,8 @@ replace it with a unique directory for your checkout. Before compilation, verify
 writable. Stop if unavailable; never fall back to a local target directory.
 
 ```sh
-npm ci --prefix packages/repository
-npm run build --prefix packages/repository
+npm ci --prefix packages/ui
+npm run build --prefix packages/ui
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-089c" cargo test -p crab-http-server --locked --lib server::auth_tests
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-089c" cargo test -p crab-http-server --locked --lib server::receive_tests
 ```
@@ -70,7 +70,7 @@ are in `crab/scripts/check-crate-interface-builds.py` and
 - `crates/crab-http-server/REFERENCE.md` — detailed contracts and qualification history.
 - `crates/crab-http-server/Cargo.toml` — dependency and feature authority.
 
-Read `crates/crab-http-server/build.rs` and `packages/repository/package.json` for embedding changes. Dedicated image/service proof: `.github/workflows/http-server-container.yml`; native fetch proof: `.github/workflows/git-protocol-v2-partial-clone.yml`. Browser UI changes require their own frontend checks.
+Read `crates/crab-http-server/build.rs` and `packages/ui/package.json` for embedding changes. Dedicated image/service proof: `.github/workflows/http-server-container.yml`; native fetch proof: `.github/workflows/git-protocol-v2-partial-clone.yml`. Browser UI changes require their own frontend checks.
 
 Update this guide when entry points, ownership, invariants, features, or test
 routes change. Keep detailed API preconditions in rustdoc rather than copying

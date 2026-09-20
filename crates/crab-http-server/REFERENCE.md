@@ -63,7 +63,7 @@ The process does not create a server checkout, clone a repository, run the Git e
 | `crab-storage` | Provider construction, object locations, and conditional storage operations |
 | `crab-metadata` | Manifests, refs, visibility evidence, indexes, receipts, and publication formats |
 | `crab-coordination` | Per-ref leases, namespace serialization, and garbage collection (GC) fences |
-| `packages/repository` | React interface, URL state, design tokens, Pierre Trees and Diffs, and accessible interactions |
+| `packages/ui` | React interface, URL state, design tokens, Pierre Trees and Diffs, and accessible interactions |
 
 ### Follow one repository read
 
@@ -90,7 +90,7 @@ If committed refs await indexing, the server runs the shared read-readiness pass
 
 ## Run the current development build
 
-Build the frontend before Rust because `build.rs` embeds `packages/repository/dist/index.html` and rejects symlinked assets.
+Build the frontend before Rust because `build.rs` embeds `packages/ui/dist/index.html` and rejects symlinked assets.
 
 ### Meet the prerequisites
 
@@ -110,8 +110,8 @@ Set `TMPDIR` to a suitable volume when the system temporary directory is small o
 This sequence installs the locked frontend dependencies, builds the React bundle, and compiles the release server:
 
 ```sh
-npm ci --prefix packages/repository
-npm run build --prefix packages/repository
+npm ci --prefix packages/ui
+npm run build --prefix packages/ui
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-http-server-dev" \
   cargo build -p crab-http-server --release --locked
 ```
@@ -1342,9 +1342,9 @@ Stateful publication futures are drained instead of aborted. This prevents a dro
 Run focused checks from the repository root. Use a target directory unique to this checkout:
 
 ```sh
-npm test --prefix packages/repository
-npm run typecheck --prefix packages/repository
-npm run format:check --prefix packages/repository
+npm test --prefix packages/ui
+npm run typecheck --prefix packages/ui
+npm run format:check --prefix packages/ui
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-http-server-dev" \
   cargo test -p crab-http-server --locked
 ```

@@ -194,12 +194,12 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: packages/repository/package-lock.json
+          cache-dependency-path: packages/ui/package-lock.json
 
       - name: Build embedded repository frontend
         run: |
-          npm ci --prefix packages/repository
-          npm run build --prefix packages/repository
+          npm ci --prefix packages/ui
+          npm run build --prefix packages/ui
 
       - name: Install AWS CLI
         run: |

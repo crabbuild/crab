@@ -22,7 +22,7 @@ Paths in this table are relative to `crates/crab-http-server/` unless stated.
 | Repository policy | [repository_settings.rs](../src/repository_settings.rs), [receive/publish.rs](../src/receive/publish.rs), [lfs.rs](../src/lfs.rs) | Branch protection and archive state use typed Cell queries and commands; Git receive, Pull merge admission, LFS, releases and the HTTP mutation boundary read the same authority | Qualify remote-owner fault paths and sustained policy-read load |
 | Authentication | [auth.rs](../src/auth.rs) | Durable sessions, identity, membership, CSRF, scoped Git tokens | Add authenticated delegation without weakening permission checks |
 | Storage client | [storage_root.rs](../src/storage_root.rs), [Store](../../crab-storage/src/store.rs) | Provider-neutral root and conditional primitives | Reuse origin access; exclude cached or staged authority reads |
-| UI | [packages/repository](../../../packages/repository) | Embedded React application and typed API consumers. Tree navigation renders from the shallow `tree` action; a separate `tree-attribution` request progressively adds last-change summaries | Preserve snapshot identity checks and truthful retry/recovery states |
+| UI | [packages/ui](../../../packages/ui) | Embedded React application and typed API consumers. Tree navigation renders from the shallow `tree` action; a separate `tree-attribution` request progressively adds last-change summaries | Preserve snapshot identity checks and truthful retry/recovery states |
 | Deployment | [Helm chart](../deploy/helm/crab-http-server/README.md) | Three-replica floor, Service/Ingress, peer mTLS Secret, exec readiness, PDB, peer-aware NetworkPolicy, metrics/HPA options, ephemeral Cell storage | Qualify the three-Pod replacement and partition matrix |
 
 Current persistence is described in
@@ -220,7 +220,7 @@ for recovering deleted collaboration documents.
 - [Release authorization tests](../src/auth_tests/releases.rs), label, assignee,
   and Git-token siblings protect adjacent permission and retry contracts.
 - Browser tests under
-  [packages/repository/tests/browser](../../../packages/repository/tests/browser)
+  [packages/ui/tests/browser](../../../packages/ui/tests/browser)
   cover the UI side of workflows; browser E2E is outside this delivery gate.
 - The [container workflow](../../../.github/workflows/http-server-container.yml)
   includes packaging, an abrupt native receive and isolated cold-restore checks.

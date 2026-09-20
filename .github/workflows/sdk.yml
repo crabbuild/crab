@@ -184,11 +184,11 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: packages/repository/package-lock.json
+          cache-dependency-path: packages/ui/package-lock.json
       - name: Build embedded repository frontend
         run: |
-          npm ci --prefix packages/repository
-          npm run build --prefix packages/repository
+          npm ci --prefix packages/ui
+          npm run build --prefix packages/ui
       - name: Qualify shared publication owners
         run: |
           cargo "+${SDK_MSRV}" test -p crab-remote --locked --all-features --test publication
@@ -283,11 +283,11 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: packages/repository/package-lock.json
+          cache-dependency-path: packages/ui/package-lock.json
       - name: Build embedded repository frontend
         run: |
-          npm ci --prefix packages/repository
-          npm run build --prefix packages/repository
+          npm ci --prefix packages/ui
+          npm run build --prefix packages/ui
       - name: Start isolated RustFS
         run: |
           docker run -d --name sdk-rustfs -p 9000:9000 \

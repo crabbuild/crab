@@ -58,8 +58,8 @@ volume, following root `AGENTS.md`. This example uses `/Volumes/Workspace`:
 
 ```sh
 export CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-http-server-dev
-npm ci --prefix packages/repository
-npm run build --prefix packages/repository
+npm ci --prefix packages/ui
+npm run build --prefix packages/ui
 cargo build -p crab-http-server --release --locked
 ```
 
@@ -221,7 +221,7 @@ must not turn an incomplete archive into a successful download.
 Start with [AGENTS.md](AGENTS.md) for entry points, ownership, and invariants.
 The main source path is `src/main.rs` → `src/server.rs` → request handlers;
 publication continues into `crab-write`. The frontend lives in
-[`packages/repository`](../../packages/repository).
+[`packages/ui`](../../packages/ui).
 
 Build the frontend before Rust checks. Focused HTTP authentication coverage:
 

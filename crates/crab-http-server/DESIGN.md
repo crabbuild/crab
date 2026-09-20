@@ -1000,8 +1000,8 @@ Component timing observations and localhost RustFS timings are diagnostic only. 
 Build the embedded frontend before compiling this crate. Use a target directory unique to this checkout:
 
 ```sh
-npm ci --prefix packages/repository
-npm run build --prefix packages/repository
+npm ci --prefix packages/ui
+npm run build --prefix packages/ui
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-http-server-dev" \
   cargo test -p crab-http-server --locked --lib server::receive_tests
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-http-server-dev" \

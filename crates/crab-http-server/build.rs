@@ -3,10 +3,10 @@ use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manifest = std::env::var("CARGO_MANIFEST_DIR")?;
-    let root = Path::new(&manifest).join("../../packages/repository/dist");
+    let root = Path::new(&manifest).join("../../packages/ui/dist");
     println!("cargo:rerun-if-changed={}", root.display());
     if !root.join("index.html").is_file() {
-        return Err("build the React application first: npm ci --prefix packages/repository && npm run build --prefix packages/repository".into());
+        return Err("build the React application first: npm ci --prefix packages/ui && npm run build --prefix packages/ui".into());
     }
     let root = root.canonicalize()?;
     let mut pending = vec![root.clone()];
