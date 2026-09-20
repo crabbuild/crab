@@ -30,7 +30,7 @@ Async object-store operations run outside SQL transactions. While a publication
 is pending, the actor can handle control messages and renewal, but it does not
 start another application mutation in the first version. Other cells continue.
 
-`ManagedDb` now owns the application writer and both replication connections.
+`Db` now owns the application writer and both replication connections.
 Domain commands use its transaction callback; no independent writer factory
 may bypass it. Restore uses explicit local files before managed activation.
 No untracked database opener may change checkpoint behavior.

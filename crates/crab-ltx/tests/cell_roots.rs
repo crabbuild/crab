@@ -7,8 +7,8 @@ use std::sync::{
 
 use bytes::Bytes;
 use crab_ltx::{
-    CaptureBatch, CaptureTiming, CellObjectKind, CellReplica, CellStorageLayout, DiskBudget, Host,
-    Limits, ManagedDb, RecoveryOverlay, RootRef, VerifiedPlan,
+    CaptureBatch, CaptureTiming, CellObjectKind, CellReplica, CellStorageLayout, Db, DiskBudget,
+    Host, Limits, RecoveryOverlay, RootRef, VerifiedPlan,
     bundle::{Bundle, BundleEntry},
     restore_exact,
 };
@@ -24,8 +24,7 @@ fn checksum_path(database: &std::path::Path) -> std::path::PathBuf {
 #[tokio::test]
 async fn prepared_cell_handles_release_dirty_admission() {
     let directory = tempfile::TempDir::new().unwrap();
-    let mut writer =
-        ManagedDb::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
+    let mut writer = Db::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
     writer
         .transaction(|transaction| transaction.execute_batch("CREATE TABLE values_(v)"))
         .unwrap();
@@ -64,8 +63,7 @@ fn replica(store: Store, cell: [u8; 32], incarnation: [u8; 16]) -> CellReplica {
 #[tokio::test]
 async fn prepared_root_reopens_without_a_mutable_head() {
     let directory = tempfile::TempDir::new().unwrap();
-    let mut writer =
-        ManagedDb::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
+    let mut writer = Db::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
     writer
         .transaction(|transaction| {
             transaction.execute_batch(
@@ -162,8 +160,7 @@ async fn prepared_root_reopens_without_a_mutable_head() {
 #[tokio::test]
 async fn exact_root_inventory_verifies_every_remote_dependency() {
     let directory = tempfile::TempDir::new().unwrap();
-    let mut writer =
-        ManagedDb::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
+    let mut writer = Db::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
     writer
         .transaction(|transaction| {
             transaction.execute_batch(
@@ -213,8 +210,7 @@ async fn exact_root_inventory_verifies_every_remote_dependency() {
 #[tokio::test]
 async fn root_scope_and_commit_sequence_are_fenced() {
     let directory = tempfile::TempDir::new().unwrap();
-    let mut writer =
-        ManagedDb::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
+    let mut writer = Db::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
     writer
         .transaction(|transaction| transaction.execute_batch("CREATE TABLE values_(v)"))
         .unwrap();
@@ -235,7 +231,7 @@ async fn root_scope_and_commit_sequence_are_fenced() {
 async fn scheduled_cell_compaction_promotes_fanout_and_preserves_root() {
     let source = tempfile::TempDir::new().unwrap();
     let database = source.path().join("scheduled.sqlite");
-    let mut writer = ManagedDb::open(&database, Limits::default()).unwrap();
+    let mut writer = Db::open(&database, Limits::default()).unwrap();
     let store = Store::new(Arc::new(InMemory::new()));
     let replica = replica(store, [41; 32], [42; 16]);
     let mut root = None;
@@ -324,7 +320,7 @@ async fn scheduled_cell_compaction_promotes_fanout_and_preserves_root() {
 async fn exact_cell_root_opens_sparse_writer_and_publishes_incrementally() {
     let source = tempfile::TempDir::new().unwrap();
     let source_path = source.path().join("source.sqlite");
-    let mut writer = ManagedDb::open(&source_path, Limits::default()).unwrap();
+    let mut writer = Db::open(&source_path, Limits::default()).unwrap();
     writer
         .transaction(|transaction| {
             transaction.execute_batch(
@@ -413,8 +409,7 @@ async fn exact_cell_root_opens_sparse_writer_and_publishes_incrementally() {
 #[tokio::test]
 async fn changed_cut_loads_only_touched_directory_nodes() {
     let directory = tempfile::TempDir::new().unwrap();
-    let mut writer =
-        ManagedDb::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
+    let mut writer = Db::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
     writer
         .transaction(|transaction| {
             transaction.execute_batch(
@@ -459,8 +454,7 @@ async fn changed_cut_loads_only_touched_directory_nodes() {
 #[tokio::test]
 async fn directory_nodes_are_shared_across_exact_root_views() {
     let directory = tempfile::TempDir::new().unwrap();
-    let mut writer =
-        ManagedDb::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
+    let mut writer = Db::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
     writer
         .transaction(|transaction| {
             transaction.execute_batch(
@@ -503,8 +497,7 @@ async fn directory_nodes_are_shared_across_exact_root_views() {
 async fn directory_cache_survives_replica_restart_without_directory_origin_read() {
     let directory = tempfile::TempDir::new().unwrap();
     let cache_root = directory.path().join("directory-cache");
-    let mut writer =
-        ManagedDb::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
+    let mut writer = Db::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
     writer
         .transaction(|transaction| {
             transaction.execute_batch(
@@ -572,8 +565,7 @@ async fn directory_cache_survives_replica_restart_without_directory_origin_read(
 #[tokio::test(flavor = "multi_thread")]
 async fn sparse_hydration_coalesces_contiguous_cell_frames() {
     let directory = tempfile::TempDir::new().unwrap();
-    let mut writer =
-        ManagedDb::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
+    let mut writer = Db::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
     writer
         .transaction(|transaction| {
             transaction.execute_batch(
@@ -627,8 +619,7 @@ async fn sparse_hydration_coalesces_contiguous_cell_frames() {
 #[tokio::test]
 async fn directory_growth_adds_authenticated_parent_level() {
     let directory = tempfile::TempDir::new().unwrap();
-    let mut writer =
-        ManagedDb::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
+    let mut writer = Db::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
     writer
         .transaction(|transaction| {
             transaction.execute_batch(
@@ -678,7 +669,7 @@ async fn truncate_regrow_cannot_reuse_old_locator() {
         .execute_batch("PRAGMA auto_vacuum = FULL; VACUUM")
         .unwrap();
     drop(initial);
-    let mut writer = ManagedDb::open(&path, Limits::default()).unwrap();
+    let mut writer = Db::open(&path, Limits::default()).unwrap();
     writer
         .transaction(|transaction| {
             transaction.execute_batch(
@@ -768,7 +759,7 @@ async fn initial_streaming_directory_merges_truncation_and_regrowth() {
         .execute_batch("PRAGMA auto_vacuum = FULL; VACUUM")
         .unwrap();
     drop(initial);
-    let mut writer = ManagedDb::open(&path, Limits::default()).unwrap();
+    let mut writer = Db::open(&path, Limits::default()).unwrap();
     writer
         .transaction(|transaction| {
             transaction.execute_batch(
@@ -825,7 +816,7 @@ async fn initial_streaming_directory_merges_truncation_and_regrowth() {
 async fn prepare_does_not_write_mutable_keys() {
     let directory = tempfile::TempDir::new().unwrap();
     let path = directory.path().join("cell.sqlite");
-    let mut writer = ManagedDb::open(&path, Limits::default()).unwrap();
+    let mut writer = Db::open(&path, Limits::default()).unwrap();
     writer
         .transaction(|transaction| {
             transaction.execute_batch(
@@ -959,7 +950,7 @@ async fn prepare_does_not_write_mutable_keys() {
 async fn recovered_overlay_requires_exact_predecessor_and_final_position() {
     let directory = tempfile::TempDir::new().unwrap();
     let mut writer =
-        ManagedDb::open(&directory.path().join("recovery.sqlite"), Limits::default()).unwrap();
+        Db::open(&directory.path().join("recovery.sqlite"), Limits::default()).unwrap();
     writer
         .transaction(|transaction| {
             transaction.execute_batch(
@@ -1040,7 +1031,7 @@ async fn recovered_overlay_requires_exact_predecessor_and_final_position() {
 async fn compaction_streams_large_frames_and_cleans_scratch() {
     let source = tempfile::TempDir::new().unwrap();
     let database = source.path().join("large.sqlite");
-    let mut writer = ManagedDb::open(&database, Limits::default()).unwrap();
+    let mut writer = Db::open(&database, Limits::default()).unwrap();
     writer
         .transaction(|transaction| {
             transaction.execute_batch(
@@ -1103,7 +1094,7 @@ async fn compaction_streams_large_frames_and_cleans_scratch() {
 async fn compaction_rejects_selected_body_corruption_outside_page_frames() {
     let source = tempfile::TempDir::new().unwrap();
     let database = source.path().join("corrupt.sqlite");
-    let mut writer = ManagedDb::open(&database, Limits::default()).unwrap();
+    let mut writer = Db::open(&database, Limits::default()).unwrap();
     writer
         .transaction(|transaction| {
             transaction.execute_batch(

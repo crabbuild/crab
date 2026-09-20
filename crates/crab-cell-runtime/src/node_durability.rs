@@ -289,7 +289,7 @@ mod tests {
 
     fn capture() -> (tempfile::TempDir, crab_ltx::CaptureBatch) {
         let directory = tempfile::TempDir::new().unwrap();
-        let mut database = crab_ltx::ManagedDb::open(
+        let mut database = crab_ltx::Db::open(
             &directory.path().join("durability.sqlite"),
             crab_ltx::Limits::default(),
         )

@@ -1,6 +1,6 @@
 <svg viewBox="0 0 1120 690" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title description">
   <title id="title">Crab LTX capture, publication, and recovery sequence</title>
-  <desc id="description">The application writes through ManagedDb, prepares immutable objects through CellReplica, publishes the root through Cell authority, and later recovers only that authority-pinned root.</desc>
+  <desc id="description">The application writes through Db, prepares immutable objects through CellReplica, publishes the root through Cell authority, and later recovers only that authority-pinned root.</desc>
   <style>text { font-family: 'SF Mono', 'Cascadia Code', 'DejaVu Sans Mono', monospace; }</style>
   <defs>
     <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/></pattern>
@@ -53,7 +53,7 @@
   <text x="130" y="112" fill="#f8fafc" font-size="11" font-weight="600" text-anchor="middle">Host runtime</text>
   <rect x="280" y="85" width="130" height="45" rx="6" fill="#0f172a"/>
   <rect x="280" y="85" width="130" height="45" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
-  <text x="345" y="112" fill="#f8fafc" font-size="11" font-weight="600" text-anchor="middle">ManagedDb</text>
+  <text x="345" y="112" fill="#f8fafc" font-size="11" font-weight="600" text-anchor="middle">Db</text>
   <rect x="495" y="85" width="130" height="45" rx="6" fill="#0f172a"/>
   <rect x="495" y="85" width="130" height="45" rx="6" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
   <text x="560" y="112" fill="#f8fafc" font-size="11" font-weight="600" text-anchor="middle">CellReplica</text>

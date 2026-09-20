@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, Transaction};
 
 use crate::{CaptureBatch, CrabError, Limits, LocalSegment, Position, Result, SegmentInfo};
-use crate::{db::Db, host::LtxHost, ltx, types::Txid};
+use crate::{db::Db as CaptureDb, host::LtxHost, ltx, types::Txid};
 
 /// Number of SQLite connections retained by one open managed database.
 pub const MANAGED_SQLITE_CONNECTIONS: u64 = 3;
@@ -19,8 +19,8 @@ const MANAGED_CONNECTION_PAGE_CACHE_KIB: i64 = 64;
 /// checkpoints, control-table edits, or deletion of retained LTX files. Opening
 /// claims a fresh metadata directory; reactivation requires exact restore into
 /// a fresh directory, not reusing potentially unpublished local state.
-pub struct ManagedDb {
-    db: Db,
+pub struct Db {
+    db: CaptureDb,
     writer: Connection,
     observer: crate::commit::CommitObserver,
     required_cut: Option<crate::commit::WalCut>,
@@ -38,7 +38,7 @@ pub struct ManagedDb {
     paged: Option<crate::writable_vfs::Registration>,
 }
 
-impl ManagedDb {
+impl Db {
     /// Returns a thread-safe handle for interrupting the current SQLite operation.
     ///
     /// The handle becomes inert after the database closes. Calling it does not
@@ -264,8 +264,10 @@ impl ManagedDb {
         };
         // Atomic directory creation fences concurrent handles and stale sessions.
         // Never unlink it on close: an old open file must not acquire a new epoch.
-        facilities.filesystem.create_dir(&Db::meta_path_for(path))?;
-        let db = Db::open_with_host(path, host, vfs)?;
+        facilities
+            .filesystem
+            .create_dir(&CaptureDb::meta_path_for(path))?;
+        let db = CaptureDb::open_with_host(path, host, vfs)?;
         let writer = open_connection(path, vfs)?;
         writer.busy_timeout(std::time::Duration::from_secs(1))?;
         writer.pragma_update(None, "wal_autocheckpoint", 0)?;
@@ -834,8 +836,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let host = crate::Host::default().with_clock(Arc::new(TimingClock::new()));
         let mut db =
-            ManagedDb::open_with_host(&temp.path().join("timed.sqlite"), Limits::default(), host)
-                .unwrap();
+            Db::open_with_host(&temp.path().join("timed.sqlite"), Limits::default(), host).unwrap();
         db.transaction(|tx| {
             tx.execute_batch("CREATE TABLE events(value TEXT); INSERT INTO events VALUES ('ok')")
         })
@@ -914,8 +915,7 @@ mod tests {
             max_capture_bytes: 128,
             ..Limits::default()
         };
-        let mut db =
-            ManagedDb::open_with_host(&temp.path().join("failed.sqlite"), limits, host).unwrap();
+        let mut db = Db::open_with_host(&temp.path().join("failed.sqlite"), limits, host).unwrap();
         db.transaction(|tx| {
             tx.execute_batch(
                 "CREATE TABLE events(value BLOB); INSERT INTO events VALUES(randomblob(4096))",
@@ -969,8 +969,7 @@ mod tests {
             max_capture_bytes: 128,
             ..Limits::default()
         };
-        let mut db =
-            ManagedDb::open_with_host(&temp.path().join("disk.sqlite"), limits, host).unwrap();
+        let mut db = Db::open_with_host(&temp.path().join("disk.sqlite"), limits, host).unwrap();
         let ran = std::cell::Cell::new(false);
 
         let result = db.transaction(|_| {
@@ -994,10 +993,10 @@ mod tests {
         let host = crate::Host::default()
             .with_local_disk_budget(crate::DiskBudget::new(bytes.saturating_sub(1)));
 
-        let result = ManagedDb::open_with_host(&path, Limits::default(), host);
+        let result = Db::open_with_host(&path, Limits::default(), host);
 
         assert!(matches!(result, Err(CrabError::Limit("local disk bytes"))));
-        assert!(!Db::meta_path_for(&path).exists());
+        assert!(!CaptureDb::meta_path_for(&path).exists());
     }
 
     #[test]
@@ -1005,7 +1004,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let source_path = temp.path().join("source.sqlite");
         let limits = Limits::default();
-        let mut source = ManagedDb::open(&source_path, limits).unwrap();
+        let mut source = Db::open(&source_path, limits).unwrap();
         source
             .transaction(|transaction| {
                 transaction.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES (1)")
@@ -1020,7 +1019,7 @@ mod tests {
             .with_local_disk_budget(crate::DiskBudget::new(database_bytes.saturating_sub(1)));
         let destination = temp.path().join("destination.sqlite");
 
-        let result = ManagedDb::resume_with_host(&plan, &destination, limits, host);
+        let result = Db::resume_with_host(&plan, &destination, limits, host);
 
         assert!(matches!(result, Err(CrabError::Limit("local disk bytes"))));
         assert!(!destination.exists());
@@ -1036,7 +1035,7 @@ mod tests {
             max_capture_bytes: 1024 * 1024,
             ..Limits::default()
         };
-        let mut db = ManagedDb::open_with_host(&path, limits, host).unwrap();
+        let mut db = Db::open_with_host(&path, limits, host).unwrap();
 
         db.transaction(|transaction| {
             transaction.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES (1)")
@@ -1063,7 +1062,7 @@ mod tests {
     #[test]
     fn typed_operation_error_rolls_back_and_keeps_writer_usable() {
         let temp = tempfile::TempDir::new().unwrap();
-        let mut db = ManagedDb::open(&temp.path().join("typed.sqlite"), Limits::default()).unwrap();
+        let mut db = Db::open(&temp.path().join("typed.sqlite"), Limits::default()).unwrap();
         db.transaction(|tx| tx.execute_batch("CREATE TABLE inventory(value INTEGER NOT NULL)"))
             .unwrap();
 
@@ -1100,7 +1099,7 @@ mod tests {
             .execute_batch("PRAGMA auto_vacuum=FULL; VACUUM;")
             .unwrap();
         drop(initial);
-        let mut db = ManagedDb::open(&path, Limits::default()).unwrap();
+        let mut db = Db::open(&path, Limits::default()).unwrap();
         db.db.truncate_page_n = 20;
         db.db.min_checkpoint_page_n = 10;
         let mut segments = Vec::new();

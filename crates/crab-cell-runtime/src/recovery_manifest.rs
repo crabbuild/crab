@@ -508,7 +508,7 @@ mod tests {
         let limits = crab_ltx::Limits::default();
         let directory = tempfile::TempDir::new().unwrap();
         let mut database =
-            crab_ltx::ManagedDb::open(&directory.path().join("cell.sqlite"), limits).unwrap();
+            crab_ltx::Db::open(&directory.path().join("cell.sqlite"), limits).unwrap();
         database
             .transaction(|transaction| transaction.execute_batch("CREATE TABLE values_(v)"))
             .unwrap();

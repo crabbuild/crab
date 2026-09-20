@@ -366,7 +366,7 @@ async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
     )
     .unwrap();
     let source = tempfile::TempDir::new().unwrap();
-    let mut database = crab_ltx::ManagedDb::open(
+    let mut database = crab_ltx::Db::open(
         &source.path().join("follower.sqlite"),
         super::super::repository_replica_limits(),
     )

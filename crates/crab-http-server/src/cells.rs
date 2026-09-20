@@ -3147,7 +3147,7 @@ mod tests {
         )
         .unwrap();
         let database_dir = tempfile::TempDir::new().unwrap();
-        let mut database = crab_ltx::ManagedDb::open(
+        let mut database = crab_ltx::Db::open(
             &database_dir.path().join("repository.sqlite"),
             repository_replica_limits(),
         )

@@ -1,4 +1,4 @@
-use crab_ltx::{Limits, LocalSegment, ManagedDb, SegmentInfo, VerifiedPlan, restore_exact};
+use crab_ltx::{Db, Limits, LocalSegment, SegmentInfo, VerifiedPlan, restore_exact};
 use std::io::{BufRead, Read, Write};
 use std::process::{Command, Stdio};
 
@@ -10,7 +10,7 @@ fn crash_writer() {
         return;
     };
     let path = std::path::PathBuf::from(path);
-    let mut db = ManagedDb::open(&path.join("repo.sqlite"), Limits::default()).unwrap();
+    let mut db = Db::open(&path.join("repo.sqlite"), Limits::default()).unwrap();
     db.transaction(|tx| {
         tx.execute("CREATE TABLE witnesses (value TEXT)", [])?;
         tx.execute("INSERT INTO witnesses VALUES ('survived process kill')", [])?;

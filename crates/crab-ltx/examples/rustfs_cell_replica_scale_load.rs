@@ -1,6 +1,6 @@
 mod support;
 
-use crab_ltx::{CellReplica, CellStorageLayout, CrabError, Limits, ManagedDb, RootRef};
+use crab_ltx::{CellReplica, CellStorageLayout, CrabError, Db, Limits, RootRef};
 use object_store::path::Path as ObjectPath;
 use std::{
     fs::{self, File},
@@ -29,7 +29,7 @@ async fn main() -> crab_ltx::Result<()> {
     let scratch_directory = temporary_directory(&workload_root, "compaction")?;
     let limits = limits_for(target_bytes);
     let database = source_directory.path().join("cell.sqlite");
-    let mut writer = ManagedDb::open(&database, limits)?;
+    let mut writer = Db::open(&database, limits)?;
     writer.transaction(|transaction| {
         transaction.execute_batch("CREATE TABLE payload(value BLOB NOT NULL)")
     })?;

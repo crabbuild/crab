@@ -1,5 +1,5 @@
 use super::*;
-use crab_ltx::{ManagedDb, NodeFrameScope, encode_node_frame};
+use crab_ltx::{Db, NodeFrameScope, encode_node_frame};
 
 fn frame(sequence: u64, segment: &crab_ltx::LocalSegment, limits: crab_ltx::Limits) -> Bytes {
     encode_node_frame(
@@ -26,7 +26,7 @@ fn frame(sequence: u64, segment: &crab_ltx::LocalSegment, limits: crab_ltx::Limi
 async fn append_recovers_torn_suffix_deduplicates_and_seals() {
     let limits = crab_ltx::Limits::default();
     let source = tempfile::TempDir::new().unwrap();
-    let mut database = ManagedDb::open(&source.path().join("cell.sqlite"), limits).unwrap();
+    let mut database = Db::open(&source.path().join("cell.sqlite"), limits).unwrap();
     database
         .transaction(|transaction| {
             transaction.execute_batch(
@@ -123,7 +123,7 @@ async fn append_recovers_torn_suffix_deduplicates_and_seals() {
 async fn append_skips_an_object_covered_queued_prefix() {
     let limits = crab_ltx::Limits::default();
     let source = tempfile::TempDir::new().unwrap();
-    let mut database = ManagedDb::open(&source.path().join("cell.sqlite"), limits).unwrap();
+    let mut database = Db::open(&source.path().join("cell.sqlite"), limits).unwrap();
     database
         .transaction(|transaction| {
             transaction.execute_batch(
@@ -185,7 +185,7 @@ async fn append_skips_an_object_covered_queued_prefix() {
 async fn covered_prefix_is_pruned_from_open_lane_before_restart() {
     let limits = crab_ltx::Limits::default();
     let source = tempfile::TempDir::new().unwrap();
-    let mut database = ManagedDb::open(&source.path().join("cell.sqlite"), limits).unwrap();
+    let mut database = Db::open(&source.path().join("cell.sqlite"), limits).unwrap();
     database
         .transaction(|transaction| {
             transaction.execute_batch(
@@ -235,7 +235,7 @@ async fn covered_prefix_is_pruned_from_open_lane_before_restart() {
 async fn restarted_lane_returns_only_the_requested_large_frame_page() {
     let limits = crab_ltx::Limits::default();
     let source = tempfile::TempDir::new().unwrap();
-    let mut database = ManagedDb::open(&source.path().join("source.sqlite"), limits).unwrap();
+    let mut database = Db::open(&source.path().join("source.sqlite"), limits).unwrap();
     database
         .transaction(|transaction| {
             transaction.execute_batch(
@@ -285,7 +285,7 @@ async fn restarted_lane_returns_only_the_requested_large_frame_page() {
 async fn closed_chunk_name_must_match_verified_record_range() {
     let limits = crab_ltx::Limits::default();
     let source = tempfile::TempDir::new().unwrap();
-    let mut database = ManagedDb::open(&source.path().join("cell.sqlite"), limits).unwrap();
+    let mut database = Db::open(&source.path().join("cell.sqlite"), limits).unwrap();
     database
         .transaction(|transaction| transaction.execute_batch("CREATE TABLE values_(v)"))
         .unwrap();
@@ -331,7 +331,7 @@ async fn closed_chunk_name_must_match_verified_record_range() {
 async fn conflicting_duplicate_and_sequence_gap_fail_closed() {
     let limits = crab_ltx::Limits::default();
     let source = tempfile::TempDir::new().unwrap();
-    let mut database = ManagedDb::open(&source.path().join("cell.sqlite"), limits).unwrap();
+    let mut database = Db::open(&source.path().join("cell.sqlite"), limits).unwrap();
     database
         .transaction(|transaction| transaction.execute_batch("CREATE TABLE values_(v)"))
         .unwrap();
@@ -418,7 +418,7 @@ fn open_reserves_only_existing_follower_bytes_and_rejects_an_undersized_budget()
 async fn append_reserves_capacity_before_writing_and_seal_accounts_for_marker() {
     let limits = crab_ltx::Limits::default();
     let source = tempfile::TempDir::new().unwrap();
-    let mut database = ManagedDb::open(&source.path().join("cell.sqlite"), limits).unwrap();
+    let mut database = Db::open(&source.path().join("cell.sqlite"), limits).unwrap();
     database
         .transaction(|transaction| transaction.execute_batch("CREATE TABLE values_(v)"))
         .unwrap();
@@ -461,7 +461,7 @@ async fn append_reserves_capacity_before_writing_and_seal_accounts_for_marker() 
 async fn retire_requires_full_coverage_and_persists_an_append_fence() {
     let limits = crab_ltx::Limits::default();
     let source = tempfile::TempDir::new().unwrap();
-    let mut database = ManagedDb::open(&source.path().join("cell.sqlite"), limits).unwrap();
+    let mut database = Db::open(&source.path().join("cell.sqlite"), limits).unwrap();
     database
         .transaction(|transaction| transaction.execute_batch("CREATE TABLE values_(v)"))
         .unwrap();
@@ -508,7 +508,7 @@ async fn retire_requires_full_coverage_and_persists_an_append_fence() {
 async fn retired_lane_collection_requires_exact_grace_aged_candidate() {
     let limits = crab_ltx::Limits::default();
     let source = tempfile::TempDir::new().unwrap();
-    let mut database = ManagedDb::open(&source.path().join("cell.sqlite"), limits).unwrap();
+    let mut database = Db::open(&source.path().join("cell.sqlite"), limits).unwrap();
     database
         .transaction(|transaction| transaction.execute_batch("CREATE TABLE values_(v)"))
         .unwrap();

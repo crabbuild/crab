@@ -59,7 +59,7 @@ breaking removal.
 | --- | --- | --- |
 | Epoch-head CAS and historical `open_exact` | `CellAuthority` control CAS plus `CellReplica` exact `RootRef` | Covered by Cell authority/root publication and takeover tests; the standalone head is intentionally not migrated |
 | Bundle selection by repository/epoch | Cell bundle rows and authenticated directory extents | Covered for Cell-scoped rows by `cell_roots` bundle preparation/recovery tests |
-| Paged frame hash/CRC and writable sparse VFS | `CellPagedDatabase`, `ManagedDb::hydrate_step`, shared VFS | Covered by Cell root sparse-read, coalescing, hydration, and checksum-failure tests |
+| Paged frame hash/CRC and writable sparse VFS | `CellPagedDatabase`, `Db::hydrate_step`, shared VFS | Covered by Cell root sparse-read, coalescing, hydration, and checksum-failure tests |
 | Caller-driven level schedule | Cell scheduled compaction and actor hydration tick | Covered by Cell scheduled compaction and runtime owner scheduling |
 | Standalone source-loss/reopen tests | Cell source-loss takeover/publication tests | Covered by Cell root reopen, restore, and runtime failover suites |
 | Celld/rustyriver compatibility fixtures | Crab CRB1/LTX exact-root tests | Missing external wire-compatibility qualification; not an authorization contract |

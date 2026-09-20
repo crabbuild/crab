@@ -5,7 +5,7 @@ use crab_cell_runtime::{
     RequestId, SqlWorkerPool, StoredOutcome, WorkerExecution, install_runtime_schema,
 };
 use crab_ltx::CellStorageLayout;
-use crab_ltx::{CellReplica, Limits, ManagedDb};
+use crab_ltx::{CellReplica, Db, Limits};
 use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path};
 
@@ -40,7 +40,7 @@ fn fixture(cell_byte: u8) -> Fixture {
         )
         .unwrap();
     drop(connection);
-    let writer = ManagedDb::open(&database, Limits::default()).unwrap();
+    let writer = Db::open(&database, Limits::default()).unwrap();
     Fixture {
         _directory: directory,
         cell,

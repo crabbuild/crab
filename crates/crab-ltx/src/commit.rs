@@ -25,7 +25,7 @@ impl CommitObserver {
             frames: Box::new(AtomicU32::new(0)),
         };
         // SAFETY: the boxed atomic has a stable address and outlives the writer.
-        // The callback neither unwinds nor calls SQLite. ManagedDb drops its
+        // The callback neither unwinds nor calls SQLite. Db drops its
         // writer before this observer, including on implicit drop.
         unsafe {
             ffi::sqlite3_wal_hook(

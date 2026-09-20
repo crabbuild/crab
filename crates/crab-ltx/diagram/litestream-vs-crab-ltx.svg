@@ -85,7 +85,7 @@
 
   <rect x="665" y="250" width="160" height="70" rx="7" fill="#0f172a"/>
   <rect x="665" y="250" width="160" height="70" rx="7" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
-  <text x="745" y="278" fill="#f8fafc" font-size="11" font-weight="600" text-anchor="middle">ManagedDb</text>
+  <text x="745" y="278" fill="#f8fafc" font-size="11" font-weight="600" text-anchor="middle">Db</text>
   <text x="745" y="295" fill="#94a3b8" font-size="8" text-anchor="middle">SQLite + WAL ownership</text>
   <text x="745" y="308" fill="#94a3b8" font-size="8" text-anchor="middle">verified local cuts</text>
 

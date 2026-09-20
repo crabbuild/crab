@@ -43,7 +43,7 @@ implementations, and the official
 | Concern | Litestream v0.5.17 | `crab-ltx` |
 | --- | --- | --- |
 | Deployment | Standalone process next to the application | Library linked into a Rust process |
-| Write ownership | Observes an application-owned SQLite database through SQLite and WAL files | All supported SQL writes pass through an exclusive `ManagedDb` session |
+| Write ownership | Observes an application-owned SQLite database through SQLite and WAL files | All supported SQL writes pass through an exclusive `Db` session |
 | Progress | Background monitor loops sync WAL, upload LTX, compact levels, create snapshots, and enforce retention | The host explicitly calls `capture`, `checkpoint`, `prepare`, compaction, and pruning |
 | Remote state | `ReplicaClient` lists LTX levels and selects ranges for restore | `CellReplica` opens an exact `RootRef`; it never discovers truth by listing objects |
 | Durability boundary | A successful replica sync advances Litestream's replica position | Uploaded immutable objects are only a proposal; the host must publish the root with Cell authority before acknowledging |
@@ -73,7 +73,7 @@ durability.
 
 The safe write path is:
 
-1. Run a transaction through `ManagedDb`.
+1. Run a transaction through `Db`.
 2. Call `capture()` to produce one or more ordered local LTX segments.
 3. Upload and verify them with `CellReplica::prepare()`.
 4. Publish the returned root through the embedding runtime's owner/head CAS.
@@ -124,7 +124,7 @@ The following example is compiled as a Rust doc test. Both destination
 directories exist, and the restored database path does not.
 
 ```rust,no_run
-use crab_ltx::{Limits, ManagedDb, VerifiedPlan, restore_exact};
+use crab_ltx::{Limits, Db, VerifiedPlan, restore_exact};
 
 fn main() -> crab_ltx::Result<()> {
     let source = tempfile::tempdir()?;
@@ -132,7 +132,7 @@ fn main() -> crab_ltx::Result<()> {
     let limits = Limits::default();
     let database_path = source.path().join("repository.sqlite");
 
-    let mut database = ManagedDb::open(&database_path, limits)?;
+    let mut database = Db::open(&database_path, limits)?;
     database.transaction(|transaction| {
         transaction.execute(
             "CREATE TABLE issues (number INTEGER PRIMARY KEY, title TEXT NOT NULL)",
@@ -186,10 +186,10 @@ use different variants and may fence the session.
 ```rust,no_run
 use std::io;
 
-use crab_ltx::{ManagedDb, TransactionError};
+use crab_ltx::{Db, TransactionError};
 
 fn rename_issue(
-    database: &mut ManagedDb,
+    database: &mut Db,
     number: i64,
     title: &str,
 ) -> Result<(), TransactionError<io::Error>> {
@@ -222,9 +222,9 @@ returned batch includes the pending write cut and any additional cut created by
 checkpoint maintenance; publish the whole batch before acknowledging it.
 
 ```rust,no_run
-use crab_ltx::{CaptureBatch, CheckpointMode, ManagedDb};
+use crab_ltx::{CaptureBatch, CheckpointMode, Db};
 
-fn capture_and_truncate_wal(database: &mut ManagedDb) -> crab_ltx::Result<CaptureBatch> {
+fn capture_and_truncate_wal(database: &mut Db) -> crab_ltx::Result<CaptureBatch> {
     database.checkpoint(CheckpointMode::Truncate)
 }
 ```
@@ -235,19 +235,19 @@ for it.
 
 ## Resume a verified lineage
 
-`ManagedDb::resume` installs a verified plan into a fresh path and seeds the
+`Db::resume` installs a verified plan into a fresh path and seeds the
 next capture with the plan's exact TXID and rolling checksum. It never infers
 acknowledged state from an abandoned database directory.
 
 ```rust,no_run
-use crab_ltx::{Limits, ManagedDb, VerifiedPlan};
+use crab_ltx::{Limits, Db, VerifiedPlan};
 
 fn main() -> crab_ltx::Result<()> {
     let source = tempfile::tempdir()?;
     let destination = tempfile::tempdir()?;
     let limits = Limits::default();
 
-    let mut original = ManagedDb::open(&source.path().join("state.sqlite"), limits)?;
+    let mut original = Db::open(&source.path().join("state.sqlite"), limits)?;
     original.transaction(|transaction| {
         transaction.execute("CREATE TABLE events (value TEXT NOT NULL)", [])?;
         transaction.execute("INSERT INTO events VALUES ('first')", [])?;
@@ -257,7 +257,7 @@ fn main() -> crab_ltx::Result<()> {
     let plan = VerifiedPlan::new(&captured.segments, captured.position, limits)?;
     original.close()?;
 
-    let mut resumed = ManagedDb::resume(
+    let mut resumed = Db::resume(
         &plan,
         &destination.path().join("state.sqlite"),
         limits,
@@ -302,10 +302,10 @@ fn bind_replica(store: Store) -> crab_ltx::Result<CellReplica> {
 ```
 
 ```rust,ignore
-use crab_ltx::{CaptureBatch, CellReplica, ManagedDb, PreparedRoot, RootRef};
+use crab_ltx::{CaptureBatch, CellReplica, Db, PreparedRoot, RootRef};
 
 async fn prepare_root(
-    database: &mut ManagedDb,
+    database: &mut Db,
     replica: &CellReplica,
     previous: Option<&RootRef>,
     commit_sequence: u64,
@@ -326,7 +326,7 @@ async fn prepare_root(
 `CellReplica::prepare` writes only immutable, content-addressed objects. The
 embedding runtime publishes `PreparedRoot::root()` through `crab-cell-runtime`
 authority. After durable publication it may call
-`ManagedDb::prune_captured(&captured)` for that exact acknowledged batch.
+`Db::prune_captured(&captured)` for that exact acknowledged batch.
 
 The live RustFS example exercises Cell publication, sparse activation,
 compaction, source deletion, and exact recovery. See the
@@ -383,13 +383,13 @@ of remaining work proactively.
 ```rust,ignore
 use std::path::Path;
 
-use crab_ltx::{CellReplica, Hydration, ManagedDb, RootRef};
+use crab_ltx::{CellReplica, Hydration, Db, RootRef};
 
 async fn activate_sparse(
     replica: &CellReplica,
     published: &RootRef,
     destination: &Path,
-) -> crab_ltx::Result<ManagedDb> {
+) -> crab_ltx::Result<Db> {
     let verified = replica.open_root(published).await?;
     let writable = verified.paged().prepare_writable(destination).await?;
     let mut database = writable.open_writable(destination)?;
@@ -401,7 +401,7 @@ async fn activate_sparse(
 ```
 
 The sparse database remains pinned to the selected root. New writes still use
-`ManagedDb::transaction`, `capture`, immutable preparation, and authority CAS
+`Db::transaction`, `capture`, immutable preparation, and authority CAS
 in that order.
 
 ## Core API
@@ -410,15 +410,15 @@ in that order.
 
 | API | Contract |
 | --- | --- |
-| `ManagedDb::open` | Claims a fresh exclusive session and owns the writer, control, and read-lock SQLite connections |
-| `ManagedDb::transaction` | Commits one local SQL transaction; does not claim remote durability |
-| `ManagedDb::capture` | Returns every new ordered cut plus its exact TXID/checksum endpoint |
-| `ManagedDb::checkpoint` | Captures a barrier, runs the selected SQLite checkpoint, and returns every generated cut |
-| `ManagedDb::snapshot` | Returns an independent full snapshot plus any pending captured cuts |
+| `Db::open` | Claims a fresh exclusive session and owns the writer, control, and read-lock SQLite connections |
+| `Db::transaction` | Commits one local SQL transaction; does not claim remote durability |
+| `Db::capture` | Returns every new ordered cut plus its exact TXID/checksum endpoint |
+| `Db::checkpoint` | Captures a barrier, runs the selected SQLite checkpoint, and returns every generated cut |
+| `Db::snapshot` | Returns an independent full snapshot plus any pending captured cuts |
 | `VerifiedPlan::new` | Owns and verifies the complete selected snapshot-plus-delta chain |
 | `restore_exact` | Installs a fresh database at exactly the verified endpoint; never overwrites |
 | `compact_exact` | Produces a verified full snapshot without deleting its inputs |
-| `ManagedDb::resume` | Restores a verified plan into a fresh session and continues its TXID/checksum lineage |
+| `Db::resume` | Restores a verified plan into a fresh session and continues its TXID/checksum lineage |
 
 ### Cell replication (`replica`)
 
@@ -431,7 +431,7 @@ in that order.
 | `VerifiedRoot::restore` | Streams an exact verified database into a fresh destination |
 | `VerifiedRoot::paged` | Opens authenticated page and page-run reads |
 | `CellPagedDatabase::prepare_writable` | Seeds a fresh sparse writable activation at the root's exact position |
-| `ManagedDb::hydrate_step` | Resolves a bounded number of missing sparse pages on the owner-controlled database worker |
+| `Db::hydrate_step` | Resolves a bounded number of missing sparse pages on the owner-controlled database worker |
 | `CellReplica::reachable_objects` | Returns `RootObjectRef` values for the verified immutable dependency set |
 
 ## Safety model
@@ -462,7 +462,7 @@ authority record that selects them.
 The application must provide the policy a sidecar would normally own:
 
 - serialize SQL and publication for each database;
-- keep all mutations inside `ManagedDb` and avoid direct checkpoints, `ATTACH`,
+- keep all mutations inside `Db` and avoid direct checkpoints, `ATTACH`,
   pager-changing pragmas, and edits to `_litestream_seq` or `_litestream_lock`;
 - publish roots through owner/incarnation/sequence authority before responding;
 - schedule capture, checkpoint, hydration, compaction, and retries;
@@ -472,7 +472,7 @@ The application must provide the policy a sidecar would normally own:
 - pin live roots and own remote retention and garbage collection.
 
 Local calls are synchronous and should run on a dedicated database thread or a
-bounded blocking executor. `&mut ManagedDb` serializes access within one handle;
+bounded blocking executor. `&mut Db` serializes access within one handle;
 it does not create a distributed lock.
 
 The database path, SQLite sidecars, and private
@@ -486,7 +486,7 @@ recover the authoritative plan or Cell root into a fresh directory instead.
 input/output file, 1 GiB across a plan or retained captures, and 1,024 segments.
 These are per-operation correctness bounds, not an RSS quota.
 
-Each open `ManagedDb` retains three SQLite connections with a 64 KiB page-cache
+Each open `Db` retains three SQLite connections with a 64 KiB page-cache
 target per connection. `Host` can share disk, I/O, blocking-job, recovery,
 dirty-job, scratch, and telemetry admission across many databases. Sparse page
 read-ahead is capped at 64 pages or 1 MiB per request, and the shared decoded
