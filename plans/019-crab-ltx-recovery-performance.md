@@ -658,6 +658,26 @@ small-workload run put Crab's recovery median below pinned Celld's, but host
 load and tail variance were high, so this remains directional rather than a
 release-performance claim.
 
+The capture encoder also passed every small header, page frame, and trailer
+write through `HostFile::write_all`, which queried the output file's metadata
+before every write to enforce `max_file_bytes`. Exclusively created LTX outputs
+now track their sequential extent in memory; opened WAL and checksum files keep
+live filesystem length checks. In a 20-pair grouped-capture A/B on the same
+contended host, local-write time improved in 17 pairs, with a paired median
+reduction of about 2.4 ms. Raw medians moved from 10.5 ms to 7.9 ms for local
+writes, 145.6 ms to 140.8 ms for capture, and 193.1 ms to 180.4 ms total. The
+filesystem barriers still dominate, so these are directional CPU/I/O-call
+results rather than a 1.5x end-to-end claim.
+
+A fresh 15-pair synchronous small-workload comparison is the current honesty
+gate. Crab recovery was 13.8 ms versus Celld's 15.8 ms, but Crab capture was
+172.5 ms versus 94.9 ms and total latency was 202.2 ms versus 123.2 ms. Crab's
+capture ledger attributed medians of 74.6 ms to file fsync and 84.0 ms to the
+parent-directory sync. The latter is absent from the pinned Celld return path.
+Therefore Crab does not currently beat Celld for independently durable
+per-capture latency; grouped throughput and verified recovery are the measured
+wins, and the contracts must not be collapsed into one headline.
+
 ## Test plan
 
 - `crates/crab-ltx/perf/crab/src/main.rs`
