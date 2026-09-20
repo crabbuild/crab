@@ -1,22 +1,20 @@
-use crab_cell_runtime::{
-    ApplicationId, CellId, CellTarget, Digest, EffectBatch, EffectCommandIntent,
-    EffectLeaseOutcome, EffectTokenSource, HandlerOutcome, InboxApplyOutcome, InboxDelivery,
-    IncarnationId, NamespaceId, TenantId, effect_ack_delivered, effect_claim,
-    effect_cleanup_terminal, effect_validate_claim, inbox_apply, inbox_cleanup_expired,
-    install_runtime_schema, peer_wire,
+use super::EffectBatch;
+use crate::{
+    ApplicationId, CellId, CellTarget, Digest, EffectCommandIntent, EffectLeaseOutcome,
+    EffectTokenSource, HandlerOutcome, InboxApplyOutcome, InboxDelivery, IncarnationId,
+    NamespaceId, TenantId, effect_ack_delivered, effect_claim, effect_cleanup_terminal,
+    effect_validate_claim, inbox_apply, inbox_cleanup_expired, install_runtime_schema, peer_wire,
 };
 use prost::Message;
 
 struct Tokens(u8);
 
 impl EffectTokenSource for Tokens {
-    fn next_token(&mut self) -> crab_cell_runtime::Result<[u8; 16]> {
+    fn next_token(&mut self) -> crate::Result<[u8; 16]> {
         self.0 = self
             .0
             .checked_add(1)
-            .ok_or(crab_cell_runtime::Error::Command(
-                "test effect token overflow",
-            ))?;
+            .ok_or(crate::Error::Command("test effect token overflow"))?;
         Ok([self.0; 16])
     }
 }
@@ -428,7 +426,7 @@ fn manual_retry_preserves_identity_and_never_reopens_terminal_effect() {
         .unwrap()
         .remove(0);
     assert_eq!(
-        crab_cell_runtime::effect_retry(&transaction, 4_999, &claim).unwrap(),
+        crate::effect_retry(&transaction, 4_999, &claim).unwrap(),
         EffectLeaseOutcome::Failed
     );
     assert!(

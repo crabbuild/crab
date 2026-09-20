@@ -40,7 +40,8 @@ and one byte counter for the complete transaction.
 
 - `crates/crab-cell-runtime/src/registry.rs:160-204` stores command metadata but
   creates a new `EffectBatch` for every `effect_batch()` call.
-- `crates/crab-cell-runtime/src/effects.rs:85-155` stores only `next_ordinal`.
+- `crates/crab-cell-runtime/src/effects.rs:85-155` stores the command-owned
+  ordinal and encoded-byte counters.
 - `crates/crab-cell-runtime/src/effects.rs:342-352` scans `sys_effects` for every
   insertion to enforce command limits.
 - `crates/crab-cell-runtime/src/migrations/runtime.sql:35-52` has no
@@ -51,7 +52,8 @@ and one byte counter for the complete transaction.
   allocator across a bounded transition loop; preserve that invariant.
 - No Rust source outside `crab-cell-runtime` currently constructs `EffectBatch`.
   The crate is `publish = false`, so no shipped public compatibility has been
-  established by the repository. Recheck tags before removal.
+  established by the repository. The low-level effect tests now live beside
+  the private allocator instead of requiring a public constructor.
 
 ## Target contract
 
@@ -69,7 +71,7 @@ and one byte counter for the complete transaction.
 
 | Purpose | Command | Expected on success |
 | --- | --- | --- |
-| Effect tests | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-019-effects cargo test -p crab-cell-runtime --test effects --locked` | exit 0 |
+| Effect tests | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-019-effects cargo test -p crab-cell-runtime --lib effects::tests --locked` | exit 0 |
 | Client/command tests | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-019-effects cargo test -p crab-cell-runtime --test client --locked` | exit 0 |
 | Workflow/Queue tests | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-019-effects cargo test -p crab-cell-runtime --test workflow --test workflow_api --test queue --locked` | exit 0 |
 | Query-plan guard | `rg -n "created_sequence = \\?1" crates/crab-cell-runtime/src/effects.rs` | no aggregate scan match |

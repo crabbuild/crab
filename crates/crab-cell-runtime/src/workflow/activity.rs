@@ -5,7 +5,8 @@ use super::{
     WorkflowDefinition, WorkflowOutcome, WorkflowStatus, commit_transition, load_run_by_id,
     prepare_transition, verify_definition,
 };
-use crate::{Digest, EffectBatch, Error, Result};
+use crate::effects::EffectBatch;
+use crate::{Digest, Error, Result};
 
 pub(super) const MAX_CLAIM_ITEMS: usize = 32;
 const MAX_CLAIM_BYTES: usize = 512 << 10;

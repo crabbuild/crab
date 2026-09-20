@@ -90,14 +90,13 @@ pub use cron::{
     cron_query, install_cron_schema, register_cron,
 };
 pub use effects::{
-    EffectAckRequest, EffectBatch, EffectClaim, EffectClaimCommand, EffectClaimRequest,
-    EffectCommandIntent, EffectLease, EffectLeaseCommand, EffectLeaseOutcome, EffectLeaseRequest,
-    EffectModule, EffectRunOutcome, EffectSource, EffectState, EffectSupervisor,
-    EffectSupervisorError, EffectTokenSource, EffectValidateClaimQuery, EffectValidateRequest,
-    InboxApplyOutcome, InboxDelivery, SystemEffectTokens, effect_ack_delivered, effect_claim,
-    effect_cleanup_terminal, effect_extend, effect_id, effect_operation_digest, effect_retry,
-    effect_validate_claim, inbox_apply, inbox_cleanup_expired, inbox_resolve,
-    register_effect_delivery,
+    EffectAckRequest, EffectClaim, EffectClaimCommand, EffectClaimRequest, EffectCommandIntent,
+    EffectLease, EffectLeaseCommand, EffectLeaseOutcome, EffectLeaseRequest, EffectModule,
+    EffectRunOutcome, EffectSource, EffectState, EffectSupervisor, EffectSupervisorError,
+    EffectTokenSource, EffectValidateClaimQuery, EffectValidateRequest, InboxApplyOutcome,
+    InboxDelivery, SystemEffectTokens, effect_ack_delivered, effect_claim, effect_cleanup_terminal,
+    effect_extend, effect_id, effect_operation_digest, effect_retry, effect_validate_claim,
+    inbox_apply, inbox_cleanup_expired, inbox_resolve, register_effect_delivery,
 };
 pub use error::{Error, Result};
 pub use executor::{

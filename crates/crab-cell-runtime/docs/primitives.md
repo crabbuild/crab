@@ -288,7 +288,9 @@ The quiescent-pause rule avoids converting an already-running external side effe
 
 ## Deliver cross-Cell effects through an inbox
 
-A command may create an `EffectBatch`. Effects carry typed Cell commands only and inherit the source tenant and application.
+A command emits typed Cell effects through `CommandContext::emit_effect`, which
+uses the command-owned allocator. Effects carry typed Cell commands only and
+inherit the source tenant and application.
 
 ```mermaid
 flowchart LR

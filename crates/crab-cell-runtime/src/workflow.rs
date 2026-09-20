@@ -1,7 +1,8 @@
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
+use crate::effects::EffectBatch;
 use crate::{
-    CellTarget, Digest, EffectBatch, EffectCommandIntent, Error, NamespaceId, RequestId, Result,
+    CellTarget, Digest, EffectCommandIntent, Error, NamespaceId, RequestId, Result,
     effects::validate_effect_command_intent,
 };
 

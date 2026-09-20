@@ -10,6 +10,10 @@ use crate::{
 mod api;
 mod supervisor;
 
+#[cfg(test)]
+#[path = "effects_tests.rs"]
+mod tests;
+
 pub use api::{
     EffectAckRequest, EffectClaimCommand, EffectClaimRequest, EffectLeaseCommand,
     EffectLeaseRequest, EffectModule, EffectSource, EffectValidateClaimQuery,
@@ -86,7 +90,7 @@ pub struct EffectCommandIntent {
 ///
 /// One batch must be shared by every primitive transition performed by the
 /// same Cell command so each emitted effect receives a unique ordinal.
-pub struct EffectBatch {
+pub(crate) struct EffectBatch {
     source: CellTarget,
     incarnation: IncarnationId,
     sequence: u64,
@@ -97,7 +101,7 @@ pub struct EffectBatch {
 
 impl EffectBatch {
     /// Verifies the supplied source against the authoritative command transaction.
-    pub fn new(
+    pub(crate) fn new(
         transaction: &Transaction<'_>,
         source: &CellTarget,
         sequence: u64,
@@ -147,7 +151,7 @@ impl EffectBatch {
     }
 
     /// Inserts one canonical Cell command without pinning a destination owner incarnation.
-    pub fn insert_command(
+    pub(crate) fn insert_command(
         &mut self,
         transaction: &Transaction<'_>,
         intent: &EffectCommandIntent,

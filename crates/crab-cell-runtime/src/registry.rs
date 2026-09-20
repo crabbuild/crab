@@ -10,15 +10,16 @@ mod descriptor;
 
 use descriptor::{encode_release, requires_persisted_work_inventory, verify_rolling_compatibility};
 
+use crate::effects::EffectBatch;
 use crate::{
     ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome, ActivitySupervisor,
     ActivitySupervisorError, ActivitySupport, ApplicationId, BlockingActivityHandler,
     BlockingActivityReservation, CatalogRole, CellClient, CellId, CellTarget, Committed, Digest,
-    EffectBatch, EffectCommandIntent, EffectModule, EffectPeerClient, EffectRunOutcome,
-    EffectSupervisor, EffectSupervisorError, Error, HandlerOutcome, InvocationError,
-    MaintenanceModule, MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest,
-    MutationIdentity, NamespaceId, Result, SqlBatch, SqlResultSet, TenantId, WireValue,
-    WorkflowActivities, WorkflowActivityModule, WorkflowDefinition,
+    EffectCommandIntent, EffectModule, EffectPeerClient, EffectRunOutcome, EffectSupervisor,
+    EffectSupervisorError, Error, HandlerOutcome, InvocationError, MaintenanceModule,
+    MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest, MutationIdentity,
+    NamespaceId, Result, SqlBatch, SqlResultSet, TenantId, WireValue, WorkflowActivities,
+    WorkflowActivityModule, WorkflowDefinition,
     codec::{decode_wire, encode_wire},
     sql_batch, sql_query_batch,
 };

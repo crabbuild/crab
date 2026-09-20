@@ -5,15 +5,15 @@ mod support;
 use crab_cell_runtime::{
     ApplicationId, BoundedDecoder, BoundedEncoder, BuildDescriptor, CatalogEntry, CatalogProof,
     CatalogRole, CellAuthority, CellClient, CellDescription, CellModule, CellRuntime, CellTarget,
-    CodecError, Command, CommandContext, CommandResult, Digest, EffectBatch, EffectClaim,
-    EffectClaimRequest, EffectCommandIntent, EffectLeaseOutcome, EffectModule, EffectPeerClient,
-    EffectRunOutcome, EffectSource, IncarnationId, InvocationError, MigrationDescriptor,
-    ModuleDescriptor, MutationIdentity, NamespaceDescriptor, NamespaceId, OperationDescriptor,
-    Owner, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerPrincipal, PeerRoundTrip,
-    PeerSigner, PeerVerifier, Query, QueryContext, Receipt, Registry, RegistryBuilder, RequestId,
-    Resolution, SessionId, SqlBatch, SqlStatement, SqlValue, SqlWorkerPool, TenantId,
-    VerifiedPeerRequest, WireValue, command_operation_digest, effect_id, effect_operation_digest,
-    peer_wire as wire, register_effect_delivery,
+    CodecError, Command, CommandContext, CommandResult, Digest, EffectClaim, EffectClaimRequest,
+    EffectCommandIntent, EffectLeaseOutcome, EffectModule, EffectPeerClient, EffectRunOutcome,
+    EffectSource, IncarnationId, InvocationError, MigrationDescriptor, ModuleDescriptor,
+    MutationIdentity, NamespaceDescriptor, NamespaceId, OperationDescriptor, Owner, PeerAuthorizer,
+    PeerCellResolver, PeerDispatcher, PeerPrincipal, PeerRoundTrip, PeerSigner, PeerVerifier,
+    Query, QueryContext, Receipt, Registry, RegistryBuilder, RequestId, Resolution, SessionId,
+    SqlBatch, SqlStatement, SqlValue, SqlWorkerPool, TenantId, VerifiedPeerRequest, WireValue,
+    command_operation_digest, effect_id, effect_operation_digest, peer_wire as wire,
+    register_effect_delivery,
 };
 use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits};
@@ -65,6 +65,14 @@ const COMMANDS: &[OperationDescriptor] = &[
         input_limit: 1 << 20,
         output_limit: 16,
     },
+    OperationDescriptor {
+        id: 6,
+        codec_version: 1,
+        schema_min: 1,
+        schema_max: 1,
+        input_limit: 64,
+        output_limit: 64,
+    },
 ];
 const QUERIES: &[OperationDescriptor] = &[
     OperationDescriptor {
@@ -98,6 +106,7 @@ impl CellModule for RepositoryModule {
         registry.bind_command::<CreateComment>()?;
         registry.bind_command::<RejectComment>()?;
         registry.bind_command::<InvalidResultComment>()?;
+        registry.bind_command::<EmitEffectComment>()?;
         registry.bind_query::<CountComments>()?;
         register_effect_delivery::<Self>(registry)?;
         Ok(())
@@ -154,6 +163,34 @@ impl Command for RejectComment {
             }],
         })?;
         Ok(CommandResult::Rejected(b"moderated".to_vec()))
+    }
+}
+
+struct EmitEffectComment;
+
+impl Command for EmitEffectComment {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 6;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Vec<u8>;
+    type Output = Vec<u8>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        input: Self::Input,
+    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+        let expires_at_ms = context
+            .now_ms()
+            .checked_add(60_000)
+            .ok_or(crab_cell_runtime::Error::Command("effect expiry overflow"))?;
+        let effect_id = context.emit_effect(&EffectCommandIntent {
+            target: context.target().clone(),
+            command_id: CreateComment::ID,
+            codec_version: CreateComment::CODEC_VERSION,
+            input,
+            expires_at_ms,
+        })?;
+        Ok(CommandResult::Success(effect_id.to_vec()))
     }
 }
 
@@ -702,43 +739,20 @@ async fn typed_effect_source_publishes_claim_validation_ack_and_lost_lease() {
     let source_sequence = 1;
     let ordinal = 0;
     let identity = mutation(30);
-    let effect_id = effect_id(source_cell, source_incarnation, source_sequence, ordinal);
+    let expected_effect_id = effect_id(source_cell, source_incarnation, source_sequence, ordinal);
     let expires_at_ms = identity.issued_at_ms + 60_000;
     let mut encoder = BoundedEncoder::new(64).unwrap();
     b"effect-source".to_vec().encode(&mut encoder).unwrap();
     let input = encoder.finish();
-    let source_target = fixture.target.clone();
-    let effect_target = fixture.target.clone();
-    fixture
-        .handle()
-        .execute(
-            identity,
-            Digest::from_bytes([31; 32]),
-            identity.issued_at_ms,
-            1024,
-            1,
-            move |transaction| {
-                EffectBatch::new(
-                    transaction,
-                    &source_target,
-                    source_sequence,
-                    identity.issued_at_ms,
-                )?
-                .insert_command(
-                    transaction,
-                    &EffectCommandIntent {
-                        target: effect_target,
-                        command_id: CreateComment::ID,
-                        codec_version: CreateComment::CODEC_VERSION,
-                        input,
-                        expires_at_ms,
-                    },
-                )?;
-                Ok(crab_cell_runtime::HandlerOutcome::Success(Vec::new()))
-            },
-        )
+    let client = CellClient::local(Arc::clone(&fixture.registry), fixture.handle().clone());
+    let committed = client
+        .command::<EmitEffectComment>(&fixture.target, identity, input)
         .await
         .unwrap();
+    let effect_id: [u8; 32] = committed.output.try_into().unwrap();
+    assert_eq!(effect_id, expected_effect_id);
+    assert_eq!(source_sequence, committed.receipt.commit_sequence);
+    assert_eq!(expires_at_ms, identity.issued_at_ms + 60_000);
 
     let first_handle = fixture.take_handle();
     drop(first_handle);
@@ -822,42 +836,15 @@ async fn effect_supervisor_delivers_to_inbox_and_acknowledges_source() {
     let fixture = fixture().await;
     let source_sequence = 1;
     let identity = mutation(40);
-    let expires_at_ms = identity.issued_at_ms + 60_000;
     let mut encoder = BoundedEncoder::new(64).unwrap();
     b"supervised".to_vec().encode(&mut encoder).unwrap();
     let input = encoder.finish();
-    let source_target = fixture.target.clone();
-    let effect_target = fixture.target.clone();
-    fixture
-        .handle()
-        .execute(
-            identity,
-            Digest::from_bytes([41; 32]),
-            identity.issued_at_ms,
-            1024,
-            1,
-            move |transaction| {
-                EffectBatch::new(
-                    transaction,
-                    &source_target,
-                    source_sequence,
-                    identity.issued_at_ms,
-                )?
-                .insert_command(
-                    transaction,
-                    &EffectCommandIntent {
-                        target: effect_target,
-                        command_id: CreateComment::ID,
-                        codec_version: CreateComment::CODEC_VERSION,
-                        input,
-                        expires_at_ms,
-                    },
-                )?;
-                Ok(crab_cell_runtime::HandlerOutcome::Success(Vec::new()))
-            },
-        )
+    let client = CellClient::local(Arc::clone(&fixture.registry), fixture.handle().clone());
+    let committed = client
+        .command::<EmitEffectComment>(&fixture.target, identity, input)
         .await
         .unwrap();
+    assert_eq!(source_sequence, committed.receipt.commit_sequence);
 
     let signer = PeerSigner::new(
         SessionId::from_bytes([42; 16]),

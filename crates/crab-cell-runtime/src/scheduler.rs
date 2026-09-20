@@ -2,10 +2,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crab_ltx::rusqlite::Transaction;
 
+use crate::effects::EffectBatch;
 use crate::{
-    CatalogProof, CatalogShardScan, CellAuthority, CellCatalog, CellTarget, CronTarget,
-    EffectBatch, Error, NodeAdvertisement, QueueDeadLetterTarget, Result, SessionId,
-    VersionedControl, WorkflowDefinition,
+    CatalogProof, CatalogShardScan, CellAuthority, CellCatalog, CellTarget, CronTarget, Error,
+    NodeAdvertisement, QueueDeadLetterTarget, Result, SessionId, VersionedControl,
+    WorkflowDefinition,
     blob::blob_cleanup_expired,
     cron::cron_fire_due_bounded,
     effects::{
