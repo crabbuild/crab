@@ -19,7 +19,7 @@ use crab_cell_runtime::{
     register_blob, register_cron, register_effect_delivery, register_kv, register_maintenance,
     register_queue, register_sql, register_workflow, register_workflow_activities,
 };
-use crab_ltx::{CellReplica, Limits};
+use crab_ltx::{CellReplica, DiskBudget, Host, Limits};
 use crab_storage::Store;
 use object_store::memory::InMemory;
 
@@ -645,8 +645,13 @@ async fn reference_application_uses_typed_handle_for_a_real_commit() {
         .await
         .unwrap();
     let directory = tempfile::TempDir::new().unwrap();
-    let runtime =
-        CellRuntime::new(SqlWorkerPool::new(1, 4).unwrap(), 16 * 1024 * 1024, session).unwrap();
+    let runtime = CellRuntime::new_with_replica_host(
+        SqlWorkerPool::new(1, 4).unwrap(),
+        16 * 1024 * 1024,
+        session,
+        reference_host(),
+    )
+    .unwrap();
     let handle = runtime
         .bootstrap(
             proof,
@@ -760,6 +765,10 @@ where
             initialize,
         )
         .await
+}
+
+fn reference_host() -> Host {
+    Host::default().with_local_disk_budget(DiskBudget::new(1 << 30))
 }
 
 fn reference_identity(byte: u8, now_ms: i64) -> MutationIdentity {
@@ -915,10 +924,11 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
     );
     let directory = tempfile::TempDir::new().unwrap();
     let session = crab_cell_runtime::SessionId::from_bytes([24; 16]);
-    let runtime = CellRuntime::new(
+    let runtime = CellRuntime::new_with_replica_host(
         SqlWorkerPool::new(4, 32).unwrap(),
         64 * 1024 * 1024,
         session,
+        reference_host(),
     )
     .unwrap();
     let registry = application.registry();
