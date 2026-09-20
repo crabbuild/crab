@@ -6,6 +6,7 @@ on:
       - "crates/crab-cell-runtime/**"
       - "crates/crab-cell-app/**"
       - "crates/crab-cell-host/**"
+      - "crates/crab-http-server/**"
       - "crates/crab-ltx/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -20,6 +21,7 @@ on:
       - "crates/crab-cell-runtime/**"
       - "crates/crab-cell-app/**"
       - "crates/crab-cell-host/**"
+      - "crates/crab-http-server/**"
       - "crates/crab-ltx/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -57,6 +59,10 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
         run: cargo test -p crab-cell-app -p crab-cell-host --locked
+      - name: Verify public CellNode typed primitive workload
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
+        run: cargo test -p crab-http-server --test public_cell_host_application --test public_cell_qualification --locked
       - name: Keep Compose receipt schema gate synchronized
         shell: bash
         run: |

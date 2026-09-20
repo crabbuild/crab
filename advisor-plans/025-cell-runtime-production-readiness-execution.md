@@ -22,9 +22,11 @@
 - **Implementation status**: local runtime, typed application, public host typed
   lifecycle smoke,
   provider-neutral durability construction/recruitment/rotation, deterministic
-  workload, public receipt/matrix validation, protected-profile/run-artifact
-  verifier coverage, and release negative gates are implemented and tested;
-  protected provider/Kubernetes/scale receipts remain open
+  workload, public `CellNode` typed all-primitive execution, public
+  receipt/matrix validation, protected-profile/run-artifact verifier coverage,
+  and release negative gates are implemented and tested; the complete ten-row
+  public-host workload and protected provider/Kubernetes/scale receipts remain
+  open
 
 ## Decision boundary
 
@@ -226,6 +228,7 @@ Run each Cargo command with a checkout-specific target directory under
 | --- | --- | --- |
 | Application contract | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-app RUSTC_WRAPPER= cargo test -p crab-cell-app --locked` | all unit and reference-application tests pass |
 | Host ownership | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-host RUSTC_WRAPPER= cargo test -p crab-cell-host --locked` | lifecycle/facility tests pass with no leaked tasks |
+| Public typed primitive host | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-public-host RUSTC_WRAPPER= cargo test -p crab-http-server --test public_cell_host_application --test public_cell_qualification --locked` | one `CellNode` boots every primitive Cell and the typed workload artifact verifies |
 | Runtime regression | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-runtime RUSTC_WRAPPER= cargo test -p crab-cell-runtime --locked` | all runtime tests pass; ignored provider tests are reported, not fabricated |
 | Server composition | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-server RUSTC_WRAPPER= cargo test -p crab-http-server --lib --locked` | server library tests pass |
 | Strict lint | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-quality RUSTC_WRAPPER= cargo clippy -p crab-cell-app -p crab-cell-host -p crab-cell-runtime --all-targets --locked -- -D warnings` | exit 0 |
