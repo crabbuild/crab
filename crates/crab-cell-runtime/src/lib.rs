@@ -129,7 +129,7 @@ pub use node_log::{
 };
 pub use node_log_recovery::{
     CompletedNodeRecovery, NodeLogRecovery, RecoveryCell, RecoveryCoordinator, SealedSession,
-    recoverable_cells,
+    recoverable_cells, recoverable_cells_from_frames,
 };
 pub use node_log_shipper::{NodeLogShipper, NodeLogSubmission};
 pub use node_log_state::{NodeLogPhase, NodeLogStatus, NodeRecoveryClaim};

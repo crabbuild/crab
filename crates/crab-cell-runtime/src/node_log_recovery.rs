@@ -4,10 +4,10 @@ use std::sync::Arc;
 use futures_util::{StreamExt, future::join_all, stream};
 
 use crate::{
-    ApplicationId, CellAuthority, CellCatalog, Digest, Error, FencedNodeSession, NodeDirectory,
-    NodeId, NodeLogPhase, NodeLogTransport, NodeTakeoverProof, RecoveryBase, RecoveryManifestStore,
-    Result, SealRequest, SealedNodeLog, SessionId, TailRequest, Transition, VersionedControl,
-    build_recovery_overlays,
+    ApplicationId, CatalogProof, CellAuthority, CellCatalog, CellId, Digest, Error,
+    FencedNodeSession, NodeDirectory, NodeId, NodeLogPhase, NodeLogTransport, NodeTakeoverProof,
+    RecoveryBase, RecoveryManifestStore, Result, SealRequest, SealedNodeLog, SessionId,
+    TailRequest, Transition, VersionedControl, build_recovery_overlays,
 };
 
 const MAX_RECOVERY_CATALOG_HEAD_READS: usize = 32;
@@ -105,6 +105,93 @@ pub async fn recoverable_cells(
     Ok(cells)
 }
 
+/// Loads only catalog entries whose authenticated node-frame scopes are present
+/// in a sealed witness. Each affected catalog shard is scanned once, then the
+/// exact current Cell control is revalidated before recovery may proceed.
+pub async fn recoverable_cells_from_frames(
+    catalog: &CellCatalog,
+    authority: &CellAuthority,
+    owner: SessionId,
+    frames: &[crab_ltx::VerifiedNodeFrame],
+    limit: usize,
+) -> Result<Vec<RecoveryCell>> {
+    if owner.as_bytes().iter().all(|byte| *byte == 0) || limit == 0 {
+        return Err(Error::Node("node recovery inventory bound is invalid"));
+    }
+    type Scope = ([u8; 16], u64);
+    let mut scopes = BTreeMap::<[u8; 32], Scope>::new();
+    let application = *catalog.application().as_bytes();
+    for frame in frames {
+        let scope = frame.scope();
+        if scope.leader_session != *owner.as_bytes() || scope.application != application {
+            return Err(Error::Node("recovery frame application or owner differs"));
+        }
+        let key = (scope.incarnation, scope.cell_epoch);
+        if let Some(existing) = scopes.get(&scope.cell) {
+            if *existing != key {
+                return Err(Error::Control(
+                    "recovery Cell scope has multiple generations",
+                ));
+            }
+        } else {
+            if scopes.len() == limit {
+                return Err(Error::Node(
+                    "node recovery Cell inventory exceeds its limit",
+                ));
+            }
+            scopes.insert(scope.cell, key);
+        }
+    }
+    if scopes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut needed = BTreeMap::<u8, Vec<[u8; 32]>>::new();
+    for cell in scopes.keys() {
+        needed.entry(cell[0]).or_default().push(*cell);
+    }
+    let mut entries = BTreeMap::<[u8; 32], CatalogProof>::new();
+    for (shard, cells) in needed {
+        let mut scan = catalog.scan_shard(shard).await?;
+        while let Some(page) = scan.next_page().await? {
+            for proof in page.entries() {
+                if cells.binary_search(proof.entry().cell().as_bytes()).is_ok() {
+                    entries.insert(*proof.entry().cell().as_bytes(), proof.clone());
+                }
+            }
+        }
+    }
+
+    let mut recovered = Vec::with_capacity(scopes.len());
+    for (cell_bytes, (incarnation, cell_epoch)) in scopes {
+        let cell = CellId::from_bytes(cell_bytes);
+        let proof = entries
+            .remove(&cell_bytes)
+            .ok_or(Error::Catalog("recovery frame Cell is not cataloged"))?;
+        if proof.entry().cell() != cell {
+            return Err(Error::Catalog("recovery catalog proof scope differs"));
+        }
+        let observed = authority
+            .load(cell)
+            .await?
+            .ok_or(Error::Control("recovery Cell control is missing"))?;
+        let control = observed.value();
+        if control.owner.as_ref().map(|current| current.session) != Some(owner)
+            || control.incarnation.as_bytes() != &incarnation
+            || control.epoch != cell_epoch
+            || control.ltx_root().is_none()
+        {
+            return Err(Error::Control("recovery Cell control scope differs"));
+        }
+        recovered.push(RecoveryCell {
+            application: catalog.application(),
+            authority: authority.clone(),
+            observed,
+        });
+    }
+    Ok(recovered)
+}
+
 impl RecoveryCoordinator {
     #[must_use]
     pub const fn new(recovery: NodeLogRecovery, manifests: RecoveryManifestStore) -> Self {
@@ -122,6 +209,20 @@ impl RecoveryCoordinator {
         &self,
         fenced: FencedNodeSession,
         cells: Vec<RecoveryCell>,
+    ) -> Result<Vec<VersionedControl>> {
+        self.recovery.validate_fence(&fenced)?;
+        let sealed = self.recovery.ensure_sealed().await?;
+        self.recover_sealed(fenced, cells, sealed).await
+    }
+
+    /// Attaches overlays from a witness that was already sealed by the caller.
+    /// Keeping the witness explicit lets orchestration derive affected Cells
+    /// from authenticated frame scopes before any catalog scan.
+    pub async fn recover_sealed(
+        &self,
+        fenced: FencedNodeSession,
+        cells: Vec<RecoveryCell>,
+        sealed: SealedSession,
     ) -> Result<Vec<VersionedControl>> {
         self.recovery.validate_fence(&fenced)?;
         let mut bases = Vec::with_capacity(cells.len());
@@ -146,7 +247,6 @@ impl RecoveryCoordinator {
             });
         }
 
-        let sealed = self.recovery.ensure_sealed().await?;
         if sealed.frames.is_empty() {
             return Ok(Vec::new());
         }

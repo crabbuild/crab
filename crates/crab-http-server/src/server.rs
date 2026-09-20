@@ -918,12 +918,14 @@ pub async fn serve(config: Config) -> Result<()> {
         peer_tls.client_identity(),
         session,
     ));
-    let node_log_transport: Arc<dyn crab_cell_runtime::NodeLogTransport> =
-        Arc::new(crate::peer::NodeLogHttpTransport::new(
+    let node_log_transport: Arc<dyn crab_cell_runtime::NodeLogTransport> = Arc::new(
+        crate::peer::NodeLogHttpTransport::new(
             directory.clone(),
             peer_tls.client_identity(),
             session,
-        ));
+        )
+        .with_local_follower(node, follower_store.clone()),
+    );
     let release_store = ReleaseStore::new(startup.layout.clone(), startup.identity)?;
     let peer_receiver = crate::peer::PeerReceiver::new(
         node,
@@ -963,6 +965,7 @@ pub async fn serve(config: Config) -> Result<()> {
         scheduler_status.clone(),
     )?
     .with_node_recovery(Arc::clone(&node_log_transport))
+    .with_node(node)
     .with_node_recovery_disk(local_disk.clone())
     .with_metrics(metrics.clone());
     let durability_application = startup.identity.application();

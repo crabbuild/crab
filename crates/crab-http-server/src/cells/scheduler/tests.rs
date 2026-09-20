@@ -402,12 +402,18 @@ async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
             follower,
         ));
     recover_node_session(
-        directory.clone(),
-        CellCatalog::new(layout.clone(), tenant),
-        CellAuthority::new(layout.clone()),
-        RecoveryManifestStore::new(layout, super::super::repository_replica_limits()),
-        transport,
-        crab_ltx::DiskBudget::new(512 << 20),
+        RecoveryContext {
+            directory: directory.clone(),
+            catalog: CellCatalog::new(layout.clone(), tenant),
+            authority: CellAuthority::new(layout.clone()),
+            manifests: RecoveryManifestStore::new(
+                layout,
+                super::super::repository_replica_limits(),
+            ),
+            transport,
+            recovery_disk: crab_ltx::DiskBudget::new(512 << 20),
+            metrics: None,
+        },
         leader,
         claimant,
     )

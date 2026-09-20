@@ -15,6 +15,8 @@ const MAX_TAIL_PAGE_BYTES: usize = 1 << 20;
 const MAX_TAIL_PAGE_FRAMES: usize = 4096;
 const MAX_RETIRED_LANES: usize = 1_024;
 const FOLLOWER_QUARANTINE: &str = "followers-quarantine";
+const INDEX_BYTES_PER_RECORD: u64 = 128;
+const MAX_FOLLOWER_INDEX_BYTES: u64 = 256 << 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Lane {
@@ -80,6 +82,7 @@ pub struct FollowerStore {
     lanes: LaneMap,
     disk: crab_ltx::DiskBudget,
     retained: Arc<Mutex<crab_ltx::DiskReservation>>,
+    index_used: Arc<Mutex<u64>>,
     quarantined_entries: usize,
 }
 
@@ -108,6 +111,7 @@ impl FollowerStore {
             lanes: Arc::new(Mutex::new(HashMap::new())),
             disk,
             retained: Arc::new(Mutex::new(retained)),
+            index_used: Arc::new(Mutex::new(0)),
             quarantined_entries,
         })
     }
@@ -154,6 +158,7 @@ impl FollowerStore {
         let root = self.root.clone();
         let limits = self.limits;
         let retained = Arc::clone(&self.retained);
+        let index_used = Arc::clone(&self.index_used);
         let growth = encoded_bytes
             .and_then(|bytes| bytes.checked_add((frames.len() * RECORD_HEADER_BYTES) as u64))
             .ok_or(Error::Node("follower append byte count overflow"))?;
@@ -165,7 +170,15 @@ impl FollowerStore {
             let mut state = lock
                 .lock()
                 .map_err(|_| Error::Node("follower lane lock poisoned"))?;
-            let result = append_sync(&root, lane, frames, covered_through, limits, &mut state);
+            let result = append_sync(
+                &root,
+                lane,
+                frames,
+                covered_through,
+                limits,
+                &index_used,
+                &mut state,
+            );
             let resize =
                 follower_bytes(&root).and_then(|bytes| retained.resize(bytes).map_err(Error::from));
             if result.is_err() {
@@ -184,6 +197,7 @@ impl FollowerStore {
         let root = self.root.clone();
         let limits = self.limits;
         let retained = Arc::clone(&self.retained);
+        let index_used = Arc::clone(&self.index_used);
         tokio::task::spawn_blocking(move || {
             let retained = retained
                 .lock()
@@ -195,7 +209,7 @@ impl FollowerStore {
             if !directory.join("sealed").exists() && !directory.join("retired").exists() {
                 retained.try_grow(8)?;
             }
-            let result = seal_sync(&root, lane, limits, &mut state);
+            let result = seal_sync(&root, lane, limits, &index_used, &mut state);
             let resize =
                 follower_bytes(&root).and_then(|bytes| retained.resize(bytes).map_err(Error::from));
             if result.is_err() {
@@ -250,12 +264,26 @@ impl FollowerStore {
         let lock = self.lane_lock(lane)?;
         let root = self.root.clone();
         let limits = self.limits;
+        let index_used = Arc::clone(&self.index_used);
         tokio::task::spawn_blocking(move || {
-            let _guard = lock
+            let mut state = lock
                 .lock()
                 .map_err(|_| Error::Node("follower lane lock poisoned"))?;
-            read_tail_sync(&root, lane, first_sequence, limits, usize::MAX, usize::MAX)
-                .map(|page| page.frames)
+            let result = read_tail_sync(
+                &root,
+                lane,
+                first_sequence,
+                limits,
+                &index_used,
+                &mut state,
+                usize::MAX,
+                usize::MAX,
+            )
+            .map(|page| page.frames);
+            if result.is_err() {
+                *state = None;
+            }
+            result
         })
         .await
         .map_err(Error::FollowerWorkerJoin)?
@@ -275,18 +303,25 @@ impl FollowerStore {
         let lock = self.lane_lock(lane)?;
         let root = self.root.clone();
         let limits = self.limits;
+        let index_used = Arc::clone(&self.index_used);
         tokio::task::spawn_blocking(move || {
-            let _guard = lock
+            let mut state = lock
                 .lock()
                 .map_err(|_| Error::Node("follower lane lock poisoned"))?;
-            read_tail_sync(
+            let result = read_tail_sync(
                 &root,
                 lane,
                 first_sequence,
                 limits,
+                &index_used,
+                &mut state,
                 MAX_TAIL_PAGE_BYTES,
                 MAX_TAIL_PAGE_FRAMES,
-            )
+            );
+            if result.is_err() {
+                *state = None;
+            }
+            result
         })
         .await
         .map_err(Error::FollowerWorkerJoin)?
@@ -677,6 +712,7 @@ fn append_sync(
     frames: Vec<Bytes>,
     covered_through: u64,
     limits: crab_ltx::Limits,
+    index_used: &Arc<Mutex<u64>>,
     state: &mut Option<LaneMemory>,
 ) -> Result<FollowerReceipt> {
     validate_lane(lane)?;
@@ -692,23 +728,20 @@ fn append_sync(
     if state.is_none() {
         let retained = scan_lane(&chunks, lane, limits)?;
         let open_records = scan_chunk(&chunks.join("open.log"), lane, limits, true)?;
-        *state = Some(LaneMemory {
-            records: retained
-                .into_iter()
-                .map(|(sequence, record)| (sequence, record.digest))
-                .collect(),
-            open_first: open_records.first().map(|record| record.sequence),
-            open_last: open_records.last().map(|record| record.sequence),
-        });
+        *state = Some(lane_memory(retained, &open_records, index_used)?);
     }
     let pruned_through = prune_covered(&chunks, lane, covered_through, limits)?;
     let state = state
         .as_mut()
         .ok_or(Error::Node("follower lane state did not initialize"))?;
-    if let Some(pruned_through) = pruned_through {
-        state
-            .records
-            .retain(|sequence, _| *sequence > pruned_through);
+    if pruned_through.is_some() {
+        let records = scan_lane(&chunks, lane, limits)?;
+        let index_bytes = u64::try_from(records.len())
+            .map_err(|_| Error::Capacity("follower lane index"))?
+            .checked_mul(INDEX_BYTES_PER_RECORD)
+            .ok_or(Error::Capacity("follower lane index"))?;
+        state.index.resize_to(index_bytes)?;
+        state.records = records;
         let open_records = scan_chunk(&chunks.join("open.log"), lane, limits, true)?;
         state.open_first = open_records.first().map(|record| record.sequence);
         state.open_last = open_records.last().map(|record| record.sequence);
@@ -725,7 +758,17 @@ fn append_sync(
 
     let open_path = chunks.join("open.log");
     let mut file = open_append(&open_path)?;
-    let mut wrote = false;
+    let mut pending: Vec<StoredRecord> = Vec::new();
+    let mut pending_digests = HashMap::new();
+    let mut open_first = state.open_first;
+    let mut open_last = state.open_last;
+    let frame_count =
+        u64::try_from(frames.len()).map_err(|_| Error::Capacity("follower lane index"))?;
+    state.index.grow(
+        frame_count
+            .checked_mul(INDEX_BYTES_PER_RECORD)
+            .ok_or(Error::Capacity("follower lane index"))?,
+    )?;
     for encoded in frames {
         let frame = crab_ltx::inspect_node_frame(encoded.clone(), limits)?;
         let scope = frame.scope();
@@ -735,9 +778,17 @@ fn append_sync(
         let sequence = scope.node_sequence;
         let digest = frame.digest();
         if let Some(existing) = state.records.get(&sequence) {
-            if *existing != digest {
+            if existing.digest != digest {
                 return Err(Error::Node("conflicting duplicate follower frame"));
             }
+            continue;
+        }
+        if let Some(existing) = pending_digests.get(&sequence)
+            && *existing != digest
+        {
+            return Err(Error::Node("conflicting duplicate follower frame"));
+        }
+        if pending_digests.contains_key(&sequence) {
             continue;
         }
         // Object publication can advance while this frame is still queued for
@@ -755,21 +806,49 @@ fn append_sync(
         {
             file.sync_data()?;
             drop(file);
-            rotate_open(&chunks, &open_path, state.open_first, state.open_last)?;
+            let destination = rotate_open(&chunks, &open_path, open_first, open_last)?;
+            relocate_records(
+                &mut state.records,
+                open_first.ok_or(Error::Node("follower open range is missing"))?,
+                open_last.ok_or(Error::Node("follower open range is missing"))?,
+                &destination,
+            );
+            let destination: Arc<Path> = Arc::from(destination.as_path());
+            for record in &mut pending {
+                record.path = Arc::clone(&destination);
+            }
             file = open_append(&open_path)?;
-            state.open_first = None;
-            state.open_last = None;
+            open_first = None;
         }
+        let offset = file.metadata()?.len();
         write_record(&mut file, sequence, digest, &encoded)?;
-        state.open_first.get_or_insert(sequence);
-        state.open_last = Some(sequence);
+        open_first.get_or_insert(sequence);
+        open_last = Some(sequence);
         durable_through = sequence;
-        state.records.insert(sequence, digest);
-        wrote = true;
+        pending_digests.insert(sequence, digest);
+        pending.push(StoredRecord {
+            sequence,
+            digest,
+            path: Arc::from(open_path.as_path()),
+            offset: offset
+                .checked_add(RECORD_HEADER_BYTES as u64)
+                .ok_or(Error::Node("follower record offset overflow"))?,
+            length: encoded.len(),
+        });
     }
-    if wrote {
+    if !pending.is_empty() {
         file.sync_data()?;
+        state
+            .records
+            .extend(pending.into_iter().map(|record| (record.sequence, record)));
+        state.open_first = open_first;
+        state.open_last = open_last;
     }
+    let index_bytes = u64::try_from(state.records.len())
+        .map_err(|_| Error::Capacity("follower lane index"))?
+        .checked_mul(INDEX_BYTES_PER_RECORD)
+        .ok_or(Error::Capacity("follower lane index"))?;
+    state.index.shrink_to(index_bytes);
     let base_sequence = state
         .records
         .keys()
@@ -786,6 +865,7 @@ fn seal_sync(
     root: &Path,
     lane: Lane,
     limits: crab_ltx::Limits,
+    index_used: &Arc<Mutex<u64>>,
     state: &mut Option<LaneMemory>,
 ) -> Result<FollowerReceipt> {
     validate_lane(lane)?;
@@ -801,14 +881,7 @@ fn seal_sync(
     }
     if state.is_none() {
         let retained = scan_lane(&chunks, lane, limits)?;
-        *state = Some(LaneMemory {
-            records: retained
-                .into_iter()
-                .map(|(sequence, record)| (sequence, record.digest))
-                .collect(),
-            open_first: None,
-            open_last: None,
-        });
+        *state = Some(lane_memory(retained, &[], index_used)?);
     }
     let state = state
         .as_ref()
@@ -884,6 +957,8 @@ fn read_tail_sync(
     lane: Lane,
     first_sequence: u64,
     limits: crab_ltx::Limits,
+    index_used: &Arc<Mutex<u64>>,
+    state: &mut Option<LaneMemory>,
     max_bytes: usize,
     max_frames: usize,
 ) -> Result<FollowerTailPage> {
@@ -893,12 +968,56 @@ fn read_tail_sync(
     if !marker.exists() {
         return Err(Error::Node("follower lane is not sealed"));
     }
-    let retained = scan_lane(&directory.join("chunks"), lane, limits)?;
-    let durable_through = retained.keys().next_back().copied().unwrap_or(0);
+    if state.is_none() {
+        let retained = scan_lane(&directory.join("chunks"), lane, limits)?;
+        let open_records = scan_chunk(&directory.join("chunks/open.log"), lane, limits, true)?;
+        let scan_only = retained.clone();
+        match lane_memory(retained, &open_records, index_used) {
+            Ok(memory) => *state = Some(memory),
+            Err(Error::Capacity(_)) => {
+                return read_tail_records(
+                    root,
+                    lane,
+                    first_sequence,
+                    limits,
+                    &scan_only,
+                    max_bytes,
+                    max_frames,
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let state = state
+        .as_ref()
+        .ok_or(Error::Node("follower lane state did not initialize"))?;
+    read_tail_records(
+        root,
+        lane,
+        first_sequence,
+        limits,
+        &state.records,
+        max_bytes,
+        max_frames,
+    )
+}
+
+fn read_tail_records(
+    root: &Path,
+    lane: Lane,
+    first_sequence: u64,
+    limits: crab_ltx::Limits,
+    records: &BTreeMap<u64, StoredRecord>,
+    max_bytes: usize,
+    max_frames: usize,
+) -> Result<FollowerTailPage> {
+    let directory = lane_directory(root, lane);
+    let marker = directory.join("sealed");
+    let durable_through = records.keys().next_back().copied().unwrap_or(0);
     if read_watermark(&marker, "follower seal marker is invalid")? != durable_through {
         return Err(Error::Node("follower seal watermark differs"));
     }
-    if retained.is_empty() || first_sequence < *retained.keys().next().unwrap_or(&u64::MAX) {
+    if records.is_empty() || first_sequence < *records.keys().next().unwrap_or(&u64::MAX) {
         return Err(Error::Node("requested follower tail is not retained"));
     }
     if first_sequence > durable_through.saturating_add(1) {
@@ -909,29 +1028,64 @@ fn read_tail_sync(
     let mut frames = Vec::new();
     let mut bytes = 0_usize;
     let mut next_sequence = None;
-    for (sequence, record) in retained.range(first_sequence..) {
+    for (sequence, record) in records.range(first_sequence..) {
         if frames.len() == max_frames
             || (!frames.is_empty() && bytes.saturating_add(record.length) > max_bytes)
         {
             next_sequence = Some(*sequence);
             break;
         }
-        let mut file = std::fs::File::open(&record.path)?;
-        file.seek(SeekFrom::Start(record.offset))?;
-        let mut encoded = vec![0; record.length];
-        file.read_exact(&mut encoded)?;
-        // The scan verified framing and LTX; recheck bytes after seeking so
-        // disk changes between validation and page materialization fail closed.
-        if *blake3::hash(&encoded).as_bytes() != record.digest {
-            return Err(Error::Node("stored follower record changed after scan"));
-        }
+        let encoded = read_indexed_record(root, lane, record, limits)?;
         bytes = bytes.saturating_add(record.length);
-        frames.push(Bytes::from(encoded));
+        frames.push(encoded);
     }
     Ok(FollowerTailPage {
         frames,
         next_sequence,
     })
+}
+
+fn read_indexed_record(
+    root: &Path,
+    lane: Lane,
+    record: &StoredRecord,
+    limits: crab_ltx::Limits,
+) -> Result<Bytes> {
+    let chunks = lane_directory(root, lane).join("chunks");
+    if record.path.parent() != Some(chunks.as_path())
+        || !std::fs::symlink_metadata(&record.path)?
+            .file_type()
+            .is_file()
+    {
+        return Err(Error::Node("indexed follower record path is invalid"));
+    }
+    let header_offset = record
+        .offset
+        .checked_sub(RECORD_HEADER_BYTES as u64)
+        .ok_or(Error::Node("indexed follower record offset is invalid"))?;
+    let mut file = std::fs::File::open(&record.path)?;
+    file.seek(SeekFrom::Start(header_offset))?;
+    let mut header = [0_u8; RECORD_HEADER_BYTES];
+    file.read_exact(&mut header)?;
+    let (sequence, length, digest) = parse_record_header(&header)?;
+    if sequence != record.sequence || length != record.length as u64 || digest != record.digest {
+        return Err(Error::Node("indexed follower record header changed"));
+    }
+    let mut encoded = vec![0; record.length];
+    file.read_exact(&mut encoded)?;
+    if *blake3::hash(&encoded).as_bytes() != record.digest {
+        return Err(Error::Node("stored follower record changed after index"));
+    }
+    let frame = crab_ltx::inspect_node_frame(Bytes::from(encoded.clone()), limits)?;
+    let scope = frame.scope();
+    if scope.node_sequence != record.sequence
+        || scope.leader_session != *lane.leader.as_bytes()
+        || scope.log_epoch != lane.epoch
+        || frame.digest() != record.digest
+    {
+        return Err(Error::Node("indexed follower record scope changed"));
+    }
+    Ok(Bytes::from(encoded))
 }
 
 #[derive(Clone)]
@@ -943,10 +1097,103 @@ struct StoredRecord {
     length: usize,
 }
 
+struct IndexReservation {
+    used: Arc<Mutex<u64>>,
+    bytes: u64,
+}
+
+impl IndexReservation {
+    fn new(used: &Arc<Mutex<u64>>, bytes: u64) -> Result<Self> {
+        let mut current = used
+            .lock()
+            .map_err(|_| Error::Node("follower index reservation lock poisoned"))?;
+        let next = current
+            .checked_add(bytes)
+            .ok_or(Error::Capacity("follower lane index"))?;
+        if next > MAX_FOLLOWER_INDEX_BYTES {
+            return Err(Error::Capacity("follower lane index"));
+        }
+        *current = next;
+        Ok(Self {
+            used: Arc::clone(used),
+            bytes,
+        })
+    }
+
+    fn grow(&mut self, additional: u64) -> Result<()> {
+        if additional == 0 {
+            return Ok(());
+        }
+        let mut current = self
+            .used
+            .lock()
+            .map_err(|_| Error::Node("follower index reservation lock poisoned"))?;
+        let next = current
+            .checked_add(additional)
+            .ok_or(Error::Capacity("follower lane index"))?;
+        if next > MAX_FOLLOWER_INDEX_BYTES {
+            return Err(Error::Capacity("follower lane index"));
+        }
+        *current = next;
+        self.bytes = self
+            .bytes
+            .checked_add(additional)
+            .ok_or(Error::Capacity("follower lane index"))?;
+        Ok(())
+    }
+
+    fn shrink_to(&mut self, bytes: u64) {
+        if bytes >= self.bytes {
+            return;
+        }
+        let released = self.bytes - bytes;
+        if let Ok(mut current) = self.used.lock() {
+            *current = current.saturating_sub(released);
+        }
+        self.bytes = bytes;
+    }
+
+    fn resize_to(&mut self, bytes: u64) -> Result<()> {
+        if bytes > self.bytes {
+            self.grow(bytes - self.bytes)
+        } else {
+            self.shrink_to(bytes);
+            Ok(())
+        }
+    }
+}
+
+impl Drop for IndexReservation {
+    fn drop(&mut self) {
+        if let Ok(mut current) = self.used.lock() {
+            *current = current.saturating_sub(self.bytes);
+        }
+    }
+}
+
 struct LaneMemory {
-    records: BTreeMap<u64, [u8; 32]>,
+    records: BTreeMap<u64, StoredRecord>,
     open_first: Option<u64>,
     open_last: Option<u64>,
+    index: IndexReservation,
+}
+
+fn lane_memory(
+    records: BTreeMap<u64, StoredRecord>,
+    open_records: &[StoredRecord],
+    index_used: &Arc<Mutex<u64>>,
+) -> Result<LaneMemory> {
+    let record_count =
+        u64::try_from(records.len()).map_err(|_| Error::Capacity("follower lane index"))?;
+    let bytes = record_count
+        .checked_mul(INDEX_BYTES_PER_RECORD)
+        .ok_or(Error::Capacity("follower lane index"))?;
+    Ok(LaneMemory {
+        open_first: open_records.first().map(|record| record.sequence),
+        open_last: open_records.last().map(|record| record.sequence),
+        index: IndexReservation::new(index_used, bytes)?,
+        records,
+    })
 }
 
 fn scan_lane(
@@ -1180,14 +1427,26 @@ fn rotate_open(
     open_path: &Path,
     first: Option<u64>,
     last: Option<u64>,
-) -> Result<()> {
+) -> Result<PathBuf> {
     let (Some(first), Some(last)) = (first, last) else {
         return Err(Error::Node("cannot rotate an empty follower chunk"));
     };
     let destination = chunks.join(format!("{first:020}-{last:020}.log"));
-    std::fs::rename(open_path, destination)?;
+    std::fs::rename(open_path, &destination)?;
     sync_directory(chunks)?;
-    Ok(())
+    Ok(destination)
+}
+
+fn relocate_records(
+    records: &mut BTreeMap<u64, StoredRecord>,
+    first: u64,
+    last: u64,
+    destination: &Path,
+) {
+    let path: Arc<Path> = Arc::from(destination);
+    for record in records.range_mut(first..=last).map(|(_, record)| record) {
+        record.path = Arc::clone(&path);
+    }
 }
 
 fn prune_covered(

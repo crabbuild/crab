@@ -459,34 +459,43 @@ impl RepositoryCellRouter {
             return Ok(false);
         }
         let now_ms = super::unix_now_ms()?;
-        let Some(score) = self
-            .peer
-            .directory
-            .choose_advertised_placement(
-                &self.placement,
-                target.cell_id(),
-                now_ms,
-                self.peer.owner.session,
-                1_024,
-            )
-            .await?
-        else {
-            // A fully legacy fleet has no placement contract yet. Preserve
-            // ordinary local acquisition until the rollout has one signed
-            // observation to consume; mixed fleets never select legacy nodes.
-            return Ok(false);
+        let node = if let Some(owner) = observed.value().owner.as_ref()
+            && let Some(node) = self
+                .peer
+                .directory
+                .preferred_recovery_node(owner.session, now_ms)
+                .await?
+        {
+            node
+        } else {
+            let Some(score) = self
+                .peer
+                .directory
+                .choose_advertised_placement(
+                    &self.placement,
+                    target.cell_id(),
+                    now_ms,
+                    self.peer.owner.session,
+                    1_024,
+                )
+                .await?
+            else {
+                // A fully legacy fleet has no placement contract yet. Preserve
+                // ordinary local acquisition until the rollout has one signed
+                // observation to consume; mixed fleets never select legacy nodes.
+                return Ok(false);
+            };
+            self.peer
+                .directory
+                .load(score.session, now_ms)
+                .await?
+                .ok_or(crab_cell_runtime::Error::CellNotActive)?
+                .advertisement()
+                .clone()
         };
-        if score.session == self.peer.owner.session {
+        if node.session() == self.peer.owner.session {
             return Ok(false);
         }
-        let node = self
-            .peer
-            .directory
-            .load(score.session, now_ms)
-            .await?
-            .ok_or(crab_cell_runtime::Error::CellNotActive)?
-            .advertisement()
-            .clone();
         match self
             .peer
             .activate_remote(target.clone(), node, principal, now_ms)

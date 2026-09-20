@@ -14,9 +14,9 @@ use crab_cell_runtime::{
     CatalogProof, CatalogShardScan, CellAuthority, CellCatalog, CellId, CellTarget, ControlState,
     DueCellScan, EffectRunOutcome, FencedNodeSession, InvocationError, MaintenanceTickOutcome,
     MaintenanceTickRequest, MigrationFailure, MigrationProgressAttempt, MigrationProgressStore,
-    MutationIdentity, NodeDirectory, NodeLogRecovery, NodeLogTransport, RecoveryCoordinator,
-    RecoveryManifestStore, Registry, ReleaseState, ReleaseStore, RequestId, SchedulerFleet,
-    SessionId, preferred_scanner, recoverable_cells,
+    MutationIdentity, NodeDirectory, NodeId, NodeLogRecovery, NodeLogTransport,
+    RecoveryCoordinator, RecoveryManifestStore, Registry, ReleaseState, ReleaseStore, RequestId,
+    SchedulerFleet, SessionId, preferred_scanner, recoverable_cells_from_frames,
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -35,6 +35,7 @@ const NODE_COLLECTION_INTERVAL_MS: i64 = 60_000;
 const NODE_COLLECTION_LIMIT: usize = 128;
 const MAX_NODE_RECOVERY_JOBS: usize = 2;
 const MAX_NODE_RECOVERY_CELLS: usize = 10_000;
+const FOLLOWER_FIRST_GRACE_MS: i64 = 2_000;
 const RECOVERY_CLAIM_HEARTBEAT: Duration = Duration::from_secs(10);
 const RECOVERY_CLAIM_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 const RECOVERY_CLAIM_STORAGE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -96,6 +97,7 @@ pub(crate) struct RepositoryCellScheduler {
     directory: NodeDirectory,
     router: RepositoryCellRouter,
     session: SessionId,
+    node: Option<NodeId>,
     status: SchedulerStatus,
     fleet: SchedulerFleet,
     registry: Arc<Registry>,
@@ -107,6 +109,7 @@ pub(crate) struct RepositoryCellScheduler {
     node_log_transport: Option<Arc<dyn NodeLogTransport>>,
     metrics: Option<crate::metrics::Metrics>,
     recovery_sessions: Arc<Mutex<HashSet<SessionId>>>,
+    recovery_affinity_seen: HashMap<SessionId, i64>,
     recovery_jobs: tokio::task::JoinSet<crate::Result<SessionId>>,
     recovery_manifests: RecoveryManifestStore,
     recovery_disk: crab_cell_runtime::DiskBudget,
@@ -147,6 +150,7 @@ impl RepositoryCellScheduler {
             directory,
             router,
             session,
+            node: None,
             status,
             fleet: SchedulerFleet::default(),
             registry,
@@ -158,6 +162,7 @@ impl RepositoryCellScheduler {
             node_log_transport: None,
             metrics: None,
             recovery_sessions: Arc::new(Mutex::new(HashSet::new())),
+            recovery_affinity_seen: HashMap::new(),
             recovery_jobs: tokio::task::JoinSet::new(),
             recovery_manifests,
             recovery_disk,
@@ -173,6 +178,11 @@ impl RepositoryCellScheduler {
     #[must_use]
     pub(crate) fn with_node_recovery(mut self, transport: Arc<dyn NodeLogTransport>) -> Self {
         self.node_log_transport = Some(transport);
+        self
+    }
+
+    pub(crate) fn with_node(mut self, node: NodeId) -> Self {
+        self.node = Some(node);
         self
     }
 
@@ -251,8 +261,10 @@ impl RepositoryCellScheduler {
             self.last_node_collection_ms = now_ms;
             tracing::debug!(removed, "collected stale Cell node advertisements");
         }
-        if preferred_scanner(0, &nodes)? == Some(self.session) {
-            self.schedule_node_recovery(now_ms).await?;
+        let preferred_recovery_scanner = preferred_scanner(0, &nodes)? == Some(self.session);
+        if preferred_recovery_scanner || self.node.is_some() {
+            self.schedule_node_recovery(now_ms, preferred_recovery_scanner)
+                .await?;
         }
         let start = self.next_shard;
         let mut assigned = Vec::new();
@@ -650,7 +662,11 @@ impl RepositoryCellScheduler {
         }
     }
 
-    async fn schedule_node_recovery(&mut self, now_ms: i64) -> crate::Result<()> {
+    async fn schedule_node_recovery(
+        &mut self,
+        now_ms: i64,
+        preferred_recovery_scanner: bool,
+    ) -> crate::Result<()> {
         let Some(transport) = self.node_log_transport.as_ref() else {
             return Ok(());
         };
@@ -658,36 +674,65 @@ impl RepositoryCellScheduler {
         if available == 0 {
             return Ok(());
         }
-        let candidates = self
-            .directory
-            .recovery_candidates(self.session, now_ms, available)
-            .await?;
-        for session in candidates {
+        let mut candidates = if let Some(node) = self.node {
+            self.directory
+                .recovery_candidates_for_node(self.session, node, now_ms, available)
+                .await?
+        } else if preferred_recovery_scanner {
+            self.directory
+                .recovery_candidates(self.session, now_ms, available)
+                .await?
+        } else {
+            Vec::new()
+        };
+        if candidates.len() < available && preferred_recovery_scanner {
+            let fallback = self
+                .directory
+                .recovery_candidates_without_live_followers(
+                    self.session,
+                    now_ms,
+                    available.saturating_sub(candidates.len()),
+                )
+                .await?;
+            candidates.extend(fallback);
+            if self.node.is_some() && candidates.len() < available {
+                let observed = self
+                    .directory
+                    .recovery_candidates(self.session, now_ms, available)
+                    .await?;
+                let mut observed_sessions = HashSet::new();
+                for session in observed {
+                    observed_sessions.insert(session);
+                    let first_seen = self.recovery_affinity_seen.entry(session).or_insert(now_ms);
+                    if now_ms.saturating_sub(*first_seen) >= FOLLOWER_FIRST_GRACE_MS {
+                        candidates.push(session);
+                    }
+                }
+                self.recovery_affinity_seen
+                    .retain(|session, _| observed_sessions.contains(session));
+            }
+            candidates.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+            candidates.dedup();
+        }
+        for session in candidates.into_iter().take(available) {
             let Some(reservation) = self.reserve_recovery(session)? else {
                 continue;
             };
-            let directory = self.directory.clone();
-            let catalog = self.catalog.clone();
-            let authority = self.authority.clone();
-            let manifests = self.recovery_manifests.clone();
-            let transport = Arc::clone(transport);
+            let context = RecoveryContext {
+                directory: self.directory.clone(),
+                catalog: self.catalog.clone(),
+                authority: self.authority.clone(),
+                manifests: self.recovery_manifests.clone(),
+                transport: Arc::clone(transport),
+                recovery_disk: self.recovery_disk.clone(),
+                metrics: self.metrics.clone(),
+            };
             let claimant = self.session;
-            let metrics = self.metrics.clone();
-            let recovery_disk = self.recovery_disk.clone();
             self.recovery_jobs.spawn(async move {
                 let _reservation = reservation;
                 let started = std::time::Instant::now();
-                let result = recover_node_session(
-                    directory,
-                    catalog,
-                    authority,
-                    manifests,
-                    transport,
-                    recovery_disk,
-                    session,
-                    claimant,
-                )
-                .await;
+                let metrics = context.metrics.clone();
+                let result = recover_node_session(context, session, claimant).await;
                 if let Some(metrics) = metrics {
                     metrics.record_recovery_finished(
                         started.elapsed(),
@@ -854,60 +899,191 @@ impl Drop for RecoverySessionReservation {
     }
 }
 
-async fn recover_node_session(
+struct RecoveryContext {
     directory: NodeDirectory,
     catalog: crab_cell_runtime::CellCatalog,
     authority: CellAuthority,
     manifests: RecoveryManifestStore,
     transport: Arc<dyn NodeLogTransport>,
     recovery_disk: crab_cell_runtime::DiskBudget,
+    metrics: Option<crate::metrics::Metrics>,
+}
+
+async fn recover_node_session(
+    context: RecoveryContext,
     session: SessionId,
     claimant: SessionId,
 ) -> crate::Result<()> {
-    let mut fenced = claim_expired_with_timeout(
+    let RecoveryContext {
+        directory,
+        catalog,
+        authority,
+        manifests,
+        transport,
+        recovery_disk,
+        metrics,
+    } = context;
+    let phase_started = std::time::Instant::now();
+    let mut fenced = match claim_expired_with_timeout(
         &directory,
         session,
         claimant,
         super::unix_now_ms()?,
         RECOVERY_CLAIM_STORAGE_TIMEOUT,
     )
-    .await?;
+    .await
+    {
+        Ok(fenced) => fenced,
+        Err(error) => {
+            if let Some(metrics) = &metrics {
+                metrics.record_recovery_phase(
+                    crate::metrics::RecoveryPhase::Claim,
+                    phase_started.elapsed(),
+                );
+            }
+            return Err(error);
+        }
+    };
+    if let Some(metrics) = &metrics {
+        metrics.record_recovery_phase(
+            crate::metrics::RecoveryPhase::Claim,
+            phase_started.elapsed(),
+        );
+    }
     tracing::debug!(?session, ?claimant, "claimed expired Cell node log");
-    let cells = await_with_claim_heartbeat(
-        &directory,
-        &mut fenced,
-        recoverable_cells(&catalog, &authority, session, MAX_NODE_RECOVERY_CELLS),
-    )
-    .await?;
-    tracing::debug!(
-        ?session,
-        ?claimant,
-        cells = cells.len(),
-        "inventoried Cells for node-log recovery"
-    );
-    let recovery = NodeLogRecovery::from_fenced_with_disk(
+    let phase_started = std::time::Instant::now();
+    let recovery = match NodeLogRecovery::from_fenced_with_disk(
         transport,
         &fenced,
         super::repository_replica_limits(),
         recovery_disk,
-    )?;
-    let coordinator = RecoveryCoordinator::new(recovery, manifests);
-    let recovery_fence = fenced.clone();
-    let controls = await_with_claim_heartbeat(
+    ) {
+        Ok(recovery) => recovery,
+        Err(error) => {
+            if let Some(metrics) = &metrics {
+                metrics.record_recovery_phase(
+                    crate::metrics::RecoveryPhase::Witness,
+                    phase_started.elapsed(),
+                );
+            }
+            return Err(error.into());
+        }
+    };
+    let sealed =
+        match await_with_claim_heartbeat(&directory, &mut fenced, recovery.ensure_sealed()).await {
+            Ok(sealed) => sealed,
+            Err(error) => {
+                if let Some(metrics) = &metrics {
+                    metrics.record_recovery_phase(
+                        crate::metrics::RecoveryPhase::Witness,
+                        phase_started.elapsed(),
+                    );
+                }
+                return Err(error);
+            }
+        };
+    if let Some(metrics) = &metrics {
+        metrics.record_recovery_phase(
+            crate::metrics::RecoveryPhase::Witness,
+            phase_started.elapsed(),
+        );
+    }
+    tracing::debug!(
+        ?session,
+        ?claimant,
+        durable_through = sealed.durable_through,
+        frames = sealed.frames.len(),
+        "sealed node-log witnesses"
+    );
+    let phase_started = std::time::Instant::now();
+    let cells = match await_with_claim_heartbeat(
         &directory,
         &mut fenced,
-        coordinator.recover(recovery_fence, cells),
+        recoverable_cells_from_frames(
+            &catalog,
+            &authority,
+            session,
+            &sealed.frames,
+            MAX_NODE_RECOVERY_CELLS,
+        ),
     )
-    .await?;
+    .await
+    {
+        Ok(cells) => cells,
+        Err(error) => {
+            if let Some(metrics) = &metrics {
+                metrics.record_recovery_phase(
+                    crate::metrics::RecoveryPhase::ScopeValidation,
+                    phase_started.elapsed(),
+                );
+            }
+            return Err(error);
+        }
+    };
+    if let Some(metrics) = &metrics {
+        metrics.record_recovery_phase(
+            crate::metrics::RecoveryPhase::ScopeValidation,
+            phase_started.elapsed(),
+        );
+    }
+    tracing::debug!(
+        ?session,
+        ?claimant,
+        cells = cells.len(),
+        "validated tail-scoped Cells for node-log recovery"
+    );
+    let coordinator = RecoveryCoordinator::new(recovery, manifests);
+    let recovery_fence = fenced.clone();
+    let phase_started = std::time::Instant::now();
+    let controls = match await_with_claim_heartbeat(
+        &directory,
+        &mut fenced,
+        coordinator.recover_sealed(recovery_fence, cells, sealed),
+    )
+    .await
+    {
+        Ok(controls) => controls,
+        Err(error) => {
+            if let Some(metrics) = &metrics {
+                metrics.record_recovery_phase(
+                    crate::metrics::RecoveryPhase::PinAttach,
+                    phase_started.elapsed(),
+                );
+            }
+            return Err(error);
+        }
+    };
+    if let Some(metrics) = &metrics {
+        metrics.record_recovery_phase(
+            crate::metrics::RecoveryPhase::PinAttach,
+            phase_started.elapsed(),
+        );
+    }
     tracing::debug!(
         ?session,
         ?claimant,
         controls = controls.len(),
         "pinned recovered Cell overlays"
     );
-    coordinator
+    let phase_started = std::time::Instant::now();
+    match coordinator
         .finish(&directory, fenced, controls, super::unix_now_ms()?)
-        .await?;
+        .await
+    {
+        Ok(_) => {}
+        Err(error) => {
+            if let Some(metrics) = &metrics {
+                metrics.record_recovery_phase(
+                    crate::metrics::RecoveryPhase::Seal,
+                    phase_started.elapsed(),
+                );
+            }
+            return Err(error.into());
+        }
+    }
+    if let Some(metrics) = &metrics {
+        metrics.record_recovery_phase(crate::metrics::RecoveryPhase::Seal, phase_started.elapsed());
+    }
     tracing::debug!(?session, ?claimant, "sealed recovered Cell node log");
     Ok(())
 }

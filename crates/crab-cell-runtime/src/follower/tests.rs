@@ -282,6 +282,105 @@ async fn restarted_lane_returns_only_the_requested_large_frame_page() {
 }
 
 #[tokio::test]
+async fn indexed_tail_revalidates_headers_and_rebuilds_after_disk_mutation() {
+    let limits = crab_ltx::Limits::default();
+    let source = tempfile::TempDir::new().unwrap();
+    let mut database = Db::open(&source.path().join("source.sqlite"), limits).unwrap();
+    database
+        .transaction(|transaction| {
+            transaction.execute_batch("CREATE TABLE values_(v); INSERT INTO values_ VALUES (1)")
+        })
+        .unwrap();
+    let capture = database.capture().unwrap();
+    let encoded = frame(1, capture.segments.first().unwrap(), limits);
+    let root = tempfile::TempDir::new().unwrap();
+    let leader = SessionId::from_bytes([1; 16]);
+    let store = FollowerStore::open(
+        root.path().to_owned(),
+        limits,
+        crab_ltx::DiskBudget::new(1 << 30),
+    )
+    .unwrap();
+    store.append(leader, 2, vec![encoded], 0).await.unwrap();
+    store.seal(leader, 2).await.unwrap();
+    assert_eq!(
+        store
+            .read_tail_page(leader, 2, 1)
+            .await
+            .unwrap()
+            .frames
+            .len(),
+        1
+    );
+
+    let open = lane_directory(root.path(), Lane { leader, epoch: 2 })
+        .join("chunks")
+        .join("open.log");
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&open)
+        .unwrap();
+    use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+    file.seek(SeekFrom::Start(20)).unwrap();
+    let mut original = [0_u8; 1];
+    file.read_exact(&mut original).unwrap();
+    file.seek(SeekFrom::Start(20)).unwrap();
+    file.write_all(&[original[0] ^ 1]).unwrap();
+    file.sync_data().unwrap();
+    assert!(store.read_tail_page(leader, 2, 1).await.is_err());
+
+    file.seek(SeekFrom::Start(20)).unwrap();
+    file.write_all(&original).unwrap();
+    file.sync_data().unwrap();
+    assert_eq!(
+        store
+            .read_tail_page(leader, 2, 1)
+            .await
+            .unwrap()
+            .frames
+            .len(),
+        1
+    );
+    database.close().unwrap();
+}
+
+#[tokio::test]
+async fn tail_read_falls_back_to_scan_when_index_budget_is_exhausted() {
+    let limits = crab_ltx::Limits::default();
+    let source = tempfile::TempDir::new().unwrap();
+    let mut database = Db::open(&source.path().join("source.sqlite"), limits).unwrap();
+    database
+        .transaction(|transaction| transaction.execute_batch("CREATE TABLE values_(v)"))
+        .unwrap();
+    let capture = database.capture().unwrap();
+    let encoded = frame(1, capture.segments.first().unwrap(), limits);
+    let root = tempfile::TempDir::new().unwrap();
+    let leader = SessionId::from_bytes([1; 16]);
+    let store = FollowerStore::open(
+        root.path().to_owned(),
+        limits,
+        crab_ltx::DiskBudget::new(1 << 30),
+    )
+    .unwrap();
+    store.append(leader, 2, vec![encoded], 0).await.unwrap();
+    store.seal(leader, 2).await.unwrap();
+    drop(store);
+    let store = FollowerStore::open(
+        root.path().to_owned(),
+        limits,
+        crab_ltx::DiskBudget::new(1 << 30),
+    )
+    .unwrap();
+    *store.index_used.lock().unwrap() = MAX_FOLLOWER_INDEX_BYTES;
+
+    let page = store.read_tail_page(leader, 2, 1).await.unwrap();
+    assert_eq!(page.frames.len(), 1);
+    assert_eq!(page.next_sequence, None);
+    database.close().unwrap();
+}
+
+#[tokio::test]
 async fn closed_chunk_name_must_match_verified_record_range() {
     let limits = crab_ltx::Limits::default();
     let source = tempfile::TempDir::new().unwrap();

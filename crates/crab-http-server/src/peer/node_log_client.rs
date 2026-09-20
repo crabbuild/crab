@@ -3,8 +3,8 @@ use std::time::Duration;
 use axum::http::{StatusCode, header};
 use bytes::Bytes;
 use crab_cell_runtime::{
-    AppendRequest, Error as CellError, FollowerReceipt, NodeDirectory, NodeId, NodeLogTransport,
-    RetireRequest, SealRequest, SessionId, TailRequest,
+    AppendRequest, Error as CellError, FollowerReceipt, FollowerStore, NodeDirectory, NodeId,
+    NodeLogTransport, RetireRequest, SealRequest, SessionId, TailRequest,
 };
 use futures_util::{StreamExt, future::BoxFuture};
 use serde::Deserialize;
@@ -23,6 +23,8 @@ pub(crate) struct NodeLogHttpTransport {
     directory: NodeDirectory,
     tls: PeerTlsClient,
     session: SessionId,
+    local_member: Option<NodeId>,
+    local_store: Option<FollowerStore>,
 }
 
 impl NodeLogHttpTransport {
@@ -35,7 +37,21 @@ impl NodeLogHttpTransport {
             directory,
             tls,
             session,
+            local_member: None,
+            local_store: None,
         }
+    }
+
+    pub(crate) fn with_local_follower(mut self, member: NodeId, store: FollowerStore) -> Self {
+        self.local_member = Some(member);
+        self.local_store = Some(store);
+        self
+    }
+
+    fn local_store(&self, member: NodeId) -> Option<FollowerStore> {
+        (self.local_member == Some(member))
+            .then(|| self.local_store.clone())
+            .flatten()
     }
 
     async fn remote(&self, member: NodeId) -> crab_cell_runtime::Result<RemoteFollower> {
@@ -61,6 +77,26 @@ impl NodeLogHttpTransport {
         member: NodeId,
         request: AppendRequest,
     ) -> crab_cell_runtime::Result<FollowerReceipt> {
+        if let Some(store) = self.local_store(member) {
+            let now_ms = now_ms().map_err(transport_error)?;
+            self.directory
+                .authorize_log_append(
+                    request.leader_session,
+                    member,
+                    request.log_epoch,
+                    request.covered_through,
+                    now_ms,
+                )
+                .await?;
+            return store
+                .append(
+                    request.leader_session,
+                    request.log_epoch,
+                    request.frames,
+                    request.covered_through,
+                )
+                .await;
+        }
         let remote = self.remote(member).await?;
         let path = format!(
             "internal/cells/v1/node-log/{}/{}/append",
@@ -86,6 +122,19 @@ impl NodeLogHttpTransport {
         member: NodeId,
         request: SealRequest,
     ) -> crab_cell_runtime::Result<FollowerReceipt> {
+        if let Some(store) = self.local_store(member) {
+            let now_ms = now_ms().map_err(transport_error)?;
+            self.directory
+                .authorize_log_recovery(
+                    request.leader_session,
+                    self.session,
+                    member,
+                    request.log_epoch,
+                    now_ms,
+                )
+                .await?;
+            return store.seal(request.leader_session, request.log_epoch).await;
+        }
         let remote = self.remote(member).await?;
         let path = format!(
             "internal/cells/v1/node-log/{}/{}/recovery/{}/seal",
@@ -109,6 +158,25 @@ impl NodeLogHttpTransport {
         member: NodeId,
         request: RetireRequest,
     ) -> crab_cell_runtime::Result<FollowerReceipt> {
+        if let Some(store) = self.local_store(member) {
+            let now_ms = now_ms().map_err(transport_error)?;
+            self.directory
+                .authorize_log_retire(
+                    request.leader_session,
+                    member,
+                    request.log_epoch,
+                    request.covered_through,
+                    now_ms,
+                )
+                .await?;
+            return store
+                .retire(
+                    request.leader_session,
+                    request.log_epoch,
+                    request.covered_through,
+                )
+                .await;
+        }
         let remote = self.remote(member).await?;
         let path = format!(
             "internal/cells/v1/node-log/{}/{}/retire/{}",
@@ -181,6 +249,25 @@ impl NodeLogHttpTransport {
         member: NodeId,
         request: TailRequest,
     ) -> crab_cell_runtime::Result<crab_cell_runtime::FollowerTailPage> {
+        if let Some(store) = self.local_store(member) {
+            let now_ms = now_ms().map_err(transport_error)?;
+            self.directory
+                .authorize_log_recovery(
+                    request.leader_session,
+                    self.session,
+                    member,
+                    request.log_epoch,
+                    now_ms,
+                )
+                .await?;
+            return store
+                .read_tail_page(
+                    request.leader_session,
+                    request.log_epoch,
+                    request.first_sequence,
+                )
+                .await;
+        }
         let remote = self.remote(member).await?;
         let path = format!(
             "internal/cells/v1/node-log/{}/{}/recovery/{}/tail/{}",
