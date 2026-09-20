@@ -15,6 +15,7 @@ struct Config {
     payload_bytes: usize,
     rounds: usize,
     warmup: usize,
+    sync_parent: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -53,6 +54,7 @@ struct ConfigOutput {
     payload_bytes: usize,
     measured_rounds: usize,
     warmup_rounds: usize,
+    sync_parent: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -94,6 +96,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             payload_bytes: config.payload_bytes,
             measured_rounds: config.rounds,
             warmup_rounds: config.warmup,
+            sync_parent: config.sync_parent,
         },
         median: Summary::from_samples(&samples),
         samples,
@@ -112,6 +115,7 @@ impl Config {
         let payload_bytes = option(&args, "--payload-bytes")?.unwrap_or(4096);
         let rounds = option(&args, "--rounds")?.unwrap_or(5);
         let warmup = option(&args, "--warmup")?.unwrap_or(1);
+        let sync_parent = args.iter().any(|arg| arg == "--sync-parent");
         if transactions == 0 || payload_bytes == 0 || rounds == 0 {
             return Err("transactions, payload-bytes, and rounds must be positive".into());
         }
@@ -120,6 +124,7 @@ impl Config {
             payload_bytes,
             rounds,
             warmup,
+            sync_parent,
         })
     }
 }
@@ -153,6 +158,9 @@ async fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error
     workload_write_us += elapsed_us(started);
     let started = Instant::now();
     ltx_db.sync()?;
+    if config.sync_parent {
+        sync_ltx_parent(ltx_db.meta_path())?;
+    }
     capture_us += elapsed_us(started);
 
     for id in 0..config.transactions {
@@ -168,6 +176,9 @@ async fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error
 
         let started = Instant::now();
         ltx_db.sync()?;
+        if config.sync_parent {
+            sync_ltx_parent(ltx_db.meta_path())?;
+        }
         capture_us += elapsed_us(started);
     }
 
@@ -225,6 +236,11 @@ async fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error
         source_database_bytes,
         final_txid: output.info.max_txid.0,
     })
+}
+
+fn sync_ltx_parent(meta_path: &Path) -> Result<(), Box<dyn Error>> {
+    std::fs::File::open(meta_path.join("ltx").join("0"))?.sync_all()?;
+    Ok(())
 }
 
 fn list_ltx_files(root: &Path, level: u32) -> Result<Vec<(PathBuf, u64)>, Box<dyn Error>> {

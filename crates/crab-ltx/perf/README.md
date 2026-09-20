@@ -111,6 +111,12 @@ Celld path fsyncs the file but uses a plain rename without a parent-directory
 sync. Do not treat the capture-only gap as a portable performance win without
 making that durability choice explicit.
 
+The Celld runner accepts `--sync-parent` as a diagnostic contract-normalization
+mode. After each upstream `Db::sync()`, it syncs Celld's L0 directory before
+recording capture completion. This is not pinned Celld behavior and must be
+reported separately; it answers what the local comparison looks like when both
+runners pay a parent-directory barrier per capture.
+
 The grouped Crab mode measures batch completion: all captures remain
 unacknowledged until the final file-and-directory barrier succeeds. It is a
 throughput comparison, not a measurement of independently durable
