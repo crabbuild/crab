@@ -6,15 +6,16 @@ use std::{
 };
 
 use crab_cell_app::ApplicationHandle;
-use crab_cell_host::CellNodeBuilder;
+use crab_cell_host::{CellNode, CellNodeBuilder};
 use crab_cell_runtime::{
     ActivitySupervisor, ApplicationId, BlobCondition, BlobMutation, BlobQuery, CatalogRole,
     CellClient, CellStorageLayout, CellTarget, CronMutation, Digest, EffectClaimRequest, Error,
-    KvAtomicRequest, KvMutation, MutationIdentity, NodeLeaseGuard, QualificationExecution,
+    KvAtomicRequest, KvMutation, MutationIdentity, NodeLeaseGuard, QUALIFICATION_MATRIX_ROWS,
+    QualificationExecution, QualificationMatrixEntry, QualificationMatrixManifest,
     QualificationOperation, QualificationOperationExecutor, QualificationProfile,
-    QualificationRunner, QualificationWorkload, QueueClaimRequest, QueueSendRequest, RequestId,
-    Result, SqlBatch, SqlStatement, SqlValue, SqlWorkerPool, TenantId, WorkflowOutcome,
-    WorkflowSignal, install_blob_schema, install_cron_schema, install_kv_schema,
+    QualificationReceipt, QualificationRunner, QualificationWorkload, QueueClaimRequest,
+    QueueSendRequest, RequestId, Result, SqlBatch, SqlStatement, SqlValue, SqlWorkerPool, TenantId,
+    WorkflowOutcome, WorkflowSignal, install_blob_schema, install_cron_schema, install_kv_schema,
     install_queue_schema, install_workflow_schema, partition_for_shard,
 };
 use crab_storage::Store;
@@ -44,6 +45,11 @@ struct PublicHostQualificationExecutor {
     tenant: TenantId,
     application: ApplicationId,
     now_ms: i64,
+    run_tag: u64,
+}
+
+fn operation_id(run_tag: u64, index: u64) -> u64 {
+    run_tag.saturating_mul(1_000_000).saturating_add(index)
 }
 
 impl QualificationOperationExecutor for PublicHostQualificationExecutor {
@@ -54,8 +60,10 @@ impl QualificationOperationExecutor for PublicHostQualificationExecutor {
         let tenant = self.tenant;
         let application = self.application;
         let now_ms = self.now_ms;
+        let run_tag = self.run_tag;
         Box::pin(async move {
-            let mutation_index = operation.index().saturating_mul(100);
+            let operation_id = operation_id(run_tag, operation.index());
+            let mutation_index = operation_id.saturating_mul(100);
             let mutation = identity(mutation_index, now_ms);
             if operation.rejection_hint() {
                 let wrong_target = CellTarget::new(
@@ -98,7 +106,7 @@ impl QualificationOperationExecutor for PublicHostQualificationExecutor {
                 "kv" => {
                     let kv = handle.kv::<fixture::ReferenceKv>(fixture::KV_NAMESPACE)?;
                     let scope = b"public-qualification".to_vec();
-                    let key = operation.index().to_be_bytes().to_vec();
+                    let key = operation_id.to_be_bytes().to_vec();
                     let request = KvAtomicRequest {
                         scope: scope.clone(),
                         checks: Vec::new(),
@@ -122,7 +130,7 @@ impl QualificationOperationExecutor for PublicHostQualificationExecutor {
                     )
                     .map_err(|_| Error::Control("public qualification clock overflow"))?
                     .saturating_add(20);
-                    let expired_key = fixed_id(operation.index()).to_vec();
+                    let expired_key = fixed_id(operation_id).to_vec();
                     kv.atomic(
                         identity(mutation_index.saturating_add(1), now_ms),
                         KvAtomicRequest {
@@ -147,8 +155,9 @@ impl QualificationOperationExecutor for PublicHostQualificationExecutor {
                 }
                 "blob" => {
                     let blob = handle.blob::<fixture::ReferenceBlob>()?;
-                    let key = format!("public-qualification/{}", operation.index()).into_bytes();
-                    let upload_id = fixed_id(operation.index());
+                    let key = format!("public-qualification/{run_tag}/{}", operation.index())
+                        .into_bytes();
+                    let upload_id = fixed_id(operation_id);
                     blob.mutate(
                         mutation,
                         BlobMutation::Begin {
@@ -196,7 +205,7 @@ impl QualificationOperationExecutor for PublicHostQualificationExecutor {
                 }
                 "queue" => {
                     let queue = handle.queue::<fixture::ReferenceQueue>()?;
-                    let producer_id = fixed_id(operation.index());
+                    let producer_id = fixed_id(operation_id);
                     queue
                         .send(
                             mutation,
@@ -262,7 +271,7 @@ impl QualificationOperationExecutor for PublicHostQualificationExecutor {
                 }
                 "cron" => {
                     let cron = handle.cron::<fixture::ReferenceCron>()?;
-                    let schedule_id = fixed_id(operation.index());
+                    let schedule_id = fixed_id(operation_id);
                     cron.mutate(
                         mutation,
                         CronMutation::Upsert {
@@ -297,7 +306,8 @@ impl QualificationOperationExecutor for PublicHostQualificationExecutor {
                 }
                 "workflow" => {
                     let workflow = handle.workflow::<fixture::ReferenceWorkflow>()?;
-                    let workflow_id = format!("public-workflow-{}", operation.index()).into_bytes();
+                    let workflow_id =
+                        format!("public-workflow-{run_tag}-{}", operation.index()).into_bytes();
                     let started = workflow
                         .start(mutation, workflow_id.clone(), b"activity".to_vec())
                         .await
@@ -313,7 +323,7 @@ impl QualificationOperationExecutor for PublicHostQualificationExecutor {
                             WorkflowSignal {
                                 workflow_id: workflow_id.clone(),
                                 run_id,
-                                signal_id: fixed_id(operation.index()),
+                                signal_id: fixed_id(operation_id),
                                 event: b"cancel".to_vec(),
                             },
                         )
@@ -327,7 +337,8 @@ impl QualificationOperationExecutor for PublicHostQualificationExecutor {
                 }
                 "activity" => {
                     let workflow = handle.workflow::<fixture::ReferenceWorkflow>()?;
-                    let workflow_id = format!("public-activity-{}", operation.index()).into_bytes();
+                    let workflow_id =
+                        format!("public-activity-{run_tag}-{}", operation.index()).into_bytes();
                     workflow
                         .start(mutation, workflow_id.clone(), b"activity".to_vec())
                         .await
@@ -347,7 +358,8 @@ impl QualificationOperationExecutor for PublicHostQualificationExecutor {
                 }
                 "effects" => {
                     let workflow = handle.workflow::<fixture::ReferenceWorkflow>()?;
-                    let workflow_id = format!("public-effect-{}", operation.index()).into_bytes();
+                    let workflow_id =
+                        format!("public-effect-{run_tag}-{}", operation.index()).into_bytes();
                     workflow
                         .start(mutation, workflow_id, b"effect".to_vec())
                         .await
@@ -400,8 +412,13 @@ impl QualificationOperationExecutor for PublicHostQualificationExecutor {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn public_cell_node_runs_typed_primitive_workload() {
+async fn public_host_fixture() -> (
+    CellNode,
+    ApplicationHandle<fixture::ReferenceApplication>,
+    TenantId,
+    ApplicationId,
+    tempfile::TempDir,
+) {
     let application = Arc::new(fixture::compiled());
     let tenant = TenantId::from_bytes([71; 16]);
     let application_id = ApplicationId::from_bytes([72; 16]);
@@ -539,6 +556,12 @@ async fn public_cell_node_runs_typed_primitive_workload() {
     let client = CellClient::local_many(registry, handles).expect("qualification client");
     let typed =
         node.application_handle::<fixture::ReferenceApplication>(client, tenant, application_id);
+    (node, typed, tenant, application_id, directory)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn public_cell_node_runs_typed_primitive_workload() {
+    let (node, typed, tenant, application_id, _directory) = public_host_fixture().await;
     let now_ms = i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -554,6 +577,7 @@ async fn public_cell_node_runs_typed_primitive_workload() {
         tenant,
         application: application_id,
         now_ms,
+        run_tag: 0,
     };
     let summary = workload.run(&mut executor).await.expect("typed workload");
     assert_eq!(summary.operations(), 64);
@@ -618,6 +642,145 @@ async fn public_cell_node_runs_typed_primitive_workload() {
             trusted_signer,
         )
         .expect("qualification receipt verification");
+
+    drop(typed);
+    node.shutdown().await.expect("qualification shutdown");
+    assert!(!node.is_ready());
+}
+
+struct MatrixRowEvidence {
+    workload: String,
+    receipt: QualificationReceipt,
+    artifacts: Vec<Vec<u8>>,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn public_cell_node_runs_complete_matrix_through_typed_apis() {
+    let (node, typed, tenant, application_id, _directory) = public_host_fixture().await;
+    let profile = QualificationProfile::pr_contract();
+    let image = Digest::from_bytes([74; 32]);
+    let signing_key_bytes = [76; 32];
+    let trusted_signer = SigningKey::from_bytes(&signing_key_bytes)
+        .verifying_key()
+        .to_bytes();
+    let mut rows = Vec::with_capacity(QUALIFICATION_MATRIX_ROWS.len());
+
+    for (row_index, row) in QUALIFICATION_MATRIX_ROWS.iter().enumerate() {
+        let row_now_ms = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_millis(),
+        )
+        .expect("current epoch fits mutation identity");
+        let workload = QualificationWorkload::generate_with_size(
+            &profile,
+            41_u64.saturating_add(row_index as u64),
+            1,
+            16,
+            1,
+        )
+        .expect("qualification workload");
+        let mut executor = PublicHostQualificationExecutor {
+            handle: typed.clone(),
+            tenant,
+            application: application_id,
+            now_ms: row_now_ms,
+            run_tag: row_index as u64 + 1,
+        };
+        let summary = workload.run(&mut executor).await.expect("typed workload");
+        let run_artifact = summary.artifact(&workload).expect("run artifact");
+        run_artifact
+            .verify_for_profile(&profile)
+            .expect("run artifact profile");
+        let workload_bytes = workload.encode().expect("workload encoding");
+        let run_bytes = run_artifact.encode().expect("run artifact encoding");
+        let artifacts = if *row == "primitives" {
+            vec![workload_bytes, run_bytes]
+        } else {
+            vec![run_bytes]
+        };
+        let artifact_digests = artifacts
+            .iter()
+            .map(|artifact| Digest::from_bytes(*blake3::hash(artifact).as_bytes()))
+            .collect();
+        let receipt = QualificationRunner::new(SigningKey::from_bytes(&signing_key_bytes))
+            .emit_with_profile_and_evidence(
+                &profile,
+                "public-host-matrix-source".into(),
+                image,
+                "local".into(),
+                (*row).into(),
+                "none".into(),
+                summary.metrics().expect("receipt metrics"),
+                artifacts
+                    .first()
+                    .expect("matrix row has a primary artifact"),
+                true,
+                (
+                    "rustc".into(),
+                    "debug".into(),
+                    "local".into(),
+                    workload.seed(),
+                    0,
+                    0,
+                    false,
+                ),
+                1,
+                2,
+                b"none",
+                artifact_digests,
+                Vec::new(),
+            )
+            .expect("qualification receipt");
+        receipt.encode().expect("receipt encoding");
+        rows.push(MatrixRowEvidence {
+            workload: (*row).into(),
+            receipt,
+            artifacts,
+        });
+    }
+
+    let manifest = QualificationMatrixManifest::new(
+        rows.iter()
+            .map(|row| {
+                QualificationMatrixEntry::new(
+                    row.workload.clone(),
+                    format!("receipts/{}.json", row.workload),
+                    row.artifacts
+                        .iter()
+                        .enumerate()
+                        .map(|(index, _)| format!("artifacts/{}-{index}.json", row.workload))
+                        .collect(),
+                )
+            })
+            .collect::<Result<Vec<_>>>()
+            .expect("qualification matrix manifest"),
+    )
+    .expect("complete qualification matrix");
+    let encoded_manifest = manifest.encode().expect("matrix manifest encoding");
+    assert_eq!(
+        QualificationMatrixManifest::decode(&encoded_manifest).expect("matrix manifest decoding"),
+        manifest
+    );
+
+    let artifact_views = rows
+        .iter()
+        .map(|row| row.artifacts.iter().map(Vec::as_slice).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let evidence = rows
+        .iter()
+        .zip(artifact_views.iter())
+        .map(|(row, artifacts)| (row.workload.as_str(), &row.receipt, artifacts.as_slice()))
+        .collect::<Vec<_>>();
+    QualificationReceipt::verify_matrix_for_profile_with_signer(
+        "public-host-matrix-source",
+        image,
+        &profile,
+        &evidence,
+        trusted_signer,
+    )
+    .expect("typed ten-row qualification matrix");
 
     drop(typed);
     node.shutdown().await.expect("qualification shutdown");

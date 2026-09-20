@@ -20,13 +20,12 @@
 - **Category**: architecture / correctness / performance / operations / release
 - **Planned at**: commit `49bc8f0cc96`, 2026-09-20
 - **Implementation status**: local runtime, typed application, public host typed
-  lifecycle smoke,
+  lifecycle smoke and complete ten-row matrix smoke,
   provider-neutral durability construction/recruitment/rotation, deterministic
   workload, public `CellNode` typed all-primitive execution, public
   receipt/matrix validation, protected-profile/run-artifact verifier coverage,
-  and release negative gates are implemented and tested; the complete ten-row
-  public-host workload and protected provider/Kubernetes/scale receipts remain
-  open
+  and release negative gates are implemented and tested; the protected
+  ten-row profile workload and provider/Kubernetes/scale receipts remain open
 
 ## Decision boundary
 
@@ -250,8 +249,9 @@ flags. Never run bucket-wide GC.
   reverse facility drain, task joining, lease fencing, and zero reservations.
 - [x] Application semantic-validation fixtures cover every relationship listed
   in step 3 and all full-primitive calls remain typed and module-safe.
-- [ ] The ten-row workload is driven only through public typed host/application
-  APIs and binds all measured fields and raw-artifact digests.
+- [x] The ten-row local matrix smoke is driven only through public typed
+  host/application APIs and binds its measured fields and raw-artifact digests;
+  protected profile execution remains open.
 - [x] Same seed/profile reproduces the logical qualification digest and a
   changed seed changes it; labels remain bounded.
 - [ ] Every required primitive fault/retry/duplicate/expiry/cancellation/
