@@ -2482,7 +2482,7 @@ mod tests {
         };
 
         assert!(matches!(
-            monitor.ensure_available(1),
+            monitor.ensure_available(available),
             Err(error) if error.kind() == io::ErrorKind::StorageFull
         ));
     }
